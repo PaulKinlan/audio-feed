@@ -157,10 +157,10 @@ async function decide(
   reason?: string,
 ): Promise<User> {
   const user = await store.getUser(userId);
-  if (!user) throw new Error(`Unknown user: ${userId}`);
+  if (!user) throw new UnknownUserError(userId);
   if (user.status === action) return user;
   if (!ALLOWED_FROM[action].includes(user.status)) {
-    throw new Error(`Cannot move user ${userId} from ${user.status} to ${action}`);
+    throw new IllegalTransitionError(userId, user.status, action);
   }
 
   const at = new Date().toISOString();
@@ -200,9 +200,34 @@ export function suspendUser(
 }
 
 export class NotAuthorizedError extends Error {
-  constructor(userId: string, readonly status: UserStatus | "unknown") {
+  constructor(readonly userId: string, readonly status: UserStatus | "unknown") {
     super(`Audio generation not authorized for user ${userId} (status: ${status})`);
     this.name = "NotAuthorizedError";
+  }
+}
+
+/**
+ * Failure modes are types, not message strings.
+ *
+ * Callers map these onto HTTP status codes — 404 for unknown, 409 for an
+ * illegal transition. Matching on `error.message` instead would turn a reworded
+ * string into a silent 500, so the distinction lives in the type system.
+ */
+export class UnknownUserError extends Error {
+  constructor(readonly userId: string) {
+    super(`Unknown user: ${userId}`);
+    this.name = "UnknownUserError";
+  }
+}
+
+export class IllegalTransitionError extends Error {
+  constructor(
+    readonly userId: string,
+    readonly from: UserStatus,
+    readonly to: UserStatus,
+  ) {
+    super(`Cannot move user ${userId} from ${from} to ${to}`);
+    this.name = "IllegalTransitionError";
   }
 }
 
@@ -241,7 +266,7 @@ export async function updatePreferences(
   patch: { displayName?: string; voice?: string; feeds?: string[] },
 ): Promise<User> {
   const user = await store.getUser(userId);
-  if (!user) throw new Error(`Unknown user: ${userId}`);
+  if (!user) throw new UnknownUserError(userId);
   const updated: User = {
     ...user,
     displayName: patch.displayName?.trim() || user.displayName,
@@ -261,7 +286,7 @@ export async function updatePreferences(
  */
 export async function rotateFeedToken(store: MetadataStore, userId: string): Promise<User> {
   const user = await store.getUser(userId);
-  if (!user) throw new Error(`Unknown user: ${userId}`);
+  if (!user) throw new UnknownUserError(userId);
   const updated: User = { ...user, feedToken: newFeedToken() };
   await store.putUser(updated);
   return updated;

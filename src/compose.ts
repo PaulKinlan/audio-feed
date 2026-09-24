@@ -9,12 +9,13 @@
  * This module is the only place that knows about the lanes at once. It builds
  * the `AppHandlers` map and is called by `src/server.ts`.
  *
- * ─── Where the adapters live ──────────────────────────────────────────────────
- * Three functions below (`loadUserByFeedToken`, `authorizeForSynthesis`,
- * `applyAdminDecision`) are the ONLY auth coupling in this file, deliberately
- * concentrated so audio-feed-ruw (which moves `src/auth/users.ts` onto the
- * `MetadataStore` interface and adds `getUserByFeedToken`) can be adopted by
- * rewriting them and nothing else.
+ * ─── Auth coupling ────────────────────────────────────────────────────────────
+ * This file holds NO auth policy of its own. It calls `src/auth/users.ts`, which
+ * is policy over the `MetadataStore` interface (audio-feed-ruw). The three local
+ * adapters that used to live here — `loadUserByFeedToken`, `authorizeForSynthesis`
+ * and `approveUserRecord` — were a deliberate bridge while the canonical `User`
+ * was mid-flight, and have been collapsed onto `getUserByFeedToken`,
+ * `assertAuthorizedForAudio` and `approveUser`.
  *
  * The storage→feed episode mapping is the `b0a` bead's subject; it lives here for
  * now because the RSS generator needs `pubDate` and `audioUrl` and the storage
@@ -23,11 +24,21 @@
 import { createUrlIngestHandler, type ExtractedArticle } from "./ingest/url.ts";
 import { buildFeed } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
-import { requireAdminToken, tokensMatch } from "./auth/users.ts";
-import { INBOX_SOURCE_ID, isPublishable, isSynthesisAuthorized, type User } from "./types.ts";
+import {
+  approveUser,
+  assertAuthorizedForAudio,
+  getUserByFeedToken,
+  IllegalTransitionError,
+  NotAuthorizedError,
+  requireAdminToken,
+  UnknownUserError,
+} from "./auth/users.ts";
+import { INBOX_SOURCE_ID, isPublishable, type User } from "./types.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
 import type { Article, AudioMode, Episode } from "./types.ts";
+
+export { IllegalTransitionError, NotAuthorizedError, UnknownUserError };
 
 /** Extraction of the capability token a podcast client can actually send. */
 const TOKEN_HEADERS = ["x-feed-token", "x-user-token"] as const;
@@ -45,98 +56,25 @@ function presentedToken(request: Request): string | null {
 /**
  * Resolve a feed token to its user.
  *
- * Two shapes, because the canonical User is mid-flight (audio-feed-ruw adds
- * `feedToken` plus a `getUserByFeedToken` index): today the unguessable user id
- * IS the capability the feed path carries, and once `feedToken` exists this
- * prefers it. Either way the token is compared in constant time.
- */
-async function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | null> {
-  if (!token) return null;
-  const direct = await ctx.stores.metadata.getUser(token);
-  if (direct) return direct;
-  for (const user of await ctx.stores.metadata.listUsers()) {
-    const candidate = (user as { feedToken?: string }).feedToken;
-    if (typeof candidate === "string" && candidate.length > 0) {
-      if (await tokensMatch(token, candidate)) return user;
-    }
-  }
-  return null;
-}
-
-/**
- * The paid-synthesis gate.
+ * The user id is NOT accepted here, and that removal is the point.
  *
- * Fails closed and throws rather than returning a boolean, so a caller that
- * forgets the `!` still cannot spend money. (audio-feed-ruw will supply
- * `assertAuthorizedForAudio(store, userId)`; this is the same decision.)
- */
-async function authorizeForSynthesis(ctx: AppContext, userId: string): Promise<User> {
-  const user = await ctx.stores.metadata.getUser(userId);
-  if (!user || !isSynthesisAuthorized(user)) {
-    throw new NotApprovedError(userId, user?.status ?? "unknown");
-  }
-  return user;
-}
-
-export class NotApprovedError extends Error {
-  constructor(readonly userId: string, readonly status: string) {
-    super(`Audio generation is not authorized for user ${userId} (status: ${status})`);
-    this.name = "NotApprovedError";
-  }
-}
-
-/** Display name across model generations: `name` today, `displayName` once ruw lands. */
-function displayNameOf(user: User): string {
-  const named = user as { name?: string; displayName?: string };
-  return named.displayName ?? named.name ?? user.email;
-}
-
-/**
- * Apply an admin approval.
+ * While the canonical `User` had no `feedToken`, this fell back to
+ * `getUser(token)` so the id doubled as the feed capability. That was a
+ * reasonable bridge and a real hole: user ids are not secret. They appear in
+ * `/api/episodes?userId=`, in `/api/admin/users/:id/approve`, and in the 202
+ * body this file returns from an ingest. Anyone who learned an id could read
+ * that user's entire feed. Driven through the real dispatcher before the fix:
  *
- * The route only ever approves, and today's storage model has three states with
- * no `rejected`, so the legal precedents are `pending` and `suspended` (a
- * suspended user may be re-admitted). audio-feed-ruw brings the four-state union
- * and a ledger; this is the one place to extend.
+ *   GET /feed/<feedToken>/master.xml -> 200
+ *   GET /feed/<user id>/master.xml   -> 200   <- the bypass
+ *
+ * Now it is a single indexed lookup on the capability itself. That is also why
+ * there is no constant-time compare any more: nothing is compared here. The
+ * previous shape scanned every user per request, which made feed polling O(n)
+ * and leaked user count through response time.
  */
-async function approveUserRecord(
-  ctx: AppContext,
-  userId: string,
-  adminId: string,
-): Promise<User> {
-  const user = await ctx.stores.metadata.getUser(userId);
-  if (!user) throw new UnknownUserError(userId);
-  if (user.status === "approved") return user; // idempotent
-  if (user.status !== "pending" && user.status !== "suspended") {
-    throw new IllegalTransitionError(userId, user.status, "approved");
-  }
-  const now = new Date().toISOString();
-  const updated: User = {
-    ...user,
-    status: "approved",
-    approvedAt: now,
-    approvedBy: adminId,
-  };
-  await ctx.stores.metadata.putUser(updated);
-  return updated;
-}
-
-export class UnknownUserError extends Error {
-  constructor(readonly userId: string) {
-    super(`Unknown user: ${userId}`);
-    this.name = "UnknownUserError";
-  }
-}
-
-export class IllegalTransitionError extends Error {
-  constructor(
-    readonly userId: string,
-    readonly from: string,
-    readonly to: string,
-  ) {
-    super(`Cannot move user ${userId} from ${from} to ${to}`);
-    this.name = "IllegalTransitionError";
-  }
+function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | null> {
+  return getUserByFeedToken(ctx.stores.metadata, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -238,11 +176,11 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     // (rather than from rss.ts's origin-only helper) is what stopped the feed
     // advertising a 404 — the tww contract mismatch.
     const channel: ChannelMeta = {
-      title: `${displayNameOf(user)} — Audio Feed`,
+      title: `${user.displayName} — Audio Feed`,
       selfUrl: feedUrlFor(ctx, token, "master.xml"),
       link: ctx.config.publicBaseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
-      author: displayNameOf(user),
+      author: user.displayName,
       ownerEmail: user.email,
       language: "en",
       categories: ["News", "Technology"],
@@ -309,9 +247,9 @@ export function createIngestHandler(
       if (!user) return forbidden("Unknown feed token.");
       try {
         // Throwing gate first, so a forgotten boolean check cannot fail open.
-        return await authorizeForSynthesis(ctx, user.id);
+        return await assertAuthorizedForAudio(ctx.stores.metadata, user.id);
       } catch (error) {
-        if (error instanceof NotApprovedError) {
+        if (error instanceof NotAuthorizedError) {
           return forbidden("An approved user is required.");
         }
         throw error;
@@ -388,10 +326,13 @@ export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveU
     }
 
     try {
-      const updated = await approveUserRecord(ctx, params.id ?? "", "admin");
-      // Never echo a capability: the feed URL already carries the token.
+      // Writes the status change and its ledger entry in one atomic commit, so
+      // the audit trail cannot drift from the record it describes.
+      const updated = await approveUser(ctx.stores.metadata, params.id ?? "", "admin");
+      // Never echo a capability: the feed URL already carries the token, and a
+      // `PublicUser` could not carry it even if this grew into a fuller body.
       return Response.json(
-        { id: updated.id, status: updated.status, approvedAt: updated.approvedAt },
+        { id: updated.id, status: updated.status, decidedAt: updated.decidedAt },
         { headers: { "cache-control": "no-store" } },
       );
     } catch (error) {

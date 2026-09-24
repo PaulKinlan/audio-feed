@@ -77,7 +77,7 @@ function enclosureUrl(xml: string): string | null {
 Deno.test("a subscriber can read the feed, take the enclosure and fetch the audio", async () => {
   const { fetch } = await seededApp();
 
-  const feed = await fetch(req("/feed/user-1/master.xml"));
+  const feed = await fetch(req("/feed/token-user-1/master.xml"));
   assertEquals(feed.status, 200);
   assertStringIncludes(feed.headers.get("content-type") ?? "", "application/rss+xml");
   const xml = await feed.text();
@@ -103,15 +103,15 @@ Deno.test("a subscriber can read the feed, take the enclosure and fetch the audi
 Deno.test("the feed advertises the route that is actually served (tww contract)", async () => {
   const { fetch } = await seededApp();
 
-  const master = await (await fetch(req("/feed/user-1/master.xml"))).text();
-  assertStringIncludes(master, `<atom:link href="${BASE}/feed/user-1/master.xml"`);
+  const master = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
+  assertStringIncludes(master, `<atom:link href="${BASE}/feed/token-user-1/master.xml"`);
 
-  const source = await fetch(req("/feed/user-1/stratechery/direct.xml"));
+  const source = await fetch(req("/feed/token-user-1/stratechery/direct.xml"));
   assertEquals(source.status, 200);
   const xml = await source.text();
-  assertStringIncludes(xml, `<atom:link href="${BASE}/feed/user-1/stratechery/direct.xml"`);
+  assertStringIncludes(xml, `<atom:link href="${BASE}/feed/token-user-1/stratechery/direct.xml"`);
   // The self-link must be a served route, not the origin-only helper's guess.
-  assertEquals((await fetch(req("/feed/user-1/stratechery/direct.xml"))).status, 200);
+  assertEquals((await fetch(req("/feed/token-user-1/stratechery/direct.xml"))).status, 200);
 });
 
 Deno.test("an enclosure length comes from the store when the record lacks one", async () => {
@@ -146,7 +146,7 @@ Deno.test("an enclosure length comes from the store when the record lacks one", 
   );
   await stores.blobs.put("episode-3.mp3", bytes(777), { contentType: "audio/mpeg" });
 
-  const xml = await (await fetch(req("/feed/user-1/master.xml"))).text();
+  const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
   assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-2.mp3" length="999"`);
   assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-3.mp3" length="777"`);
   assertStringIncludes(
@@ -160,7 +160,7 @@ Deno.test("only publishable episodes are syndicated", async () => {
   await stores.metadata.putEpisode(
     makeEpisode({ id: "episode-2", userId: "user-1", status: "pending", audioKey: undefined }),
   );
-  const xml = await (await fetch(req("/feed/user-1/master.xml"))).text();
+  const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
   assert(xml.includes("episode-1"), "ready episode must be listed");
   assert(!xml.includes("episode-2"), "an episode with no audio must not be syndicated");
 });
@@ -171,15 +171,15 @@ Deno.test("only publishable episodes are syndicated", async () => {
 
 Deno.test("unapproved users have no feed, and unknown tokens are 404", async () => {
   const { fetch } = await seededApp();
-  assertEquals((await fetch(req("/feed/pending-1/master.xml"))).status, 403);
+  assertEquals((await fetch(req("/feed/token-pending-1/master.xml"))).status, 403);
   assertEquals((await fetch(req("/feed/nobody/master.xml"))).status, 404);
-  assertEquals((await fetch(req("/feed/user-1/unknown-source/direct.xml"))).status, 404);
+  assertEquals((await fetch(req("/feed/token-user-1/unknown-source/direct.xml"))).status, 404);
 });
 
 Deno.test("ingest queues for an approved user and refuses everyone else", async () => {
   const { fetch, stores } = await seededApp();
   const body = JSON.stringify({ url: "https://example.com/an-article", mode: "direct" });
-  const json = { "content-type": "application/json", "x-feed-token": "user-1" };
+  const json = { "content-type": "application/json", "x-feed-token": "token-user-1" };
 
   const queued = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
   assertEquals(queued.status, 202);
@@ -199,7 +199,7 @@ Deno.test("ingest queues for an approved user and refuses everyone else", async 
   assertEquals(
     (await fetch(req("/api/ingest", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-feed-token": "pending-1" },
+      headers: { "content-type": "application/json", "x-feed-token": "token-pending-1" },
       body,
     }))).status,
     403,
@@ -261,8 +261,8 @@ Deno.test("an unconfigured admin token cannot approve anyone", async () => {
 Deno.test("no product route answers 501 when handlers are mounted", async () => {
   const { fetch } = await seededApp();
   const routes: Array<[string, RequestInit]> = [
-    ["/feed/user-1/master.xml", {}],
-    ["/feed/user-1/stratechery/direct.xml", {}],
+    ["/feed/token-user-1/master.xml", {}],
+    ["/feed/token-user-1/stratechery/direct.xml", {}],
     ["/api/ingest", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -281,7 +281,7 @@ Deno.test("without handlers the seams still fail closed rather than open", async
   // fixed: it must be OBVIOUSLY unwired, never silently permissive.
   const stores = memoryStores();
   const { fetch } = createApp({ config, stores });
-  assertEquals((await fetch(req("/feed/user-1/master.xml"))).status, 501);
+  assertEquals((await fetch(req("/feed/token-user-1/master.xml"))).status, 501);
   assertEquals(
     (await fetch(req("/api/ingest", {
       method: "POST",
@@ -294,4 +294,126 @@ Deno.test("without handlers the seams still fail closed rather than open", async
     (await fetch(req("/api/admin/users/user-1/approve", { method: "POST" }))).status,
     501,
   );
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-ruw: the feed capability is the feedToken, and ONLY the feedToken
+// ---------------------------------------------------------------------------
+
+Deno.test("a user id is not a feed capability", async () => {
+  const { fetch } = await seededApp();
+
+  // While the canonical User had no `feedToken`, the feed path fell back to
+  // `getUser(token)`, so the id doubled as the capability. User ids are not
+  // secret: they appear in `/api/episodes?userId=`, in the admin approve path,
+  // and in this file's own 202 ingest body. Anyone who learned an id could read
+  // that user's whole feed.
+  assertEquals(
+    (await fetch(req("/feed/user-1/master.xml"))).status,
+    404,
+    "a user id must not open a feed",
+  );
+  assertEquals(
+    (await fetch(req("/feed/user-1/stratechery/direct.xml"))).status,
+    404,
+    "a user id must not open a per-source feed",
+  );
+
+  // And the real capability still works, so this is a narrowing, not a break.
+  assertEquals((await fetch(req("/feed/token-user-1/master.xml"))).status, 200);
+});
+
+Deno.test("a user id is not accepted as an ingest credential", async () => {
+  const { fetch } = await seededApp();
+  const body = JSON.stringify({ url: "https://example.com/an-article", mode: "direct" });
+
+  const withId = await fetch(req("/api/ingest", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-feed-token": "user-1" },
+    body,
+  }));
+  assertEquals(withId.status, 403, "a user id must not authorize paid synthesis");
+
+  const withToken = await fetch(req("/api/ingest", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-feed-token": "token-user-1" },
+    body,
+  }));
+  assertEquals(withToken.status, 202);
+});
+
+Deno.test("one user's capability never opens another user's feed", async () => {
+  const { fetch, stores } = await seededApp();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-2", email: "other@example.com", status: "approved" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-other",
+      userId: "user-2",
+      sourceId: "stratechery",
+      status: "ready",
+      audioKey: "episode-other.mp3",
+      contentType: "audio/mpeg",
+    }),
+  );
+
+  const mine = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
+  assert(mine.includes("episode-1"), "own episode must be present");
+  assert(!mine.includes("episode-other"), "another user's episode must never appear in my feed");
+});
+
+Deno.test("approval writes a ledger entry atomically with the status change", async () => {
+  const { fetch, stores } = await seededApp();
+
+  // Before ruw the approve route wrote only the user record, so the audit trail
+  // did not exist. The ledger is only worth having if it cannot drift from the
+  // decision it describes, which is why both are one commit.
+  const approved = await fetch(req("/api/admin/users/pending-1/approve", {
+    method: "POST",
+    headers: { "x-admin-token": "admin-secret" },
+  }));
+  assertEquals(approved.status, 200);
+
+  const body = await approved.json();
+  assertEquals(body.status, "approved");
+  assert(body.decidedAt, "the response must report when the decision was made");
+
+  const log = await stores.metadata.listApprovalLog();
+  assertEquals(log.length, 1, "an approval must leave exactly one ledger record");
+  assertEquals(log[0]?.userId, "pending-1");
+  assertEquals(log[0]?.action, "approved");
+});
+
+Deno.test("no route echoes a feed capability", async () => {
+  const { fetch, stores } = await seededApp();
+  const user = await stores.metadata.getUser("user-1");
+  assert(user);
+
+  // A leaked token grants feed access until it is rotated, and rotation breaks
+  // every subscribed client. So no response body may contain one.
+  const responses = [
+    await fetch(req("/api/admin/users/pending-1/approve", {
+      method: "POST",
+      headers: { "x-admin-token": "admin-secret" },
+    })),
+    await fetch(req("/api/episodes?userId=user-1")),
+    await fetch(req("/api/ingest", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-feed-token": "token-user-1" },
+      body: JSON.stringify({ url: "https://example.com/an-article", mode: "direct" }),
+    })),
+  ];
+
+  for (const response of responses) {
+    const text = await response.text();
+    assert(
+      !text.includes("feedToken"),
+      `a response leaked the feedToken key: ${text.slice(0, 200)}`,
+    );
+    assert(
+      !text.includes(user.feedToken),
+      `a response leaked a feed token value: ${text.slice(0, 200)}`,
+    );
+  }
 });
