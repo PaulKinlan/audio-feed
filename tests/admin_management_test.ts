@@ -802,3 +802,81 @@ Deno.test("list-sourced user in openManage populates feedToken from sources resp
   );
   assertEquals(feedRes.status, 200, "master feed URL must resolve 200");
 });
+
+Deno.test("cascade clears failedBlobs when a retry succeeds (audio-feed-37p)", async () => {
+  // The c9q item 4 fix (failedBlobKeys.delete on a successful retry) had NO test
+  // that could fail without it: the only failedBlobs assertion lived in a test where
+  // blobs.delete never fails, so failedBlobs was trivially 0 either way. This test
+  // makes the failure real and then makes the retry succeed.
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(
+    makeSource({ id: "src-blob", userId: "user-1", title: "Blob Source" }),
+  );
+
+  const keys: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const key = `audio/blobfail-${i}.wav`;
+    keys.push(key);
+    await stores.blobs.put(key, new Uint8Array([1]), { contentType: "audio/wav" });
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-blobfail-${i}`,
+        userId: "user-1",
+        sourceId: "src-blob",
+        status: "ready",
+        audioKey: key,
+      }),
+    );
+  }
+
+  // The episode delete fails once per episode, which is what keeps the episode in
+  // the next listing and therefore forces the second pass.
+  const episodeAttempts = new Map<string, number>();
+  const originalEpisodeDelete = stores.metadata.deleteEpisode.bind(stores.metadata);
+  stores.metadata.deleteEpisode = (userId: string, id: string) => {
+    const count = (episodeAttempts.get(id) ?? 0) + 1;
+    episodeAttempts.set(id, count);
+    if (count === 1) return Promise.resolve(false);
+    return originalEpisodeDelete(userId, id);
+  };
+
+  // Every blob delete rejects on its FIRST attempt for each key and succeeds after.
+  const blobAttempts = new Map<string, number>();
+  const originalBlobDelete = stores.blobs.delete.bind(stores.blobs);
+  stores.blobs.delete = (key: string) => {
+    const count = (blobAttempts.get(key) ?? 0) + 1;
+    blobAttempts.set(key, count);
+    if (count === 1) return Promise.reject(new Error("transient blob delete failure"));
+    return originalBlobDelete(key);
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-blob?cascade=true`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+
+  // The failure path must actually have run, or this test proves nothing: each key
+  // was attempted twice, meaning the first attempt failed as intended.
+  assertEquals(blobAttempts.size, 5, "every blob must have been attempted");
+  for (const key of keys) {
+    assert(
+      (blobAttempts.get(key) ?? 0) >= 2,
+      `${key} must have failed once and been retried (attempts: ${blobAttempts.get(key)})`,
+    );
+  }
+
+  assertEquals(body.ok, true);
+  assertEquals(body.deletedEpisodes, 5);
+  assertEquals(body.deletedBlobs, 5);
+  // The regression: without failedBlobKeys.delete() on the successful retry, this
+  // reports 5 — deleted and failed at the same time, and the storage is clean.
+  assertEquals(body.failedBlobs, 0);
+  for (const key of keys) {
+    assertEquals(await stores.blobs.head(key), null, `${key} must be gone from the store`);
+  }
+});
