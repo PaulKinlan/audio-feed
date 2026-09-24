@@ -35,6 +35,7 @@ import {
   UnknownUserError,
 } from "./auth/users.ts";
 import { INBOX_SOURCE_ID, type User } from "./types.ts";
+import { resolveOrigin } from "./origin.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
 import type { Article, AudioMode } from "./types.ts";
@@ -93,6 +94,10 @@ function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | nul
 async function publishableEpisodes(
   ctx: AppContext,
   userId: string,
+  // The origin is resolved per request (audio-feed-0k3), so it is passed in
+  // rather than read from config. Enclosure URLs built from a stale guess are
+  // audio a podcast client cannot fetch.
+  baseUrl: string,
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<FeedEpisode[]> {
   const episodes = await ctx.stores.metadata.listEpisodes({
@@ -109,7 +114,7 @@ async function publishableEpisodes(
       ? await ctx.stores.blobs.head(episode.audioKey)
       : null;
     const mapped = toFeedEpisode(episode, {
-      publicBaseUrl: ctx.config.publicBaseUrl,
+      publicBaseUrl: baseUrl,
       byteLength: info?.size,
     });
     if (mapped) publishable.push(mapped);
@@ -144,13 +149,17 @@ const forbidden = (message: string) =>
  * feed would otherwise keep serving audio generated before a suspension.
  */
 export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFeed"] {
-  return async ({ params }) => {
+  return async ({ params, req }) => {
     const token = params.token ?? "";
     const user = await loadUserByFeedToken(ctx, token);
     if (!user) return notFound("Unknown feed");
     if (user.status !== "approved") return forbidden(`Feed unavailable (status: ${user.status})`);
 
-    const episodes = await publishableEpisodes(ctx, user.id);
+    // Per request, not per process: an unconfigured deployment used to emit
+    // localhost enclosures that no podcast client could fetch (audio-feed-0k3).
+    const { baseUrl } = resolveOrigin(ctx.config, req);
+
+    const episodes = await publishableEpisodes(ctx, user.id, baseUrl);
     const sources = await ctx.stores.metadata.listSources(user.id);
     const titles = new Map(sources.map((source) => [source.id, source.title]));
 
@@ -159,8 +168,8 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     // advertising a 404 — the tww contract mismatch.
     const channel: ChannelMeta = {
       title: `${user.displayName} — Audio Feed`,
-      selfUrl: ctx.config.publicBaseUrl + masterFeedUrl(token),
-      link: ctx.config.publicBaseUrl,
+      selfUrl: baseUrl + masterFeedUrl(token),
+      link: baseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
       author: user.displayName,
       ownerEmail: user.email,
@@ -181,7 +190,7 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
 
 /** `GET /feed/:token/:sourceId/:mode.xml` — one source, one presentation mode. */
 export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFeed"] {
-  return async ({ params }) => {
+  return async ({ params, req }) => {
     const token = params.token ?? "";
     const user = await loadUserByFeedToken(ctx, token);
     if (!user) return notFound("Unknown feed");
@@ -192,12 +201,14 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
     const source = await ctx.stores.metadata.getSource(user.id, sourceId);
     if (!source) return notFound(`Unknown source: ${sourceId}`);
 
-    const episodes = await publishableEpisodes(ctx, user.id, { sourceId, mode });
+    const { baseUrl } = resolveOrigin(ctx.config, req);
+
+    const episodes = await publishableEpisodes(ctx, user.id, baseUrl, { sourceId, mode });
     const modeLabel = mode === "deepdive" ? "Deep Dive" : "Direct Read";
     const channel: ChannelMeta = {
       title: `${source.title} — ${modeLabel}`,
-      selfUrl: ctx.config.publicBaseUrl + sourceFeedUrl(token, sourceId, mode),
-      link: source.siteUrl ?? ctx.config.publicBaseUrl,
+      selfUrl: baseUrl + sourceFeedUrl(token, sourceId, mode),
+      link: source.siteUrl ?? baseUrl,
       description: `${modeLabel} audio of ${source.title} articles.`,
       author: source.title,
       ownerEmail: user.email,

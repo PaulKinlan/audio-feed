@@ -21,6 +21,7 @@
 
 import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
+import { originCacheControl, resolveOrigin } from "../origin.ts";
 
 /** Escapes text interpolated into the document. */
 function esc(value: string): string {
@@ -603,9 +604,13 @@ export function renderHomePage({
 }
 
 /** `GET /` — the human entry point. */
-export function handleHome({ ctx }: RouteContext<AppContext>): Response {
+export function handleHome({ ctx, req }: RouteContext<AppContext>): Response {
+  // Resolved per request (audio-feed-0k3). An unconfigured deployment used to
+  // print `http://localhost:8000/feed/...` as the URL to subscribe to.
+  const origin = resolveOrigin(ctx.config, req);
+
   const html = renderHomePage({
-    publicBaseUrl: ctx.config.publicBaseUrl,
+    publicBaseUrl: origin.baseUrl,
     synthesisConfigured: Boolean(ctx.config.geminiApiKey),
   });
 
@@ -613,9 +618,19 @@ export function handleHome({ ctx }: RouteContext<AppContext>): Response {
     status: 200,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      // Short: the page reports whether synthesis is configured, so a stale
-      // copy could tell a visitor the service is unavailable after it is fixed.
-      "cache-control": "public, max-age=300",
+      // `private` whenever the origin came from the request rather than from
+      // configuration. This page tells people where to send a feed token, and a
+      // feed token is a bearer credential — a document whose content depends on
+      // the request host must never sit in a shared cache, or one spoofed
+      // request poisons the copy served to everyone after it.
+      //
+      // The max-age is short regardless: the page reports whether synthesis is
+      // configured, so a stale copy could claim the service is unavailable
+      // after it has been fixed.
+      "cache-control": originCacheControl(origin, 300),
+      // The response body varies with the host that routed the request, so say
+      // so: a cache keyed only on path would otherwise be free to mix them.
+      ...(origin.explicit ? {} : { vary: "Host" }),
     },
   });
 }

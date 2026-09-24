@@ -26,7 +26,15 @@ export async function bootstrap() {
   const app = createApp({ config, stores }, handlers);
   serverFetch = app.fetch;
 
-  console.log(`[audio-feed] ${stores.describe} base=${config.publicBaseUrl}`);
+  console.log(
+    `[audio-feed] ${stores.describe} base=${config.publicBaseUrl ?? "<derived from each request>"}`,
+  );
+  if (config.trustProxyHeaders) {
+    console.warn(
+      "[audio-feed] TRUST_PROXY_HEADERS is on — x-forwarded-host/proto are honoured. " +
+        "Only correct behind a proxy that overwrites client-supplied values.",
+    );
+  }
   if (!config.geminiApiKey) {
     console.warn("[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable");
   }

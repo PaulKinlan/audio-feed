@@ -15,8 +15,26 @@ import { S3BlobStore } from "./storage/s3.ts";
 
 export interface AppConfig {
   port: number;
-  /** Public origin, used to build absolute feed and enclosure URLs. */
-  publicBaseUrl: string;
+  /**
+   * Explicit public origin. OPTIONAL, and optional on purpose (audio-feed-0k3).
+   *
+   * This used to default to `http://localhost:<port>`, which meant a deployment
+   * that set nothing believed its own origin was loopback — and told visitors to
+   * subscribe to `http://localhost:8000/feed/...`. A guess is worse than an
+   * absence here, because an absence can be resolved from the request that
+   * actually arrived. See `src/origin.ts`.
+   *
+   * Set it when something upstream rewrites Host, or to pin a canonical domain.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Trust `x-forwarded-proto` / `x-forwarded-host` when deriving the origin.
+   *
+   * Off unless an operator opts in, because those headers are hop-by-hop: any
+   * client can set them, and only the operator knows whether a proxy in front
+   * overwrites client-supplied values.
+   */
+  trustProxyHeaders?: boolean;
   /** Present only when TTS is configured; 65u owns its use. */
   geminiApiKey?: string;
   adminToken?: string;
@@ -32,9 +50,14 @@ export function loadConfig(): AppConfig {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid PORT: ${env("PORT")}`);
   }
+  const trust = env("TRUST_PROXY_HEADERS")?.toLowerCase();
+
   return {
     port,
-    publicBaseUrl: (env("PUBLIC_BASE_URL") ?? `http://localhost:${port}`).replace(/\/+$/, ""),
+    // No localhost fallback. An unset value means "resolve it from the request",
+    // which is the only thing that knows the real origin.
+    publicBaseUrl: env("PUBLIC_BASE_URL")?.replace(/\/+$/, ""),
+    trustProxyHeaders: trust === "1" || trust === "true" || trust === "yes",
     geminiApiKey: env("GEMINI_API_KEY"),
     adminToken: env("ADMIN_TOKEN"),
   };
