@@ -14,6 +14,8 @@ import {
   directFeedUrl,
   escapeXml,
   formatDuration,
+  masterFeedUrl,
+  sourceFeedUrl,
   toRfc2822,
 } from "../../src/feed/rss.ts";
 import type { Episode, FeedSource } from "../../src/feed/types.ts";
@@ -105,21 +107,56 @@ Deno.test("duration formats as HH:MM:SS", () => {
   if (formatDuration(-5) !== "00:00:00") throw new Error(formatDuration(-5));
 });
 
-Deno.test("feed URLs match the documented routes", () => {
+Deno.test("feed URLs are the token-bearing routes the router serves", () => {
   const origin = "https://audio.example.com";
-  if (directFeedUrl(origin, "stratechery") !== `${origin}/feed/stratechery/direct.xml`) {
-    throw new Error("direct url");
+  const token = "capability-token";
+  // These return router PATHS, not absolute URLs: the caller supplies its own
+  // origin. One definition of the shape the router registers (audio-feed-tww).
+  if (directFeedUrl(token, "stratechery") !== `/feed/${token}/stratechery/direct.xml`) {
+    throw new Error(directFeedUrl(token, "stratechery"));
   }
-  if (deepDiveFeedUrl(origin, "stratechery") !== `${origin}/feed/stratechery/deepdive.xml`) {
-    throw new Error("deepdive url");
+  if (deepDiveFeedUrl(token, "stratechery") !== `/feed/${token}/stratechery/deepdive.xml`) {
+    throw new Error(deepDiveFeedUrl(token, "stratechery"));
   }
-  const master = buildMasterFeed({ origin, episodes: [episode()] });
-  if (!master.includes(`<atom:link href="${origin}/feed/master.xml"`)) throw new Error(master);
+  if (masterFeedUrl(token) !== `/feed/${token}/master.xml`) {
+    throw new Error(masterFeedUrl(token));
+  }
+  // The mode-typed builder takes the same union the router's :mode uses, so a
+  // misspelt mode cannot compile into a 404.
+  if (
+    sourceFeedUrl(token, "stratechery", "deepdive") !== `/feed/${token}/stratechery/deepdive.xml`
+  ) {
+    throw new Error(sourceFeedUrl(token, "stratechery", "deepdive"));
+  }
+  if (sourceFeedUrl(token, "stratechery", "direct") !== directFeedUrl(token, "stratechery")) {
+    throw new Error("sourceFeedUrl and directFeedUrl must agree");
+  }
+  // A token must not be able to rewrite the route with path-significant characters.
+  if (masterFeedUrl("a/../b") !== "/feed/a%2F..%2Fb/master.xml") {
+    throw new Error(masterFeedUrl("a/../b"));
+  }
+
+  const master = buildMasterFeed({ origin, token, episodes: [episode()] });
+  if (!master.includes(`<atom:link href="${origin}/feed/${token}/master.xml"`)) {
+    throw new Error("the master self-link must carry the token");
+  }
+  // The self-link is what a client follows, so it must be the served route.
+  const xml = buildSourceFeed({
+    origin,
+    token,
+    source,
+    kind: "direct",
+    episodes: [episode()],
+  });
+  if (!xml.includes(`<atom:link href="${origin}/feed/${token}/stratechery/direct.xml"`)) {
+    throw new Error("the per-source self-link must carry the token");
+  }
 });
 
 Deno.test("per-source feed carries podcast enclosure and iTunes tags", () => {
   const xml = buildSourceFeed({
     origin: "https://audio.example.com",
+    token: "tok",
     source,
     kind: "direct",
     episodes: [episode()],
@@ -131,7 +168,7 @@ Deno.test("per-source feed carries podcast enclosure and iTunes tags", () => {
     '<?xml version="1.0" encoding="UTF-8"?>',
     'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"',
     "<title>Stratechery — Direct Read</title>",
-    'href="https://audio.example.com/feed/stratechery/direct.xml" rel="self"',
+    'href="https://audio.example.com/feed/tok/stratechery/direct.xml" rel="self"',
     '<guid isPermaLink="false">ep-1</guid>',
     "<pubDate>Thu, 24 Sep 2026 10:00:00 +0000</pubDate>",
     '<enclosure url="https://cdn.example.com/ep-1.mp3" length="4200000" type="audio/mpeg"/>',
@@ -152,6 +189,7 @@ Deno.test("per-source feed carries podcast enclosure and iTunes tags", () => {
 Deno.test("per-source feed excludes the other presentation mode", () => {
   const xml = buildSourceFeed({
     origin: "https://audio.example.com",
+    token: "tok",
     source,
     kind: "deepdive",
     episodes: [
@@ -180,6 +218,7 @@ Deno.test("per-source feeds never leak another source's episodes", () => {
     for (const kind of ["direct", "deepdive"] as const) {
       const xml = buildSourceFeed({
         origin: "https://audio.example.com",
+        token: "tok",
         source: target,
         kind,
         episodes: shared,
@@ -201,6 +240,7 @@ Deno.test("per-source feeds never leak another source's episodes", () => {
 Deno.test("episodes are newest first and de-duplicated by guid", () => {
   const xml = buildSourceFeed({
     origin: "https://audio.example.com",
+    token: "tok",
     source,
     kind: "direct",
     episodes: [
@@ -217,6 +257,7 @@ Deno.test("master feed aggregates sources and attributes titles", () => {
   const other: FeedSource = { id: "other", title: "Other Blog" };
   const xml = buildMasterFeed({
     origin: "https://audio.example.com",
+    token: "tok",
     sources: [source, other],
     episodes: [
       episode({ guid: "a", title: "Mine" }),

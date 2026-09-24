@@ -11,6 +11,8 @@ import type { Episode, FeedSource } from "../src/feed/types.ts";
 
 const outDir = Deno.args[0] ?? "/tmp/audiofeed-fixtures";
 const ORIGIN = Deno.env.get("ORIGIN") ?? "http://localhost:8787";
+/** The capability a subscriber would use; fixtures are served, not authenticated. */
+const TOKEN = Deno.env.get("FEED_TOKEN") ?? "local-dev-token";
 
 const sources: FeedSource[] = [
   {
@@ -76,6 +78,7 @@ for (const source of sources) {
       file,
       buildSourceFeed({
         origin: ORIGIN,
+        token: TOKEN,
         source,
         kind,
         episodes,
@@ -90,6 +93,7 @@ await Deno.writeTextFile(
   `${outDir}/feed/master.xml`,
   buildMasterFeed({
     origin: ORIGIN,
+    token: TOKEN,
     sources,
     episodes,
     title: "Audio Feed",

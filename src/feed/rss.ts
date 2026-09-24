@@ -72,16 +72,42 @@ export function formatDuration(seconds: number): string {
   return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
 }
 
-export function directFeedUrl(origin: string, sourceId: string): string {
-  return `${origin}/feed/${sourceId}/direct.xml`;
+/**
+ * Feed URL builders — the ONE definition of the feed URL shape.
+ *
+ * These return the router-registered PATH (`/feed/:token/…`), not an absolute
+ * URL: the token is the per-user capability, and callers prefix their own origin
+ * to make a link absolute. Keeping the path here is what stops the generator and
+ * the router disagreeing — the audio-feed-tww mismatch, where every emitted feed
+ * URL 404'd because the generator advertised `/feed/<source>/direct.xml` while
+ * the router served `/feed/:token/:source/direct.xml`.
+ *
+ * Feed URLs are a one-way contract: once a podcast client subscribes, that
+ * address is polled forever, so the token-bearing shape is the one to emit.
+ */
+export function directFeedUrl(token: string, sourceId: string): string {
+  return `/feed/${encodeURIComponent(token)}/${encodeURIComponent(sourceId)}/direct.xml`;
 }
 
-export function deepDiveFeedUrl(origin: string, sourceId: string): string {
-  return `${origin}/feed/${sourceId}/deepdive.xml`;
+export function deepDiveFeedUrl(token: string, sourceId: string): string {
+  return `/feed/${encodeURIComponent(token)}/${encodeURIComponent(sourceId)}/deepdive.xml`;
 }
 
-export function masterFeedUrl(origin: string): string {
-  return `${origin}/feed/master.xml`;
+export function masterFeedUrl(token: string): string {
+  return `/feed/${encodeURIComponent(token)}/master.xml`;
+}
+
+/**
+ * Per-source path for a mode.
+ *
+ * The mode is the feed's own `EpisodeKind` union — the same `direct | deepdive`
+ * literals as the router's `:mode` and as `AudioMode` — so a misspelt mode is a
+ * compile error rather than a 404 nobody notices until a client stops updating
+ * (audio-feed-opus review note). `directFeedUrl`/`deepDiveFeedUrl` remain as the
+ * named builders and both delegate here through this function's body.
+ */
+export function sourceFeedUrl(token: string, sourceId: string, mode: EpisodeKind): string {
+  return mode === "deepdive" ? deepDiveFeedUrl(token, sourceId) : directFeedUrl(token, sourceId);
 }
 
 /** Newest first, and one entry per guid even if a caller passes duplicates. */
@@ -207,19 +233,22 @@ export function buildFeed(
 export function buildSourceFeed(
   options: {
     origin: string;
+    /** The per-user capability in the feed path; required — see the URL builders. */
+    token: string;
     source: FeedSource;
     kind: EpisodeKind;
     episodes: Episode[];
     ownerEmail?: string;
   },
 ): string {
-  const { origin, source, kind, episodes, ownerEmail } = options;
+  const { origin, token, source, kind, episodes, ownerEmail } = options;
   const modeLabel = kind === "deepdive" ? "Deep Dive" : "Direct Read";
   return buildFeed(
     {
       title: `${source.title} — ${modeLabel}`,
       link: source.link ?? origin,
-      selfUrl: (kind === "deepdive" ? deepDiveFeedUrl : directFeedUrl)(origin, source.id),
+      selfUrl: origin +
+        (kind === "deepdive" ? deepDiveFeedUrl : directFeedUrl)(token, source.id),
       description: source.description ??
         `${modeLabel} audio of ${source.title} articles.` +
           (kind === "deepdive" ? " Two-voice discussion with background research." : ""),
@@ -240,6 +269,8 @@ export function buildSourceFeed(
 export function buildMasterFeed(
   options: {
     origin: string;
+    /** The per-user capability in the feed path; required — see the URL builders. */
+    token: string;
     episodes: Episode[];
     sources?: FeedSource[];
     title?: string;
@@ -247,7 +278,7 @@ export function buildMasterFeed(
     imageUrl?: string;
   },
 ): string {
-  const { origin, episodes, sources = [], title, ownerEmail, imageUrl } = options;
+  const { origin, token, episodes, sources = [], title, ownerEmail, imageUrl } = options;
   const titles = new Map(sources.map((source) => [source.id, source.title]));
   const channelTitle = title ?? "Audio Feed";
 
@@ -255,7 +286,7 @@ export function buildMasterFeed(
     {
       title: channelTitle,
       link: origin,
-      selfUrl: masterFeedUrl(origin),
+      selfUrl: origin + masterFeedUrl(token),
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
       imageUrl,
       author: channelTitle,

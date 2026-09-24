@@ -22,7 +22,7 @@
  * record has `createdAt` and `audioKey`. This file does not claim b0a.
  */
 import { createUrlIngestHandler, type ExtractedArticle } from "./ingest/url.ts";
-import { buildFeed } from "./feed/rss.ts";
+import { buildFeed, masterFeedUrl, sourceFeedUrl } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
 import {
   approveUser,
@@ -80,12 +80,6 @@ function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | nul
 // ---------------------------------------------------------------------------
 // storage → feed mapping (see the header note: this is b0a's subject)
 // ---------------------------------------------------------------------------
-
-function feedUrlFor(ctx: AppContext, token: string, path: string): string {
-  // The router serves /feed/:token/…, so the emitted self-link must carry the
-  // token too — otherwise the feed advertises a 404 (the tww contract mismatch).
-  return `${ctx.config.publicBaseUrl}/feed/${encodeURIComponent(token)}/${path}`;
-}
 
 /** Publishable means it has playable audio; a missing enclosure is a broken player. */
 function toFeedEpisode(episode: Episode, ctx: AppContext): FeedEpisode | null {
@@ -177,7 +171,7 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     // advertising a 404 — the tww contract mismatch.
     const channel: ChannelMeta = {
       title: `${user.displayName} — Audio Feed`,
-      selfUrl: feedUrlFor(ctx, token, "master.xml"),
+      selfUrl: ctx.config.publicBaseUrl + masterFeedUrl(token),
       link: ctx.config.publicBaseUrl,
       description: "All subscribed audio-feed episodes: direct reads and deep dives.",
       author: user.displayName,
@@ -214,7 +208,7 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
     const modeLabel = mode === "deepdive" ? "Deep Dive" : "Direct Read";
     const channel: ChannelMeta = {
       title: `${source.title} — ${modeLabel}`,
-      selfUrl: feedUrlFor(ctx, token, `${sourceId}/${mode}.xml`),
+      selfUrl: ctx.config.publicBaseUrl + sourceFeedUrl(token, sourceId, mode),
       link: source.siteUrl ?? ctx.config.publicBaseUrl,
       description: `${modeLabel} audio of ${source.title} articles.`,
       author: source.title,
