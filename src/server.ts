@@ -9,13 +9,16 @@
  */
 
 import { createApp } from "./app.ts";
+import { createHandlers } from "./compose.ts";
 import { loadConfig, openStores } from "./config.ts";
 
 if (import.meta.main) {
   const config = loadConfig();
   const stores = await openStores();
 
-  const { fetch } = createApp({ config, stores });
+  // audio-feed-agl: build the lane handlers, or every product route answers 501.
+  const handlers = createHandlers({ config, stores });
+  const { fetch } = createApp({ config, stores }, handlers);
 
   console.log(`[audio-feed] ${stores.describe} base=${config.publicBaseUrl}`);
   if (!config.geminiApiKey) {
