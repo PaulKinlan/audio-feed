@@ -104,6 +104,15 @@ export interface MetadataStore {
   /** Newest first. Backs both the per-source and master feeds. */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
   /**
+   * Pending and recoverable episodes, ordered by `createdAt` ascending (FIFO, oldest first).
+   * Cross-user queue backing the synthesis worker (audio-feed-bbb).
+   */
+  listPendingEpisodes(opts?: {
+    limit?: number;
+    nowMs?: number;
+    leaseMs?: number;
+  }): Promise<Episode[]>;
+  /**
    * Take exclusive ownership of an episode for synthesis, atomically.
    *
    * Resolves the claimed episode (status `synthesizing`, claim recorded), or

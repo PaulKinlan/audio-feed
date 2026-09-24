@@ -414,8 +414,66 @@ Deno.test("the batch budget still bounds synthesis work", async () => {
   assertEquals(calls, 2, "batchSize 2 must bound synthesis calls to 2");
   assertEquals(run.ready.length, 2);
   // The rest stays pending for the next tick rather than being dropped. Episodes are
-  // listed newest-first, so the two newest were the ones attempted.
-  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "pending");
+  // listed oldest-first (FIFO), so allowed-0 and allowed-1 were attempted and allowed-5 stays pending.
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-5"))?.status, "pending");
+});
+
+Deno.test("queue order is FIFO cross-user by age, preventing a prolific user from starving older jobs", async () => {
+  const stores: Stores = memoryStores();
+  // User "hog" with a backlog queued on 2026-09-10
+  await stores.metadata.putUser(makeUser({ id: "hog", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "hog" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-hog", userId: "hog", sourceId: "inbox" }),
+  );
+  for (let i = 0; i < 5; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `hog-${i}`,
+        userId: "hog",
+        sourceId: "inbox",
+        articleId: "art-hog",
+        status: "pending",
+        createdAt: "2026-09-10T12:00:00.000Z",
+      }),
+    );
+  }
+
+  // User "waiter" with one episode queued earlier on 2026-09-01
+  await stores.metadata.putUser(makeUser({ id: "waiter", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "waiter" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-waiter", userId: "waiter", sourceId: "inbox" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "waiter-oldest",
+      userId: "waiter",
+      sourceId: "inbox",
+      articleId: "art-waiter",
+      status: "pending",
+      createdAt: "2026-09-01T12:00:00.000Z",
+    }),
+  );
+
+  const ctx = { config, stores };
+  const processedOrder: string[] = [];
+  const run = await runSynthesisBatch(ctx, ({ episode }) => {
+    processedOrder.push(episode.id);
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 3 });
+
+  // Older job must be processed first!
+  assertEquals(
+    processedOrder[0],
+    "waiter-oldest",
+    "oldest job across users must be synthesised first",
+  );
+  assertEquals(run.ready.length, 3);
+  assertEquals(
+    (await stores.metadata.getEpisode("waiter", "waiter-oldest"))?.status,
+    "ready",
+  );
 });
 
 Deno.test("a suspension landing mid-tick stops the remaining spend", async () => {

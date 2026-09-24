@@ -608,4 +608,103 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(all.length, 1, "claim + complete must not duplicate the index entry");
     assertEquals(all[0]?.status, "ready");
   });
+
+  // -- listPendingEpisodes (audio-feed-bbb) ----------------------------------
+
+  test("listPendingEpisodes returns pending episodes oldest first (FIFO)", async (store) => {
+    await store.putEpisode(
+      makeEpisode({
+        id: "mid",
+        userId: "u1",
+        status: "pending",
+        createdAt: "2026-09-02T00:00:00.000Z",
+      }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "newest",
+        userId: "u2",
+        status: "pending",
+        createdAt: "2026-09-03T00:00:00.000Z",
+      }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "oldest",
+        userId: "u1",
+        status: "pending",
+        createdAt: "2026-09-01T00:00:00.000Z",
+      }),
+    );
+
+    const pending = await store.listPendingEpisodes();
+    assertEquals(pending.map((e) => e.id), ["oldest", "mid", "newest"]);
+  });
+
+  test("listPendingEpisodes excludes ready, failed, and actively leased episodes", async (store) => {
+    await store.putEpisode(
+      makeEpisode({
+        id: "p1",
+        userId: "u1",
+        status: "pending",
+        createdAt: "2026-09-01T00:00:00.000Z",
+      }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "r1",
+        userId: "u1",
+        status: "ready",
+        createdAt: "2026-09-01T01:00:00.000Z",
+      }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "f1",
+        userId: "u1",
+        status: "failed",
+        createdAt: "2026-09-01T02:00:00.000Z",
+      }),
+    );
+
+    // Active claim (not expired)
+    await store.putEpisode(
+      makeEpisode({
+        id: "active",
+        userId: "u1",
+        status: "synthesizing",
+        claimedAt: new Date().toISOString(),
+        createdAt: "2026-09-01T03:00:00.000Z",
+      }),
+    );
+
+    // Stale/expired claim
+    await store.putEpisode(
+      makeEpisode({
+        id: "expired",
+        userId: "u1",
+        status: "synthesizing",
+        claimedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+        createdAt: "2026-08-30T00:00:00.000Z",
+      }),
+    );
+
+    const queue = await store.listPendingEpisodes({ leaseMs: 15 * 60_000 });
+    assertEquals(queue.map((e) => e.id), ["expired", "p1"]);
+  });
+
+  test("listPendingEpisodes honours limit", async (store) => {
+    for (let i = 0; i < 5; i++) {
+      await store.putEpisode(
+        makeEpisode({
+          id: `ep-${i}`,
+          userId: "u1",
+          status: "pending",
+          createdAt: `2026-09-0${i + 1}T00:00:00.000Z`,
+        }),
+      );
+    }
+    const limited = await store.listPendingEpisodes({ limit: 2 });
+    assertEquals(limited.map((e) => e.id), ["ep-0", "ep-1"]);
+  });
 }
