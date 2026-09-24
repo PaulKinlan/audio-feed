@@ -190,7 +190,8 @@ export function createMasterFeedHandler(ctx: AppContext): AppHandlers["masterFee
     return feedResponse(
       buildFeed(channel, episodes, {
         titleFor: (episode: FeedEpisode) => {
-          const sourceTitle = episode.sourceId ? titles.get(episode.sourceId) : undefined;
+          const sourceTitle = (episode.sourceId ? titles.get(episode.sourceId) : undefined) ??
+            episode.sourceTitle;
           return sourceTitle ? `${sourceTitle}: ${episode.title}` : episode.title;
         },
       }),
@@ -419,6 +420,7 @@ export function createIngestHandler(
         id: episodeId,
         userId: user.id,
         sourceId: INBOX_SOURCE_ID,
+        sourceTitle: "Inbox",
         articleId,
         mode,
         status: "pending",
@@ -769,9 +771,61 @@ export function createAdminDeleteUserSourceHandler(
     const source = await ctx.stores.metadata.getSource(userId, sourceId);
     if (!source) return notFound("Unknown source");
 
+    const url = new URL(req.url);
+    const cascade = url.searchParams.get("cascade") === "true";
+
+    const episodes = await ctx.stores.metadata.listEpisodes({
+      userId,
+      sourceId,
+      limit: 1000,
+    });
+
+    let deletedEpisodes = 0;
+    let deletedBlobs = 0;
+    let cancelledPending = 0;
+    let retainedEpisodes = 0;
+
+    if (cascade) {
+      for (const episode of episodes) {
+        if (episode.audioKey) {
+          try {
+            await ctx.stores.blobs.delete(episode.audioKey);
+            deletedBlobs++;
+          } catch {
+            // best-effort blob delete
+          }
+        }
+        await ctx.stores.metadata.deleteEpisode(userId, episode.id);
+        deletedEpisodes++;
+      }
+    } else {
+      for (const episode of episodes) {
+        if (episode.status === "pending" || episode.status === "synthesizing") {
+          await ctx.stores.metadata.deleteEpisode(userId, episode.id);
+          cancelledPending++;
+        } else {
+          retainedEpisodes++;
+        }
+      }
+    }
+
     await ctx.stores.metadata.deleteSource(userId, sourceId);
     return Response.json(
-      { ok: true, deleted: sourceId },
+      cascade
+        ? {
+          ok: true,
+          deleted: sourceId,
+          cascaded: true,
+          deletedEpisodes,
+          deletedBlobs,
+        }
+        : {
+          ok: true,
+          deleted: sourceId,
+          cascaded: false,
+          retainedEpisodes,
+          cancelledPending,
+        },
       { headers: { "cache-control": "no-store" } },
     );
   };

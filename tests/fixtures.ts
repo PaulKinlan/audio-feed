@@ -67,6 +67,7 @@ export function makeEpisode(overrides: Partial<Episode> = {}): Episode {
     id: "episode-1",
     userId: "user-1",
     sourceId: "stratechery",
+    sourceTitle: "Stratechery",
     articleId: "article-1",
     mode,
     status: "ready",

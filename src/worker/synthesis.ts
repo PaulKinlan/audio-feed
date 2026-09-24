@@ -148,7 +148,7 @@ function isPermanent(error: unknown): boolean {
 /** Default synthesizer: the real client, with the source's configured voices. */
 export function createGeminiSynthesizer(ctx: AppContext): Synthesizer {
   const client = new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
-  return async ({ article, source, mode }) => {
+  return async ({ article, source, episode, mode }) => {
     if (mode === "deepdive") {
       const [expert, foil] = source?.voices.deepdive ?? ["Kore", "Puck"];
       return await client.synthesizeDialogue({
@@ -169,7 +169,7 @@ export function createGeminiSynthesizer(ctx: AppContext): Synthesizer {
       title: article.title,
       author: article.author,
       publishedAt: article.publishedAt,
-      sourceName: source?.title,
+      sourceName: source?.title ?? episode.sourceTitle,
       body: article.content,
       voice: source?.voices.direct,
     });

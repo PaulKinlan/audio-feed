@@ -298,7 +298,8 @@ export function buildMasterFeed(
     {
       // Attribute only when the source is known, so titles never read "undefined: …".
       titleFor: (episode) => {
-        const sourceTitle = episode.sourceId ? titles.get(episode.sourceId) : undefined;
+        const sourceTitle = (episode.sourceId ? titles.get(episode.sourceId) : undefined) ??
+          episode.sourceTitle;
         return sourceTitle ? `${sourceTitle}: ${episode.title}` : episode.title;
       },
     },

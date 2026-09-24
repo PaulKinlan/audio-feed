@@ -735,15 +735,18 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         delBtn.textContent = "Remove";
         delBtn.setAttribute("aria-label", "Remove feed " + source.title);
         delBtn.addEventListener("click", async () => {
-          if (!confirm("Remove feed subscription?")) return;
+          if (!confirm("Remove feed subscription \\"" + source.title + "\\"?")) return;
           delBtn.disabled = true;
           try {
-            await api(
+            const res = await api(
               "/api/admin/users/" + encodeURIComponent(userId) + "/sources/" +
                 encodeURIComponent(source.id),
               { method: "DELETE" },
             );
-            say(manageSourcesFeedback, "ok", "Removed feed: " + source.title);
+            const msg = res && res.cancelledPending > 0
+              ? "Removed feed: " + source.title + " (" + res.cancelledPending + " pending cancelled, " + res.retainedEpisodes + " retained)"
+              : "Removed feed: " + source.title;
+            say(manageSourcesFeedback, "ok", msg);
             await loadManageSources(userId);
           } catch (error) {
             say(manageSourcesFeedback, "error", String(error.message || error));

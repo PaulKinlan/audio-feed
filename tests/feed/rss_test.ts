@@ -274,6 +274,26 @@ Deno.test("master feed aggregates sources and attributes titles", () => {
   if (xml.split("<item>").length - 1 !== 3) throw new Error("master should carry all episodes");
 });
 
+Deno.test("master feed preserves attribution via sourceTitle when source was deleted", () => {
+  const xml = buildMasterFeed({
+    origin: "https://audio.example.com",
+    token: "tok",
+    sources: [], // source deleted
+    episodes: [
+      episode({
+        guid: "d",
+        title: "Survivor",
+        sourceId: "deleted-source",
+        sourceTitle: "Saved Source",
+      }),
+    ],
+  });
+  assertWellFormed(xml);
+  if (!xml.includes("<title>Saved Source: Survivor</title>")) {
+    throw new Error("sourceTitle must attribute episode even when source was deleted");
+  }
+});
+
 Deno.test("well-formedness checker rejects broken XML", () => {
   let threw = false;
   try {

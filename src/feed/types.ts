@@ -35,6 +35,8 @@ export interface Episode {
   kind?: EpisodeKind;
   /** Source this episode belongs to. Required for master-feed attribution. */
   sourceId?: string;
+  /** Source title preserved for attribution if the source is deleted (audio-feed-ap6). */
+  sourceTitle?: string;
   /** Article the audio was generated from. */
   link?: string;
   /** Bytes of the audio file. Encoders should set this; 0 is emitted if absent. */

@@ -43,6 +43,7 @@ Deno.test("every field gap between the two Episode types is bridged deliberately
   assertEquals(projected.guid, "episode-1"); // id -> guid
   assertEquals(projected.kind, "direct"); // mode -> kind
   assertEquals(projected.sourceId, "stratechery");
+  assertEquals(projected.sourceTitle, "Stratechery");
   assertEquals(projected.title, "The Aggregation Theory of Everything");
   assertEquals(projected.description, "A spoken read.");
   assertEquals(projected.mimeType, "audio/wav"); // contentType -> mimeType

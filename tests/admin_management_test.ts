@@ -9,7 +9,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
-import { makeSource, makeUser } from "./fixtures.ts";
+import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -165,6 +165,7 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId removes subscriber feed
   const body = await res.json();
   assertEquals(body.ok, true);
   assertEquals(body.deleted, "src-1");
+  assertEquals(body.cascaded, false);
 
   assertEquals((await stores.metadata.listSources("user-1")).length, 0);
 
@@ -176,6 +177,126 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId removes subscriber feed
     }),
   );
   assertEquals(notFound.status, 404);
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId default retains ready episodes with attribution and cancels pending (audio-feed-ap6)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-1", userId: "user-1", title: "Stratechery" }),
+  );
+  // 1 ready episode with audio
+  await stores.blobs.put("audio/ready.wav", new Uint8Array([1, 2, 3]), {
+    contentType: "audio/wav",
+  });
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-ready",
+      userId: "user-1",
+      sourceId: "src-1",
+      sourceTitle: "Stratechery",
+      status: "ready",
+      audioKey: "audio/ready.wav",
+      title: "An Article",
+    }),
+  );
+  // 1 pending episode
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-pending",
+      userId: "user-1",
+      sourceId: "src-1",
+      sourceTitle: "Stratechery",
+      status: "pending",
+      audioKey: undefined,
+      title: "Pending Article",
+    }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-1`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.deleted, "src-1");
+  assertEquals(body.cascaded, false);
+  assertEquals(body.retainedEpisodes, 1);
+  assertEquals(body.cancelledPending, 1);
+
+  // Source is gone
+  assertEquals(await stores.metadata.getSource("user-1", "src-1"), null);
+
+  // Pending episode was cancelled
+  assertEquals(await stores.metadata.getEpisode("user-1", "ep-pending"), null);
+
+  // Ready episode was retained and audio still served
+  const readyEp = await stores.metadata.getEpisode("user-1", "ep-ready");
+  assert(readyEp);
+  assertEquals(readyEp.status, "ready");
+  assert(await stores.blobs.get("audio/ready.wav"));
+
+  // Master feed syndicates retained episode and preserves Stratechery prefix
+  const masterRes = await fetch(new Request(`${BASE}/feed/tok-1/master.xml`));
+  assertEquals(masterRes.status, 200);
+  const xml = await masterRes.text();
+  assertStringIncludes(xml, "<title>Stratechery: An Article</title>");
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId with ?cascade=true purges episodes and blobs (audio-feed-ap6)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-purge", userId: "user-1", title: "Purge Me" }),
+  );
+  await stores.blobs.put("audio/purge.wav", new Uint8Array([4, 5, 6]), {
+    contentType: "audio/wav",
+  });
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-purge",
+      userId: "user-1",
+      sourceId: "src-purge",
+      sourceTitle: "Purge Me",
+      status: "ready",
+      audioKey: "audio/purge.wav",
+      title: "Gone Forever",
+    }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-purge?cascade=true`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.deleted, "src-purge");
+  assertEquals(body.cascaded, true);
+  assertEquals(body.deletedEpisodes, 1);
+  assertEquals(body.deletedBlobs, 1);
+
+  // Source is gone
+  assertEquals(await stores.metadata.getSource("user-1", "src-purge"), null);
+  // Episode is gone
+  assertEquals(await stores.metadata.getEpisode("user-1", "ep-purge"), null);
+  // Blob is deleted
+  assertEquals(await stores.blobs.get("audio/purge.wav"), null);
+
+  // Master feed no longer has the episode
+  const masterRes = await fetch(new Request(`${BASE}/feed/tok-1/master.xml`));
+  assertEquals(masterRes.status, 200);
+  const xml = await masterRes.text();
+  assertEquals(xml.includes("Gone Forever"), false);
 });
 
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {

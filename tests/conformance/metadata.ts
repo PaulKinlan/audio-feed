@@ -396,6 +396,22 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(all[0]?.status, "ready");
   });
 
+  test("deletes an episode and removes it from user and pending indexes", async (store) => {
+    const ep = makeEpisode({ id: "e1", userId: "user-1", status: "pending", audioKey: undefined });
+    await store.putEpisode(ep);
+    assertEquals((await store.getEpisode("user-1", "e1"))?.id, "e1");
+    assertEquals((await store.listEpisodes({ userId: "user-1" })).length, 1);
+    assertEquals((await store.listPendingEpisodes()).episodes.length, 1);
+
+    await store.deleteEpisode("user-1", "e1");
+    assertEquals(await store.getEpisode("user-1", "e1"), null);
+    assertEquals((await store.listEpisodes({ userId: "user-1" })).length, 0);
+    assertEquals((await store.listPendingEpisodes()).episodes.length, 0);
+
+    // Deleting non-existent episode does not throw
+    await store.deleteEpisode("user-1", "e1");
+  });
+
   test("returns copies, not live references", async (store) => {
     const episode = makeEpisode({ id: "e1", title: "Original" });
     await store.putEpisode(episode);

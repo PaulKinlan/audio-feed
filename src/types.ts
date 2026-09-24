@@ -174,6 +174,11 @@ export interface Episode {
   id: string;
   userId: string;
   sourceId: string;
+  /**
+   * Title of the source at the time the episode was queued.
+   * Preserves feed attribution even if the source is subsequently deleted (audio-feed-ap6).
+   */
+  sourceTitle?: string;
   articleId: string;
   mode: AudioMode;
   status: EpisodeStatus;

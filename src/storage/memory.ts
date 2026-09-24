@@ -210,6 +210,11 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(found ? structuredClone(found) : null);
   }
 
+  deleteEpisode(userId: string, id: string): Promise<void> {
+    this.#episodes.delete(MemoryMetadataStore.#scoped(userId, id));
+    return Promise.resolve();
+  }
+
   listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
     const limit = query.limit ?? 50;
     const out = [...this.#episodes.values()]

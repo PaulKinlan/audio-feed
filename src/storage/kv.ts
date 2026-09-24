@@ -247,6 +247,42 @@ export class KvMetadataStore implements MetadataStore {
     return (await this.#kv.get<Episode>(["episode", userId, id])).value;
   }
 
+  async deleteEpisode(userId: string, id: string): Promise<void> {
+    const key: Deno.KvKey = ["episode", userId, id];
+    const entry = await this.#kv.get<Episode>(key);
+    if (!entry.value) return;
+    const ep = entry.value;
+    const sortKey = descendingKey(ep.createdAt, ep.id);
+    const result = await this.#kv.atomic()
+      .check(entry)
+      .delete(key)
+      .delete(["episode_by_user", userId, sortKey])
+      .delete(["episode_by_source", userId, ep.sourceId, ep.mode, sortKey])
+      .delete(["pending_episodes", ep.createdAt, ep.id])
+      .delete(["synthesizing_episodes", ep.createdAt, ep.id])
+      .commit();
+    if (!result.ok) {
+      const retry = await this.#kv.get<Episode>(key);
+      if (retry.value) {
+        const retrySortKey = descendingKey(retry.value.createdAt, retry.value.id);
+        await this.#kv.atomic()
+          .check(retry)
+          .delete(key)
+          .delete(["episode_by_user", userId, retrySortKey])
+          .delete([
+            "episode_by_source",
+            userId,
+            retry.value.sourceId,
+            retry.value.mode,
+            retrySortKey,
+          ])
+          .delete(["pending_episodes", retry.value.createdAt, retry.value.id])
+          .delete(["synthesizing_episodes", retry.value.createdAt, retry.value.id])
+          .commit();
+      }
+    }
+  }
+
   /**
    * Compare-and-swap claim. The `.check(entry)` is the entire point.
    *

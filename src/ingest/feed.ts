@@ -237,6 +237,7 @@ async function queueItems(
         id: newEpisodeId(),
         userId: source.userId,
         sourceId: source.id,
+        sourceTitle: source.title,
         articleId,
         mode,
         // The worker picks this up; this module never synthesises.

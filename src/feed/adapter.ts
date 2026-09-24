@@ -66,6 +66,7 @@ export function toFeedEpisode(
     description: episode.description,
     kind: episode.mode,
     sourceId: episode.sourceId,
+    sourceTitle: episode.sourceTitle,
     byteLength: recorded ?? context.byteLength,
     mimeType: episode.contentType,
     durationSeconds: episode.durationSeconds,

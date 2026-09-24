@@ -113,6 +113,7 @@ export interface MetadataStore {
   // -- episodes ---------------------------------------------------------
   putEpisode(episode: Episode): Promise<void>;
   getEpisode(userId: string, id: string): Promise<Episode | null>;
+  deleteEpisode(userId: string, id: string): Promise<void>;
   /** Newest first. Backs both the per-source and master feeds. */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
   /**
