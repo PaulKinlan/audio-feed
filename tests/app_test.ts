@@ -145,6 +145,45 @@ Deno.test("audio: serves a whole object and advertises range support", async () 
   assertEquals((await collect(res.body!)).byteLength, 1000);
 });
 
+Deno.test("audio: GET skips head() and resolves canonical audio/ key in one get() call (audio-feed-1rx)", async () => {
+  const { fetch, stores } = app();
+  await stores.blobs.put("audio/u1/direct/e1.mp3", bytes(1000), { contentType: "audio/mpeg" });
+
+  let headCalls = 0;
+  let getCalls = 0;
+  const originalHead = stores.blobs.head.bind(stores.blobs);
+  const originalGet = stores.blobs.get.bind(stores.blobs);
+
+  stores.blobs.head = (key) => {
+    headCalls++;
+    return originalHead(key);
+  };
+  stores.blobs.get = (key, opts) => {
+    getCalls++;
+    return originalGet(key, opts);
+  };
+
+  // 1. GET canonical route /audio/u1/direct/e1.mp3
+  const getRes = await fetch(get("/audio/u1/direct/e1.mp3"));
+  assertEquals(getRes.status, 200);
+  await getRes.body?.cancel();
+
+  // Exactly 0 head() calls, 1 get() call
+  assertEquals(headCalls, 0, "GET must skip head() entirely");
+  assertEquals(getCalls, 1, "Canonical key must resolve in exactly 1 get() call");
+
+  // 2. HEAD canonical route /audio/u1/direct/e1.mp3
+  headCalls = 0;
+  getCalls = 0;
+  const headRes = await fetch(get("/audio/u1/direct/e1.mp3", { method: "HEAD" }));
+  assertEquals(headRes.status, 200);
+  await headRes.body?.cancel();
+
+  // Exactly 1 head() call, 0 get() calls
+  assertEquals(headCalls, 1, "HEAD must resolve in exactly 1 head() call");
+  assertEquals(getCalls, 0, "HEAD must not call get()");
+});
+
 Deno.test("audio: HEAD returns metadata with no body", async () => {
   const { fetch, stores } = app();
   await stores.blobs.put("k.mp3", bytes(512), { contentType: "audio/mpeg" });
