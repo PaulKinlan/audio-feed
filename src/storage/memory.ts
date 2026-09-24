@@ -82,6 +82,9 @@ export class MemoryMetadataStore implements MetadataStore {
   readonly #sources = new Map<string, Source>();
   readonly #articles = new Map<string, Article>();
   readonly #episodes = new Map<string, Episode>();
+  // Sorted indexes of pending and synthesizing episodes (audio-feed-7li)
+  readonly #pendingIndex: { sortKey: string; userId: string; id: string }[] = [];
+  readonly #synthesizingIndex: { sortKey: string; userId: string; id: string }[] = [];
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -198,10 +201,28 @@ export class MemoryMetadataStore implements MetadataStore {
   // -- episodes -------------------------------------------------------------
 
   putEpisode(episode: Episode): Promise<void> {
-    this.#episodes.set(
-      MemoryMetadataStore.#scoped(episode.userId, episode.id),
-      structuredClone(episode),
-    );
+    const key = MemoryMetadataStore.#scoped(episode.userId, episode.id);
+    const existing = this.#episodes.get(key);
+    if (existing) {
+      const oldSortKey = `${existing.createdAt}\u0000${existing.id}`;
+      removeSortedIndex(this.#pendingIndex, oldSortKey);
+      removeSortedIndex(this.#synthesizingIndex, oldSortKey);
+    }
+    const newSortKey = `${episode.createdAt}\u0000${episode.id}`;
+    if (episode.status === "pending") {
+      insertSortedIndex(this.#pendingIndex, {
+        sortKey: newSortKey,
+        userId: episode.userId,
+        id: episode.id,
+      });
+    } else if (episode.status === "synthesizing") {
+      insertSortedIndex(this.#synthesizingIndex, {
+        sortKey: newSortKey,
+        userId: episode.userId,
+        id: episode.id,
+      });
+    }
+    this.#episodes.set(key, structuredClone(episode));
     return Promise.resolve();
   }
 
@@ -212,7 +233,11 @@ export class MemoryMetadataStore implements MetadataStore {
 
   deleteEpisode(userId: string, id: string): Promise<boolean> {
     const key = MemoryMetadataStore.#scoped(userId, id);
-    if (!this.#episodes.has(key)) return Promise.resolve(false);
+    const ep = this.#episodes.get(key);
+    if (!ep) return Promise.resolve(false);
+    const sortKey = `${ep.createdAt}\u0000${ep.id}`;
+    removeSortedIndex(this.#pendingIndex, sortKey);
+    removeSortedIndex(this.#synthesizingIndex, sortKey);
     this.#episodes.delete(key);
     return Promise.resolve(true);
   }
@@ -249,20 +274,57 @@ export class MemoryMetadataStore implements MetadataStore {
     const nowMs = opts.nowMs ?? Date.now();
     const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
 
-    const candidates = [...this.#episodes.values()]
-      .filter((ep) =>
-        ep.status === "pending" ||
-        (ep.status === "synthesizing" && isClaimExpired(ep, nowMs, leaseMs))
-      )
-      .map((ep) => structuredClone(ep))
-      .sort(byOldestFirst);
+    let startIndex = 0;
+    if (opts.cursor) {
+      if (/^\d+$/.test(opts.cursor)) {
+        startIndex = parseInt(opts.cursor, 10);
+      } else {
+        const idx = binarySearchIndex(this.#pendingIndex, opts.cursor);
+        startIndex = idx >= 0 ? idx + 1 : ~idx;
+      }
+    }
 
-    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
-    const end = Number.isFinite(limit) ? start + limit : candidates.length;
-    const slice = candidates.slice(start, end);
-    const nextCursor = end < candidates.length ? String(end) : undefined;
+    const episodes: Episode[] = [];
+    let currentIndex = startIndex;
 
-    return Promise.resolve({ episodes: slice, cursor: nextCursor });
+    while (currentIndex < this.#pendingIndex.length) {
+      if (Number.isFinite(limit) && episodes.length >= limit) break;
+      const entry = this.#pendingIndex[currentIndex];
+      currentIndex++;
+      if (!entry) break;
+      const ep = this.#episodes.get(MemoryMetadataStore.#scoped(entry.userId, entry.id));
+      if (ep && ep.status === "pending") {
+        episodes.push(structuredClone(ep));
+      }
+    }
+
+    const last = this.#pendingIndex[currentIndex - 1];
+    const nextCursor = currentIndex < this.#pendingIndex.length && last && episodes.length > 0
+      ? last.sortKey
+      : undefined;
+
+    // Check synthesizing episodes with expired claims only on initial scan (cursor undefined),
+    // matching KvMetadataStore behaviour
+    if (!opts.cursor && (!Number.isFinite(limit) || episodes.length < limit)) {
+      let addedExpired = false;
+      for (const entry of this.#synthesizingIndex) {
+        if (Number.isFinite(limit) && episodes.length >= limit) break;
+        const ep = this.#episodes.get(MemoryMetadataStore.#scoped(entry.userId, entry.id));
+        if (
+          ep &&
+          ep.status === "synthesizing" &&
+          isClaimExpired(ep, nowMs, leaseMs)
+        ) {
+          episodes.push(structuredClone(ep));
+          addedExpired = true;
+        }
+      }
+      if (addedExpired) {
+        episodes.sort(byOldestFirst);
+      }
+    }
+
+    return Promise.resolve({ episodes, cursor: nextCursor });
   }
 
   /**
@@ -284,10 +346,13 @@ export class MemoryMetadataStore implements MetadataStore {
       (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
     if (!claimable) return Promise.resolve(null);
 
+    const oldSortKey = `${found.createdAt}\u0000${found.id}`;
     const attempts = (found.attempts ?? 0) + 1;
     if (attempts > claim.maxClaims) {
       // Abandon rather than re-bill: an input that keeps killing its host would
       // otherwise be re-claimed forever on lease expiry.
+      removeSortedIndex(this.#pendingIndex, oldSortKey);
+      removeSortedIndex(this.#synthesizingIndex, oldSortKey);
       this.#episodes.set(key, {
         ...structuredClone(found),
         status: "failed",
@@ -305,6 +370,12 @@ export class MemoryMetadataStore implements MetadataStore {
       claimedBy: claim.owner,
       attempts,
     };
+    removeSortedIndex(this.#pendingIndex, oldSortKey);
+    insertSortedIndex(this.#synthesizingIndex, {
+      sortKey: oldSortKey,
+      userId,
+      id: episodeId,
+    });
     this.#episodes.set(key, claimed);
     return Promise.resolve(structuredClone(claimed));
   }
@@ -316,6 +387,9 @@ export class MemoryMetadataStore implements MetadataStore {
     if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
       return Promise.resolve(false);
     }
+    const sortKey = `${current.createdAt}\u0000${current.id}`;
+    removeSortedIndex(this.#synthesizingIndex, sortKey);
+    removeSortedIndex(this.#pendingIndex, sortKey);
     this.#episodes.set(key, structuredClone(episode));
     return Promise.resolve(true);
   }
@@ -337,4 +411,46 @@ export function byNewestFirst(a: Episode, b: Episode): number {
 export function byOldestFirst(a: Episode, b: Episode): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
   return a.id.localeCompare(b.id);
+}
+
+interface IndexEntry {
+  sortKey: string;
+  userId: string;
+  id: string;
+}
+
+function compareSortKeys(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function binarySearchIndex(list: IndexEntry[], sortKey: string): number {
+  let low = 0;
+  let high = list.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >>> 1;
+    const item = list[mid];
+    if (!item) break;
+    const cmp = compareSortKeys(item.sortKey, sortKey);
+    if (cmp === 0) return mid;
+    if (cmp < 0) low = mid + 1;
+    else high = mid - 1;
+  }
+  return ~low;
+}
+
+function insertSortedIndex(list: IndexEntry[], entry: IndexEntry): void {
+  const idx = binarySearchIndex(list, entry.sortKey);
+  if (idx >= 0) {
+    list[idx] = entry;
+  } else {
+    list.splice(~idx, 0, entry);
+  }
+}
+
+function removeSortedIndex(list: IndexEntry[], sortKey: string): void {
+  const idx = binarySearchIndex(list, sortKey);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  }
 }

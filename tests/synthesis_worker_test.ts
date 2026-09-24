@@ -393,6 +393,14 @@ Deno.test("deferred jobs never consume the attempt budget", async () => {
 
 Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time and budget", async () => {
   const { ctx, stores } = await starved(50, 2);
+
+  let listCalls = 0;
+  const origList = stores.metadata.listPendingEpisodes.bind(stores.metadata);
+  stores.metadata.listPendingEpisodes = (opts) => {
+    listCalls++;
+    return origList(opts);
+  };
+
   const started = Date.now();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     batchSize: 2,
@@ -402,7 +410,41 @@ Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time a
   assertEquals(run.ready.length, 2, "approved jobs behind 50 deferred jobs must run");
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
   assert(run.deferred.length <= 2, "deferred report is capped at batchSize");
-  assert(elapsed < 2000, `must complete quickly in linear time, took ${elapsed}ms`);
+
+  // Shape-independent cost checks (audio-feed-7li item 3):
+  // 50 deferred + 2 approved = 52 total items. With CHUNK_SIZE = 25, exactly ceil(52 / 25) = 3 pages.
+  assertEquals(
+    listCalls,
+    3,
+    `paging must fetch exactly ceil(N / chunk) pages (expected 3, got ${listCalls})`,
+  );
+  assert(elapsed < 500, `must complete quickly in linear time, took ${elapsed}ms`);
+});
+
+Deno.test("deferred backlog paging scales linearly across N and 2N jobs (audio-feed-7li)", async () => {
+  // 25 deferred + 2 approved vs 50 deferred + 2 approved
+  const first = await starved(25, 2);
+  let firstCalls = 0;
+  const origFirst = first.stores.metadata.listPendingEpisodes.bind(first.stores.metadata);
+  first.stores.metadata.listPendingEpisodes = (opts) => {
+    firstCalls++;
+    return origFirst(opts);
+  };
+  await runSynthesisBatch(first.ctx, () => Promise.resolve(fakeAudio()), { batchSize: 2 });
+
+  const second = await starved(50, 2);
+  let secondCalls = 0;
+  const origSecond = second.stores.metadata.listPendingEpisodes.bind(second.stores.metadata);
+  second.stores.metadata.listPendingEpisodes = (opts) => {
+    secondCalls++;
+    return origSecond(opts);
+  };
+  await runSynthesisBatch(second.ctx, () => Promise.resolve(fakeAudio()), { batchSize: 2 });
+
+  // 27 items -> ceil(27/25) = 2 calls
+  // 52 items -> ceil(52/25) = 3 calls
+  assertEquals(firstCalls, 2);
+  assertEquals(secondCalls, 3);
 });
 
 Deno.test("the batch budget still bounds synthesis work", async () => {

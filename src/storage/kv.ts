@@ -59,7 +59,49 @@ export class KvMetadataStore implements MetadataStore {
 
   static async open(path?: string): Promise<KvMetadataStore> {
     const kv = await Deno.openKv(path);
-    return new KvMetadataStore(kv, { ownsConnection: true });
+    const store = new KvMetadataStore(kv, { ownsConnection: true });
+    await store.#ensurePendingEpisodesIndexed();
+    return store;
+  }
+
+  /**
+   * One-time backfill for pre-existing pending and synthesizing episodes (audio-feed-7li).
+   * Scans ["episode"] prefix and ensures ["pending_episodes"] and ["synthesizing_episodes"]
+   * index pointers exist for any legacy un-indexed episodes.
+   */
+  async reindexPendingEpisodes(): Promise<{ scanned: number; indexed: number }> {
+    let scanned = 0;
+    let indexed = 0;
+    for await (const entry of this.#kv.list<Episode>({ prefix: ["episode"] })) {
+      scanned++;
+      const ep = entry.value;
+      if (!ep) continue;
+      if (ep.status === "pending") {
+        const indexKey: Deno.KvKey = ["pending_episodes", ep.createdAt, ep.id];
+        const existing = await this.#kv.get(indexKey);
+        if (!existing.value) {
+          await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
+          indexed++;
+        }
+      } else if (ep.status === "synthesizing") {
+        const indexKey: Deno.KvKey = ["synthesizing_episodes", ep.createdAt, ep.id];
+        const existing = await this.#kv.get(indexKey);
+        if (!existing.value) {
+          await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
+          indexed++;
+        }
+      }
+    }
+    return { scanned, indexed };
+  }
+
+  async #ensurePendingEpisodesIndexed(): Promise<void> {
+    const migrationKey: Deno.KvKey = ["migration", "pending_episodes_reindex_v1"];
+    const marker = await this.#kv.get(migrationKey);
+    if (marker.value) return;
+
+    await this.reindexPendingEpisodes();
+    await this.#kv.set(migrationKey, true);
   }
 
   // -- users ----------------------------------------------------------------
