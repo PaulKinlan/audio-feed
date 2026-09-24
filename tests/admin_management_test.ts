@@ -644,6 +644,73 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId backfills >1000 legacy 
   assertEquals(missingSourceTitle.length, 0);
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId pages the retained scan instead of materialising it (audio-feed-att)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-big", userId: "user-1", title: "Big Source" }),
+  );
+
+  // 250 retained episodes: more than one batch, fewer than the old 1000 cap, so
+  // this pins the paging shape rather than a truncation boundary.
+  for (let i = 0; i < 250; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "user-1",
+        sourceId: "src-big",
+        sourceTitle: undefined,
+        status: "ready",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+  // A second source the scan must not touch, to prove the query still filters.
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "other", userId: "user-1", sourceId: "src-other", status: "ready" }),
+  );
+
+  const pageSizes: number[] = [];
+  const original = stores.metadata.listEpisodePage.bind(stores.metadata);
+  stores.metadata.listEpisodePage = (query) =>
+    original(query).then((page) => {
+      pageSizes.push(page.episodes.length);
+      return page;
+    });
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-big`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(
+    body.retainedEpisodes,
+    250,
+    "count must stay exact once it is accumulated per batch",
+  );
+
+  assert(pageSizes.length >= 3, `expected a multi-page scan, got ${pageSizes.length} page(s)`);
+  assert(
+    pageSizes.every((size) => size <= 100),
+    `a page exceeded the batch size: ${
+      Math.max(...pageSizes)
+    } (peak working set is the point of the change)`,
+  );
+  // Every retained episode got its attribution; the untouched source did not.
+  const backfilled = await stores.metadata.listEpisodes({
+    userId: "user-1",
+    sourceId: "src-big",
+    limit: Number.POSITIVE_INFINITY,
+  });
+  assertEquals(backfilled.filter((e) => e.sourceTitle === "Big Source").length, 250);
+  assertEquals((await stores.metadata.getEpisode("user-1", "other"))?.sourceTitle, "Stratechery");
+});
+
 Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect concurrently deleted episodes during backfill (audio-feed-hvn)", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
@@ -663,15 +730,18 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect conc
     }),
   );
 
-  // Intercept listEpisodes: right after listEpisodes returns, delete the episode before backfill runs
-  const originalList = stores.metadata.listEpisodes.bind(stores.metadata);
-  stores.metadata.listEpisodes = async (query) => {
-    const list = await originalList(query);
+  // Intercept the retained-episode scan: right after a page returns, delete the
+  // episode before backfill runs. audio-feed-att moved this path from
+  // listEpisodes to listEpisodePage, so the seam follows it — the property under
+  // test (backfill must not resurrect a concurrently deleted episode) is unchanged.
+  const originalList = stores.metadata.listEpisodePage.bind(stores.metadata);
+  stores.metadata.listEpisodePage = async (query) => {
+    const page = await originalList(query);
     if (query.status === "ready") {
       // Simulate concurrent deletion by user
       await stores.metadata.deleteEpisode("user-1", "ep-to-delete");
     }
-    return list;
+    return page;
   };
 
   const res = await fetch(

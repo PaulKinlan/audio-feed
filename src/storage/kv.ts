@@ -30,6 +30,8 @@ import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import type {
   EpisodeClaim,
+  EpisodePage,
+  EpisodePageResult,
   EpisodeQuery,
   ListPendingOptions,
   ListPendingResult,
@@ -456,22 +458,32 @@ export class KvMetadataStore implements MetadataStore {
     return result.ok;
   }
 
-  async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+  listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+    return this.listEpisodePage(query).then((page) => page.episodes);
+  }
+
+  async listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {
     const limit = query.limit ?? 50;
     const prefix = this.#indexPrefix(query);
 
-    const out: Episode[] = [];
+    const episodes: Episode[] = [];
+    const iter = this.#kv.list<string>({ prefix }, {
+      cursor: query.cursor,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
     // Keys are stored newest-first, so a plain ascending scan is already ordered.
-    for await (const entry of this.#kv.list<string>({ prefix })) {
+    for await (const entry of iter) {
       const episode = await this.getEpisode(query.userId, entry.value);
       if (!episode) continue;
       if (query.sourceId && episode.sourceId !== query.sourceId) continue;
       if (query.mode && episode.mode !== query.mode) continue;
       if (query.status && episode.status !== query.status) continue;
-      out.push(episode);
-      if (out.length >= limit) break;
+      episodes.push(episode);
+      if (episodes.length >= limit) break;
     }
-    return out;
+
+    const cursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
+    return { episodes, cursor };
   }
 
   async listPendingEpisodes(

@@ -57,6 +57,17 @@ export interface EpisodeQuery {
   limit?: number;
 }
 
+export interface EpisodePage extends EpisodeQuery {
+  /** Opaque cursor from the previous page; omit for the first page. */
+  cursor?: string;
+}
+
+export interface EpisodePageResult {
+  episodes: Episode[];
+  /** Absent when the scan is exhausted. */
+  cursor?: string;
+}
+
 export interface ListPendingOptions {
   limit?: number;
   cursor?: string;
@@ -121,6 +132,17 @@ export interface MetadataStore {
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean>;
   /** Newest first. Backs both the per-source and master feeds. */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
+  /**
+   * Cursor-paged `listEpisodes`, so a full-catalogue scan never has to be held
+   * in memory at once (audio-feed-att). Cursors are adapter-defined and opaque;
+   * they address a position in the index scan, so this is not a stable snapshot
+   * across concurrent writes.
+   *
+   * A page can hold fewer than `limit` episodes — entries the query filters out
+   * still consume the underlying scan — so keep paging until `cursor` is absent
+   * rather than treating a short page as the end.
+   */
+  listEpisodePage(query: EpisodePage): Promise<EpisodePageResult>;
   /**
    * Pending and recoverable episodes, ordered by `createdAt` ascending (FIFO, oldest first).
    * Cross-user queue backing the synthesis worker (audio-feed-bbb).

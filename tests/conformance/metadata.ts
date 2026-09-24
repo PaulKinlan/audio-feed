@@ -8,7 +8,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import type { MetadataStore } from "../../src/storage/mod.ts";
+import type { EpisodeQuery, MetadataStore } from "../../src/storage/mod.ts";
 import type { Episode } from "../../src/types.ts";
 import { makeApproval, makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 
@@ -375,6 +375,105 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       );
     }
     assertEquals((await store.listEpisodes({ userId: "user-1", limit: 3 })).length, 3);
+  });
+
+  // -- cursor-paged scan (audio-feed-att) -----------------------------------
+
+  /** Walk a whole scan the way `compose.ts` does, so paging bugs show up here. */
+  async function drainPages(
+    store: MetadataStore,
+    query: Omit<EpisodeQuery, "limit">,
+    limit: number,
+  ) {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const page = await store.listEpisodePage({ ...query, limit, cursor });
+      seen.push(...page.episodes.map((e) => e.id));
+      pages++;
+      if (!page.cursor || page.cursor === cursor) break;
+      cursor = page.cursor;
+      assert(pages < 50, "paging did not terminate");
+    }
+    return { seen, pages };
+  }
+
+  test("pages a full scan with no omission and no repeat", async (store) => {
+    for (let i = 0; i < 7; i++) {
+      await store.putEpisode(
+        makeEpisode({
+          id: `e${i}`,
+          createdAt: `2026-09-0${i + 1}T00:00:00.000Z`,
+        }),
+      );
+    }
+    const whole = (await store.listEpisodes({ userId: "user-1", limit: Number.POSITIVE_INFINITY }))
+      .map((e) => e.id);
+    const { seen, pages } = await drainPages(store, { userId: "user-1" }, 2);
+    assertEquals(seen, whole, "paged scan must cover exactly what the uncapped scan returns");
+    assertEquals(pages, 4, "7 episodes at 2 per page is 4 pages (the last empty or partial)");
+  });
+
+  test("a short or empty page is not the end of the scan", async (store) => {
+    // Two of the four are filtered out by `status`, so a page can return fewer
+    // than `limit` — or none — while the scan still has rows left.
+    await store.putEpisode(
+      makeEpisode({ id: "r1", status: "ready", createdAt: "2026-09-01T00:00:00.000Z" }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "p1",
+        status: "pending",
+        audioKey: undefined,
+        createdAt: "2026-09-02T00:00:00.000Z",
+      }),
+    );
+    await store.putEpisode(
+      makeEpisode({ id: "r2", status: "ready", createdAt: "2026-09-03T00:00:00.000Z" }),
+    );
+    await store.putEpisode(
+      makeEpisode({
+        id: "p2",
+        status: "pending",
+        audioKey: undefined,
+        createdAt: "2026-09-04T00:00:00.000Z",
+      }),
+    );
+
+    const { seen } = await drainPages(store, { userId: "user-1", status: "ready" }, 1);
+    assertEquals(seen, ["r2", "r1"]);
+  });
+
+  test("a delete behind the cursor does not skip the next episode", async (store) => {
+    for (let i = 0; i < 5; i++) {
+      await store.putEpisode(
+        makeEpisode({
+          id: `e${i}`,
+          createdAt: `2026-09-0${i + 1}T00:00:00.000Z`,
+        }),
+      );
+    }
+    // Newest first: e4, e3, e2, e1, e0. Delete the first page's only episode,
+    // i.e. one BEHIND the cursor, then finish the scan.
+    const first = await store.listEpisodePage({ userId: "user-1", limit: 1 });
+    assertEquals(first.episodes.map((e) => e.id), ["e4"]);
+    assert(first.cursor, "expected a cursor after a full page");
+    await store.deleteEpisode("user-1", "e4");
+
+    const rest: string[] = [];
+    let cursor = first.cursor;
+    for (;;) {
+      const page = await store.listEpisodePage({ userId: "user-1", limit: 1, cursor });
+      rest.push(...page.episodes.map((e) => e.id));
+      if (!page.cursor || page.cursor === cursor) break;
+      cursor = page.cursor;
+    }
+    assertEquals(
+      rest,
+      ["e3", "e2", "e1", "e0"],
+      "deleting a visited episode must not skip a pending one",
+    );
   });
 
   test("never leaks episodes across users", async (store) => {
