@@ -840,22 +840,23 @@ export function createAdminDeleteUserSourceHandler(
       //   audio-feed-des   progress guard      (answers 200 where it must answer 500)
       //   audio-feed-4qj   transient drain     (abandons rows after a transient failure)
       //   audio-feed-mf5   incomplete counting (reports no remaining episodes to count)
-      // Cursor-paging the CASCADE loop reddens:
-      //   audio-feed-37p, and the audio-feed-mf5 distinct-blob-retry count - blob
-      //     accounting goes wrong once rows are visited twice
-      //   audio-feed-m04   answers 500 `incomplete` for a source it could fully drain:
-      //     deleting while a cursor advances re-presents rows, the fingerprint repeats,
-      //     and the stall guard fires. Paging here can fail in BOTH directions - it can
-      //     strand rows behind a false success, and it can refuse over work it can do.
-      // No merged total is claimed: the two runs above disagree on whether
-      // audio-feed-m04 belongs in the cascade list (it is reproduced here at
-      // tests/admin_management_test.ts:800, where a paged cascade loop answers 500 for
-      // a source it can fully drain; audiofeed-opus's run did not reproduce it). What
-      // both agree on is the direction, and that is the whole point of the comment:
-      // paging either loop breaks the incomplete-delete guard. `mf5` appears twice
-      // because it is two different tests, listed per loop so each claim stays
-      // checkable by mutating one loop. An earlier form named only audio-feed-des,
-      // which understated why the re-read is load-bearing (audio-feed-9h1).
+      // Cursor-paging the CASCADE loop fails differently depending on whether the
+      // stall guard survives the conversion, and the two outcomes are bad in
+      // opposite directions:
+      //   guard RETAINED -> audio-feed-m04 answers 500 `incomplete` for a source it
+      //     could fully drain. The cursor re-presents deleted rows, the fingerprint
+      //     repeats, and the guard fires on real work. Reproduced by both
+      //     audiofeed-astra and audiofeed-opus.
+      //   guard DROPPED  -> audio-feed-37p and the audio-feed-mf5 distinct-blob-retry
+      //     count: rows are visited twice, so blob accounting goes wrong. Measured by
+      //     audiofeed-opus; audiofeed-astra saw these alongside the m04 refusal.
+      // The trap is that "page this loop" reads as though the guard belongs to the
+      // cursor, and dropping it fixes nothing - it trades a refusal for a false
+      // success over orphaned episodes. `mf5` names two different tests, so claims are
+      // listed per loop and stay checkable by mutating one loop. Two earlier forms were
+      // wrong in different ways: one named only audio-feed-des, and the next called the
+      // two runs unreconciled after review had in fact explained the difference - a
+      // stale claim of its own, which is the class audio-feed-dzv exists to clear.
       // `listEpisodes` keeps its limit-bounds-matches meaning (audio-feed-m04) so this
       // re-read stays correct against a per-user index.
       let prevFingerprint: string | undefined = undefined;
