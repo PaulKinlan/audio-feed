@@ -7,7 +7,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
-import { memoryStores } from "../src/config.ts";
+import { memoryStores, openStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -709,6 +709,113 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId pages the retained scan
   });
   assertEquals(backfilled.filter((e) => e.sourceTitle === "Big Source").length, 250);
   assertEquals((await stores.metadata.getEpisode("user-1", "other"))?.sourceTitle, "Stratechery");
+});
+
+Deno.test("DELETE of a source whose episodes are the oldest in a large KV catalogue still drains it (audio-feed-m04)", async () => {
+  // The memory adapter bounds `limit` by matches by construction; only the KV
+  // adapter walks a per-user index and filters, which is where a `limit` that
+  // came to mean "entries examined" abandons rows. So this runs on the real
+  // KvMetadataStore, not the memory double the rest of this file uses.
+  const stores: Stores = await openStores({ kvPath: ":memory:" });
+  const ctx = { config, stores };
+  const handlers = createHandlers(ctx, {});
+  const { fetch } = createApp(ctx, handlers);
+  try {
+    await stores.metadata.putUser(
+      makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+    );
+    await stores.metadata.putSource(makeSource({ id: "quiet", userId: "user-1", title: "Quiet" }));
+    await stores.metadata.putSource(
+      makeSource({ id: "quietc", userId: "user-1", title: "Quiet Cascade" }),
+    );
+    await stores.metadata.putSource(makeSource({ id: "busy", userId: "user-1", title: "Busy" }));
+
+    // 5 pending episodes for `quiet`, OLDER than 400 pending for `busy`, so they
+    // are last in a newest-first scan.
+    for (let i = 0; i < 400; i++) {
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `busy-${i}`,
+          userId: "user-1",
+          sourceId: "busy",
+          status: "pending",
+          audioKey: undefined,
+          createdAt: new Date(1760000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+    for (let i = 0; i < 5; i++) {
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `quiet-${i}`,
+          userId: "user-1",
+          sourceId: "quiet",
+          status: "pending",
+          audioKey: undefined,
+          createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+        }),
+      );
+      await stores.blobs.put(`audio/quiet-${i}.mp3`, new Uint8Array([1]), {
+        contentType: "audio/mpeg",
+      });
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `quiet-ready-${i}`,
+          userId: "user-1",
+          sourceId: "quietc",
+          status: "ready",
+          audioKey: `audio/quiet-${i}.mp3`,
+          createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+
+    const res = await fetch(
+      new Request(`${BASE}/api/admin/users/user-1/sources/quiet`, {
+        method: "DELETE",
+        headers: { "x-admin-token": "admin-secret" },
+      }),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.cancelledPending, 5, "the 5 oldest pending rows must be cancelled");
+    assertEquals(
+      (await stores.metadata.listEpisodes({
+        userId: "user-1",
+        sourceId: "quiet",
+        status: "pending",
+      }))
+        .length,
+      0,
+      "nothing may survive for a feed that no longer exists",
+    );
+
+    // Cascade: the ready rows and their blobs must go too.
+    const cascade = await fetch(
+      new Request(`${BASE}/api/admin/users/user-1/sources/quietc?cascade=true`, {
+        method: "DELETE",
+        headers: { "x-admin-token": "admin-secret" },
+      }),
+    );
+    assertEquals(cascade.status, 200);
+    const cascaded = await cascade.json();
+    assertEquals(cascaded.deletedEpisodes, 5, "cascade must purge the oldest ready rows");
+    assertEquals(cascaded.deletedBlobs, 5, "cascade must not leave the blobs behind");
+    assertEquals(
+      (await stores.metadata.listEpisodes({ userId: "user-1", sourceId: "quietc" })).length,
+      0,
+      "no orphaned episodes for a deleted source",
+    );
+    // The unrelated busy backlog is untouched by a delete scoped to `quiet`.
+    assertEquals(
+      (await stores.metadata.listEpisodes({ userId: "user-1", sourceId: "busy", limit: 500 }))
+        .length,
+      400,
+      "the scan must not over-reach into another source",
+    );
+  } finally {
+    await stores.metadata.close();
+  }
 });
 
 Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect concurrently deleted episodes during backfill (audio-feed-hvn)", async () => {

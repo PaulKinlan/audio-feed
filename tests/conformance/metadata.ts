@@ -377,6 +377,34 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.listEpisodes({ userId: "user-1", limit: 3 })).length, 3);
   });
 
+  test("a filtered listEpisodes returns matches sitting beyond limit index entries", async (store) => {
+    // audio-feed-m04: `limit` must bound MATCHES, not entries examined. The quiet
+    // source's episodes are the OLDEST, so they are last in a newest-first scan;
+    // a scan that stopped after `limit` entries would return none of them.
+    for (let i = 0; i < 150; i++) {
+      await store.putEpisode(
+        makeEpisode({
+          id: `busy-${i}`,
+          sourceId: "busy",
+          createdAt: new Date(1760000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+    for (let i = 0; i < 10; i++) {
+      await store.putEpisode(
+        makeEpisode({
+          id: `quiet-${i}`,
+          sourceId: "quiet",
+          createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+
+    const got = await store.listEpisodes({ userId: "user-1", sourceId: "quiet", limit: 100 });
+    assertEquals(got.length, 10, "a filtered query must still find matches past the entry horizon");
+    assertEquals(new Set(got.map((e) => e.sourceId)), new Set(["quiet"]));
+  });
+
   // -- cursor-paged scan (audio-feed-att) -----------------------------------
 
   /** Walk a whole scan the way `compose.ts` does, so paging bugs show up here. */

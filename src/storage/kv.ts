@@ -458,8 +458,26 @@ export class KvMetadataStore implements MetadataStore {
     return result.ok;
   }
 
-  listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
-    return this.listEpisodePage(query).then((page) => page.episodes);
+  async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+    // `limit` bounds MATCHES here, not entries examined. A filtered query's
+    // matches can sit arbitrarily deep in a newest-first index scan, so one
+    // page of `listEpisodePage` (whose limit bounds the underlying scan) is not
+    // equivalent to what this method has always returned. The two drain loops in
+    // createAdminDeleteSourceHandler stop on `batch.length === 0`, so returning
+    // short here silently abandons episodes for a feed that is being deleted
+    // (audio-feed-m04, the audio-feed-4qj shape arriving through a changed seam).
+    const limit = query.limit ?? 50;
+    if (!Number.isFinite(limit)) return (await this.listEpisodePage(query)).episodes;
+
+    const out: Episode[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.listEpisodePage({ ...query, limit, cursor });
+      out.push(...page.episodes);
+      if (out.length >= limit || !page.cursor || page.cursor === cursor) break;
+      cursor = page.cursor;
+    }
+    return out.slice(0, limit);
   }
 
   async listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {

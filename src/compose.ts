@@ -825,6 +825,19 @@ export function createAdminDeleteUserSourceHandler(
 
     if (cascade) {
       // Drain all episodes in batches until none remain (audio-feed-7ve, audio-feed-des)
+      //
+      // These two loops deliberately RE-READ from the start of the scan instead of
+      // paging with a cursor, and that is not an oversight for whoever converts the
+      // rest of this handler (audio-feed-att). The re-read is the stall detector:
+      // a failed `deleteEpisode` leaves the same batch in place, the fingerprint
+      // repeats, and after two stalls the request answers 500 `incomplete` without
+      // deleting the source. Cursor-paging advances past rows that were never
+      // removed, so the scan simply ends and the handler reports success over a
+      // source it has orphaned — measured: paging this loop reddens
+      // audio-feed-des with 200 where it must answer 500. That is the audio-feed-4qj
+      // shape arriving through a third door. `listEpisodes` keeps its
+      // limit-bounds-matches meaning (audio-feed-m04) so this pattern stays correct
+      // against a per-user index.
       let prevFingerprint: string | undefined = undefined;
       let consecutiveStalls = 0;
 
