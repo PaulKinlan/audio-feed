@@ -42,6 +42,18 @@ if (import.meta.main) {
               `${result.deferred.length} deferred (of ${result.considered})`,
           );
         }
+        // Separate line, never folded into a success-shaped one: a tick that
+        // reports "0 ready" while silently discarding paid work is exactly the
+        // failure shape this whole change is about. The held-vs-lease numbers
+        // make it actionable — they say how much too short the lease was, not
+        // merely that it was (audio-feed-vfs / audio-feed-kiq).
+        for (const { episodeId, heldMs, leaseMs } of result.superseded) {
+          console.warn(
+            `[audio-feed] synthesis: episode ${episodeId} superseded after ` +
+              `${Math.round(heldMs / 1000)}s, lease was ${Math.round(leaseMs / 1000)}s — ` +
+              `paid work discarded; raise leaseMs above the real synthesis time`,
+          );
+        }
       },
     })
     : null;

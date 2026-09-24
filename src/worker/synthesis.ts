@@ -20,11 +20,27 @@
  *   retries 429/503 internally and honours Retry-After, so this outer loop covers
  *   the rest (blob write failures, transient transport errors); after that the
  *   episode is marked failed so a poison job cannot bill repeatedly.
+ *
+ * Exclusivity and recovery (audio-feed-vfs / audio-feed-kiq):
+ * - Every episode is taken with an ATOMIC CLAIM immediately before its own
+ *   synthesis. `server.ts` starts a worker per process and Deno Deploy runs
+ *   several isolates, so without a compare-and-swap two workers both saw
+ *   `pending`, both wrote `synthesizing`, and both paid for the same episode.
+ * - The claim carries a LEASE, which is what makes `synthesizing` recoverable.
+ *   A worker that dies mid-synthesis leaves a claim nobody will finish; once the
+ *   lease expires another worker takes it over, instead of the episode sitting
+ *   in a status the queue never looks at, forever.
+ * - The terminal write is claim-conditional. A slow worker whose lease expired
+ *   must not overwrite the result of the worker that superseded it.
+ * - Claims are bounded per episode. Lease recovery without a bound re-bills a
+ *   job that reliably kills its host, which is the one case the in-tick retry
+ *   counter cannot see — it dies with the process.
  */
 import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import { GeminiTtsClient, GeminiTtsTruncatedError } from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
+import { DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS, isClaimExpired } from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
@@ -45,7 +61,19 @@ export interface SynthesisWorkerOptions {
   /** Base backoff between attempts. */
   retryBaseDelayMs?: number;
   maxEpisodeSeconds?: number;
+  /** How long a claim is honoured before another worker may take the episode. */
+  leaseMs?: number;
+  /** Claims per episode before it is abandoned as unprocessable. */
+  maxClaims?: number;
+  /** Worker identity recorded on the claim. Defaults to a per-process id. */
+  owner?: string;
 }
+
+/**
+ * One id per process. Two isolates therefore never share an owner, which is
+ * what lets `completeEpisode` tell "my claim" from "someone else's".
+ */
+const WORKER_ID = `worker-${crypto.randomUUID()}`;
 
 const DEFAULTS: Required<SynthesisWorkerOptions> = {
   batchSize: 5,
@@ -53,6 +81,9 @@ const DEFAULTS: Required<SynthesisWorkerOptions> = {
   maxAttempts: 3,
   retryBaseDelayMs: 500,
   maxEpisodeSeconds: 0,
+  leaseMs: DEFAULT_CLAIM_LEASE_MS,
+  maxClaims: DEFAULT_MAX_CLAIMS,
+  owner: WORKER_ID,
 };
 
 export interface SynthesisBatchResult {
@@ -62,11 +93,44 @@ export interface SynthesisBatchResult {
   failed: Array<{ episodeId: string; error: string }>;
   /** Jobs not attempted because the owner may not spend (left pending). */
   deferred: Array<{ episodeId: string; reason: string }>;
+  /**
+   * Jobs another worker holds, or that are out of claims. Nothing was spent —
+   * this is the normal outcome of losing a race, not a failure.
+   */
+  skipped: Array<{ episodeId: string; reason: string }>;
+  /**
+   * Work that completed but could not be written because the claim was lost.
+   *
+   * Reported rather than swallowed: it is money spent for nothing, and a rising
+   * count means the lease is too short for real synthesis times.
+   *
+   * `heldMs` is what makes it actionable. "Superseded" says the lease is wrong;
+   * "superseded after 1080s, lease was 900s" says what to set it to. Without the
+   * number, the next tuning round is another guess.
+   */
+  superseded: Array<{ episodeId: string; heldMs: number; leaseMs: number }>;
   /** Pending episodes considered. */
   considered: number;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How long this worker held the claim it just lost, against the lease it was
+ * given. The gap between the two is the amount by which the lease was too
+ * short — which is the number an operator needs, not the fact of the refusal.
+ */
+function supersededEntry(
+  episode: Episode,
+  leaseMs: number,
+): { episodeId: string; heldMs: number; leaseMs: number } {
+  const claimedAtMs = Date.parse(episode.claimedAt ?? "");
+  return {
+    episodeId: episode.id,
+    heldMs: Number.isFinite(claimedAtMs) ? Date.now() - claimedAtMs : -1,
+    leaseMs,
+  };
+}
 
 /** A failure that retrying cannot fix, so the episode is marked failed immediately. */
 function isPermanent(error: unknown): boolean {
@@ -124,8 +188,16 @@ export async function runSynthesisBatch(
   options: SynthesisWorkerOptions = {},
 ): Promise<SynthesisBatchResult> {
   const opts = { ...DEFAULTS, ...options };
-  const result: SynthesisBatchResult = { ready: [], failed: [], deferred: [], considered: 0 };
+  const result: SynthesisBatchResult = {
+    ready: [],
+    failed: [],
+    deferred: [],
+    skipped: [],
+    superseded: [],
+    considered: 0,
+  };
   const { metadata, blobs } = ctx.stores;
+  const nowMs = Date.now();
 
   // `listEpisodes` is user-scoped by design, so the queue is gathered per user.
   //
@@ -146,11 +218,21 @@ export async function runSynthesisBatch(
       deferReason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
     }
 
-    const episodes = await metadata.listEpisodes({
-      userId: user.id,
-      status: "pending",
-      limit: opts.batchSize,
-    });
+    // Two queries, and the second one is not redundant: a `status: "pending"`
+    // list STRUCTURALLY cannot return a job stranded by a crashed worker, and
+    // that blindness IS audio-feed-kiq. The extra call is the price of the fix,
+    // not an oversight — do not collapse it back to one query without replacing
+    // it with a cross-status queue (see audio-feed-bbb's listEpisodesByStatus,
+    // which subsumes both). Episodes inside a live lease are filtered out here
+    // and, belt and braces, refused by the claim itself.
+    const [fresh, inFlight] = await Promise.all([
+      metadata.listEpisodes({ userId: user.id, status: "pending", limit: opts.batchSize }),
+      metadata.listEpisodes({ userId: user.id, status: "synthesizing", limit: opts.batchSize }),
+    ]);
+    const episodes = [
+      ...fresh,
+      ...inFlight.filter((episode) => isClaimExpired(episode, nowMs, opts.leaseMs)),
+    ];
 
     if (deferReason !== null) {
       // Visible in the result and the job survives so a lifted suspension can be
@@ -187,25 +269,36 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    const article = await metadata.getArticle(episode.userId, episode.articleId);
-    if (!article) {
-      result.failed.push({ episodeId: episode.id, error: "article record is missing" });
-      await metadata.putEpisode({
-        ...episode,
-        status: "failed",
-        error: "article record is missing",
-      });
+    // Claim just-in-time, not at gather time. Claiming all five up front would
+    // leave the last claim ageing through four synthesis calls, so a legitimate
+    // long batch would manufacture its own stale lease.
+    const claimed = await metadata.claimEpisode(episode.userId, episode.id, {
+      owner: opts.owner,
+      now: new Date().toISOString(),
+      leaseMs: opts.leaseMs,
+      maxClaims: opts.maxClaims,
+    });
+    if (!claimed) {
+      // Another worker holds it, or it is out of claims and the store abandoned
+      // it. Either way nothing was spent here.
+      result.skipped.push({ episodeId: episode.id, reason: "claimed elsewhere or exhausted" });
       continue;
     }
-    const source = await metadata.getSource(episode.userId, episode.sourceId);
 
-    await metadata.putEpisode({ ...episode, status: "synthesizing" });
+    const article = await metadata.getArticle(claimed.userId, claimed.articleId);
+    if (!article) {
+      const error = "article record is missing";
+      await metadata.completeEpisode({ ...claimed, status: "failed", error }, opts.owner);
+      result.failed.push({ episodeId: claimed.id, error });
+      continue;
+    }
+    const source = await metadata.getSource(claimed.userId, claimed.sourceId);
 
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
-        audio = await synthesize({ article, source, episode, mode: episode.mode });
+        audio = await synthesize({ article, source, episode: claimed, mode: claimed.mode });
         break;
       } catch (error) {
         lastError = error;
@@ -218,28 +311,37 @@ export async function runSynthesisBatch(
 
     if (!audio) {
       const error = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
-      await metadata.putEpisode({ ...episode, status: "failed", error });
-      result.failed.push({ episodeId: episode.id, error });
+      const wrote = await metadata.completeEpisode(
+        { ...claimed, status: "failed", error },
+        opts.owner,
+      );
+      if (wrote) result.failed.push({ episodeId: claimed.id, error });
+      else result.superseded.push(supersededEntry(claimed, opts.leaseMs));
       continue;
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    const audioKey = `${episode.id}.wav`;
+    const audioKey = `${claimed.id}.wav`;
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
-    const nowIso = new Date().toISOString();
-    await metadata.putEpisode({
-      ...episode,
+    const byteLength = stored.size ?? bytes.length;
+    // Claim-conditional: if this worker's lease expired and another already
+    // finished the episode, writing here would overwrite the winner's audio
+    // with ours and leave no trace that it happened.
+    const wrote = await metadata.completeEpisode({
+      ...claimed,
       status: "ready",
       audioKey,
       // The enclosure is built from these, so they must describe the stored bytes.
-      byteLength: stored.size ?? bytes.length,
+      byteLength,
       contentType: "audio/wav",
       durationSeconds: audio.durationSeconds,
-      readyAt: nowIso,
+      readyAt: new Date().toISOString(),
       error: undefined,
-    });
-    result.ready.push({ episodeId: episode.id, audioKey, byteLength: stored.size ?? bytes.length });
+    }, opts.owner);
+
+    if (wrote) result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+    else result.superseded.push(supersededEntry(claimed, opts.leaseMs));
   }
 
   return result;

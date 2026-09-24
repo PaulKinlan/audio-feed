@@ -133,10 +133,13 @@ check(
 
 // 4. The worker turns the queued job into audio.
 const run = await runSynthesisBatch(ctx, () => Promise.resolve(stubAudio()));
+// `superseded` is part of the pass condition, not just the message: work that
+// was paid for and discarded must never be hidden behind a green tick.
 check(
   "worker",
-  run.ready.length === 1 && run.failed.length === 0,
-  `${run.ready.length} ready, ${run.failed.length} failed, ${run.deferred.length} deferred`,
+  run.ready.length === 1 && run.failed.length === 0 && run.superseded.length === 0,
+  `${run.ready.length} ready, ${run.failed.length} failed, ${run.deferred.length} deferred, ` +
+    `${run.skipped.length} skipped, ${run.superseded.length} superseded`,
 );
 
 // 5. The feed a subscriber already holds now carries it, with a self-link that

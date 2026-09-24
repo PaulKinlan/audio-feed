@@ -27,7 +27,8 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
-import type { EpisodeQuery, MetadataStore } from "./mod.ts";
+import { isClaimExpired } from "../types.ts";
+import type { EpisodeClaim, EpisodeQuery, MetadataStore } from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -216,6 +217,91 @@ export class KvMetadataStore implements MetadataStore {
 
   async getEpisode(userId: string, id: string): Promise<Episode | null> {
     return (await this.#kv.get<Episode>(["episode", userId, id])).value;
+  }
+
+  /**
+   * Compare-and-swap claim. The `.check(entry)` is the entire point.
+   *
+   * A read-then-write lets two isolates both observe `pending`, both write
+   * `synthesizing`, and both call a paid API for one episode — the second write
+   * wins silently and the first synthesis is billed and thrown away
+   * (audio-feed-vfs). The check makes the loser's commit fail against the
+   * versionstamp it read, so exactly one worker proceeds.
+   */
+  async claimEpisode(
+    userId: string,
+    episodeId: string,
+    claim: EpisodeClaim,
+  ): Promise<Episode | null> {
+    const key: Deno.KvKey = ["episode", userId, episodeId];
+    const entry = await this.#kv.get<Episode>(key);
+    const found = entry.value;
+    if (!found) return null;
+
+    const nowMs = Date.parse(claim.now);
+    const claimable = found.status === "pending" ||
+      (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
+    if (!claimable) return null;
+
+    const attempts = (found.attempts ?? 0) + 1;
+    if (attempts > claim.maxClaims) {
+      // Abandon rather than re-bill. Still checked, so this cannot clobber a
+      // worker that legitimately claimed between our read and this write.
+      const abandoned: Episode = {
+        ...found,
+        status: "failed",
+        error: `abandoned after ${claim.maxClaims} attempts`,
+        claimedAt: undefined,
+        claimedBy: undefined,
+      };
+      await this.#atomicPutEpisode(abandoned, entry);
+      return null;
+    }
+
+    const claimed: Episode = {
+      ...found,
+      status: "synthesizing",
+      claimedAt: claim.now,
+      claimedBy: claim.owner,
+      attempts,
+    };
+    const ok = await this.#atomicPutEpisode(claimed, entry);
+    // A failed check means another worker won the race — the normal answer, not
+    // an error. The caller moves on to the next job.
+    return ok ? claimed : null;
+  }
+
+  async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    const key: Deno.KvKey = ["episode", episode.userId, episode.id];
+    const entry = await this.#kv.get<Episode>(key);
+    const current = entry.value;
+    // Superseded: the lease expired and another worker already finished this.
+    // Writing anyway would overwrite the winner's audio with ours, silently.
+    if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+      return false;
+    }
+    return await this.#atomicPutEpisode(episode, entry);
+  }
+
+  /**
+   * `putEpisode`'s write set, guarded by the versionstamp the caller read.
+   * Keeps the feed indexes in step with the record in one commit.
+   */
+  async #atomicPutEpisode(
+    episode: Episode,
+    guard: Deno.KvEntryMaybe<Episode>,
+  ): Promise<boolean> {
+    const sortKey = descendingKey(episode.createdAt, episode.id);
+    const result = await this.#kv.atomic()
+      .check(guard)
+      .set(["episode", episode.userId, episode.id], episode)
+      .set(["episode_by_user", episode.userId, sortKey], episode.id)
+      .set(
+        ["episode_by_source", episode.userId, episode.sourceId, episode.mode, sortKey],
+        episode.id,
+      )
+      .commit();
+    return result.ok;
   }
 
   async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {

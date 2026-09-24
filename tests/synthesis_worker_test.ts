@@ -466,3 +466,219 @@ Deno.test("a suspension landing mid-tick stops the remaining spend", async () =>
     `expected one episode left pending, got ${statuses.join(",")}`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-vfs / audio-feed-kiq: exclusivity and recovery
+//
+// The store-level conformance suite proves the claim primitive is atomic. These
+// prove the WORKER uses it — a correct primitive called in the wrong place
+// still double-spends.
+// ---------------------------------------------------------------------------
+
+/** One approved user with `count` queued episodes. */
+async function queuedMany(count: number) {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
+  );
+  for (let i = 0; i < count; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "user-1",
+        sourceId: "inbox",
+        articleId: "article-1",
+        status: "pending",
+        audioKey: undefined,
+      }),
+    );
+  }
+  return { ctx: { config, stores }, stores };
+}
+
+Deno.test("two workers racing one episode bill it exactly once", async () => {
+  // The vfs measurement: before the claim, two concurrent batches over ONE
+  // pending episode produced two paid synthesis calls. `server.ts` starts a
+  // worker per process and Deploy runs several isolates, so this is the default
+  // production topology, and the only symptom was the invoice.
+  const { ctx, stores } = await queuedMany(1);
+
+  let paid = 0;
+  const synth: Synthesizer = async () => {
+    paid++;
+    await new Promise((r) => setTimeout(r, 20));
+    return fakeAudio();
+  };
+
+  const [a, b] = await Promise.all([
+    runSynthesisBatch(ctx, synth, { owner: "worker-a" }),
+    runSynthesisBatch(ctx, synth, { owner: "worker-b" }),
+  ]);
+
+  assertEquals(paid, 1, "the same episode must never be billed twice");
+  assertEquals(a.ready.length + b.ready.length, 1);
+  assertEquals(a.skipped.length + b.skipped.length, 1, "the loser reports a skip, not a failure");
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-0"))?.status, "ready");
+});
+
+Deno.test("an episode held by another worker is never touched or failed", async () => {
+  // Two independent layers stop this, and the test distinguishes them because
+  // conflating them once cost a confusing red test:
+  //
+  //  1. GATHER filters it out — the `pending` query cannot see a `synthesizing`
+  //     episode, and the `synthesizing` query drops anything inside a live
+  //     lease. So it is never even a candidate, and `skipped` stays empty.
+  //  2. The CLAIM would refuse it anyway. That is the layer that matters when
+  //     two workers gather simultaneously and both see `pending` — exercised by
+  //     the racing test above, and by the conformance suite directly.
+  //
+  // What must be true either way: nothing is spent, and a live job is NOT
+  // marked failed while another worker is successfully synthesising it.
+  const { ctx, stores } = await queuedMany(1);
+  await stores.metadata.claimEpisode("user-1", "ep-0", {
+    owner: "other-worker",
+    now: new Date().toISOString(),
+    leaseMs: 60_000,
+    maxClaims: 3,
+  });
+
+  let paid = 0;
+  const run = await runSynthesisBatch(ctx, () => {
+    paid++;
+    return Promise.resolve(fakeAudio());
+  });
+
+  assertEquals(paid, 0, "a held episode must not be synthesised");
+  assertEquals(run.failed, [], "another worker's live job must never be marked failed");
+  assertEquals(run.considered, 0, "a live lease is filtered before it costs budget");
+
+  // Still owned by the other worker, still in flight, attempt count untouched.
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  assertEquals(episode?.status, "synthesizing");
+  assertEquals(episode?.claimedBy, "other-worker");
+  assertEquals(episode?.attempts, 1, "a refused claim must not consume an attempt");
+});
+
+Deno.test("a crashed worker's episode is reclaimed once its lease expires", async () => {
+  // The kiq measurement: a crash between the `synthesizing` write and the
+  // terminal write stranded the episode permanently, because the queue only
+  // ever listed `pending`. Three recovery ticks found nothing.
+  const { ctx, stores } = await queuedMany(1);
+
+  // A worker claims it and dies: the claim is stale, the episode never finished.
+  await stores.metadata.claimEpisode("user-1", "ep-0", {
+    owner: "dead-worker",
+    now: new Date(Date.now() - 20 * 60_000).toISOString(),
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-0"))?.status, "synthesizing");
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "live-worker",
+  });
+
+  assertEquals(run.ready.length, 1, "an expired claim must be recovered, not stranded");
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  assertEquals(episode?.status, "ready");
+  assertEquals(episode?.claimedBy, "live-worker");
+});
+
+Deno.test("an episode stranded before leases existed is still recoverable", async () => {
+  // Records written by the pre-claim worker have `synthesizing` and no
+  // `claimedAt`. Refusing to reclaim them would leave exactly the episodes this
+  // change exists to rescue stuck forever.
+  const { ctx, stores } = await queuedMany(1);
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  await stores.metadata.putEpisode({ ...episode!, status: "synthesizing" });
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()));
+
+  assertEquals(run.ready.length, 1, "a legacy stranded episode must be picked up");
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-0"))?.status, "ready");
+});
+
+Deno.test("an episode inside a live lease is left alone", async () => {
+  // The other half of recovery: reclaiming too eagerly is just vfs again, since
+  // the first worker is still spending.
+  const { ctx, stores } = await queuedMany(1);
+  await stores.metadata.claimEpisode("user-1", "ep-0", {
+    owner: "busy-worker",
+    now: new Date().toISOString(),
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+
+  let paid = 0;
+  const run = await runSynthesisBatch(ctx, () => {
+    paid++;
+    return Promise.resolve(fakeAudio());
+  });
+
+  assertEquals(paid, 0, "a live lease must not be stolen mid-synthesis");
+  assertEquals(run.ready, []);
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-0"))?.claimedBy, "busy-worker");
+});
+
+Deno.test("a superseded worker discards its result instead of overwriting the winner", async () => {
+  const { ctx, stores } = await queuedMany(1);
+
+  // This worker's lease expires while it is synthesising, and another worker
+  // takes over and finishes first.
+  const run = await runSynthesisBatch(ctx, async () => {
+    const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+    await stores.metadata.completeEpisode(
+      {
+        ...episode!,
+        status: "ready",
+        audioKey: "winner.wav",
+        contentType: "audio/wav",
+        byteLength: 999,
+      },
+      episode!.claimedBy!,
+    );
+    // Now the original claim is gone; this worker's own write must be refused.
+    await stores.metadata.putEpisode({
+      ...(await stores.metadata.getEpisode("user-1", "ep-0"))!,
+      status: "synthesizing",
+      claimedBy: "someone-else",
+      claimedAt: new Date().toISOString(),
+    });
+    return fakeAudio();
+  }, { owner: "slow-worker" });
+
+  assertEquals(run.ready, [], "a superseded worker must not report success");
+  assertEquals(run.superseded.length, 1, "the discarded work must be reported, not swallowed");
+  // And it must be reported with enough detail to tune the lease.
+  const entry = run.superseded[0]!;
+  assert(entry.leaseMs > 0, "the lease in force must be reported");
+  assert(entry.heldMs >= 0, "how long the claim was held must be reported");
+});
+
+Deno.test("a job that keeps crashing is abandoned rather than re-billed forever", async () => {
+  // Lease recovery without a bound is perpetual motion for a poison input:
+  // crash, expire, reclaim, crash, bill again. The counter is persisted because
+  // an in-process one dies with the process it was counting.
+  const { ctx, stores } = await queuedMany(1);
+
+  let paid = 0;
+  for (let tick = 1; tick <= 5; tick++) {
+    await runSynthesisBatch(ctx, async () => {
+      paid++;
+      // "Crash": the claim is taken, the money is spent, nothing terminal is
+      // written, and the lease is left to expire.
+      const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+      await stores.metadata.putEpisode({
+        ...episode!,
+        claimedAt: new Date(Date.now() - 60 * 60_000).toISOString(),
+      });
+      throw new Error("isolate died");
+    }, { maxAttempts: 1, maxClaims: 3, retryBaseDelayMs: 1 });
+  }
+
+  assert(paid <= 3, `a poison job must stop being billed, got ${paid} charges`);
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  assertEquals(episode?.status, "failed", "an exhausted job must be visibly abandoned");
+});

@@ -7,12 +7,14 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
+import { isClaimExpired } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
   type BlobStore,
   type ByteRange,
   collect,
+  type EpisodeClaim,
   type EpisodeQuery,
   type MetadataStore,
   resolveRange,
@@ -213,6 +215,61 @@ export class MemoryMetadataStore implements MetadataStore {
       .slice(0, limit)
       .map((e) => structuredClone(e));
     return Promise.resolve(out);
+  }
+
+  /**
+   * Single-threaded JS makes this trivially atomic: nothing can interleave
+   * between the read and the write because there is no `await` between them.
+   *
+   * That is precisely why it must be written carefully rather than casually —
+   * a memory adapter that grants a claim the KV adapter would refuse lets the
+   * conformance suite pass while production double-spends, which is the exact
+   * failure the suite exists to prevent.
+   */
+  claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
+    const key = MemoryMetadataStore.#scoped(userId, episodeId);
+    const found = this.#episodes.get(key);
+    if (!found) return Promise.resolve(null);
+
+    const nowMs = Date.parse(claim.now);
+    const claimable = found.status === "pending" ||
+      (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
+    if (!claimable) return Promise.resolve(null);
+
+    const attempts = (found.attempts ?? 0) + 1;
+    if (attempts > claim.maxClaims) {
+      // Abandon rather than re-bill: an input that keeps killing its host would
+      // otherwise be re-claimed forever on lease expiry.
+      this.#episodes.set(key, {
+        ...structuredClone(found),
+        status: "failed",
+        error: `abandoned after ${claim.maxClaims} attempts`,
+        claimedAt: undefined,
+        claimedBy: undefined,
+      });
+      return Promise.resolve(null);
+    }
+
+    const claimed: Episode = {
+      ...structuredClone(found),
+      status: "synthesizing",
+      claimedAt: claim.now,
+      claimedBy: claim.owner,
+      attempts,
+    };
+    this.#episodes.set(key, claimed);
+    return Promise.resolve(structuredClone(claimed));
+  }
+
+  completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    const key = MemoryMetadataStore.#scoped(episode.userId, episode.id);
+    const current = this.#episodes.get(key);
+    // Superseded: another worker reclaimed the expired lease and finished first.
+    if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+      return Promise.resolve(false);
+    }
+    this.#episodes.set(key, structuredClone(episode));
+    return Promise.resolve(true);
   }
 
   close(): Promise<void> {

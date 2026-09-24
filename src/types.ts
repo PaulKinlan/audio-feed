@@ -192,6 +192,73 @@ export interface Episode {
   error?: string;
   createdAt: string;
   readyAt?: string;
+
+  /**
+   * Worker lease (audio-feed-vfs / audio-feed-kiq).
+   *
+   * Set atomically as part of the `pending -> synthesizing` transition, so the
+   * claim and the status can never disagree. Two things depend on it:
+   *
+   * - MUTUAL EXCLUSION: a worker that loses the compare-and-swap does not
+   *   synthesise, so two isolates cannot bill the same episode twice.
+   * - RECOVERY: `claimedAt` is what makes `synthesizing` a temporary state. A
+   *   worker that dies mid-synthesis leaves a claim nobody will ever finish;
+   *   once the lease expires the episode is claimable again instead of being
+   *   stranded in a status the queue never looks at.
+   */
+  claimedAt?: string;
+  /** Opaque worker identity. Diagnostic only — expiry is what grants a reclaim. */
+  claimedBy?: string;
+  /**
+   * Claims taken so far, incremented as part of the claim itself.
+   *
+   * Persisted rather than counted in memory because the case that needs
+   * bounding is the one an in-process counter cannot see: an input that kills
+   * the isolate is re-claimed by the next worker with a fresh counter, and a
+   * poison job that crashes its host would otherwise be re-billed forever.
+   */
+  attempts?: number;
+}
+
+/**
+ * How long a worker may hold an episode before another may take it over.
+ *
+ * Sized against the LONGEST plausible synthesis, not the average. If a lease
+ * expires while the first worker is still spending, a second worker takes the
+ * claim mid-call and both pay — which is audio-feed-vfs again, arriving by a
+ * different route. A short article measured ~10s, but a two-voice deep dive on
+ * a long article is minutes, and that is the number that matters.
+ *
+ * The asymmetry decides it: too long merely delays a retry after a crash; too
+ * short bills twice. So err long.
+ */
+export const DEFAULT_CLAIM_LEASE_MS = 15 * 60_000;
+
+/**
+ * Claims allowed before an episode is abandoned as unprocessable.
+ *
+ * Lease-expiry recovery without a bound is a perpetual motion machine for a
+ * poison job: crash, expire, re-claim, crash, bill again.
+ */
+export const DEFAULT_MAX_CLAIMS = 3;
+
+/**
+ * Whether an existing claim may be taken over.
+ *
+ * A `synthesizing` episode with NO `claimedAt` is treated as expired on
+ * purpose: records written before leases existed are exactly the stranded ones
+ * this is meant to rescue, and refusing to reclaim them would leave every
+ * already-stuck episode stuck forever.
+ */
+export function isClaimExpired(
+  episode: Pick<Episode, "claimedAt">,
+  nowMs: number,
+  leaseMs: number = DEFAULT_CLAIM_LEASE_MS,
+): boolean {
+  if (!episode.claimedAt) return true;
+  const claimedAtMs = Date.parse(episode.claimedAt);
+  if (!Number.isFinite(claimedAtMs)) return true;
+  return nowMs - claimedAtMs >= leaseMs;
 }
 
 /** An episode is publishable in a feed only when it has playable audio. */
