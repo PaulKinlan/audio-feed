@@ -599,6 +599,93 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId backfills sourceTitle o
   assertStringIncludes(xml, "<title>Legacy Source: Old Article</title>");
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId backfills >1000 legacy episodes without truncation (audio-feed-c9q)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-huge-legacy", userId: "user-1", title: "Huge Legacy" }),
+  );
+
+  // Seed 1,200 legacy ready episodes without sourceTitle
+  for (let i = 0; i < 1200; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-leg-${i}`,
+        userId: "user-1",
+        sourceId: "src-huge-legacy",
+        sourceTitle: undefined,
+        status: "ready",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-huge-legacy`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.retainedEpisodes, 1200);
+
+  // Verify all 1,200 episodes have sourceTitle backfilled
+  const episodes = await stores.metadata.listEpisodes({
+    userId: "user-1",
+    sourceId: "src-huge-legacy",
+    limit: Number.POSITIVE_INFINITY,
+  });
+  assertEquals(episodes.length, 1200);
+  const missingSourceTitle = episodes.filter((ep) => !ep.sourceTitle);
+  assertEquals(missingSourceTitle.length, 0);
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect concurrently deleted episodes during backfill (audio-feed-hvn)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-cas-test", userId: "user-1", title: "CAS Test" }),
+  );
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-to-delete",
+      userId: "user-1",
+      sourceId: "src-cas-test",
+      sourceTitle: undefined,
+      status: "ready",
+    }),
+  );
+
+  // Intercept listEpisodes: right after listEpisodes returns, delete the episode before backfill runs
+  const originalList = stores.metadata.listEpisodes.bind(stores.metadata);
+  stores.metadata.listEpisodes = async (query) => {
+    const list = await originalList(query);
+    if (query.status === "ready") {
+      // Simulate concurrent deletion by user
+      await stores.metadata.deleteEpisode("user-1", "ep-to-delete");
+    }
+    return list;
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-cas-test`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+
+  // Episode must NOT be resurrected by backfill!
+  assertEquals(await stores.metadata.getEpisode("user-1", "ep-to-delete"), null);
+});
+
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(

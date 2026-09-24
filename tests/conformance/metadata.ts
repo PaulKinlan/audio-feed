@@ -414,6 +414,35 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(secondDelete, false);
   });
 
+  test("backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio-feed-hvn)", async (store) => {
+    // 1. Absent episode returns false and does NOT resurrect
+    const absentResult = await store.backfillEpisodeSourceTitle("user-1", "non-existent", "Title");
+    assertEquals(absentResult, false);
+    assertEquals(await store.getEpisode("user-1", "non-existent"), null);
+
+    // 2. Existing episode without sourceTitle is backfilled
+    const ep = makeEpisode({ id: "e-backfill", userId: "user-1", sourceTitle: undefined });
+    await store.putEpisode(ep);
+    assertEquals((await store.getEpisode("user-1", "e-backfill"))?.sourceTitle, undefined);
+
+    const backfilled = await store.backfillEpisodeSourceTitle(
+      "user-1",
+      "e-backfill",
+      "Backfilled Title",
+    );
+    assertEquals(backfilled, true);
+    assertEquals((await store.getEpisode("user-1", "e-backfill"))?.sourceTitle, "Backfilled Title");
+
+    // 3. Repeated call preserves existing sourceTitle
+    const repeat = await store.backfillEpisodeSourceTitle(
+      "user-1",
+      "e-backfill",
+      "Different Title",
+    );
+    assertEquals(repeat, true);
+    assertEquals((await store.getEpisode("user-1", "e-backfill"))?.sourceTitle, "Backfilled Title");
+  });
+
   test("returns copies, not live references", async (store) => {
     const episode = makeEpisode({ id: "e1", title: "Original" });
     await store.putEpisode(episode);

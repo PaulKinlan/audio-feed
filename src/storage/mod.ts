@@ -114,6 +114,11 @@ export interface MetadataStore {
   putEpisode(episode: Episode): Promise<void>;
   getEpisode(userId: string, id: string): Promise<Episode | null>;
   deleteEpisode(userId: string, id: string): Promise<boolean>;
+  /**
+   * Backfill sourceTitle on an existing episode with optimistic concurrency control (CAS).
+   * Resolves `false` if the episode does not exist (prevents resurrection, audio-feed-hvn).
+   */
+  backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean>;
   /** Newest first. Backs both the per-source and master feeds. */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
   /**

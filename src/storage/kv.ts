@@ -283,6 +283,34 @@ export class KvMetadataStore implements MetadataStore {
     return retryResult.ok;
   }
 
+  async backfillEpisodeSourceTitle(
+    userId: string,
+    id: string,
+    sourceTitle: string,
+  ): Promise<boolean> {
+    const key: Deno.KvKey = ["episode", userId, id];
+    const entry = await this.#kv.get<Episode>(key);
+    if (!entry.value) return false;
+    if (entry.value.sourceTitle) return true;
+    const updated: Episode = { ...entry.value, sourceTitle };
+    const res = await this.#kv.atomic()
+      .check(entry)
+      .set(key, updated)
+      .commit();
+    if (res.ok) return true;
+
+    // Retry once if atomic check collided
+    const retry = await this.#kv.get<Episode>(key);
+    if (!retry.value) return false;
+    if (retry.value.sourceTitle) return true;
+    const retryUpdated: Episode = { ...retry.value, sourceTitle };
+    const retryRes = await this.#kv.atomic()
+      .check(retry)
+      .set(key, retryUpdated)
+      .commit();
+    return retryRes.ok;
+  }
+
   /**
    * Compare-and-swap claim. The `.check(entry)` is the entire point.
    *

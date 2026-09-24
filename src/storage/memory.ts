@@ -217,6 +217,18 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(true);
   }
 
+  backfillEpisodeSourceTitle(
+    userId: string,
+    id: string,
+    sourceTitle: string,
+  ): Promise<boolean> {
+    const key = MemoryMetadataStore.#scoped(userId, id);
+    const ep = this.#episodes.get(key);
+    if (!ep) return Promise.resolve(false);
+    if (!ep.sourceTitle) ep.sourceTitle = sourceTitle;
+    return Promise.resolve(true);
+  }
+
   listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
     const limit = query.limit ?? 50;
     const out = [...this.#episodes.values()]

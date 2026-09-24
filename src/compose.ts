@@ -810,6 +810,7 @@ export function createAdminDeleteUserSourceHandler(
             try {
               await ctx.stores.blobs.delete(episode.audioKey);
               deletedBlobKeys.add(episode.audioKey);
+              failedBlobKeys.delete(episode.audioKey);
             } catch {
               failedBlobKeys.add(episode.audioKey);
             }
@@ -862,18 +863,18 @@ export function createAdminDeleteUserSourceHandler(
         ? (await ctx.stores.metadata.listEpisodes({
           userId,
           sourceId,
-          limit: 1000,
+          limit: Number.POSITIVE_INFINITY,
         })).length
         : (await ctx.stores.metadata.listEpisodes({
           userId,
           sourceId,
           status: "pending",
-          limit: 1000,
+          limit: Number.POSITIVE_INFINITY,
         })).length + (await ctx.stores.metadata.listEpisodes({
           userId,
           sourceId,
           status: "synthesizing",
-          limit: 1000,
+          limit: Number.POSITIVE_INFINITY,
         })).length;
 
       if (remainingEpisodes > 0) {
@@ -896,17 +897,33 @@ export function createAdminDeleteUserSourceHandler(
       userId,
       sourceId,
       status: "ready",
-      limit: 1000,
+      limit: Number.POSITIVE_INFINITY,
     });
 
     if (!cascade) {
-      // Backfill sourceTitle for legacy episodes being retained (audio-feed-rkf)
+      // Backfill sourceTitle with CAS for legacy episodes being retained (audio-feed-rkf, audio-feed-hvn, audio-feed-c9q)
       for (const episode of readyEpisodes) {
         if (!episode.sourceTitle) {
-          await ctx.stores.metadata.putEpisode({
-            ...episode,
-            sourceTitle: source.title,
-          });
+          const ok = await ctx.stores.metadata.backfillEpisodeSourceTitle(
+            userId,
+            episode.id,
+            source.title,
+          );
+          if (!ok) {
+            const current = await ctx.stores.metadata.getEpisode(userId, episode.id);
+            if (current && !current.sourceTitle) {
+              return Response.json(
+                {
+                  ok: false,
+                  error:
+                    "Source deletion incomplete: could not backfill sourceTitle on retained episode",
+                  incomplete: true,
+                  sourceId,
+                },
+                { status: 500, headers: { "cache-control": "no-store" } },
+              );
+            }
+          }
         }
       }
     }
