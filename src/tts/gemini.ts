@@ -63,7 +63,7 @@ export const DEFAULT_NARRATION_VOICE: GeminiTtsVoice = "Charon";
 export const DEFAULT_EXPERT_VOICE: GeminiTtsVoice = "Fenrir";
 export const DEFAULT_FOIL_VOICE: GeminiTtsVoice = "Puck";
 
-export const DEFAULT_TTS_MODEL = "gemini-2.5-flash-preview-tts";
+export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 export const GEMINI_API_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta";
 
@@ -116,13 +116,24 @@ export interface DialogueInput {
   };
 }
 
+export interface SpeechMetadata {
+  speaker?: string;
+  style?: string;
+}
+
+export interface ContentPart {
+  text: string;
+  speech_metadata?: SpeechMetadata;
+  speechMetadata?: SpeechMetadata;
+}
+
 /**
  * Request payload for Gemini GenerateContent API with Audio modality
  */
 export interface GeminiGenerateContentRequest {
   contents: Array<{
     role?: string;
-    parts: Array<{ text: string }>;
+    parts: Array<ContentPart>;
   }>;
   generationConfig: {
     responseModalities: ["AUDIO"];
@@ -637,13 +648,57 @@ export function formatNarrationPrompt(input: NarrationInput): string {
   return sections.join("\n\n");
 }
 
+export interface FormattedDialogue {
+  prompt: string;
+  turns: DialogueTurn[];
+  speakers: [DialogueSpeaker, DialogueSpeaker];
+}
+
+/**
+ * Parse a text script with "Speaker: Text" lines into structured DialogueTurns
+ */
+export function parseScriptIntoTurns(
+  script: string,
+  speakers: [DialogueSpeaker, DialogueSpeaker],
+): DialogueTurn[] {
+  const lines = script.split("\n").map((l) => l.trim()).filter(Boolean);
+  const turns: DialogueTurn[] = [];
+  let currentSpeaker = speakers[0].name;
+
+  for (const line of lines) {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0 && colonIdx < 30) {
+      const candidateName = line.slice(0, colonIdx).trim();
+      const matched = speakers.find(
+        (s) => s.name.toLowerCase() === candidateName.toLowerCase(),
+      );
+      if (matched) {
+        currentSpeaker = matched.name;
+        const text = line.slice(colonIdx + 1).trim();
+        if (text) {
+          turns.push({ speaker: currentSpeaker, text });
+          continue;
+        }
+      }
+    }
+
+    const lastTurn = turns[turns.length - 1];
+    if (lastTurn) {
+      lastTurn.text += " " + line;
+    } else {
+      turns.push({ speaker: currentSpeaker, text: line });
+    }
+  }
+
+  return turns.length > 0
+    ? turns
+    : [{ speaker: speakers[0].name, text: script }];
+}
+
 /**
  * Format a NotebookLM-style dialogue prompt between an expert and a curious foil
  */
-export function formatDialoguePrompt(input: DialogueInput): {
-  prompt: string;
-  speakers: [DialogueSpeaker, DialogueSpeaker];
-} {
+export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
   const speakers: [DialogueSpeaker, DialogueSpeaker] = input.speakers ?? [
     { name: "Alex", role: "expert", voice: DEFAULT_EXPERT_VOICE },
     { name: "Sam", role: "curious_foil", voice: DEFAULT_FOIL_VOICE },
@@ -657,9 +712,58 @@ export function formatDialoguePrompt(input: DialogueInput): {
   const topicOrTitle = input.topic || input.title || input.article?.title ||
     "today's subject";
 
-  const lines: string[] = [];
+  let turns: DialogueTurn[] = [];
 
-  lines.push(
+  if (input.turns && input.turns.length > 0) {
+    turns = [...input.turns];
+  } else if (input.script?.trim()) {
+    turns = parseScriptIntoTurns(input.script, speakers);
+  } else if (input.article) {
+    // Generate conversational script framing based on the article
+    const art = input.article;
+    const authorLine = art.author ? ` written by ${art.author}` : "";
+    turns = [
+      {
+        speaker: foil.name,
+        text:
+          `Welcome back to the deep dive! Today we're digging into "${art.title}"${authorLine}. ${expert.name}, this looks like a fascinating read. What's the core thesis here?`,
+      },
+      {
+        speaker: expert.name,
+        text:
+          `Thanks ${foil.name}. At its heart, this piece is about the practical realities and strategic shifts taking place. Let's start with the central argument: ${
+            art.summary || art.body.slice(0, 400)
+          }...`,
+      },
+      {
+        speaker: foil.name,
+        text:
+          `That's a bold claim. How does the author back that up, and what are the trade-offs people usually miss?`,
+      },
+      {
+        speaker: expert.name,
+        text: `Here is where it gets really interesting: ${
+          art.body.slice(400, 1600)
+        }...`,
+      },
+      {
+        speaker: foil.name,
+        text:
+          `Makes total sense when you frame it that way. What should listeners take away from this?`,
+      },
+      {
+        speaker: expert.name,
+        text:
+          `The big takeaway is that execution and architectural simplicity beat premature abstraction every single time.`,
+      },
+    ];
+  } else {
+    throw new Error(
+      "DialogueInput must provide either turns, script, or an article",
+    );
+  }
+
+  const promptLines: string[] = [
     `You are generating a natural, highly engaging two-voice conversational podcast deep dive in the style of NotebookLM.`,
     `Topic: "${topicOrTitle}".`,
     `Speakers:`,
@@ -668,40 +772,13 @@ export function formatDialoguePrompt(input: DialogueInput): {
     `Style guidelines:`,
     `- Speak with natural human cadence, seamless turn-taking, subtle vocal enthusiasm, and authentic conversational flow.`,
     `- No robotic pauses or unnatural transitions.`,
-  );
-
-  lines.push(`\n[Dialogue Script]`);
-
-  if (input.turns && input.turns.length > 0) {
-    for (const turn of input.turns) {
-      lines.push(`${turn.speaker}: ${turn.text}`);
-    }
-  } else if (input.script?.trim()) {
-    lines.push(input.script.trim());
-  } else if (input.article) {
-    // Generate conversational script framing based on the article
-    const art = input.article;
-    const authorLine = art.author ? ` written by ${art.author}` : "";
-    lines.push(
-      `${foil.name}: Welcome back to the deep dive! Today we're digging into "${art.title}"${authorLine}. ${expert.name}, this looks like a fascinating read. What's the core thesis here?`,
-      `${expert.name}: Thanks ${foil.name}. At its heart, this piece is about the practical realities and strategic shifts taking place. Let's start with the central argument: ${
-        art.summary || art.body.slice(0, 400)
-      }...`,
-      `${foil.name}: That's a bold claim. How does the author back that up, and what are the trade-offs people usually miss?`,
-      `${expert.name}: Here is where it gets really interesting: ${
-        art.body.slice(400, 1600)
-      }...`,
-      `${foil.name}: Makes total sense when you frame it that way. What should listeners take away from this?`,
-      `${expert.name}: The big takeaway is that execution and architectural simplicity beat premature abstraction every single time.`,
-    );
-  } else {
-    throw new Error(
-      "DialogueInput must provide either turns, script, or an article",
-    );
-  }
+    `\n[Dialogue Script]`,
+    ...turns.map((t) => `${t.speaker}: ${t.text}`),
+  ];
 
   return {
-    prompt: lines.join("\n"),
+    prompt: promptLines.join("\n"),
+    turns,
     speakers,
   };
 }
@@ -739,17 +816,32 @@ export function buildSingleVoiceRequest(
 }
 
 /**
- * Build Gemini GenerateContent request for two-voice dialogue
+ * Build Gemini GenerateContent request for two-voice dialogue.
+ * Attaches speech_metadata.speaker to each part in contents as required by Gemini 3.8 Flash TTS.
  */
 export function buildDialogueRequest(
-  prompt: string,
+  turnsOrScript: DialogueTurn[] | string,
   speakers: [DialogueSpeaker, DialogueSpeaker],
   temperature = 0.8,
 ): GeminiGenerateContentRequest {
+  const turns = Array.isArray(turnsOrScript)
+    ? turnsOrScript
+    : parseScriptIntoTurns(turnsOrScript, speakers);
+
+  const parts: ContentPart[] = turns.map((turn) => ({
+    text: turn.text,
+    speech_metadata: {
+      speaker: turn.speaker,
+    },
+    speechMetadata: {
+      speaker: turn.speaker,
+    },
+  }));
+
   return {
     contents: [
       {
-        parts: [{ text: prompt }],
+        parts,
       },
     ],
     generationConfig: {
@@ -975,8 +1067,8 @@ export class GeminiTtsClient {
     input: DialogueInput,
     options: SynthesisOptions = {},
   ): Promise<DecodedAudioResult> {
-    const { prompt, speakers } = formatDialoguePrompt(input);
-    const request = buildDialogueRequest(prompt, speakers, options.temperature);
+    const { turns, speakers } = formatDialoguePrompt(input);
+    const request = buildDialogueRequest(turns, speakers, options.temperature);
     return await this.sendRequest(request, options);
   }
 
@@ -996,7 +1088,8 @@ export class GeminiTtsClient {
       );
     }
 
-    const url = `${this.baseUrl}/models/${model}:generateContent?key=${apiKey}`;
+    // Do not pass API key in query params; send via x-goog-api-key header only
+    const url = `${this.baseUrl}/models/${model}:generateContent`;
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",

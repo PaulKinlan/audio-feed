@@ -11,7 +11,10 @@ import {
   DEFAULT_EXPERT_VOICE,
   DEFAULT_FOIL_VOICE,
   DEFAULT_NARRATION_VOICE,
+  DEFAULT_TTS_MODEL,
   detectAudioFormat,
+  DialogueSpeaker,
+  DialogueTurn,
   formatDialoguePrompt,
   formatNarrationIntro,
   formatNarrationPrompt,
@@ -50,6 +53,7 @@ Deno.test("Voice configuration - supports all 5 required voices", () => {
   assertEquals(DEFAULT_NARRATION_VOICE, "Charon");
   assertEquals(DEFAULT_EXPERT_VOICE, "Fenrir");
   assertEquals(DEFAULT_FOIL_VOICE, "Puck");
+  assertEquals(DEFAULT_TTS_MODEL, "gemini-3.8-flash-tts");
 });
 
 // ---------------------------------------------------------------------------
@@ -218,6 +222,23 @@ Deno.test("Two-voice dialogue - request builder creates multiSpeakerVoiceConfig"
     "Puck",
   );
   assertEquals(req.generationConfig.temperature, 0.85);
+});
+
+Deno.test("Two-voice dialogue - attaches speech_metadata.speaker to each turn part", () => {
+  const speakers: [DialogueSpeaker, DialogueSpeaker] = [
+    { name: "Alex", role: "expert", voice: "Fenrir" },
+    { name: "Sam", role: "curious_foil", voice: "Puck" },
+  ];
+  const turns: DialogueTurn[] = [
+    { speaker: "Alex", text: "Hello listeners." },
+    { speaker: "Sam", text: "Excited to be here." },
+  ];
+  const req = buildDialogueRequest(turns, speakers);
+  assertEquals(req.contents[0]?.parts.length, 2);
+  assertEquals(req.contents[0]?.parts[0]?.text, "Hello listeners.");
+  assertEquals(req.contents[0]?.parts[0]?.speech_metadata?.speaker, "Alex");
+  assertEquals(req.contents[0]?.parts[1]?.text, "Excited to be here.");
+  assertEquals(req.contents[0]?.parts[1]?.speech_metadata?.speaker, "Sam");
 });
 
 // ---------------------------------------------------------------------------
@@ -453,7 +474,12 @@ Deno.test("GeminiTtsClient - synthesizeNarration executes flow with mock fetch",
     voice: "Charon",
   });
 
-  assertEquals(capturedUrl.includes("key=test-api-key-12345"), true);
+  // Header only: API key must NOT be sent in query string
+  assertEquals(capturedUrl.includes("key="), false);
+  assertEquals(
+    capturedUrl,
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent",
+  );
   assertEquals(
     (capturedHeaders as Record<string, string>)["x-goog-api-key"],
     "test-api-key-12345",
@@ -543,6 +569,18 @@ Deno.test("GeminiTtsClient - synthesizeDialogue executes multi-speaker request",
       ?.speakerVoiceConfigs[1]?.speaker,
     "Sam",
   );
+
+  // Assert per-part speech_metadata.speaker
+  assertEquals(capturedBody?.contents[0]?.parts.length, 2);
+  assertEquals(
+    capturedBody?.contents[0]?.parts[0]?.speech_metadata?.speaker,
+    "Alex",
+  );
+  assertEquals(
+    capturedBody?.contents[0]?.parts[1]?.speech_metadata?.speaker,
+    "Sam",
+  );
+
   assertEquals(result.format, "pcm");
   assertEquals(result.durationSeconds, 0.5);
 });
