@@ -58,7 +58,7 @@ export async function tokensMatch(provided: string, expected: string): Promise<b
   const left = new Uint8Array(a);
   const right = new Uint8Array(b);
   let diff = 0;
-  for (let i = 0; i < left.length; i++) diff |= left[i] ^ right[i];
+  for (let i = 0; i < left.length; i++) diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
   return diff === 0;
 }
 
@@ -86,7 +86,7 @@ export async function createUser(
   const user: User = {
     id: crypto.randomUUID(),
     email,
-    displayName: input.displayName?.trim() || email.split("@")[0],
+    displayName: input.displayName?.trim() || email.split("@")[0] || email,
     // Hard-coded: signups land in the approval queue, always.
     status: "pending",
     isAdmin: input.isAdmin ?? false,

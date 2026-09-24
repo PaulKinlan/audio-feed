@@ -222,8 +222,8 @@ Deno.test("detectAudioFormat: an explicit hint beats the weak MPEG frame sync", 
 Deno.test("the API key never appears in the request URL", async () => {
   const { fn, calls } = scripted([okResponse()]);
   await client(fn).sendRequest(request);
-  const url = calls[0].url;
+  const url = calls[0]!.url;
   if (url.includes("test-key")) throw new Error(`key leaked into url: ${url}`);
-  const headers = calls[0].init?.headers as Record<string, string>;
+  const headers = calls[0]!.init?.headers as Record<string, string>;
   if (headers["x-goog-api-key"] !== "test-key") throw new Error("header missing");
 });

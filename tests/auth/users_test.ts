@@ -167,7 +167,7 @@ Deno.test("the full transition matrix is enforced", async () => {
       const current = await getUser(kv, user.id);
       if (current?.status !== from) throw new Error(`setup failed: wanted ${from}, got ${current?.status}`);
 
-      const shouldPass = allowed[from].includes(to);
+      const shouldPass = allowed[from]?.includes(to) ?? false;
       let passed = true;
       let message = "";
       try {
@@ -250,9 +250,9 @@ Deno.test("approval ledger records every decision, attributes feeds, filters sta
   }
 
   const approved = await listUsers(kv, "approved");
-  if (approved.length !== 1 || approved[0].id !== a.id) throw new Error("approved filter wrong");
+  if (approved.length !== 1 || approved[0]?.id !== a.id) throw new Error("approved filter wrong");
   const pending = await listUsers(kv, "pending");
-  if (pending.length !== 1 || pending[0].id !== admin.id) throw new Error("pending filter wrong");
+  if (pending.length !== 1 || pending[0]?.id !== admin.id) throw new Error("pending filter wrong");
   if ((await listUsers(kv)).length !== 3) throw new Error("unfiltered list wrong");
 
   // One subscriber cannot read another's data; admins can.

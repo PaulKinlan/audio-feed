@@ -51,7 +51,7 @@ function assertWellFormed(xml: string) {
       if (open !== tag) throw new Error(`Mismatched close </${tag}> for <${open}>`);
       continue;
     }
-    stack.push(tag);
+    if (tag) stack.push(tag);
   }
   if (stack.length) throw new Error(`Unclosed tags: ${stack.join(", ")}`);
 
