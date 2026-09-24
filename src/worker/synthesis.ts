@@ -349,8 +349,17 @@ export async function runSynthesisBatch(
       error: undefined,
     }, opts.owner);
 
-    if (wrote) result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
-    else result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+    if (wrote) {
+      result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+    } else {
+      // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk)
+      try {
+        await blobs.delete(audioKey);
+      } catch {
+        // best-effort cleanup
+      }
+      result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+    }
   }
 
   return result;

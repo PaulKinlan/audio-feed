@@ -299,6 +299,65 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId with ?cascade=true purg
   assertEquals(xml.includes("Gone Forever"), false);
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId drains >1000 episodes without truncation (audio-feed-7ve)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-huge", userId: "user-1", title: "Huge Source" }),
+  );
+
+  // Seed 1,050 pending episodes
+  for (let i = 0; i < 1050; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-huge-${i}`,
+        userId: "user-1",
+        sourceId: "src-huge",
+        status: "pending",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  // Verify all 1,050 are stored
+  assertEquals(
+    (await stores.metadata.listEpisodes({
+      userId: "user-1",
+      sourceId: "src-huge",
+      limit: Number.MAX_SAFE_INTEGER,
+    })).length,
+    1050,
+  );
+
+  // Default delete should cancel ALL 1,050 pending episodes in batches without truncation
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-huge`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.deleted, "src-huge");
+  assertEquals(body.cascaded, false);
+  assertEquals(body.cancelledPending, 1050);
+  assertEquals(body.retainedEpisodes, 0);
+
+  // Ensure 0 episodes remain
+  assertEquals(
+    (await stores.metadata.listEpisodes({
+      userId: "user-1",
+      sourceId: "src-huge",
+      limit: Number.MAX_SAFE_INTEGER,
+    })).length,
+    0,
+  );
+  assertEquals((await stores.metadata.listPendingEpisodes()).episodes.length, 0);
+});
+
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
