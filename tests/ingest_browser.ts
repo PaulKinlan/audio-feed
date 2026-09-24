@@ -11,9 +11,11 @@ const handler = createUrlIngestHandler({
       {
         id: "fixture-user",
         email: "fixture@example.com",
-        role: "user",
+        displayName: "Fixture",
+        isAdmin: false,
         status: request.headers.get("x-fixture-status") === "approved" ? "approved" : "pending",
         createdAt: "2026-09-24T00:00:00Z",
+        feedToken: "token-fixture-user",
       } satisfies User,
     ),
   fetchArticle: (url, signal) =>

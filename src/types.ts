@@ -21,26 +21,86 @@ export function isAudioMode(value: unknown): value is AudioMode {
 // Users
 // ---------------------------------------------------------------------------
 
-export type UserRole = "admin" | "user";
-
 /**
  * `pending` accounts must never trigger a Gemini synthesis call — that is the
- * whole point of the approval gate (audio-feed-7wn).
+ * whole point of the approval gate (audio-feed-7wn). `rejected` and `suspended`
+ * are equally closed; only `approved` opens the gate.
  */
-export type UserStatus = "pending" | "approved" | "suspended";
+export type UserStatus = "pending" | "approved" | "rejected" | "suspended";
 
+export const USER_STATUSES: readonly UserStatus[] = [
+  "pending",
+  "approved",
+  "rejected",
+  "suspended",
+] as const;
+
+export function isUserStatus(value: unknown): value is UserStatus {
+  return USER_STATUSES.includes(value as UserStatus);
+}
+
+/**
+ * A subscriber. Each user is its own listening persona.
+ *
+ * ONE definition, ONE owner of the `["user", id]` record (audio-feed-ruw).
+ * Before this merge two modules wrote that key with different shapes and
+ * silently dropped each other's fields — `isAdmin` disappearing is a privilege
+ * bug, and `status` disappearing is an unauthorized-spend bug.
+ */
 export interface User {
   id: string;
   email: string;
-  name?: string;
-  role: UserRole;
+  displayName: string;
   status: UserStatus;
+  isAdmin: boolean;
   createdAt: string;
-  approvedAt?: string;
-  approvedBy?: string;
+  /**
+   * Per-user feed capability.
+   *
+   * SECRET. Podcast clients cannot authenticate, so this token in the feed URL
+   * is the only credential those requests carry — anyone holding it can read
+   * the user's feed. Never put it in a response body, a log line, or an error
+   * message; serialise `PublicUser` (see `redactUser`) instead.
+   */
+  feedToken: string;
+  /** Preferred TTS voice preset (Aoede, Charon, Fenrir, Kore, Puck). */
+  voice?: string;
+  /** Source ids this user subscribes to. */
+  feeds?: string[];
+  decidedAt?: string;
+  decidedBy?: string;
+  reason?: string;
 }
 
-/** The only gate that authorizes paid synthesis work for a user. */
+/**
+ * A user without its feed capability — the only user shape safe to serialise.
+ *
+ * Structural, not a convention: a `PublicUser` cannot carry `feedToken`, so
+ * leaking it requires deliberately widening the type rather than forgetting a
+ * `delete`.
+ */
+export type PublicUser = Omit<User, "feedToken">;
+
+export function redactUser(user: User): PublicUser {
+  const { feedToken: _feedToken, ...rest } = user;
+  return rest;
+}
+
+/** One admin decision. Written atomically with the user it decided. */
+export interface ApprovalRecord {
+  userId: string;
+  action: UserStatus;
+  adminId: string;
+  at: string;
+  reason?: string;
+}
+
+/**
+ * The only gate that authorizes paid synthesis work.
+ *
+ * Prefer the throwing `assertAuthorizedForAudio` on a synthesis path: a boolean
+ * fails open the moment a caller forgets a `!`.
+ */
 export function isSynthesisAuthorized(user: User | null | undefined): boolean {
   return user?.status === "approved";
 }

@@ -14,24 +14,26 @@ import {
   isAuthorizedForAudio,
   listUsers,
   NotAuthorizedError,
+  redactUser,
   rejectUser,
   requireAdminToken,
   suspendUser,
 } from "../src/auth/users.ts";
+import { KvMetadataStore } from "../src/storage/kv.ts";
 
 const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") ?? "test-admin-token";
-const kv = await Deno.openKv(":memory:");
-const admin = await createUser(kv, { email: "admin@example.com", displayName: "Admin", isAdmin: true });
+const store = await KvMetadataStore.open(":memory:");
+const admin = await createUser(store, { email: "admin@example.com", displayName: "Admin", isAdmin: true });
 
 // Refuse to serve if the gate is ever open on a cold start.
 for (const status of ["pending", "rejected", "suspended"] as const) {
-  const probe = await createUser(kv, { email: `probe-${status}@example.com` });
-  if (status === "rejected") await rejectUser(kv, probe.id, admin.id);
+  const probe = await createUser(store, { email: `probe-${status}@example.com` });
+  if (status === "rejected") await rejectUser(store, probe.id, admin.id);
   if (status === "suspended") {
-    await approveUser(kv, probe.id, admin.id);
-    await suspendUser(kv, probe.id, admin.id);
+    await approveUser(store, probe.id, admin.id);
+    await suspendUser(store, probe.id, admin.id);
   }
-  if (await isAuthorizedForAudio(kv, probe.id)) {
+  if (await isAuthorizedForAudio(store, probe.id)) {
     throw new Error(`gate open for ${status} user — refusing to serve`);
   }
 }
@@ -72,31 +74,38 @@ Deno.serve({ port }, async (request) => {
     switch (`${request.method} ${url.pathname}`) {
       // Public signup: always lands in the approval queue.
       case "POST /signup": {
-        const user = await createUser(kv, { email: body.email, displayName: body.displayName });
+        const user = await createUser(store, { email: body.email, displayName: body.displayName });
         return json({ id: user.id, status: user.status, email: user.email }, 201);
       }
 
       // Admin queue. Requires the admin token.
+      //
+      // `redactUser` is not decoration: `listUsers` returns the full record,
+      // and serialising it directly would hand every pending user's feed
+      // capability to anyone who can reach this endpoint. The feed token is a
+      // bearer credential — a leaked one grants read access to that user's feed
+      // until it is rotated, and rotation breaks every subscribed client.
       case "GET /pending": {
         await requireAdminToken(token, ADMIN_TOKEN);
-        return json({ pending: await listUsers(kv, "pending"), adminId: admin.id });
+        const pending = await listUsers(store, "pending");
+        return json({ pending: pending.map(redactUser), adminId: admin.id });
       }
 
       case "POST /approve": {
         await requireAdminToken(token, ADMIN_TOKEN);
-        const updated = await approveUser(kv, body.userId, admin.id);
+        const updated = await approveUser(store, body.userId, admin.id);
         return json({ id: updated.id, status: updated.status });
       }
 
       case "POST /suspend": {
         await requireAdminToken(token, ADMIN_TOKEN);
-        const updated = await suspendUser(kv, body.userId, admin.id, body.reason);
+        const updated = await suspendUser(store, body.userId, admin.id, body.reason);
         return json({ id: updated.id, status: updated.status });
       }
 
       // The money path: refuses anything that is not an approved user.
       case "POST /synthesize": {
-        const user = await assertAuthorizedForAudio(kv, body.userId);
+        const user = await assertAuthorizedForAudio(store, body.userId);
         return json({ queued: true, userId: user.id, voice: user.voice ?? "Aoede" });
       }
 

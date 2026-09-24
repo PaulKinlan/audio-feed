@@ -13,7 +13,15 @@
  * Owned by: audio-feed-0h8.
  */
 
-import type { Article, AudioMode, Episode, EpisodeStatus, Source, User } from "../types.ts";
+import type {
+  ApprovalRecord,
+  Article,
+  AudioMode,
+  Episode,
+  EpisodeStatus,
+  Source,
+  User,
+} from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // Metadata
@@ -32,10 +40,32 @@ export interface EpisodeQuery {
 
 export interface MetadataStore {
   // -- users ------------------------------------------------------------
+  /**
+   * Atomic first write. Resolves `false` — never throws — when the email or the
+   * feed token is already taken.
+   *
+   * Separate from `putUser` because signup needs an uniqueness guarantee that a
+   * read-then-write cannot give: two concurrent signups for one email both see
+   * "free" and both succeed. Callers map `false` to their own duplicate error.
+   */
+  insertUser(user: User): Promise<boolean>;
+  /** Update an existing user. Keeps the email and feed-token indexes in step. */
   putUser(user: User): Promise<void>;
   getUser(id: string): Promise<User | null>;
   getUserByEmail(email: string): Promise<User | null>;
+  /** Resolves `null` for an unknown, empty, or malformed token. Never throws. */
+  getUserByFeedToken(token: string): Promise<User | null>;
   listUsers(): Promise<User[]>;
+  /**
+   * Write a status change and its ledger entry in ONE commit.
+   *
+   * Two calls would let the ledger disagree with the user it describes — an
+   * approval that happened with no record, or a record for an approval that
+   * did not. The audit trail is only worth having if it cannot drift.
+   */
+  recordApproval(user: User, record: ApprovalRecord): Promise<void>;
+  /** Oldest first. The admin audit trail. */
+  listApprovalLog(): Promise<ApprovalRecord[]>;
 
   // -- sources ----------------------------------------------------------
   putSource(source: Source): Promise<void>;

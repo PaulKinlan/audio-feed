@@ -10,10 +10,23 @@
  *   - Sort keys use a descending timestamp so KV's natural ascending order
  *     yields newest-first without buffering the whole set.
  *
- * Owned by: audio-feed-0h8.
+ * KEY OWNERSHIP (audio-feed-ruw): this module is the ONLY writer of `["user",
+ * id]`. `src/auth/users.ts` used to write the same key with a different record
+ * shape, so whichever ran last silently dropped the other's fields. Policy now
+ * lives in `auth/users.ts` and persistence lives here. Do not reintroduce a
+ * second writer — if a caller needs a new user query, add it to `MetadataStore`.
+ *
+ * Index keys, all distinct first parts so a `["user"]` prefix scan returns user
+ * records and nothing else:
+ *   ["user", id]                  the record
+ *   ["user_by_email", email]      -> id
+ *   ["user_by_feed_token", token] -> id
+ *   ["approval_log", at, userId]  the admin audit trail
+ *
+ * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
 
-import type { Article, Episode, Source, User } from "../types.ts";
+import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import type { EpisodeQuery, MetadataStore } from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
@@ -44,16 +57,58 @@ export class KvMetadataStore implements MetadataStore {
 
   // -- users ----------------------------------------------------------------
 
+  /**
+   * Atomic first write. The `check`s are the point: a read-then-write cannot
+   * stop two concurrent signups for one email from both observing "free" and
+   * both committing. Resolves `false` rather than throwing so the caller owns
+   * the wording of the duplicate error.
+   */
+  async insertUser(user: User): Promise<boolean> {
+    const email = user.email.toLowerCase();
+    const userKey: Deno.KvKey = ["user", user.id];
+    const emailKey: Deno.KvKey = ["user_by_email", email];
+    const tokenKey: Deno.KvKey = ["user_by_feed_token", user.feedToken];
+
+    const [existingUser, existingEmail, existingToken] = await Promise.all([
+      this.#kv.get<User>(userKey),
+      this.#kv.get<string>(emailKey),
+      this.#kv.get<string>(tokenKey),
+    ]);
+    if (existingUser.value || existingEmail.value || existingToken.value) return false;
+
+    const result = await this.#kv.atomic()
+      .check(existingUser)
+      .check(existingEmail)
+      .check(existingToken)
+      .set(userKey, user)
+      .set(emailKey, user.id)
+      .set(tokenKey, user.id)
+      .commit();
+
+    // A failed check means someone else won the race, which is the same answer
+    // as "already taken" — not an error condition.
+    return result.ok;
+  }
+
   async putUser(user: User): Promise<void> {
-    const emailKey = ["user_by_email", user.email.toLowerCase()];
+    const email = user.email.toLowerCase();
     const existing = await this.#kv.get<User>(["user", user.id]);
 
-    const tx = this.#kv.atomic().set(["user", user.id], user).set(emailKey, user.id);
+    const tx = this.#kv.atomic()
+      .set(["user", user.id], user)
+      .set(["user_by_email", email], user.id)
+      .set(["user_by_feed_token", user.feedToken], user.id);
 
-    // An email change must not leave the old index pointing at this user.
-    const previousEmail = existing.value?.email.toLowerCase();
-    if (previousEmail && previousEmail !== user.email.toLowerCase()) {
-      tx.delete(["user_by_email", previousEmail]);
+    // A changed email or a rotated token must not leave a stale index entry
+    // pointing at this user — a rotated feed token that still resolves has not
+    // actually been revoked.
+    const previous = existing.value;
+    if (previous) {
+      const previousEmail = previous.email.toLowerCase();
+      if (previousEmail !== email) tx.delete(["user_by_email", previousEmail]);
+      if (previous.feedToken !== user.feedToken) {
+        tx.delete(["user_by_feed_token", previous.feedToken]);
+      }
     }
 
     const result = await tx.commit();
@@ -70,9 +125,35 @@ export class KvMetadataStore implements MetadataStore {
     return await this.getUser(pointer.value);
   }
 
+  async getUserByFeedToken(token: string): Promise<User | null> {
+    // An empty key part throws in Deno KV; a feed route must answer 404, not 500.
+    if (!token) return null;
+    const pointer = await this.#kv.get<string>(["user_by_feed_token", token]);
+    if (!pointer.value) return null;
+    return await this.getUser(pointer.value);
+  }
+
   async listUsers(): Promise<User[]> {
     const out: User[] = [];
     for await (const entry of this.#kv.list<User>({ prefix: ["user"] })) {
+      out.push(entry.value);
+    }
+    return out;
+  }
+
+  /** One commit, so the ledger can never disagree with the user it describes. */
+  async recordApproval(user: User, record: ApprovalRecord): Promise<void> {
+    const result = await this.#kv.atomic()
+      .set(["user", user.id], user)
+      .set(["approval_log", record.at, record.userId], record)
+      .commit();
+    if (!result.ok) throw new Error(`recordApproval failed for ${user.id}`);
+  }
+
+  async listApprovalLog(): Promise<ApprovalRecord[]> {
+    const out: ApprovalRecord[] = [];
+    // Key order is [at, userId], so an ascending scan is already oldest-first.
+    for await (const entry of this.#kv.list<ApprovalRecord>({ prefix: ["approval_log"] })) {
       out.push(entry.value);
     }
     return out;

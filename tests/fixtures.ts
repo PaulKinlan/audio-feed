@@ -3,17 +3,30 @@
  * change to the domain model breaks one file, not twelve.
  */
 
-import type { Article, AudioMode, Episode, Source, User } from "../src/types.ts";
+import type { ApprovalRecord, Article, AudioMode, Episode, Source, User } from "../src/types.ts";
 import { DEFAULT_VOICES } from "../src/types.ts";
 
 export function makeUser(overrides: Partial<User> = {}): User {
   return {
     id: "user-1",
     email: "paul@example.com",
-    name: "Paul",
-    role: "user",
+    displayName: "Paul",
     status: "approved",
+    isAdmin: false,
     createdAt: "2026-09-01T00:00:00.000Z",
+    // Distinct per user id, so a fixture can never accidentally assert that two
+    // users share a feed capability.
+    feedToken: `token-${overrides.id ?? "user-1"}`,
+    ...overrides,
+  };
+}
+
+export function makeApproval(overrides: Partial<ApprovalRecord> = {}): ApprovalRecord {
+  return {
+    userId: "user-1",
+    action: "approved",
+    adminId: "admin-1",
+    at: "2026-09-02T00:00:00.000Z",
     ...overrides,
   };
 }

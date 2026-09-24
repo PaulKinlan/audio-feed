@@ -1,39 +1,35 @@
 /**
- * Multi-user model and the admin-approval gate.
+ * Multi-user policy and the admin-approval gate.
  *
- * Storage is Deno KV (see PRODUCT.md). The one rule that matters: no audio is
- * ever synthesised for a user whose status is not `approved`, because
- * synthesis is the only thing here that costs money.
+ * The one rule that matters: no audio is ever synthesised for a user whose
+ * status is not `approved`, because synthesis is the only thing here that costs
+ * money.
+ *
+ * THIS MODULE NO LONGER TOUCHES `Deno.Kv` (audio-feed-ruw).
+ *
+ * It used to write `["user", id]` directly, while `src/storage/kv.ts` wrote the
+ * same key with a different record shape. Whichever ran last silently dropped
+ * the other's fields — `isAdmin` vanishing is a privilege bug, and `status`
+ * vanishing is an unauthorized-spend bug. Both were invisible: every unit test
+ * passed, because each module only ever read back its own writes.
+ *
+ * The fix is structural rather than conventional. Persistence belongs to
+ * `MetadataStore`; this file is policy over it: email validation, transition
+ * rules, the audit ledger, and the gate. One writer, one shape, one key.
+ *
+ * Every function here takes a `MetadataStore`, never a `Deno.Kv`. If you find
+ * yourself needing `Deno.openKv()` in this file, the interface is missing a
+ * method — add it there and to the conformance suite.
+ *
+ * Owned by: audio-feed-7wn, restructured by audio-feed-ruw.
  */
-export type UserStatus = "pending" | "approved" | "rejected" | "suspended";
 
-/** A subscriber. Each user is its own listening persona. */
-export interface User {
-  id: string;
-  email: string;
-  displayName: string;
-  status: UserStatus;
-  isAdmin: boolean;
-  createdAt: string;
-  /** Preferred TTS voice preset (Aoede, Charon, Fenrir, Kore, Puck). */
-  voice?: string;
-  /** Source ids this user subscribes to. */
-  feeds?: string[];
-  decidedAt?: string;
-  decidedBy?: string;
-  reason?: string;
-}
+import { newFeedToken, newUserId, timingSafeEqual } from "../ids.ts";
+import type { MetadataStore } from "../storage/mod.ts";
+import type { ApprovalRecord, User, UserStatus } from "../types.ts";
 
-export interface ApprovalRecord {
-  userId: string;
-  action: UserStatus;
-  adminId: string;
-  at: string;
-  reason?: string;
-}
-
-const userKey = (id: string) => ["user", id];
-const emailKey = (email: string) => ["user-email", normaliseEmail(email)];
+export type { ApprovalRecord, PublicUser, User, UserStatus } from "../types.ts";
+export { redactUser } from "../types.ts";
 
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -45,8 +41,8 @@ export function isValidEmail(email: string): boolean {
 }
 
 /**
- * Constant-time-ish secret comparison. `===` on secrets leaks length and
- * prefix through timing, so both sides are hashed to a fixed width first.
+ * Constant-time secret comparison, hashed to a fixed width first so the
+ * comparison cannot leak the secret's length.
  */
 export async function tokensMatch(provided: string, expected: string): Promise<boolean> {
   if (!provided || !expected) return false;
@@ -55,11 +51,11 @@ export async function tokensMatch(provided: string, expected: string): Promise<b
     crypto.subtle.digest("SHA-256", encoder.encode(provided)),
     crypto.subtle.digest("SHA-256", encoder.encode(expected)),
   ]);
-  const left = new Uint8Array(a);
-  const right = new Uint8Array(b);
-  let diff = 0;
-  for (let i = 0; i < left.length; i++) diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
-  return diff === 0;
+  return timingSafeEqual(hex(new Uint8Array(a)), hex(new Uint8Array(b)));
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -72,9 +68,14 @@ export async function requireAdminToken(provided: string | null, expected: strin
   }
 }
 
-/** Create a pending subscriber. Never approved on creation. */
+/**
+ * Create a pending subscriber. Never approved on creation.
+ *
+ * The feed token is minted here, so a user is subscribable from the moment it
+ * exists and no caller has to handle a user with a missing capability.
+ */
 export async function createUser(
-  kv: Deno.Kv,
+  store: MetadataStore,
   input: {
     email: string;
     displayName?: string;
@@ -86,53 +87,53 @@ export async function createUser(
   const email = normaliseEmail(input.email);
   if (!isValidEmail(email)) throw new Error(`Invalid email: ${input.email}`);
 
-  const existing = await kv.get<string>(emailKey(email));
-  if (existing.value) throw new Error(`Email already registered: ${email}`);
-
   const user: User = {
-    id: crypto.randomUUID(),
+    id: newUserId(),
     email,
     displayName: input.displayName?.trim() || email.split("@")[0] || email,
     // Hard-coded: signups land in the approval queue, always.
     status: "pending",
     isAdmin: input.isAdmin ?? false,
     createdAt: new Date().toISOString(),
+    feedToken: newFeedToken(),
     voice: input.voice,
     feeds: input.feeds ?? [],
   };
 
-  const result = await kv.atomic()
-    .check(existing)
-    .set(userKey(user.id), user)
-    .set(emailKey(email), user.id)
-    .commit();
-  if (!result.ok) throw new Error(`Email already registered: ${email}`);
+  // Atomic in the store, so two concurrent signups for one email cannot both
+  // succeed. A read-then-write here would let exactly that through.
+  if (!(await store.insertUser(user))) {
+    throw new Error(`Email already registered: ${email}`);
+  }
   return user;
 }
 
-export async function getUser(kv: Deno.Kv, id: string): Promise<User | null> {
-  return (await kv.get<User>(userKey(id))).value;
+export function getUser(store: MetadataStore, id: string): Promise<User | null> {
+  return store.getUser(id);
 }
 
-export async function getUserByEmail(kv: Deno.Kv, email: string): Promise<User | null> {
-  const id = (await kv.get<string>(emailKey(email))).value;
-  return id ? await getUser(kv, id) : null;
+export function getUserByEmail(store: MetadataStore, email: string): Promise<User | null> {
+  return store.getUserByEmail(normaliseEmail(email));
 }
 
-export async function listUsers(kv: Deno.Kv, status?: UserStatus): Promise<User[]> {
-  const users: User[] = [];
-  for await (const entry of kv.list<User>({ prefix: ["user"] })) {
-    if (!status || entry.value.status === status) users.push(entry.value);
-  }
-  return users.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+/**
+ * Resolve the bearer of a feed URL. `null` for unknown, empty, or malformed —
+ * a feed route answers 404 either way, and distinguishing "no such token" from
+ * "wrong token" would confirm which tokens exist.
+ */
+export function getUserByFeedToken(store: MetadataStore, token: string): Promise<User | null> {
+  return store.getUserByFeedToken(token);
 }
 
-export async function listApprovalLog(kv: Deno.Kv): Promise<ApprovalRecord[]> {
-  const records: ApprovalRecord[] = [];
-  for await (const entry of kv.list<ApprovalRecord>({ prefix: ["approval-log"] })) {
-    records.push(entry.value);
-  }
-  return records.sort((a, b) => a.at.localeCompare(b.at));
+export async function listUsers(store: MetadataStore, status?: UserStatus): Promise<User[]> {
+  const users = await store.listUsers();
+  return users
+    .filter((user) => !status || user.status === status)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export function listApprovalLog(store: MetadataStore): Promise<ApprovalRecord[]> {
+  return store.listApprovalLog();
 }
 
 /**
@@ -149,84 +150,84 @@ const ALLOWED_FROM: Record<UserStatus, UserStatus[]> = {
 };
 
 async function decide(
-  kv: Deno.Kv,
+  store: MetadataStore,
   userId: string,
   action: UserStatus,
   adminId: string,
   reason?: string,
 ): Promise<User> {
-  const user = await getUser(kv, userId);
+  const user = await store.getUser(userId);
   if (!user) throw new Error(`Unknown user: ${userId}`);
   if (user.status === action) return user;
   if (!ALLOWED_FROM[action].includes(user.status)) {
     throw new Error(`Cannot move user ${userId} from ${user.status} to ${action}`);
   }
 
-  const updated: User = {
-    ...user,
-    status: action,
-    decidedAt: new Date().toISOString(),
-    decidedBy: adminId,
-    reason,
-  };
-  const record: ApprovalRecord = {
-    userId,
-    action,
-    adminId,
-    at: updated.decidedAt!,
-    reason,
-  };
+  const at = new Date().toISOString();
+  const updated: User = { ...user, status: action, decidedAt: at, decidedBy: adminId, reason };
+  const record: ApprovalRecord = { userId, action, adminId, at, reason };
 
-  await kv.atomic()
-    .set(userKey(userId), updated)
-    .set(["approval-log", record.at, userId], record)
-    .commit();
+  // One commit for both. Two calls would let the ledger disagree with the user
+  // it describes, and an audit trail that can drift is not an audit trail.
+  await store.recordApproval(updated, record);
   return updated;
 }
 
-export function approveUser(kv: Deno.Kv, userId: string, adminId: string): Promise<User> {
-  return decide(kv, userId, "approved", adminId);
+export function approveUser(
+  store: MetadataStore,
+  userId: string,
+  adminId: string,
+): Promise<User> {
+  return decide(store, userId, "approved", adminId);
 }
 
 export function rejectUser(
-  kv: Deno.Kv,
+  store: MetadataStore,
   userId: string,
   adminId: string,
   reason?: string,
 ): Promise<User> {
-  return decide(kv, userId, "rejected", adminId, reason);
+  return decide(store, userId, "rejected", adminId, reason);
 }
 
 export function suspendUser(
-  kv: Deno.Kv,
+  store: MetadataStore,
   userId: string,
   adminId: string,
   reason?: string,
 ): Promise<User> {
-  return decide(kv, userId, "suspended", adminId, reason);
+  return decide(store, userId, "suspended", adminId, reason);
 }
 
 export class NotAuthorizedError extends Error {
-  constructor(userId: string, status: UserStatus | "unknown") {
+  constructor(userId: string, readonly status: UserStatus | "unknown") {
     super(`Audio generation not authorized for user ${userId} (status: ${status})`);
     this.name = "NotAuthorizedError";
   }
 }
 
 /**
- * The single gate every synthesis path must pass. Throws for anything that is
- * not an approved user, so a missing check fails closed rather than open.
+ * The single gate every synthesis path must pass.
+ *
+ * Throws rather than returning a boolean, so a forgotten `!` cannot fail open.
+ * Prefer this over `isSynthesisAuthorized` anywhere money is about to be spent.
  */
-export async function assertAuthorizedForAudio(kv: Deno.Kv, userId: string): Promise<User> {
-  const user = await getUser(kv, userId);
+export async function assertAuthorizedForAudio(
+  store: MetadataStore,
+  userId: string,
+): Promise<User> {
+  const user = await store.getUser(userId);
   if (!user) throw new NotAuthorizedError(userId, "unknown");
   if (user.status !== "approved") throw new NotAuthorizedError(userId, user.status);
   return user;
 }
 
-export async function isAuthorizedForAudio(kv: Deno.Kv, userId: string): Promise<boolean> {
+export async function isAuthorizedForAudio(
+  store: MetadataStore,
+  userId: string,
+): Promise<boolean> {
   try {
-    await assertAuthorizedForAudio(kv, userId);
+    await assertAuthorizedForAudio(store, userId);
     return true;
   } catch {
     return false;
@@ -235,11 +236,11 @@ export async function isAuthorizedForAudio(kv: Deno.Kv, userId: string): Promise
 
 /** Update a user's own listening preferences. Does not touch status. */
 export async function updatePreferences(
-  kv: Deno.Kv,
+  store: MetadataStore,
   userId: string,
   patch: { displayName?: string; voice?: string; feeds?: string[] },
 ): Promise<User> {
-  const user = await getUser(kv, userId);
+  const user = await store.getUser(userId);
   if (!user) throw new Error(`Unknown user: ${userId}`);
   const updated: User = {
     ...user,
@@ -247,7 +248,22 @@ export async function updatePreferences(
     voice: patch.voice ?? user.voice,
     feeds: patch.feeds ?? user.feeds,
   };
-  await kv.set(userKey(userId), updated);
+  await store.putUser(updated);
+  return updated;
+}
+
+/**
+ * Rotate a user's feed capability.
+ *
+ * Every subscribed podcast client stops working immediately — that is the
+ * point. It is the only way to revoke a leaked feed URL, because the clients
+ * holding it cannot be asked to authenticate.
+ */
+export async function rotateFeedToken(store: MetadataStore, userId: string): Promise<User> {
+  const user = await store.getUser(userId);
+  if (!user) throw new Error(`Unknown user: ${userId}`);
+  const updated: User = { ...user, feedToken: newFeedToken() };
+  await store.putUser(updated);
   return updated;
 }
 

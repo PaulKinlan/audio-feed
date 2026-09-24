@@ -19,9 +19,11 @@ const source = "https://example.com/article";
 const approved: User = {
   id: "approved-user",
   email: "listener@example.com",
+  displayName: "Listener",
   status: "approved",
-  role: "user",
+  isAdmin: false,
   createdAt: "2026-09-24T00:00:00Z",
+  feedToken: "token-approved-user",
 };
 const article = extractArticle(html, source);
 const htmlResponse = (body = html) =>

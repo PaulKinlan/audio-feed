@@ -6,7 +6,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import type { Article, Episode, Source, User } from "../types.ts";
+import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -75,6 +75,7 @@ export class MemoryBlobStore implements BlobStore {
 
 export class MemoryMetadataStore implements MetadataStore {
   readonly #users = new Map<string, User>();
+  readonly #approvals: ApprovalRecord[] = [];
   readonly #sources = new Map<string, Source>();
   readonly #articles = new Map<string, Article>();
   readonly #episodes = new Map<string, Episode>();
@@ -84,6 +85,17 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   // -- users ----------------------------------------------------------------
+
+  insertUser(user: User): Promise<boolean> {
+    if (this.#users.has(user.id)) return Promise.resolve(false);
+    const email = user.email.toLowerCase();
+    for (const existing of this.#users.values()) {
+      if (existing.email.toLowerCase() === email) return Promise.resolve(false);
+      if (existing.feedToken === user.feedToken) return Promise.resolve(false);
+    }
+    this.#users.set(user.id, structuredClone(user));
+    return Promise.resolve(true);
+  }
 
   putUser(user: User): Promise<void> {
     this.#users.set(user.id, structuredClone(user));
@@ -103,8 +115,29 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(null);
   }
 
+  getUserByFeedToken(token: string): Promise<User | null> {
+    if (!token) return Promise.resolve(null);
+    for (const user of this.#users.values()) {
+      if (user.feedToken === token) return Promise.resolve(structuredClone(user));
+    }
+    return Promise.resolve(null);
+  }
+
   listUsers(): Promise<User[]> {
     return Promise.resolve([...this.#users.values()].map((u) => structuredClone(u)));
+  }
+
+  recordApproval(user: User, record: ApprovalRecord): Promise<void> {
+    this.#users.set(user.id, structuredClone(user));
+    this.#approvals.push(structuredClone(record));
+    return Promise.resolve();
+  }
+
+  listApprovalLog(): Promise<ApprovalRecord[]> {
+    const out = this.#approvals.map((record) => structuredClone(record));
+    // Oldest first, tie-broken by user so repeated reads cannot swap entries.
+    out.sort((a, b) => a.at === b.at ? a.userId.localeCompare(b.userId) : a.at.localeCompare(b.at));
+    return Promise.resolve(out);
   }
 
   // -- sources --------------------------------------------------------------
