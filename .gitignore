@@ -4,3 +4,6 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Local runtime data and verification artifacts
+var/
