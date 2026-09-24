@@ -79,8 +79,8 @@ export interface Stores {
 export function selectBlobStore(): { store: BlobStore; describe: string } {
   const bucket = env("STORAGE_BUCKET");
   const endpoint = env("STORAGE_ENDPOINT");
-  const accessKeyId = env("STORAGE_ACCESS_KEY_ID");
-  const secretAccessKey = env("STORAGE_SECRET_ACCESS_KEY");
+  const accessKeyId = env("STORAGE_ACCESS_KEY_ID") ?? env("STORAGE_ACCESS_KEY");
+  const secretAccessKey = env("STORAGE_SECRET_ACCESS_KEY") ?? env("STORAGE_SECRET_KEY");
 
   const provided = [bucket, endpoint, accessKeyId, secretAccessKey].filter(Boolean).length;
 
