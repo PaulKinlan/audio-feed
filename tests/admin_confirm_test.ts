@@ -19,8 +19,8 @@
  *
  * Owned by: audio-feed-05b.
  */
-import { assert, assertEquals } from "@std/assert";
-import { runAdminScript } from "./admin_script.ts";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { adminScriptSource, extractInlineScript, runAdminScript } from "./admin_script.ts";
 import type { AdminHarness } from "./admin_script.ts";
 
 const USER = {
@@ -67,6 +67,45 @@ async function openConsole(): Promise<AdminHarness> {
 const deletes = (h: AdminHarness) => h.requests.filter((r) => r.method === "DELETE");
 const rotations = (h: AdminHarness) =>
   h.requests.filter((r) => r.method === "POST" && r.path.endsWith("/rotate-token"));
+
+Deno.test("the harness refuses to guess which script block is the console's (audio-feed-euq)", () => {
+  // These tests are worth something only if they run the script that ships. The
+  // extraction used to take the FIRST <script> block, which was correct while
+  // the page had one -- but a block inserted before it would have been run
+  // instead, silently, while the suite stayed green. That is the same failure
+  // this file exists to prevent, one level out, so the guard gets its own tests.
+  //
+  // The real page has exactly one block, so neither guard can fire against it.
+  // Hence feeding the pure extractor pages the real one is not, yet.
+  assertThrows(
+    () =>
+      extractInlineScript(
+        `<html><script type="application/ld+json">{"a":1}</script>` +
+          `<script>(() => { "use strict"; })()</script></html>`,
+      ),
+    Error,
+    "2 script blocks",
+    "a decoy block before the console script must be refused, not run",
+  );
+
+  assertThrows(
+    () => extractInlineScript(`<html><body>no script</body></html>`),
+    Error,
+    "no inline script",
+  );
+
+  assertThrows(
+    () => extractInlineScript(`<html><script>console.log("analytics")</script></html>`),
+    Error,
+    "does not look like the console script",
+    "a single block that is not the console's must be refused",
+  );
+
+  // And the page as it actually renders still resolves to the console's IIFE.
+  const source = adminScriptSource();
+  assert(source.includes(`"use strict"`));
+  assert(source.includes("rotateManageToken"), "must be the console script, not some other block");
+});
 
 Deno.test("dismissing the Remove dialog sends no DELETE (audio-feed-05b)", async () => {
   const harness = await openConsole();
