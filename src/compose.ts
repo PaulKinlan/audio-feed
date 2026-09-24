@@ -180,9 +180,21 @@ async function publishableEpisodes(
     mode: filter.mode,
     limit: 200,
   });
-  return episodes
-    .map((episode) => toFeedEpisode(episode, ctx))
-    .filter((episode): episode is FeedEpisode => episode !== null);
+
+  const publishable: FeedEpisode[] = [];
+  for (const episode of episodes) {
+    const mapped = toFeedEpisode(episode, ctx);
+    if (!mapped) continue;
+    // `<enclosure length>` is required by RSS, and 0 is never a real audio size:
+    // it means the record predates synthesis finishing. The store knows the size
+    // of what it will actually serve, so ask it rather than trusting the record.
+    if ((mapped.byteLength === undefined || mapped.byteLength <= 0) && episode.audioKey) {
+      const info = await ctx.stores.blobs.head(episode.audioKey);
+      if (info) mapped.byteLength = info.size;
+    }
+    publishable.push(mapped);
+  }
+  return publishable;
 }
 
 function feedResponse(xml: string): Response {

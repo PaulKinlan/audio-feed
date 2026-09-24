@@ -114,6 +114,47 @@ Deno.test("the feed advertises the route that is actually served (tww contract)"
   assertEquals((await fetch(req("/feed/user-1/stratechery/direct.xml"))).status, 200);
 });
 
+Deno.test("an enclosure length comes from the store when the record lacks one", async () => {
+  const { fetch, stores } = await seededApp();
+  // A record written before synthesis finished carries no byteLength; the
+  // enclosure must still publish the real size rather than 0, which would make
+  // players guess (and is what a seeded/legacy record actually looks like).
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-2",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "ready",
+      audioKey: "episode-2.mp3",
+      byteLength: undefined,
+      contentType: "audio/mpeg",
+    }),
+  );
+  await stores.blobs.put("episode-2.mp3", bytes(999), { contentType: "audio/mpeg" });
+  // 0 is not a real audio size either — it is the same "unknown" state, and the
+  // live harness produced exactly that, so both spellings are asserted.
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-3",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "ready",
+      audioKey: "episode-3.mp3",
+      byteLength: 0,
+      contentType: "audio/mpeg",
+    }),
+  );
+  await stores.blobs.put("episode-3.mp3", bytes(777), { contentType: "audio/mpeg" });
+
+  const xml = await (await fetch(req("/feed/user-1/master.xml"))).text();
+  assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-2.mp3" length="999"`);
+  assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-3.mp3" length="777"`);
+  assertStringIncludes(
+    xml,
+    `<enclosure url="${BASE}/audio/episode-1.mp3" length="${AUDIO.length}"`,
+  );
+});
+
 Deno.test("only publishable episodes are syndicated", async () => {
   const { fetch, stores } = await seededApp();
   await stores.metadata.putEpisode(
