@@ -128,30 +128,50 @@ export async function runSynthesisBatch(
   const { metadata, blobs } = ctx.stores;
 
   // `listEpisodes` is user-scoped by design, so the queue is gathered per user.
+  //
+  // Authorization is resolved BEFORE an episode is charged to the batch budget. The
+  // first version gathered `batchSize` candidates and checked approval afterwards, so
+  // a suspended user's backlog filled every slot and was then deferred — that user
+  // starved synthesis for everyone else forever (audio-feed-d4b: considered=5
+  // ready=0 deferred=5, every tick). Deferred work is reported but costs no budget.
   const users = await metadata.listUsers();
   const pending: Array<{ episode: Episode; userId: string }> = [];
   for (const user of users) {
+    if (pending.length >= opts.batchSize) break;
+
+    let deferReason: string | null = null;
+    try {
+      await assertAuthorizedForAudio(metadata, user.id);
+    } catch (error) {
+      deferReason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
+    }
+
     const episodes = await metadata.listEpisodes({
       userId: user.id,
       status: "pending",
       limit: opts.batchSize,
     });
-    for (const episode of episodes) pending.push({ episode, userId: user.id });
-    if (pending.length >= opts.batchSize) break;
-  }
 
-  for (const { episode } of pending.slice(0, opts.batchSize)) {
-    result.considered++;
-
-    // Re-check approval at the point of spending, not just at queue time.
-    try {
-      await assertAuthorizedForAudio(metadata, episode.userId);
-    } catch (error) {
-      const reason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
-      // Deferred, not failed: a suspension can be lifted and nothing was spent.
-      result.deferred.push({ episodeId: episode.id, reason });
+    if (deferReason !== null) {
+      // Visible in the result and the job survives so a lifted suspension can be
+      // served — but it must not deny a slot to a user who IS approved.
+      result.considered += episodes.length;
+      for (const episode of episodes) {
+        result.deferred.push({ episodeId: episode.id, reason: deferReason });
+      }
       continue;
     }
+
+    for (const episode of episodes) {
+      if (pending.length >= opts.batchSize) break;
+      pending.push({ episode, userId: user.id });
+      result.considered++;
+    }
+  }
+
+  for (const { episode } of pending) {
+    // Approval was already resolved per user above, in this same tick, at the point
+    // of spending — which is why a deferred user no longer costs an attempt slot.
 
     const article = await metadata.getArticle(episode.userId, episode.articleId);
     if (!article) {
