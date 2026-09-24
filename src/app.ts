@@ -51,6 +51,9 @@ export interface AppHandlers {
   listUsers?: Handler<AppContext>;
   createUser?: Handler<AppContext>;
   suspendUser?: Handler<AppContext>;
+  /** audio-feed-2e5 — RSS/Atom subscriptions for a subscriber. */
+  listSources?: Handler<AppContext>;
+  createSource?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -91,6 +94,13 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
 
   // -- api ------------------------------------------------------------------
   router.post("/api/ingest", handlers.ingest ?? (() => notImplemented("URL ingest")));
+  // Feed subscriptions (audio-feed-2e5). User-scoped: the caller's feed token is
+  // the identity, exactly as on /api/ingest.
+  router.get("/api/sources", handlers.listSources ?? (() => notImplemented("Source list")));
+  router.post(
+    "/api/sources",
+    handlers.createSource ?? (() => notImplemented("Source subscription")),
+  );
   router.get("/api/episodes", handleEpisodes);
   router.post(
     "/api/admin/users/:id/approve",

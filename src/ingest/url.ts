@@ -222,6 +222,84 @@ export async function fetchArticle(
   }
 }
 
+/**
+ * Feed documents (audio-feed-2e5).
+ *
+ * A feed URL is user-supplied, so fetching it is the same SSRF surface as
+ * fetching an article: it must resolve publicly, and every REDIRECT must be
+ * re-checked, because a hostile feed can redirect to an internal address. This
+ * reuses `requestPublic` and `readBounded` rather than restating those rules, so
+ * a fix to the guard cannot leave the feed path behind.
+ *
+ * The difference from `fetchArticle` is only the accepted content types: a feed
+ * is XML, never HTML. HTML is refused deliberately — parsing a random web page as
+ * a feed would turn "subscribe to this URL" into a content-scraping primitive.
+ */
+const MAX_FEED_BYTES = 2 * 1024 * 1024;
+const FEED_CONTENT_TYPE =
+  /^(application\/(rss|atom)\+xml|application\/xml|text\/xml|text\/rss)(?:;|$)/i;
+
+export async function fetchFeedDocument(
+  input: string,
+  options: {
+    transport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<{ xml: string; url: string }> {
+  let url = articleUrl(input);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  try {
+    for (let hop = 0; hop <= 5; hop++) {
+      const response = await (options.transport ?? requestPublic)(url, signal);
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        await response.body?.cancel();
+        const location = response.headers.get("location");
+        if (!location || hop === 5) {
+          throw new IngestError(422, "Feed has an invalid or excessive redirect chain.");
+        }
+        // Re-resolved through the public lookup, exactly as fetchArticle does.
+        url = articleUrl(new URL(location, url).href);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new IngestError(422, "Feed is unavailable or requires a subscription.");
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      const encoding = response.headers.get("content-encoding");
+      if (!FEED_CONTENT_TYPE.test(contentType) || (encoding && encoding !== "identity")) {
+        await response.body?.cancel();
+        throw new IngestError(422, "That URL is not an uncompressed RSS or Atom feed.");
+      }
+      if (Number(response.headers.get("content-length")) > MAX_FEED_BYTES) {
+        await response.body?.cancel();
+        throw new IngestError(413, "Feed exceeds the 2 MiB size limit.");
+      }
+      const bytes = await readBounded(response.body, MAX_FEED_BYTES, 413, signal);
+      const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
+      let xml: string;
+      try {
+        xml = new TextDecoder(charset).decode(bytes);
+      } catch {
+        throw new IngestError(422, "Feed uses an unsupported character encoding.");
+      }
+      return { xml, url: url.href };
+    }
+    throw new IngestError(422, "Feed could not be fetched.");
+  } catch (error) {
+    if (signal.aborted) throw new IngestError(504, "Feed fetch timed out or was cancelled.");
+    if (error instanceof IngestError) throw error;
+    throw new IngestError(502, "Unable to fetch the feed.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
 function plainText(node: Node): string {

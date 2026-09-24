@@ -21,7 +21,13 @@
  * now because the RSS generator needs `pubDate` and `audioUrl` and the storage
  * record has `createdAt` and `audioKey`. This file does not claim b0a.
  */
-import { createUrlIngestHandler, type ExtractedArticle } from "./ingest/url.ts";
+import {
+  articleUrl,
+  createUrlIngestHandler,
+  type ExtractedArticle,
+  IngestError,
+} from "./ingest/url.ts";
+import { subscribeToFeed } from "./ingest/feed.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
 import { toFeedEpisode } from "./feed/adapter.ts";
@@ -37,7 +43,7 @@ import {
   suspendUser,
   UnknownUserError,
 } from "./auth/users.ts";
-import { INBOX_SOURCE_ID, type User } from "./types.ts";
+import { INBOX_SOURCE_ID, isAudioMode, type User } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
@@ -225,7 +231,138 @@ export function createSourceFeedHandler(ctx: AppContext): AppHandlers["sourceFee
 
 export interface ComposeDeps {
   /** Test seam: lets the acceptance check queue an article without real network. */
-  fetchArticle?: (url: string, signal: AbortSignal) => Promise<ExtractedArticle>;
+  fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
+  /** Test seam: fetches a feed document without real network (audio-feed-2e5). */
+  feedTransport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+}
+
+/**
+ * Resolve the caller's feed token to an APPROVED user, or return the response to
+ * send. Shared by every user-scoped API route so the spend gate cannot be
+ * forgotten on a new one.
+ */
+async function approvedUserFor(
+  ctx: AppContext,
+  req: Request,
+): Promise<{ user: User } | { denied: Response }> {
+  const token = presentedToken(req);
+  if (!token) return { denied: forbidden("A feed token is required (x-feed-token).") };
+  const user = await loadUserByFeedToken(ctx, token);
+  if (!user) return { denied: forbidden("Unknown feed token.") };
+  try {
+    await assertAuthorizedForAudio(ctx.stores.metadata, user.id);
+  } catch (error) {
+    if (error instanceof NotAuthorizedError) {
+      return { denied: forbidden("An approved user is required.") };
+    }
+    throw error;
+  }
+  return { user };
+}
+
+/** `GET /api/sources` — the caller's subscribed feeds. */
+export function createListSourcesHandler(ctx: AppContext): AppHandlers["listSources"] {
+  return async ({ req }) => {
+    const resolved = await approvedUserFor(ctx, req);
+    if ("denied" in resolved) return resolved.denied;
+    const sources = await ctx.stores.metadata.listSources(resolved.user.id);
+    return Response.json(
+      {
+        sources: sources.map((source) => ({
+          id: source.id,
+          title: source.title,
+          feedUrl: source.feedUrl,
+          siteUrl: source.siteUrl,
+          modes: source.modes,
+          lastPolledAt: source.lastPolledAt,
+          // The per-source feed paths a subscriber would actually poll.
+          feedPaths: source.feedUrl
+            ? source.modes.map((mode) =>
+              `/feed/${resolved.user.feedToken}/${source.id}/${mode}.xml`
+            )
+            : [],
+        })),
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/**
+ * `POST /api/sources` — subscribe to an RSS/Atom feed.
+ *
+ * The initial poll runs inside this request so the user sees episodes appear
+ * immediately rather than waiting for the next tick; it is capped (5 items) for
+ * exactly that reason, and the interval poller picks up the rest.
+ */
+export function createCreateSourceHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["createSource"] {
+  return async ({ req }) => {
+    const resolved = await approvedUserFor(ctx, req);
+    if ("denied" in resolved) return resolved.denied;
+
+    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown } = {};
+    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
+      body = await req.json().catch(() => ({}));
+    }
+    if (typeof body.feedUrl !== "string" || body.feedUrl.trim() === "") {
+      return Response.json({ error: "A feed URL is required." }, {
+        status: 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    let feedUrl: string;
+    try {
+      feedUrl = articleUrl(body.feedUrl).href;
+    } catch (error) {
+      const status = error instanceof IngestError ? error.status : 400;
+      return Response.json(
+        { error: "That does not look like a fetchable feed URL." },
+        { status, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const modes = Array.isArray(body.modes)
+      ? body.modes.filter((mode): mode is AudioMode =>
+        typeof mode === "string" && isAudioMode(mode)
+      )
+      : undefined;
+
+    try {
+      const { source, poll } = await subscribeToFeed(
+        ctx,
+        {
+          userId: resolved.user.id,
+          feedUrl,
+          title: typeof body.title === "string" ? body.title : undefined,
+          modes,
+        },
+        { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+      );
+      return Response.json(
+        {
+          source: {
+            id: source.id,
+            title: source.title,
+            feedUrl: source.feedUrl,
+            modes: source.modes,
+          },
+          poll,
+          // What the user subscribes to next.
+          feedPaths: source.modes.map((mode) =>
+            `/feed/${resolved.user.feedToken}/${source.id}/${mode}.xml`
+          ),
+        },
+        { status: 201, headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      return Response.json(
+        { error: String((error as Error)?.message ?? error) },
+        { status: 422, headers: { "cache-control": "no-store" } },
+      );
+    }
+  };
 }
 
 /** `POST /api/ingest` — queue an arbitrary article for synthesis. */
@@ -466,6 +603,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),
     approveUser: createApproveUserHandler(ctx),
+    listSources: createListSourcesHandler(ctx),
+    createSource: createCreateSourceHandler(ctx, deps),
     listUsers: createListUsersHandler(ctx),
     createUser: createCreateUserHandler(ctx),
     suspendUser: createSuspendUserHandler(ctx),

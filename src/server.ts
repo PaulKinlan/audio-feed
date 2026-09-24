@@ -12,6 +12,7 @@ import { createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
 import { loadConfig, openStores } from "./config.ts";
 import { createGeminiSynthesizer, startSynthesisWorker } from "./worker/synthesis.ts";
+import { startFeedPollWorker } from "./ingest/feed.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -71,11 +72,26 @@ export async function bootstrap() {
     })
     : null;
 
+  // audio-feed-2e5: subscribed feeds are polled on an interval, so a feed keeps
+  // producing episodes without anyone pressing anything. Independent of the
+  // synthesis worker: this fetches and queues, it never spends on TTS itself.
+  const feedPollAbort = new AbortController();
+  const feedPoller = startFeedPollWorker({ config, stores }, {
+    signal: feedPollAbort.signal,
+    onTick: (result) => {
+      console.log(
+        `[audio-feed] feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
+      );
+    },
+  });
+
   const server = Deno.serve({ port: config.port }, serverFetch);
 
   // Stop the worker before closing KV so no tick writes to a closed handle.
   const shutdown = async () => {
     workerAbort.abort();
+    feedPollAbort.abort();
+    await feedPoller.stop();
     await worker?.stop();
     await server.shutdown();
     await stores.metadata.close();
