@@ -40,7 +40,7 @@ import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import { GeminiTtsClient, GeminiTtsTruncatedError } from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
-import { DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS, isClaimExpired } from "../types.ts";
+import { DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS } from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
@@ -199,56 +199,65 @@ export async function runSynthesisBatch(
   const { metadata, blobs } = ctx.stores;
   const nowMs = Date.now();
 
-  // `listEpisodes` is user-scoped by design, so the queue is gathered per user.
+  // Cross-user FIFO queue (audio-feed-bbb):
   //
-  // Authorization is resolved BEFORE an episode is charged to the batch budget. The
-  // first version gathered `batchSize` candidates and checked approval afterwards, so
-  // a suspended user's backlog filled every slot and was then deferred — that user
-  // starved synthesis for everyone else forever (audio-feed-d4b: considered=5
-  // ready=0 deferred=5, every tick). Deferred work is reported but costs no budget.
-  const users = await metadata.listUsers();
+  // `listPendingEpisodes` lists the oldest pending or recoverable episodes across
+  // all users in one query, ordered by createdAt ascending (FIFO). This eliminates the
+  // per-user fan-out (scaling query count with queue depth, not total users) and
+  // ensures older jobs are never starved behind a prolific user's backlog.
+  //
+  // Authorization is checked per-user before spending. Deferred work (e.g. from
+  // unapproved/suspended users) is reported but does not block approved work behind it,
+  // and result.deferred is capped at batchSize to prevent unbounded memory growth.
+  // Cross-user FIFO queue (audio-feed-bbb):
+  //
+  // `listPendingEpisodes` lists the oldest pending or recoverable episodes across
+  // all users in FIFO order. Paged in chunks so that a large backlog from unapproved
+  // or suspended users cannot saturate the query window and starve approved jobs
+  // (sotw-ds-flash review finding 5z1), while bounding per-tick scans (xxn).
   const pending: Array<{ episode: Episode; userId: string }> = [];
-  for (const user of users) {
-    if (pending.length >= opts.batchSize) break;
-
-    let deferReason: string | null = null;
+  const authCache = new Map<string, string | null>();
+  const isUserAuthorized = async (userId: string): Promise<string | null> => {
+    if (authCache.has(userId)) return authCache.get(userId)!;
+    let reason: string | null = null;
     try {
-      await assertAuthorizedForAudio(metadata, user.id);
+      await assertAuthorizedForAudio(metadata, userId);
     } catch (error) {
-      deferReason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
+      reason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
     }
+    authCache.set(userId, reason);
+    return reason;
+  };
 
-    // Two queries, and the second one is not redundant: a `status: "pending"`
-    // list STRUCTURALLY cannot return a job stranded by a crashed worker, and
-    // that blindness IS audio-feed-kiq. The extra call is the price of the fix,
-    // not an oversight — do not collapse it back to one query without replacing
-    // it with a cross-status queue (see audio-feed-bbb's listEpisodesByStatus,
-    // which subsumes both). Episodes inside a live lease are filtered out here
-    // and, belt and braces, refused by the claim itself.
-    const [fresh, inFlight] = await Promise.all([
-      metadata.listEpisodes({ userId: user.id, status: "pending", limit: opts.batchSize }),
-      metadata.listEpisodes({ userId: user.id, status: "synthesizing", limit: opts.batchSize }),
-    ]);
-    const episodes = [
-      ...fresh,
-      ...inFlight.filter((episode) => isClaimExpired(episode, nowMs, opts.leaseMs)),
-    ];
+  let cursor: string | undefined = undefined;
+  const chunkSize = Math.max(opts.batchSize * 5, 25);
 
-    if (deferReason !== null) {
-      // Visible in the result and the job survives so a lifted suspension can be
-      // served — but it must not deny a slot to a user who IS approved.
-      result.considered += episodes.length;
-      for (const episode of episodes) {
-        result.deferred.push({ episodeId: episode.id, reason: deferReason });
-      }
-      continue;
-    }
+  while (pending.length < opts.batchSize) {
+    const { episodes: candidates, cursor: nextCursor } = await metadata.listPendingEpisodes({
+      cursor,
+      limit: chunkSize,
+      nowMs,
+      leaseMs: opts.leaseMs,
+    });
+    if (candidates.length === 0) break;
 
-    for (const episode of episodes) {
+    for (const episode of candidates) {
       if (pending.length >= opts.batchSize) break;
-      pending.push({ episode, userId: user.id });
       result.considered++;
+
+      const deferReason = await isUserAuthorized(episode.userId);
+      if (deferReason !== null) {
+        if (result.deferred.length < opts.batchSize) {
+          result.deferred.push({ episodeId: episode.id, reason: deferReason });
+        }
+        continue;
+      }
+
+      pending.push({ episode, userId: episode.userId });
     }
+
+    if (!nextCursor || candidates.length < chunkSize) break;
+    cursor = nextCursor;
   }
 
   for (const { episode } of pending) {

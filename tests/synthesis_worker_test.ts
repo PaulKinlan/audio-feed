@@ -319,7 +319,7 @@ Deno.test("END TO END: ingest queues it, the worker synthesises it, the feed pub
 // ---------------------------------------------------------------------------
 
 /** A suspended user with a backlog, inserted FIRST so their jobs are scanned first. */
-async function starved(backlog = 5) {
+async function starved(backlog = 5, approved = 2) {
   const stores: Stores = memoryStores();
   await stores.metadata.putUser(
     makeUser({ id: "suspended-1", email: "s@example.com", status: "suspended" }),
@@ -329,7 +329,7 @@ async function starved(backlog = 5) {
   await stores.metadata.putArticle(
     makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
   );
-  // The blocked backlog, created first so it is encountered first.
+  // The blocked backlog, created first with older timestamps so it is encountered first.
   for (let i = 0; i < backlog; i++) {
     await stores.metadata.putEpisode(
       makeEpisode({
@@ -338,11 +338,12 @@ async function starved(backlog = 5) {
         sourceId: "inbox",
         status: "pending",
         audioKey: undefined,
+        createdAt: "2026-09-01T00:00:00.000Z",
       }),
     );
   }
-  // One approved job behind it in the queue.
-  for (let i = 0; i < 2; i++) {
+  // Approved jobs behind it in the queue.
+  for (let i = 0; i < approved; i++) {
     await stores.metadata.putEpisode(
       makeEpisode({
         id: `allowed-${i}`,
@@ -351,6 +352,7 @@ async function starved(backlog = 5) {
         articleId: "article-1",
         status: "pending",
         audioKey: undefined,
+        createdAt: "2026-09-10T00:00:00.000Z",
       }),
     );
   }
@@ -359,17 +361,20 @@ async function starved(backlog = 5) {
 }
 
 Deno.test("a suspended user's backlog does not block an approved user's job", async () => {
-  const { ctx, stores } = await starved();
+  // 25 deferred jobs from suspended user + 3 approved jobs (audio-feed-bbb review finding)
+  const { ctx, stores } = await starved(25, 3);
   let calls = 0;
   const run = await runSynthesisBatch(ctx, () => {
     calls++;
     return Promise.resolve(fakeAudio());
-  });
+  }, { batchSize: 3 });
 
-  // The regression: this used to be ready=0 deferred=5, every tick, forever.
-  assert(run.ready.length > 0, `approved work must still run, got ${JSON.stringify(run)}`);
-  assertEquals(calls, run.ready.length);
+  // Must process all 3 approved jobs despite the 25 older deferred jobs!
+  assertEquals(run.ready.length, 3, `all 3 approved jobs must run, got ${JSON.stringify(run)}`);
+  assertEquals(calls, 3);
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-1"))?.status, "ready");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-2"))?.status, "ready");
   // The blocked backlog is reported and preserved, not destroyed.
   assert(run.deferred.length > 0, "the suspended backlog must be reported as deferred");
   assertEquals((await stores.metadata.getEpisode("suspended-1", "blocked-0"))?.status, "pending");
@@ -383,6 +388,20 @@ Deno.test("deferred jobs never consume the attempt budget", async () => {
   assertEquals(run.ready.length, 2, JSON.stringify(run));
   assert(run.deferred.length >= 2, "the suspended user's jobs are still reported");
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-1"))?.status, "ready");
+});
+
+Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time and budget", async () => {
+  const { ctx, stores } = await starved(50, 2);
+  const started = Date.now();
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    batchSize: 2,
+  });
+  const elapsed = Date.now() - started;
+
+  assertEquals(run.ready.length, 2, "approved jobs behind 50 deferred jobs must run");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
+  assert(run.deferred.length <= 2, "deferred report is capped at batchSize");
+  assert(elapsed < 2000, `must complete quickly in linear time, took ${elapsed}ms`);
 });
 
 Deno.test("the batch budget still bounds synthesis work", async () => {
@@ -414,8 +433,66 @@ Deno.test("the batch budget still bounds synthesis work", async () => {
   assertEquals(calls, 2, "batchSize 2 must bound synthesis calls to 2");
   assertEquals(run.ready.length, 2);
   // The rest stays pending for the next tick rather than being dropped. Episodes are
-  // listed newest-first, so the two newest were the ones attempted.
-  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "pending");
+  // listed oldest-first (FIFO), so allowed-0 and allowed-1 were attempted and allowed-5 stays pending.
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-5"))?.status, "pending");
+});
+
+Deno.test("queue order is FIFO cross-user by age, preventing a prolific user from starving older jobs", async () => {
+  const stores: Stores = memoryStores();
+  // User "hog" with a backlog queued on 2026-09-10
+  await stores.metadata.putUser(makeUser({ id: "hog", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "hog" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-hog", userId: "hog", sourceId: "inbox" }),
+  );
+  for (let i = 0; i < 5; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `hog-${i}`,
+        userId: "hog",
+        sourceId: "inbox",
+        articleId: "art-hog",
+        status: "pending",
+        createdAt: "2026-09-10T12:00:00.000Z",
+      }),
+    );
+  }
+
+  // User "waiter" with one episode queued earlier on 2026-09-01
+  await stores.metadata.putUser(makeUser({ id: "waiter", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "waiter" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-waiter", userId: "waiter", sourceId: "inbox" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "waiter-oldest",
+      userId: "waiter",
+      sourceId: "inbox",
+      articleId: "art-waiter",
+      status: "pending",
+      createdAt: "2026-09-01T12:00:00.000Z",
+    }),
+  );
+
+  const ctx = { config, stores };
+  const processedOrder: string[] = [];
+  const run = await runSynthesisBatch(ctx, ({ episode }) => {
+    processedOrder.push(episode.id);
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 3 });
+
+  // Older job must be processed first!
+  assertEquals(
+    processedOrder[0],
+    "waiter-oldest",
+    "oldest job across users must be synthesised first",
+  );
+  assertEquals(run.ready.length, 3);
+  assertEquals(
+    (await stores.metadata.getEpisode("waiter", "waiter-oldest"))?.status,
+    "ready",
+  );
 });
 
 Deno.test("a suspension landing mid-tick stops the remaining spend", async () => {

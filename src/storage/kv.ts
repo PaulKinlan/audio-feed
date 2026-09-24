@@ -27,8 +27,14 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
-import { isClaimExpired } from "../types.ts";
-import type { EpisodeClaim, EpisodeQuery, MetadataStore } from "./mod.ts";
+import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
+import type {
+  EpisodeClaim,
+  EpisodeQuery,
+  ListPendingOptions,
+  ListPendingResult,
+  MetadataStore,
+} from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -206,7 +212,7 @@ export class KvMetadataStore implements MetadataStore {
 
   async putEpisode(episode: Episode): Promise<void> {
     const sortKey = descendingKey(episode.createdAt, episode.id);
-    const result = await this.#kv.atomic()
+    const tx = this.#kv.atomic()
       .set(["episode", episode.userId, episode.id], episode)
       // master feed index
       .set(["episode_by_user", episode.userId, sortKey], episode.id)
@@ -214,8 +220,26 @@ export class KvMetadataStore implements MetadataStore {
       .set(
         ["episode_by_source", episode.userId, episode.sourceId, episode.mode, sortKey],
         episode.id,
-      )
-      .commit();
+      );
+
+    if (episode.status === "pending") {
+      tx.set(["pending_episodes", episode.createdAt, episode.id], {
+        userId: episode.userId,
+        id: episode.id,
+      });
+      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+    } else if (episode.status === "synthesizing") {
+      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
+      tx.set(["synthesizing_episodes", episode.createdAt, episode.id], {
+        userId: episode.userId,
+        id: episode.id,
+      });
+    } else {
+      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
+      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+    }
+
+    const result = await tx.commit();
     if (!result.ok) throw new Error(`putEpisode failed for ${episode.id}`);
   }
 
@@ -296,15 +320,33 @@ export class KvMetadataStore implements MetadataStore {
     guard: Deno.KvEntryMaybe<Episode>,
   ): Promise<boolean> {
     const sortKey = descendingKey(episode.createdAt, episode.id);
-    const result = await this.#kv.atomic()
+    const tx = this.#kv.atomic()
       .check(guard)
       .set(["episode", episode.userId, episode.id], episode)
       .set(["episode_by_user", episode.userId, sortKey], episode.id)
       .set(
         ["episode_by_source", episode.userId, episode.sourceId, episode.mode, sortKey],
         episode.id,
-      )
-      .commit();
+      );
+
+    if (episode.status === "pending") {
+      tx.set(["pending_episodes", episode.createdAt, episode.id], {
+        userId: episode.userId,
+        id: episode.id,
+      });
+      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+    } else if (episode.status === "synthesizing") {
+      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
+      tx.set(["synthesizing_episodes", episode.createdAt, episode.id], {
+        userId: episode.userId,
+        id: episode.id,
+      });
+    } else {
+      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
+      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+    }
+
+    const result = await tx.commit();
     return result.ok;
   }
 
@@ -324,6 +366,63 @@ export class KvMetadataStore implements MetadataStore {
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  async listPendingEpisodes(
+    opts: ListPendingOptions = {},
+  ): Promise<ListPendingResult> {
+    const limit = opts.limit ?? 50;
+    const nowMs = opts.nowMs ?? Date.now();
+    const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
+
+    const episodes: Episode[] = [];
+
+    // Native Deno KV iterator with cursor and limit — zero skip overhead (audio-feed-bbb, xxn)
+    const iter = this.#kv.list<{ userId: string; id: string }>(
+      { prefix: ["pending_episodes"] },
+      {
+        cursor: opts.cursor,
+        limit: Number.isFinite(limit) ? limit : undefined,
+      },
+    );
+
+    for await (const entry of iter) {
+      const { userId, id } = entry.value;
+      const episode = await this.getEpisode(userId, id);
+      if (episode && episode.status === "pending") {
+        episodes.push(episode);
+      }
+    }
+
+    const nextCursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
+
+    // Check synthesizing episodes with expired claims only on initial scan (cursor undefined)
+    if (!opts.cursor && (!Number.isFinite(limit) || episodes.length < limit)) {
+      for await (
+        const entry of this.#kv.list<{ userId: string; id: string }>({
+          prefix: ["synthesizing_episodes"],
+        })
+      ) {
+        const { userId, id } = entry.value;
+        const episode = await this.getEpisode(userId, id);
+        if (
+          episode &&
+          episode.status === "synthesizing" &&
+          isClaimExpired(episode, nowMs, leaseMs)
+        ) {
+          episodes.push(episode);
+        }
+      }
+      episodes.sort((a, b) => {
+        const timeDiff = a.createdAt.localeCompare(b.createdAt);
+        return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
+      });
+    }
+
+    return {
+      episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
+      cursor: nextCursor,
+    };
   }
 
   /**

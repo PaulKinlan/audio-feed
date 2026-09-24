@@ -7,7 +7,8 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
-import { isClaimExpired } from "../types.ts";
+import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
+import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -222,6 +223,29 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(out);
   }
 
+  listPendingEpisodes(
+    opts: ListPendingOptions = {},
+  ): Promise<ListPendingResult> {
+    const limit = opts.limit ?? 50;
+    const nowMs = opts.nowMs ?? Date.now();
+    const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
+
+    const candidates = [...this.#episodes.values()]
+      .filter((ep) =>
+        ep.status === "pending" ||
+        (ep.status === "synthesizing" && isClaimExpired(ep, nowMs, leaseMs))
+      )
+      .map((ep) => structuredClone(ep))
+      .sort(byOldestFirst);
+
+    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+    const end = Number.isFinite(limit) ? start + limit : candidates.length;
+    const slice = candidates.slice(start, end);
+    const nextCursor = end < candidates.length ? String(end) : undefined;
+
+    return Promise.resolve({ episodes: slice, cursor: nextCursor });
+  }
+
   /**
    * Single-threaded JS makes this trivially atomic: nothing can interleave
    * between the read and the write because there is no `await` between them.
@@ -289,4 +313,9 @@ export class MemoryMetadataStore implements MetadataStore {
 export function byNewestFirst(a: Episode, b: Episode): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
   return b.id.localeCompare(a.id);
+}
+
+export function byOldestFirst(a: Episode, b: Episode): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  return a.id.localeCompare(b.id);
 }

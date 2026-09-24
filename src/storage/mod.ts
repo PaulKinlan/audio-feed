@@ -57,6 +57,18 @@ export interface EpisodeQuery {
   limit?: number;
 }
 
+export interface ListPendingOptions {
+  limit?: number;
+  cursor?: string;
+  nowMs?: number;
+  leaseMs?: number;
+}
+
+export interface ListPendingResult {
+  episodes: Episode[];
+  cursor?: string;
+}
+
 export interface MetadataStore {
   // -- users ------------------------------------------------------------
   /**
@@ -103,6 +115,11 @@ export interface MetadataStore {
   getEpisode(userId: string, id: string): Promise<Episode | null>;
   /** Newest first. Backs both the per-source and master feeds. */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
+  /**
+   * Pending and recoverable episodes, ordered by `createdAt` ascending (FIFO, oldest first).
+   * Cross-user queue backing the synthesis worker (audio-feed-bbb).
+   */
+  listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult>;
   /**
    * Take exclusive ownership of an episode for synthesis, atomically.
    *
