@@ -1,10 +1,13 @@
 /**
  * Podcast RSS 2.0 / iTunes feed generation.
  *
- * Three feed shapes, per PRODUCT.md:
- *   /feed/<source-id>/direct.xml    single-voice author reads
- *   /feed/<source-id>/deepdive.xml  two-voice NotebookLM-style discussions
- *   /feed/master.xml                every subscribed episode, one feed
+ * Three feed shapes, per PRODUCT.md. Each carries the caller's feed token, which
+ * is the capability the router authenticates — a token-less form 404s, so the
+ * forms below are the only ones a subscriber can use (audio-feed-dzv, and the
+ * audio-feed-tww mismatch recorded at the URL builders further down).
+ *   /feed/<token>/<source-id>/direct.xml     single-voice author reads
+ *   /feed/<token>/<source-id>/deepdive.xml   two-voice NotebookLM-style discussions
+ *   /feed/<token>/master.xml                 every subscribed episode, one feed
  *
  * No XML library: the output surface is small, fixed, and fully covered by
  * tests/feed/rss_test.ts.
