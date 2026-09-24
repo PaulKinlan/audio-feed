@@ -778,9 +778,13 @@ export function createAdminDeleteUserSourceHandler(
     const cancelledPendingIds = new Set<string>();
     let deletedBlobs = 0;
     let failedBlobs = 0;
+    let abortedEarly = false;
 
     if (cascade) {
       // Drain all episodes in batches until none remain (audio-feed-7ve, audio-feed-des)
+      let prevFingerprint: string | undefined = undefined;
+      let consecutiveStalls = 0;
+
       while (true) {
         const batch = await ctx.stores.metadata.listEpisodes({
           userId,
@@ -788,7 +792,19 @@ export function createAdminDeleteUserSourceHandler(
           limit: 100,
         });
         if (batch.length === 0) break;
-        let removedInPass = 0;
+
+        const fingerprint = batch.map((e) => e.id).join(",");
+        if (fingerprint === prevFingerprint) {
+          consecutiveStalls++;
+          if (consecutiveStalls >= 2) {
+            abortedEarly = true;
+            break;
+          }
+        } else {
+          consecutiveStalls = 0;
+        }
+        prevFingerprint = fingerprint;
+
         for (const episode of batch) {
           if (episode.audioKey) {
             try {
@@ -800,16 +816,16 @@ export function createAdminDeleteUserSourceHandler(
           }
           const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
           if (removed) {
-            removedInPass++;
             deletedEpisodeIds.add(episode.id);
           }
         }
-        // Progress guard: abort if a full pass removes 0 items (persistent failure)
-        if (removedInPass === 0) break;
       }
     } else {
       // Drain all pending and synthesizing episodes in batches so no spend occurs (audio-feed-7ve, audio-feed-des)
       for (const status of ["pending", "synthesizing"] as const) {
+        let prevFingerprint: string | undefined = undefined;
+        let consecutiveStalls = 0;
+
         while (true) {
           const batch = await ctx.stores.metadata.listEpisodes({
             userId,
@@ -818,17 +834,48 @@ export function createAdminDeleteUserSourceHandler(
             limit: 100,
           });
           if (batch.length === 0) break;
-          let removedInPass = 0;
+
+          const fingerprint = batch.map((e) => e.id).join(",");
+          if (fingerprint === prevFingerprint) {
+            consecutiveStalls++;
+            if (consecutiveStalls >= 2) {
+              abortedEarly = true;
+              break;
+            }
+          } else {
+            consecutiveStalls = 0;
+          }
+          prevFingerprint = fingerprint;
+
           for (const episode of batch) {
             const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
             if (removed) {
-              removedInPass++;
               cancelledPendingIds.add(episode.id);
             }
           }
-          // Progress guard: abort if a full pass removes 0 items (persistent failure)
-          if (removedInPass === 0) break;
         }
+      }
+    }
+
+    if (abortedEarly) {
+      const remaining = await ctx.stores.metadata.listEpisodes({
+        userId,
+        sourceId,
+        limit: 100,
+      });
+      if (remaining.length > 0) {
+        return Response.json(
+          {
+            ok: false,
+            error: "Source deletion incomplete: could not remove all episodes",
+            incomplete: true,
+            sourceId,
+            remainingEpisodes: remaining.length,
+            deletedEpisodes: deletedEpisodeIds.size,
+            cancelledPending: cancelledPendingIds.size,
+          },
+          { status: 500, headers: { "cache-control": "no-store" } },
+        );
       }
     }
 

@@ -390,11 +390,72 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId aborts loop on persiste
       headers: { "x-admin-token": "admin-secret" },
     }),
   );
+  assertEquals(res.status, 500);
+  const body = await res.json();
+  assertEquals(body.ok, false);
+  assertEquals(body.incomplete, true);
+  assertEquals(body.cancelledPending, 0); // 0 confirmed removals
+  // Loop terminates after consecutive identical passes (10 calls: 2 passes * 5 episodes)
+  assertEquals(calls, 10);
+  // Source is NOT deleted when incomplete
+  assert(await stores.metadata.getSource("user-1", "src-stub"));
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId drains mixed/transient failure without abandoning remaining episodes (audio-feed-4qj)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-mixed", userId: "user-1", title: "Mixed Source" }),
+  );
+
+  // Seed 250 pending episodes
+  for (let i = 0; i < 250; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-mixed-${i}`,
+        userId: "user-1",
+        sourceId: "src-mixed",
+        status: "pending",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  // First 100 delete calls fail (transient failure on first batch pass)
+  let calls = 0;
+  const originalDelete = stores.metadata.deleteEpisode.bind(stores.metadata);
+  stores.metadata.deleteEpisode = (userId: string, id: string) => {
+    calls++;
+    if (calls <= 100) return Promise.resolve(false);
+    return originalDelete(userId, id);
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-mixed`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
   assertEquals(res.status, 200);
   const body = await res.json();
-  assertEquals(body.cancelledPending, 0); // 0 confirmed removals
-  // Loop must terminate after 1 batch pass (5 calls) via progress guard, rather than looping infinitely
-  assertEquals(calls, 5);
+  assertEquals(body.ok, true);
+  assertEquals(body.deleted, "src-mixed");
+  // All 250 episodes are successfully cancelled and drained
+  assertEquals(body.cancelledPending, 250);
+
+  // Source is deleted
+  assertEquals(await stores.metadata.getSource("user-1", "src-mixed"), null);
+  // Zero episodes remain
+  assertEquals(
+    (await stores.metadata.listEpisodes({
+      userId: "user-1",
+      sourceId: "src-mixed",
+      limit: Number.MAX_SAFE_INTEGER,
+    })).length,
+    0,
+  );
 });
 
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
