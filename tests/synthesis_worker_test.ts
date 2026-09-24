@@ -14,6 +14,7 @@ import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
 import { GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { audioBlobKey } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
@@ -80,14 +81,14 @@ Deno.test("a queued episode is synthesised, stored and marked ready", async () =
 
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "ready");
-  assertEquals(episode?.audioKey, "episode-1.wav");
+  assertEquals(episode?.audioKey, "audio/user-1/direct/episode-1.wav");
   assertEquals(episode?.contentType, "audio/wav");
   assertEquals(episode?.byteLength, 524);
   assert(episode?.readyAt, "readyAt must be recorded: the feed sorts on it");
   assert(episode?.error === undefined, "a ready episode must not carry an error");
 
   // The bytes must actually be in the blob store, not just referenced.
-  const blob = await stores.blobs.head("episode-1.wav");
+  const blob = await stores.blobs.head("audio/user-1/direct/episode-1.wav");
   assertEquals(blob?.size, 524);
   assertEquals(blob?.contentType, "audio/wav");
 });
@@ -136,7 +137,7 @@ Deno.test("attempts are bounded and a poison job ends up failed, not billed fore
   assertEquals(episode?.status, "failed");
   assertStringIncludes(episode?.error ?? "", "still rate limited");
   // Nothing was stored for a failed job.
-  assertEquals(await stores.blobs.head("episode-1.wav"), null);
+  assertEquals(await stores.blobs.head("audio/user-1/direct/episode-1.wav"), null);
 });
 
 Deno.test("a permanent failure is not retried at all", async () => {
@@ -758,4 +759,42 @@ Deno.test("a job that keeps crashing is abandoned rather than re-billed forever"
   assert(paid <= 3, `a poison job must stop being billed, got ${paid} charges`);
   const episode = await stores.metadata.getEpisode("user-1", "ep-0");
   assertEquals(episode?.status, "failed", "an exhausted job must be visibly abandoned");
+});
+
+Deno.test("article content exceeding maxInputCharacters fails closed without spending (audio-feed-3hb)", async () => {
+  const { ctx, stores } = await queued();
+  // Article with 1,000 chars, limit set to 500
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-1",
+      userId: "user-1",
+      content: "A".repeat(1000),
+    }),
+  );
+
+  let synthesized = false;
+  const synth: Synthesizer = () => {
+    synthesized = true;
+    return Promise.resolve(fakeAudio());
+  };
+
+  const result = await runSynthesisBatch(ctx, synth, { maxInputCharacters: 500 });
+  assertEquals(synthesized, false, "must fail closed before calling synthesis");
+  assertEquals(result.failed.length, 1);
+  assertStringIncludes(result.failed[0]!.error, "article content exceeds input limit");
+  assertEquals(result.ready.length, 0);
+
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "1000 > 500 chars");
+});
+
+Deno.test("synthesised audio blob key uses canonical audioBlobKey scoping (audio-feed-3hb)", async () => {
+  const { ctx, stores } = await queued();
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()));
+  assertEquals(result.ready.length, 1);
+  const expectedKey = audioBlobKey({ userId: "user-1", id: "episode-1", mode: "direct" }, "wav");
+  assertEquals(result.ready[0]?.audioKey, expectedKey);
+  assertEquals(expectedKey, "audio/user-1/direct/episode-1.wav");
+  assert(await stores.blobs.get(expectedKey));
 });
