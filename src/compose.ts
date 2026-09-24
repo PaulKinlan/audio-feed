@@ -835,19 +835,29 @@ export function createAdminDeleteUserSourceHandler(
       // were never removed, so the scan simply ends and the handler reports success
       // over a source it has orphaned.
       //
-      // Measured, not reasoned — and measured on each loop separately, because
-      // they break different guards:
-      //   non-cascade loop cursor-paged (audiofeed-astra, then audiofeed-opus on the
-      //   approved tip) reddens audio-feed-des (answers 200 where it must answer
-      //   500), audio-feed-4qj (abandons rows after a transient failure) and
-      //   audio-feed-mf5 (reports no remaining episodes to count).
-      //   cascade loop cursor-paged reddens a different set: audio-feed-37p, the
-      //   audio-feed-mf5 distinct-blob-retry count, and the audio-feed-m04
-      //   oldest-in-catalogue drain test.
-      // Five guards across the two loops. An earlier form of this warning named
-      // only audio-feed-des, which understated why the pattern is load-bearing
-      // (audio-feed-9h1). `listEpisodes` keeps its limit-bounds-matches meaning
-      // (audio-feed-m04) so this re-read stays correct against a per-user index.
+      // Measured, not reasoned - and measured on each loop separately, because they
+      // fail in different ways. Cursor-paging the NON-cascade loop reddens:
+      //   audio-feed-des   progress guard      (answers 200 where it must answer 500)
+      //   audio-feed-4qj   transient drain     (abandons rows after a transient failure)
+      //   audio-feed-mf5   incomplete counting (reports no remaining episodes to count)
+      // Cursor-paging the CASCADE loop reddens:
+      //   audio-feed-37p, and the audio-feed-mf5 distinct-blob-retry count - blob
+      //     accounting goes wrong once rows are visited twice
+      //   audio-feed-m04   answers 500 `incomplete` for a source it could fully drain:
+      //     deleting while a cursor advances re-presents rows, the fingerprint repeats,
+      //     and the stall guard fires. Paging here can fail in BOTH directions - it can
+      //     strand rows behind a false success, and it can refuse over work it can do.
+      // No merged total is claimed: the two runs above disagree on whether
+      // audio-feed-m04 belongs in the cascade list (it is reproduced here at
+      // tests/admin_management_test.ts:800, where a paged cascade loop answers 500 for
+      // a source it can fully drain; audiofeed-opus's run did not reproduce it). What
+      // both agree on is the direction, and that is the whole point of the comment:
+      // paging either loop breaks the incomplete-delete guard. `mf5` appears twice
+      // because it is two different tests, listed per loop so each claim stays
+      // checkable by mutating one loop. An earlier form named only audio-feed-des,
+      // which understated why the re-read is load-bearing (audio-feed-9h1).
+      // `listEpisodes` keeps its limit-bounds-matches meaning (audio-feed-m04) so this
+      // re-read stays correct against a per-user index.
       let prevFingerprint: string | undefined = undefined;
       let consecutiveStalls = 0;
 
