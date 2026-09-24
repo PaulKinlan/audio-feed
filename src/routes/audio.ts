@@ -62,6 +62,14 @@ export async function handleAudio(
     });
   }
 
+  // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
+  for (const key of candidateKeys) {
+    const direct = await ctx.stores.blobs.url(key);
+    if (direct) {
+      return new Response(null, { status: 302, headers: { location: direct } });
+    }
+  }
+
   // GET: skip head() calls entirely to avoid extra store round trips (audio-feed-1rx).
   const range = parseRangeHeader(req.headers.get("range"));
 
@@ -90,12 +98,6 @@ export async function handleAudio(
   }
 
   if (!object || !resolvedKey) return notFound("Unknown audio object");
-
-  // A store-provided URL means the client can fetch bytes directly.
-  const direct = await ctx.stores.blobs.url(resolvedKey);
-  if (direct) {
-    return new Response(null, { status: 302, headers: { location: direct } });
-  }
 
   const headers = new Headers({
     "content-type": object.contentType,

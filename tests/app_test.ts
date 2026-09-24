@@ -184,6 +184,21 @@ Deno.test("audio: GET skips head() and resolves canonical audio/ key in one get(
   assertEquals(getCalls, 0, "HEAD must not call get()");
 });
 
+Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (audio-feed-vnb)", async () => {
+  const { fetch, stores } = app();
+  let getCalls = 0;
+  stores.blobs.get = () => {
+    getCalls++;
+    throw new Error("get() must not be called when store provides direct URLs");
+  };
+  stores.blobs.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
+
+  const res = await fetch(get("/audio/u1/direct/e1.mp3"));
+  assertEquals(res.status, 302);
+  assertEquals(res.headers.get("location"), "https://cdn.example.com/audio/u1/direct/e1.mp3");
+  assertEquals(getCalls, 0, "direct URL must bypass get() completely");
+});
+
 Deno.test("audio: HEAD returns metadata with no body", async () => {
   const { fetch, stores } = app();
   await stores.blobs.put("k.mp3", bytes(512), { contentType: "audio/mpeg" });
