@@ -26,12 +26,14 @@ async function app() {
   // removes the id fallback; the rebase switches this line to
   // `makeUser({ id: "user-1", feedToken: TOKEN })` and adds the case that a user
   // id must NOT work as a token.
-  await stores.metadata.putUser(makeUser({ id: TOKEN, status: "approved" }));
-  await stores.metadata.putSource(makeSource({ id: "stratechery", userId: TOKEN }));
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", feedToken: TOKEN, status: "approved" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "stratechery", userId: "user-1" }));
   await stores.metadata.putEpisode(
     makeEpisode({
       id: "episode-1",
-      userId: TOKEN,
+      userId: "user-1",
       sourceId: "stratechery",
       status: "ready",
       audioKey: "episode-1.mp3",
