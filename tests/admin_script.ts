@@ -207,12 +207,58 @@ export interface HarnessOptions {
   storedToken?: string | null;
 }
 
-/** Pull the inline script out of the page exactly as a browser would. */
+/**
+ * Pull the inline script out of the page exactly as a browser would.
+ *
+ * Deliberately strict about WHICH block it got (audio-feed-euq). Taking the
+ * first `<script>` was correct while the page had exactly one, but a block
+ * inserted before it -- JSON-LD, analytics, a no-JS fallback -- would have been
+ * run instead, and a non-empty match would have sailed past a "no inline script"
+ * guard. The suite would then have stopped testing what ships while still
+ * reporting green, which is the exact failure this harness exists to prevent.
+ *
+ * So: every block is collected, there must be exactly one, and it must look
+ * like the console's own IIFE. Any of those failing is a loud error naming what
+ * changed, not a silent substitution.
+ */
 export function adminScriptSource(publicBaseUrl = "https://audio.example.com"): string {
-  const html = renderAdminPage({ publicBaseUrl, adminConfigured: true });
-  const match = html.match(/<script>([\s\S]*?)<\/script>/);
-  if (!match || !match[1]) throw new Error("admin page has no inline script");
-  return match[1];
+  return extractInlineScript(renderAdminPage({ publicBaseUrl, adminConfigured: true }));
+}
+
+/**
+ * The validation itself, taking HTML directly so its failure paths are testable.
+ *
+ * The real page has exactly one script block, so neither guard below can fire
+ * against it -- and a guard that cannot be exercised is a guard nobody knows
+ * works. Keeping this pure lets `admin_confirm_test.ts` feed it a page with two
+ * blocks, or none, or a decoy, and check it refuses rather than substituting.
+ */
+export function extractInlineScript(html: string): string {
+  const blocks = [...html.matchAll(/<script(\b[^>]*)>([\s\S]*?)<\/script>/g)];
+
+  if (blocks.length === 0) throw new Error("admin page has no inline script");
+  if (blocks.length > 1) {
+    const described = blocks
+      .map((b, i) => `[${i}] attrs=${JSON.stringify(b[1] ?? "")} length=${(b[2] ?? "").length}`)
+      .join(", ");
+    throw new Error(
+      `admin page now has ${blocks.length} script blocks, so "the inline script" is ambiguous: ` +
+        `${described}. Teach adminScriptSource which one is the console's, rather than ` +
+        `letting these tests run whichever comes first.`,
+    );
+  }
+
+  const source = blocks[0]![2] ?? "";
+  // The console's script is an IIFE in strict mode. If that stops being true the
+  // page has been restructured, and these tests must be re-pointed on purpose.
+  if (!source.includes('"use strict"')) {
+    throw new Error(
+      `the admin page's only script block does not look like the console script ` +
+        `(no "use strict"; starts: ${JSON.stringify(source.trim().slice(0, 60))}). ` +
+        `Check what the page now renders before trusting these tests.`,
+    );
+  }
+  return source;
 }
 
 /**
