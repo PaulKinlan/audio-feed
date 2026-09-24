@@ -727,9 +727,12 @@ Deno.test("admin console page renders subscriber management section and auto-loa
   assertStringIncludes(html, 'id="subFeedUrl"');
   assertStringIncludes(html, 'id="subFeedMode"');
 
-  // Favicon and confirmation dialog checks (audio-feed-2dt)
+  // Favicon (audio-feed-2dt)
   assertStringIncludes(html, '<link rel="icon"');
-  assertStringIncludes(html, "confirm(");
+  // The confirmation guards are NOT asserted here. `assertStringIncludes(html,
+  // "confirm(")` passed even when the dialogs' return values were discarded, so
+  // clicking Cancel deleted the feed anyway (audio-feed-05b). They are driven
+  // for real in tests/admin_confirm_test.ts, which watches for the request.
 
   // Auto-load on refresh: script calls loadUsers() when stored token is found
   assertStringIncludes(html, 'sessionStorage.getItem("audio-feed-admin-token")');
