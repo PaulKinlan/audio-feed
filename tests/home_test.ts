@@ -260,6 +260,25 @@ Deno.test("POST / is 405, not 404", async () => {
   assertStringIncludes((await res.json()).detail, "GET");
 });
 
+Deno.test("the homepage renders the RSS subscribe form with secure method and token handling", () => {
+  const html = renderHomePage({
+    publicBaseUrl: "https://audio.example.com",
+    synthesisConfigured: true,
+  });
+
+  assertStringIncludes(html, '<form id="subscribe-source" action="/api/sources" method="post">');
+  assertStringIncludes(html, 'id="feed-url"');
+  assertStringIncludes(html, 'name="feedUrl"');
+  assertStringIncludes(html, 'id="feed-title"');
+  assertStringIncludes(html, 'id="submit-feed"');
+  assertStringIncludes(html, 'id="feed-result"');
+
+  // Must reuse the token header and never expose it in a query string
+  assertStringIncludes(html, '"x-feed-token": token.value.trim()');
+  assert(!html.includes("?token="));
+  assert(!html.includes("?feedToken="));
+});
+
 Deno.test("adding the homepage did not shadow another route", async () => {
   const fetch = app();
 

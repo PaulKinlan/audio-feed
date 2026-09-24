@@ -501,12 +501,20 @@ export function createListUsersHandler(ctx: AppContext): AppHandlers["listUsers"
  * is how accounts end up created-but-unusable. The token is returned exactly here,
  * once, because this is the moment the admin has to pass it on.
  */
-export function createCreateUserHandler(ctx: AppContext): AppHandlers["createUser"] {
+export function createCreateUserHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["createUser"] {
   return async ({ req }) => {
     const denied = await adminGate(ctx, req);
     if (denied) return denied;
 
-    let body: { email?: unknown; displayName?: unknown; voice?: unknown } = {};
+    let body: {
+      email?: unknown;
+      displayName?: unknown;
+      voice?: unknown;
+      feedUrl?: unknown;
+    } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
       body = await req.json().catch(() => ({}));
     }
@@ -526,6 +534,32 @@ export function createCreateUserHandler(ctx: AppContext): AppHandlers["createUse
         voice: typeof body.voice === "string" ? body.voice : undefined,
       });
       const approved = await approveUser(ctx.stores.metadata, created.id, "admin");
+
+      let initialSource: {
+        id: string;
+        title: string;
+        feedUrl: string;
+        queued: number;
+      } | undefined;
+
+      if (typeof body.feedUrl === "string" && body.feedUrl.trim() !== "") {
+        const validatedUrl = articleUrl(body.feedUrl.trim()).href;
+        const { source, poll } = await subscribeToFeed(
+          ctx,
+          {
+            userId: approved.id,
+            feedUrl: validatedUrl,
+          },
+          { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+        );
+        initialSource = {
+          id: source.id,
+          title: source.title,
+          feedUrl: source.feedUrl ?? validatedUrl,
+          queued: poll.queued,
+        };
+      }
+
       return Response.json(
         {
           id: approved.id,
@@ -534,6 +568,7 @@ export function createCreateUserHandler(ctx: AppContext): AppHandlers["createUse
           status: approved.status,
           // The one deliberate exposure of a capability: the admin is the issuer.
           feedToken: approved.feedToken,
+          initialSource,
         },
         { status: 201, headers: { "cache-control": "no-store" } },
       );
@@ -606,7 +641,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     listSources: createListSourcesHandler(ctx),
     createSource: createCreateSourceHandler(ctx, deps),
     listUsers: createListUsersHandler(ctx),
-    createUser: createCreateUserHandler(ctx),
+    createUser: createCreateUserHandler(ctx, deps),
     suspendUser: createSuspendUserHandler(ctx),
   };
 }

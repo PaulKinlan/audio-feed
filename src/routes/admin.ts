@@ -260,6 +260,12 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         </label>
         <input id="displayName" name="displayName" type="text" autocomplete="off" />
       </div>
+      <div class="field">
+        <label for="feedUrl">Initial RSS feed URL (optional)
+          <span class="hint">Subscribes the new user immediately and queues recent posts.</span>
+        </label>
+        <input id="feedUrl" name="feedUrl" type="url" placeholder="https://example.com/feed.xml" autocomplete="off" />
+      </div>
       <div class="row">
         <button type="submit" id="createUser">Create and approve</button>
       </div>
@@ -457,13 +463,20 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     created.appendChild(h3);
 
     const dl = document.createElement("dl");
-    for (const [label, value, cls] of [
+    const listItems = [
       ["Email", user.email],
       ["Display name", user.displayName || "—"],
       ["Status", user.status],
       ["User ID", user.id, "mono"],
       ["Feed token", user.feedToken, "mono"],
-    ]) {
+    ];
+    if (user.initialSource) {
+      listItems.push([
+        "Initial feed",
+        user.initialSource.title + " (" + user.initialSource.queued + " queued)",
+      ]);
+    }
+    for (const [label, value, cls] of listItems) {
       const [dt, dd] = definition(label, value, cls);
       dl.append(dt, dd);
     }
@@ -506,6 +519,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     const feedback = document.getElementById("createFeedback");
     const email = document.getElementById("email").value.trim();
     const displayName = document.getElementById("displayName").value.trim();
+    const feedUrl = document.getElementById("feedUrl").value.trim();
     if (!email) {
       say(feedback, "error", "An email address is required.");
       document.getElementById("email").focus();
@@ -516,9 +530,19 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     try {
       const user = await api("/api/admin/users", {
         method: "POST",
-        body: JSON.stringify({ email, displayName: displayName || undefined }),
+        body: JSON.stringify({
+          email,
+          displayName: displayName || undefined,
+          feedUrl: feedUrl || undefined,
+        }),
       });
-      say(feedback, "ok", "Created and approved " + user.email + ".");
+      say(
+        feedback,
+        "ok",
+        "Created and approved " + user.email +
+          (user.initialSource ? (" with feed " + user.initialSource.title) : "") +
+          ".",
+      );
       showCreated(user);
       createForm.reset();
       await loadUsers();

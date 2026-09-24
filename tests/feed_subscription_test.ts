@@ -422,3 +422,40 @@ Deno.test("END TO END: subscribe to a feed, then play what its episodes publish"
   );
   assertEquals(repoll.queued, 0);
 });
+
+Deno.test("admin create subscriber with optional feedUrl subscribes and queues immediately", async () => {
+  const { fetch, stores } = app({
+    feedTransport: feedTransport(RSS),
+    fetchArticle: article("Aggregation & AI", "Body text."),
+  });
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({
+        email: "subscribed-new@example.com",
+        displayName: "Subscribed User",
+        feedUrl: "https://stratechery.com/feed/",
+      }),
+    }),
+  );
+
+  assertEquals(res.status, 201);
+  const body = await res.json();
+  assertEquals(body.email, "subscribed-new@example.com");
+  assertEquals(body.status, "approved");
+  assert(body.feedToken, "must return feed token");
+  assert(body.initialSource, "must return initialSource");
+  assertEquals(body.initialSource.title, "stratechery.com");
+  assertEquals(body.initialSource.queued, 2);
+
+  const sources = await stores.metadata.listSources(body.id);
+  assertEquals(sources.length, 1);
+  assertEquals(sources[0]?.title, "stratechery.com");
+
+  const episodes = await stores.metadata.listEpisodes({ userId: body.id });
+  assertEquals(episodes.length, 2);
+});

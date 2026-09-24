@@ -451,15 +451,84 @@ export function renderHomePage({
 
   <div id="result" role="status" aria-live="polite"></div>
 
+  <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>
+  <p>
+    Follow an entire publication. Recent posts will be queued and converted to audio as they are published.
+  </p>
+
+  <!--
+    method="post" ensures a no-JS native submit never puts the token in the URL.
+    Uses the same feed token field entered above.
+  -->
+  <form id="subscribe-source" action="/api/sources" method="post">
+    <div class="field">
+      <label for="feed-url">RSS or Atom feed URL</label>
+      <span class="hint" id="feed-url-hint">The XML feed address of the blog or newsletter.</span>
+      <input
+        type="url"
+        id="feed-url"
+        name="feedUrl"
+        required
+        placeholder="https://example.com/feed.xml"
+        aria-describedby="feed-url-hint"
+        aria-errormessage="feed-url-error"
+        autocomplete="url"
+        spellcheck="false"
+      >
+      <span class="error" id="feed-url-error"><span aria-hidden="true">⚠</span> Enter a full feed URL, including https://</span>
+    </div>
+
+    <div class="field">
+      <label for="feed-title">Feed title (optional)</label>
+      <span class="hint" id="feed-title-hint">Defaults to the title in the feed.</span>
+      <input
+        type="text"
+        id="feed-title"
+        name="title"
+        placeholder="e.g. Stratechery"
+        aria-describedby="feed-title-hint"
+        autocomplete="off"
+        spellcheck="false"
+      >
+    </div>
+
+    <fieldset>
+      <legend>Audio presentation mode</legend>
+      <div class="choice">
+        <input type="radio" id="feed-mode-direct" name="feedMode" value="direct" checked>
+        <label for="feed-mode-direct">
+          Direct read
+          <span class="what">One narrator reading each post.</span>
+        </label>
+      </div>
+      <div class="choice">
+        <input type="radio" id="feed-mode-deepdive" name="feedMode" value="deepdive">
+        <label for="feed-mode-deepdive">
+          Deep dive
+          <span class="what">Two-voice discussion of each post.</span>
+        </label>
+      </div>
+    </fieldset>
+
+    <button type="submit" id="submit-feed">Subscribe to Feed</button>
+  </form>
+
+  <div id="feed-result" role="status" aria-live="polite"></div>
+
   <noscript>
     <p class="note">
-      This form needs JavaScript, because the feed token travels in a request
+      These forms need JavaScript, because the feed token travels in a request
       header rather than the URL. Without it, use curl:
     </p>
     <pre><code>curl -X POST ${base}/api/ingest \\
   -H 'content-type: application/json' \\
   -H 'x-feed-token: YOUR_TOKEN' \\
-  -d '{"url":"https://example.com/an-article","mode":"direct"}'</code></pre>
+  -d '{"url":"https://example.com/an-article","mode":"direct"}'
+
+curl -X POST ${base}/api/sources \\
+  -H 'content-type: application/json' \\
+  -H 'x-feed-token: YOUR_TOKEN' \\
+  -d '{"feedUrl":"https://example.com/feed.xml","modes":["direct"]}'</code></pre>
   </noscript>
 
   <h2>Prefer the command line?</h2>
@@ -594,6 +663,108 @@ export function renderHomePage({
     } finally {
       button.removeAttribute("aria-disabled");
       button.textContent = "Send to Audio";
+    }
+  });
+
+  const feedForm = document.getElementById("subscribe-source");
+  const feedButton = document.getElementById("submit-feed");
+  const feedResult = document.getElementById("feed-result");
+  const feedUrl = document.getElementById("feed-url");
+  const feedTitle = document.getElementById("feed-title");
+
+  const sayFeed = (kind, message, detail) => {
+    feedResult.className = kind;
+    feedResult.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = message;
+    feedResult.append(p);
+    if (detail) {
+      const d = document.createElement("p");
+      d.className = "detail";
+      d.textContent = detail;
+      feedResult.append(d);
+    }
+  };
+
+  feedUrl.addEventListener("blur", () => sync(feedUrl));
+  feedUrl.addEventListener("input", () => {
+    if (feedUrl.checkValidity()) {
+      feedUrl.removeAttribute("aria-invalid");
+      feedUrl.classList.remove("is-invalid");
+    }
+  });
+
+  feedForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    sync(feedUrl);
+    sync(token);
+    if (!token.value.trim()) {
+      sayFeed("bad", "A feed token is required.", "Enter your feed token in the field above.");
+      token.focus();
+      return;
+    }
+    if (!feedUrl.checkValidity()) {
+      feedUrl.reportValidity();
+      return;
+    }
+
+    feedButton.setAttribute("aria-disabled", "true");
+    feedButton.textContent = "Subscribing…";
+    sayFeed("", "Checking feed and queueing posts…");
+
+    try {
+      const response = await fetch("/api/sources", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-feed-token": token.value.trim(),
+        },
+        body: JSON.stringify({
+          feedUrl: feedUrl.value.trim(),
+          title: feedTitle.value.trim() || undefined,
+          modes: [feedForm.elements.feedMode.value],
+        }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+
+      if (response.status === 201) {
+        const count = body.poll && typeof body.poll.queued === "number" ? body.poll.queued : 0;
+        const sourceTitle = body.source && body.source.title ? body.source.title : "the feed";
+        const feedPath = body.feedPaths && body.feedPaths[0] ? body.feedPaths[0] : null;
+        const detail = feedPath ? "Per-source feed URL: " + ${
+    JSON.stringify(base)
+  } + feedPath : undefined;
+
+        sayFeed(
+          "ok",
+          "Subscribed to " + sourceTitle + ". " + count + " post(s) queued for synthesis.",
+          detail,
+        );
+
+        const keptMode = feedForm.elements.feedMode.value;
+        feedForm.reset();
+        feedForm.elements.feedMode.value = keptMode;
+        feedUrl.removeAttribute("aria-invalid");
+        feedUrl.classList.remove("is-invalid");
+      } else if (response.status === 403) {
+        sayFeed(
+          "bad",
+          "That token was not accepted, or the account is not approved yet.",
+          "New accounts need admin approval before audio can be generated.",
+        );
+      } else {
+        sayFeed(
+          "bad",
+          body.error || "The feed could not be subscribed.",
+          "Status " + response.status,
+        );
+      }
+    } catch (error) {
+      sayFeed("bad", "Could not reach the server.", String(error));
+    } finally {
+      feedButton.removeAttribute("aria-disabled");
+      feedButton.textContent = "Subscribe to Feed";
     }
   });
 })();
