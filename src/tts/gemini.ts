@@ -64,6 +64,16 @@ export const DEFAULT_EXPERT_VOICE: GeminiTtsVoice = "Fenrir";
 export const DEFAULT_FOIL_VOICE: GeminiTtsVoice = "Puck";
 
 export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
+/** Per-attempt deadline. A hung request must not hold a synthesis worker forever. */
+export const DEFAULT_TIMEOUT_MS = 60_000;
+/** Retries AFTER the first attempt. */
+export const DEFAULT_MAX_RETRIES = 1;
+/**
+ * Statuses where the API definitively did not process the request, so retrying cannot double-charge.
+ * Other 5xx and network failures may already have generated (and billed) audio — retrying those is a
+ * cost decision, so it is opt-in via retryOn: "all".
+ */
+const TRANSIENT_STATUSES = new Set([429, 503]);
 export const GEMINI_API_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta";
 
@@ -169,6 +179,15 @@ export interface DecodedAudioResult {
   channels: number;
   bitsPerSample: number;
   durationSeconds: number;
+  /**
+   * Why the model stopped ("STOP" when the audio is complete).
+   *
+   * An episode that was cut off mid-sentence must not be published as if it were finished, so a
+   * non-complete reason is surfaced here AND rejected by default (see allowTruncated).
+   */
+  finishReason?: string;
+  /** True when finishReason is anything other than STOP — the audio is incomplete. */
+  truncated: boolean;
   toWav(): Uint8Array;
 }
 
@@ -179,21 +198,45 @@ export interface SynthesisOptions {
   model?: string;
   temperature?: number;
   signal?: AbortSignal;
+  /**
+   * Per-attempt deadline in ms. Defaults to the client's timeoutMs (60s). A hung request would
+   * otherwise hold a synthesis worker forever.
+   */
+  timeoutMs?: number;
+  /** Override the client's maxRetries for this call. */
+  maxRetries?: number;
+  /**
+   * Which failures may be retried. "transient" (default) covers only statuses that mean the API
+   * definitively did not process the request (429, 503). "all" also retries other 5xx and network
+   * errors — a cost decision, because the server may already have generated (and billed) audio.
+   */
+  retryOn?: RetryPolicy;
+  /**
+   * Return truncated audio instead of throwing. Off by default: a half-episode is not an episode,
+   * and silently publishing one is the failure mode this flag exists to prevent.
+   */
+  allowTruncated?: boolean;
 }
 
-/**
- * Client configuration
- */
-export interface GeminiTtsClientConfig {
-  apiKey?: string;
-  model?: string;
-  baseUrl?: string;
-  fetchFn?: typeof fetch;
-}
+export type RetryPolicy = "none" | "transient" | "all";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Custom error thrown when the Gemini TTS API returns an error response
+ * Exponential backoff with jitter, honouring Retry-After when the API sends one.
+ * Jitter matters because a rate-limited fleet retrying in lockstep just re-trips the limit.
  */
+function backoffMs(attempt: number, baseMs: number, retryAfterHeader: string | null): number {
+  if (retryAfterHeader) {
+    const seconds = Number(retryAfterHeader);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
+    const when = Date.parse(retryAfterHeader);
+    if (!Number.isNaN(when)) return Math.min(Math.max(0, when - Date.now()), 30_000);
+  }
+  const capped = Math.min(baseMs * 2 ** (attempt - 1), 30_000);
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
 export class GeminiTtsError extends Error {
   constructor(
     message: string,
@@ -204,6 +247,45 @@ export class GeminiTtsError extends Error {
     this.name = "GeminiTtsError";
   }
 }
+
+/** Raised when the model stopped early, so callers cannot mistake partial audio for a full read. */
+export class GeminiTtsTruncatedError extends GeminiTtsError {
+  constructor(
+    public readonly finishReason: string,
+    partial: DecodedAudioResult,
+  ) {
+    super(
+      `Gemini TTS returned incomplete audio (finishReason: ${finishReason}). ` +
+        `The episode is truncated — split the input, or pass allowTruncated: true to accept it ` +
+        `with result.truncated === true.`,
+      undefined,
+      partial,
+    );
+    this.name = "GeminiTtsTruncatedError";
+  }
+}
+
+/**
+ * Client configuration
+ */
+export interface GeminiTtsClientConfig {
+  apiKey?: string;
+  model?: string;
+  baseUrl?: string;
+  fetchFn?: typeof fetch;
+  /** Per-attempt deadline in ms (default 60000). */
+  timeoutMs?: number;
+  /** Retry attempts after the first try (default 1). */
+  maxRetries?: number;
+  /** Which failures may be retried (default "transient": 429 and 503 only). */
+  retryOn?: RetryPolicy;
+  /** Base backoff in ms, doubled per attempt and jittered (default 250). */
+  retryBaseDelayMs?: number;
+}
+
+/**
+ * Custom error thrown when the Gemini TTS API returns an error response
+ */
 
 // ---------------------------------------------------------------------------
 // Base64 & Audio Format Helpers
@@ -262,18 +344,16 @@ export function detectAudioFormat(
   }
 
   if (bytes.length >= 3) {
-    // ID3v2 tag: "ID3"
+    // ID3v2 tag: "ID3" — a strong, unambiguous container signature.
     if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
-      return "mp3";
-    }
-    // MPEG frame sync: 11 bits set (0xFF followed by byte with high 3 bits set)
-    const b0 = bytes[0];
-    const b1 = bytes[1];
-    if (b0 === 0xff && b1 !== undefined && (b1 & 0xe0) === 0xe0) {
       return "mp3";
     }
   }
 
+  // An explicit hint now outranks the bare MPEG frame sync below. That sync is only 11 bits, so
+  // raw L16 PCM whose first sample starts 0xFF 0xE0.. was being classified as mp3, which silently
+  // corrupted sampleRate/channels/duration downstream (audio-feed-e6l). Container signatures above
+  // stay authoritative, because a RIFF/ID3 header cannot occur by chance in PCM.
   if (mimeHint) {
     const lower = mimeHint.toLowerCase();
     if (lower.includes("wav")) return "wav";
@@ -281,9 +361,13 @@ export function detectAudioFormat(
     if (lower.includes("pcm") || lower.includes("l16")) return "pcm";
   }
 
-  // Gemini audio/pcm is raw PCM bytes with no container header
-  if (mimeHint?.includes("audio/pcm") || mimeHint?.includes("audio/L16")) {
-    return "pcm";
+  if (bytes.length >= 3) {
+    // MPEG frame sync: 11 bits set (0xFF followed by byte with high 3 bits set)
+    const b0 = bytes[0];
+    const b1 = bytes[1];
+    if (b0 === 0xff && b1 !== undefined && (b1 & 0xe0) === 0xe0) {
+      return "mp3";
+    }
   }
 
   // Default to PCM if non-empty byte buffer from Gemini TTS
@@ -883,6 +967,7 @@ export function buildDialogueRequest(
 export function decodeAudioResponse(
   jsonResponse: unknown,
   defaultSampleRate = 24000,
+  options: { allowTruncated?: boolean } = {},
 ): DecodedAudioResult {
   if (!jsonResponse || typeof jsonResponse !== "object") {
     throw new GeminiTtsError(
@@ -918,15 +1003,14 @@ export function decodeAudioResponse(
   }
 
   const finishReason = firstCandidate.finishReason as string | undefined;
-  if (
+  const incomplete = Boolean(
     finishReason && finishReason !== "STOP" &&
-    finishReason !== "FINISH_REASON_UNSPECIFIED"
-  ) {
-    if (finishReason === "SAFETY") {
-      throw new GeminiTtsError(
-        "Gemini audio generation blocked by SAFETY filter",
-      );
-    }
+      finishReason !== "FINISH_REASON_UNSPECIFIED",
+  );
+  if (incomplete && finishReason === "SAFETY") {
+    throw new GeminiTtsError(
+      "Gemini audio generation blocked by SAFETY filter",
+    );
   }
 
   const content = firstCandidate.content as Record<string, unknown> | undefined;
@@ -996,7 +1080,7 @@ export function decodeAudioResponse(
     durationSeconds = bytesPerSecond > 0 ? rawBytes.length / bytesPerSecond : 0;
   }
 
-  return {
+  const result: DecodedAudioResult = {
     rawBytes,
     mimeType,
     format,
@@ -1004,6 +1088,8 @@ export function decodeAudioResponse(
     channels,
     bitsPerSample,
     durationSeconds,
+    finishReason,
+    truncated: incomplete,
     toWav(): Uint8Array {
       if (format === "wav") {
         return rawBytes;
@@ -1015,6 +1101,13 @@ export function decodeAudioResponse(
       });
     },
   };
+
+  // Fail closed on incomplete audio: a truncated read is not a finished episode, and returning it
+  // as a normal success is how a half-episode gets published (web-ai... audio-feed-e6l).
+  if (incomplete && !options.allowTruncated) {
+    throw new GeminiTtsTruncatedError(finishReason!, result);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1119,10 @@ export class GeminiTtsClient {
   private model: string;
   private baseUrl: string;
   private fetchFn: typeof fetch;
+  private timeoutMs: number;
+  private maxRetries: number;
+  private retryOn: RetryPolicy;
+  private retryBaseDelayMs: number;
 
   constructor(config: GeminiTtsClientConfig = {}) {
     let envKey: string | undefined;
@@ -1045,6 +1142,10 @@ export class GeminiTtsClient {
     this.model = config.model || DEFAULT_TTS_MODEL;
     this.baseUrl = config.baseUrl || GEMINI_API_BASE_URL;
     this.fetchFn = config.fetchFn || fetch;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryOn = config.retryOn ?? "transient";
+    this.retryBaseDelayMs = config.retryBaseDelayMs ?? 250;
   }
 
   /**
@@ -1096,14 +1197,49 @@ export class GeminiTtsClient {
       "x-goog-api-key": apiKey,
     };
 
-    const res = await this.fetchFn(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(request),
-      signal: options.signal,
-    });
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+    const maxRetries = options.maxRetries ?? this.maxRetries;
+    const retryOn = options.retryOn ?? this.retryOn;
+    const attempts = Math.max(1, maxRetries + 1);
 
-    if (!res.ok) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const deadline = AbortSignal.timeout(timeoutMs);
+      // The caller's signal (if any) still wins; the timeout is the floor, never a replacement for it.
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, deadline])
+        : deadline;
+
+      let res: Response;
+      try {
+        res = await this.fetchFn(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(request),
+          signal,
+        });
+      } catch (error) {
+        if (options.signal?.aborted) throw error; // caller cancelled: never retry
+        lastError = deadline.aborted && !options.signal
+          ? new GeminiTtsError(
+            `Gemini TTS request timed out after ${timeoutMs}ms`,
+            undefined,
+            error,
+          )
+          : error;
+        const retryable = retryOn === "all" && attempt < attempts;
+        if (!retryable) throw lastError;
+        await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+        continue;
+      }
+
+      if (res.ok) {
+        const json = await res.json();
+        return decodeAudioResponse(json, undefined, {
+          allowTruncated: options.allowTruncated,
+        });
+      }
+
       let errDetails: unknown;
       let errMsg = `Gemini API HTTP error ${res.status}: ${res.statusText}`;
       try {
@@ -1121,10 +1257,17 @@ export class GeminiTtsClient {
       } catch {
         // use default statusText
       }
-      throw new GeminiTtsError(errMsg, res.status, errDetails);
+
+      lastError = new GeminiTtsError(errMsg, res.status, errDetails);
+      const retryable = retryOn !== "none" && attempt < attempts &&
+        (TRANSIENT_STATUSES.has(res.status) ||
+          (retryOn === "all" && res.status >= 500));
+      if (!retryable) throw lastError;
+      await sleep(backoffMs(attempt, this.retryBaseDelayMs, res.headers.get("retry-after")));
     }
 
-    const json = await res.json();
-    return decodeAudioResponse(json);
+    throw lastError instanceof Error
+      ? lastError
+      : new GeminiTtsError("Gemini TTS request failed");
   }
 }
