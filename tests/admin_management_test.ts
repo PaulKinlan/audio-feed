@@ -880,3 +880,64 @@ Deno.test("cascade clears failedBlobs when a retry succeeds (audio-feed-37p)", a
     assertEquals(await stores.blobs.head(key), null, `${key} must be gone from the store`);
   }
 });
+
+Deno.test("cascade reports blobs it could not delete, and leaves them in place (audio-feed-6pn)", async () => {
+  // The 37p test guards the FALSE POSITIVE on failedBlobs (a retry that succeeds must
+  // clear the key). This is the false NEGATIVE, and it is the costlier direction: a
+  // counter that can never be non-zero reports "nothing leaked" while the blobs sit
+  // orphaned and billed. Opus measured that deleting failedBlobKeys.add() entirely
+  // left the whole suite green, because every failedBlobs assertion asserted zero.
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(
+    makeSource({ id: "src-leak", userId: "user-1", title: "Leaking Source" }),
+  );
+
+  const keys: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const key = `audio/leak-${i}.wav`;
+    keys.push(key);
+    await stores.blobs.put(key, new Uint8Array([1]), { contentType: "audio/wav" });
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-leak-${i}`,
+        userId: "user-1",
+        sourceId: "src-leak",
+        status: "ready",
+        audioKey: key,
+      }),
+    );
+  }
+
+  // The blob store is down for deletes: every attempt fails, persistently.
+  const attempts = new Map<string, number>();
+  stores.blobs.delete = (key: string) => {
+    attempts.set(key, (attempts.get(key) ?? 0) + 1);
+    return Promise.reject(new Error("blob store unavailable"));
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-leak?cascade=true`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+
+  // The failure path ran for every key, or this test proves nothing.
+  assertEquals(attempts.size, 4, "every blob delete must have been attempted");
+
+  // The episodes still go, so the source is removed and no synthesis is pending.
+  assertEquals(body.deletedEpisodes, 4);
+  // And the operator is TOLD about the orphaned blobs, which is the whole point:
+  // reported as neither deleted nor silently ignored.
+  assertEquals(body.deletedBlobs, 0);
+  assertEquals(body.failedBlobs, 4);
+  for (const key of keys) {
+    assert(
+      await stores.blobs.head(key) !== null,
+      `${key} should still be in the store — it leaked`,
+    );
+  }
+});
