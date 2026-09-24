@@ -403,13 +403,15 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.listEpisodes({ userId: "user-1" })).length, 1);
     assertEquals((await store.listPendingEpisodes()).episodes.length, 1);
 
-    await store.deleteEpisode("user-1", "e1");
+    const deleted = await store.deleteEpisode("user-1", "e1");
+    assertEquals(deleted, true);
     assertEquals(await store.getEpisode("user-1", "e1"), null);
     assertEquals((await store.listEpisodes({ userId: "user-1" })).length, 0);
     assertEquals((await store.listPendingEpisodes()).episodes.length, 0);
 
-    // Deleting non-existent episode does not throw
-    await store.deleteEpisode("user-1", "e1");
+    // Deleting non-existent episode returns false, does not throw
+    const secondDelete = await store.deleteEpisode("user-1", "e1");
+    assertEquals(secondDelete, false);
   });
 
   test("returns copies, not live references", async (store) => {

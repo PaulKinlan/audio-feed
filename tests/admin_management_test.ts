@@ -358,6 +358,45 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId drains >1000 episodes w
   assertEquals((await stores.metadata.listPendingEpisodes()).episodes.length, 0);
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId aborts loop on persistent delete failure via progress guard (audio-feed-des)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-stub", userId: "user-1", title: "Stub Source" }),
+  );
+  for (let i = 0; i < 5; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-stub-${i}`,
+        userId: "user-1",
+        sourceId: "src-stub",
+        status: "pending",
+      }),
+    );
+  }
+
+  // Stub deleteEpisode to always fail (return false)
+  let calls = 0;
+  stores.metadata.deleteEpisode = () => {
+    calls++;
+    return Promise.resolve(false);
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-stub`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.cancelledPending, 0); // 0 confirmed removals
+  // Loop must terminate after 1 batch pass (5 calls) via progress guard, rather than looping infinitely
+  assertEquals(calls, 5);
+});
+
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(

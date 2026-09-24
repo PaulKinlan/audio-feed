@@ -774,13 +774,13 @@ export function createAdminDeleteUserSourceHandler(
     const url = new URL(req.url);
     const cascade = url.searchParams.get("cascade") === "true";
 
-    let deletedEpisodes = 0;
+    const deletedEpisodeIds = new Set<string>();
+    const cancelledPendingIds = new Set<string>();
     let deletedBlobs = 0;
     let failedBlobs = 0;
-    let cancelledPending = 0;
 
     if (cascade) {
-      // Drain all episodes in batches until none remain (audio-feed-7ve)
+      // Drain all episodes in batches until none remain (audio-feed-7ve, audio-feed-des)
       while (true) {
         const batch = await ctx.stores.metadata.listEpisodes({
           userId,
@@ -788,6 +788,7 @@ export function createAdminDeleteUserSourceHandler(
           limit: 100,
         });
         if (batch.length === 0) break;
+        let removedInPass = 0;
         for (const episode of batch) {
           if (episode.audioKey) {
             try {
@@ -797,12 +798,17 @@ export function createAdminDeleteUserSourceHandler(
               failedBlobs++;
             }
           }
-          await ctx.stores.metadata.deleteEpisode(userId, episode.id);
-          deletedEpisodes++;
+          const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
+          if (removed) {
+            removedInPass++;
+            deletedEpisodeIds.add(episode.id);
+          }
         }
+        // Progress guard: abort if a full pass removes 0 items (persistent failure)
+        if (removedInPass === 0) break;
       }
     } else {
-      // Drain all pending and synthesizing episodes in batches so no spend occurs (audio-feed-7ve)
+      // Drain all pending and synthesizing episodes in batches so no spend occurs (audio-feed-7ve, audio-feed-des)
       for (const status of ["pending", "synthesizing"] as const) {
         while (true) {
           const batch = await ctx.stores.metadata.listEpisodes({
@@ -812,10 +818,16 @@ export function createAdminDeleteUserSourceHandler(
             limit: 100,
           });
           if (batch.length === 0) break;
+          let removedInPass = 0;
           for (const episode of batch) {
-            await ctx.stores.metadata.deleteEpisode(userId, episode.id);
-            cancelledPending++;
+            const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
+            if (removed) {
+              removedInPass++;
+              cancelledPendingIds.add(episode.id);
+            }
           }
+          // Progress guard: abort if a full pass removes 0 items (persistent failure)
+          if (removedInPass === 0) break;
         }
       }
     }
@@ -824,7 +836,7 @@ export function createAdminDeleteUserSourceHandler(
       userId,
       sourceId,
       status: "ready",
-      limit: Number.MAX_SAFE_INTEGER,
+      limit: 1000,
     })).length;
 
     await ctx.stores.metadata.deleteSource(userId, sourceId);
@@ -834,7 +846,7 @@ export function createAdminDeleteUserSourceHandler(
           ok: true,
           deleted: sourceId,
           cascaded: true,
-          deletedEpisodes,
+          deletedEpisodes: deletedEpisodeIds.size,
           deletedBlobs,
           failedBlobs,
         }
@@ -843,7 +855,7 @@ export function createAdminDeleteUserSourceHandler(
           deleted: sourceId,
           cascaded: false,
           retainedEpisodes: readyEpisodes,
-          cancelledPending,
+          cancelledPending: cancelledPendingIds.size,
         },
       { headers: { "cache-control": "no-store" } },
     );
