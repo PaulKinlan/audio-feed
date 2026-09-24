@@ -63,18 +63,40 @@ export async function handleAudio(
   }
 
   // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
+  //
+  // Nothing here may assume url() answers the same way for EVERY key. That was the
+  // audio-feed-gxn bug: a store that offers direct URLs for one prefix only (a CDN
+  // mapped over "audio/", say) made the first candidate look like a redirecting
+  // store, and when its head() missed the handler returned 404 for an object that
+  // existed and that HEAD could see. The interface never promised per-key
+  // consistency, so the handler must not depend on it.
   if (!isHead) {
-    let isRedirectingStore = false;
+    // Whether the store offered a direct URL for EVERY candidate, which is what
+    // distinguishes a uniformly-redirecting store from a per-key one.
+    let everyKeyHasDirectUrl = true;
     for (const key of candidateKeys) {
       const direct = await ctx.stores.blobs.url(key);
-      if (!direct) break;
-      isRedirectingStore = true;
+      if (!direct) {
+        // `continue`, not `break`: a key with no direct URL says nothing about the
+        // next candidate on a store that answers per key (audio-feed-gxn).
+        everyKeyHasDirectUrl = false;
+        continue;
+      }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
         return new Response(null, { status: 302, headers: { location: direct } });
       }
     }
-    if (isRedirectingStore) {
+    // Short-circuit a miss ONLY when the store offered a direct URL for every
+    // candidate: that is the uniform case (S3 answers for any key), where get()
+    // would be a wasted round trip for a definitive 404, and audio-feed-vlw pins
+    // that behaviour with `getCalls === 0`.
+    //
+    // If any candidate had NO direct URL the store answers per key, so nothing here
+    // can conclude that a missing object is missing — a CDN mapped over one prefix
+    // would 404 objects that exist (audio-feed-gxn). Existence is then decided by
+    // the get() loop below, which costs one get() on a genuine miss.
+    if (everyKeyHasDirectUrl) {
       return notFound("Unknown audio object");
     }
   }
