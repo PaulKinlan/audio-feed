@@ -310,7 +310,7 @@ Deno.test("a non-feed URL is refused, and nothing is stored", async () => {
 });
 
 Deno.test("a text/plain response that contains valid XML/Atom is accepted", async () => {
-  const textPlainFeed = (url: URL, _signal: AbortSignal) =>
+  const textPlainFeed = (_url: URL, _signal: AbortSignal) =>
     Promise.resolve(
       new Response(RSS, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } }),
     );

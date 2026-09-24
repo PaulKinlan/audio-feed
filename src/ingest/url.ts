@@ -289,7 +289,9 @@ export async function fetchFeedDocument(
         throw new IngestError(422, "Feed uses an unsupported character encoding.");
       }
       const trimmed = xml.trimStart();
-      if (!trimmed.startsWith("<?xml") && !trimmed.startsWith("<rss") && !trimmed.startsWith("<feed")) {
+      if (
+        !trimmed.startsWith("<?xml") && !trimmed.startsWith("<rss") && !trimmed.startsWith("<feed")
+      ) {
         throw new IngestError(422, "That URL is not an uncompressed RSS or Atom feed.");
       }
       return { xml, url: url.href };
