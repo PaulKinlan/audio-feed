@@ -401,6 +401,13 @@ Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time a
     return origList(opts);
   };
 
+  let pointReads = 0;
+  const origGet = stores.metadata.getEpisode.bind(stores.metadata);
+  stores.metadata.getEpisode = (userId, id) => {
+    pointReads++;
+    return origGet(userId, id);
+  };
+
   const started = Date.now();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     batchSize: 2,
@@ -411,12 +418,19 @@ Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time a
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
   assert(run.deferred.length <= 2, "deferred report is capped at batchSize");
 
-  // Shape-independent cost checks (audio-feed-7li item 3):
+  // Shape-independent cost checks (audio-feed-7li item 3, audio-feed-2np):
   // 50 deferred + 2 approved = 52 total items. With CHUNK_SIZE = 25, exactly ceil(52 / 25) = 3 pages.
   assertEquals(
     listCalls,
     3,
     `paging must fetch exactly ceil(N / chunk) pages (expected 3, got ${listCalls})`,
+  );
+  // Point reads across all pages must touch only the 52 examined items (plus claim reads for the 2 approved),
+  // proving that listPendingEpisodes touches only page items and does not scan the catalogue (audio-feed-2np).
+  assertEquals(
+    pointReads,
+    53,
+    `point reads must equal 52 examined items + 1 verification read (expected 53, got ${pointReads})`,
   );
   assert(elapsed < 500, `must complete quickly in linear time, took ${elapsed}ms`);
 });

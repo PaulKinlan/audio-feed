@@ -267,7 +267,7 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(out);
   }
 
-  listPendingEpisodes(
+  async listPendingEpisodes(
     opts: ListPendingOptions = {},
   ): Promise<ListPendingResult> {
     const limit = opts.limit ?? 50;
@@ -292,9 +292,9 @@ export class MemoryMetadataStore implements MetadataStore {
       const entry = this.#pendingIndex[currentIndex];
       currentIndex++;
       if (!entry) break;
-      const ep = this.#episodes.get(MemoryMetadataStore.#scoped(entry.userId, entry.id));
+      const ep = await this.getEpisode(entry.userId, entry.id);
       if (ep && ep.status === "pending") {
-        episodes.push(structuredClone(ep));
+        episodes.push(ep);
       }
     }
 
@@ -309,13 +309,13 @@ export class MemoryMetadataStore implements MetadataStore {
       let addedExpired = false;
       for (const entry of this.#synthesizingIndex) {
         if (Number.isFinite(limit) && episodes.length >= limit) break;
-        const ep = this.#episodes.get(MemoryMetadataStore.#scoped(entry.userId, entry.id));
+        const ep = await this.getEpisode(entry.userId, entry.id);
         if (
           ep &&
           ep.status === "synthesizing" &&
           isClaimExpired(ep, nowMs, leaseMs)
         ) {
-          episodes.push(structuredClone(ep));
+          episodes.push(ep);
           addedExpired = true;
         }
       }
@@ -324,7 +324,7 @@ export class MemoryMetadataStore implements MetadataStore {
       }
     }
 
-    return Promise.resolve({ episodes, cursor: nextCursor });
+    return { episodes, cursor: nextCursor };
   }
 
   /**

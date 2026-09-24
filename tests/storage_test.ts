@@ -77,3 +77,60 @@ Deno.test("KvMetadataStore: reindexPendingEpisodes backfills pre-existing un-ind
 
   await store.close();
 });
+
+Deno.test("KvMetadataStore.open: runs automatic backfill migration on open (audio-feed-2np)", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const kvPath = `${tempDir}/test.kv`;
+
+  // Seed raw KV without indexes
+  const kv = await Deno.openKv(kvPath);
+  const ep = makeEpisode({
+    id: "ep-legacy-auto",
+    userId: "u1",
+    status: "pending",
+    createdAt: "2026-09-01T00:00:00.000Z",
+  });
+  await kv.set(["episode", "u1", ep.id], ep);
+  kv.close();
+
+  // Open through KvMetadataStore.open() - must run #ensurePendingEpisodesIndexed()
+  const store = await KvMetadataStore.open(kvPath);
+
+  const pending = await store.listPendingEpisodes();
+  assertEquals(pending.episodes.length, 1);
+  assertEquals(pending.episodes[0]?.id, "ep-legacy-auto");
+
+  await store.close();
+  await Deno.remove(tempDir, { recursive: true });
+});
+
+Deno.test("MemoryMetadataStore: listPendingEpisodes work per page is O(limit) and does not scale with backlog size N (audio-feed-2np)", async () => {
+  const store = new MemoryMetadataStore();
+
+  // Populate 100 pending episodes
+  for (let i = 0; i < 100; i++) {
+    await store.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "u1",
+        status: "pending",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+
+  let touched = 0;
+  const origGet = store.getEpisode.bind(store);
+  store.getEpisode = (userId, id) => {
+    touched++;
+    return origGet(userId, id);
+  };
+
+  // Fetch single page of limit 10
+  const page = await store.listPendingEpisodes({ limit: 10 });
+  assertEquals(page.episodes.length, 10);
+
+  // The indexed implementation must touch ONLY the 10 episodes in the page,
+  // NOT the 100 episodes in the store!
+  assertEquals(touched, 10, "work per page must be exactly limit items, not whole store");
+});
