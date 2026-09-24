@@ -82,6 +82,7 @@ Deno.test("GET /api/admin/users/:id/sources lists feeds for subscriber", async (
   );
   assertEquals(res.status, 200);
   const body = await res.json();
+  assertEquals(body.feedToken, "tok-1");
   assertEquals(body.sources.length, 1);
   assertEquals(body.sources[0]?.title, "My Blog");
   assertEquals(body.sources[0]?.feedPaths, ["/feed/tok-1/source-1/direct.xml"]);
@@ -223,4 +224,44 @@ Deno.test("admin console page renders subscriber management section and auto-loa
   assertStringIncludes(html, "loadUsers();");
   // Enter key support on password input
   assertStringIncludes(html, 'e.key === "Enter"');
+});
+
+Deno.test("list-sourced user in openManage populates feedToken from sources response and master feed returns 200", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({
+      id: "user-1",
+      email: "paul@example.com",
+      status: "approved",
+      feedToken: "tok-12345",
+    }),
+  );
+
+  // 1. listUsers returns redacted user without feedToken
+  const listRes = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(listRes.status, 200);
+  const listBody = await listRes.json();
+  const listUser = listBody.users[0];
+  assertEquals(listUser.id, "user-1");
+  assertEquals(listUser.feedToken, undefined, "list must not leak feedToken");
+
+  // 2. Fetching user sources returns feedToken for management panel
+  const sourcesRes = await fetch(
+    new Request(`${BASE}/api/admin/users/${listUser.id}/sources`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(sourcesRes.status, 200);
+  const sourcesBody = await sourcesRes.json();
+  assertEquals(sourcesBody.feedToken, "tok-12345", "sources must return feedToken for management");
+
+  // 3. The computed master feed URL resolves to 200 OK
+  const feedRes = await fetch(
+    new Request(`${BASE}/feed/${sourcesBody.feedToken}/master.xml`),
+  );
+  assertEquals(feedRes.status, 200, "master feed URL must resolve 200");
 });

@@ -647,6 +647,7 @@ export function createAdminListUserSourcesHandler(
     const sources = await ctx.stores.metadata.listSources(userId);
     return Response.json(
       {
+        feedToken: user.feedToken,
         sources: sources.map((source) => ({
           id: source.id,
           title: source.title,

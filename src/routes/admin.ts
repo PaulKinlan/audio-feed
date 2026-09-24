@@ -701,6 +701,13 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     manageSourcesCaption.textContent = "Loading feeds…";
     try {
       const res = await api("/api/admin/users/" + encodeURIComponent(userId) + "/sources");
+      if (res && res.feedToken && currentManagingUser && currentManagingUser.id === userId) {
+        currentManagingUser.feedToken = res.feedToken;
+        renderManageDetails(currentManagingUser);
+        const feedUrl = ORIGIN.replace(/\\/+$/, "") + "/feed/" +
+          encodeURIComponent(res.feedToken) + "/master.xml";
+        manageFeedUrl.value = feedUrl;
+      }
       const sources = res.sources || [];
       manageSourcesBody.replaceChildren();
       for (const source of sources) {
@@ -750,8 +757,9 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     currentManagingUser = user;
     manageName.textContent = user.displayName || user.email;
     renderManageDetails(user);
-    const feedUrl = ORIGIN.replace(/\\/+$/, "") + "/feed/" +
-      encodeURIComponent(user.feedToken || "") + "/master.xml";
+    const feedUrl = user.feedToken
+      ? ORIGIN.replace(/\\/+$/, "") + "/feed/" + encodeURIComponent(user.feedToken) + "/master.xml"
+      : "Loading feed URL…";
     manageFeedUrl.value = feedUrl;
     say(manageSourcesFeedback, "", "");
     say(addSourceFeedback, "", "");
