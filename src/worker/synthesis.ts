@@ -40,7 +40,7 @@ import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import { GeminiTtsClient, GeminiTtsTruncatedError } from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
-import { DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS } from "../types.ts";
+import { audioBlobKey, DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS } from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
@@ -60,7 +60,8 @@ export interface SynthesisWorkerOptions {
   maxAttempts?: number;
   /** Base backoff between attempts. */
   retryBaseDelayMs?: number;
-  maxEpisodeSeconds?: number;
+  /** Maximum article content length in characters allowed for synthesis before spend (audio-feed-3hb). Default 100,000. */
+  maxInputCharacters?: number;
   /** How long a claim is honoured before another worker may take the episode. */
   leaseMs?: number;
   /** Claims per episode before it is abandoned as unprocessable. */
@@ -80,7 +81,7 @@ const DEFAULTS: Required<SynthesisWorkerOptions> = {
   intervalMs: 15_000,
   maxAttempts: 3,
   retryBaseDelayMs: 500,
-  maxEpisodeSeconds: 0,
+  maxInputCharacters: 100_000,
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   owner: WORKER_ID,
@@ -301,6 +302,15 @@ export async function runSynthesisBatch(
       result.failed.push({ episodeId: claimed.id, error });
       continue;
     }
+
+    if (opts.maxInputCharacters && article.content.length > opts.maxInputCharacters) {
+      const error =
+        `article content exceeds input limit (${article.content.length} > ${opts.maxInputCharacters} chars)`;
+      await metadata.completeEpisode({ ...claimed, status: "failed", error }, opts.owner);
+      result.failed.push({ episodeId: claimed.id, error });
+      continue;
+    }
+
     const source = await metadata.getSource(claimed.userId, claimed.sourceId);
 
     let audio: DecodedAudioResult | null = null;
@@ -330,7 +340,7 @@ export async function runSynthesisBatch(
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    const audioKey = `${claimed.id}.wav`;
+    const audioKey = audioBlobKey(claimed, "wav");
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
     const byteLength = stored.size ?? bytes.length;
