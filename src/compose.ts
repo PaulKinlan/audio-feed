@@ -828,16 +828,26 @@ export function createAdminDeleteUserSourceHandler(
       //
       // These two loops deliberately RE-READ from the start of the scan instead of
       // paging with a cursor, and that is not an oversight for whoever converts the
-      // rest of this handler (audio-feed-att). The re-read is the stall detector:
-      // a failed `deleteEpisode` leaves the same batch in place, the fingerprint
-      // repeats, and after two stalls the request answers 500 `incomplete` without
-      // deleting the source. Cursor-paging advances past rows that were never
-      // removed, so the scan simply ends and the handler reports success over a
-      // source it has orphaned — measured: paging this loop reddens
-      // audio-feed-des with 200 where it must answer 500. That is the audio-feed-4qj
-      // shape arriving through a third door. `listEpisodes` keeps its
-      // limit-bounds-matches meaning (audio-feed-m04) so this pattern stays correct
-      // against a per-user index.
+      // rest of this handler (audio-feed-att). The re-read is the incomplete-delete
+      // guard: a failed `deleteEpisode` leaves the same batch in place, the
+      // fingerprint repeats, and after two stalls the request answers 500
+      // `incomplete` without deleting the source. A cursor advances past rows that
+      // were never removed, so the scan simply ends and the handler reports success
+      // over a source it has orphaned.
+      //
+      // Measured, not reasoned — and measured on each loop separately, because
+      // they break different guards:
+      //   non-cascade loop cursor-paged (audiofeed-astra, then audiofeed-opus on the
+      //   approved tip) reddens audio-feed-des (answers 200 where it must answer
+      //   500), audio-feed-4qj (abandons rows after a transient failure) and
+      //   audio-feed-mf5 (reports no remaining episodes to count).
+      //   cascade loop cursor-paged reddens a different set: audio-feed-37p, the
+      //   audio-feed-mf5 distinct-blob-retry count, and the audio-feed-m04
+      //   oldest-in-catalogue drain test.
+      // Five guards across the two loops. An earlier form of this warning named
+      // only audio-feed-des, which understated why the pattern is load-bearing
+      // (audio-feed-9h1). `listEpisodes` keeps its limit-bounds-matches meaning
+      // (audio-feed-m04) so this re-read stays correct against a per-user index.
       let prevFingerprint: string | undefined = undefined;
       let consecutiveStalls = 0;
 
