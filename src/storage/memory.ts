@@ -6,7 +6,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import type { Article, AudioMode, Episode, Source, User } from "../types.ts";
+import type { Article, Episode, Source, User } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -33,18 +33,26 @@ export class MemoryBlobStore implements BlobStore {
     return { key, size: bytes.byteLength, contentType };
   }
 
-  get(key: string, opts?: { range?: ByteRange }): Promise<BlobObject | null> {
+  // The `async` keyword here is load-bearing, not decoration. `resolveRange`
+  // throws for an unsatisfiable range; from a sync function returning
+  // `Promise.resolve(...)` that throw escapes *before* the promise exists, so
+  // `store.get(k).catch(...)` gets an uncaught exception on this adapter while
+  // the S3 adapter rejects normally. Same interface, two failure modes — which
+  // is exactly what the conformance suite caught. `async` converts the throw
+  // into a rejection so every adapter behaves identically.
+  // deno-lint-ignore require-await
+  async get(key: string, opts?: { range?: ByteRange }): Promise<BlobObject | null> {
     const found = this.#objects.get(key);
-    if (!found) return Promise.resolve(null);
+    if (!found) return null;
     const range = resolveRange(opts?.range, found.bytes.byteLength);
     const slice = range ? found.bytes.subarray(range.start, range.end + 1) : found.bytes;
-    return Promise.resolve({
+    return {
       key,
       size: found.bytes.byteLength,
       contentType: found.contentType,
       body: streamOf(slice),
       ...(range ? { range } : {}),
-    });
+    };
   }
 
   head(key: string): Promise<BlobInfo | null> {
@@ -187,10 +195,3 @@ export function byNewestFirst(a: Episode, b: Episode): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
   return b.id.localeCompare(a.id);
 }
-
-/** Convenience for tests and local dev. */
-export function memoryStores(): { metadata: MemoryMetadataStore; blobs: MemoryBlobStore } {
-  return { metadata: new MemoryMetadataStore(), blobs: new MemoryBlobStore() };
-}
-
-export type { AudioMode };
