@@ -144,6 +144,24 @@ This generates and displays:
 - The personal RSS Master Feed URL (`/feed/<token>/master.xml`)
 - Ready-to-use curl and web submission parameters
 
+### Background Workers & Manual Triggers
+
+On serverless platforms like Deno Deploy, background workers operate on native `Deno.cron` to ensure tasks run even when the HTTP isolate sleeps:
+- **`audio-feed-poll-feeds` (`*/15 * * * *`)**: Polls due RSS/Atom feeds every 15 minutes.
+- **`audio-feed-synthesis` (`*/2 * * * *`)**: Drains the pending synthesis queue every 2 minutes.
+
+Operators can trigger immediate batch runs on demand via the `/admin` console UI ("Poll Feeds Now" and "Synthesize Queue Now" buttons) or directly via REST API:
+
+```bash
+# Immediately poll all due RSS feeds
+curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/poll-now \
+  -H "x-admin-token: <your-admin-token>"
+
+# Immediately run a synthesis batch on pending episodes
+curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/synthesize-now \
+  -H "x-admin-token: <your-admin-token>"
+```
+
 ---
 
 ## Send-to-Audio (Ingest)

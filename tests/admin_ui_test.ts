@@ -49,6 +49,11 @@ Deno.test("the admin page renders the console with accessible controls", () => {
   assertStringIncludes(html, 'id="createForm"');
   assertStringIncludes(html, 'id="usersBody"');
   assertStringIncludes(html, 'id="adminToken"');
+  assertStringIncludes(html, 'id="pollNowBtn"');
+  assertStringIncludes(html, 'id="synthesizeNowBtn"');
+  assertStringIncludes(html, 'id="triggersFeedback"');
+  assertStringIncludes(html, "Poll Feeds Now");
+  assertStringIncludes(html, "Synthesize Queue Now");
   // Accessible labelling: every input has a label, the table has a caption and
   // scoped headers, and the live regions announce results.
   assertStringIncludes(html, 'for="email"');
@@ -104,6 +109,8 @@ Deno.test("every admin route refuses without the token, including the read", asy
     ["/api/admin/users", { method: "POST", body: JSON.stringify({ email: "new@example.com" }) }],
     ["/api/admin/users/user-1/approve", { method: "POST" }],
     ["/api/admin/users/user-1/suspend", { method: "POST" }],
+    ["/api/admin/poll-now", { method: "POST" }],
+    ["/api/admin/synthesize-now", { method: "POST" }],
   ];
   for (const [path, init] of calls) {
     assertEquals((await fetch(req(path, init))).status, 401, `${path} without a token`);

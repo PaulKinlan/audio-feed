@@ -298,6 +298,19 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     <p class="feedback" id="usersFeedback" role="status" aria-live="polite"></p>
   </section>
 
+  <section class="card" aria-labelledby="triggers-h">
+    <h2 id="triggers-h">Background tasks &amp; triggers</h2>
+    <p class="muted" id="triggers-help">
+      Feeds and synthesis are scheduled on Deno Deploy via native <code class="mono">Deno.cron</code>
+      (feeds every 15 min; synthesis every 2 min). Trigger an immediate batch run on demand below.
+    </p>
+    <div class="row">
+      <button type="button" id="pollNowBtn" class="secondary" disabled>Poll Feeds Now</button>
+      <button type="button" id="synthesizeNowBtn" class="secondary" disabled>Synthesize Queue Now</button>
+    </div>
+    <p class="feedback" id="triggersFeedback" role="status" aria-live="polite"></p>
+  </section>
+
   <section class="card" id="manageSection" aria-labelledby="manage-h" hidden>
     <div class="row" style="justify-content: space-between; align-items: center;">
       <h2 id="manage-h" style="margin: 0;">4. Manage subscriber: <span id="manageName"></span></h2>
@@ -369,6 +382,9 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   const created = document.getElementById("created");
   const loadUsersBtn = document.getElementById("loadUsers");
   const createForm = document.getElementById("createForm");
+  const pollNowBtn = document.getElementById("pollNowBtn");
+  const synthesizeNowBtn = document.getElementById("synthesizeNowBtn");
+  const triggersFeedback = document.getElementById("triggersFeedback");
 
   const say = (el, tone, message) => {
     el.dataset.tone = tone;
@@ -379,6 +395,8 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   if (stored) {
     tokenInput.value = stored;
     loadUsersBtn.disabled = false;
+    if (pollNowBtn) pollNowBtn.disabled = false;
+    if (synthesizeNowBtn) synthesizeNowBtn.disabled = false;
     say(authFeedback, "ok", "Token loaded from this session.");
     // Auto-load on refresh (audio-feed-e3n)
     loadUsers();
@@ -428,8 +446,44 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     }
     sessionStorage.setItem("audio-feed-admin-token", token());
     loadUsersBtn.disabled = false;
+    if (pollNowBtn) pollNowBtn.disabled = false;
+    if (synthesizeNowBtn) synthesizeNowBtn.disabled = false;
     say(authFeedback, "ok", "Token saved for this session.");
     loadUsers();
+  });
+
+  pollNowBtn?.addEventListener("click", async () => {
+    pollNowBtn.disabled = true;
+    say(triggersFeedback, "ok", "Polling due feeds…");
+    try {
+      const res = await api("/api/admin/poll-now", { method: "POST" });
+      say(
+        triggersFeedback,
+        "ok",
+        "Polled " + res.polled + " feeds: " + res.queued + " queued, " + res.failed + " failed.",
+      );
+    } catch (error) {
+      say(triggersFeedback, "error", String(error.message || error));
+    } finally {
+      pollNowBtn.disabled = false;
+    }
+  });
+
+  synthesizeNowBtn?.addEventListener("click", async () => {
+    synthesizeNowBtn.disabled = true;
+    say(triggersFeedback, "ok", "Processing synthesis queue…");
+    try {
+      const res = await api("/api/admin/synthesize-now", { method: "POST" });
+      say(
+        triggersFeedback,
+        "ok",
+        "Synthesis batch: " + res.ready + " ready, " + res.failed + " failed, " + res.deferred + " deferred.",
+      );
+    } catch (error) {
+      say(triggersFeedback, "error", String(error.message || error));
+    } finally {
+      synthesizeNowBtn.disabled = false;
+    }
   });
 
   function cell(text, className) {

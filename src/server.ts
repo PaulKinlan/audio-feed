@@ -13,6 +13,7 @@ import { createHandlers } from "./compose.ts";
 import { loadConfig, openStores } from "./config.ts";
 import { createGeminiSynthesizer, startSynthesisWorker } from "./worker/synthesis.ts";
 import { startFeedPollWorker } from "./ingest/feed.ts";
+import { registerCronJobs } from "./cron.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -84,6 +85,11 @@ export async function bootstrap() {
       );
     },
   });
+
+  // audio-feed-dsn: Native Deno.cron background jobs on Deno Deploy.
+  // In serverless edge environments isolates sleep between requests, pausing
+  // in-memory setInterval timers. Deno.cron wakes the isolate on schedule in the cloud.
+  registerCronJobs({ config, stores });
 
   const server = Deno.serve({ port: config.port }, serverFetch);
 

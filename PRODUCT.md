@@ -43,4 +43,5 @@ Converts RSS articles and on-demand web URLs into personalized podcast feeds fea
 - **Storage:**
   - Metadata: Deno KV (users, feeds, episodes, admin approval ledger).
   - Audio Blobs: Cloudflare R2 / S3-compatible object storage with signed playback URLs.
+- **Background Scheduling:** Native `Deno.cron` workers for scheduled feed polling (`*/15 * * * *`) and synthesis queue processing (`*/2 * * * *`), supplemented by admin on-demand trigger endpoints.
 - **Task Tracking:** Beads (`bd`) issue tracker.

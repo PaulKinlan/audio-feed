@@ -59,6 +59,9 @@ export interface AppHandlers {
   adminCreateSource?: Handler<AppContext>;
   adminDeleteSource?: Handler<AppContext>;
   adminRotateToken?: Handler<AppContext>;
+  /** audio-feed-dsn — manual triggers for background tasks. */
+  adminPollNow?: Handler<AppContext>;
+  adminSynthesizeNow?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -138,6 +141,14 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/users/:id/rotate-token",
     handlers.adminRotateToken ?? (() => notImplemented("Admin rotate token")),
+  );
+  router.post(
+    "/api/admin/poll-now",
+    handlers.adminPollNow ?? (() => notImplemented("Admin poll now")),
+  );
+  router.post(
+    "/api/admin/synthesize-now",
+    handlers.adminSynthesizeNow ?? (() => notImplemented("Admin synthesize now")),
   );
 
   handlers.extra?.(router);

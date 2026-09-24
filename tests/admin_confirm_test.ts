@@ -19,7 +19,7 @@
  *
  * Owned by: audio-feed-05b.
  */
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { adminScriptSource, extractInlineScript, runAdminScript } from "./admin_script.ts";
 import type { AdminHarness } from "./admin_script.ts";
 
@@ -230,4 +230,58 @@ Deno.test("a dismissed dialog leaves the button usable (audio-feed-05b)", async 
   remove[0]!.click();
   await harness.flush();
   assertEquals(deletes(harness).length, 1);
+});
+
+Deno.test("clicking Poll Feeds Now triggers POST /api/admin/poll-now and updates feedback (audio-feed-dsn)", async () => {
+  const harness = await runAdminScript({
+    storedToken: "admin-secret",
+    respond: (method, path) => {
+      if (method === "POST" && path === "/api/admin/poll-now") {
+        return { ok: true, polled: 3, queued: 5, failed: 0 };
+      }
+      return { ok: true };
+    },
+  });
+
+  const btn = harness.byId("pollNowBtn");
+  assertEquals(btn.disabled, false, "button must be enabled when token is saved");
+  btn.click();
+  await harness.flush();
+
+  const pollRequests = harness.requests.filter((r) =>
+    r.method === "POST" && r.path === "/api/admin/poll-now"
+  );
+  assertEquals(pollRequests.length, 1);
+  assertEquals(btn.disabled, false, "button must be re-enabled after response");
+  assertStringIncludes(
+    harness.byId("triggersFeedback").textContent,
+    "Polled 3 feeds: 5 queued, 0 failed.",
+  );
+});
+
+Deno.test("clicking Synthesize Queue Now triggers POST /api/admin/synthesize-now and updates feedback (audio-feed-dsn)", async () => {
+  const harness = await runAdminScript({
+    storedToken: "admin-secret",
+    respond: (method, path) => {
+      if (method === "POST" && path === "/api/admin/synthesize-now") {
+        return { ok: true, ready: 4, failed: 1, deferred: 0 };
+      }
+      return { ok: true };
+    },
+  });
+
+  const btn = harness.byId("synthesizeNowBtn");
+  assertEquals(btn.disabled, false);
+  btn.click();
+  await harness.flush();
+
+  const synthRequests = harness.requests.filter((r) =>
+    r.method === "POST" && r.path === "/api/admin/synthesize-now"
+  );
+  assertEquals(synthRequests.length, 1);
+  assertEquals(btn.disabled, false);
+  assertStringIncludes(
+    harness.byId("triggersFeedback").textContent,
+    "Synthesis batch: 4 ready, 1 failed, 0 deferred.",
+  );
 });

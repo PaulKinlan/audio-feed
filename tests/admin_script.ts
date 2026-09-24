@@ -62,6 +62,9 @@ const PAGE_IDS = [
   "subFeedUrl",
   "subFeedTitle",
   "subFeedMode",
+  "pollNowBtn",
+  "synthesizeNowBtn",
+  "triggersFeedback",
 ];
 
 export interface StubElement {

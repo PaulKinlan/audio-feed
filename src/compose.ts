@@ -27,7 +27,18 @@ import {
   type ExtractedArticle,
   IngestError,
 } from "./ingest/url.ts";
-import { subscribeToFeed } from "./ingest/feed.ts";
+import {
+  type FeedPollOptions,
+  type PollDependencies,
+  runFeedPollBatch,
+  subscribeToFeed,
+} from "./ingest/feed.ts";
+import {
+  createGeminiSynthesizer,
+  runSynthesisBatch,
+  type SynthesisWorkerOptions,
+  type Synthesizer,
+} from "./worker/synthesis.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
 import { toFeedEpisode } from "./feed/adapter.ts";
@@ -285,6 +296,12 @@ export interface ComposeDeps {
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
   /** Test seam: fetches a feed document without real network (audio-feed-2e5). */
   feedTransport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+  /** Test seam: synthesizer for synthesis queue processing (audio-feed-dsn). */
+  synthesizer?: Synthesizer;
+  /** Test seam: feed poll options / dependencies (audio-feed-dsn). */
+  feedPollOptions?: PollDependencies & FeedPollOptions;
+  /** Test seam: synthesis worker options (audio-feed-dsn). */
+  synthesisOptions?: SynthesisWorkerOptions;
 }
 
 /**
@@ -1052,6 +1069,74 @@ export function createAdminRotateUserTokenHandler(
   };
 }
 
+/** `POST /api/admin/poll-now` — trigger an immediate feed poll batch (audio-feed-dsn). */
+export function createAdminPollNowHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminPollNow"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const result = await runFeedPollBatch(ctx, {
+      ...deps.feedPollOptions,
+      transport: deps.feedTransport,
+      fetchArticle: deps.fetchArticle,
+    });
+
+    return Response.json(
+      {
+        ok: true,
+        polled: result.polled,
+        queued: result.queued,
+        failed: result.failed,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/** `POST /api/admin/synthesize-now` — trigger an immediate synthesis batch (audio-feed-dsn). */
+export function createAdminSynthesizeNowHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminSynthesizeNow"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const synthesizer = deps.synthesizer ??
+      (ctx.config.geminiApiKey ? createGeminiSynthesizer(ctx) : null);
+
+    if (!synthesizer) {
+      return Response.json(
+        {
+          ok: false,
+          error: "Synthesis unavailable: GEMINI_API_KEY is not configured.",
+          ready: 0,
+          failed: 0,
+          deferred: 0,
+        },
+        { status: 503, headers: { "cache-control": "no-store" } },
+      );
+    }
+
+    const result = await runSynthesisBatch(ctx, synthesizer, deps.synthesisOptions);
+    return Response.json(
+      {
+        ok: true,
+        ready: result.ready.length,
+        failed: result.failed.length,
+        deferred: result.deferred.length,
+        skipped: result.skipped.length,
+        superseded: result.superseded.length,
+        considered: result.considered,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
 /** Build every lane seam for a real server. Called by src/server.ts. */
 export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHandlers {
   return {
@@ -1068,5 +1153,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminCreateSource: createAdminCreateUserSourceHandler(ctx, deps),
     adminDeleteSource: createAdminDeleteUserSourceHandler(ctx),
     adminRotateToken: createAdminRotateUserTokenHandler(ctx),
+    adminPollNow: createAdminPollNowHandler(ctx, deps),
+    adminSynthesizeNow: createAdminSynthesizeNowHandler(ctx, deps),
   };
 }
