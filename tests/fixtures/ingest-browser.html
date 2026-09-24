@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Send-to-Audio acceptance harness</title>
+    <style>
+    body {
+      max-width: 65rem;
+      margin: 2rem auto;
+      padding: 1rem;
+      font: 1rem/1.5 system-ui;
+    }
+    input[type="url"] {
+      display: block;
+      width: 95%;
+      padding: .75rem;
+      font: inherit;
+    }
+    fieldset {
+      margin-block: 1rem;
+    }
+    button {
+      font: inherit;
+      padding: .75rem;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    </style>
+    <script src="/client.js" defer></script>
+  </head>
+  <body>
+    <h1>Send-to-Audio acceptance harness</h1>
+    <p>Local fixture users and in-memory queue. No real accounts, synthesis, credentials, or durable storage.</p>
+    <form action="/api/ingest" method="post">
+      <label for="url">Article URL (required)</label>
+      <input id="url" name="url" type="url" value="https://example.com/article" required>
+      <fieldset>
+        <legend>Audio mode</legend>
+        <label><input type="radio" name="mode" value="direct" checked> Full read</label>
+        <label><input type="radio" name="mode" value="deepdive"> Deep dive</label>
+      </fieldset>
+      <fieldset>
+        <legend>Fixture user status (not production authentication)</legend>
+        <label><input type="radio" name="status" value="approved" checked> Approved</label>
+        <label><input type="radio" name="status" value="pending"> Pending</label>
+      </fieldset>
+      <button type="submit">Send to Audio</button>
+    </form>
+    <p id="jobs">Queued fixture jobs: 0</p>
+    <pre id="result" aria-live="polite">No request made.</pre>
+  </body>
+</html>
