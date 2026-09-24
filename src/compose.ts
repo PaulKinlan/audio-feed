@@ -776,8 +776,8 @@ export function createAdminDeleteUserSourceHandler(
 
     const deletedEpisodeIds = new Set<string>();
     const cancelledPendingIds = new Set<string>();
-    let deletedBlobs = 0;
-    let failedBlobs = 0;
+    const deletedBlobKeys = new Set<string>();
+    const failedBlobKeys = new Set<string>();
     let abortedEarly = false;
 
     if (cascade) {
@@ -806,12 +806,12 @@ export function createAdminDeleteUserSourceHandler(
         prevFingerprint = fingerprint;
 
         for (const episode of batch) {
-          if (episode.audioKey) {
+          if (episode.audioKey && !deletedBlobKeys.has(episode.audioKey)) {
             try {
               await ctx.stores.blobs.delete(episode.audioKey);
-              deletedBlobs++;
+              deletedBlobKeys.add(episode.audioKey);
             } catch {
-              failedBlobs++;
+              failedBlobKeys.add(episode.audioKey);
             }
           }
           const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
@@ -858,19 +858,32 @@ export function createAdminDeleteUserSourceHandler(
     }
 
     if (abortedEarly) {
-      const remaining = await ctx.stores.metadata.listEpisodes({
-        userId,
-        sourceId,
-        limit: 100,
-      });
-      if (remaining.length > 0) {
+      const remainingEpisodes = cascade
+        ? (await ctx.stores.metadata.listEpisodes({
+          userId,
+          sourceId,
+          limit: 1000,
+        })).length
+        : (await ctx.stores.metadata.listEpisodes({
+          userId,
+          sourceId,
+          status: "pending",
+          limit: 1000,
+        })).length + (await ctx.stores.metadata.listEpisodes({
+          userId,
+          sourceId,
+          status: "synthesizing",
+          limit: 1000,
+        })).length;
+
+      if (remainingEpisodes > 0) {
         return Response.json(
           {
             ok: false,
             error: "Source deletion incomplete: could not remove all episodes",
             incomplete: true,
             sourceId,
-            remainingEpisodes: remaining.length,
+            remainingEpisodes,
             deletedEpisodes: deletedEpisodeIds.size,
             cancelledPending: cancelledPendingIds.size,
           },
@@ -879,12 +892,24 @@ export function createAdminDeleteUserSourceHandler(
       }
     }
 
-    const readyEpisodes = cascade ? 0 : (await ctx.stores.metadata.listEpisodes({
+    const readyEpisodes = cascade ? [] : await ctx.stores.metadata.listEpisodes({
       userId,
       sourceId,
       status: "ready",
       limit: 1000,
-    })).length;
+    });
+
+    if (!cascade) {
+      // Backfill sourceTitle for legacy episodes being retained (audio-feed-rkf)
+      for (const episode of readyEpisodes) {
+        if (!episode.sourceTitle) {
+          await ctx.stores.metadata.putEpisode({
+            ...episode,
+            sourceTitle: source.title,
+          });
+        }
+      }
+    }
 
     await ctx.stores.metadata.deleteSource(userId, sourceId);
     return Response.json(
@@ -894,14 +919,14 @@ export function createAdminDeleteUserSourceHandler(
           deleted: sourceId,
           cascaded: true,
           deletedEpisodes: deletedEpisodeIds.size,
-          deletedBlobs,
-          failedBlobs,
+          deletedBlobs: deletedBlobKeys.size,
+          failedBlobs: failedBlobKeys.size,
         }
         : {
           ok: true,
           deleted: sourceId,
           cascaded: false,
-          retainedEpisodes: readyEpisodes,
+          retainedEpisodes: readyEpisodes.length,
           cancelledPending: cancelledPendingIds.size,
         },
       { headers: { "cache-control": "no-store" } },

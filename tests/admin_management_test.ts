@@ -458,6 +458,147 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId drains mixed/transient 
   );
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId incomplete path only counts pending/synthesizing, not retained ready (audio-feed-mf5)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-inc", userId: "user-1", title: "Incomplete Source" }),
+  );
+
+  // 3 pending episodes
+  for (let i = 0; i < 3; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-pend-${i}`,
+        userId: "user-1",
+        sourceId: "src-inc",
+        status: "pending",
+      }),
+    );
+  }
+  // 20 ready episodes
+  for (let i = 0; i < 20; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-ready-${i}`,
+        userId: "user-1",
+        sourceId: "src-inc",
+        status: "ready",
+        audioKey: `audio/key-${i}.wav`,
+      }),
+    );
+  }
+
+  // Stub deleteEpisode to always fail
+  stores.metadata.deleteEpisode = () => Promise.resolve(false);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-inc`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 500);
+  const body = await res.json();
+  assertEquals(body.ok, false);
+  assertEquals(body.incomplete, true);
+  // Must report only the 3 pending episodes that failed to cancel, NOT 23!
+  assertEquals(body.remainingEpisodes, 3);
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId cascade counts distinct deletedBlobs on retry (audio-feed-mf5)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-cas", userId: "user-1", title: "Cascade Source" }),
+  );
+
+  // 5 ready episodes with blobs
+  for (let i = 0; i < 5; i++) {
+    const key = `audio/blob-${i}.wav`;
+    await stores.blobs.put(key, new Uint8Array([1]), { contentType: "audio/wav" });
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-cas-${i}`,
+        userId: "user-1",
+        sourceId: "src-cas",
+        status: "ready",
+        audioKey: key,
+      }),
+    );
+  }
+
+  // Each episode fails delete once, forcing a second retry pass
+  const attempts = new Map<string, number>();
+  const originalDelete = stores.metadata.deleteEpisode.bind(stores.metadata);
+  stores.metadata.deleteEpisode = (userId: string, id: string) => {
+    const count = (attempts.get(id) ?? 0) + 1;
+    attempts.set(id, count);
+    if (count === 1) return Promise.resolve(false);
+    return originalDelete(userId, id);
+  };
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-cas?cascade=true`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.deletedEpisodes, 5);
+  // deletedBlobs must report 5 distinct keys deleted, NOT 10!
+  assertEquals(body.deletedBlobs, 5);
+  assertEquals(body.failedBlobs, 0);
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId backfills sourceTitle on legacy retained episodes (audio-feed-rkf)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-legacy", userId: "user-1", title: "Legacy Source" }),
+  );
+
+  // Legacy episode with undefined sourceTitle
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-leg",
+      userId: "user-1",
+      sourceId: "src-legacy",
+      sourceTitle: undefined,
+      status: "ready",
+      audioKey: "audio/leg.wav",
+      title: "Old Article",
+    }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-legacy`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+
+  // Stored episode now has backfilled sourceTitle
+  const updatedEp = await stores.metadata.getEpisode("user-1", "ep-leg");
+  assert(updatedEp);
+  assertEquals(updatedEp.sourceTitle, "Legacy Source");
+
+  // Master feed syndicates with attribution
+  const masterRes = await fetch(new Request(`${BASE}/feed/tok-1/master.xml`));
+  assertEquals(masterRes.status, 200);
+  const xml = await masterRes.text();
+  assertStringIncludes(xml, "<title>Legacy Source: Old Article</title>");
+});
+
 Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
