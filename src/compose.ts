@@ -24,6 +24,7 @@
 import { createUrlIngestHandler, type ExtractedArticle } from "./ingest/url.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
+import { toFeedEpisode } from "./feed/adapter.ts";
 import {
   approveUser,
   assertAuthorizedForAudio,
@@ -33,10 +34,10 @@ import {
   requireAdminToken,
   UnknownUserError,
 } from "./auth/users.ts";
-import { INBOX_SOURCE_ID, isPublishable, type User } from "./types.ts";
+import { INBOX_SOURCE_ID, type User } from "./types.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
-import type { Article, AudioMode, Episode } from "./types.ts";
+import type { Article, AudioMode } from "./types.ts";
 
 export { IllegalTransitionError, NotAuthorizedError, UnknownUserError };
 
@@ -78,29 +79,17 @@ function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | nul
 }
 
 // ---------------------------------------------------------------------------
-// storage → feed mapping (see the header note: this is b0a's subject)
+// storage → feed projection
 // ---------------------------------------------------------------------------
 
-/** Publishable means it has playable audio; a missing enclosure is a broken player. */
-function toFeedEpisode(episode: Episode, ctx: AppContext): FeedEpisode | null {
-  if (!isPublishable(episode)) return null;
-  return {
-    guid: episode.id,
-    title: episode.title,
-    // readyAt is when audio existed; createdAt is when the job was queued. Podcast
-    // clients sort by pubDate, so a minutes-long synthesis gap would show up as a
-    // stale ordering (audio-feed-opus, review note).
-    pubDate: episode.readyAt ?? episode.createdAt,
-    audioUrl: `${ctx.config.publicBaseUrl}/audio/${episode.audioKey}`,
-    description: episode.description,
-    kind: episode.mode,
-    sourceId: episode.sourceId,
-    byteLength: episode.byteLength,
-    mimeType: episode.contentType,
-    durationSeconds: episode.durationSeconds,
-  };
-}
-
+/**
+ * Query the user's episodes and project them for the generator.
+ *
+ * The projection itself lives in `src/feed/adapter.ts` (audio-feed-b0a) because
+ * that is the seam between two unrelated Episode types; this function only adds
+ * the IO the projection deliberately does not do — asking the blob store how big
+ * a file is when the record predates synthesis recording its size.
+ */
 async function publishableEpisodes(
   ctx: AppContext,
   userId: string,
@@ -115,16 +104,15 @@ async function publishableEpisodes(
 
   const publishable: FeedEpisode[] = [];
   for (const episode of episodes) {
-    const mapped = toFeedEpisode(episode, ctx);
-    if (!mapped) continue;
-    // `<enclosure length>` is required by RSS, and 0 is never a real audio size:
-    // it means the record predates synthesis finishing. The store knows the size
-    // of what it will actually serve, so ask it rather than trusting the record.
-    if ((mapped.byteLength === undefined || mapped.byteLength <= 0) && episode.audioKey) {
-      const info = await ctx.stores.blobs.head(episode.audioKey);
-      if (info) mapped.byteLength = info.size;
-    }
-    publishable.push(mapped);
+    const needsSize = !episode.byteLength || episode.byteLength <= 0;
+    const info = needsSize && episode.audioKey
+      ? await ctx.stores.blobs.head(episode.audioKey)
+      : null;
+    const mapped = toFeedEpisode(episode, {
+      publicBaseUrl: ctx.config.publicBaseUrl,
+      byteLength: info?.size,
+    });
+    if (mapped) publishable.push(mapped);
   }
   return publishable;
 }
