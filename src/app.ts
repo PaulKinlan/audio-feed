@@ -9,6 +9,7 @@
  * Route map (paths are contract — feed URLs end up in podcast clients and can
  * never be changed once subscribed):
  *
+ *   GET  /                                    homepage, human entry point [f2a]
  *   GET  /health                              liveness
  *   GET  /feed/:token/master.xml              master aggregated feed      [7w6]
  *   GET  /feed/:token/:sourceId/:mode.xml     per-source feed             [7w6]
@@ -23,6 +24,7 @@
 import { type Handler, Router } from "./router.ts";
 import { json, notFound } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
+import { handleHome } from "./routes/home.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
 
@@ -50,6 +52,11 @@ export interface AppHandlers {
 
 export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   const router = new Router<AppContext>();
+
+  // audio-feed-f2a: every other route is machine-facing, so a person arriving
+  // at the origin used to get `no route for GET /` and no way to learn what the
+  // service was. This is the human entry point.
+  router.get("/", handleHome);
 
   router.get("/health", ({ ctx }) =>
     json({
