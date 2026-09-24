@@ -170,8 +170,22 @@ export async function runSynthesisBatch(
   }
 
   for (const { episode } of pending) {
-    // Approval was already resolved per user above, in this same tick, at the point
-    // of spending — which is why a deferred user no longer costs an attempt slot.
+    // Two approval checks, each for a different job:
+    //  - the gather-time filter above decides fairly who gets the batch budget, so a
+    //    suspended user cannot starve anyone;
+    //  - this one is the SPEND gate. A tick is not instantaneous (real synthesis
+    //    measured 10.2s per episode, so a batchSize of 5 runs ~50s), and a
+    //    suspension landing inside that window must stop the money. The gather-time
+    //    snapshot is "approved when the tick started"; this is "approved when we
+    //    spend", and only the second one is the gate (audio-feed-opus review).
+    try {
+      await assertAuthorizedForAudio(metadata, episode.userId);
+    } catch (error) {
+      const reason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
+      // Deferred, not failed: nothing was spent and a lifted suspension can be served.
+      result.deferred.push({ episodeId: episode.id, reason });
+      continue;
+    }
 
     const article = await metadata.getArticle(episode.userId, episode.articleId);
     if (!article) {

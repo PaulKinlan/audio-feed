@@ -417,3 +417,52 @@ Deno.test("the batch budget still bounds synthesis work", async () => {
   // listed newest-first, so the two newest were the ones attempted.
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "pending");
 });
+
+Deno.test("a suspension landing mid-tick stops the remaining spend", async () => {
+  // The window audio-feed-opus identified: one tick can run ~50s at real synthesis
+  // speed, so approval must be re-read immediately before spending, not only at
+  // gather time. Here the user is suspended while their FIRST episode synthesises.
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
+  );
+  for (let i = 0; i < 2; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "user-1",
+        sourceId: "inbox",
+        articleId: "article-1",
+        status: "pending",
+        audioKey: undefined,
+      }),
+    );
+  }
+  const ctx = { config, stores };
+
+  let calls = 0;
+  const run = await runSynthesisBatch(ctx, async () => {
+    calls++;
+    // The admin suspends the user while the first episode is being synthesised.
+    const user = await stores.metadata.getUser("user-1");
+    await stores.metadata.putUser({ ...user!, status: "suspended" });
+    return fakeAudio();
+  }, { batchSize: 5 });
+
+  assertEquals(calls, 1, "the second episode must not be synthesised after the suspension");
+  assertEquals(run.ready.length, 1);
+  assert(
+    run.deferred.length >= 1,
+    `the remaining episode must be deferred, got ${JSON.stringify(run)}`,
+  );
+  // The un-synthesised episode survives as pending so re-approval can serve it.
+  const statuses = await Promise.all(
+    ["ep-0", "ep-1"].map(async (id) => (await stores.metadata.getEpisode("user-1", id))?.status),
+  );
+  assert(
+    statuses.includes("pending"),
+    `expected one episode left pending, got ${statuses.join(",")}`,
+  );
+});
