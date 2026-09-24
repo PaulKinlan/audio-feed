@@ -25,6 +25,7 @@ import { type Handler, Router } from "./router.ts";
 import { json, notFound } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
+import { handleAdmin } from "./routes/admin.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
 
@@ -46,6 +47,10 @@ export interface AppHandlers {
   ingest?: Handler<AppContext>;
   /** audio-feed-7wn — multi-user admin approval. */
   approveUser?: Handler<AppContext>;
+  /** audio-feed-z2s — the admin console's subscriber list, creation and suspension. */
+  listUsers?: Handler<AppContext>;
+  createUser?: Handler<AppContext>;
+  suspendUser?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -57,6 +62,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // at the origin used to get `no route for GET /` and no way to learn what the
   // service was. This is the human entry point.
   router.get("/", handleHome);
+  // The admin console shell. Public by design: it carries no subscriber data, and
+  // every byte of that data comes from the token-gated /api/admin/users routes
+  // (audio-feed-z2s).
+  router.get("/admin", handleAdmin);
 
   router.get("/health", ({ ctx }) =>
     json({
@@ -86,6 +95,18 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/users/:id/approve",
     handlers.approveUser ?? (() => notImplemented("Admin approval")),
+  );
+  router.post(
+    "/api/admin/users/:id/suspend",
+    handlers.suspendUser ?? (() => notImplemented("Admin suspension")),
+  );
+  router.get(
+    "/api/admin/users",
+    handlers.listUsers ?? (() => notImplemented("Admin user list")),
+  );
+  router.post(
+    "/api/admin/users",
+    handlers.createUser ?? (() => notImplemented("Admin user creation")),
   );
 
   handlers.extra?.(router);
