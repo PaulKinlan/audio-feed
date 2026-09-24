@@ -20,9 +20,9 @@ Converts RSS articles and on-demand web URLs into personalized podcast feeds fea
    - Dynamic pacing, natural conversational banter, and structured chapter markers.
 
 ### Feed Topology
-- **Per-Source Direct Read Feed:** `https://<domain>/feed/<source-id>/direct.xml`
-- **Per-Source Deep Dive Feed:** `https://<domain>/feed/<source-id>/deepdive.xml`
-- **Master Aggregated Feed:** `https://<domain>/feed/master.xml` (all subscribed articles in one unified feed for podcast players like Pocket Casts, Apple Podcasts, Overcast).
+- **Master Aggregated Feed:** `https://<domain>/feed/<feed-token>/master.xml` (all subscribed articles in one unified feed across all sources for podcast players like Pocket Casts, Apple Podcasts, Overcast; capped to the newest 200 episodes; tolerates client tracking/cache-busting query parameters).
+- **Per-Source Direct Read Feed:** `https://<domain>/feed/<feed-token>/<source-id>/direct.xml` (single-voice author narration for an individual source, capped to the newest 200 episodes).
+- **Per-Source Deep Dive Feed:** `https://<domain>/feed/<feed-token>/<source-id>/deepdive.xml` (two-voice dialogue analysis for an individual source, capped to the newest 200 episodes).
 
 ### Instant Ingest ("Send-to-Audio")
 - Modeled after the local `remarkable-pending` reading workflow.

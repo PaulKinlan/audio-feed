@@ -417,3 +417,129 @@ Deno.test("no route echoes a feed capability", async () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-4fm: master.xml ignores query parameters and caps at 200 items
+// ---------------------------------------------------------------------------
+
+Deno.test("master.xml ignores query parameters and returns 200 across all sources (audio-feed-4fm)", async () => {
+  const { fetch, stores } = await seededApp();
+  // Add a second source and episode to verify multi-source aggregation.
+  await stores.metadata.putSource(
+    makeSource({ id: "daringfireball", userId: "user-1", title: "Daring Fireball" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-2",
+      userId: "user-1",
+      sourceId: "daringfireball",
+      sourceTitle: "Daring Fireball",
+      status: "ready",
+      title: "Another Article",
+      audioKey: "audio/user-1/direct/episode-2.mp3",
+      createdAt: "2026-09-02T00:00:00.000Z",
+      readyAt: "2026-09-02T00:05:00.000Z",
+    }),
+  );
+
+  // A client appending ?sourceId=stratechery must get 200 (not 400),
+  // and must receive the whole aggregated feed (including daringfireball),
+  // because master.xml is unfiltered by design to tolerate podcast aggregators.
+  const res = await fetch(req("/feed/token-user-1/master.xml?sourceId=stratechery"));
+  assertEquals(res.status, 200);
+  const xml = await res.text();
+  assertStringIncludes(xml, "Stratechery: An Article");
+  assertStringIncludes(xml, "Daring Fireball: Another Article");
+
+  // Arbitrary cache-busting or tracking parameters must also be accepted with 200.
+  const cacheBust = await fetch(
+    req("/feed/token-user-1/master.xml?tracking=client123&t=1727218800&_cb=987"),
+  );
+  assertEquals(cacheBust.status, 200);
+  assertStringIncludes(
+    await cacheBust.text(),
+    `<atom:link href="${BASE}/feed/token-user-1/master.xml"`,
+  );
+});
+
+Deno.test("master.xml and per-source feeds cap output to newest 200 episodes (audio-feed-4fm)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(
+    makeSource({ id: "src-1", userId: "user-1", title: "Source 1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-2", userId: "user-1", title: "Source 2" }),
+  );
+
+  // Seed 250 ready episodes across src-1 and src-2 with monotonically increasing timestamps.
+  for (let i = 0; i < 250; i++) {
+    const pad = String(i).padStart(3, "0");
+    const sourceId = i % 2 === 0 ? "src-1" : "src-2";
+    const ts = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${pad}`,
+        userId: "user-1",
+        sourceId,
+        sourceTitle: sourceId === "src-1" ? "Source 1" : "Source 2",
+        status: "ready",
+        title: `Episode ${pad}`,
+        audioKey: `audio/user-1/direct/ep-${pad}.mp3`,
+        byteLength: 500,
+        createdAt: ts,
+        readyAt: ts,
+      }),
+    );
+  }
+
+  const handlers = createHandlers({ config, stores });
+  const { fetch } = createApp({ config, stores }, handlers);
+
+  // 1. Master feed is capped to 200 episodes.
+  const masterRes = await fetch(req("/feed/token-user-1/master.xml"));
+  assertEquals(masterRes.status, 200);
+  const masterXml = await masterRes.text();
+  const masterItems = masterXml.match(/<item>/g) ?? [];
+  assertEquals(masterItems.length, 200, "master.xml must cap at 200 episodes");
+
+  // The 200 returned should be the newest (ep-050 through ep-249), omitting ep-000 through ep-049.
+  assertStringIncludes(masterXml, "Episode 249");
+  assertStringIncludes(masterXml, "Episode 050");
+  assert(
+    !masterXml.includes("<title>Source 1: Episode 000</title>"),
+    "oldest episode 000 must be omitted",
+  );
+  assert(
+    !masterXml.includes("<title>Source 2: Episode 049</title>"),
+    "oldest episode 049 must be omitted",
+  );
+
+  // 2. Per-source feed is also capped to 200 episodes if a source has >200.
+  // Add 100 more episodes into src-1 (src-1 now has 125 + 100 = 225 episodes).
+  for (let i = 250; i < 350; i++) {
+    const pad = String(i).padStart(3, "0");
+    const ts = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${pad}`,
+        userId: "user-1",
+        sourceId: "src-1",
+        sourceTitle: "Source 1",
+        status: "ready",
+        title: `Episode ${pad}`,
+        audioKey: `audio/user-1/direct/ep-${pad}.mp3`,
+        byteLength: 500,
+        createdAt: ts,
+        readyAt: ts,
+      }),
+    );
+  }
+
+  const srcRes = await fetch(req("/feed/token-user-1/src-1/direct.xml"));
+  assertEquals(srcRes.status, 200);
+  const srcXml = await srcRes.text();
+  const srcItems = srcXml.match(/<item>/g) ?? [];
+  assertEquals(srcItems.length, 200, "per-source feed must also cap at 200 episodes");
+  assertStringIncludes(srcXml, "Episode 349");
+});

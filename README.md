@@ -18,6 +18,28 @@ reads and two-voice deep dive analysis.
 - **Admin Approval Gating:** Multi-user data model where new accounts require admin verification to
   prevent unauthorized Gemini API spend.
 
+## Podcast Feeds & Syndication Topology
+
+`audio-feed` publishes standard podcast RSS 2.0 / iTunes XML feeds with Atom self-links, pubDates, episode durations, and authenticated audio enclosures (`/audio/...`). Feed URLs are secured via the user's secret capability token (`feedToken`).
+
+### 1. Master Aggregated Feed (`GET /feed/:token/master.xml`)
+
+The Master Feed consolidates all published audio across all of a user's subscribed RSS feeds and on-demand web ingests into a single unified podcast channel.
+
+- **Unified Catalog:** Combines both Direct Narration and Deep Dive Dialogue episodes from all sources.
+- **Unfiltered by Source:** The master feed represents the user's aggregated library across all subscribed sources.
+- **Query Parameter Tolerance:** Any query parameters appended to the URL (such as `?sourceId=...`, `?t=...`, or client cache-busters) are intentionally ignored rather than rejected with HTTP 400. Real-world podcast clients and aggregators (Apple Podcasts, Overcast, Pocket Casts, AntennaPod) routinely append tracking, timestamp, and cache-busting parameters when polling feeds. Returning 400 would break live subscriber playback. To subscribe to a specific source alone, use its dedicated per-source feed URL instead.
+- **200-Episode Window:** Capped to the newest 200 ready episodes. This follows standard podcast publishing practice for aggregate feeds, preventing multi-megabyte XML payloads, mobile bandwidth exhaustion, and aggregator timeout errors. Older episodes beyond the 200 newest are omitted from the syndicated XML.
+
+### 2. Per-Source Feeds (`GET /feed/:token/:sourceId/:mode.xml`)
+
+Subscribers who prefer dedicated channels for specific publications or presentation styles can subscribe to individual per-source feeds:
+
+- **Modes:**
+  - `:mode = direct` — Single-voice author narration (Stratechery style).
+  - `:mode = deepdive` — Two-voice conversational analysis and debate (NotebookLM style).
+- **200-Episode Window:** Each individual per-source feed is likewise capped to its newest 200 ready episodes using the same bounded window.
+
 ## Quickstart
 
 ```bash

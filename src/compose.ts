@@ -198,6 +198,12 @@ const forbidden = (message: string) =>
 /**
  * `GET /feed/:token/master.xml` — every ready episode for the token's user.
  *
+ * Capped to the newest 200 episodes (industry standard RSS practice to avoid
+ * multi-megabyte XML payloads and client timeouts). Unfiltered across sources;
+ * query parameters (such as ?sourceId= or client tracking/cache-busters) are
+ * deliberately ignored rather than rejected with 400 to preserve compatibility
+ * with podcast aggregators and apps that append query parameters.
+ *
  * Non-approved users get 403 even though the gate is about synthesis cost: their
  * feed would otherwise keep serving audio generated before a suspension.
  */
