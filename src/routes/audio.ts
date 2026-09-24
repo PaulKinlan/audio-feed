@@ -32,28 +32,28 @@ export async function handleAudio(
   const rawKey = params.key;
   if (!rawKey || !isSafeBlobKey(rawKey)) return notFound("Unknown audio object");
 
-  // Resolve key against blob storage (support both direct key and audio/ prefixed canonical key)
-  let key = rawKey;
-  let info = await ctx.stores.blobs.head(key);
-  if (!info && !key.startsWith("audio/") && isSafeBlobKey(`audio/${key}`)) {
-    const candidate = `audio/${key}`;
-    const candidateInfo = await ctx.stores.blobs.head(candidate);
-    if (candidateInfo) {
-      key = candidate;
-      info = candidateInfo;
-    }
-  }
-
   const isHead = req.method === "HEAD";
 
-  // A store-provided URL means the client can fetch bytes directly.
-  const direct = await ctx.stores.blobs.url(key);
-  if (direct && !isHead) {
-    return new Response(null, { status: 302, headers: { location: direct } });
-  }
+  // For keys not starting with "audio/", the canonical shape emitted by new feeds
+  // is audio/${rawKey}. Try the canonical candidate first, then rawKey (audio-feed-1rx).
+  const candidateKeys = rawKey.startsWith("audio/")
+    ? [rawKey]
+    : isSafeBlobKey(`audio/${rawKey}`)
+    ? [`audio/${rawKey}`, rawKey]
+    : [rawKey];
 
   if (isHead) {
-    if (!info) return notFound("Unknown audio object");
+    let resolvedKey: string | null = null;
+    let info = null;
+    for (const key of candidateKeys) {
+      info = await ctx.stores.blobs.head(key);
+      if (info) {
+        resolvedKey = key;
+        break;
+      }
+    }
+    if (!info || !resolvedKey) return notFound("Unknown audio object");
+
     return headResponse(info.size, {
       "content-type": info.contentType,
       "accept-ranges": "bytes",
@@ -62,25 +62,51 @@ export async function handleAudio(
     });
   }
 
-  const range = parseRangeHeader(req.headers.get("range"));
-
-  let object;
-  try {
-    object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
-  } catch (error) {
-    if (error instanceof RangeNotSatisfiableError) {
-      return new Response(null, {
-        status: 416,
-        headers: {
-          "content-range": `bytes */${error.size}`,
-          "accept-ranges": "bytes",
-        },
-      });
+  // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
+  if (!isHead) {
+    let isRedirectingStore = false;
+    for (const key of candidateKeys) {
+      const direct = await ctx.stores.blobs.url(key);
+      if (!direct) break;
+      isRedirectingStore = true;
+      const info = await ctx.stores.blobs.head(key);
+      if (info) {
+        return new Response(null, { status: 302, headers: { location: direct } });
+      }
     }
-    throw error;
+    if (isRedirectingStore) {
+      return notFound("Unknown audio object");
+    }
   }
 
-  if (!object) return notFound("Unknown audio object");
+  // GET: skip head() calls entirely to avoid extra store round trips (audio-feed-1rx).
+  const range = parseRangeHeader(req.headers.get("range"));
+
+  let resolvedKey: string | null = null;
+  let object = null;
+
+  for (const key of candidateKeys) {
+    try {
+      object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
+    } catch (error) {
+      if (error instanceof RangeNotSatisfiableError) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            "content-range": `bytes */${error.size}`,
+            "accept-ranges": "bytes",
+          },
+        });
+      }
+      throw error;
+    }
+    if (object) {
+      resolvedKey = key;
+      break;
+    }
+  }
+
+  if (!object || !resolvedKey) return notFound("Unknown audio object");
 
   const headers = new Headers({
     "content-type": object.contentType,
