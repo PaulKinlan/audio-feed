@@ -1,8 +1,4 @@
-import {
-  assertEquals,
-  assertRejects,
-  assertThrows,
-} from "jsr:@std/assert@^1.0.10";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@^1.0.10";
 import {
   base64ToUint8Array,
   buildDialogueRequest,
@@ -148,8 +144,7 @@ Deno.test("Two-voice dialogue - formats NotebookLM style prompt from turns", () 
     turns: [
       {
         speaker: "Kore",
-        text:
-          "Today we are diving into WasmGC. What makes it different from traditional Wasm?",
+        text: "Today we are diving into WasmGC. What makes it different from traditional Wasm?",
       },
       {
         speaker: "Fenrir",
@@ -176,8 +171,7 @@ Deno.test("Two-voice dialogue - formats from article context when turns not supp
     article: {
       title: "State of Autonomous Systems",
       author: "Paul Kinlan",
-      body:
-        "Autonomous agents require bounded execution and continuous verification.",
+      body: "Autonomous agents require bounded execution and continuous verification.",
       summary: "A practical guide to multi-agent architectures.",
     },
   });

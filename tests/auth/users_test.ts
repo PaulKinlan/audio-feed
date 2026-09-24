@@ -19,8 +19,8 @@ import {
   isValidEmail,
   listApprovalLog,
   listUsers,
-  NotAuthorizedError,
   normaliseEmail,
+  NotAuthorizedError,
   rejectUser,
   requireAdminToken,
   suspendUser,
@@ -165,7 +165,9 @@ Deno.test("the full transition matrix is enforced", async () => {
         if (from === "suspended") await suspendUser(kv, user.id, admin.id);
       }
       const current = await getUser(kv, user.id);
-      if (current?.status !== from) throw new Error(`setup failed: wanted ${from}, got ${current?.status}`);
+      if (current?.status !== from) {
+        throw new Error(`setup failed: wanted ${from}, got ${current?.status}`);
+      }
 
       const shouldPass = allowed[from]?.includes(to) ?? false;
       let passed = true;
@@ -177,7 +179,11 @@ Deno.test("the full transition matrix is enforced", async () => {
         message = String(error);
       }
       if (passed !== shouldPass) {
-        throw new Error(`${from} -> ${to}: expected ${shouldPass ? "allowed" : "refused"}, ${passed ? "allowed" : message}`);
+        throw new Error(
+          `${from} -> ${to}: expected ${shouldPass ? "allowed" : "refused"}, ${
+            passed ? "allowed" : message
+          }`,
+        );
       }
       if (shouldPass && (await getUser(kv, user.id))?.status !== to) {
         throw new Error(`${from} -> ${to} did not persist`);
@@ -245,7 +251,9 @@ Deno.test("approval ledger records every decision, attributes feeds, filters sta
   const log = await listApprovalLog(kv);
   if (log.length !== 2) throw new Error(`expected 2 ledger records, got ${log.length}`);
   if (!log.every((record) => record.adminId === admin.id)) throw new Error("admin not attributed");
-  if (!log.some((record) => record.action === "rejected" && record.reason === "no source of truth")) {
+  if (
+    !log.some((record) => record.action === "rejected" && record.reason === "no source of truth")
+  ) {
     throw new Error("rejection reason missing from ledger");
   }
 

@@ -75,7 +75,13 @@ export async function requireAdminToken(provided: string | null, expected: strin
 /** Create a pending subscriber. Never approved on creation. */
 export async function createUser(
   kv: Deno.Kv,
-  input: { email: string; displayName?: string; voice?: string; feeds?: string[]; isAdmin?: boolean },
+  input: {
+    email: string;
+    displayName?: string;
+    voice?: string;
+    feeds?: string[];
+    isAdmin?: boolean;
+  },
 ): Promise<User> {
   const email = normaliseEmail(input.email);
   if (!isValidEmail(email)) throw new Error(`Invalid email: ${input.email}`);
@@ -182,11 +188,21 @@ export function approveUser(kv: Deno.Kv, userId: string, adminId: string): Promi
   return decide(kv, userId, "approved", adminId);
 }
 
-export function rejectUser(kv: Deno.Kv, userId: string, adminId: string, reason?: string): Promise<User> {
+export function rejectUser(
+  kv: Deno.Kv,
+  userId: string,
+  adminId: string,
+  reason?: string,
+): Promise<User> {
   return decide(kv, userId, "rejected", adminId, reason);
 }
 
-export function suspendUser(kv: Deno.Kv, userId: string, adminId: string, reason?: string): Promise<User> {
+export function suspendUser(
+  kv: Deno.Kv,
+  userId: string,
+  adminId: string,
+  reason?: string,
+): Promise<User> {
   return decide(kv, userId, "suspended", adminId, reason);
 }
 

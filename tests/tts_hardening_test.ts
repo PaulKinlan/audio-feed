@@ -84,7 +84,9 @@ Deno.test("a plain 500 is NOT retried by default (a retry could double-charge)",
     threw = error instanceof GeminiTtsError && (error as GeminiTtsError).status === 500;
   }
   if (!threw) throw new Error("500 should throw");
-  if (calls.length !== 1) throw new Error(`500 must not be retried by default, got ${calls.length} attempts`);
+  if (calls.length !== 1) {
+    throw new Error(`500 must not be retried by default, got ${calls.length} attempts`);
+  }
 });
 
 Deno.test("retryOn: 'all' retries 5xx, and retries are bounded", async () => {
@@ -111,15 +113,18 @@ Deno.test("retryOn: 'none' disables retries entirely", async () => {
   } catch {
     threw = true;
   }
-  if (!threw || calls.length !== 1) throw new Error(`expected one attempt then throw, got ${calls.length}`);
+  if (!threw || calls.length !== 1) {
+    throw new Error(`expected one attempt then throw, got ${calls.length}`);
+  }
 });
 
 Deno.test("a hung request is killed by the per-attempt timeout", async () => {
   // Never resolves unless aborted — the whole reason a default deadline exists.
-  const hang = ((_input: RequestInfo | URL, init?: RequestInit) =>
-    new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
-    })) as typeof fetch;
+  const hang =
+    ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      })) as typeof fetch;
 
   const started = Date.now();
   let message = "";
@@ -156,7 +161,9 @@ Deno.test("caller cancellation is never retried and surfaces as-is", async () =>
   } catch (error) {
     message = String((error as Error).message);
   }
-  if (!/caller gave up/.test(message)) throw new Error(`caller abort must surface, got: ${message}`);
+  if (!/caller gave up/.test(message)) {
+    throw new Error(`caller abort must surface, got: ${message}`);
+  }
   if (attempts !== 1) throw new Error(`cancellation must not be retried, got ${attempts} attempts`);
 });
 
@@ -180,7 +187,9 @@ Deno.test("truncated audio throws by default and is opt-in via allowTruncated", 
 
 Deno.test("decodeAudioResponse reports finishReason and truncation on the result", () => {
   const complete = decodeAudioResponse(JSON.parse(audioBody("STOP", "audio/wav")));
-  if (complete.truncated || complete.finishReason !== "STOP") throw new Error("complete audio misflagged");
+  if (complete.truncated || complete.finishReason !== "STOP") {
+    throw new Error("complete audio misflagged");
+  }
 
   let flagged = false;
   try {
@@ -212,11 +221,17 @@ Deno.test("detectAudioFormat: an explicit hint beats the weak MPEG frame sync", 
   }
   // Container signatures stay authoritative even against a contradicting hint.
   const riff = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45]);
-  if (detectAudioFormat(riff, "audio/pcm") !== "wav") throw new Error("RIFF must win over a wrong hint");
+  if (detectAudioFormat(riff, "audio/pcm") !== "wav") {
+    throw new Error("RIFF must win over a wrong hint");
+  }
   const id3 = new Uint8Array([0x49, 0x44, 0x33, 0x03, 0x00]);
-  if (detectAudioFormat(id3, "audio/pcm") !== "mp3") throw new Error("ID3 must win over a wrong hint");
+  if (detectAudioFormat(id3, "audio/pcm") !== "mp3") {
+    throw new Error("ID3 must win over a wrong hint");
+  }
   // With no hint the sync heuristic still applies.
-  if (detectAudioFormat(l16LooksLikeSync) !== "mp3") throw new Error("bare sync should still detect mp3");
+  if (detectAudioFormat(l16LooksLikeSync) !== "mp3") {
+    throw new Error("bare sync should still detect mp3");
+  }
 });
 
 Deno.test("the API key never appears in the request URL", async () => {

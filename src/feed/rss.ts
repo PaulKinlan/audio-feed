@@ -44,24 +44,32 @@ export function toRfc2822(iso: string): string {
   if (Number.isNaN(date.getTime())) throw new Error(`Invalid pubDate: ${iso}`);
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const months = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
   ];
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${days[date.getUTCDay()]}, ${pad(date.getUTCDate())} ${
     months[date.getUTCMonth()]
-  } ${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${
-    pad(date.getUTCMinutes())
-  }:${pad(date.getUTCSeconds())} +0000`;
+  } ${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${
+    pad(date.getUTCSeconds())
+  } +0000`;
 }
 
 /** itunes:duration accepts seconds or HH:MM:SS. */
 export function formatDuration(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${
-    pad(total % 60)
-  }`;
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
 }
 
 export function directFeedUrl(origin: string, sourceId: string): string {
@@ -105,18 +113,24 @@ function itemXml(episode: Episode, title: string): string {
       `      <itunes:duration>${formatDuration(episode.durationSeconds)}</itunes:duration>`,
     );
   }
-  if (episode.season !== undefined) lines.push(`      <itunes:season>${episode.season}</itunes:season>`);
+  if (episode.season !== undefined) {
+    lines.push(`      <itunes:season>${episode.season}</itunes:season>`);
+  }
   if (episode.episodeNumber !== undefined) {
     lines.push(`      <itunes:episode>${episode.episodeNumber}</itunes:episode>`);
   }
   if (episode.kind) {
     lines.push(
-      `      <itunes:episodeType>${episode.kind === "deepdive" ? "bonus" : "full"}</itunes:episodeType>`,
+      `      <itunes:episodeType>${
+        episode.kind === "deepdive" ? "bonus" : "full"
+      }</itunes:episodeType>`,
     );
   }
   if (episode.chaptersUrl) {
     lines.push(
-      `      <podcast:chapters url="${escapeXml(episode.chaptersUrl)}" type="application/json+chapters"/>`,
+      `      <podcast:chapters url="${
+        escapeXml(episode.chaptersUrl)
+      }" type="application/json+chapters"/>`,
     );
   }
 

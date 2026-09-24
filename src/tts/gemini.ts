@@ -74,8 +74,7 @@ export const DEFAULT_MAX_RETRIES = 1;
  * cost decision, so it is opt-in via retryOn: "all".
  */
 const TRANSIENT_STATUSES = new Set([429, 503]);
-export const GEMINI_API_BASE_URL =
-  "https://generativelanguage.googleapis.com/v1beta";
+export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
 /**
  * Narration input for single-voice reading (Stratechery / Ben Thompson style)
@@ -532,9 +531,7 @@ export function parseWavHeader(bytes: Uint8Array): {
     offset += 8 + chunkSize;
   }
 
-  const bytesPerSecond = byteRate > 0
-    ? byteRate
-    : (sampleRate * channels * bitsPerSample) / 8;
+  const bytesPerSecond = byteRate > 0 ? byteRate : (sampleRate * channels * bitsPerSample) / 8;
   const durationSeconds = bytesPerSecond > 0 ? dataLength / bytesPerSecond : 0;
 
   return {
@@ -774,9 +771,7 @@ export function parseScriptIntoTurns(
     }
   }
 
-  return turns.length > 0
-    ? turns
-    : [{ speaker: speakers[0].name, text: script }];
+  return turns.length > 0 ? turns : [{ speaker: speakers[0].name, text: script }];
 }
 
 /**
@@ -789,9 +784,8 @@ export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
   ];
 
   const expert = speakers.find((s) => s.role === "expert") ?? speakers[0];
-  const foil =
-    speakers.find((s) => s.role === "curious_foil" || s.role === "host") ??
-      speakers[1];
+  const foil = speakers.find((s) => s.role === "curious_foil" || s.role === "host") ??
+    speakers[1];
 
   const topicOrTitle = input.topic || input.title || input.article?.title ||
     "today's subject";
@@ -826,9 +820,7 @@ export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
       },
       {
         speaker: expert.name,
-        text: `Here is where it gets really interesting: ${
-          art.body.slice(400, 1600)
-        }...`,
+        text: `Here is where it gets really interesting: ${art.body.slice(400, 1600)}...`,
       },
       {
         speaker: foil.name,
@@ -980,9 +972,7 @@ export function decodeAudioResponse(
   if (res.error) {
     const err = res.error as Record<string, unknown>;
     throw new GeminiTtsError(
-      typeof err.message === "string"
-        ? err.message
-        : "Gemini API returned an error",
+      typeof err.message === "string" ? err.message : "Gemini API returned an error",
       typeof err.code === "number" ? err.code : 500,
       err,
     );
@@ -1064,9 +1054,7 @@ export function decodeAudioResponse(
     } catch {
       // Fallback calculation if custom wav header
       const bytesPerSec = (sampleRate * channels * bitsPerSample) / 8;
-      durationSeconds = bytesPerSec > 0
-        ? (rawBytes.length - 44) / bytesPerSec
-        : 0;
+      durationSeconds = bytesPerSec > 0 ? (rawBytes.length - 44) / bytesPerSec : 0;
     }
   } else if (format === "mp3") {
     const mp3Info = inspectMp3(rawBytes);
@@ -1206,9 +1194,7 @@ export class GeminiTtsClient {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const deadline = AbortSignal.timeout(timeoutMs);
       // The caller's signal (if any) still wins; the timeout is the floor, never a replacement for it.
-      const signal = options.signal
-        ? AbortSignal.any([options.signal, deadline])
-        : deadline;
+      const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
 
       let res: Response;
       try {
@@ -1266,8 +1252,6 @@ export class GeminiTtsClient {
       await sleep(backoffMs(attempt, this.retryBaseDelayMs, res.headers.get("retry-after")));
     }
 
-    throw lastError instanceof Error
-      ? lastError
-      : new GeminiTtsError("Gemini TTS request failed");
+    throw lastError instanceof Error ? lastError : new GeminiTtsError("Gemini TTS request failed");
   }
 }

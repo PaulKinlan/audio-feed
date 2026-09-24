@@ -62,8 +62,10 @@ function assertWellFormed(xml: string) {
 }
 
 Deno.test("escapes XML control characters and entities", () => {
-  if (escapeXml("a & b < c > d \" e ' f") !==
-    "a &amp; b &lt; c &gt; d &quot; e &apos; f") {
+  if (
+    escapeXml("a & b < c > d \" e ' f") !==
+      "a &amp; b &lt; c &gt; d &quot; e &apos; f"
+  ) {
     throw new Error(escapeXml("a & b < c > d \" e ' f"));
   }
   if (escapeXml("bad\u0000char\u001F") !== "badchar") throw new Error("control chars not stripped");
@@ -131,7 +133,7 @@ Deno.test("per-source feed carries podcast enclosure and iTunes tags", () => {
     "<title>Stratechery — Direct Read</title>",
     'href="https://audio.example.com/feed/stratechery/direct.xml" rel="self"',
     '<guid isPermaLink="false">ep-1</guid>',
-    '<pubDate>Thu, 24 Sep 2026 10:00:00 +0000</pubDate>',
+    "<pubDate>Thu, 24 Sep 2026 10:00:00 +0000</pubDate>",
     '<enclosure url="https://cdn.example.com/ep-1.mp3" length="4200000" type="audio/mpeg"/>',
     "<itunes:duration>00:31:15</itunes:duration>",
     "<itunes:explicit>false</itunes:explicit>",
@@ -158,7 +160,7 @@ Deno.test("per-source feed excludes the other presentation mode", () => {
     ],
   });
   if (!xml.includes("ep-2")) throw new Error("deepdive episode missing from deepdive feed");
-  if (xml.includes("<guid isPermaLink=\"false\">ep-1</guid>")) {
+  if (xml.includes('<guid isPermaLink="false">ep-1</guid>')) {
     throw new Error("direct episode leaked into deepdive feed");
   }
   if (!xml.includes("<itunes:episodeType>bonus</itunes:episodeType>")) {
@@ -225,7 +227,9 @@ Deno.test("master feed aggregates sources and attributes titles", () => {
   assertWellFormed(xml);
   if (!xml.includes("<title>Stratechery: Mine</title>")) throw new Error("source prefix missing");
   if (!xml.includes("<title>Other Blog: Theirs</title>")) throw new Error("second source prefix");
-  if (!xml.includes("<title>Orphan</title>")) throw new Error("unknown source must keep bare title");
+  if (!xml.includes("<title>Orphan</title>")) {
+    throw new Error("unknown source must keep bare title");
+  }
   if (xml.split("<item>").length - 1 !== 3) throw new Error("master should carry all episodes");
 });
 
@@ -260,7 +264,7 @@ Deno.test("feed stays well-formed with hostile article text", () => {
       description: "d",
       selfUrl: "https://audio.example.com/feed/master.xml",
     },
-    [episode({ description: "sneaky ]]> <enclosure url=\"evil\" length=\"1\" type=\"x\"/>" })],
+    [episode({ description: 'sneaky ]]> <enclosure url="evil" length="1" type="x"/>' })],
   );
   assertWellFormed(hostile);
   // The evil tag must stay inert text inside CDATA, never become real markup.
