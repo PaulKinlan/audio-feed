@@ -9,6 +9,7 @@
     "check": "deno check src/**/*.ts tests/**/*.ts",
     "fmt": "deno fmt",
     "lint": "deno lint",
+    "smoke": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/smoke.ts",
     "gate": "deno fmt --check && deno lint && deno check src/**/*.ts tests/**/*.ts && deno test --allow-net --allow-env --allow-read --allow-write --unstable-kv"
   },
   "imports": {
