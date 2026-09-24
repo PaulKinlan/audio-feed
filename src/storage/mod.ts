@@ -57,6 +57,17 @@ export interface EpisodeQuery {
   limit?: number;
 }
 
+export interface EpisodePage extends EpisodeQuery {
+  /** Opaque cursor from the previous page; omit for the first page. */
+  cursor?: string;
+}
+
+export interface EpisodePageResult {
+  episodes: Episode[];
+  /** Absent when the scan is exhausted. */
+  cursor?: string;
+}
+
 export interface ListPendingOptions {
   limit?: number;
   cursor?: string;
@@ -119,8 +130,32 @@ export interface MetadataStore {
    * Resolves `false` if the episode does not exist (prevents resurrection, audio-feed-hvn).
    */
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean>;
-  /** Newest first. Backs both the per-source and master feeds. */
+  /**
+   * Newest first. Backs both the per-source and master feeds.
+   *
+   * `limit` bounds MATCHES, not index entries examined: a filtered query keeps
+   * scanning until it has `limit` matching episodes or the index is exhausted.
+   * That distinction is the whole difference between this and `listEpisodePage`
+   * below, and it is load-bearing — the drain loops in `compose.ts` stop on an
+   * empty batch, so a `limit` that bounded entries would let them report success
+   * over episodes they never removed (audio-feed-m04).
+   */
   listEpisodes(query: EpisodeQuery): Promise<Episode[]>;
+  /**
+   * Cursor-paged `listEpisodes`, so a full-catalogue scan never has to be held
+   * in memory at once (audio-feed-att). Cursors are adapter-defined and opaque;
+   * they address a position in the index scan, so this is not a stable snapshot
+   * across concurrent writes.
+   *
+   * A page can hold fewer than `limit` episodes — entries the query filters out
+   * still consume the underlying scan — so keep paging until `cursor` is absent
+   * rather than treating a short page as the end. Here `limit` bounds the scan
+   * worked, not the matches returned; `listEpisodes` above is the variant whose
+   * `limit` counts matches. The two adapters differ in how tightly they honour
+   * this `limit` (memory bounds matches, KV bounds entries), which is why callers
+   * must page to exhaustion rather than infer completion from a short page.
+   */
+  listEpisodePage(query: EpisodePage): Promise<EpisodePageResult>;
   /**
    * Pending and recoverable episodes, ordered by `createdAt` ascending (FIFO, oldest first).
    * Cross-user queue backing the synthesis worker (audio-feed-bbb).

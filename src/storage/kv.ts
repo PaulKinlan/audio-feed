@@ -30,6 +30,8 @@ import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import type {
   EpisodeClaim,
+  EpisodePage,
+  EpisodePageResult,
   EpisodeQuery,
   ListPendingOptions,
   ListPendingResult,
@@ -457,21 +459,49 @@ export class KvMetadataStore implements MetadataStore {
   }
 
   async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+    // `limit` bounds MATCHES here, not entries examined. A filtered query's
+    // matches can sit arbitrarily deep in a newest-first index scan, so one
+    // page of `listEpisodePage` (whose limit bounds the underlying scan) is not
+    // equivalent to what this method has always returned. The two drain loops in
+    // createAdminDeleteSourceHandler stop on `batch.length === 0`, so returning
+    // short here silently abandons episodes for a feed that is being deleted
+    // (audio-feed-m04, the audio-feed-4qj shape arriving through a changed seam).
+    const limit = query.limit ?? 50;
+    if (!Number.isFinite(limit)) return (await this.listEpisodePage(query)).episodes;
+
+    const out: Episode[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.listEpisodePage({ ...query, limit, cursor });
+      out.push(...page.episodes);
+      if (out.length >= limit || !page.cursor || page.cursor === cursor) break;
+      cursor = page.cursor;
+    }
+    return out.slice(0, limit);
+  }
+
+  async listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {
     const limit = query.limit ?? 50;
     const prefix = this.#indexPrefix(query);
 
-    const out: Episode[] = [];
+    const episodes: Episode[] = [];
+    const iter = this.#kv.list<string>({ prefix }, {
+      cursor: query.cursor,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
     // Keys are stored newest-first, so a plain ascending scan is already ordered.
-    for await (const entry of this.#kv.list<string>({ prefix })) {
+    for await (const entry of iter) {
       const episode = await this.getEpisode(query.userId, entry.value);
       if (!episode) continue;
       if (query.sourceId && episode.sourceId !== query.sourceId) continue;
       if (query.mode && episode.mode !== query.mode) continue;
       if (query.status && episode.status !== query.status) continue;
-      out.push(episode);
-      if (out.length >= limit) break;
+      episodes.push(episode);
+      if (episodes.length >= limit) break;
     }
-    return out;
+
+    const cursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
+    return { episodes, cursor };
   }
 
   async listPendingEpisodes(

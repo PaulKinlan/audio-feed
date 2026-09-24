@@ -8,6 +8,7 @@
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
+import type { EpisodePage, EpisodePageResult } from "./mod.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import {
   type BlobInfo,
@@ -255,16 +256,40 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+    return this.listEpisodePage(query).then((page) => page.episodes);
+  }
+
+  listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {
     const limit = query.limit ?? 50;
-    const out = [...this.#episodes.values()]
+    const matches = [...this.#episodes.values()]
       .filter((e) => e.userId === query.userId)
       .filter((e) => !query.sourceId || e.sourceId === query.sourceId)
       .filter((e) => !query.mode || e.mode === query.mode)
       .filter((e) => !query.status || e.status === query.status)
-      .sort(byNewestFirst)
-      .slice(0, limit)
-      .map((e) => structuredClone(e));
-    return Promise.resolve(out);
+      .sort(byNewestFirst);
+    // Cursor is the last returned episode's position in the total order, NOT an
+    // array index: the array is rebuilt per call, so a concurrent delete behind
+    // an index cursor shifts it and silently skips an episode — the exact
+    // unrecoverable-skip class audio-feed-c9q was filed for, which this paging
+    // exists to remove. (listPendingEpisodes still uses an index cursor; that is
+    // audio-feed-7li's scope, and its worker caller tolerates a revisit.)
+    let from = 0;
+    if (query.cursor) {
+      const at = query.cursor.lastIndexOf("|");
+      const createdAt = at < 0 ? "" : query.cursor.slice(0, at);
+      const id = at < 0 ? "" : query.cursor.slice(at + 1);
+      const anchor = { createdAt, id };
+      // First episode that sorts strictly AFTER the anchor (newest-first order).
+      from = matches.findIndex((e) => byNewestFirst(anchor, e) < 0);
+      if (from === -1) from = matches.length;
+    }
+    const end = Number.isFinite(limit) ? from + limit : matches.length;
+    const episodes = matches.slice(from, end).map((e) => structuredClone(e));
+    const last = episodes.at(-1);
+    return Promise.resolve({
+      episodes,
+      cursor: end < matches.length && last ? `${last.createdAt}|${last.id}` : undefined,
+    });
   }
 
   async listPendingEpisodes(
@@ -403,7 +428,10 @@ export class MemoryMetadataStore implements MetadataStore {
  * Newest first, tie-broken by id so ordering is total and stable — episodes
  * minted in the same millisecond must not swap places between reads.
  */
-export function byNewestFirst(a: Episode, b: Episode): number {
+/** The two fields that fully order an episode; an anchor cursor holds only these. */
+export type EpisodeKey = Pick<Episode, "createdAt" | "id">;
+
+export function byNewestFirst(a: EpisodeKey, b: EpisodeKey): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
   return b.id.localeCompare(a.id);
 }

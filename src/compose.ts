@@ -45,12 +45,55 @@ import {
   UnknownUserError,
 } from "./auth/users.ts";
 import { INBOX_SOURCE_ID, isAudioMode, type User } from "./types.ts";
+import type { EpisodeQuery, MetadataStore } from "./storage/mod.ts";
+import type { Episode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
 import type { Article, AudioMode } from "./types.ts";
 
 export { IllegalTransitionError, NotAuthorizedError, UnknownUserError };
+
+/**
+ * Walk a whole-catalogue episode scan one batch at a time (audio-feed-att).
+ *
+ * `listEpisodes` with an uncapped limit materialised every matching Episode into
+ * one array — measured at ~0.33 KB/episode, so a 50k-episode source cost ~16 MB
+ * per call and a single admin request made up to four of them. Reinstating a cap
+ * is NOT the fix: audio-feed-c9q showed rows past a cap are silently skipped and
+ * then orphaned unrecoverably. This pages the same scan and discards each batch,
+ * so the peak working set is one batch while coverage stays complete.
+ */
+const EPISODE_SCAN_BATCH = 100;
+
+async function* episodeScan(
+  metadata: MetadataStore,
+  query: Omit<EpisodeQuery, "limit">,
+): AsyncGenerator<Episode[]> {
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await metadata.listEpisodePage({
+      ...query,
+      limit: EPISODE_SCAN_BATCH,
+      cursor,
+    });
+    yield page.episodes;
+    // A cursor that stops advancing means the scan is done. Without this a
+    // misbehaving adapter spins here forever, and a hang is the worst refusal.
+    if (!page.cursor || page.cursor === cursor) return;
+    cursor = page.cursor;
+  }
+}
+
+/** Count a scan without holding it: the counting sites never need the objects. */
+async function countEpisodeScan(
+  metadata: MetadataStore,
+  query: Omit<EpisodeQuery, "limit">,
+): Promise<number> {
+  let total = 0;
+  for await (const batch of episodeScan(metadata, query)) total += batch.length;
+  return total;
+}
 
 /** Extraction of the capability token a podcast client can actually send. */
 const TOKEN_HEADERS = ["x-feed-token", "x-user-token"] as const;
@@ -782,6 +825,19 @@ export function createAdminDeleteUserSourceHandler(
 
     if (cascade) {
       // Drain all episodes in batches until none remain (audio-feed-7ve, audio-feed-des)
+      //
+      // These two loops deliberately RE-READ from the start of the scan instead of
+      // paging with a cursor, and that is not an oversight for whoever converts the
+      // rest of this handler (audio-feed-att). The re-read is the stall detector:
+      // a failed `deleteEpisode` leaves the same batch in place, the fingerprint
+      // repeats, and after two stalls the request answers 500 `incomplete` without
+      // deleting the source. Cursor-paging advances past rows that were never
+      // removed, so the scan simply ends and the handler reports success over a
+      // source it has orphaned — measured: paging this loop reddens
+      // audio-feed-des with 200 where it must answer 500. That is the audio-feed-4qj
+      // shape arriving through a third door. `listEpisodes` keeps its
+      // limit-bounds-matches meaning (audio-feed-m04) so this pattern stays correct
+      // against a per-user index.
       let prevFingerprint: string | undefined = undefined;
       let consecutiveStalls = 0;
 
@@ -860,22 +916,13 @@ export function createAdminDeleteUserSourceHandler(
 
     if (abortedEarly) {
       const remainingEpisodes = cascade
-        ? (await ctx.stores.metadata.listEpisodes({
-          userId,
-          sourceId,
-          limit: Number.POSITIVE_INFINITY,
-        })).length
-        : (await ctx.stores.metadata.listEpisodes({
-          userId,
-          sourceId,
-          status: "pending",
-          limit: Number.POSITIVE_INFINITY,
-        })).length + (await ctx.stores.metadata.listEpisodes({
-          userId,
-          sourceId,
-          status: "synthesizing",
-          limit: Number.POSITIVE_INFINITY,
-        })).length;
+        ? await countEpisodeScan(ctx.stores.metadata, { userId, sourceId })
+        : await countEpisodeScan(ctx.stores.metadata, { userId, sourceId, status: "pending" }) +
+          await countEpisodeScan(ctx.stores.metadata, {
+            userId,
+            sourceId,
+            status: "synthesizing",
+          });
 
       if (remainingEpisodes > 0) {
         return Response.json(
@@ -893,17 +940,19 @@ export function createAdminDeleteUserSourceHandler(
       }
     }
 
-    const readyEpisodes = cascade ? [] : await ctx.stores.metadata.listEpisodes({
-      userId,
-      sourceId,
-      status: "ready",
-      limit: Number.POSITIVE_INFINITY,
-    });
-
+    let retainedEpisodes = 0;
     if (!cascade) {
       // Backfill sourceTitle with CAS for legacy episodes being retained (audio-feed-rkf, audio-feed-hvn, audio-feed-c9q)
-      for (const episode of readyEpisodes) {
-        if (!episode.sourceTitle) {
+      for await (
+        const batch of episodeScan(ctx.stores.metadata, {
+          userId,
+          sourceId,
+          status: "ready",
+        })
+      ) {
+        for (const episode of batch) {
+          retainedEpisodes++;
+          if (episode.sourceTitle) continue;
           const ok = await ctx.stores.metadata.backfillEpisodeSourceTitle(
             userId,
             episode.id,
@@ -943,7 +992,7 @@ export function createAdminDeleteUserSourceHandler(
           ok: true,
           deleted: sourceId,
           cascaded: false,
-          retainedEpisodes: readyEpisodes.length,
+          retainedEpisodes,
           cancelledPending: cancelledPendingIds.size,
         },
       { headers: { "cache-control": "no-store" } },

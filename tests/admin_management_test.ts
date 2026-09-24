@@ -7,7 +7,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
-import { memoryStores } from "../src/config.ts";
+import { memoryStores, openStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -644,6 +644,180 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId backfills >1000 legacy 
   assertEquals(missingSourceTitle.length, 0);
 });
 
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId pages the retained scan instead of materialising it (audio-feed-att)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-big", userId: "user-1", title: "Big Source" }),
+  );
+
+  // 250 retained episodes: more than one batch, fewer than the old 1000 cap, so
+  // this pins the paging shape rather than a truncation boundary.
+  for (let i = 0; i < 250; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "user-1",
+        sourceId: "src-big",
+        sourceTitle: undefined,
+        status: "ready",
+        createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+      }),
+    );
+  }
+  // A second source the scan must not touch, to prove the query still filters.
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "other", userId: "user-1", sourceId: "src-other", status: "ready" }),
+  );
+
+  const pageSizes: number[] = [];
+  const original = stores.metadata.listEpisodePage.bind(stores.metadata);
+  stores.metadata.listEpisodePage = (query) =>
+    original(query).then((page) => {
+      pageSizes.push(page.episodes.length);
+      return page;
+    });
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-big`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(
+    body.retainedEpisodes,
+    250,
+    "count must stay exact once it is accumulated per batch",
+  );
+
+  assert(pageSizes.length >= 3, `expected a multi-page scan, got ${pageSizes.length} page(s)`);
+  assert(
+    pageSizes.every((size) => size <= 100),
+    `a page exceeded the batch size: ${
+      Math.max(...pageSizes)
+    } (peak working set is the point of the change)`,
+  );
+  // Every retained episode got its attribution; the untouched source did not.
+  const backfilled = await stores.metadata.listEpisodes({
+    userId: "user-1",
+    sourceId: "src-big",
+    limit: Number.POSITIVE_INFINITY,
+  });
+  assertEquals(backfilled.filter((e) => e.sourceTitle === "Big Source").length, 250);
+  assertEquals((await stores.metadata.getEpisode("user-1", "other"))?.sourceTitle, "Stratechery");
+});
+
+Deno.test("DELETE of a source whose episodes are the oldest in a large KV catalogue still drains it (audio-feed-m04)", async () => {
+  // The memory adapter bounds `limit` by matches by construction; only the KV
+  // adapter walks a per-user index and filters, which is where a `limit` that
+  // came to mean "entries examined" abandons rows. So this runs on the real
+  // KvMetadataStore, not the memory double the rest of this file uses.
+  const stores: Stores = await openStores({ kvPath: ":memory:" });
+  const ctx = { config, stores };
+  const handlers = createHandlers(ctx, {});
+  const { fetch } = createApp(ctx, handlers);
+  try {
+    await stores.metadata.putUser(
+      makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+    );
+    await stores.metadata.putSource(makeSource({ id: "quiet", userId: "user-1", title: "Quiet" }));
+    await stores.metadata.putSource(
+      makeSource({ id: "quietc", userId: "user-1", title: "Quiet Cascade" }),
+    );
+    await stores.metadata.putSource(makeSource({ id: "busy", userId: "user-1", title: "Busy" }));
+
+    // 5 pending episodes for `quiet`, OLDER than 400 pending for `busy`, so they
+    // are last in a newest-first scan.
+    for (let i = 0; i < 400; i++) {
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `busy-${i}`,
+          userId: "user-1",
+          sourceId: "busy",
+          status: "pending",
+          audioKey: undefined,
+          createdAt: new Date(1760000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+    for (let i = 0; i < 5; i++) {
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `quiet-${i}`,
+          userId: "user-1",
+          sourceId: "quiet",
+          status: "pending",
+          audioKey: undefined,
+          createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+        }),
+      );
+      await stores.blobs.put(`audio/quiet-${i}.mp3`, new Uint8Array([1]), {
+        contentType: "audio/mpeg",
+      });
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `quiet-ready-${i}`,
+          userId: "user-1",
+          sourceId: "quietc",
+          status: "ready",
+          audioKey: `audio/quiet-${i}.mp3`,
+          createdAt: new Date(1700000000000 + i * 1000).toISOString(),
+        }),
+      );
+    }
+
+    const res = await fetch(
+      new Request(`${BASE}/api/admin/users/user-1/sources/quiet`, {
+        method: "DELETE",
+        headers: { "x-admin-token": "admin-secret" },
+      }),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.cancelledPending, 5, "the 5 oldest pending rows must be cancelled");
+    assertEquals(
+      (await stores.metadata.listEpisodes({
+        userId: "user-1",
+        sourceId: "quiet",
+        status: "pending",
+      }))
+        .length,
+      0,
+      "nothing may survive for a feed that no longer exists",
+    );
+
+    // Cascade: the ready rows and their blobs must go too.
+    const cascade = await fetch(
+      new Request(`${BASE}/api/admin/users/user-1/sources/quietc?cascade=true`, {
+        method: "DELETE",
+        headers: { "x-admin-token": "admin-secret" },
+      }),
+    );
+    assertEquals(cascade.status, 200);
+    const cascaded = await cascade.json();
+    assertEquals(cascaded.deletedEpisodes, 5, "cascade must purge the oldest ready rows");
+    assertEquals(cascaded.deletedBlobs, 5, "cascade must not leave the blobs behind");
+    assertEquals(
+      (await stores.metadata.listEpisodes({ userId: "user-1", sourceId: "quietc" })).length,
+      0,
+      "no orphaned episodes for a deleted source",
+    );
+    // The unrelated busy backlog is untouched by a delete scoped to `quiet`.
+    assertEquals(
+      (await stores.metadata.listEpisodes({ userId: "user-1", sourceId: "busy", limit: 500 }))
+        .length,
+      400,
+      "the scan must not over-reach into another source",
+    );
+  } finally {
+    await stores.metadata.close();
+  }
+});
+
 Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect concurrently deleted episodes during backfill (audio-feed-hvn)", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
@@ -663,15 +837,18 @@ Deno.test("DELETE /api/admin/users/:id/sources/:sourceId does not resurrect conc
     }),
   );
 
-  // Intercept listEpisodes: right after listEpisodes returns, delete the episode before backfill runs
-  const originalList = stores.metadata.listEpisodes.bind(stores.metadata);
-  stores.metadata.listEpisodes = async (query) => {
-    const list = await originalList(query);
+  // Intercept the retained-episode scan: right after a page returns, delete the
+  // episode before backfill runs. audio-feed-att moved this path from
+  // listEpisodes to listEpisodePage, so the seam follows it — the property under
+  // test (backfill must not resurrect a concurrently deleted episode) is unchanged.
+  const originalList = stores.metadata.listEpisodePage.bind(stores.metadata);
+  stores.metadata.listEpisodePage = async (query) => {
+    const page = await originalList(query);
     if (query.status === "ready") {
       // Simulate concurrent deletion by user
       await stores.metadata.deleteEpisode("user-1", "ep-to-delete");
     }
-    return list;
+    return page;
   };
 
   const res = await fetch(
