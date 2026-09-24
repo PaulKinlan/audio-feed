@@ -229,18 +229,17 @@ export async function runSynthesisBatch(
     return reason;
   };
 
-  let offset = 0;
+  let cursor: string | undefined = undefined;
   const chunkSize = Math.max(opts.batchSize * 5, 25);
 
   while (pending.length < opts.batchSize) {
-    const candidates = await metadata.listPendingEpisodes({
-      offset,
+    const { episodes: candidates, cursor: nextCursor } = await metadata.listPendingEpisodes({
+      cursor,
       limit: chunkSize,
       nowMs,
       leaseMs: opts.leaseMs,
     });
     if (candidates.length === 0) break;
-    offset += candidates.length;
 
     for (const episode of candidates) {
       if (pending.length >= opts.batchSize) break;
@@ -257,7 +256,8 @@ export async function runSynthesisBatch(
       pending.push({ episode, userId: episode.userId });
     }
 
-    if (candidates.length < chunkSize) break;
+    if (!nextCursor || candidates.length < chunkSize) break;
+    cursor = nextCursor;
   }
 
   for (const { episode } of pending) {

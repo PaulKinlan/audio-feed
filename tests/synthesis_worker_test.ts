@@ -390,6 +390,20 @@ Deno.test("deferred jobs never consume the attempt budget", async () => {
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-1"))?.status, "ready");
 });
 
+Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time and budget", async () => {
+  const { ctx, stores } = await starved(50, 2);
+  const started = Date.now();
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    batchSize: 2,
+  });
+  const elapsed = Date.now() - started;
+
+  assertEquals(run.ready.length, 2, "approved jobs behind 50 deferred jobs must run");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
+  assert(run.deferred.length <= 2, "deferred report is capped at batchSize");
+  assert(elapsed < 2000, `must complete quickly in linear time, took ${elapsed}ms`);
+});
+
 Deno.test("the batch budget still bounds synthesis work", async () => {
   const stores: Stores = memoryStores();
   await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));

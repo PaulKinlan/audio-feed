@@ -7,6 +7,7 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
+import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import {
   type BlobInfo,
@@ -223,15 +224,9 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   listPendingEpisodes(
-    opts: {
-      limit?: number;
-      offset?: number;
-      nowMs?: number;
-      leaseMs?: number;
-    } = {},
-  ): Promise<Episode[]> {
+    opts: ListPendingOptions = {},
+  ): Promise<ListPendingResult> {
     const limit = opts.limit ?? 50;
-    const offset = opts.offset ?? 0;
     const nowMs = opts.nowMs ?? Date.now();
     const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
 
@@ -243,10 +238,12 @@ export class MemoryMetadataStore implements MetadataStore {
       .map((ep) => structuredClone(ep))
       .sort(byOldestFirst);
 
-    const start = Math.max(0, offset);
-    return Promise.resolve(
-      Number.isFinite(limit) ? candidates.slice(start, start + limit) : candidates.slice(start),
-    );
+    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+    const end = Number.isFinite(limit) ? start + limit : candidates.length;
+    const slice = candidates.slice(start, end);
+    const nextCursor = end < candidates.length ? String(end) : undefined;
+
+    return Promise.resolve({ episodes: slice, cursor: nextCursor });
   }
 
   /**

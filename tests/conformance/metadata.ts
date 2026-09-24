@@ -637,7 +637,7 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       }),
     );
 
-    const pending = await store.listPendingEpisodes();
+    const { episodes: pending } = await store.listPendingEpisodes();
     assertEquals(pending.map((e) => e.id), ["oldest", "mid", "newest"]);
   });
 
@@ -689,7 +689,7 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       }),
     );
 
-    const queue = await store.listPendingEpisodes({ leaseMs: 15 * 60_000 });
+    const { episodes: queue } = await store.listPendingEpisodes({ leaseMs: 15 * 60_000 });
     assertEquals(queue.map((e) => e.id), ["expired", "p1"]);
   });
 
@@ -704,7 +704,11 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
         }),
       );
     }
-    const limited = await store.listPendingEpisodes({ limit: 2 });
+    const { episodes: limited, cursor } = await store.listPendingEpisodes({ limit: 2 });
     assertEquals(limited.map((e) => e.id), ["ep-0", "ep-1"]);
+    assert(cursor, "cursor must be returned when more items exist");
+
+    const next = await store.listPendingEpisodes({ cursor, limit: 2 });
+    assertEquals(next.episodes.map((e) => e.id), ["ep-2", "ep-3"]);
   });
 }

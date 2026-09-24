@@ -28,7 +28,13 @@
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
-import type { EpisodeClaim, EpisodeQuery, MetadataStore } from "./mod.ts";
+import type {
+  EpisodeClaim,
+  EpisodeQuery,
+  ListPendingOptions,
+  ListPendingResult,
+  MetadataStore,
+} from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -363,44 +369,35 @@ export class KvMetadataStore implements MetadataStore {
   }
 
   async listPendingEpisodes(
-    opts: {
-      limit?: number;
-      offset?: number;
-      nowMs?: number;
-      leaseMs?: number;
-    } = {},
-  ): Promise<Episode[]> {
+    opts: ListPendingOptions = {},
+  ): Promise<ListPendingResult> {
     const limit = opts.limit ?? 50;
-    const offset = opts.offset ?? 0;
     const nowMs = opts.nowMs ?? Date.now();
     const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
 
-    const candidates: Episode[] = [];
-    let skipped = 0;
+    const episodes: Episode[] = [];
 
-    // 1. Pending episodes (scanned in createdAt ascending order)
-    for await (
-      const entry of this.#kv.list<{ userId: string; id: string }>({
-        prefix: ["pending_episodes"],
-      })
-    ) {
+    // Native Deno KV iterator with cursor and limit — zero skip overhead (audio-feed-bbb, xxn)
+    const iter = this.#kv.list<{ userId: string; id: string }>(
+      { prefix: ["pending_episodes"] },
+      {
+        cursor: opts.cursor,
+        limit: Number.isFinite(limit) ? limit : undefined,
+      },
+    );
+
+    for await (const entry of iter) {
       const { userId, id } = entry.value;
       const episode = await this.getEpisode(userId, id);
       if (episode && episode.status === "pending") {
-        if (skipped < offset) {
-          skipped++;
-          continue;
-        }
-        candidates.push(episode);
-        // Break early once limit is reached (avoid O(N) full-prefix scan — xxn)
-        if (Number.isFinite(limit) && candidates.length >= limit) {
-          break;
-        }
+        episodes.push(episode);
       }
     }
 
-    // 2. Synthesizing episodes with expired claims
-    if (!Number.isFinite(limit) || candidates.length < limit) {
+    const nextCursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
+
+    // Check synthesizing episodes with expired claims only on initial scan (cursor undefined)
+    if (!opts.cursor && (!Number.isFinite(limit) || episodes.length < limit)) {
       for await (
         const entry of this.#kv.list<{ userId: string; id: string }>({
           prefix: ["synthesizing_episodes"],
@@ -413,16 +410,19 @@ export class KvMetadataStore implements MetadataStore {
           episode.status === "synthesizing" &&
           isClaimExpired(episode, nowMs, leaseMs)
         ) {
-          candidates.push(episode);
+          episodes.push(episode);
         }
       }
-      candidates.sort((a, b) => {
+      episodes.sort((a, b) => {
         const timeDiff = a.createdAt.localeCompare(b.createdAt);
         return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
       });
     }
 
-    return Number.isFinite(limit) ? candidates.slice(0, limit) : candidates;
+    return {
+      episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
+      cursor: nextCursor,
+    };
   }
 
   /**
