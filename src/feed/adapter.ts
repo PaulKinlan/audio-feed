@@ -43,7 +43,9 @@ export interface FeedProjectionContext {
 
 /** The stable, non-expiring enclosure path served by `GET /audio/:key`. */
 export function enclosureUrl(publicBaseUrl: string, audioKey: string): string {
-  return `${publicBaseUrl.replace(/\/+$/, "")}/audio/${audioKey}`;
+  const base = publicBaseUrl.replace(/\/+$/, "");
+  const trimmed = audioKey.startsWith("audio/") ? audioKey.slice(6) : audioKey;
+  return `${base}/audio/${trimmed}`;
 }
 
 /**

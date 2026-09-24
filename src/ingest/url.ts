@@ -30,6 +30,7 @@ export class IngestError extends Error {
 }
 
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
+export const MAX_ARTICLE_CONTENT_CHARS = 100_000;
 const TIMEOUT_MS = 15_000;
 
 /** Only global unicast addresses: deny loopback, LAN, metadata and transition ranges. */
@@ -361,6 +362,12 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     throw new IngestError(
       422,
       "No readable article found; login and script-only pages are not supported.",
+    );
+  }
+  if (body.length > MAX_ARTICLE_CONTENT_CHARS) {
+    throw new IngestError(
+      413,
+      `Article content exceeds the character limit (${body.length} > ${MAX_ARTICLE_CONTENT_CHARS}).`,
     );
   }
   const rawDate = clean(result.publishedTime ?? explicitDate);

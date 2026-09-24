@@ -29,8 +29,20 @@ export function isSafeBlobKey(key: string): boolean {
 export async function handleAudio(
   { req, params, ctx }: RouteContext<AppContext>,
 ): Promise<Response> {
-  const key = params.key;
-  if (!key || !isSafeBlobKey(key)) return notFound("Unknown audio object");
+  const rawKey = params.key;
+  if (!rawKey || !isSafeBlobKey(rawKey)) return notFound("Unknown audio object");
+
+  // Resolve key against blob storage (support both direct key and audio/ prefixed canonical key)
+  let key = rawKey;
+  let info = await ctx.stores.blobs.head(key);
+  if (!info && !key.startsWith("audio/") && isSafeBlobKey(`audio/${key}`)) {
+    const candidate = `audio/${key}`;
+    const candidateInfo = await ctx.stores.blobs.head(candidate);
+    if (candidateInfo) {
+      key = candidate;
+      info = candidateInfo;
+    }
+  }
 
   const isHead = req.method === "HEAD";
 
@@ -41,7 +53,6 @@ export async function handleAudio(
   }
 
   if (isHead) {
-    const info = await ctx.stores.blobs.head(key);
     if (!info) return notFound("Unknown audio object");
     return headResponse(info.size, {
       "content-type": info.contentType,

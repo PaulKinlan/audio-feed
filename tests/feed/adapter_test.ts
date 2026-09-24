@@ -81,6 +81,10 @@ Deno.test("audioKey becomes a stable proxy URL, never a store-signed URL", () =>
   });
   assertEquals(projected?.audioUrl, `${BASE}/audio/nested/episode-1.wav`);
   assertEquals(enclosureUrl(`${BASE}/`, "x.wav"), `${BASE}/audio/x.wav`);
+  assertEquals(
+    enclosureUrl(`${BASE}/`, "audio/user-1/direct/x.wav"),
+    `${BASE}/audio/user-1/direct/x.wav`,
+  );
   // The projection takes no store, so a signed URL cannot be introduced by accident.
   assertEquals(Object.keys(projected ?? {}).includes("signedUrl"), false);
 });

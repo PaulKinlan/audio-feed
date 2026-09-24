@@ -520,3 +520,21 @@ Deno.test("queue failure is not reported as success and does not leak internal e
   equal(response.status, 503);
   equal((await response.text()).includes("credential"), false);
 });
+
+Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_CHARS (audio-feed-9yk)", () => {
+  const hugeText = "Word ".repeat(25_000); // 125,000 chars
+  const html =
+    `<!doctype html><html><head><title>Huge Article</title></head><body><article><p>${hugeText}</p></article></body></html>`;
+  throws(
+    () => extractArticle(html, "https://example.com/huge"),
+    (err: unknown) => {
+      equal(err instanceof IngestError, true);
+      equal((err as IngestError).status, 413);
+      equal(
+        (err as IngestError).message.includes("Article content exceeds the character limit"),
+        true,
+      );
+      return true;
+    },
+  );
+});
