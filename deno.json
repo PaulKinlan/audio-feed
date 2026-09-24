@@ -23,10 +23,14 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["deno.window", "deno.unstable"]
   },
+  // TypeScript source only. Markdown and generated config (.claude/, .agents/,
+  // .codex/) are tool-authored -- `bd setup` rewrites them -- so formatting
+  // those files means a reformat-vs-regenerate fight on every bd upgrade.
   "fmt": {
     "lineWidth": 100,
     "semiColons": true,
-    "singleQuote": false
+    "singleQuote": false,
+    "include": ["src/", "tests/"]
   },
   "lint": {
     "rules": {
