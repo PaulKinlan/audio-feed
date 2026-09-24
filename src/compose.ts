@@ -28,10 +28,13 @@ import { toFeedEpisode } from "./feed/adapter.ts";
 import {
   approveUser,
   assertAuthorizedForAudio,
+  createUser,
   getUserByFeedToken,
   IllegalTransitionError,
+  listUsers,
   NotAuthorizedError,
   requireAdminToken,
+  suspendUser,
   UnknownUserError,
 } from "./auth/users.ts";
 import { INBOX_SOURCE_ID, type User } from "./types.ts";
@@ -297,26 +300,144 @@ export function createIngestHandler(
   return ({ req }) => handler(req);
 }
 
-/** `POST /api/admin/users/:id/approve` — admin queue, token-gated. */
-export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveUser"] {
-  return async ({ params, req }) => {
-    const expected = ctx.config.adminToken;
-    if (!expected) {
-      // Fail closed and say why: an unconfigured server must not have an open
-      // approval endpoint.
-      return forbidden("ADMIN_TOKEN is not configured on this server.");
+/**
+ * The admin gate for every `/api/admin/*` route.
+ *
+ * Returns a Response to send back when the caller may not proceed, or null when
+ * they may. One helper rather than four copies, so a new admin route cannot be
+ * added without the token check by accident — the failure mode this whole surface
+ * exists to prevent (audio-feed-z2s).
+ */
+async function adminGate(ctx: AppContext, req: Request): Promise<Response | null> {
+  const expected = ctx.config.adminToken;
+  if (!expected) {
+    // Fail closed and say why: an unconfigured server must not have open admin
+    // endpoints at all.
+    return forbidden("ADMIN_TOKEN is not configured on this server.");
+  }
+  const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
+    ? req.headers.get("authorization")!.slice(7).trim()
+    : null;
+  try {
+    await requireAdminToken(req.headers.get("x-admin-token") ?? bearer, expected);
+    return null;
+  } catch {
+    return Response.json({ error: "Unauthorized: admin token required" }, {
+      status: 401,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+}
+
+/** `GET /api/admin/users` — the subscriber list for the console. */
+export function createListUsersHandler(ctx: AppContext): AppHandlers["listUsers"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const users = await listUsers(ctx.stores.metadata);
+    return Response.json(
+      {
+        // No feedToken here: the list is rendered into a page, and a capability
+        // that is not needed to render a row should not travel in its response.
+        // The create response returns it once, because that is the moment the
+        // admin has to hand it to the subscriber.
+        users: users.map((user) => ({
+          id: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          status: user.status,
+          isAdmin: user.isAdmin,
+          createdAt: user.createdAt,
+          decidedAt: user.decidedAt,
+        })),
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/**
+ * `POST /api/admin/users` — create a subscriber, already approved.
+ *
+ * Creation and approval are one action on purpose: an admin typing a subscriber's
+ * details has already decided to admit them, and requiring a second click for it
+ * is how accounts end up created-but-unusable. The token is returned exactly here,
+ * once, because this is the moment the admin has to pass it on.
+ */
+export function createCreateUserHandler(ctx: AppContext): AppHandlers["createUser"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    let body: { email?: unknown; displayName?: unknown; voice?: unknown } = {};
+    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
+      body = await req.json().catch(() => ({}));
     }
-    const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
-      ? req.headers.get("authorization")!.slice(7).trim()
-      : null;
-    try {
-      await requireAdminToken(req.headers.get("x-admin-token") ?? bearer, expected);
-    } catch {
-      return Response.json({ error: "Unauthorized: admin token required" }, {
-        status: 401,
+    if (typeof body.email !== "string" || body.email.trim() === "") {
+      return Response.json({ error: "An email address is required." }, {
+        status: 400,
         headers: { "cache-control": "no-store" },
       });
     }
+
+    try {
+      const created = await createUser(ctx.stores.metadata, {
+        email: body.email,
+        displayName: typeof body.displayName === "string" && body.displayName.trim()
+          ? body.displayName.trim()
+          : undefined,
+        voice: typeof body.voice === "string" ? body.voice : undefined,
+      });
+      const approved = await approveUser(ctx.stores.metadata, created.id, "admin");
+      return Response.json(
+        {
+          id: approved.id,
+          email: approved.email,
+          displayName: approved.displayName,
+          status: approved.status,
+          // The one deliberate exposure of a capability: the admin is the issuer.
+          feedToken: approved.feedToken,
+        },
+        { status: 201, headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      // A duplicate email is the common case and deserves 409, not 500.
+      const conflict = /already registered|taken/i.test(message);
+      return Response.json({ error: message }, {
+        status: conflict ? 409 : 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+  };
+}
+
+/** `POST /api/admin/users/:id/suspend` — stop a subscriber's synthesis and feed. */
+export function createSuspendUserHandler(ctx: AppContext): AppHandlers["suspendUser"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    try {
+      const updated = await suspendUser(ctx.stores.metadata, params.id ?? "", "admin");
+      return Response.json(
+        { id: updated.id, status: updated.status, decidedAt: updated.decidedAt },
+        { headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      if (error instanceof UnknownUserError) return notFound(error.message);
+      if (error instanceof IllegalTransitionError) {
+        return Response.json({ error: error.message }, { status: 409 });
+      }
+      throw error;
+    }
+  };
+}
+
+/** `POST /api/admin/users/:id/approve` — admin queue, token-gated. */
+export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveUser"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
 
     try {
       // Writes the status change and its ledger entry in one atomic commit, so
@@ -345,5 +466,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),
     approveUser: createApproveUserHandler(ctx),
+    listUsers: createListUsersHandler(ctx),
+    createUser: createCreateUserHandler(ctx),
+    suspendUser: createSuspendUserHandler(ctx),
   };
 }
