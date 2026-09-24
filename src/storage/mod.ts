@@ -109,6 +109,7 @@ export interface MetadataStore {
    */
   listPendingEpisodes(opts?: {
     limit?: number;
+    offset?: number;
     nowMs?: number;
     leaseMs?: number;
   }): Promise<Episode[]>;

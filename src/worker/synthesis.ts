@@ -209,12 +209,13 @@ export async function runSynthesisBatch(
   // Authorization is checked per-user before spending. Deferred work (e.g. from
   // unapproved/suspended users) is reported but does not block approved work behind it,
   // and result.deferred is capped at batchSize to prevent unbounded memory growth.
-  const candidates = await metadata.listPendingEpisodes({
-    limit: Math.max(opts.batchSize * 3, 20),
-    nowMs,
-    leaseMs: opts.leaseMs,
-  });
-
+  // Cross-user FIFO queue (audio-feed-bbb):
+  //
+  // `listPendingEpisodes` lists the oldest pending or recoverable episodes across
+  // all users in FIFO order. Paged in chunks so that a large backlog from unapproved
+  // or suspended users cannot saturate the query window and starve approved jobs
+  // (sotw-ds-flash review finding 5z1), while bounding per-tick scans (xxn).
+  const pending: Array<{ episode: Episode; userId: string }> = [];
   const authCache = new Map<string, string | null>();
   const isUserAuthorized = async (userId: string): Promise<string | null> => {
     if (authCache.has(userId)) return authCache.get(userId)!;
@@ -228,20 +229,35 @@ export async function runSynthesisBatch(
     return reason;
   };
 
-  const pending: Array<{ episode: Episode; userId: string }> = [];
-  for (const episode of candidates) {
-    if (pending.length >= opts.batchSize) break;
-    result.considered++;
+  let offset = 0;
+  const chunkSize = Math.max(opts.batchSize * 5, 25);
 
-    const deferReason = await isUserAuthorized(episode.userId);
-    if (deferReason !== null) {
-      if (result.deferred.length < opts.batchSize) {
-        result.deferred.push({ episodeId: episode.id, reason: deferReason });
+  while (pending.length < opts.batchSize) {
+    const candidates = await metadata.listPendingEpisodes({
+      offset,
+      limit: chunkSize,
+      nowMs,
+      leaseMs: opts.leaseMs,
+    });
+    if (candidates.length === 0) break;
+    offset += candidates.length;
+
+    for (const episode of candidates) {
+      if (pending.length >= opts.batchSize) break;
+      result.considered++;
+
+      const deferReason = await isUserAuthorized(episode.userId);
+      if (deferReason !== null) {
+        if (result.deferred.length < opts.batchSize) {
+          result.deferred.push({ episodeId: episode.id, reason: deferReason });
+        }
+        continue;
       }
-      continue;
+
+      pending.push({ episode, userId: episode.userId });
     }
 
-    pending.push({ episode, userId: episode.userId });
+    if (candidates.length < chunkSize) break;
   }
 
   for (const { episode } of pending) {

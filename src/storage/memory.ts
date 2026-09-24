@@ -223,9 +223,15 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   listPendingEpisodes(
-    opts: { limit?: number; nowMs?: number; leaseMs?: number } = {},
+    opts: {
+      limit?: number;
+      offset?: number;
+      nowMs?: number;
+      leaseMs?: number;
+    } = {},
   ): Promise<Episode[]> {
     const limit = opts.limit ?? 50;
+    const offset = opts.offset ?? 0;
     const nowMs = opts.nowMs ?? Date.now();
     const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
 
@@ -235,10 +241,12 @@ export class MemoryMetadataStore implements MetadataStore {
         (ep.status === "synthesizing" && isClaimExpired(ep, nowMs, leaseMs))
       )
       .map((ep) => structuredClone(ep))
-      .sort(byOldestFirst)
-      .slice(0, limit);
+      .sort(byOldestFirst);
 
-    return Promise.resolve(candidates);
+    const start = Math.max(0, offset);
+    return Promise.resolve(
+      Number.isFinite(limit) ? candidates.slice(start, start + limit) : candidates.slice(start),
+    );
   }
 
   /**

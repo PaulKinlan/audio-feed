@@ -319,7 +319,7 @@ Deno.test("END TO END: ingest queues it, the worker synthesises it, the feed pub
 // ---------------------------------------------------------------------------
 
 /** A suspended user with a backlog, inserted FIRST so their jobs are scanned first. */
-async function starved(backlog = 5) {
+async function starved(backlog = 5, approved = 2) {
   const stores: Stores = memoryStores();
   await stores.metadata.putUser(
     makeUser({ id: "suspended-1", email: "s@example.com", status: "suspended" }),
@@ -329,7 +329,7 @@ async function starved(backlog = 5) {
   await stores.metadata.putArticle(
     makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
   );
-  // The blocked backlog, created first so it is encountered first.
+  // The blocked backlog, created first with older timestamps so it is encountered first.
   for (let i = 0; i < backlog; i++) {
     await stores.metadata.putEpisode(
       makeEpisode({
@@ -338,11 +338,12 @@ async function starved(backlog = 5) {
         sourceId: "inbox",
         status: "pending",
         audioKey: undefined,
+        createdAt: "2026-09-01T00:00:00.000Z",
       }),
     );
   }
-  // One approved job behind it in the queue.
-  for (let i = 0; i < 2; i++) {
+  // Approved jobs behind it in the queue.
+  for (let i = 0; i < approved; i++) {
     await stores.metadata.putEpisode(
       makeEpisode({
         id: `allowed-${i}`,
@@ -351,6 +352,7 @@ async function starved(backlog = 5) {
         articleId: "article-1",
         status: "pending",
         audioKey: undefined,
+        createdAt: "2026-09-10T00:00:00.000Z",
       }),
     );
   }
@@ -359,17 +361,20 @@ async function starved(backlog = 5) {
 }
 
 Deno.test("a suspended user's backlog does not block an approved user's job", async () => {
-  const { ctx, stores } = await starved();
+  // 25 deferred jobs from suspended user + 3 approved jobs (audio-feed-bbb review finding)
+  const { ctx, stores } = await starved(25, 3);
   let calls = 0;
   const run = await runSynthesisBatch(ctx, () => {
     calls++;
     return Promise.resolve(fakeAudio());
-  });
+  }, { batchSize: 3 });
 
-  // The regression: this used to be ready=0 deferred=5, every tick, forever.
-  assert(run.ready.length > 0, `approved work must still run, got ${JSON.stringify(run)}`);
-  assertEquals(calls, run.ready.length);
+  // Must process all 3 approved jobs despite the 25 older deferred jobs!
+  assertEquals(run.ready.length, 3, `all 3 approved jobs must run, got ${JSON.stringify(run)}`);
+  assertEquals(calls, 3);
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-1"))?.status, "ready");
+  assertEquals((await stores.metadata.getEpisode("user-1", "allowed-2"))?.status, "ready");
   // The blocked backlog is reported and preserved, not destroyed.
   assert(run.deferred.length > 0, "the suspended backlog must be reported as deferred");
   assertEquals((await stores.metadata.getEpisode("suspended-1", "blocked-0"))?.status, "pending");

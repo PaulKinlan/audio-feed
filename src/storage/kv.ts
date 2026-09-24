@@ -363,13 +363,20 @@ export class KvMetadataStore implements MetadataStore {
   }
 
   async listPendingEpisodes(
-    opts: { limit?: number; nowMs?: number; leaseMs?: number } = {},
+    opts: {
+      limit?: number;
+      offset?: number;
+      nowMs?: number;
+      leaseMs?: number;
+    } = {},
   ): Promise<Episode[]> {
     const limit = opts.limit ?? 50;
+    const offset = opts.offset ?? 0;
     const nowMs = opts.nowMs ?? Date.now();
     const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
 
     const candidates: Episode[] = [];
+    let skipped = 0;
 
     // 1. Pending episodes (scanned in createdAt ascending order)
     for await (
@@ -380,33 +387,42 @@ export class KvMetadataStore implements MetadataStore {
       const { userId, id } = entry.value;
       const episode = await this.getEpisode(userId, id);
       if (episode && episode.status === "pending") {
+        if (skipped < offset) {
+          skipped++;
+          continue;
+        }
         candidates.push(episode);
+        // Break early once limit is reached (avoid O(N) full-prefix scan — xxn)
+        if (Number.isFinite(limit) && candidates.length >= limit) {
+          break;
+        }
       }
     }
 
     // 2. Synthesizing episodes with expired claims
-    for await (
-      const entry of this.#kv.list<{ userId: string; id: string }>({
-        prefix: ["synthesizing_episodes"],
-      })
-    ) {
-      const { userId, id } = entry.value;
-      const episode = await this.getEpisode(userId, id);
-      if (
-        episode &&
-        episode.status === "synthesizing" &&
-        isClaimExpired(episode, nowMs, leaseMs)
+    if (!Number.isFinite(limit) || candidates.length < limit) {
+      for await (
+        const entry of this.#kv.list<{ userId: string; id: string }>({
+          prefix: ["synthesizing_episodes"],
+        })
       ) {
-        candidates.push(episode);
+        const { userId, id } = entry.value;
+        const episode = await this.getEpisode(userId, id);
+        if (
+          episode &&
+          episode.status === "synthesizing" &&
+          isClaimExpired(episode, nowMs, leaseMs)
+        ) {
+          candidates.push(episode);
+        }
       }
+      candidates.sort((a, b) => {
+        const timeDiff = a.createdAt.localeCompare(b.createdAt);
+        return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
+      });
     }
 
-    candidates.sort((a, b) => {
-      const timeDiff = a.createdAt.localeCompare(b.createdAt);
-      return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
-    });
-
-    return candidates.slice(0, limit);
+    return Number.isFinite(limit) ? candidates.slice(0, limit) : candidates;
   }
 
   /**
