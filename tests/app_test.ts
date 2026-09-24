@@ -186,6 +186,8 @@ Deno.test("audio: GET skips head() and resolves canonical audio/ key in one get(
 
 Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (audio-feed-vnb)", async () => {
   const { fetch, stores } = app();
+  await stores.blobs.put("audio/u1/direct/e1.mp3", bytes(1000), { contentType: "audio/mpeg" });
+
   let getCalls = 0;
   stores.blobs.get = () => {
     getCalls++;
@@ -197,6 +199,37 @@ Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (a
   assertEquals(res.status, 302);
   assertEquals(res.headers.get("location"), "https://cdn.example.com/audio/u1/direct/e1.mp3");
   assertEquals(getCalls, 0, "direct URL must bypass get() completely");
+});
+
+Deno.test("audio: direct-URL store resolves legacy flat key to existing key without dead redirect (audio-feed-vlw)", async () => {
+  const { fetch, stores } = app();
+  // Store has ONLY legacy.mp3 (flat key), NOT audio/legacy.mp3
+  await stores.blobs.put("legacy.mp3", bytes(500), { contentType: "audio/mpeg" });
+
+  let getCalls = 0;
+  stores.blobs.get = () => {
+    getCalls++;
+    throw new Error("get() must not be called when store provides direct URLs");
+  };
+  // S3BlobStore.url() synthesizes a URL without checking existence
+  stores.blobs.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
+
+  // 1. GET /audio/legacy.mp3 redirects to legacy.mp3, not audio/legacy.mp3
+  const res = await fetch(get("/audio/legacy.mp3"));
+  assertEquals(res.status, 302);
+  assertEquals(res.headers.get("location"), "https://cdn.example.com/legacy.mp3");
+  assertEquals(getCalls, 0, "direct URL must bypass get() completely");
+
+  // 2. HEAD /audio/legacy.mp3 returns 200 (HEAD and GET agree)
+  const headRes = await fetch(get("/audio/legacy.mp3", { method: "HEAD" }));
+  assertEquals(headRes.status, 200);
+  assertEquals(headRes.headers.get("content-length"), "500");
+  await headRes.body?.cancel();
+
+  // 3. GET /audio/missing.mp3 returns 404 (HEAD and GET agree)
+  const missingRes = await fetch(get("/audio/missing.mp3"));
+  assertEquals(missingRes.status, 404);
+  assertEquals(getCalls, 0, "missing check on direct-URL store must not call get()");
 });
 
 Deno.test("audio: HEAD returns metadata with no body", async () => {

@@ -63,10 +63,19 @@ export async function handleAudio(
   }
 
   // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
-  for (const key of candidateKeys) {
-    const direct = await ctx.stores.blobs.url(key);
-    if (direct) {
-      return new Response(null, { status: 302, headers: { location: direct } });
+  if (!isHead) {
+    let isRedirectingStore = false;
+    for (const key of candidateKeys) {
+      const direct = await ctx.stores.blobs.url(key);
+      if (!direct) break;
+      isRedirectingStore = true;
+      const info = await ctx.stores.blobs.head(key);
+      if (info) {
+        return new Response(null, { status: 302, headers: { location: direct } });
+      }
+    }
+    if (isRedirectingStore) {
+      return notFound("Unknown audio object");
     }
   }
 
