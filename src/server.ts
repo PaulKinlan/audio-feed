@@ -13,13 +13,18 @@ import { createHandlers } from "./compose.ts";
 import { loadConfig, openStores } from "./config.ts";
 import { createGeminiSynthesizer, startSynthesisWorker } from "./worker/synthesis.ts";
 
-if (import.meta.main) {
+const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
+
+let serverFetch: ((req: Request) => Promise<Response> | Response) | null = null;
+
+export async function bootstrap() {
   const config = loadConfig();
   const stores = await openStores();
 
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
   const handlers = createHandlers({ config, stores });
-  const { fetch } = createApp({ config, stores }, handlers);
+  const app = createApp({ config, stores }, handlers);
+  serverFetch = app.fetch;
 
   console.log(`[audio-feed] ${stores.describe} base=${config.publicBaseUrl}`);
   if (!config.geminiApiKey) {
@@ -58,7 +63,7 @@ if (import.meta.main) {
     })
     : null;
 
-  const server = Deno.serve({ port: config.port }, fetch);
+  const server = Deno.serve({ port: config.port }, serverFetch);
 
   // Stop the worker before closing KV so no tick writes to a closed handle.
   const shutdown = async () => {
@@ -67,6 +72,26 @@ if (import.meta.main) {
     await server.shutdown();
     await stores.metadata.close();
   };
-  Deno.addSignalListener("SIGINT", () => void shutdown());
-  Deno.addSignalListener("SIGTERM", () => void shutdown());
+
+  try {
+    Deno.addSignalListener("SIGINT", () => void shutdown());
+    Deno.addSignalListener("SIGTERM", () => void shutdown());
+  } catch {
+    // Signals not supported in serverless/Deno Deploy environments.
+  }
+
+  return { server, fetch: serverFetch, shutdown };
 }
+
+if (import.meta.main || isDeploy) {
+  await bootstrap();
+}
+
+export default {
+  async fetch(req: Request) {
+    if (!serverFetch) {
+      await bootstrap();
+    }
+    return serverFetch!(req);
+  },
+};
