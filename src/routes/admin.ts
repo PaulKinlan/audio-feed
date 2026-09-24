@@ -65,6 +65,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Admin — Audio Feed</title>
 <meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📻</text></svg>">
 <style>
   /* ---- tokens (identical to src/routes/home.ts) ------------------------- */
   :root {
@@ -663,6 +664,13 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 
   rotateManageToken.addEventListener("click", async () => {
     if (!currentManagingUser) return;
+    if (
+      !confirm(
+        "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working.",
+      )
+    ) {
+      return;
+    }
     rotateManageToken.disabled = true;
     try {
       const res = await api(
@@ -727,6 +735,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         delBtn.textContent = "Remove";
         delBtn.setAttribute("aria-label", "Remove feed " + source.title);
         delBtn.addEventListener("click", async () => {
+          if (!confirm("Remove feed subscription?")) return;
           delBtn.disabled = true;
           try {
             await api(

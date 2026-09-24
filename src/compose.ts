@@ -324,11 +324,18 @@ export function createCreateSourceHandler(
         { status, headers: { "cache-control": "no-store" } },
       );
     }
-    const modes = Array.isArray(body.modes)
-      ? body.modes.filter((mode): mode is AudioMode =>
+    let modes: AudioMode[] | undefined;
+    if (Array.isArray(body.modes)) {
+      modes = body.modes.filter((mode): mode is AudioMode =>
         typeof mode === "string" && isAudioMode(mode)
-      )
-      : undefined;
+      );
+      if (modes.length === 0) {
+        return Response.json(
+          { error: "At least one valid audio mode is required (direct or deepdive)." },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
 
     try {
       const { source, poll } = await subscribeToFeed(
@@ -700,11 +707,18 @@ export function createAdminCreateUserSourceHandler(
       );
     }
 
-    const modes = Array.isArray(body.modes)
-      ? body.modes.filter((mode): mode is AudioMode =>
+    let modes: AudioMode[] | undefined;
+    if (Array.isArray(body.modes)) {
+      modes = body.modes.filter((mode): mode is AudioMode =>
         typeof mode === "string" && isAudioMode(mode)
-      )
-      : undefined;
+      );
+      if (modes.length === 0) {
+        return Response.json(
+          { error: "At least one valid audio mode is required (direct or deepdive)." },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
 
     try {
       const { source, poll } = await subscribeToFeed(

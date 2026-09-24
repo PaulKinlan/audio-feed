@@ -219,11 +219,40 @@ Deno.test("admin console page renders subscriber management section and auto-loa
   assertStringIncludes(html, 'id="subFeedUrl"');
   assertStringIncludes(html, 'id="subFeedMode"');
 
+  // Favicon and confirmation dialog checks (audio-feed-2dt)
+  assertStringIncludes(html, '<link rel="icon"');
+  assertStringIncludes(html, "confirm(");
+
   // Auto-load on refresh: script calls loadUsers() when stored token is found
   assertStringIncludes(html, 'sessionStorage.getItem("audio-feed-admin-token")');
   assertStringIncludes(html, "loadUsers();");
   // Enter key support on password input
   assertStringIncludes(html, 'e.key === "Enter"');
+});
+
+Deno.test("POST /api/admin/users/:id/sources with all-invalid modes returns 400", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({
+        feedUrl: "https://example.com/feed.xml",
+        modes: ["nonsense", "invalid"],
+      }),
+    }),
+  );
+
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertStringIncludes(body.error, "valid audio mode is required");
 });
 
 Deno.test("list-sourced user in openManage populates feedToken from sources response and master feed returns 200", async () => {

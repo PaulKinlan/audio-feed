@@ -478,3 +478,24 @@ Deno.test("admin create subscriber with optional feedUrl subscribes and queues i
   const episodes = await stores.metadata.listEpisodes({ userId: body.id });
   assertEquals(episodes.length, 2);
 });
+
+Deno.test("POST /api/sources with all-invalid modes returns 400", async () => {
+  const { fetch, stores } = app({
+    feedTransport: feedTransport(RSS),
+    fetchArticle: article("A", "Body."),
+  });
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const res = await fetch(
+    post(
+      "/api/sources",
+      { feedUrl: "https://example.com/feed.xml", modes: ["nonsense", "invalid"] },
+      "token-user-1",
+    ),
+  );
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertStringIncludes(body.error, "valid audio mode is required");
+});
