@@ -178,6 +178,10 @@ export class KvMetadataStore implements MetadataStore {
     return out;
   }
 
+  async deleteSource(userId: string, id: string): Promise<void> {
+    await this.#kv.delete(["source", userId, id]);
+  }
+
   // -- articles -------------------------------------------------------------
 
   async putArticle(article: Article): Promise<void> {

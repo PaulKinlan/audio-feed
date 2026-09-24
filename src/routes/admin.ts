@@ -142,7 +142,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   label { display: block; font-weight: 600; margin-block-end: var(--space-1); }
   .hint { display: block; font-weight: 400; color: var(--text-muted); font-size: 0.85rem; }
 
-  input {
+  input, select {
     font: inherit;
     inline-size: 100%;
     padding: 0.5rem 0.6rem;
@@ -151,7 +151,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     background: var(--surface);
     color: var(--text);
   }
-  input:focus-visible, button:focus-visible, summary:focus-visible {
+  input:focus-visible, select:focus-visible, button:focus-visible, summary:focus-visible {
     outline: 3px solid var(--accent);
     outline-offset: 2px;
   }
@@ -296,6 +296,64 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     </div>
     <p class="feedback" id="usersFeedback" role="status" aria-live="polite"></p>
   </section>
+
+  <section class="card" id="manageSection" aria-labelledby="manage-h" hidden>
+    <div class="row" style="justify-content: space-between; align-items: center;">
+      <h2 id="manage-h" style="margin: 0;">4. Manage subscriber: <span id="manageName"></span></h2>
+      <button type="button" id="closeManage" class="secondary">Close</button>
+    </div>
+    <div class="created" style="margin-block-start: var(--space-4);">
+      <dl id="manageDetails"></dl>
+      <div class="copy-row">
+        <input type="text" id="manageFeedUrl" readonly aria-label="Subscriber master feed URL" />
+        <button type="button" id="copyManageFeedUrl">Copy feed URL</button>
+        <button type="button" id="rotateManageToken" class="danger">Rotate token</button>
+      </div>
+      <p class="muted" id="rotateHelp" style="margin-block-start: var(--space-2); margin-block-end: 0; font-size: 0.8rem;">
+        Rotating the feed token revokes the old URL immediately.
+      </p>
+    </div>
+
+    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Subscribed RSS feeds</h3>
+    <div class="table-wrap">
+      <table aria-describedby="manageSourcesHelp">
+        <caption id="manageSourcesCaption">Loading feeds…</caption>
+        <thead>
+          <tr>
+            <th scope="col">Title</th>
+            <th scope="col">Feed URL</th>
+            <th scope="col">Mode</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="manageSourcesBody"></tbody>
+      </table>
+    </div>
+    <p class="feedback" id="manageSourcesFeedback" role="status" aria-live="polite"></p>
+
+    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Add feed to subscriber</h3>
+    <form id="addSourceForm" novalidate>
+      <div class="field">
+        <label for="subFeedUrl">RSS or Atom feed URL</label>
+        <input id="subFeedUrl" type="url" required placeholder="https://example.com/feed.xml" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="subFeedTitle">Feed title (optional)</label>
+        <input id="subFeedTitle" type="text" placeholder="Defaults to title in feed" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="subFeedMode">Audio mode</label>
+        <select id="subFeedMode">
+          <option value="direct" selected>Direct read (one voice)</option>
+          <option value="deepdive">Deep dive (two voices)</option>
+        </select>
+      </div>
+      <div class="row">
+        <button type="submit" id="submitAddSource">Add feed</button>
+      </div>
+      <p class="feedback" id="addSourceFeedback" role="status" aria-live="polite"></p>
+    </form>
+  </section>
 </main>
 
 <script>
@@ -321,9 +379,18 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     tokenInput.value = stored;
     loadUsersBtn.disabled = false;
     say(authFeedback, "ok", "Token loaded from this session.");
+    // Auto-load on refresh (audio-feed-e3n)
+    loadUsers();
   } else {
     say(authFeedback, "error", "No token yet. Paste it and save.");
   }
+
+  tokenInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("saveToken").click();
+    }
+  });
 
   function token() {
     return tokenInput.value.trim();
@@ -403,6 +470,15 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 
     const actions = document.createElement("td");
     actions.className = "actions";
+
+    const manage = document.createElement("button");
+    manage.type = "button";
+    manage.className = "secondary";
+    manage.textContent = "Manage";
+    manage.setAttribute("aria-label", "Manage " + user.email);
+    manage.addEventListener("click", () => openManage(user));
+    actions.appendChild(manage);
+
     if (user.status !== "approved") {
       const approve = document.createElement("button");
       approve.type = "button";
@@ -550,6 +626,175 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       say(feedback, "error", String(error.message || error));
     } finally {
       submit.disabled = false;
+    }
+  });
+
+  // ---- Subscriber Management (audio-feed-e3n) -----------------------------
+  let currentManagingUser = null;
+  const manageSection = document.getElementById("manageSection");
+  const manageName = document.getElementById("manageName");
+  const manageDetails = document.getElementById("manageDetails");
+  const manageFeedUrl = document.getElementById("manageFeedUrl");
+  const copyManageFeedUrl = document.getElementById("copyManageFeedUrl");
+  const rotateManageToken = document.getElementById("rotateManageToken");
+  const manageSourcesBody = document.getElementById("manageSourcesBody");
+  const manageSourcesCaption = document.getElementById("manageSourcesCaption");
+  const manageSourcesFeedback = document.getElementById("manageSourcesFeedback");
+  const addSourceForm = document.getElementById("addSourceForm");
+  const addSourceFeedback = document.getElementById("addSourceFeedback");
+  const submitAddSource = document.getElementById("submitAddSource");
+  const closeManage = document.getElementById("closeManage");
+
+  closeManage.addEventListener("click", () => {
+    manageSection.hidden = true;
+    currentManagingUser = null;
+  });
+
+  copyManageFeedUrl.addEventListener("click", async () => {
+    manageFeedUrl.select();
+    try {
+      await navigator.clipboard.writeText(manageFeedUrl.value);
+      copyManageFeedUrl.textContent = "Copied";
+      setTimeout(() => (copyManageFeedUrl.textContent = "Copy feed URL"), 2000);
+    } catch {
+      copyManageFeedUrl.textContent = "Press Ctrl/Cmd+C";
+    }
+  });
+
+  rotateManageToken.addEventListener("click", async () => {
+    if (!currentManagingUser) return;
+    rotateManageToken.disabled = true;
+    try {
+      const res = await api(
+        "/api/admin/users/" + encodeURIComponent(currentManagingUser.id) + "/rotate-token",
+        { method: "POST" },
+      );
+      currentManagingUser.feedToken = res.feedToken;
+      const newFeedUrl = ORIGIN.replace(/\\/+$/, "") + "/feed/" +
+        encodeURIComponent(res.feedToken) + "/master.xml";
+      manageFeedUrl.value = newFeedUrl;
+      renderManageDetails(currentManagingUser);
+      say(manageSourcesFeedback, "ok", "Feed token rotated successfully. Old URL revoked.");
+    } catch (error) {
+      say(manageSourcesFeedback, "error", String(error.message || error));
+    } finally {
+      rotateManageToken.disabled = false;
+    }
+  });
+
+  function renderManageDetails(user) {
+    manageDetails.replaceChildren();
+    for (const [label, value, cls] of [
+      ["Email", user.email],
+      ["Display name", user.displayName || "—"],
+      ["Status", user.status],
+      ["User ID", user.id, "mono"],
+      ["Feed token", user.feedToken || "—", "mono"],
+    ]) {
+      const [dt, dd] = definition(label, value, cls);
+      manageDetails.append(dt, dd);
+    }
+  }
+
+  async function loadManageSources(userId) {
+    manageSourcesBody.replaceChildren();
+    manageSourcesCaption.textContent = "Loading feeds…";
+    try {
+      const res = await api("/api/admin/users/" + encodeURIComponent(userId) + "/sources");
+      const sources = res.sources || [];
+      manageSourcesBody.replaceChildren();
+      for (const source of sources) {
+        const tr = document.createElement("tr");
+        tr.appendChild(cell(source.title || "—"));
+        const tdUrl = document.createElement("td");
+        tdUrl.className = "mono";
+        tdUrl.textContent = source.feedUrl || "—";
+        tr.appendChild(tdUrl);
+        tr.appendChild(cell((source.modes || []).join(", ")));
+
+        const tdActions = document.createElement("td");
+        tdActions.className = "actions";
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "danger";
+        delBtn.textContent = "Remove";
+        delBtn.setAttribute("aria-label", "Remove feed " + source.title);
+        delBtn.addEventListener("click", async () => {
+          delBtn.disabled = true;
+          try {
+            await api(
+              "/api/admin/users/" + encodeURIComponent(userId) + "/sources/" +
+                encodeURIComponent(source.id),
+              { method: "DELETE" },
+            );
+            say(manageSourcesFeedback, "ok", "Removed feed: " + source.title);
+            await loadManageSources(userId);
+          } catch (error) {
+            say(manageSourcesFeedback, "error", String(error.message || error));
+            delBtn.disabled = false;
+          }
+        });
+        tdActions.appendChild(delBtn);
+        tr.appendChild(tdActions);
+        manageSourcesBody.appendChild(tr);
+      }
+      manageSourcesCaption.textContent = sources.length === 0
+        ? "No feeds subscribed yet."
+        : sources.length + " feed" + (sources.length === 1 ? "" : "s") + " subscribed.";
+    } catch (error) {
+      say(manageSourcesFeedback, "error", String(error.message || error));
+    }
+  }
+
+  function openManage(user) {
+    currentManagingUser = user;
+    manageName.textContent = user.displayName || user.email;
+    renderManageDetails(user);
+    const feedUrl = ORIGIN.replace(/\\/+$/, "") + "/feed/" +
+      encodeURIComponent(user.feedToken || "") + "/master.xml";
+    manageFeedUrl.value = feedUrl;
+    say(manageSourcesFeedback, "", "");
+    say(addSourceFeedback, "", "");
+    manageSection.hidden = false;
+    loadManageSources(user.id);
+    manageSection.scrollIntoView({ behavior: "smooth" });
+  }
+
+  addSourceForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!currentManagingUser) return;
+    const urlInput = document.getElementById("subFeedUrl");
+    const titleInput = document.getElementById("subFeedTitle");
+    const modeSelect = document.getElementById("subFeedMode");
+    const feedUrl = urlInput.value.trim();
+    const title = titleInput.value.trim();
+    const mode = modeSelect.value;
+    if (!feedUrl) {
+      say(addSourceFeedback, "error", "Feed URL is required.");
+      urlInput.focus();
+      return;
+    }
+    submitAddSource.disabled = true;
+    try {
+      const res = await api(
+        "/api/admin/users/" + encodeURIComponent(currentManagingUser.id) + "/sources",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            feedUrl,
+            title: title || undefined,
+            modes: [mode],
+          }),
+        },
+      );
+      const queued = res.poll && typeof res.poll.queued === "number" ? res.poll.queued : 0;
+      say(addSourceFeedback, "ok", "Feed added! " + queued + " post(s) queued for synthesis.");
+      addSourceForm.reset();
+      await loadManageSources(currentManagingUser.id);
+    } catch (error) {
+      say(addSourceFeedback, "error", String(error.message || error));
+    } finally {
+      submitAddSource.disabled = false;
     }
   });
 })();

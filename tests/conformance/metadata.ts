@@ -276,6 +276,18 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.listSources("user-1")).length, 1);
   });
 
+  test("deletes a source", async (store) => {
+    await store.putSource(makeSource({ id: "s1", userId: "user-1" }));
+    assertEquals((await store.getSource("user-1", "s1"))?.id, "s1");
+
+    await store.deleteSource("user-1", "s1");
+    assertEquals(await store.getSource("user-1", "s1"), null);
+    assertEquals((await store.listSources("user-1")).length, 0);
+
+    // Deleting non-existent source does not throw
+    await store.deleteSource("user-1", "s1");
+  });
+
   // -- articles -------------------------------------------------------------
 
   test("finds an article by url for dedupe", async (store) => {

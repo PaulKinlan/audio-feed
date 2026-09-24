@@ -54,6 +54,11 @@ export interface AppHandlers {
   /** audio-feed-2e5 — RSS/Atom subscriptions for a subscriber. */
   listSources?: Handler<AppContext>;
   createSource?: Handler<AppContext>;
+  /** audio-feed-e3n — admin subscriber management: sources and token rotation. */
+  adminListSources?: Handler<AppContext>;
+  adminCreateSource?: Handler<AppContext>;
+  adminDeleteSource?: Handler<AppContext>;
+  adminRotateToken?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -117,6 +122,22 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/users",
     handlers.createUser ?? (() => notImplemented("Admin user creation")),
+  );
+  router.get(
+    "/api/admin/users/:id/sources",
+    handlers.adminListSources ?? (() => notImplemented("Admin list sources")),
+  );
+  router.post(
+    "/api/admin/users/:id/sources",
+    handlers.adminCreateSource ?? (() => notImplemented("Admin create source")),
+  );
+  router.delete(
+    "/api/admin/users/:id/sources/:sourceId",
+    handlers.adminDeleteSource ?? (() => notImplemented("Admin delete source")),
+  );
+  router.post(
+    "/api/admin/users/:id/rotate-token",
+    handlers.adminRotateToken ?? (() => notImplemented("Admin rotate token")),
   );
 
   handlers.extra?.(router);

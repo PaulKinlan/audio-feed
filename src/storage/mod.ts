@@ -90,6 +90,7 @@ export interface MetadataStore {
   putSource(source: Source): Promise<void>;
   getSource(userId: string, id: string): Promise<Source | null>;
   listSources(userId: string): Promise<Source[]>;
+  deleteSource(userId: string, id: string): Promise<void>;
 
   // -- articles ---------------------------------------------------------
   putArticle(article: Article): Promise<void>;

@@ -1,0 +1,226 @@
+/**
+ * Admin subscriber management tests (audio-feed-e3n).
+ *
+ * Verifies feed inspection, adding/removing feeds for subscribers,
+ * feed token rotation, and auto-load behavior.
+ */
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { createApp } from "../src/app.ts";
+import { createHandlers } from "../src/compose.ts";
+import { memoryStores } from "../src/config.ts";
+import { renderAdminPage } from "../src/routes/admin.ts";
+import { makeSource, makeUser } from "./fixtures.ts";
+import type { AppConfig, Stores } from "../src/config.ts";
+
+const BASE = "https://audio.example.com";
+const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
+
+const RSS_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Sample Feed</title>
+  <link>https://example.com</link>
+  <item>
+    <title>Post 1</title>
+    <link>https://example.com/post-1</link>
+    <pubDate>Mon, 01 Sep 2026 06:00:00 +0000</pubDate>
+    <description>First post description.</description>
+  </item>
+</channel></rss>`;
+
+function app(deps = {}) {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  const handlers = createHandlers(ctx, {
+    feedTransport: () =>
+      Promise.resolve(
+        new Response(RSS_SAMPLE, {
+          status: 200,
+          headers: { "content-type": "application/rss+xml; charset=utf-8" },
+        }),
+      ),
+    fetchArticle: (url) =>
+      Promise.resolve({
+        url,
+        title: "Article Title",
+        author: "Author",
+        publishedAt: "2026-09-01T06:00:00.000Z",
+        lead: "Lead",
+        body: "Article body text.",
+      }),
+    ...deps,
+  });
+  const { fetch } = createApp(ctx, handlers);
+  return { fetch, stores, ctx };
+}
+
+Deno.test("GET /api/admin/users/:id/sources lists feeds for subscriber", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({
+      id: "source-1",
+      userId: "user-1",
+      title: "My Blog",
+      feedUrl: "https://example.com/feed.xml",
+      modes: ["direct"],
+    }),
+  );
+
+  // Refused without token
+  const unauth = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`),
+  );
+  assertEquals(unauth.status, 401);
+
+  // Allowed with token
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.sources.length, 1);
+  assertEquals(body.sources[0]?.title, "My Blog");
+  assertEquals(body.sources[0]?.feedPaths, ["/feed/tok-1/source-1/direct.xml"]);
+
+  // Unknown user 404
+  const unknown = await fetch(
+    new Request(`${BASE}/api/admin/users/ghost/sources`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(unknown.status, 404);
+});
+
+Deno.test("POST /api/admin/users/:id/sources subscribes user and queues posts", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-admin-token": "admin-secret",
+      },
+      body: JSON.stringify({
+        feedUrl: "https://example.com/feed.xml",
+        title: "Added by Admin",
+        modes: ["deepdive"],
+      }),
+    }),
+  );
+
+  assertEquals(res.status, 201);
+  const body = await res.json();
+  assertEquals(body.source.title, "Added by Admin");
+  assertEquals(body.source.modes, ["deepdive"]);
+  assertEquals(body.poll.queued, 1);
+  assertEquals(body.feedPaths, [`/feed/tok-1/${body.source.id}/deepdive.xml`]);
+
+  // Stored in metadata
+  const sources = await stores.metadata.listSources("user-1");
+  assertEquals(sources.length, 1);
+  assertEquals(sources[0]?.title, "Added by Admin");
+
+  // Ingested episode exists
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  assertEquals(episodes.length, 1);
+  assertEquals(episodes[0]?.mode, "deepdive");
+});
+
+Deno.test("DELETE /api/admin/users/:id/sources/:sourceId removes subscriber feed", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-1" }),
+  );
+  await stores.metadata.putSource(
+    makeSource({ id: "src-1", userId: "user-1", title: "To Remove" }),
+  );
+
+  assertEquals((await stores.metadata.listSources("user-1")).length, 1);
+
+  // Missing token 401
+  const unauth = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-1`, {
+      method: "DELETE",
+    }),
+  );
+  assertEquals(unauth.status, 401);
+
+  // Delete with token
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-1`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.deleted, "src-1");
+
+  assertEquals((await stores.metadata.listSources("user-1")).length, 0);
+
+  // Second delete returns 404
+  const notFound = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/sources/src-1`, {
+      method: "DELETE",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(notFound.status, 404);
+});
+
+Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes old capability", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "old-token" }),
+  );
+
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/rotate-token`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assert(body.feedToken, "must return new feedToken");
+  assert(body.feedToken !== "old-token", "must generate a new token");
+
+  // Old token is revoked
+  assertEquals(await stores.metadata.getUserByFeedToken("old-token"), null);
+  // New token resolves
+  assertEquals(
+    (await stores.metadata.getUserByFeedToken(body.feedToken))?.id,
+    "user-1",
+  );
+});
+
+Deno.test("admin console page renders subscriber management section and auto-loads on refresh", () => {
+  const html = renderAdminPage({
+    publicBaseUrl: "https://audio.example.com",
+    adminConfigured: true,
+  });
+
+  assertStringIncludes(html, 'id="manageSection"');
+  assertStringIncludes(html, 'id="manageDetails"');
+  assertStringIncludes(html, 'id="manageFeedUrl"');
+  assertStringIncludes(html, 'id="rotateManageToken"');
+  assertStringIncludes(html, 'id="manageSourcesBody"');
+  assertStringIncludes(html, 'id="addSourceForm"');
+  assertStringIncludes(html, 'id="subFeedUrl"');
+  assertStringIncludes(html, 'id="subFeedMode"');
+
+  // Auto-load on refresh: script calls loadUsers() when stored token is found
+  assertStringIncludes(html, 'sessionStorage.getItem("audio-feed-admin-token")');
+  assertStringIncludes(html, "loadUsers();");
+  // Enter key support on password input
+  assertStringIncludes(html, 'e.key === "Enter"');
+});

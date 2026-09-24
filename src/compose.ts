@@ -40,6 +40,7 @@ import {
   listUsers,
   NotAuthorizedError,
   requireAdminToken,
+  rotateFeedToken,
   suspendUser,
   UnknownUserError,
 } from "./auth/users.ts";
@@ -631,6 +632,161 @@ export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveU
   };
 }
 
+/** `GET /api/admin/users/:id/sources` — list feeds for a subscriber. */
+export function createAdminListUserSourcesHandler(
+  ctx: AppContext,
+): AppHandlers["adminListSources"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const userId = params.id ?? "";
+    const user = await ctx.stores.metadata.getUser(userId);
+    if (!user) return notFound("Unknown user");
+
+    const sources = await ctx.stores.metadata.listSources(userId);
+    return Response.json(
+      {
+        sources: sources.map((source) => ({
+          id: source.id,
+          title: source.title,
+          feedUrl: source.feedUrl,
+          siteUrl: source.siteUrl,
+          modes: source.modes,
+          lastPolledAt: source.lastPolledAt,
+          feedPaths: source.feedUrl
+            ? source.modes.map((mode) => `/feed/${user.feedToken}/${source.id}/${mode}.xml`)
+            : [],
+        })),
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/** `POST /api/admin/users/:id/sources` — subscribe a user to a feed as admin. */
+export function createAdminCreateUserSourceHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminCreateSource"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const userId = params.id ?? "";
+    const user = await ctx.stores.metadata.getUser(userId);
+    if (!user) return notFound("Unknown user");
+
+    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown } = {};
+    if ((req.headers.get("content-type") ?? "").includes("application/json")) {
+      body = await req.json().catch(() => ({}));
+    }
+    if (typeof body.feedUrl !== "string" || body.feedUrl.trim() === "") {
+      return Response.json({ error: "A feed URL is required." }, {
+        status: 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+
+    let feedUrl: string;
+    try {
+      feedUrl = articleUrl(body.feedUrl).href;
+    } catch (error) {
+      const status = error instanceof IngestError ? error.status : 400;
+      return Response.json(
+        { error: "That does not look like a fetchable feed URL." },
+        { status, headers: { "cache-control": "no-store" } },
+      );
+    }
+
+    const modes = Array.isArray(body.modes)
+      ? body.modes.filter((mode): mode is AudioMode =>
+        typeof mode === "string" && isAudioMode(mode)
+      )
+      : undefined;
+
+    try {
+      const { source, poll } = await subscribeToFeed(
+        ctx,
+        {
+          userId: user.id,
+          feedUrl,
+          title: typeof body.title === "string" ? body.title : undefined,
+          modes,
+        },
+        { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
+      );
+      return Response.json(
+        {
+          source: {
+            id: source.id,
+            title: source.title,
+            feedUrl: source.feedUrl,
+            modes: source.modes,
+          },
+          poll,
+          feedPaths: source.modes.map((mode) => `/feed/${user.feedToken}/${source.id}/${mode}.xml`),
+        },
+        { status: 201, headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      return Response.json(
+        { error: String((error as Error)?.message ?? error) },
+        { status: 422, headers: { "cache-control": "no-store" } },
+      );
+    }
+  };
+}
+
+/** `DELETE /api/admin/users/:id/sources/:sourceId` — remove a feed from a user. */
+export function createAdminDeleteUserSourceHandler(
+  ctx: AppContext,
+): AppHandlers["adminDeleteSource"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const userId = params.id ?? "";
+    const sourceId = params.sourceId ?? "";
+    const user = await ctx.stores.metadata.getUser(userId);
+    if (!user) return notFound("Unknown user");
+
+    const source = await ctx.stores.metadata.getSource(userId, sourceId);
+    if (!source) return notFound("Unknown source");
+
+    await ctx.stores.metadata.deleteSource(userId, sourceId);
+    return Response.json(
+      { ok: true, deleted: sourceId },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/** `POST /api/admin/users/:id/rotate-token` — rotate a user's feed token. */
+export function createAdminRotateUserTokenHandler(
+  ctx: AppContext,
+): AppHandlers["adminRotateToken"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const userId = params.id ?? "";
+    try {
+      const updated = await rotateFeedToken(ctx.stores.metadata, userId);
+      return Response.json(
+        {
+          id: updated.id,
+          feedToken: updated.feedToken,
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      if (error instanceof UnknownUserError) return notFound(error.message);
+      throw error;
+    }
+  };
+}
+
 /** Build every lane seam for a real server. Called by src/server.ts. */
 export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHandlers {
   return {
@@ -643,5 +799,9 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     listUsers: createListUsersHandler(ctx),
     createUser: createCreateUserHandler(ctx, deps),
     suspendUser: createSuspendUserHandler(ctx),
+    adminListSources: createAdminListUserSourcesHandler(ctx),
+    adminCreateSource: createAdminCreateUserSourceHandler(ctx, deps),
+    adminDeleteSource: createAdminDeleteUserSourceHandler(ctx),
+    adminRotateToken: createAdminRotateUserTokenHandler(ctx),
   };
 }

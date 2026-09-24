@@ -165,6 +165,11 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(out);
   }
 
+  deleteSource(userId: string, id: string): Promise<void> {
+    this.#sources.delete(MemoryMetadataStore.#scoped(userId, id));
+    return Promise.resolve();
+  }
+
   // -- articles -------------------------------------------------------------
 
   putArticle(article: Article): Promise<void> {
