@@ -309,6 +309,25 @@ Deno.test("a non-feed URL is refused, and nothing is stored", async () => {
   assertEquals((await stores.metadata.listSources("user-1")).length, 0);
 });
 
+Deno.test("a text/plain response that contains valid XML/Atom is accepted", async () => {
+  const textPlainFeed = (url: URL, _signal: AbortSignal) =>
+    Promise.resolve(
+      new Response(RSS, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } }),
+    );
+  const { fetch, stores } = app({ feedTransport: textPlainFeed });
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const res = await fetch(
+    post("/api/sources", { feedUrl: "https://bandarra.me/feed/feed.xml" }, "token-user-1"),
+  );
+  assertEquals(res.status, 201);
+  const body = await res.json();
+  assertEquals(body.source.feedUrl, "https://bandarra.me/feed/feed.xml");
+  assert(body.feedPaths.length > 0);
+});
+
 Deno.test("GET /api/sources lists the caller's feeds and their feed paths", async () => {
   const { fetch, stores } = app({
     feedTransport: feedTransport(RSS),

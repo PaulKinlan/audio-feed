@@ -237,7 +237,7 @@ export async function fetchArticle(
  */
 const MAX_FEED_BYTES = 2 * 1024 * 1024;
 const FEED_CONTENT_TYPE =
-  /^(application\/(rss|atom)\+xml|application\/xml|text\/xml|text\/rss)(?:;|$)/i;
+  /^(application\/(rss|atom)\+xml|application\/xml|text\/xml|text\/rss|text\/plain|application\/octet-stream)(?:;|$)/i;
 
 export async function fetchFeedDocument(
   input: string,
@@ -287,6 +287,10 @@ export async function fetchFeedDocument(
         xml = new TextDecoder(charset).decode(bytes);
       } catch {
         throw new IngestError(422, "Feed uses an unsupported character encoding.");
+      }
+      const trimmed = xml.trimStart();
+      if (!trimmed.startsWith("<?xml") && !trimmed.startsWith("<rss") && !trimmed.startsWith("<feed")) {
+        throw new IngestError(422, "That URL is not an uncompressed RSS or Atom feed.");
       }
       return { xml, url: url.href };
     }
