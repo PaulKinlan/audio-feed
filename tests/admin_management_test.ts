@@ -65,6 +65,7 @@ Deno.test("GET /api/admin/users/:id/sources lists feeds for subscriber", async (
       title: "My Blog",
       feedUrl: "https://example.com/feed.xml",
       modes: ["direct"],
+      lastPollError: "HTTP 403 Forbidden",
     }),
   );
 
@@ -86,6 +87,7 @@ Deno.test("GET /api/admin/users/:id/sources lists feeds for subscriber", async (
   assertEquals(body.sources.length, 1);
   assertEquals(body.sources[0]?.title, "My Blog");
   assertEquals(body.sources[0]?.feedPaths, ["/feed/tok-1/source-1/direct.xml"]);
+  assertEquals(body.sources[0]?.lastPollError, "HTTP 403 Forbidden");
 
   // Unknown user 404
   const unknown = await fetch(

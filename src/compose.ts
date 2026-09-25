@@ -733,6 +733,7 @@ export function createAdminListUserSourcesHandler(
           siteUrl: source.siteUrl,
           modes: source.modes,
           lastPolledAt: source.lastPolledAt,
+          lastPollError: source.lastPollError,
           feedPaths: source.feedUrl
             ? source.modes.map((mode) => `/feed/${user.feedToken}/${source.id}/${mode}.xml`)
             : [],

@@ -538,3 +538,130 @@ Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_
     },
   );
 });
+
+Deno.test("fetchArticle: decompresses gzip and deflate responses (audio-feed-dcj)", async () => {
+  const rawBytes = new TextEncoder().encode(html);
+
+  // 1. gzip compression
+  const gzipStream = new ReadableStream({
+    start(c) {
+      c.enqueue(rawBytes);
+      c.close();
+    },
+  }).pipeThrough(new CompressionStream("gzip"));
+  const gzipBytes = await new Response(gzipStream).bytes();
+
+  const gzipResponse = new Response(gzipBytes, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-encoding": "gzip",
+    },
+  });
+  const fromGzip = await fetchArticle("https://example.com/compressed-article", {
+    transport: () => Promise.resolve(gzipResponse),
+  });
+  equal(fromGzip.title, "Why small libraries last");
+  equal(fromGzip.body.includes("Small libraries earn trust by doing one job well"), true);
+
+  // 2. deflate compression
+  const deflateStream = new ReadableStream({
+    start(c) {
+      c.enqueue(rawBytes);
+      c.close();
+    },
+  }).pipeThrough(new CompressionStream("deflate"));
+  const deflateBytes = await new Response(deflateStream).bytes();
+
+  const deflateResponse = new Response(deflateBytes, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-encoding": "deflate",
+    },
+  });
+  const fromDeflate = await fetchArticle("https://example.com/compressed-article", {
+    transport: () => Promise.resolve(deflateResponse),
+  });
+  equal(fromDeflate.title, "Why small libraries last");
+});
+
+Deno.test("fetchFeedDocument: decompresses gzip feeds (audio-feed-dcj)", async () => {
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Gzipped Feed</title>
+  <item>
+    <title>Post 1</title>
+    <link>https://example.com/p1</link>
+  </item>
+</channel></rss>`;
+  const rawBytes = new TextEncoder().encode(feedXml);
+
+  const gzipStream = new ReadableStream({
+    start(c) {
+      c.enqueue(rawBytes);
+      c.close();
+    },
+  }).pipeThrough(new CompressionStream("gzip"));
+  const gzipBytes = await new Response(gzipStream).bytes();
+
+  const gzipResponse = new Response(gzipBytes, {
+    status: 200,
+    headers: {
+      "content-type": "application/rss+xml",
+      "content-encoding": "gzip",
+    },
+  });
+  const { fetchFeedDocument } = await import("../src/ingest/url.ts");
+  const res = await fetchFeedDocument("https://example.com/feed.xml", {
+    transport: () => Promise.resolve(gzipResponse),
+  });
+  equal(res.xml.includes("Gzipped Feed"), true);
+});
+
+Deno.test("fetchFeedDocument and fetchArticle send specific Accept headers (audio-feed-dcj)", async () => {
+  let feedAccept = "";
+  const feedXml = `<rss version="2.0"><channel><title>F</title></channel></rss>`;
+  const { fetchFeedDocument } = await import("../src/ingest/url.ts");
+  await fetchFeedDocument("https://example.com/feed.xml", {
+    transport: (_url: URL, _signal: AbortSignal, init?: { headers?: Record<string, string> }) => {
+      feedAccept = init?.headers?.["Accept"] ?? "";
+      return Promise.resolve(
+        new Response(feedXml, { headers: { "content-type": "application/rss+xml" } }),
+      );
+    },
+  });
+  equal(feedAccept.includes("application/rss+xml"), true);
+  equal(feedAccept.includes("application/atom+xml"), true);
+
+  let articleAccept = "";
+  await fetchArticle("https://example.com/art", {
+    transport: (_url: URL, _signal: AbortSignal, init?: { headers?: Record<string, string> }) => {
+      articleAccept = init?.headers?.["Accept"] ?? "";
+      return Promise.resolve(
+        new Response(html, { headers: { "content-type": "text/html" } }),
+      );
+    },
+  });
+  equal(articleAccept.includes("text/html"), true);
+});
+
+Deno.test("fetchArticle: rejects unsupported content-encoding with 422", async () => {
+  const res = new Response("dummy", {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-encoding": "br",
+    },
+  });
+  await rejects(
+    () => fetchArticle("https://example.com/art", { transport: () => Promise.resolve(res) }),
+    (err: unknown) => err instanceof IngestError && err.status === 422,
+  );
+});
+
+Deno.test("url.ts advertises gzip and identity, never ambiguous deflate (audio-feed-09j)", async () => {
+  const urlSource = await Deno.readTextFile(new URL("../src/ingest/url.ts", import.meta.url));
+  equal(urlSource.includes('"Accept-Encoding": "gzip, identity"'), true);
+  equal(urlSource.includes('"Accept-Encoding": "gzip, deflate'), false);
+});

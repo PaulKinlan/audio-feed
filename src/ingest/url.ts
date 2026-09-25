@@ -85,10 +85,14 @@ export function publicLookup(
   };
 }
 
-type Transport = (url: URL, signal: AbortSignal) => Promise<Response>;
+export type Transport = (
+  url: URL,
+  signal: AbortSignal,
+  init?: { headers?: Record<string, string> },
+) => Promise<Response>;
 
 /** Node's HTTP client exposes lookup; native Deno fetch would resolve again after validation. */
-const requestPublic: Transport = (url, signal) => {
+export const requestPublic: Transport = (url, signal, init) => {
   return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
       method: "GET",
@@ -97,9 +101,11 @@ const requestPublic: Transport = (url, signal) => {
       agent: false,
       maxHeaderSize: 16 * 1024,
       headers: {
-        "Accept": "text/html, application/xhtml+xml",
-        "Accept-Encoding": "identity",
-        "User-Agent": "AudioFeed/1.0 (article reader)",
+        "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+        "Accept-Encoding": "gzip, identity",
+        "User-Agent":
+          "AudioFeed/1.0 (podcast generator; +https://github.com/PaulKinlan/audio-feed)",
+        ...(init?.headers ?? {}),
       },
     }, (incoming) => {
       const headers = new Headers();
@@ -120,6 +126,27 @@ const requestPublic: Transport = (url, signal) => {
     request.end();
   });
 };
+
+function decompressBody(
+  body: ReadableStream<Uint8Array> | null,
+  encoding: string | null,
+  kind: "Article" | "Feed",
+): ReadableStream<Uint8Array> | null {
+  if (!body || !encoding) return body;
+  const normalized = encoding.trim().toLowerCase();
+  if (normalized === "" || normalized === "identity") return body;
+  if (normalized === "gzip" || normalized === "x-gzip") {
+    return body.pipeThrough(
+      new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>,
+    );
+  }
+  if (normalized === "deflate") {
+    return body.pipeThrough(
+      new DecompressionStream("deflate") as unknown as TransformStream<Uint8Array, Uint8Array>,
+    );
+  }
+  throw new IngestError(422, `${kind} uses an unsupported content-encoding: ${encoding}.`);
+}
 
 async function readBounded(
   body: ReadableStream<Uint8Array> | null,
@@ -176,7 +203,11 @@ export async function fetchArticle(
     : controller.signal;
   try {
     for (let hop = 0; hop <= 5; hop++) {
-      const response = await (options.transport ?? requestPublic)(url, signal);
+      const response = await (options.transport ?? requestPublic)(url, signal, {
+        headers: {
+          "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+        },
+      });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get("location");
@@ -192,18 +223,32 @@ export async function fetchArticle(
       }
       const contentType = response.headers.get("content-type") ?? "";
       const encoding = response.headers.get("content-encoding");
-      if (
-        !/^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(contentType) ||
-        (encoding && encoding !== "identity")
-      ) {
+      if (!/^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(contentType)) {
         await response.body?.cancel();
-        throw new IngestError(422, "Article must be an uncompressed HTML page.");
+        throw new IngestError(422, "Article must be an HTML page.");
       }
       if (Number(response.headers.get("content-length")) > MAX_HTML_BYTES) {
         await response.body?.cancel();
         throw new IngestError(413, "Article exceeds the 2 MiB size limit.");
       }
-      const bytes = await readBounded(response.body, MAX_HTML_BYTES, 413, signal);
+
+      let decompressedBody: ReadableStream<Uint8Array> | null;
+      try {
+        decompressedBody = decompressBody(response.body, encoding, "Article");
+      } catch (err) {
+        await response.body?.cancel();
+        throw err instanceof IngestError
+          ? err
+          : new IngestError(422, "Article decompression failed.");
+      }
+
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBounded(decompressedBody, MAX_HTML_BYTES, 413, signal);
+      } catch (err) {
+        if (err instanceof IngestError) throw err;
+        throw new IngestError(422, "Article decompression failed.");
+      }
       const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
       let html: string;
       try {
@@ -243,7 +288,7 @@ const FEED_CONTENT_TYPE =
 export async function fetchFeedDocument(
   input: string,
   options: {
-    transport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+    transport?: Transport;
     signal?: AbortSignal;
     timeoutMs?: number;
   } = {},
@@ -256,7 +301,12 @@ export async function fetchFeedDocument(
     : controller.signal;
   try {
     for (let hop = 0; hop <= 5; hop++) {
-      const response = await (options.transport ?? requestPublic)(url, signal);
+      const response = await (options.transport ?? requestPublic)(url, signal, {
+        headers: {
+          "Accept":
+            "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain;q=0.8, */*;q=0.5",
+        },
+      });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get("location");
@@ -273,15 +323,30 @@ export async function fetchFeedDocument(
       }
       const contentType = response.headers.get("content-type") ?? "";
       const encoding = response.headers.get("content-encoding");
-      if (!FEED_CONTENT_TYPE.test(contentType) || (encoding && encoding !== "identity")) {
+      if (!FEED_CONTENT_TYPE.test(contentType)) {
         await response.body?.cancel();
-        throw new IngestError(422, "That URL is not an uncompressed RSS or Atom feed.");
+        throw new IngestError(422, "That URL is not an RSS or Atom feed.");
       }
       if (Number(response.headers.get("content-length")) > MAX_FEED_BYTES) {
         await response.body?.cancel();
         throw new IngestError(413, "Feed exceeds the 2 MiB size limit.");
       }
-      const bytes = await readBounded(response.body, MAX_FEED_BYTES, 413, signal);
+
+      let decompressedBody: ReadableStream<Uint8Array> | null;
+      try {
+        decompressedBody = decompressBody(response.body, encoding, "Feed");
+      } catch (err) {
+        await response.body?.cancel();
+        throw err instanceof IngestError ? err : new IngestError(422, "Feed decompression failed.");
+      }
+
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBounded(decompressedBody, MAX_FEED_BYTES, 413, signal);
+      } catch (err) {
+        if (err instanceof IngestError) throw err;
+        throw new IngestError(422, "Feed decompression failed.");
+      }
       const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
       let xml: string;
       try {
@@ -307,9 +372,14 @@ export async function fetchFeedDocument(
   }
 }
 
-const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
+/**
+ * DOM text helpers, exported for the feed-fallback path: an item's embedded HTML
+ * must become the same shape of text as a fetched article's, or the two paths
+ * disagree about what an article body looks like (audio-feed-8g0).
+ */
+export const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
-function plainText(node: Node): string {
+export function plainText(node: Node): string {
   if (node.nodeType === 3) return (node.textContent ?? "").replace(/\s+/g, " ");
   const text = Array.from(node.childNodes).map(plainText).join("");
   return /^(P|DIV|SECTION|H[1-6]|LI|UL|OL|PRE|BLOCKQUOTE|BR|TR)$/.test(node.nodeName)
