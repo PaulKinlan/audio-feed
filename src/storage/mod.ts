@@ -142,6 +142,23 @@ export interface MetadataStore {
    * so callers never need `insertArticleIfAbsent` + `putEpisode` side by side.
    */
   insertArticleWithEpisodeIfAbsent(article: Article, episode: Episode): Promise<boolean>;
+
+  /**
+   * Write an article and its episode in ONE commit, with no URL dedupe
+   * (audio-feed-d8q).
+   *
+   * The inbox path needs the pair guarantee of `insertArticleWithEpisodeIfAbsent`
+   * without its refusal: re-sending the same URL to "Send to Audio" is a request
+   * for another episode, not a duplicate to drop. What must not happen either way
+   * is the half-write — an article stored with no episode is a URL that every later
+   * feed poll skips, because queueItems dedupes on the article alone. Measured on
+   * main before this existed: an article stored with no episode made a feed poll of
+   * that same URL report queued=0 skipped=1 episodes=0, forever.
+   *
+   * Throws if the commit fails, so the caller's error path is the whole story: after
+   * a throw, nothing was stored and a retry starts from clean.
+   */
+  putArticleWithEpisode(article: Article, episode: Episode): Promise<void>;
   getArticle(userId: string, id: string): Promise<Article | null>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;

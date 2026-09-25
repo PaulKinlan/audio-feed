@@ -82,6 +82,8 @@ export class MemoryMetadataStore implements MetadataStore {
   readonly #approvals: ApprovalRecord[] = [];
   readonly #sources = new Map<string, Source>();
   readonly #articles = new Map<string, Article>();
+  /** URL → article id, mirroring KV's `article_by_url` index (audio-feed-d8q). */
+  readonly #articleByUrl = new Map<string, string>();
   readonly #episodes = new Map<string, Episode>();
   // Sorted indexes of pending and synthesizing episodes (audio-feed-7li)
   readonly #pendingIndex: { sortKey: string; userId: string; id: string }[] = [];
@@ -178,19 +180,28 @@ export class MemoryMetadataStore implements MetadataStore {
   // -- articles -------------------------------------------------------------
 
   putArticle(article: Article): Promise<void> {
+    this.#indexArticle(article);
+    return Promise.resolve();
+  }
+
+  /**
+   * Record an article and point the URL index at it, which is what the KV adapter's
+   * `article_by_url` key does. Kept as a real index rather than a scan so the two
+   * adapters agree on which article a URL resolves to after the same URL is written
+   * twice — the inbox re-send case (audio-feed-d8q), where scanning returned the
+   * OLDEST match here while KV returned the NEWEST.
+   */
+  #indexArticle(article: Article): void {
     this.#articles.set(
       MemoryMetadataStore.#scoped(article.userId, article.id),
       structuredClone(article),
     );
-    return Promise.resolve();
+    this.#articleByUrl.set(`${article.userId}\u0000${article.url}`, article.id);
   }
 
   insertArticleIfAbsent(article: Article): Promise<boolean> {
     if (this.#hasArticleByUrl(article.userId, article.url)) return Promise.resolve(false);
-    this.#articles.set(
-      MemoryMetadataStore.#scoped(article.userId, article.id),
-      structuredClone(article),
-    );
+    this.#indexArticle(article);
     return Promise.resolve(true);
   }
 
@@ -201,19 +212,21 @@ export class MemoryMetadataStore implements MetadataStore {
     // The whole body runs without an await, so no other task can observe an
     // article whose episode is missing (audio-feed-2th).
     if (this.#hasArticleByUrl(article.userId, article.url)) return Promise.resolve(false);
-    this.#articles.set(
-      MemoryMetadataStore.#scoped(article.userId, article.id),
-      structuredClone(article),
-    );
+    this.#indexArticle(article);
     this.#writeEpisode(episode);
     return Promise.resolve(true);
   }
 
+  putArticleWithEpisode(article: Article, episode: Episode): Promise<void> {
+    // Synchronous start to finish, so no other task observes an article whose episode
+    // is not yet there (audio-feed-d8q).
+    this.#indexArticle(article);
+    this.#writeEpisode(episode);
+    return Promise.resolve();
+  }
+
   #hasArticleByUrl(userId: string, url: string): boolean {
-    for (const existing of this.#articles.values()) {
-      if (existing.userId === userId && existing.url === url) return true;
-    }
-    return false;
+    return this.#articleByUrl.has(`${userId}\u0000${url}`);
   }
 
   getArticle(userId: string, id: string): Promise<Article | null> {
@@ -222,12 +235,9 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   findArticleByUrl(userId: string, url: string): Promise<Article | null> {
-    for (const article of this.#articles.values()) {
-      if (article.userId === userId && article.url === url) {
-        return Promise.resolve(structuredClone(article));
-      }
-    }
-    return Promise.resolve(null);
+    const id = this.#articleByUrl.get(`${userId}\u0000${url}`);
+    if (!id) return Promise.resolve(null);
+    return this.getArticle(userId, id);
   }
 
   // -- episodes -------------------------------------------------------------

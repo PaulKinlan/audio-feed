@@ -365,6 +365,33 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.getEpisode("user-2", "e3"))?.id, "e3");
   });
 
+  test("putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q)", async (store) => {
+    const url = "https://example.com/sent-to-audio";
+    const article = makeArticle({ id: "a1", userId: "user-1", url });
+    const episode = makeEpisode({ id: "e1", userId: "user-1", articleId: "a1", status: "pending" });
+
+    await store.putArticleWithEpisode(article, episode);
+    assertEquals((await store.getArticle("user-1", "a1"))?.url, url);
+    assertEquals((await store.getEpisode("user-1", "e1"))?.articleId, "a1");
+    assert((await store.listPendingEpisodes()).episodes.some((e) => e.id === "e1"));
+
+    // NO dedupe here, on purpose: sending the same URL to the inbox twice is a request
+    // for a second episode, not a duplicate to drop. The newest write owns the URL, and
+    // the earlier pair stays whole — its episode still exists and still plays.
+    const again = makeArticle({ id: "a2", userId: "user-1", url });
+    const againEpisode = makeEpisode({
+      id: "e2",
+      userId: "user-1",
+      articleId: "a2",
+      status: "pending",
+    });
+    await store.putArticleWithEpisode(again, againEpisode);
+    assertEquals((await store.findArticleByUrl("user-1", url))?.id, "a2");
+    assertEquals((await store.getArticle("user-1", "a1"))?.id, "a1");
+    assertEquals((await store.getEpisode("user-1", "e1"))?.id, "e1");
+    assertEquals((await store.getEpisode("user-1", "e2"))?.articleId, "a2");
+  });
+
   // -- episodes -------------------------------------------------------------
 
   test("lists episodes newest first", async (store) => {
