@@ -31,3 +31,7 @@ Open `http://localhost:<port>/admin`, paste `harness-admin`, and press **Save to
 
 The script was added after `d97c1b9`. For the BEFORE column, copy it into a checkout of
 `d97c1b9` and run it there.
+
+From audio-feed-0ob on, a run of idle synthesis ticks is kept as one row, the latest. At
+those commits the harness shows one synthesis row where the AFTER columns show ten, and
+"Runs recorded" counts that stretch once.

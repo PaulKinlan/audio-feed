@@ -493,6 +493,15 @@ export class MemoryMetadataStore implements MetadataStore {
 
   /** Newest first, bounded on write per job — the same contract the KV adapter honours. */
   recordRun(record: RunRecord): Promise<void> {
+    // A run of idle ticks is kept as one row, the latest, as in the KV adapter
+    // (audio-feed-0ob). #runs is newest first, so find() gets the job's newest.
+    const newest = this.#runs.find((r) => r.kind === record.kind);
+    if (
+      record.idle && newest?.idle &&
+      Date.parse(newest.startedAt) <= Date.parse(record.startedAt)
+    ) {
+      this.#runs.splice(this.#runs.indexOf(newest), 1);
+    }
     this.#runs.push(structuredClone(record));
     this.#runs.sort(compareRunsNewestFirst);
     // Per job (audio-feed-ct1): a busy job must not evict a quiet one's history.

@@ -1142,6 +1142,44 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
 
     assertEquals((await store.listRuns()).map((r) => r.id), ["a", "b", "c"]);
   });
+
+  test("a run of idle ticks is kept as one row, the latest (audio-feed-0ob)", async (store) => {
+    // The synthesis cron ticks every 2 minutes and nearly always finds nothing
+    // to do. An idle tick replaces its job's newest row when that row is an
+    // older idle tick, so the history does not grow and needs no prune.
+    const idle = (id: string, i: number) =>
+      run({ id, kind: "synthesis", startedAt: isoAt(i), idle: true });
+    await store.recordRun(run({ id: "work", kind: "synthesis", startedAt: isoAt(0), ready: 2 }));
+    await store.recordRun(idle("i1", 1));
+    await store.recordRun(idle("i2", 2));
+    await store.recordRun(idle("i3", 3));
+
+    assertEquals((await store.listRuns()).map((r) => r.id), ["i3", "work"]);
+  });
+
+  test("an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob)", async (store) => {
+    await store.recordRun(
+      run({ id: "s-idle", kind: "synthesis", startedAt: isoAt(1), idle: true }),
+    );
+    // Another job's idle tick is its own row.
+    await store.recordRun(
+      run({ id: "p-idle", kind: "feed-poll", startedAt: isoAt(2), idle: true }),
+    );
+    // A tick that did work is always kept, and ends the idle run before it.
+    await store.recordRun(run({ id: "s-work", kind: "synthesis", startedAt: isoAt(3), ready: 1 }));
+    await store.recordRun(
+      run({ id: "s-idle-2", kind: "synthesis", startedAt: isoAt(4), idle: true }),
+    );
+    // Recorded late: an older idle tick never replaces a newer one.
+    await store.recordRun(
+      run({ id: "s-late", kind: "synthesis", startedAt: isoAt(0), idle: true }),
+    );
+
+    assertEquals(
+      (await store.listRuns()).map((r) => r.id),
+      ["s-idle-2", "s-work", "p-idle", "s-idle", "s-late"],
+    );
+  });
 }
 
 /** Distinct, ordered timestamps for history tests. */

@@ -129,6 +129,27 @@ Deno.test("registerCronJobs: handlers execute batch operations and handle errors
   assertEquals(ep?.status, "ready");
 });
 
+Deno.test("registerCronJobs: idle synthesis ticks are recorded as idle, and kept as one row (audio-feed-0ob)", async () => {
+  // Nothing is pending, so every tick finds nothing to do: the common case on
+  // Deploy, where this job runs every 2 minutes.
+  const stores: Stores = memoryStores();
+  const registered: CronRegistration[] = [];
+  const mockCron = (name: string, schedule: string, handler: () => Promise<void>) => {
+    registered.push({ name, schedule, handler });
+  };
+  registerCronJobs({ config, stores }, {
+    cron: mockCron,
+    synthesizer: () => Promise.resolve(mockAudio()),
+  });
+
+  const synthJob = registered.find((j) => j.name === "audio-feed-synthesis");
+  assert(synthJob);
+  for (let i = 0; i < 3; i++) await synthJob.handler();
+
+  const runs = await stores.metadata.listRuns();
+  assertEquals(runs.map((r) => [r.kind, r.idle]), [["synthesis", true]]);
+});
+
 Deno.test("registerCronJobs: supports lazy context provider function (audio-feed-ncf)", async () => {
   const stores: Stores = memoryStores();
   const ctx = { config, stores };

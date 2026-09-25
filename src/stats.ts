@@ -51,6 +51,12 @@ export async function recordRun<T>(
   trigger: RunTrigger,
   work: () => Promise<T>,
   summarise: (result: T) => Omit<RunRecord, "id" | "kind" | "trigger" | "startedAt" | "durationMs">,
+  /**
+   * Whether a scheduled run did nothing (audio-feed-0ob). Such a tick is
+   * recorded as idle, and a run of idle ticks is kept as one row. Only a cron
+   * trigger can be idle: a manual run is someone asking, so it is always kept.
+   */
+  idle?: (result: T) => boolean,
 ): Promise<T> {
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -84,6 +90,7 @@ export async function recordRun<T>(
     throw error;
   }
 
-  await remember(summarise(result));
+  const summary = summarise(result);
+  await remember(trigger === "cron" && idle?.(result) ? { ...summary, idle: true } : summary);
   return result;
 }

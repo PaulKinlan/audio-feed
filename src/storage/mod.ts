@@ -120,6 +120,12 @@ export interface RunRecord {
   deferred?: number;
   /** Present only when the run threw. */
   error?: string;
+  /**
+   * A scheduled tick that did nothing (audio-feed-0ob). A run of idle ticks is
+   * kept as one row, the latest, so a job that is nearly always idle does not
+   * fill its history with them.
+   */
+  idle?: boolean;
 }
 
 /**
@@ -323,6 +329,11 @@ export interface MetadataStore {
    * synthesis cron, which records a run every 2 minutes even when idle, push the
    * 15-minute feed poll out of the history entirely, and the dashboard then said
    * a poller that had only stopped had never run.
+   *
+   * An idle tick replaces its job's newest row when that row is an idle tick
+   * that started no later (audio-feed-0ob). The synthesis cron is idle on nearly
+   * all of its 720 ticks a day, and appending each one then pruning past the
+   * limit read the job's whole history on every one of them.
    */
   recordRun(record: RunRecord): Promise<void>;
   /**
