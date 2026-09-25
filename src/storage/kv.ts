@@ -29,6 +29,7 @@
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import type {
+  DownloadCounts,
   EpisodeClaim,
   EpisodePage,
   EpisodePageResult,
@@ -36,7 +37,9 @@ import type {
   ListPendingOptions,
   ListPendingResult,
   MetadataStore,
+  RunRecord,
 } from "./mod.ts";
+import { RUN_HISTORY_LIMIT } from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -585,6 +588,74 @@ export class KvMetadataStore implements MetadataStore {
       return ["episode_by_source", query.userId, query.sourceId, query.mode];
     }
     return ["episode_by_user", query.userId];
+  }
+
+  // -- operational stats (audio-feed-ndc) ------------------------------------
+
+  /**
+   * `.sum()` on a `KvU64`, not read-then-write.
+   *
+   * Measured on this runtime: 200 concurrent read-modify-writes landed 1 of
+   * 200; 200 atomic sums landed all 200. `/audio/:key+` is the route podcast
+   * clients hammer, so the naive form would undercount by orders of magnitude
+   * exactly when the number matters.
+   */
+  async recordDownload(userId: string | null): Promise<void> {
+    try {
+      const tx = this.#kv.atomic().sum(["download_total"], 1n);
+      if (userId) tx.sum(["download_by_user", userId], 1n);
+      await tx.commit();
+    } catch {
+      // A counter is not worth failing a download for. The episode still plays.
+    }
+  }
+
+  async getDownloadCounts(): Promise<DownloadCounts> {
+    const total = await this.#kv.get<Deno.KvU64>(["download_total"]);
+    const perUser: { userId: string; count: number }[] = [];
+    for await (const entry of this.#kv.list<Deno.KvU64>({ prefix: ["download_by_user"] })) {
+      const userId = entry.key[1];
+      if (typeof userId !== "string" || !entry.value) continue;
+      perUser.push({ userId, count: Number(entry.value.value) });
+    }
+    perUser.sort((a, b) => b.count - a.count);
+    return { total: Number(total.value?.value ?? 0n), perUser };
+  }
+
+  /**
+   * Newest-first key, then prune past the limit.
+   *
+   * Bounded on WRITE rather than on read: an unbounded history reads cheaply
+   * today and is a multi-megabyte scan a year in, which is the audio-feed-att
+   * failure. The prune costs one bounded list per run, and runs are minutes
+   * apart.
+   */
+  async recordRun(record: RunRecord): Promise<void> {
+    try {
+      await this.#kv.set(
+        ["run", descendingKey(record.startedAt, record.id)],
+        record,
+      );
+      // Drop anything past the limit. `list` is ascending over descending keys,
+      // so everything after the first RUN_HISTORY_LIMIT entries is older.
+      let seen = 0;
+      for await (const entry of this.#kv.list<RunRecord>({ prefix: ["run"] })) {
+        seen++;
+        if (seen > RUN_HISTORY_LIMIT) await this.#kv.delete(entry.key);
+      }
+    } catch {
+      // History is diagnostic. Losing a record must not fail the run it describes.
+    }
+  }
+
+  async listRuns(limit = RUN_HISTORY_LIMIT): Promise<RunRecord[]> {
+    const out: RunRecord[] = [];
+    for await (
+      const entry of this.#kv.list<RunRecord>({ prefix: ["run"] }, { limit })
+    ) {
+      if (entry.value) out.push(entry.value);
+    }
+    return out;
   }
 
   close(): Promise<void> {

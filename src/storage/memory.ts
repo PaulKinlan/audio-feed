@@ -16,10 +16,13 @@ import {
   type BlobStore,
   type ByteRange,
   collect,
+  type DownloadCounts,
   type EpisodeClaim,
   type EpisodeQuery,
   type MetadataStore,
   resolveRange,
+  RUN_HISTORY_LIMIT,
+  type RunRecord,
   streamOf,
 } from "./mod.ts";
 
@@ -86,6 +89,11 @@ export class MemoryMetadataStore implements MetadataStore {
   // Sorted indexes of pending and synthesizing episodes (audio-feed-7li)
   readonly #pendingIndex: { sortKey: string; userId: string; id: string }[] = [];
   readonly #synthesizingIndex: { sortKey: string; userId: string; id: string }[] = [];
+  // Operational stats (audio-feed-ndc). Single-threaded here, so a plain
+  // counter is already atomic; the KV adapter needs `.sum()` for the same job.
+  #downloadTotal = 0;
+  readonly #downloadsByUser = new Map<string, number>();
+  readonly #runs: RunRecord[] = [];
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -430,6 +438,38 @@ export class MemoryMetadataStore implements MetadataStore {
     removeSortedIndex(this.#pendingIndex, sortKey);
     this.#episodes.set(key, structuredClone(episode));
     return Promise.resolve(true);
+  }
+
+  // -- operational stats (audio-feed-ndc) ------------------------------------
+
+  recordDownload(userId: string | null): Promise<void> {
+    this.#downloadTotal++;
+    if (userId) {
+      this.#downloadsByUser.set(userId, (this.#downloadsByUser.get(userId) ?? 0) + 1);
+    }
+    return Promise.resolve();
+  }
+
+  getDownloadCounts(): Promise<DownloadCounts> {
+    const perUser = [...this.#downloadsByUser.entries()]
+      .map(([userId, count]) => ({ userId, count }))
+      .sort((a, b) => b.count - a.count);
+    return Promise.resolve({ total: this.#downloadTotal, perUser });
+  }
+
+  /** Newest first, bounded on write — the same contract the KV adapter honours. */
+  recordRun(record: RunRecord): Promise<void> {
+    this.#runs.push(structuredClone(record));
+    this.#runs.sort((a, b) => {
+      if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? 1 : -1;
+      return b.id.localeCompare(a.id);
+    });
+    if (this.#runs.length > RUN_HISTORY_LIMIT) this.#runs.length = RUN_HISTORY_LIMIT;
+    return Promise.resolve();
+  }
+
+  listRuns(limit = RUN_HISTORY_LIMIT): Promise<RunRecord[]> {
+    return Promise.resolve(this.#runs.slice(0, limit).map((r) => structuredClone(r)));
   }
 
   close(): Promise<void> {

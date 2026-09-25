@@ -80,6 +80,55 @@ export interface ListPendingResult {
   cursor?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Operational stats (audio-feed-ndc)
+// ---------------------------------------------------------------------------
+
+/** Which background job a run record describes. */
+export type RunKind = "feed-poll" | "synthesis";
+
+/** How a run was started. `cron` is Deno.cron; `manual` is an admin trigger. */
+export type RunTrigger = "cron" | "manual";
+
+/**
+ * One completed background run, for the admin dashboard's history.
+ *
+ * Recorded after the run finishes, including when it threw — a run that failed
+ * is the one an operator most needs to see, so `error` is part of the record
+ * rather than a reason not to write one.
+ */
+export interface RunRecord {
+  id: string;
+  kind: RunKind;
+  trigger: RunTrigger;
+  /** ISO 8601. History is ordered newest-first on this. */
+  startedAt: string;
+  durationMs: number;
+  /** feed-poll: sources polled, episodes queued, sources that errored. */
+  polled?: number;
+  queued?: number;
+  failed?: number;
+  /** synthesis: episodes finished, deferred behind an unapproved user. */
+  ready?: number;
+  deferred?: number;
+  /** Present only when the run threw. */
+  error?: string;
+}
+
+/**
+ * Enclosure request counts.
+ *
+ * NOT the same as "plays". Counted at the audio route, so a store that hands out
+ * direct URLs (S3/R2) is counted when the redirect is ISSUED, not when the
+ * client finishes downloading — the bytes never reach us. The dashboard labels
+ * this honestly rather than implying a completed download.
+ */
+export interface DownloadCounts {
+  total: number;
+  /** Descending by count. Only users with at least one request appear. */
+  perUser: { userId: string; count: number }[];
+}
+
 export interface MetadataStore {
   // -- users ------------------------------------------------------------
   /**
@@ -203,8 +252,38 @@ export interface MetadataStore {
    */
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
 
+  // -- operational stats (audio-feed-ndc) --------------------------------
+
+  /**
+   * Count one enclosure request, against the total and against `userId` when
+   * the blob key identifies one.
+   *
+   * MUST be atomic per counter. A read-modify-write loses increments under
+   * concurrency, and this is the one route podcast clients hammer: measured on
+   * Deno KV, 200 concurrent read-modify-writes landed 1 of 200, while 200
+   * atomic increments landed all 200.
+   *
+   * Resolves rather than throwing on a storage failure. A counter is not worth
+   * failing a download for.
+   */
+  recordDownload(userId: string | null): Promise<void>;
+  getDownloadCounts(): Promise<DownloadCounts>;
+
+  /**
+   * Append a run to the history, pruning to the newest `RUN_HISTORY_LIMIT`.
+   *
+   * Bounded on write, deliberately: an unbounded history is the audio-feed-att
+   * failure — a scan that is cheap today and a multi-megabyte read later.
+   */
+  recordRun(record: RunRecord): Promise<void>;
+  /** Newest first. */
+  listRuns(limit?: number): Promise<RunRecord[]>;
+
   close(): Promise<void>;
 }
+
+/** How many runs the history keeps. Older records are dropped on write. */
+export const RUN_HISTORY_LIMIT = 50;
 
 // ---------------------------------------------------------------------------
 // Blobs

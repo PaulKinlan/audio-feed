@@ -12,6 +12,7 @@
 
 import type { AppContext } from "./app.ts";
 import { runFeedPollBatch } from "./ingest/feed.ts";
+import { recordRun } from "./stats.ts";
 import {
   createGeminiSynthesizer,
   runSynthesisBatch,
@@ -101,7 +102,15 @@ export function registerCronJobs(
     handler: async () => {
       try {
         const { ctx } = await resolveContext();
-        const result = await runFeedPollBatch(ctx);
+        // Recorded for the admin dashboard, including on failure — a run that
+        // threw is the one an operator needs to see (audio-feed-ndc).
+        const result = await recordRun(
+          ctx,
+          "feed-poll",
+          "cron",
+          () => runFeedPollBatch(ctx),
+          (r) => ({ polled: r.polled, queued: r.queued, failed: r.failed }),
+        );
         console.log(
           `[audio-feed] cron feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
         );
@@ -125,7 +134,17 @@ export function registerCronJobs(
         try {
           const { ctx, synthesizer } = await resolveContext();
           if (!synthesizer) return;
-          const result = await runSynthesisBatch(ctx, synthesizer);
+          const result = await recordRun(
+            ctx,
+            "synthesis",
+            "cron",
+            () => runSynthesisBatch(ctx, synthesizer),
+            (r) => ({
+              ready: r.ready.length,
+              failed: r.failed.length,
+              deferred: r.deferred.length,
+            }),
+          );
           if (result.ready.length || result.failed.length || result.deferred.length) {
             console.log(
               `[audio-feed] cron synthesis: ${result.ready.length} ready, ${result.failed.length} failed, ` +

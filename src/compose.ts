@@ -39,6 +39,7 @@ import {
   type SynthesisWorkerOptions,
   type Synthesizer,
 } from "./worker/synthesis.ts";
+import { recordRun } from "./stats.ts";
 import { buildFeed, masterFeedUrl, sourceFeedUrl } from "./feed/rss.ts";
 import type { ChannelMeta, Episode as FeedEpisode } from "./feed/types.ts";
 import { toFeedEpisode } from "./feed/adapter.ts";
@@ -1082,11 +1083,20 @@ export function createAdminPollNowHandler(
     const denied = await adminGate(ctx, req);
     if (denied) return denied;
 
-    const result = await runFeedPollBatch(ctx, {
-      ...deps.feedPollOptions,
-      transport: deps.feedTransport,
-      fetchArticle: deps.fetchArticle,
-    });
+    // Recorded in the same history as the cron runs, tagged `manual`, so the
+    // dashboard can show who started what (audio-feed-ndc).
+    const result = await recordRun(
+      ctx,
+      "feed-poll",
+      "manual",
+      () =>
+        runFeedPollBatch(ctx, {
+          ...deps.feedPollOptions,
+          transport: deps.feedTransport,
+          fetchArticle: deps.fetchArticle,
+        }),
+      (r) => ({ polled: r.polled, queued: r.queued, failed: r.failed }),
+    );
 
     return Response.json(
       {
@@ -1125,7 +1135,17 @@ export function createAdminSynthesizeNowHandler(
       );
     }
 
-    const result = await runSynthesisBatch(ctx, synthesizer, deps.synthesisOptions);
+    const result = await recordRun(
+      ctx,
+      "synthesis",
+      "manual",
+      () => runSynthesisBatch(ctx, synthesizer, deps.synthesisOptions),
+      (r) => ({
+        ready: r.ready.length,
+        failed: r.failed.length,
+        deferred: r.deferred.length,
+      }),
+    );
     return Response.json(
       {
         ok: true,
