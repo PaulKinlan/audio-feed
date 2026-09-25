@@ -206,3 +206,38 @@ Deno.test("two subscribers are counted separately (audio-feed-ndc)", async () =>
     { userId: "user-2", count: 1 },
   ]);
 });
+
+// -- the CORS path to a redirecting store ----------------------------------
+//
+// audio-feed-csm serves a CORS-constrained request from the isolate instead of
+// redirecting it, because the object store the redirect points at does not
+// answer CORS. On a redirecting store (production's) that moves the count from
+// the 302 to the 200. Each side was tested on its own; these pin the
+// combination, which exists only now that both have landed.
+
+Deno.test("a CORS request to a redirecting store is served and counted once (audio-feed-ndc)", async () => {
+  const { fetch, stores } = await app(redirectingStore);
+
+  const res = await fetch(new Request(`${BASE}/audio/${KEY}`, { headers: { origin: BASE } }));
+  assertEquals(res.status, 200, "served from the isolate, not redirected");
+  await res.arrayBuffer();
+
+  // Exactly once: not lost along with the skipped redirect, and not taken twice.
+  const counts = await stores.metadata.getDownloadCounts();
+  assertEquals(counts.total, 1);
+  assertEquals(counts.perUser, [{ userId: "user-1", count: 1 }]);
+});
+
+Deno.test("a ranged CORS request to a redirecting store is served but NOT counted (audio-feed-ndc)", async () => {
+  // A media element with `crossorigin` requests in CORS mode, normally with a
+  // Range header. A partial fetch is not a download on this path either.
+  const { fetch, stores } = await app(redirectingStore);
+
+  const res = await fetch(
+    new Request(`${BASE}/audio/${KEY}`, { headers: { origin: BASE, range: "bytes=0-3" } }),
+  );
+  assertEquals(res.status, 206, "the range must actually have been served");
+  await res.arrayBuffer();
+
+  assertEquals((await stores.metadata.getDownloadCounts()).total, 0);
+});
