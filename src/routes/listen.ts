@@ -219,8 +219,11 @@ export function renderListenPage(
     /* Fallback only. The real value is measured from the dock at runtime (see
        the ResizeObserver below), because a hand-picked constant drifts the
        moment a row is added: measured at 186px against a guessed 136px reserve,
-       which hid the last episode behind the dock. */
-    --dock-h: 11.75rem;
+       which hid the last episode behind the dock. This number covers the
+       TALLEST dock measured — 212px at 1280x900 and 210px at 360x740 — so the
+       path with no ResizeObserver and the path with JS disabled both clear it;
+       11.75rem (188px) did neither (audio-feed-c5n). */
+    --dock-h: 13.5rem;
     --ease: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
@@ -721,14 +724,19 @@ ${ICON_SPRITE}
    * safe-area inset, and a guessed 8.5rem measured 50px short against a real
    * 186px dock. Deriving it means the reserve cannot drift from the thing it is
    * reserving for.
+   *
+   * Measured ONCE in every browser, and kept in sync where the observer exists: a
+   * browser without ResizeObserver previously never measured at all and lived with
+   * the constant, which is the wrong half of the trade for the path that has no
+   * other way to get it right (audio-feed-c5n).
    */
   const dock = document.querySelector(".dock");
-  if (dock && "ResizeObserver" in window) {
+  if (dock) {
     const sync = () => {
       const height = dock.getBoundingClientRect().height;
       if (height > 0) document.documentElement.style.setProperty("--dock-h", height + "px");
     };
-    new ResizeObserver(sync).observe(dock);
+    if ("ResizeObserver" in window) new ResizeObserver(sync).observe(dock);
     sync();
   }
 
