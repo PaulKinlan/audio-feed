@@ -1074,6 +1074,60 @@ export function createAdminRotateUserTokenHandler(
   };
 }
 
+/**
+ * `GET /api/admin/stats` — operational metrics for the dashboard (audio-feed-ndc).
+ *
+ * Every number here is bounded by construction: the run history is capped at
+ * write, and the per-user download list only contains users who have had a
+ * request. No unbounded scan, which is the audio-feed-att failure.
+ */
+export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStats"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const [downloads, runs, users] = await Promise.all([
+      ctx.stores.metadata.getDownloadCounts(),
+      ctx.stores.metadata.listRuns(),
+      ctx.stores.metadata.listUsers(),
+    ]);
+
+    // Resolve ids to emails so the dashboard shows a person, not a ULID.
+    const emailById = new Map(users.map((u) => [u.id, u.email]));
+
+    // Feed processing times come from the poll runs we recorded, not from a
+    // separate timer: one source of truth means the dashboard cannot disagree
+    // with the history it is displaying.
+    const pollRuns = runs.filter((r) => r.kind === "feed-poll");
+    const lastPoll = pollRuns[0];
+    const recent = pollRuns.slice(0, 10);
+    const averagePollMs = recent.length
+      ? Math.round(recent.reduce((sum, r) => sum + r.durationMs, 0) / recent.length)
+      : null;
+
+    return Response.json(
+      {
+        ok: true,
+        downloads: {
+          total: downloads.total,
+          perUser: downloads.perUser.map((d) => ({
+            ...d,
+            email: emailById.get(d.userId) ?? null,
+          })),
+        },
+        feedProcessing: {
+          lastPolledAt: lastPoll?.startedAt ?? null,
+          lastDurationMs: lastPoll?.durationMs ?? null,
+          averageDurationMs: averagePollMs,
+          sampleSize: recent.length,
+        },
+        runs,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
 /** `POST /api/admin/poll-now` — trigger an immediate feed poll batch (audio-feed-dsn). */
 export function createAdminPollNowHandler(
   ctx: AppContext,
@@ -1178,6 +1232,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminDeleteSource: createAdminDeleteUserSourceHandler(ctx),
     adminRotateToken: createAdminRotateUserTokenHandler(ctx),
     adminPollNow: createAdminPollNowHandler(ctx, deps),
+    adminStats: createAdminStatsHandler(ctx),
     adminSynthesizeNow: createAdminSynthesizeNowHandler(ctx, deps),
   };
 }

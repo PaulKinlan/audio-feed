@@ -19,10 +19,11 @@
  * The stub DOM implements only what the script touches -- verified by reading
  * every `document.*`, element property and global out of the rendered script:
  *   document.getElementById / createElement
- *   textContent, className, type, value, disabled, hidden, readOnly, dataset,
- *   appendChild, append, replaceChildren, setAttribute, addEventListener,
- *   focus, select, scrollIntoView, reset, click
- *   sessionStorage, navigator.clipboard, confirm, setTimeout, fetch
+ *   textContent, className, type, value, checked, disabled, hidden, readOnly,
+ *   dataset, appendChild, append, replaceChildren, setAttribute,
+ *   addEventListener, focus, select, scrollIntoView, reset, click
+ *   sessionStorage, localStorage, navigator.clipboard, confirm, setTimeout,
+ *   fetch
  * If the script grows a new DOM call, this harness throws rather than silently
  * passing, which is the behaviour we want from a test double.
  *
@@ -65,6 +66,18 @@ const PAGE_IDS = [
   "pollNowBtn",
   "synthesizeNowBtn",
   "triggersFeedback",
+  // audio-feed-ndc
+  "rememberToken",
+  "refreshStats",
+  "statDownloads",
+  "statLastPoll",
+  "statPollDuration",
+  "statRuns",
+  "runsBody",
+  "runsCaption",
+  "downloadsBody",
+  "downloadsCaption",
+  "statsFeedback",
 ];
 
 export interface StubElement {
@@ -74,6 +87,8 @@ export interface StubElement {
   className: string;
   type: string;
   value: string;
+  /** audio-feed-ndc — the remember-token checkbox is read AND written by the script. */
+  checked: boolean;
   disabled: boolean;
   hidden: boolean;
   readOnly: boolean;
@@ -124,6 +139,7 @@ function makeElement(tag: string, id = ""): StubElement {
     className: "",
     type: "",
     value: "",
+    checked: false,
     disabled: false,
     hidden: false,
     readOnly: false,
@@ -196,6 +212,15 @@ export interface AdminHarness {
   buttons(root: StubElement, label: string): StubElement[];
   /** Let queued promises settle. */
   flush(): Promise<void>;
+  /**
+   * What is in each web storage right now (audio-feed-ndc).
+   *
+   * Exposed because "remember me" is a claim about WHERE the token went, and
+   * the only way to falsify it is to look in both stores. A test that asserted
+   * the checkbox state would pass while the token sat in the wrong one.
+   */
+  sessionStore(key: string): string | null;
+  localStore(key: string): string | null;
 }
 
 export interface HarnessOptions {
@@ -208,6 +233,12 @@ export interface HarnessOptions {
   ) => unknown | null | Promise<unknown | null>;
   /** Admin token pre-seeded into sessionStorage, so the page auto-loads. */
   storedToken?: string | null;
+  /**
+   * Admin token pre-seeded into localStorage — the "remembered on this device"
+   * case (audio-feed-ndc). Separate from `storedToken` so a test can seed one,
+   * the other, or both and see which the page prefers.
+   */
+  persistedToken?: string | null;
 }
 
 /**
@@ -295,13 +326,22 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
     },
   };
 
-  const store = new Map<string, string>();
-  if (options.storedToken) store.set("audio-feed-admin-token", options.storedToken);
-  const sessionStorage = {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => void store.set(key, value),
-    removeItem: (key: string) => void store.delete(key),
+  // Two independent maps, exactly like a browser. Sharing one would make the
+  // "clear the other store" behaviour untestable: every write would appear in
+  // both, and unchecking the box would look like it forgot the token when it
+  // had not (audio-feed-ndc).
+  const makeStorage = (seed?: string | null) => {
+    const map = new Map<string, string>();
+    if (seed) map.set("audio-feed-admin-token", seed);
+    return {
+      map,
+      getItem: (key: string) => map.get(key) ?? null,
+      setItem: (key: string, value: string) => void map.set(key, value),
+      removeItem: (key: string) => void map.delete(key),
+    };
   };
+  const sessionStorage = makeStorage(options.storedToken);
+  const localStorage = makeStorage(options.persistedToken);
 
   const navigator = { clipboard: { writeText: () => Promise.resolve() } };
 
@@ -345,6 +385,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
   const run = new Function(
     "document",
     "sessionStorage",
+    "localStorage",
     "navigator",
     "confirm",
     "fetch",
@@ -354,6 +395,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
   run(
     document,
     sessionStorage,
+    localStorage,
     navigator,
     confirmFn,
     fetchFn,
@@ -376,5 +418,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
     buttons: (root, label) =>
       root.descendants().filter((el) => el.tag === "button" && el.textContent === label),
     flush,
+    sessionStore: (key) => sessionStorage.getItem(key),
+    localStore: (key) => localStorage.getItem(key),
   };
 }
