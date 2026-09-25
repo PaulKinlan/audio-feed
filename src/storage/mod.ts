@@ -121,8 +121,27 @@ export interface MetadataStore {
    * Atomic first write for an article (audio-feed-33m).
    * Resolves `true` if the article was inserted, or `false` if an article
    * with the same URL already exists for this user.
+   *
+   * A queueing caller almost always wants `insertArticleWithEpisodeIfAbsent`
+   * instead: an article stored without its episode is a tombstone (audio-feed-2th).
+   * This one stays for callers that genuinely write the article alone.
    */
   insertArticleIfAbsent(article: Article): Promise<boolean>;
+  /**
+   * Atomic first write for an article AND the episode that will narrate it
+   * (audio-feed-2th).
+   *
+   * Resolves `true` when both landed, `false` when an article with the same URL
+   * already exists for this user — in which case NEITHER record was written.
+   *
+   * This exists because the two records are one promise to the subscriber. Write
+   * them separately and an article that commits with an episode that does not
+   * leaves a tombstone: every later poll sees the article, skips the URL, and no
+   * retry can create the missing episode. One commit removes the window instead of
+   * narrowing it. The same method also carries the audio-feed-33m dedupe guarantee,
+   * so callers never need `insertArticleIfAbsent` + `putEpisode` side by side.
+   */
+  insertArticleWithEpisodeIfAbsent(article: Article, episode: Episode): Promise<boolean>;
   getArticle(userId: string, id: string): Promise<Article | null>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;

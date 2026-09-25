@@ -186,16 +186,34 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   insertArticleIfAbsent(article: Article): Promise<boolean> {
-    for (const existing of this.#articles.values()) {
-      if (existing.userId === article.userId && existing.url === article.url) {
-        return Promise.resolve(false);
-      }
-    }
+    if (this.#hasArticleByUrl(article.userId, article.url)) return Promise.resolve(false);
     this.#articles.set(
       MemoryMetadataStore.#scoped(article.userId, article.id),
       structuredClone(article),
     );
     return Promise.resolve(true);
+  }
+
+  insertArticleWithEpisodeIfAbsent(
+    article: Article,
+    episode: Episode,
+  ): Promise<boolean> {
+    // The whole body runs without an await, so no other task can observe an
+    // article whose episode is missing (audio-feed-2th).
+    if (this.#hasArticleByUrl(article.userId, article.url)) return Promise.resolve(false);
+    this.#articles.set(
+      MemoryMetadataStore.#scoped(article.userId, article.id),
+      structuredClone(article),
+    );
+    this.#writeEpisode(episode);
+    return Promise.resolve(true);
+  }
+
+  #hasArticleByUrl(userId: string, url: string): boolean {
+    for (const existing of this.#articles.values()) {
+      if (existing.userId === userId && existing.url === url) return true;
+    }
+    return false;
   }
 
   getArticle(userId: string, id: string): Promise<Article | null> {
@@ -214,7 +232,7 @@ export class MemoryMetadataStore implements MetadataStore {
 
   // -- episodes -------------------------------------------------------------
 
-  putEpisode(episode: Episode): Promise<void> {
+  #writeEpisode(episode: Episode): void {
     const key = MemoryMetadataStore.#scoped(episode.userId, episode.id);
     const existing = this.#episodes.get(key);
     if (existing) {
@@ -237,6 +255,10 @@ export class MemoryMetadataStore implements MetadataStore {
       });
     }
     this.#episodes.set(key, structuredClone(episode));
+  }
+
+  putEpisode(episode: Episode): Promise<void> {
+    this.#writeEpisode(episode);
     return Promise.resolve();
   }
 

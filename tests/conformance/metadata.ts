@@ -324,6 +324,47 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.findArticleByUrl("user-2", "https://example.com/item"))?.id, "a3");
   });
 
+  test("insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th)", async (store) => {
+    const url = "https://example.com/pair";
+    const article = makeArticle({ id: "a1", userId: "user-1", url });
+    const episode = makeEpisode({ id: "e1", userId: "user-1", articleId: "a1", status: "pending" });
+
+    assertEquals(await store.insertArticleWithEpisodeIfAbsent(article, episode), true);
+    assertEquals((await store.getArticle("user-1", "a1"))?.id, "a1");
+    assertEquals((await store.getEpisode("user-1", "e1"))?.articleId, "a1");
+    assertEquals((await store.findArticleByUrl("user-1", url))?.id, "a1");
+    // Queued, not merely stored: the worker finds it through the pending index, so
+    // an article+episode pair that skipped the indexes would never be synthesised.
+    assert((await store.listPendingEpisodes()).episodes.some((e) => e.id === "e1"));
+
+    // A URL already in the store refuses the write and leaves NO trace of the
+    // second episode either — the half-pair is the tombstone this primitive exists
+    // to prevent, so a refused insert must be invisible in both directions.
+    const dup = makeArticle({ id: "a2", userId: "user-1", url });
+    const dupEpisode = makeEpisode({
+      id: "e2",
+      userId: "user-1",
+      articleId: "a2",
+      status: "pending",
+    });
+    assertEquals(await store.insertArticleWithEpisodeIfAbsent(dup, dupEpisode), false);
+    assertEquals(await store.getArticle("user-1", "a2"), null);
+    assertEquals(await store.getEpisode("user-1", "e2"), null);
+    assertEquals((await store.findArticleByUrl("user-1", url))?.id, "a1");
+    assert(!(await store.listPendingEpisodes()).episodes.some((e) => e.id === "e2"));
+
+    // Another user's ingest of the same URL is its own pair.
+    const other = makeArticle({ id: "a3", userId: "user-2", url });
+    const otherEpisode = makeEpisode({
+      id: "e3",
+      userId: "user-2",
+      articleId: "a3",
+      status: "pending",
+    });
+    assertEquals(await store.insertArticleWithEpisodeIfAbsent(other, otherEpisode), true);
+    assertEquals((await store.getEpisode("user-2", "e3"))?.id, "e3");
+  });
+
   // -- episodes -------------------------------------------------------------
 
   test("lists episodes newest first", async (store) => {
