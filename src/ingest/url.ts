@@ -372,9 +372,14 @@ export async function fetchFeedDocument(
   }
 }
 
-const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
+/**
+ * DOM text helpers, exported for the feed-fallback path: an item's embedded HTML
+ * must become the same shape of text as a fetched article's, or the two paths
+ * disagree about what an article body looks like (audio-feed-8g0).
+ */
+export const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
-function plainText(node: Node): string {
+export function plainText(node: Node): string {
   if (node.nodeType === 3) return (node.textContent ?? "").replace(/\s+/g, " ");
   const text = Array.from(node.childNodes).map(plainText).join("");
   return /^(P|DIV|SECTION|H[1-6]|LI|UL|OL|PRE|BLOCKQUOTE|BR|TR)$/.test(node.nodeName)

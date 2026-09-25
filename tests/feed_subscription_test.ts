@@ -19,9 +19,10 @@ import {
 } from "../src/ingest/feed.ts";
 import { makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import type { DecodedAudioResult } from "../src/tts/gemini.ts";
+import type { DecodedAudioResult, GeminiGenerateContentRequest } from "../src/tts/gemini.ts";
+import { GeminiTtsClient, uint8ArrayToBase64 } from "../src/tts/gemini.ts";
 import type { Source } from "../src/types.ts";
-import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -633,6 +634,95 @@ Deno.test("pollFeedSource does NOT fall back on description only or short conten
     0,
     "must not queue episodes for paywall teasers or sub-80 char content",
   );
+});
+
+Deno.test("feed fallback strips the markup off a bare-fragment content:encoded before the TTS reads it (audio-feed-8g0)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  // content:encoded is a BARE FRAGMENT in practice — CDATA-wrapped body HTML, never a
+  // full document — and that is the one shape whose `body.textContent` came back empty,
+  // so the old `text || rawHtml` returned the markup unchanged.
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Fragment Blog</title>
+    <item>
+      <title>Two Paragraphs</title>
+      <link>https://example.com/two-paragraphs</link>
+      <content:encoded><![CDATA[<p>The first paragraph of the embedded article, long enough on its own to say what the piece is about.</p><p>The second paragraph continues the argument and must not run into the first one.</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>`;
+
+  const source: Source = makeSource({
+    id: "fragment-blog",
+    userId: "user-1",
+    feedUrl: "https://example.com/feed.xml",
+  });
+  await stores.metadata.putSource(source);
+
+  const poll = await pollFeedSource(ctx, source, {
+    transport: feedTransport(feedXml),
+    fetchArticle: () => Promise.reject(new Error("403 Forbidden - Cloudflare bot challenge")),
+  });
+  assertEquals(poll.queued, 1);
+
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  const article = await stores.metadata.getArticle("user-1", episodes[0]!.articleId);
+  assert(article, "the embedded body must be stored");
+  assert(
+    !article.content.includes("<"),
+    `markup reached the stored body: ${article.content}`,
+  );
+  assert(
+    article.content.includes("about.\n\nThe second"),
+    `block boundaries must survive as paragraph breaks, not run-together words: ${article.content}`,
+  );
+
+  // The finding is about what the MODEL is asked to read, so capture the outgoing
+  // narration request through the real synthesizer rather than asserting on the
+  // stored string alone.
+  let prompt = "";
+  const synthesize = createGeminiSynthesizer(ctx, {
+    client: new GeminiTtsClient({
+      apiKey: "test-key-not-real",
+      fetchFn: (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
+        prompt = body.contents?.[0]?.parts?.[0]?.text ?? "";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [{
+                      inlineData: {
+                        mimeType: "audio/pcm;rate=24000",
+                        data: uint8ArrayToBase64(new Uint8Array(48000)),
+                      },
+                    }],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+    }),
+  });
+
+  const run = await runSynthesisBatch(ctx, synthesize, { batchSize: 1 });
+  assertEquals(run.ready.length, 1, "the embedded article must still synthesise");
+  assert(prompt.length > 0, "the narration prompt must have been captured");
+  assertEquals(prompt.includes("<"), false, `markup reached the prompt: ${prompt}`);
+  assertStringIncludes(prompt, "The first paragraph");
+  assertStringIncludes(prompt, "The second paragraph");
 });
 
 Deno.test("pollFeedSource records lastPollError on source and clears it on success (audio-feed-dcj)", async () => {

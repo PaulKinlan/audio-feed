@@ -25,8 +25,8 @@
  * - `lastPolledAt` is written even when items fail, so one broken article cannot
  *   make the poller retry the same feed forever.
  */
-import { DOMParser } from "npm:linkedom@0.18.12";
-import { type ExtractedArticle, fetchArticle, fetchFeedDocument } from "./url.ts";
+import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
+import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import { type Article, type AudioMode, type Episode, type Source } from "../types.ts";
@@ -234,14 +234,26 @@ async function loadFeedItems(feedUrl: string, deps: PollDependencies): Promise<F
   return parseFeedItems(document.xml, document.url);
 }
 
+/**
+ * An item's embedded HTML as plain text.
+ *
+ * The input is WRAPPED IN A FULL DOCUMENT before parsing, because `content:encoded`
+ * is a bare fragment in practice (CDATA-wrapped body HTML, never `<html>`), and
+ * linkedom hands a bare fragment a body whose `textContent` is EMPTY. The old
+ * `text || rawHtml` therefore returned the markup unchanged and the TTS was asked
+ * to read `<p>` and `</p>` aloud (audio-feed-8g0).
+ *
+ * `plainText` is the same block-aware walk the fetched-article path uses, so an
+ * embedded body and a fetched body reach the synthesizer in the same shape.
+ * "Two paragraphs" must not become "paragraph.Second".
+ */
 function extractTextFromHtml(rawHtml: string): string {
   try {
-    const doc = new DOMParser().parseFromString(rawHtml, "text/html") as unknown as Document;
-    for (const el of Array.from(doc.querySelectorAll("script, style, noscript"))) {
+    const { document } = parseHTML(`<html><body>${rawHtml}</body></html>`);
+    for (const el of Array.from(document.querySelectorAll("script, style, noscript"))) {
       el.remove();
     }
-    const text = doc.body?.textContent?.trim() ?? "";
-    return text || rawHtml;
+    return plainText(document.body).split("\n").map(clean).filter(Boolean).join("\n\n");
   } catch {
     return rawHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   }
