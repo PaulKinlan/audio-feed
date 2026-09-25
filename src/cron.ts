@@ -28,13 +28,33 @@ export interface CronRegistration {
   handler: () => Promise<void>;
 }
 
+/**
+ * Outcome of a registration attempt (audio-feed-2j5).
+ *
+ * This used to be `CronRegistration[]`, and `[]` meant at least three different
+ * things: "this runtime has no Deno.cron", "there was nothing to register", and
+ * "registration already happened". The first of those was the silent one - a
+ * deployment where background polling never runs looked exactly like a healthy one,
+ * because the function returned an empty array and said nothing.
+ *
+ * `ok` plus `reason` makes absence distinguishable; `jobs` is kept so a caller can
+ * still assert which names and schedules were registered.
+ */
+export interface CronRegistrationResult {
+  ok: boolean;
+  registered: number;
+  /** Set only when ok is false, so "unsupported" is never read as "nothing to do". */
+  reason?: "cron-unavailable";
+  jobs: CronRegistration[];
+}
+
 export function registerCronJobs(
   contextOrProvider: ContextProvider,
   deps: {
     cron?: (name: string, schedule: string, handler: () => Promise<void>) => void;
     synthesizer?: Synthesizer;
   } = {},
-): CronRegistration[] {
+): CronRegistrationResult {
   const globalDeno = (globalThis as unknown as {
     Deno?: {
       cron?: (name: string, schedule: string, handler: () => Promise<void>) => void;
@@ -44,7 +64,16 @@ export function registerCronJobs(
   const cronFn = deps.cron ??
     (typeof globalDeno?.cron === "function" ? globalDeno.cron.bind(globalDeno) : null);
 
-  if (!cronFn) return [];
+  if (!cronFn) {
+    // Loud, and actionable: name the runtime condition and the consequence, rather
+    // than returning [] and letting a deployment believe background work is running.
+    // Does NOT throw - local dev and the test suite run without --unstable-cron and
+    // must keep starting (coord's decision on audio-feed-2j5).
+    console.warn(
+      "[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled",
+    );
+    return { ok: false, registered: 0, reason: "cron-unavailable", jobs: [] };
+  }
 
   const registrations: CronRegistration[] = [];
 
@@ -119,5 +148,9 @@ export function registerCronJobs(
     registrations.push(synthJob);
   }
 
-  return registrations;
+  return {
+    ok: true,
+    registered: registrations.length,
+    jobs: registrations,
+  };
 }

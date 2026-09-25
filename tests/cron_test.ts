@@ -10,6 +10,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
+import type { AppContext } from "../src/app.ts";
 import { type CronRegistration, registerCronJobs } from "../src/cron.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -65,7 +66,7 @@ Deno.test("registerCronJobs: registers poll-feeds and synthesis jobs with expect
     synthesizer: () => Promise.resolve(mockAudio()),
   });
 
-  assertEquals(jobs.length, 2);
+  assertEquals(jobs.registered, 2);
   assertEquals(registered.length, 2);
 
   const pollJob = registered.find((j) => j.name === "audio-feed-poll-feeds");
@@ -87,7 +88,7 @@ Deno.test("registerCronJobs: skips synthesis cron job when geminiApiKey is unset
   };
 
   const jobs = registerCronJobs(ctx, { cron: mockCron });
-  assertEquals(jobs.length, 1);
+  assertEquals(jobs.registered, 1);
   assertEquals(registered.length, 1);
   assertEquals(registered[0]!.name, "audio-feed-poll-feeds");
   assertEquals(registered[0]!.schedule, "*/15 * * * *");
@@ -395,4 +396,101 @@ Deno.test("POST /api/admin/synthesize-now returns 503 when synthesis is unconfig
   const data = await res.json();
   assertEquals(data.ok, false);
   assertStringIncludes(data.error, "GEMINI_API_KEY");
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-2j5 — distinguish "no cron here" from "nothing to register", and
+// exercise the REAL Deno.cron when the runtime offers it.
+// ---------------------------------------------------------------------------
+
+Deno.test("registerCronJobs: an unavailable Deno.cron is a loud, distinguishable failure", () => {
+  // The old shape returned [], which read as "registered nothing" and was
+  // indistinguishable from a successful no-op. A deployment whose background jobs
+  // never scheduled looked exactly like a healthy one.
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+
+  const result = registerCronJobs(ctx, {
+    // Explicitly absent: models a runtime with no Deno.cron and no injected mock.
+    cron: undefined as unknown as (
+      name: string,
+      schedule: string,
+      handler: () => Promise<void>,
+    ) => void,
+  });
+
+  if (typeof (globalThis as { Deno?: { cron?: unknown } }).Deno?.cron === "function") {
+    // Under --unstable-cron the real API exists, so registration must succeed.
+    assertEquals(result.ok, true, "real Deno.cron must accept registration");
+    assertEquals(result.registered, 2);
+    assertEquals(
+      result.jobs.map((j) => j.name).sort(),
+      ["audio-feed-poll-feeds", "audio-feed-synthesis"],
+      "both job names must reach the real platform API",
+    );
+    assertEquals(
+      result.jobs.find((j) => j.name === "audio-feed-poll-feeds")?.schedule,
+      "*/15 * * * *",
+    );
+    assertEquals(
+      result.jobs.find((j) => j.name === "audio-feed-synthesis")?.schedule,
+      "*/2 * * * *",
+    );
+  } else {
+    // Without the flag this branch asserts the NEW behaviour. Both paths assert
+    // something: a test that silently skips is green while covering nothing.
+    assertEquals(result.ok, false);
+    assertEquals(result.reason, "cron-unavailable");
+    assertEquals(result.registered, 0);
+    assertEquals(result.jobs.length, 0);
+  }
+});
+
+Deno.test("registerCronJobs: the unavailable-cron warning is emitted, not just the return value", () => {
+  // Added because mutation proved the return value alone did not pin the warning:
+  // deleting the console.warn while keeping `ok: false` left every test green. The
+  // structured result tells a caller; the warning is what tells an operator reading
+  // deploy logs, and audio-feed-2j5 exists because this path was silent.
+  //
+  // This test deliberately does NOT call registerCronJobs when the real Deno.cron is
+  // present. Measured under --unstable-cron: a second registration in the same
+  // process throws "Cron with this name already exists" from ext:deno_cron, because
+  // real cron is keyed by name and is NOT idempotent. The preceding test already
+  // performed the one real registration this process is allowed, so re-entering here
+  // would assert on a platform collision rather than on this behaviour. That
+  // non-idempotence is itself a finding for audio-feed-tgc/ncf and is recorded there.
+  if (typeof (globalThis as { Deno?: { cron?: unknown } }).Deno?.cron === "function") {
+    console.log(
+      "SKIP: warning path unreachable while Deno.cron exists; asserted by the normal gate",
+    );
+    return;
+  }
+
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  let result: ReturnType<typeof registerCronJobs>;
+  try {
+    const stores: Stores = memoryStores();
+    result = registerCronJobs({ config, stores } as AppContext, {
+      cron: undefined as unknown as (
+        name: string,
+        schedule: string,
+        handler: () => Promise<void>,
+      ) => void,
+    });
+  } finally {
+    console.warn = original;
+  }
+
+  assertEquals(result.ok, false);
+  const hit = warnings.find((w) => w.includes("Deno.cron is unavailable"));
+  assert(
+    hit,
+    `expected a warning naming Deno.cron unavailability, got: ${JSON.stringify(warnings)}`,
+  );
+  // Actionable, not merely descriptive: it must say what will not happen.
+  assertStringIncludes(hit, "not scheduled");
 });

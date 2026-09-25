@@ -6,6 +6,7 @@
     "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write --unstable-kv src/server.ts",
     "start": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv src/server.ts",
     "test": "deno test --allow-net --allow-env --allow-read --allow-write --unstable-kv",
+    "test:cron": "deno test --unstable-cron --allow-net --allow-env --allow-read --allow-write --unstable-kv tests/cron_test.ts",
     "check": "deno check main.ts src/**/*.ts tests/**/*.ts",
     "fmt": "deno fmt",
     "lint": "deno lint",
