@@ -1,3 +1,5 @@
+import { DEFAULT_NARRATION_VOICE } from "./tts/gemini.ts";
+
 /**
  * Canonical domain model for audio-feed.
  *
@@ -149,7 +151,17 @@ export interface VoiceConfig {
  * where a missing default belongs.
  */
 export const DEFAULT_VOICES: Required<VoiceConfig> = {
-  direct: "Charon",
+  // One source of truth for the default narrator (audio-feed-uu3). This used to be a
+  // second, independent `"Charon"` literal beside src/tts/gemini.ts's
+  // DEFAULT_NARRATION_VOICE - and it had NO reader at all, so the two could drift and
+  // nothing would notice: retuning DEFAULT_VOICES.direct left the whole suite green
+  // (measured, audio-feed-8pt/9cz review). Deriving it makes agreement structural.
+  //
+  // Safe from a cycle: src/tts/gemini.ts contains no import statements and references
+  // nothing in this file, so `types.ts -> tts/gemini.ts` is a one-way edge. Verified
+  // rather than assumed, because this import was raised as a possible cycle and closed
+  // by measurement.
+  direct: DEFAULT_NARRATION_VOICE,
   deepdive: ["Kore", "Puck"],
 };
 
