@@ -15,6 +15,8 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { OFFLINE_CACHE } from "../src/routes/pwa.ts";
+import { createServiceWorkerHarness } from "./service_worker_harness.ts";
+import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -197,23 +199,110 @@ Deno.test("the service worker caches audio first and pages network-first (audio-
   assertStringIncludes(sw, 'addEventListener("fetch"');
   assertStringIncludes(sw, 'url.pathname.startsWith("/audio/")');
   assertStringIncludes(sw, 'request.mode === "navigate"');
-  // All three Background Fetch events (audio-feed-rqp): success alone leaves a
-  // failed download showing "downloading" forever in the OS notification, and a
-  // tapped notification opening a second copy of the player means two <audio>
-  // elements and two media sessions.
-  assertStringIncludes(sw, "backgroundfetchsuccess");
-  assertStringIncludes(sw, "backgroundfetchfail");
-  assertStringIncludes(sw, "backgroundfetchclick");
-  // A failed fetch must not cache partial records: the player's entire
-  // "is it downloaded?" test is the presence of the URL in the offline cache,
-  // so a truncated file would be indistinguishable from a complete one.
-  assertEquals(
-    sw.slice(sw.indexOf("backgroundfetchfail")).includes("offline.put"),
-    false,
-    "a failed background fetch must cache nothing",
-  );
+  // The three Background Fetch lifecycle handlers are NOT pinned by string presence
+  // here any more: they are driven below, against the script that is actually served
+  // (audio-feed-qn5). A string check cannot tell a working handler from an empty one.
   // The offline audio cache must survive a worker update.
   assertStringIncludes(sw, 'name.startsWith("audio-feed-shell-") && name !== SHELL_CACHE');
+});
+
+// ---------------------------------------------------------------------------
+// Background Fetch lifecycle, driven rather than grepped (audio-feed-qn5)
+// ---------------------------------------------------------------------------
+
+/** The served worker, run against stubs. Fresh per test: the harness keeps state. */
+const swHarness = async () => {
+  const { fetch } = await seeded();
+  const sw = await (await fetch(get("/sw.js"))).text();
+  return createServiceWorkerHarness(sw);
+};
+
+const audioRecord = (name: string, response: Response): BackgroundFetchRecordStub => ({
+  request: new Request(`${BASE}/audio/${name}`),
+  responseReady: Promise.resolve(response),
+});
+
+Deno.test("a completed background fetch caches every finished episode offline (audio-feed-qn5)", async () => {
+  const harness = await swHarness();
+  const outcome = await harness.dispatch("backgroundfetchsuccess", {
+    registration: {
+      matchAll: () =>
+        Promise.resolve([
+          audioRecord("ep-1.wav", new Response("one", { status: 200 })),
+          audioRecord("ep-2.wav", new Response("two", { status: 200 })),
+        ]),
+    },
+  });
+
+  assertEquals(outcome.waits, 1, "the handler must extend the event's lifetime");
+  assertEquals(harness.cachedUrls(OFFLINE_CACHE), [
+    `${BASE}/audio/ep-1.wav`,
+    `${BASE}/audio/ep-2.wav`,
+  ]);
+  // The OS notification is the only surface left once the tab is closed.
+  assertEquals(harness.updates.at(-1)?.title, "2 episodes ready offline");
+});
+
+Deno.test("a partly-failed background fetch caches only the records that finished (audio-feed-qn5)", async () => {
+  const harness = await swHarness();
+  await harness.dispatch("backgroundfetchsuccess", {
+    registration: {
+      matchAll: () =>
+        Promise.resolve([
+          audioRecord("ep-1.wav", new Response("one", { status: 200 })),
+          audioRecord("ep-2.wav", new Response("truncated", { status: 500 })),
+        ]),
+    },
+  });
+
+  // The player's whole "is it downloaded?" test is the URL's presence in this cache, so
+  // a half-written episode must not be indistinguishable from a complete one.
+  assertEquals(harness.cachedUrls(OFFLINE_CACHE), [`${BASE}/audio/ep-1.wav`]);
+  assertEquals(
+    harness.updates.at(-1)?.title,
+    "Episode ready offline",
+    "the notification must report what was stored, not how many records were considered",
+  );
+});
+
+Deno.test("a failed background fetch caches nothing and says how to retry (audio-feed-qn5)", async () => {
+  const harness = await swHarness();
+  const outcome = await harness.dispatch("backgroundfetchfail", {
+    registration: {
+      // CACHEABLE on purpose: a handler that cached these would fail this test.
+      matchAll: () => Promise.resolve([audioRecord("ep-1.wav", new Response("one"))]),
+    },
+  });
+
+  assertEquals(outcome.waits, 1, "the handler must extend the event's lifetime");
+  assertEquals(harness.cachedUrls(OFFLINE_CACHE), []);
+  assertStringIncludes(String(harness.updates.at(-1)?.title), "Download failed");
+});
+
+Deno.test("tapping the download notification focuses the open player instead of opening a second copy (audio-feed-qn5)", async () => {
+  const harness = await swHarness();
+  let focused = 0;
+  harness.openClients = [{
+    url: `${BASE}/listen/${TOKEN}`,
+    focus: () => {
+      focused++;
+      return Promise.resolve();
+    },
+  }];
+
+  const withPlayer = await harness.dispatch("backgroundfetchclick");
+  assertEquals(withPlayer.waits, 1);
+  assertEquals(focused, 1, "an already-open listener must be focused");
+  assertEquals(
+    harness.opened,
+    [],
+    "an open player must not be duplicated: two copies means two <audio> elements",
+  );
+
+  // Nothing open: the notification is the way back into the player.
+  harness.openClients = [];
+  await harness.dispatch("backgroundfetchclick");
+  assertEquals(harness.opened, ["/listen"]);
 });
 
 Deno.test("the icon is served as SVG (audio-feed-4xb)", async () => {
