@@ -144,6 +144,10 @@ export function registerCronJobs(
               failed: r.failed.length,
               deferred: r.deferred.length,
             }),
+            // Nothing finished and nothing failed: an idle tick (audio-feed-0ob). A
+            // tick that only deferred is idle too; the kept row carries the latest
+            // deferred count.
+            (r) => r.ready.length === 0 && r.failed.length === 0,
           );
           if (result.ready.length || result.failed.length || result.deferred.length) {
             console.log(

@@ -48,7 +48,8 @@ for (let m = 0; m < MINUTES; m++) {
     });
   }
   if (m % 2 === 0) {
-    // An idle tick, which is most of them. +250 ms so it never ties with a poll.
+    // An idle tick, which is most of them, marked idle as src/cron.ts marks it
+    // (audio-feed-0ob). +250 ms so it never ties with a poll.
     await stores.metadata.recordRun({
       id: `s${m}`,
       kind: "synthesis",
@@ -58,6 +59,7 @@ for (let m = 0; m < MINUTES; m++) {
       ready: 0,
       failed: 0,
       deferred: 0,
+      idle: true,
     });
   }
 }

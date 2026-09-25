@@ -10,6 +10,7 @@ import { runMetadataConformance } from "./conformance/metadata.ts";
 import { runBlobConformance } from "./conformance/blobs.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "../src/storage/memory.ts";
 import { KvMetadataStore } from "../src/storage/kv.ts";
+import { RUN_HISTORY_LIMIT, type RunRecord } from "../src/storage/mod.ts";
 import { makeEpisode } from "./fixtures.ts";
 
 runMetadataConformance({
@@ -133,4 +134,52 @@ Deno.test("MemoryMetadataStore: listPendingEpisodes work per page is O(limit) an
   // The indexed implementation must touch ONLY the 10 episodes in the page,
   // NOT the 100 episodes in the store!
   assertEquals(touched, 10, "work per page must be exactly limit items, not whole store");
+});
+
+Deno.test("KvMetadataStore: recording an idle tick reads one entry, not the job's history (audio-feed-0ob)", async () => {
+  // audio-feed-0ob is about this number, so count it. Every write used to list
+  // the job's whole history to prune it: 51 entries at steady state. The
+  // collapse tests in the conformance suite would still pass if that came back.
+  const kv = await Deno.openKv(":memory:");
+  let listed = 0;
+  const counting = new Proxy(kv, {
+    get(target, prop) {
+      if (prop === "list") {
+        return async function* (...args: Parameters<Deno.Kv["list"]>) {
+          for await (const entry of target.list(...args)) {
+            listed++;
+            yield entry;
+          }
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const store = new KvMetadataStore(counting);
+  const run = (id: string, minute: number, idle = false): RunRecord => ({
+    id,
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: new Date(Date.UTC(2026, 8, 25) + minute * 60_000).toISOString(),
+    durationMs: 30,
+    ready: idle ? 0 : 1,
+    ...(idle ? { idle: true } : {}),
+  });
+
+  try {
+    // A full history of ticks that did work, then an idle tick after them.
+    for (let i = 0; i < RUN_HISTORY_LIMIT; i++) await store.recordRun(run(`w${i}`, i));
+    await store.recordRun(run("i1", RUN_HISTORY_LIMIT, true));
+
+    listed = 0;
+    await store.recordRun(run("i2", RUN_HISTORY_LIMIT + 1, true));
+    assertEquals(listed, 1, "the next idle tick reads one entry");
+
+    const ids = (await store.listRuns()).map((r) => r.id);
+    assertEquals(ids.slice(0, 2), ["i2", `w${RUN_HISTORY_LIMIT - 1}`], "i2 replaced i1");
+    assertEquals(ids.length, RUN_HISTORY_LIMIT, "still bounded");
+  } finally {
+    kv.close();
+  }
 });

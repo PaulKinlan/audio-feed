@@ -28,6 +28,52 @@ function ctx(stores: Stores = memoryStores()): { ctx: AppContext; stores: Stores
   return { ctx: { config, stores } as AppContext, stores };
 }
 
+Deno.test("an idle cron tick is kept as one row, the latest (audio-feed-0ob)", async () => {
+  // Three scheduled ticks that found nothing, possibly in the same millisecond.
+  const { ctx: app, stores } = ctx();
+  for (let i = 0; i < 3; i++) {
+    await recordRun(
+      app,
+      "synthesis",
+      "cron",
+      () => Promise.resolve({ ready: 0 }),
+      (r) => ({ ready: r.ready }),
+      (r) => r.ready === 0,
+    );
+  }
+
+  const runs = await stores.metadata.listRuns();
+  assertEquals(runs.length, 1, "three idle ticks, one row");
+  assertEquals(runs[0]?.idle, true);
+});
+
+Deno.test("only a scheduled tick that did nothing is idle (audio-feed-0ob)", async () => {
+  const { ctx: app, stores } = ctx();
+  const sum = (r: { ready: number }) => ({ ready: r.ready });
+  const isIdle = (r: { ready: number }) => r.ready === 0;
+  // A manual run is someone asking, so it is kept even when it found nothing.
+  for (let i = 0; i < 2; i++) {
+    await recordRun(app, "synthesis", "manual", () => Promise.resolve({ ready: 0 }), sum, isIdle);
+  }
+  // A tick that did work.
+  await recordRun(app, "synthesis", "cron", () => Promise.resolve({ ready: 2 }), sum, isIdle);
+  // A tick that threw: the predicate never sees it.
+  await assertRejects(() =>
+    recordRun(
+      app,
+      "synthesis",
+      "cron",
+      () => Promise.reject<{ ready: number }>(new Error("boom")),
+      sum,
+      isIdle,
+    )
+  );
+
+  const runs = await stores.metadata.listRuns();
+  assertEquals(runs.length, 4, "every one of them is kept");
+  assertEquals(runs.filter((r) => r.idle).length, 0);
+});
+
 Deno.test("a successful run records its summary (audio-feed-ndc)", async () => {
   const { ctx: app, stores } = ctx();
 

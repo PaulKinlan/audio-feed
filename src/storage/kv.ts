@@ -680,7 +680,24 @@ export class KvMetadataStore implements MetadataStore {
   async recordRun(record: RunRecord): Promise<void> {
     try {
       const job = ["run", record.kind];
-      await this.#kv.set([...job, descendingKey(record.startedAt, record.id)], record);
+      const key = [...job, descendingKey(record.startedAt, record.id)];
+      if (record.idle) {
+        // A run of idle ticks is kept as one row, the latest (audio-feed-0ob). When
+        // the job's newest row is an idle tick that started no later, swap this
+        // one in for it: the history does not grow, so there is nothing to prune,
+        // and the write reads one entry instead of the job's whole history.
+        for await (const newest of this.#kv.list<RunRecord>({ prefix: job }, { limit: 1 })) {
+          if (
+            newest.value?.idle &&
+            Date.parse(newest.value.startedAt) <= Date.parse(record.startedAt)
+          ) {
+            const swap = this.#kv.atomic().check(newest).delete(newest.key).set(key, record);
+            // If the row changed underneath us, fall through to an ordinary insert.
+            if ((await swap.commit()).ok) return;
+          }
+        }
+      }
+      await this.#kv.set(key, record);
       // Drop anything past the limit. `list` is ascending over descending keys,
       // so everything after the first RUN_HISTORY_LIMIT entries is older.
       let seen = 0;
