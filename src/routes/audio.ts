@@ -18,6 +18,52 @@ import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import type { RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
 
+/**
+ * Whether this request is one the browser will apply CORS rules to.
+ *
+ * PRODUCTION BUG, found by Paul on the live deployment. The audio route 302s to
+ * an R2 presigned URL, and R2's S3 endpoint sends no `access-control-allow-origin`
+ * and answers a preflight with 403 — measured against production:
+ *
+ *     GET  <r2 presigned>  with Origin: <app>  -> 200, audio/wav, 16111024 bytes,
+ *                                                 and NO access-control-allow-origin
+ *     OPTIONS <r2 presigned> with Origin: <app> -> 403
+ *
+ * So the browser receives a perfectly good 200 it is not permitted to read. The
+ * player's `<audio crossorigin="anonymous">` forced the media load into CORS
+ * mode, and the service worker's `fetch(request)` is a CORS fetch by nature, so
+ * both paths blocked.
+ *
+ * The redirect exists to keep audio bytes out of the isolate (audio-feed-vnb),
+ * which is worth keeping for the clients that can use it: a podcast app fetching
+ * an enclosure sends no `Origin` and is not subject to CORS at all. So the
+ * redirect stays the default and is skipped only for requests that would be
+ * blocked by it.
+ *
+ * `sec-fetch-mode` is checked as well as `Origin` because a same-origin `fetch()`
+ * from the page or the service worker may omit `Origin` while still being a CORS
+ * -mode request that follows the cross-origin redirect and then fails.
+ */
+export function isCorsConstrained(req: Request): boolean {
+  if (req.headers.get("origin")) return true;
+  const mode = req.headers.get("sec-fetch-mode")?.toLowerCase();
+  return mode === "cors" || mode === "same-origin";
+}
+
+/**
+ * Headers that let a browser actually READ the bytes it was sent.
+ *
+ * `access-control-expose-headers` is not optional here: without it a CORS
+ * response hands the page only the safelisted headers, so `content-range` and
+ * `content-length` are invisible and a seeking player cannot tell what it got.
+ */
+function corsHeaders(): Record<string, string> {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers": "accept-ranges, content-length, content-range, etag",
+  };
+}
+
 /** Blob keys are path-shaped; reject anything that tries to escape the prefix. */
 export function isSafeBlobKey(key: string): boolean {
   if (key.length === 0 || key.length > 512) return false;
@@ -58,6 +104,7 @@ export async function handleAudio(
       "content-type": info.contentType,
       "accept-ranges": "bytes",
       "cache-control": "public, max-age=31536000, immutable",
+      ...corsHeaders(),
       ...(info.etag ? { etag: info.etag } : {}),
     });
   }
@@ -70,7 +117,10 @@ export async function handleAudio(
   // store, and when its head() missed the handler returned 404 for an object that
   // existed and that HEAD could see. The interface never promised per-key
   // consistency, so the handler must not depend on it.
-  if (!isHead) {
+  // …but a redirect the browser cannot follow is worse than no redirect. A
+  // CORS-constrained request is served from the isolate instead, because the
+  // object store the redirect points at does not answer CORS.
+  if (!isHead && !isCorsConstrained(req)) {
     // Whether the store offered a direct URL for EVERY candidate, which is what
     // distinguishes a uniformly-redirecting store from a per-key one.
     let everyKeyHasDirectUrl = true;
@@ -135,6 +185,11 @@ export async function handleAudio(
     "accept-ranges": "bytes",
     // Episode ids are unguessable and audio is immutable once written.
     "cache-control": "public, max-age=31536000, immutable",
+    // Unconditional: these bytes are already reachable by anyone holding the
+    // key, so the header grants nothing new, and setting it only for requests
+    // that carried an `Origin` would make the response vary by request in a way
+    // a shared cache must then be told about.
+    ...corsHeaders(),
   });
   if (object.etag) headers.set("etag", object.etag);
 
