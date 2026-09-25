@@ -26,8 +26,11 @@ import { json, notFound } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
+import { handleListen, renderListenLanding } from "./routes/listen.ts";
+import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
+import { resolveOrigin } from "./origin.ts";
 
 export interface AppContext {
   config: AppConfig;
@@ -77,6 +80,25 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // every byte of that data comes from the token-gated /api/admin/users routes
   // (audio-feed-z2s).
   router.get("/admin", handleAdmin);
+  // The listener app (audio-feed-4xb): token-fronted, so a subscriber needs no
+  // account — the feed token they already hold is the whole credential.
+  router.get(
+    "/listen",
+    ({ ctx, req }) =>
+      new Response(renderListenLanding(resolveOrigin(ctx.config, req).baseUrl), {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+        },
+      }),
+  );
+  router.get("/listen/:token", handleListen);
+  // PWA surface, served as routes because this app has no static file pipeline.
+  router.get("/sw.js", handleServiceWorker);
+  router.get("/manifest.json", handleManifest);
+  router.get("/icon.svg", handleIcon);
 
   router.get("/health", ({ ctx }) =>
     json({
