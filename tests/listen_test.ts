@@ -197,7 +197,21 @@ Deno.test("the service worker caches audio first and pages network-first (audio-
   assertStringIncludes(sw, 'addEventListener("fetch"');
   assertStringIncludes(sw, 'url.pathname.startsWith("/audio/")');
   assertStringIncludes(sw, 'request.mode === "navigate"');
+  // All three Background Fetch events (audio-feed-rqp): success alone leaves a
+  // failed download showing "downloading" forever in the OS notification, and a
+  // tapped notification opening a second copy of the player means two <audio>
+  // elements and two media sessions.
   assertStringIncludes(sw, "backgroundfetchsuccess");
+  assertStringIncludes(sw, "backgroundfetchfail");
+  assertStringIncludes(sw, "backgroundfetchclick");
+  // A failed fetch must not cache partial records: the player's entire
+  // "is it downloaded?" test is the presence of the URL in the offline cache,
+  // so a truncated file would be indistinguishable from a complete one.
+  assertEquals(
+    sw.slice(sw.indexOf("backgroundfetchfail")).includes("offline.put"),
+    false,
+    "a failed background fetch must cache nothing",
+  );
   // The offline audio cache must survive a worker update.
   assertStringIncludes(sw, 'name.startsWith("audio-feed-shell-") && name !== SHELL_CACHE');
 });
@@ -213,24 +227,49 @@ Deno.test("the icon is served as SVG (audio-feed-4xb)", async () => {
   assertStringIncludes(svg, "</svg>");
 });
 
-Deno.test("the download makes no promise the page cannot keep (audio-feed-4xb)", async () => {
-  // This test replaces one that asserted a background fetch was started. Measured
-  // twice in headless Chrome: registration.backgroundFetch is exposed, fetch()
-  // resolves, getIds() stays empty, no event fires, and the button hangs on
-  // "Downloading…" — so the "you can close this tab" message was false in exactly the
-  // environment where the API looked present. The page now downloads in the
-  // foreground, which was verified end to end, and says only what it does.
+Deno.test("the download promises a background fetch only after confirming one (audio-feed-rqp)", async () => {
+  // WHAT THIS TEST REPLACES, and why the reversal is not a weakening.
+  //
+  // Its ancestor asserted the page started NO background fetch at all, because
+  // audio-feed-4xb measured the API as non-functional: fetch() resolved, getIds()
+  // stayed empty, no event fired. That measurement was taken in HEADLESS Chrome,
+  // where `'BackgroundFetchManager' in self` is true but `'serviceWorker' in
+  // navigator` is FALSE — detection passes and registration is impossible, which
+  // is exactly the symptom that was reported. Driven in real Chrome against a real
+  // origin the API works end to end; audio-feed-98i carries the correction.
+  //
+  // The DEFECT 4xb identified was real and is still guarded: the page promised
+  // "you can close this tab" on the strength of a resolved fetch() alone. A
+  // resolved fetch() is not evidence a registration exists. So the promise is now
+  // ordered AFTER the confirmation, and that ordering is what this test pins.
+  //
+  // These are source-position assertions and they are the seam, not the evidence:
+  // a string in a page cannot prove a download completes. The behaviour was driven
+  // in a browser, and that is recorded on the bead.
   const { fetch } = await seeded();
   const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
 
-  assertEquals(
-    html.includes("you can close this tab"),
-    false,
-    "the page must not promise a background download it does not start",
+  const registered = html.indexOf("backgroundFetch.fetch(");
+  const confirmed = html.indexOf("backgroundFetch.getIds()");
+  const promised = html.indexOf("you can close this tab");
+
+  assert(registered > 0, "the page must attempt a background fetch");
+  assert(confirmed > 0, "the page must confirm the registration exists");
+  assert(promised > 0, "the page tells the subscriber the tab can be closed");
+  assert(
+    confirmed < promised,
+    "the OS-level promise must come AFTER getIds() confirms the registration, " +
+      "never on the strength of a resolved fetch() — that was the audio-feed-4xb defect",
   );
-  assertEquals(html.includes("backgroundFetch.fetch("), false, "no unverified background path");
-  // The verified path, and the state it leaves the UI in.
+
+  // The fallback is the path that runs everywhere. Background Fetch is Chrome-only
+  // and not Baseline, so this is the MAJORITY path and must not be a stub.
   assertStringIncludes(html, "const response = await fetch(episode.audioUrl)");
   assertStringIncludes(html, "await store.put(episode.audioUrl, response)");
-  assertStringIncludes(html, 'button.textContent = "Downloaded"');
+
+  // And the cache confirmation is a bounded poll, not a single read: the page's
+  // `progress` event fires when the RECORD settles, while the service worker
+  // writes the cache independently under waitUntil. A single read returned EMPTY
+  // for a download that had in fact succeeded (measured, audio-feed-98i).
+  assertStringIncludes(html, "async function waitForCache(");
 });

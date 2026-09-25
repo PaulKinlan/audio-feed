@@ -175,21 +175,64 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
-// Background Fetch completion. The LISTEN page does not currently start background
-// fetches — the API is exposed in some Chrome builds but registers nothing, so the
-// feature was removed rather than promised (see the 4xb follow-up bead, which carries
-// the measurement). This handler is kept because it is the piece that work needs: a
-// completed background fetch lands in the offline cache, so playback needs no
-// separate code path when the page does start using it.
+// Background Fetch, all three events (audio-feed-rqp).
+//
+// audio-feed-4xb wired only the success handler and the page never started a
+// fetch, because the API measured as non-functional. That measurement was taken
+// in HEADLESS Chrome, where 'BackgroundFetchManager' in self is true while
+// 'serviceWorker' in navigator is FALSE: detection passes, registration is
+// impossible. Re-measured in real Chrome against a real origin it works end to
+// end, and audio-feed-98i carries the correction.
 self.addEventListener("backgroundfetchsuccess", (event) => {
   event.waitUntil(
     (async () => {
       const offline = await caches.open(OFFLINE_CACHE);
       const records = await event.registration.matchAll();
+      let stored = 0;
       for (const record of records) {
         const response = await record.responseReady;
-        if (response && response.ok) await offline.put(record.request, response);
+        if (response && response.ok) {
+          await offline.put(record.request, response);
+          stored++;
+        }
       }
+      // The OS notification is the only surface a subscriber sees once the tab is
+      // closed, so it states the outcome rather than staying on "downloading".
+      if (event.updateUI) {
+        await event.updateUI({
+          title: stored === 1 ? "Episode ready offline" : stored + " episodes ready offline",
+        });
+      }
+    })(),
+  );
+});
+
+// A failed or aborted fetch caches NOTHING, deliberately. Background Fetch can
+// deliver partial records, and a half-written episode would be indistinguishable
+// from a complete one at playback time: the player's whole "is it downloaded?"
+// test is the presence of the URL in this cache. A truncated file that plays and
+// stops is worse than an absent one the page can retry in the foreground.
+self.addEventListener("backgroundfetchfail", (event) => {
+  event.waitUntil(
+    (async () => {
+      if (event.updateUI) {
+        await event.updateUI({ title: "Download failed — open Audio Feed to retry" });
+      }
+    })(),
+  );
+});
+
+// Tapping the OS download notification belongs in the player, not a new tab: an
+// already-open listener is focused rather than duplicated, because two copies of
+// this page means two <audio> elements and two media sessions.
+self.addEventListener("backgroundfetchclick", (event) => {
+  event.waitUntil(
+    (async () => {
+      const open = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of open) {
+        if (client.url.includes("/listen")) return client.focus();
+      }
+      return self.clients.openWindow("/listen");
     })(),
   );
 });
