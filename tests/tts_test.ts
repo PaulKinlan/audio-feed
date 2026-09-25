@@ -95,7 +95,7 @@ Deno.test("Single-voice narration - custom intro and partial metadata", () => {
   assertEquals(titleOnly, "The following is Solo Thought.");
 });
 
-Deno.test("Single-voice narration - builds prompt with spoken intro and article text without meta-preamble (audio-feed-xad)", () => {
+Deno.test("Single-voice narration - builds prompt with spoken intro and article text without meta-preamble or bracketed headers (audio-feed-xad, audio-feed-9dc)", () => {
   const prompt = formatNarrationPrompt({
     title: "AI Operating Models",
     author: "Paul Kinlan",
@@ -117,16 +117,22 @@ Deno.test("Single-voice narration - builds prompt with spoken intro and article 
     false,
   );
 
-  // Spoken introduction and article text must be present
-  assertEquals(prompt.includes("[Spoken Introduction]"), true);
+  // Bracketed section markers must NOT be present (prevents TTS speaking them aloud, audio-feed-9dc)
+  assertEquals(prompt.includes("[Spoken Introduction]"), false);
+  assertEquals(prompt.includes("[Article Text]"), false);
+
+  // Spoken introduction and article text must be present directly
   assertEquals(prompt.includes("The following is AI Operating Models"), true);
   assertEquals(prompt.includes("written by Paul Kinlan"), true);
-  assertEquals(prompt.includes("[Article Text]"), true);
   assertEquals(
     prompt.includes(
       "The shift from local agents to fleet swarms is accelerating.",
     ),
     true,
+  );
+  assertEquals(
+    prompt,
+    "The following is AI Operating Models, written by Paul Kinlan, published on September 24, 2026.\n\nThe shift from local agents to fleet swarms is accelerating.",
   );
 });
 

@@ -711,17 +711,13 @@ export function formatNarrationIntro(input: NarrationInput): string {
  */
 export function formatNarrationPrompt(input: NarrationInput): string {
   const includeIntro = input.includeIntro ?? true;
-  const introText = includeIntro ? formatNarrationIntro(input) : "";
+  const introText = includeIntro ? formatNarrationIntro(input).trim() : "";
+  const bodyText = input.body.trim();
 
-  const sections: string[] = [];
-
-  if (introText) {
-    sections.push(`[Spoken Introduction]\n${introText}`);
+  if (introText && bodyText) {
+    return `${introText}\n\n${bodyText}`;
   }
-
-  sections.push(`[Article Text]\n${input.body.trim()}`);
-
-  return sections.join("\n\n");
+  return introText || bodyText;
 }
 
 export interface FormattedDialogue {
