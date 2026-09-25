@@ -601,8 +601,20 @@ ${ICON_SPRITE}
   A single media element for the whole app: one media session, one place for
   transport controls, and the same element playing cached or streamed bytes — the
   service worker decides which, so this code needs no offline mode.
+
+  NO crossorigin attribute, deliberately. It was crossorigin="anonymous", and
+  that is what broke playback in production: the attribute forces the media load
+  into CORS mode, the audio route 302s to an R2 presigned URL, and R2's S3
+  endpoint sends no access-control-allow-origin (measured: 200 with the bytes,
+  no CORS header, and a preflight answered 403). The browser then refuses a
+  response it had already received.
+
+  Nothing here needs the attribute. It buys readable pixels for a <canvas> and
+  tainting rules for WebAudio analysis; this player draws neither. Adding it back
+  requires the audio route to answer CORS for every path, including the redirect
+  one it cannot control.
 -->
-<audio id="audio" preload="metadata" crossorigin="anonymous"></audio>
+<audio id="audio" preload="metadata"></audio>
 
 <section class="dock" aria-label="Player">
   <div class="dock-inner">

@@ -23,7 +23,11 @@ import { KvMetadataStore } from "../src/storage/kv.ts";
 
 const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") ?? "test-admin-token";
 const store = await KvMetadataStore.open(":memory:");
-const admin = await createUser(store, { email: "admin@example.com", displayName: "Admin", isAdmin: true });
+const admin = await createUser(store, {
+  email: "admin@example.com",
+  displayName: "Admin",
+  isAdmin: true,
+});
 
 // Refuse to serve if the gate is ever open on a cold start.
 for (const status of ["pending", "rejected", "suspended"] as const) {

@@ -10,7 +10,7 @@
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { KvMetadataStore } from "../src/storage/kv.ts";
-import { createUser, approveUser } from "../src/auth/users.ts";
+import { approveUser, createUser } from "../src/auth/users.ts";
 
 const args = parseArgs(Deno.args, {
   string: ["kv", "origin"],
@@ -23,7 +23,9 @@ const email = args._[0]?.toString();
 const displayName = args._[1]?.toString();
 
 if (!email) {
-  console.error("Usage: deno run -A scripts/create-user.ts <email> [displayName] [--kv <path_or_url>]");
+  console.error(
+    "Usage: deno run -A scripts/create-user.ts <email> [displayName] [--kv <path_or_url>]",
+  );
   Deno.exit(1);
 }
 

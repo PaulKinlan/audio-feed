@@ -119,11 +119,32 @@ self.addEventListener("fetch", (event) => {
         if (cached) return cached;
         try {
           return await fetch(request);
-        } catch {
-          return new Response("This episode is not downloaded for offline listening.", {
-            status: 503,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-          });
+        } catch (error) {
+          // This handler used to answer EVERY failure with "not downloaded for
+          // offline listening", which is a diagnosis it has no evidence for. In
+          // production the real fault was a CORS block on a redirect to R2, and
+          // this message sent the investigation to the offline cache instead --
+          // the thing that WAS working. A fetch() here rejects for any network
+          // reason: offline, DNS, TLS, a blocked cross-origin response.
+          //
+          // So it now reports what it knows (the request failed, and whether the
+          // browser believes it is offline) rather than guessing why.
+          const offlineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+          const detail = String((error && error.message) || error);
+          return new Response(
+            offlineNow
+              ? "You are offline and this episode has not been downloaded. " +
+                "Download it while online to listen offline."
+              : "Could not load this episode's audio: " + detail +
+                ". The episode is not saved on this device, so it needs the network.",
+            {
+              status: 503,
+              headers: {
+                "content-type": "text/plain; charset=utf-8",
+                "cache-control": "no-store",
+              },
+            },
+          );
         }
       })(),
     );
