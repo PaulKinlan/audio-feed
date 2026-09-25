@@ -232,11 +232,17 @@ Deno.test("the download promises a background fetch only after confirming one (a
   //
   // Its ancestor asserted the page started NO background fetch at all, because
   // audio-feed-4xb measured the API as non-functional: fetch() resolved, getIds()
-  // stayed empty, no event fired. That measurement was taken in HEADLESS Chrome,
-  // where `'BackgroundFetchManager' in self` is true but `'serviceWorker' in
-  // navigator` is FALSE — detection passes and registration is impossible, which
-  // is exactly the symptom that was reported. Driven in real Chrome against a real
-  // origin the API works end to end; audio-feed-98i carries the correction.
+  // stayed empty, no event fired. Driven against a real origin the API works end
+  // to end; audio-feed-98i carries the correction.
+  //
+  // An earlier version of this comment blamed headless Chrome for that original
+  // finding. RETRACTED: that reading came from about:blank, and headless Chrome
+  // 152 on the app's own origin has a service worker and completes a background
+  // fetch. What actually makes a working API look broken is measured and narrower
+  // — getIds() is empty BOTH when nothing registered and when a fetch has already
+  // finished, and only the first fetch per origin is permitted (audio-feed-zlf),
+  // so a refused second attempt resolves and then never lists. Either one alone
+  // reproduces 4xb's symptom exactly.
   //
   // The DEFECT 4xb identified was real and is still guarded: the page promised
   // "you can close this tab" on the strength of a resolved fetch() alone. A

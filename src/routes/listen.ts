@@ -51,12 +51,26 @@
  * - The token is a capability: `no-store`, no referrer, never echoed cross-origin.
  *
  * BACKGROUND FETCH is now wired, and the history matters (audio-feed-98i). 4xb
- * removed it after measuring in HEADLESS Chrome, where `'BackgroundFetchManager'
- * in self` is true but `'serviceWorker' in navigator` is FALSE — detection passes
- * and registration is impossible, which is exactly the reported symptom. Driven in
- * real Chrome against a real origin it works end to end: getIds() is populated,
- * the record settles `success`, and pwa.ts's handler lands the bytes in the offline
- * cache. Two things measured there shape the code below:
+ * removed it after measuring the API as non-functional. It is not: driven against
+ * a real origin it works end to end — getIds() is populated, the record settles
+ * `success`, and pwa.ts's handler lands the bytes in the offline cache.
+ *
+ * An earlier version of this comment blamed headless Chrome, claiming
+ * `'serviceWorker' in navigator` is false there. That was wrong and is retracted:
+ * the reading came from `about:blank`, which has no service worker for reasons
+ * unrelated to the browser build. On the app's own origin, headless Chrome 152
+ * reports `serviceWorker` present and completes a background fetch. Every
+ * measurement in this file was taken in headless Chrome 152 on http://localhost.
+ *
+ * What actually makes this API look broken is two ambiguities, both measured:
+ *
+ *   - getIds() is empty when nothing registered AND when a fetch has already
+ *     COMPLETED, so one reading cannot tell those apart;
+ *   - only the FIRST fetch per origin is permitted (audio-feed-zlf), and a
+ *     refused attempt resolves and then never appears in getIds() — which is
+ *     indistinguishable from "registered nothing", i.e. 4xb's exact symptom.
+ *
+ * Two things measured there shape the code below:
  *
  *   1. A RESOLVED `fetch()` IS NOT PROOF. The registration is confirmed via
  *      getIds() before the UI promises anything, because 4xb's mistake was
@@ -74,7 +88,8 @@
  *
  * AND IT IS THE MAJORITY PATH IN CHROME TOO, which is the part that surprises.
  * Background Fetch consumes Chrome's automatic-downloads permission, and only
- * the FIRST fetch from an origin is allowed. Measured in Chrome 150:
+ * the FIRST fetch from an origin is allowed. Measured in headless Chrome 152 on
+ * http://localhost (unmeasured: headed, https, and installed-PWA behaviour):
  *
  *     permissions.query({ name: "background-fetch" })  -> "granted"
  *     attempt 0 -> ok
