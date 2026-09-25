@@ -285,3 +285,32 @@ Deno.test("clicking Synthesize Queue Now triggers POST /api/admin/synthesize-now
     "Synthesis batch: 4 ready, 1 failed, 0 deferred.",
   );
 });
+
+Deno.test("manage sources renders status and error details for failing feed (audio-feed-dcj)", async () => {
+  const harness = await runAdminScript({
+    storedToken: "admin-secret",
+    respond: (method, path) => {
+      if (method === "GET" && path === "/api/admin/users") return { users: [USER] };
+      if (method === "GET" && path === `/api/admin/users/${USER.id}/sources`) {
+        return {
+          feedToken: USER.feedToken,
+          sources: [{
+            ...SOURCE,
+            lastPolledAt: "2026-09-25T08:00:00.000Z",
+            lastPollError: "HTTP 403 Forbidden Cloudflare",
+          }],
+        };
+      }
+      return { ok: true };
+    },
+  });
+
+  const manage = harness.buttons(harness.byId("usersBody"), "Manage");
+  manage[0]!.click();
+  await harness.flush();
+
+  const tbody = harness.byId("manageSourcesBody");
+  const text = tbody.descendants().map((d) => d.textContent).join(" ");
+  assertStringIncludes(text, "Error");
+  assertStringIncludes(text, "HTTP 403 Forbidden Cloudflare");
+});

@@ -183,6 +183,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   .created dd { margin: 0; overflow-wrap: anywhere; }
   .copy-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block-start: var(--space-3); }
   .copy-row input { flex: 1 1 22rem; min-inline-size: 0; }
+  .error-detail { font-size: 0.75rem; color: var(--danger); margin-block-start: var(--space-1); word-break: break-all; }
 
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
@@ -323,6 +324,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
             <th scope="col">Title</th>
             <th scope="col">Feed URL</th>
             <th scope="col">Mode</th>
+            <th scope="col">Status</th>
             <th scope="col">Actions</th>
           </tr>
         </thead>
@@ -766,6 +768,32 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         tdUrl.textContent = source.feedUrl || "—";
         tr.appendChild(tdUrl);
         tr.appendChild(cell((source.modes || []).join(", ")));
+
+        const tdStatus = document.createElement("td");
+        if (source.lastPollError) {
+          const span = document.createElement("span");
+          span.className = "status";
+          span.dataset.status = "suspended";
+          span.textContent = "Error";
+          tdStatus.appendChild(span);
+          const errText = document.createElement("div");
+          errText.className = "error-detail";
+          errText.textContent = source.lastPollError;
+          tdStatus.appendChild(errText);
+        } else if (source.lastPolledAt) {
+          const span = document.createElement("span");
+          span.className = "status";
+          span.dataset.status = "approved";
+          span.textContent = "OK";
+          tdStatus.appendChild(span);
+        } else {
+          const span = document.createElement("span");
+          span.className = "status";
+          span.dataset.status = "pending";
+          span.textContent = "Pending";
+          tdStatus.appendChild(span);
+        }
+        tr.appendChild(tdStatus);
 
         const tdActions = document.createElement("td");
         tdActions.className = "actions";

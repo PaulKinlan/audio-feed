@@ -36,6 +36,7 @@ export interface FeedItem {
   link: string;
   publishedAt?: string;
   summary?: string;
+  contentEncoded?: string;
 }
 
 /** Feeds are XML, and linkedom must parse them as XML: in HTML mode `<link>` is a
@@ -51,22 +52,28 @@ export function parseFeedItems(xml: string, baseUrl: string): FeedItem[] {
   }
   const items: FeedItem[] = [];
   for (const node of Array.from(document.querySelectorAll("item, entry"))) {
-    const title = childText(node, ["title"]) ?? "";
+    const title = childText(node, ["title", "media:title", "dc:title"]) ?? "";
     const link = itemLink(node, baseUrl);
     if (!link) continue;
     const published = childText(node, ["pubdate", "published", "updated", "date", "dc:date"]);
+    const contentEncoded = childText(node, ["content:encoded", "encoded"]);
     const summary = childText(node, [
-      "description",
-      "summary",
-      "content",
       "content:encoded",
       "encoded",
+      "content",
+      "description",
+      "summary",
+      "media:description",
+      "itunes:summary",
+      "subtitle",
+      "itunes:subtitle",
     ]);
     items.push({
       title: title.trim() || link,
       link,
       publishedAt: toIsoDate(published),
       summary: summary?.trim() || undefined,
+      contentEncoded: contentEncoded?.trim() || undefined,
     });
   }
   return items;
@@ -90,21 +97,40 @@ function childText(node: Element, names: string[]): string | null {
 }
 
 function itemLink(node: Element, baseUrl: string): string | null {
+  // Feedburner / canonical original link
+  const origLink = childText(node, ["feedburner:origlink", "origlink"])?.trim();
+  if (origLink && /^https?:\/\//i.test(origLink)) return absolutise(origLink, baseUrl);
+
   let textLink: string | null = null;
   for (const child of Array.from(node.childNodes)) {
     const element = child as Element;
-    if (!element.nodeName || element.nodeName.toLowerCase() !== "link") continue;
-    const href = element.getAttribute?.("href");
-    if (href) {
-      const rel = (element.getAttribute("rel") ?? "alternate").toLowerCase();
-      // Atom: prefer the alternate link; a self link is the feed, not the item.
-      if (rel === "alternate") return absolutise(href, baseUrl);
-      continue;
+    if (!element.nodeName) continue;
+    const name = element.nodeName.toLowerCase();
+    if (name === "link") {
+      const href = element.getAttribute?.("href");
+      if (href) {
+        const rel = (element.getAttribute("rel") ?? "alternate").toLowerCase();
+        // Atom: prefer the alternate link; a self link is the feed, not the item.
+        if (rel === "alternate") return absolutise(href, baseUrl);
+        continue;
+      }
+      const text = (element.textContent ?? "").trim();
+      if (text) textLink = text;
     }
-    const text = (element.textContent ?? "").trim();
-    if (text) textLink = text;
   }
   if (textLink) return absolutise(textLink, baseUrl);
+
+  // Check for media:content url="..." or enclosure url="..."
+  for (const child of Array.from(node.childNodes)) {
+    const element = child as Element;
+    if (!element.nodeName) continue;
+    const name = element.nodeName.toLowerCase();
+    if (name === "media:content" || name === "enclosure" || name === "media:player") {
+      const url = element.getAttribute?.("url");
+      if (url && /^https?:\/\//i.test(url)) return absolutise(url, baseUrl);
+    }
+  }
+
   // Some feeds only carry a guid that happens to be a URL.
   const guid = childText(node, ["guid", "id"])?.trim();
   if (guid && /^https?:\/\//i.test(guid)) return guid;
@@ -155,6 +181,11 @@ export async function pollFeedSource(
   const result: PollResult = { items: 0, queued: 0, skipped: 0, failed: 0, errors: [] };
   if (!source.feedUrl) {
     result.errors.push("source has no feedUrl");
+    await ctx.stores.metadata.putSource({
+      ...source,
+      lastPolledAt: new Date().toISOString(),
+      lastPollError: "source has no feedUrl",
+    });
     return result;
   }
 
@@ -165,15 +196,28 @@ export async function pollFeedSource(
       deps.maxItems ?? DEFAULT_MAX_ITEMS,
     );
   } catch (error) {
-    result.errors.push(String((error as Error)?.message ?? error));
+    const errorMsg = String((error as Error)?.message ?? error);
+    result.errors.push(errorMsg);
     // lastPolledAt still moves: a permanently broken feed must not be retried on
     // every tick forever.
-    await ctx.stores.metadata.putSource({ ...source, lastPolledAt: new Date().toISOString() });
+    await ctx.stores.metadata.putSource({
+      ...source,
+      lastPolledAt: new Date().toISOString(),
+      lastPollError: errorMsg,
+    });
     return result;
   }
 
   await queueItems(ctx, source, items, deps, result);
-  await ctx.stores.metadata.putSource({ ...source, lastPolledAt: new Date().toISOString() });
+
+  const pollError = result.errors[0] ??
+    (result.failed > 0 ? `${result.failed} article(s) failed extraction` : undefined);
+
+  await ctx.stores.metadata.putSource({
+    ...source,
+    lastPolledAt: new Date().toISOString(),
+    lastPollError: pollError,
+  });
   return result;
 }
 
@@ -188,6 +232,19 @@ async function loadFeedItems(feedUrl: string, deps: PollDependencies): Promise<F
     signal: deps.signal,
   });
   return parseFeedItems(document.xml, document.url);
+}
+
+function extractTextFromHtml(rawHtml: string): string {
+  try {
+    const doc = new DOMParser().parseFromString(rawHtml, "text/html") as unknown as Document;
+    for (const el of Array.from(doc.querySelectorAll("script, style, noscript"))) {
+      el.remove();
+    }
+    const text = doc.body?.textContent?.trim() ?? "";
+    return text || rawHtml;
+  } catch {
+    return rawHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
 }
 
 /** Queue an episode per item that the store has not already seen. */
@@ -207,63 +264,83 @@ async function queueItems(
       result.skipped++;
       continue;
     }
+    let extracted: ExtractedArticle;
     try {
-      const extracted = deps.fetchArticle
+      extracted = deps.fetchArticle
         ? await deps.fetchArticle(item.link, deps.signal)
         : await fetchArticle(item.link, { signal: deps.signal });
-
-      // audio-feed-562: re-check after article extraction to avoid inserting duplicates
-      // if another concurrent poll or manual trigger completed while fetching.
-      const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
-      if (raced) {
-        result.skipped++;
-        continue;
-      }
-
-      const now = new Date().toISOString();
-      const articleId = newArticleId();
-      const article: Article = {
-        id: articleId,
-        userId: source.userId,
-        sourceId: source.id,
-        url: item.link,
-        title: item.title || extracted.title,
-        // The feed's own metadata is often better than the page's.
-        author: extracted.author ?? undefined,
-        publishedAt: item.publishedAt ?? extracted.publishedAt ?? undefined,
-        content: extracted.body,
-        excerpt: extracted.lead || item.summary,
-        ingestedAt: now,
-      };
-      // audio-feed-33m: atomic insert-if-absent CAS pattern closes the race between
-      // concurrent polls or manual triggers even with identical/immediate timing.
-      const inserted = await ctx.stores.metadata.insertArticleIfAbsent(article);
-      if (!inserted) {
-        result.skipped++;
-        continue;
-      }
-      const episode: Episode = {
-        id: newEpisodeId(),
-        userId: source.userId,
-        sourceId: source.id,
-        sourceTitle: source.title,
-        articleId,
-        mode,
-        // The worker picks this up; this module never synthesises.
-        status: "pending",
-        title: article.title,
-        description: article.excerpt,
-        createdAt: now,
-      };
-      await ctx.stores.metadata.putEpisode(episode);
-      result.queued++;
     } catch (error) {
-      // One unfetchable article must not fail the poll or the other items.
-      result.failed++;
-      if (result.errors.length < 3) {
-        result.errors.push(`${item.link}: ${String((error as Error)?.message ?? error)}`);
+      // Fallback: if fetching the article page over the web failed (e.g. 403, Cloudflare,
+      // paywall, bot-block, or network timeout), but the feed item itself includes
+      // full text in content:encoded (>= 80 chars), use the feed's embedded article
+      // text rather than dropping the episode. We specifically do NOT fall back to
+      // description/summary to avoid narrating paywall notices or teasers (audio-feed-yh2).
+      const fallbackText = item.contentEncoded ? extractTextFromHtml(item.contentEncoded) : "";
+      if (fallbackText.length >= 80) {
+        extracted = {
+          url: item.link,
+          title: item.title,
+          author: null,
+          publishedAt: item.publishedAt ?? null,
+          lead: item.summary
+            ? extractTextFromHtml(item.summary).slice(0, 200).trim()
+            : fallbackText.slice(0, 200).trim(),
+          body: fallbackText,
+        };
+      } else {
+        result.failed++;
+        if (result.errors.length < 3) {
+          result.errors.push(`${item.link}: ${String((error as Error)?.message ?? error)}`);
+        }
+        continue;
       }
     }
+
+    // audio-feed-562: re-check after article extraction to avoid inserting duplicates
+    // if another concurrent poll or manual trigger completed while fetching.
+    const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
+    if (raced) {
+      result.skipped++;
+      continue;
+    }
+
+    const now = new Date().toISOString();
+    const articleId = newArticleId();
+    const article: Article = {
+      id: articleId,
+      userId: source.userId,
+      sourceId: source.id,
+      url: item.link,
+      title: item.title || extracted.title,
+      // The feed's own metadata is often better than the page's.
+      author: extracted.author ?? undefined,
+      publishedAt: item.publishedAt ?? extracted.publishedAt ?? undefined,
+      content: extracted.body,
+      excerpt: extracted.lead || item.summary,
+      ingestedAt: now,
+    };
+    // audio-feed-33m: atomic insert-if-absent CAS pattern closes the race between
+    // concurrent polls or manual triggers even with identical/immediate timing.
+    const inserted = await ctx.stores.metadata.insertArticleIfAbsent(article);
+    if (!inserted) {
+      result.skipped++;
+      continue;
+    }
+    const episode: Episode = {
+      id: newEpisodeId(),
+      userId: source.userId,
+      sourceId: source.id,
+      sourceTitle: source.title,
+      articleId,
+      mode,
+      // The worker picks this up; this module never synthesises.
+      status: "pending",
+      title: article.title,
+      description: article.excerpt,
+      createdAt: now,
+    };
+    await ctx.stores.metadata.putEpisode(episode);
+    result.queued++;
   }
 }
 

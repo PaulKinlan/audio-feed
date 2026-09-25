@@ -151,6 +151,7 @@ export interface Source {
   voices: VoiceConfig;
   createdAt: string;
   lastPolledAt?: string;
+  lastPollError?: string;
 }
 
 /** Stable id of the per-user inbox that `Send-to-Audio` ingests land in. */

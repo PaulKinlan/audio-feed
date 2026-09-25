@@ -499,3 +499,173 @@ Deno.test("POST /api/sources with all-invalid modes returns 400", async () => {
   const body = await res.json();
   assertStringIncludes(body.error, "valid audio mode is required");
 });
+
+Deno.test("RSS/Atom parses media, content, and feedburner namespaces (audio-feed-dcj)", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+  xmlns:media="http://search.yahoo.com/mrss/"
+  xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:feedburner="http://rssnamespace.org/feedburner/ext/1.0">
+  <channel>
+    <title>Media Showcase</title>
+    <item>
+      <media:title>Media Title</media:title>
+      <link>https://feedproxy.google.com/~r/test/~3/abc</link>
+      <feedburner:origLink>https://example.com/canonical-article</feedburner:origLink>
+      <content:encoded><![CDATA[<p>Full article text in content encoded format.</p>]]></content:encoded>
+      <media:description>Summary description</media:description>
+      <pubDate>Wed, 02 Sep 2026 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Video Item</title>
+      <media:content url="https://example.com/video-post" type="video/mp4" />
+      <description>Video description</description>
+    </item>
+  </channel>
+</rss>`;
+
+  const items = parseFeedItems(xml, "https://example.com/feed.xml");
+  assertEquals(items.length, 2);
+
+  assertEquals(items[0]!.title, "Media Title");
+  assertEquals(items[0]!.link, "https://example.com/canonical-article");
+  assertStringIncludes(items[0]!.summary ?? "", "Full article text in content encoded");
+  assertEquals(items[0]!.publishedAt, "2026-09-02T12:00:00.000Z");
+
+  assertEquals(items[1]!.title, "Video Item");
+  assertEquals(items[1]!.link, "https://example.com/video-post");
+  assertEquals(items[1]!.summary, "Video description");
+});
+
+Deno.test("pollFeedSource falls back to embedded feed content when web article fetch fails (audio-feed-dcj)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Substack Blog</title>
+    <item>
+      <title>Paywalled Web Post</title>
+      <link>https://example.substack.com/p/paywalled-post</link>
+      <content:encoded><![CDATA[<p>This is the full rich text of the article provided directly inside the RSS feed body. It contains all the necessary paragraphs for audio synthesis even if the web link requires a Cloudflare challenge or login.</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>`;
+
+  const source: Source = makeSource({
+    id: "substack",
+    userId: "user-1",
+    feedUrl: "https://example.substack.com/feed",
+  });
+  await stores.metadata.putSource(source);
+
+  // fetchArticle simulates a 403 bot-block / paywall on the web URL
+  const poll = await pollFeedSource(ctx, source, {
+    transport: feedTransport(feedXml),
+    fetchArticle: () => Promise.reject(new Error("403 Forbidden - Cloudflare bot challenge")),
+  });
+
+  // Because feed had rich content:encoded (>= 80 chars), it fell back and queued the episode!
+  assertEquals(poll.queued, 1);
+  assertEquals(poll.failed, 0);
+
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  assertEquals(episodes.length, 1);
+  assertEquals(episodes[0]!.title, "Paywalled Web Post");
+
+  const article = await stores.metadata.getArticle("user-1", episodes[0]!.articleId);
+  assert(article, "article must be stored from feed content fallback");
+  assertStringIncludes(
+    article.content,
+    "full rich text of the article provided directly inside the RSS feed",
+  );
+});
+
+Deno.test("pollFeedSource does NOT fall back on description only or short content:encoded (audio-feed-yh2)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Paywalled Feeds</title>
+    <!-- Item 1: Paywall teaser in description only (>80 chars) -->
+    <item>
+      <title>Teaser Only Post</title>
+      <link>https://example.com/teaser-post</link>
+      <description>Subscribe to keep reading this post and get 7 days of free access to our entire catalog of deep dives.</description>
+    </item>
+    <!-- Item 2: Short content:encoded (<80 chars) -->
+    <item>
+      <title>Short Content Post</title>
+      <link>https://example.com/short-post</link>
+      <content:encoded><![CDATA[<p>Too short to narrate.</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>`;
+
+  const source: Source = makeSource({
+    id: "paywalled-source",
+    userId: "user-1",
+    feedUrl: "https://example.com/feed.xml",
+  });
+  await stores.metadata.putSource(source);
+
+  const poll = await pollFeedSource(ctx, source, {
+    transport: feedTransport(feedXml),
+    fetchArticle: () => Promise.reject(new Error("403 Forbidden - Paywall")),
+  });
+
+  // Neither item should be queued as an episode
+  assertEquals(poll.queued, 0);
+  assertEquals(poll.failed, 2);
+
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  assertEquals(
+    episodes.length,
+    0,
+    "must not queue episodes for paywall teasers or sub-80 char content",
+  );
+});
+
+Deno.test("pollFeedSource records lastPollError on source and clears it on success (audio-feed-dcj)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const source: Source = makeSource({
+    id: "failing-source",
+    userId: "user-1",
+    feedUrl: "https://broken.example.com/rss",
+  });
+  await stores.metadata.putSource(source);
+
+  // 1. Poll fails with transport 404
+  const failedPoll = await pollFeedSource(ctx, source, {
+    transport: () =>
+      Promise.resolve(new Response("Not Found", { status: 404, statusText: "Not Found" })),
+  });
+  assertEquals(failedPoll.errors.length, 1);
+
+  const updatedSource = await stores.metadata.getSource("user-1", "failing-source");
+  assert(updatedSource?.lastPollError, "lastPollError must be recorded");
+  assertStringIncludes(updatedSource!.lastPollError, "unavailable");
+
+  // 2. Poll succeeds on subsequent attempt
+  const goodXml = `<rss version="2.0"><channel><title>Fixed</title></channel></rss>`;
+  await pollFeedSource(ctx, source, {
+    transport: feedTransport(goodXml),
+  });
+
+  const healedSource = await stores.metadata.getSource("user-1", "failing-source");
+  assertEquals(healedSource?.lastPollError, undefined, "lastPollError must be cleared on success");
+});
