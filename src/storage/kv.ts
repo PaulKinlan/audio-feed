@@ -273,6 +273,18 @@ export class KvMetadataStore implements MetadataStore {
     return (await tx.commit()).ok;
   }
 
+  async putArticleWithEpisode(article: Article, episode: Episode): Promise<void> {
+    // Same single-commit guarantee as the dedupe variant, without the URL check
+    // (audio-feed-d8q): the inbox re-write of a URL is a new episode by request, but
+    // it must never be half a pair.
+    const tx = this.#kv.atomic()
+      .set(["article", article.userId, article.id], article)
+      .set(["article_by_url", article.userId, article.url], article.id);
+    KvMetadataStore.#writeEpisode(tx, episode);
+    const result = await tx.commit();
+    if (!result.ok) throw new Error(`putArticleWithEpisode failed for ${article.id}`);
+  }
+
   async getArticle(userId: string, id: string): Promise<Article | null> {
     return (await this.#kv.get<Article>(["article", userId, id])).value;
   }

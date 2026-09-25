@@ -15,10 +15,13 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
+import { pollFeedSource } from "../src/ingest/feed.ts";
 import { bytes, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig } from "../src/config.ts";
 import type { ExtractedArticle } from "../src/ingest/url.ts";
 import type { Stores } from "../src/config.ts";
+import type { Article, Episode } from "../src/types.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -69,6 +72,83 @@ const req = (path: string, init?: RequestInit) =>
 function enclosureUrl(xml: string): string | null {
   return xml.match(/<enclosure url="([^"]+)"/)?.[1] ?? null;
 }
+
+Deno.test("a failed inbox write poisons no URL: the feed still turns it into audio (audio-feed-d8q)", async () => {
+  // The seam this exists for. The inbox enqueue and the feed poller are different code,
+  // but they share ONE fact: queueItems skips a URL whose ARTICLE exists. So while the
+  // inbox wrote the two records in two steps, one failed putEpisode left an article with
+  // no audio behind it, and every later poll of a feed carrying that URL skipped it.
+  // Measured on main before the pair write existed: queued=0 skipped=1 episodes=0, with
+  // nothing reporting an error after the first poll.
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  const source = makeSource({ id: "example", userId: "user-1" });
+  await stores.metadata.putSource(source);
+
+  const inner = stores.metadata;
+  let refuse = true;
+  // The seam is "the write that would create this item's episode fails once", attached to
+  // both spellings of that write — `putEpisode` on the old two-step inbox, the pair method
+  // on the new one — so the test discriminates between them rather than only exercising
+  // the code that exists today. Methods bind to the real instance: a Proxy receiver would
+  // break the store's private fields instead of the behaviour under test.
+  const flaky = new Proxy(inner, {
+    get(target, prop) {
+      if (prop === "putArticleWithEpisode" || prop === "putEpisode") {
+        const name = prop;
+        return (arg1: unknown, arg2: unknown) => {
+          if (refuse) {
+            refuse = false;
+            return Promise.reject(new Error("store unavailable"));
+          }
+          if (name === "putEpisode") {
+            return target.putEpisode(arg1 as Parameters<MetadataStore["putEpisode"]>[0]);
+          }
+          return target.putArticleWithEpisode(arg1 as Article, arg2 as Episode);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as MetadataStore;
+
+  const ctx = { config, stores: { ...stores, metadata: flaky } };
+  const handlers = createHandlers(ctx, { fetchArticle: () => Promise.resolve(ARTICLE) });
+  const { fetch } = createApp(ctx, handlers);
+
+  const res = await fetch(req("/api/ingest", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-feed-token": "token-user-1" },
+    body: JSON.stringify({ url: ARTICLE.url, mode: "direct" }),
+  }));
+  assertEquals(res.status, 503);
+  // Nothing was recorded, so the URL is not claimed.
+  assertEquals(await stores.metadata.findArticleByUrl("user-1", ARTICLE.url), null);
+  assertEquals((await stores.metadata.listEpisodes({ userId: "user-1" })).length, 0);
+
+  // The same URL now arrives through a feed. This is the assertion that fails on the
+  // old two-step inbox: it saw the orphan article and skipped the item forever.
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Example</title>
+      <item><title>An Ingested Article</title><link>${ARTICLE.url}</link>
+        <description><![CDATA[<p>A short lead.</p>]]></description></item>
+    </channel></rss>`;
+  const poll = await pollFeedSource({ config, stores }, source, {
+    transport: () =>
+      Promise.resolve(
+        new Response(xml, {
+          status: 200,
+          headers: { "content-type": "application/rss+xml; charset=utf-8" },
+        }),
+      ),
+    fetchArticle: () => Promise.resolve(ARTICLE),
+  });
+  assertEquals(poll.queued, 1, "the URL must still be queueable after the failed inbox write");
+  assertEquals(poll.skipped, 0);
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  assertEquals(episodes.length, 1);
+  assertEquals(episodes[0]!.status, "pending");
+});
 
 // ---------------------------------------------------------------------------
 // The headline: a feed URL is subscribable and its enclosure is playable

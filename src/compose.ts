@@ -481,8 +481,7 @@ export function createIngestHandler(
         excerpt: article.lead,
         ingestedAt: now,
       };
-      await ctx.stores.metadata.putArticle(record);
-      await ctx.stores.metadata.putEpisode({
+      const episode: Episode = {
         id: episodeId,
         userId: user.id,
         sourceId: INBOX_SOURCE_ID,
@@ -493,7 +492,15 @@ export function createIngestHandler(
         title: article.title,
         description: article.lead,
         createdAt: now,
-      });
+      };
+      // audio-feed-d8q: one commit for the pair. Written as two calls, a failed
+      // putEpisode left the article stored with no audio behind it — and because
+      // queueItems dedupes on the article alone, a URL that came through the inbox once
+      // like that was skipped by every later poll of a feed carrying it (measured on
+      // main before this: queued=0 skipped=1 episodes=0, permanently). A retry still
+      // re-queues here, since this write is deliberately blind; what it can no longer do
+      // is half-succeed.
+      await ctx.stores.metadata.putArticleWithEpisode(record, episode);
       // Seed the inbox source on first use so the per-source feed route has a
       // source to resolve rather than 404ing on an empty inbox.
       if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
