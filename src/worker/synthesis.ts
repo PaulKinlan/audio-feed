@@ -44,7 +44,12 @@ import {
 } from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
-import { audioBlobKey, DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS } from "../types.ts";
+import {
+  audioBlobKey,
+  DEFAULT_CLAIM_LEASE_MS,
+  DEFAULT_MAX_CLAIMS,
+  DEFAULT_VOICES,
+} from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
@@ -174,7 +179,12 @@ export function createGeminiSynthesizer(
   const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
   return async ({ article, source, episode, mode }) => {
     if (mode === "deepdive") {
-      const [expert, foil] = source?.voices.deepdive ?? ["Kore", "Puck"];
+      // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
+      // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
+      // - the comment was describing an intention the line did not have, and
+      // audio-feed-4xt made this branch reachable in production for the first time,
+      // so the two could now disagree while both looked correct.
+      const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive!;
       return await client.synthesizeDialogue({
         title: article.title,
         article: {

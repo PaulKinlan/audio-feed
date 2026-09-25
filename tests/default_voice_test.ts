@@ -213,3 +213,100 @@ Deno.test("loadConfig accepts a valid DEFAULT_VOICE (audio-feed-4xt)", () => {
     else Deno.env.set("DEFAULT_VOICE", had);
   }
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-6ey — the deep dive pair, newly reachable in production
+// ---------------------------------------------------------------------------
+
+/** Resolve the two speaker voices a deep dive would send, per layer. */
+async function resolvedDialogueVoices(opts: {
+  configVoice?: string;
+  sourceVoices: Source["voices"];
+}): Promise<string[]> {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  const ctx = {
+    config: { port: 0, defaultVoice: opts.configVoice } as AppContext["config"],
+    stores,
+  } as AppContext;
+
+  const seen: { voices: string[] } = { voices: [] };
+  const synthesize = createGeminiSynthesizer(ctx, {
+    client: new GeminiTtsClient({
+      apiKey: "test-key-not-real",
+      fetchFn: (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          generationConfig?: {
+            speechConfig?: {
+              multiSpeakerVoiceConfig?: {
+                speakerVoiceConfigs?: Array<{
+                  voiceConfig?: { prebuiltVoiceConfig?: { voiceName?: string } };
+                }>;
+              };
+            };
+          };
+        };
+        seen.voices = (body.generationConfig?.speechConfig?.multiSpeakerVoiceConfig
+          ?.speakerVoiceConfigs ?? []).map((c) =>
+            c.voiceConfig?.prebuiltVoiceConfig?.voiceName ?? ""
+          );
+        return Promise.reject(new Error("captured dialogue request"));
+      },
+    }),
+  });
+
+  await assertRejects(
+    () =>
+      synthesize({
+        article: makeArticle({ id: "a1", userId: "u1", sourceId: "s1" }),
+        source: makeSource({ id: "s1", userId: "u1", voices: opts.sourceVoices }),
+        episode: makeEpisode({ id: "e1", userId: "u1", sourceId: "s1", articleId: "a1" }),
+        mode: "deepdive",
+      }),
+    Error,
+    "captured dialogue request",
+  );
+  return seen.voices;
+}
+
+// Deliberately LITERALS, not DEFAULT_VOICES.deepdive. Reading the same constant the
+// code reads makes an assertion that cannot fail - proven by mutation: retuning
+// DEFAULT_VOICES.deepdive to ["Aoede","Fenrir"] left all 12 tests green, because both
+// sides of the assertEquals moved together. That is the tautology the fleet rules name
+// ("asserting a constant equals its own literal"). Pinning the actual expected voices
+// is what makes this able to catch a change, and it makes the house default a stated
+// decision rather than an implication of wherever the value was read from.
+const HOUSE_DEEPDIVE_PAIR = ["Kore", "Puck"];
+
+Deno.test("a source with no deep dive pair resolves the shared default (audio-feed-6ey)", async () => {
+  // audio-feed-4xt made this branch reachable: sources are created with voices: {},
+  // so on main the fallback was dead code nothing executed. Dead code that becomes
+  // live code with no coverage is where the bug hides.
+  const voices = await resolvedDialogueVoices({ sourceVoices: {} });
+  assertEquals(voices.length, 2, "a deep dive must send exactly two speakers");
+  assertEquals(
+    voices,
+    HOUSE_DEEPDIVE_PAIR,
+    "an unset pair must resolve to the stated house default (audio-feed-6ey)",
+  );
+});
+
+Deno.test("an explicit source pair wins over the default (audio-feed-6ey)", async () => {
+  const voices = await resolvedDialogueVoices({
+    sourceVoices: { deepdive: ["Fenrir", "Aoede"] },
+  });
+  assertEquals(voices, ["Fenrir", "Aoede"], "a chosen pair must not be overridden");
+});
+
+Deno.test("DEFAULT_VOICE does not leak into the deep dive pair (audio-feed-6ey)", async () => {
+  // Pins the deliberate non-goal from audio-feed-4xt: one name has no honest mapping
+  // onto a two-voice pair, so the operator default drives direct narration only.
+  // Without this a future change could "fix" the apparent gap and silently change
+  // every dialogue's expert voice.
+  const voices = await resolvedDialogueVoices({ configVoice: "Puck", sourceVoices: {} });
+  assertEquals(
+    voices,
+    HOUSE_DEEPDIVE_PAIR,
+    "DEFAULT_VOICE must not become one half of the dialogue pair",
+  );
+});
