@@ -14,18 +14,47 @@ import { loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
   startSynthesisWorker,
+  type SynthesisWorkerHandle,
   type Synthesizer,
 } from "./worker/synthesis.ts";
-import { startFeedPollWorker } from "./ingest/feed.ts";
+import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts";
+import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
+
+export interface BootstrapOptions {
+  /**
+   * Override Deploy detection. Defaults to the environment check above.
+   *
+   * Injectable because the module-level const is evaluated once at load, so a
+   * test could never exercise the `!isDeploy` gates without it (audio-feed-1kw).
+   */
+  isDeploy?: boolean;
+  /** Bind an ephemeral port with 0. A test must never bind a fixed one. */
+  port?: number;
+  /** Injected stores. Defaults to the configured backend, which opens real KV. */
+  stores?: Stores;
+  /** Injected synthesizer. Defaults to the env-derived one; pass a stub to make
+   *  the worker gate observable without a real GEMINI_API_KEY in the suite. */
+  synthesizer?: Synthesizer | null;
+}
 
 export interface BootstrapResult {
   server: Deno.HttpServer;
   fetch: (req: Request) => Promise<Response> | Response;
   ctx: AppContext;
   synthesizer: Synthesizer | null;
+  /**
+   * The two in-memory background workers. Both are NULL on Deno Deploy, where
+   * Deno.cron owns background work (audio-feed-562). Exposed so the wiring is
+   * checkable: before audio-feed-1kw they were local to bootstrap(), which is
+   * why deleting both gates left all 432 tests green.
+   */
+  worker: SynthesisWorkerHandle | null;
+  feedPoller: FeedPollWorkerHandle | null;
+  /** The Deploy decision this process actually booted with. */
+  isDeploy: boolean;
   shutdown: () => Promise<void>;
 }
 
@@ -40,12 +69,19 @@ export function getBootstrap(): Promise<BootstrapResult> {
   return bootstrapPromise ??= bootstrap();
 }
 
-export async function bootstrap(): Promise<BootstrapResult> {
+export async function bootstrap(options: BootstrapOptions = {}): Promise<BootstrapResult> {
+  // Read the decision per call, not once at module load: that is what lets the
+  // gates below be exercised at all (audio-feed-1kw).
+  const deploy = options.isDeploy ?? isDeploy;
   const config = loadConfig();
-  const stores = await openStores();
+  const stores = options.stores ?? await openStores();
   const ctx: AppContext = { config, stores };
 
-  const synthesizer = config.geminiApiKey ? createGeminiSynthesizer(ctx) : null;
+  const synthesizer = options.synthesizer !== undefined
+    ? options.synthesizer
+    : config.geminiApiKey
+    ? createGeminiSynthesizer(ctx)
+    : null;
 
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
   const handlers = createHandlers(ctx);
@@ -74,7 +110,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
   // so concurrent polls duplicate articles and double synthesis spend).
   // In-memory workers run ONLY outside Deploy (!isDeploy).
   const workerAbort = new AbortController();
-  const worker = !isDeploy && synthesizer
+  const worker = !deploy && synthesizer
     ? startSynthesisWorker(ctx, synthesizer, {
       signal: workerAbort.signal,
       onTick: (result) => {
@@ -96,7 +132,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
     : null;
 
   const feedPollAbort = new AbortController();
-  const feedPoller = !isDeploy
+  const feedPoller = !deploy
     ? startFeedPollWorker(ctx, {
       signal: feedPollAbort.signal,
       onTick: (result) => {
@@ -107,7 +143,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
     })
     : null;
 
-  const server = Deno.serve({ port: config.port }, serverFetch);
+  const server = Deno.serve({ port: options.port ?? config.port }, serverFetch);
 
   // Stop the worker before closing KV so no tick writes to a closed handle.
   const shutdown = async () => {
@@ -126,7 +162,16 @@ export async function bootstrap(): Promise<BootstrapResult> {
     // Signals not supported in serverless/Deno Deploy environments.
   }
 
-  return { server, fetch: serverFetch, ctx, synthesizer, shutdown };
+  return {
+    server,
+    fetch: serverFetch,
+    ctx,
+    synthesizer,
+    worker,
+    feedPoller,
+    isDeploy: deploy,
+    shutdown,
+  };
 }
 
 // audio-feed-dsn / audio-feed-ncf: Native Deno.cron background jobs on Deno Deploy.
