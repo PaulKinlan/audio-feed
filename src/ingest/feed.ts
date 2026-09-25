@@ -294,9 +294,12 @@ async function queueItems(
           title: item.title,
           author: null,
           publishedAt: item.publishedAt ?? null,
-          lead: item.summary
-            ? extractTextFromHtml(item.summary).slice(0, 200).trim()
-            : fallbackText.slice(0, 200).trim(),
+          // The lead comes from the SAME field as the body (audio-feed-7jp). `item.summary`
+          // is the MERGED description/content/teaser field, and a lead is not decorative:
+          // it becomes the episode description in the published RSS and the first
+          // grounding line of a deep dive's script, so a paywall notice would reach both
+          // even though the narrated body was clean (audio-feed-yh2).
+          lead: (fallbackText.split("\n\n")[0] ?? fallbackText).slice(0, 200).trim(),
           body: fallbackText,
         };
       } else {

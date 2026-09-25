@@ -725,6 +725,104 @@ Deno.test("feed fallback strips the markup off a bare-fragment content:encoded b
   assertStringIncludes(prompt, "The second paragraph");
 });
 
+Deno.test("the fallback lead comes from content:encoded, never from the teaser in description (audio-feed-7jp)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "token-user-1" }),
+  );
+
+  const TEASER =
+    "Subscribe to keep reading this post and get 7 days of free access to our entire catalog of deep dives.";
+  const FIRST_PARAGRAPH =
+    "The embedded article opens by describing the practical realities of the shift, which is what a listener should hear first.";
+  const SECOND_PARAGRAPH = "It then moves on to the trade-offs the marketing copy never mentions.";
+
+  // The teaser sits in `description` (merged into FeedItem.summary alongside
+  // content:encoded), and a full body sits in content:encoded, so the fallback fires.
+  const feedXml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Teased Blog</title>
+    <item>
+      <title>A Teased Post</title>
+      <link>https://example.com/teased-post</link>
+      <description>${TEASER}</description>
+      <content:encoded><![CDATA[<p>${FIRST_PARAGRAPH}</p><p>${SECOND_PARAGRAPH}</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>`;
+
+  const source: Source = makeSource({
+    id: "teased-blog",
+    userId: "user-1",
+    feedUrl: "https://example.com/feed.xml",
+    modes: ["deepdive"],
+  });
+  await stores.metadata.putSource(source);
+
+  const poll = await pollFeedSource(ctx, source, {
+    transport: feedTransport(feedXml),
+    fetchArticle: () => Promise.reject(new Error("403 Forbidden - Cloudflare bot challenge")),
+  });
+  assertEquals(poll.queued, 1);
+
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  const episode = episodes[0]!;
+  const article = await stores.metadata.getArticle("user-1", episode.articleId);
+  assert(article, "the embedded body must be stored");
+
+  // The lead is not decorative: it is the episode description in the published feed
+  // and the grounding line of the deep dive's second turn.
+  assertEquals((article.excerpt ?? "").includes("Subscribe to keep reading"), false);
+  assertStringIncludes(article.excerpt ?? "", "practical realities");
+  assertEquals(episode.description?.includes("Subscribe to keep reading") ?? false, false);
+  assertStringIncludes(episode.description ?? "", "practical realities");
+
+  // Walk the dialogue path as well: the teaser was measurable in
+  // $.contents[0].parts[1].text, so assert on the whole outgoing request rather than
+  // on the stored fields alone.
+  let sent = "";
+  const synthesize = createGeminiSynthesizer(ctx, {
+    client: new GeminiTtsClient({
+      apiKey: "test-key-not-real",
+      fetchFn: (_input, init) => {
+        sent = String(init?.body);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [{
+                      inlineData: {
+                        mimeType: "audio/pcm;rate=24000",
+                        data: uint8ArrayToBase64(new Uint8Array(24000)),
+                      },
+                    }],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+    }),
+  });
+
+  const run = await runSynthesisBatch(ctx, synthesize, { batchSize: 1 });
+  assertEquals(run.ready.length, 1, "the deep dive must synthesise");
+  assert(sent.length > 0, "the dialogue request must have been captured");
+  assertEquals(
+    sent.includes("Subscribe to keep reading"),
+    false,
+    `the teaser reached the dialogue request: ${sent}`,
+  );
+  assertStringIncludes(sent, "practical realities");
+});
+
 Deno.test("pollFeedSource records lastPollError on source and clears it on success (audio-feed-dcj)", async () => {
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
