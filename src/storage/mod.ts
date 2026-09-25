@@ -117,6 +117,23 @@ export interface MetadataStore {
 
   // -- articles ---------------------------------------------------------
   putArticle(article: Article): Promise<void>;
+  /**
+   * Insert the article only if no article exists for `(userId, url)` yet.
+   *
+   * This exists because `findArticleByUrl`-then-`putArticle` cannot be made safe
+   * by adding more checks: each one only moves the window (audio-feed-33m). Two
+   * concurrent polls that both read "absent" both insert, and the second silently
+   * doubles the synthesis bill for the same article. The guarantee has to be in
+   * the write, so this is an insert-if-absent on the URL key - the same CAS shape
+   * as `claimEpisode` (audio-feed-vfs / audio-feed-kiq), using a
+   * `versionstamp: null` check meaning "this key must not exist yet".
+   *
+   * `inserted: false` means someone else won and `existing` is their record where
+   * it can be read back. Callers must treat "not inserted" as a duplicate and do
+   * no further work for it; never retry the insert, because the loser of the race
+   * has nothing to add.
+   */
+  putArticleIfAbsent(article: Article): Promise<{ inserted: boolean; existing: Article | null }>;
   getArticle(userId: string, id: string): Promise<Article | null>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;

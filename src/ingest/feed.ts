@@ -208,6 +208,10 @@ async function queueItems(
   const mode: AudioMode = source.modes[0] ?? "direct";
 
   for (const item of items) {
+    // Cost saving only, NOT the guard: this pre-check avoids paying an article
+    // fetch for something already ingested. It cannot be the dedupe, because
+    // two concurrent polls both see "absent" here. The guarantee is the atomic
+    // insert-if-absent below (audio-feed-33m).
     const existing = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
     if (existing) {
       result.skipped++;
@@ -217,14 +221,6 @@ async function queueItems(
       const extracted = deps.fetchArticle
         ? await deps.fetchArticle(item.link, deps.signal)
         : await fetchArticle(item.link, { signal: deps.signal });
-
-      // audio-feed-562: re-check after article extraction to avoid inserting duplicates
-      // if another concurrent poll or manual trigger completed while fetching.
-      const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
-      if (raced) {
-        result.skipped++;
-        continue;
-      }
 
       const now = new Date().toISOString();
       const articleId = newArticleId();
@@ -241,7 +237,16 @@ async function queueItems(
         excerpt: extracted.lead || item.summary,
         ingestedAt: now,
       };
-      await ctx.stores.metadata.putArticle(article);
+      // The guard. Replaces the audio-feed-562 post-fetch re-check, which narrowed
+      // the window but left it open: with an immediately-resolved fetch both polls
+      // passed the re-check before either wrote, so the same article queued twice
+      // and was synthesised twice. Insert-if-absent makes the loser of the race fail
+      // the commit instead of observing a stale read, so no timing shape survives it.
+      const { inserted } = await ctx.stores.metadata.putArticleIfAbsent(article);
+      if (!inserted) {
+        result.skipped++;
+        continue;
+      }
       const episode: Episode = {
         id: newEpisodeId(),
         userId: source.userId,

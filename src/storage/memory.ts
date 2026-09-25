@@ -191,12 +191,36 @@ export class MemoryMetadataStore implements MetadataStore {
   }
 
   findArticleByUrl(userId: string, url: string): Promise<Article | null> {
+    return Promise.resolve(this.#findArticleSync(userId, url));
+  }
+
+  /**
+   * Insert-if-absent, matching KvMetadataStore's `versionstamp: null` check.
+   *
+   * Single-threaded JS makes this trivially atomic: there is no `await` between the
+   * lookup and the write, so nothing can interleave. That is exactly why it must be
+   * written carefully rather than casually — a memory adapter that lets two callers
+   * both "insert" would let the conformance suite pass while production still
+   * double-spends, which is the failure the suite exists to prevent (the same
+   * argument `claimEpisode` makes in this file).
+   */
+  putArticleIfAbsent(
+    article: Article,
+  ): Promise<{ inserted: boolean; existing: Article | null }> {
+    const existing = this.#findArticleSync(article.userId, article.url);
+    if (existing) return Promise.resolve({ inserted: false, existing });
+    this.#articles.set(
+      MemoryMetadataStore.#scoped(article.userId, article.id),
+      structuredClone(article),
+    );
+    return Promise.resolve({ inserted: true, existing: null });
+  }
+
+  #findArticleSync(userId: string, url: string): Article | null {
     for (const article of this.#articles.values()) {
-      if (article.userId === userId && article.url === url) {
-        return Promise.resolve(structuredClone(article));
-      }
+      if (article.userId === userId && article.url === url) return structuredClone(article);
     }
-    return Promise.resolve(null);
+    return null;
   }
 
   // -- episodes -------------------------------------------------------------

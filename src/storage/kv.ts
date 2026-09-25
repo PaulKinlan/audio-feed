@@ -246,6 +246,26 @@ export class KvMetadataStore implements MetadataStore {
     return (await this.#kv.get<Article>(["article", userId, id])).value;
   }
 
+  async putArticleIfAbsent(
+    article: Article,
+  ): Promise<{ inserted: boolean; existing: Article | null }> {
+    const urlKey: Deno.KvKey = ["article_by_url", article.userId, article.url];
+    // `versionstamp: null` means "this key must not exist yet", so the commit fails for
+    // whoever loses the race rather than the loser overwriting the winner. This is the
+    // guard; a prior findArticleByUrl is only a cost saving (audio-feed-33m).
+    const result = await this.#kv.atomic()
+      .check({ key: urlKey, versionstamp: null })
+      .set(["article", article.userId, article.id], article)
+      .set(urlKey, article.id)
+      .commit();
+
+    if (result.ok) return { inserted: true, existing: null };
+    return {
+      inserted: false,
+      existing: await this.findArticleByUrl(article.userId, article.url),
+    };
+  }
+
   async findArticleByUrl(userId: string, url: string): Promise<Article | null> {
     const pointer = await this.#kv.get<string>(["article_by_url", userId, url]);
     if (!pointer.value) return null;

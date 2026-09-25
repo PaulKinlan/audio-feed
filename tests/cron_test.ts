@@ -221,6 +221,76 @@ Deno.test("concurrent feed polls de-duplicate and do not queue duplicate episode
   assertEquals(episodes.length, 2, "storage must contain exactly 2 distinct episodes");
 });
 
+Deno.test("concurrent polls with an immediately-resolved fetch still queue no duplicates (audio-feed-33m)", async () => {
+  // The shape audio-feed-33m named as the one the 562 re-check could not survive.
+  // The test above resolves fetchArticle after 10ms, which yields to the microtask
+  // queue and lets the first poll's write land before the second reaches its
+  // re-check - so it passes against a weaker implementation. With a synchronously
+  // resolved promise both polls passed the re-check before either wrote, and the
+  // same article queued twice. This is the case that requires the atomic insert.
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  const source = makeSource({ id: "s1", userId: "u1", feedUrl: "https://example.com/feed.xml" });
+  await stores.metadata.putSource(source);
+
+  const sampleRss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Feed 1</title>
+  <item>
+    <title>Article One</title>
+    <link>https://example.com/one</link>
+    <pubDate>Mon, 01 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+  <item>
+    <title>Article Two</title>
+    <link>https://example.com/two</link>
+    <pubDate>Tue, 02 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+</channel></rss>`;
+
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(sampleRss, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    // No setTimeout, no await boundary: resolves immediately.
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: url.endsWith("one") ? "Article One" : "Article Two",
+        author: null,
+        publishedAt: null,
+        lead: "",
+        body: "Body text.",
+      }),
+  };
+
+  const { pollFeedSource } = await import("../src/ingest/feed.ts");
+  const [resA, resB] = await Promise.all([
+    pollFeedSource(ctx, source, deps),
+    pollFeedSource(ctx, source, deps),
+  ]);
+
+  assertEquals(
+    resA.queued + resB.queued,
+    2,
+    "exactly 2 episodes across concurrent polls, never 4 (duplicate = double synthesis spend)",
+  );
+  const episodes = await stores.metadata.listEpisodes({ userId: "u1" });
+  assertEquals(episodes.length, 2, "storage must contain exactly 2 distinct episodes");
+  const articles = await Promise.all(
+    ["https://example.com/one", "https://example.com/two"].map((u) =>
+      stores.metadata.findArticleByUrl("u1", u)
+    ),
+  );
+  assertEquals(articles.filter(Boolean).length, 2, "one article per url");
+  // The loser skipped rather than errored: 2 items seen by each poll, 2 queued in
+  // total, so the other 2 must be accounted for as skips and not as failures.
+  assertEquals(resA.failed + resB.failed, 0, "a lost insert is a skip, not a failure");
+  assertEquals(resA.items + resB.items, 4, "both polls saw both items");
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/admin/poll-now
 // ---------------------------------------------------------------------------

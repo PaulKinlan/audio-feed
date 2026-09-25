@@ -300,6 +300,58 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(await store.findArticleByUrl("user-2", article.url), null);
   });
 
+  // -- insert-if-absent (audio-feed-33m) ------------------------------------
+
+  test("putArticleIfAbsent inserts once and never clobbers the winner", async (store) => {
+    const first = makeArticle({ id: "a-first" });
+    const second = makeArticle({ id: "a-second" });
+
+    const won = await store.putArticleIfAbsent(first);
+    assertEquals(won.inserted, true, "the first writer must insert");
+    assertEquals(won.existing, null);
+
+    const lost = await store.putArticleIfAbsent(second);
+    assertEquals(lost.inserted, false, "the second writer for the same url must not insert");
+    assertEquals(lost.existing?.id, "a-first", "the loser must be shown the WINNER's record");
+
+    // The decisive part: the loser's write must not have landed anywhere.
+    assertEquals((await store.getArticle("user-1", "a-first"))?.id, "a-first");
+    assertEquals(await store.getArticle("user-1", "a-second"), null);
+    assertEquals(
+      (await store.findArticleByUrl("user-1", first.url))?.id,
+      "a-first",
+      "the url pointer must still resolve to the winner",
+    );
+  });
+
+  test("putArticleIfAbsent scopes the guarantee per user", async (store) => {
+    const mine = makeArticle({ id: "a-mine", userId: "user-1" });
+    const theirs = makeArticle({ id: "a-theirs", userId: "user-2" });
+
+    assertEquals((await store.putArticleIfAbsent(mine)).inserted, true);
+    assertEquals(
+      (await store.putArticleIfAbsent(theirs)).inserted,
+      true,
+      "the same url ingested by two users is not a duplicate",
+    );
+  });
+
+  test("putArticleIfAbsent lets exactly one of two racing inserts win", async (store) => {
+    // Both calls start before either awaits, which is the shape that defeated the
+    // read-then-write re-check: with an immediately-resolved fetch, two polls both
+    // saw "absent" and both queued. Here exactly one commit must succeed.
+    const a = makeArticle({ id: "race-a" });
+    const b = makeArticle({ id: "race-b" });
+    const [ra, rb] = await Promise.all([
+      store.putArticleIfAbsent(a),
+      store.putArticleIfAbsent(b),
+    ]);
+
+    assertEquals([ra.inserted, rb.inserted].filter(Boolean).length, 1, "exactly one insert wins");
+    const winner = ra.inserted ? a.id : b.id;
+    assertEquals((await store.findArticleByUrl("user-1", a.url))?.id, winner);
+  });
+
   // -- episodes -------------------------------------------------------------
 
   test("lists episodes newest first", async (store) => {
