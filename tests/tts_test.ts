@@ -1,4 +1,10 @@
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@^1.0.10";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "jsr:@std/assert@^1.0.10";
 import {
   base64ToUint8Array,
   buildDialogueRequest,
@@ -153,8 +159,13 @@ Deno.test("Single-voice narration - request builder creates valid Gemini payload
 // 3. Two-Voice Dialogue Mode (NotebookLM Style: Expert + Curious Foil)
 // ---------------------------------------------------------------------------
 
-Deno.test("Two-voice dialogue - formats NotebookLM style prompt from turns", () => {
-  const { prompt, speakers } = formatDialoguePrompt({
+Deno.test("Two-voice dialogue - returns the supplied turns and speaker roles in order", () => {
+  // Was "formats NotebookLM style prompt from turns", asserting on
+  // `prompt.includes("style of NotebookLM")` and the speaker description lines.
+  // That string is never sent to the API (audio-feed-9jh), so those assertions
+  // were covering a discarded value and would have resisted removing it. Asserted
+  // on `turns` instead, which is what buildDialogueRequest actually transmits.
+  const { turns, speakers } = formatDialoguePrompt({
     topic: "WebAssembly Garbage Collection",
     speakers: [
       { name: "Fenrir", role: "expert", voice: "Fenrir" },
@@ -175,18 +186,17 @@ Deno.test("Two-voice dialogue - formats NotebookLM style prompt from turns", () 
 
   assertEquals(speakers[0].name, "Fenrir");
   assertEquals(speakers[1].name, "Kore");
-  assertEquals(prompt.includes("style of NotebookLM"), true);
-  assertEquals(prompt.includes("Fenrir: The domain expert"), true);
-  assertEquals(prompt.includes("Kore: The curious interviewer and foil"), true);
-  assertEquals(prompt.includes("Kore: Today we are diving into WasmGC"), true);
+  assertEquals(turns.length, 2, "supplied turns pass through unchanged");
+  assertEquals(turns[0]?.speaker, "Kore");
   assertEquals(
-    prompt.includes("Fenrir: Traditional WebAssembly operates"),
-    true,
+    turns[0]?.text,
+    "Today we are diving into WasmGC. What makes it different from traditional Wasm?",
   );
+  assertEquals(turns[1]?.speaker, "Fenrir");
 });
 
-Deno.test("Two-voice dialogue - formats from article context when turns not supplied", () => {
-  const { prompt, speakers } = formatDialoguePrompt({
+Deno.test("Two-voice dialogue - derives an opening exchange from article context", () => {
+  const { turns, speakers } = formatDialoguePrompt({
     article: {
       title: "State of Autonomous Systems",
       author: "Paul Kinlan",
@@ -200,9 +210,63 @@ Deno.test("Two-voice dialogue - formats from article context when turns not supp
   assertEquals(speakers[1].name, "Sam");
   assertEquals(speakers[1].voice, "Puck");
 
-  assertEquals(prompt.includes("Sam: Welcome back to the deep dive!"), true);
-  assertEquals(prompt.includes("State of Autonomous Systems"), true);
-  assertEquals(prompt.includes("Alex: Thanks Sam."), true);
+  // Same content the old prompt assertions checked, but read off the turns that
+  // actually reach the API rather than a string built and thrown away.
+  assert(turns.length >= 2, "an article with no turns still produces a dialogue");
+  assertEquals(turns[0]?.speaker, "Sam", "the foil opens");
+  assert(
+    turns[0]?.text.includes("Welcome back to the deep dive!") === true,
+    "opening line is part of the transmitted turn text",
+  );
+  assert(
+    turns.some((t) => t.text.includes("State of Autonomous Systems")),
+    "the article title must reach the spoken turns, not just a discarded prompt",
+  );
+  assert(
+    turns.some((t) => t.speaker === "Alex" && t.text.startsWith("Thanks Sam.")),
+    "the expert's reply is a real turn",
+  );
+});
+
+Deno.test("no meta-instruction reaches the dialogue API (audio-feed-9jh)", () => {
+  // The guard, and the reason this bead is not just dead-code removal. Dialogue
+  // escaped audio-feed-xad BY ACCIDENT: formatDialoguePrompt used to build a
+  // ~15-line "You are generating..." / "Style guidelines:" instruction string that
+  // nothing sent. A field that looks like an unused bug invites wiring in, and
+  // wiring it in would read the instructions aloud - looking exactly like a fix.
+  // So the property is pinned on the OUTGOING REQUEST, not on a comment.
+  const { turns, speakers } = formatDialoguePrompt({
+    topic: "WebAssembly Garbage Collection",
+    turns: [
+      { speaker: "Alex", text: "The domain expert speaks here." },
+      { speaker: "Sam", text: "The curious foil answers here." },
+    ],
+  });
+  const wire = JSON.stringify(buildDialogueRequest(turns, speakers));
+
+  for (
+    const phrase of [
+      "You are generating",
+      "Style guidelines",
+      "Speak with natural human cadence",
+      "No robotic pauses",
+      "The domain expert.",
+      "curious interviewer and foil",
+      "Dialogue Script",
+      "in the style of NotebookLM",
+    ]
+  ) {
+    assertEquals(
+      wire.includes(phrase),
+      false,
+      `meta-instruction "${phrase}" must not reach the API; it would be read aloud (audio-feed-xad on the dialogue path)`,
+    );
+  }
+
+  // Positive companion: the assertion above must not pass because the request came
+  // out empty. Real turn text and speaker names DO reach the wire.
+  assertStringIncludes(wire, "The domain expert speaks here.");
+  assertStringIncludes(wire, "Alex");
 });
 
 Deno.test("Two-voice dialogue - request builder creates multiSpeakerVoiceConfig", () => {
