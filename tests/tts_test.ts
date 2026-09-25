@@ -95,7 +95,7 @@ Deno.test("Single-voice narration - custom intro and partial metadata", () => {
   assertEquals(titleOnly, "The following is Solo Thought.");
 });
 
-Deno.test("Single-voice narration - builds prompt with pacing guidelines", () => {
+Deno.test("Single-voice narration - builds prompt with spoken intro and article text without meta-preamble (audio-feed-xad)", () => {
   const prompt = formatNarrationPrompt({
     title: "AI Operating Models",
     author: "Paul Kinlan",
@@ -103,12 +103,25 @@ Deno.test("Single-voice narration - builds prompt with pacing guidelines", () =>
     body: "The shift from local agents to fleet swarms is accelerating.",
   });
 
+  // Meta-prompting instructions must NOT be present in the spoken prompt text
   assertEquals(
     prompt.includes("Read the following article text directly"),
-    true,
+    false,
   );
+  assertEquals(
+    prompt.includes("Maintain a steady, measured pace"),
+    false,
+  );
+  assertEquals(
+    prompt.includes("Pronounce technical terms with confidence"),
+    false,
+  );
+
+  // Spoken introduction and article text must be present
+  assertEquals(prompt.includes("[Spoken Introduction]"), true);
   assertEquals(prompt.includes("The following is AI Operating Models"), true);
   assertEquals(prompt.includes("written by Paul Kinlan"), true);
+  assertEquals(prompt.includes("[Article Text]"), true);
   assertEquals(
     prompt.includes(
       "The shift from local agents to fleet swarms is accelerating.",

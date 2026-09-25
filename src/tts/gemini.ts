@@ -715,11 +715,6 @@ export function formatNarrationPrompt(input: NarrationInput): string {
 
   const sections: string[] = [];
 
-  sections.push(
-    "Read the following article text directly, clearly, and authoritatively in a professional podcast narrator voice.",
-    "Maintain a steady, measured pace. Pronounce technical terms with confidence.",
-  );
-
   if (introText) {
     sections.push(`[Spoken Introduction]\n${introText}`);
   }
