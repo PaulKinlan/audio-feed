@@ -41,6 +41,13 @@ import type {
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
 /**
+ * An open `kv.atomic()` builder. Derived from the method rather than named: Deno
+ * does not export the transaction type under a stable `Deno.*` name, so this
+ * cannot go stale when it renames.
+ */
+type KvAtomic = ReturnType<Deno.Kv["atomic"]>;
+
+/**
  * Descending sort token: lexicographic ascending order over these strings is
  * chronological descending order over the source timestamps.
  */
@@ -251,6 +258,21 @@ export class KvMetadataStore implements MetadataStore {
     return result.ok;
   }
 
+  async insertArticleWithEpisodeIfAbsent(
+    article: Article,
+    episode: Episode,
+  ): Promise<boolean> {
+    // One transaction, so the pair either exists together or does not exist at
+    // all (audio-feed-2th). The URL check is the audio-feed-33m guard: a losing
+    // commit writes neither record.
+    const tx = this.#kv.atomic()
+      .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
+      .set(["article", article.userId, article.id], article)
+      .set(["article_by_url", article.userId, article.url], article.id);
+    KvMetadataStore.#writeEpisode(tx, episode);
+    return (await tx.commit()).ok;
+  }
+
   async getArticle(userId: string, id: string): Promise<Article | null> {
     return (await this.#kv.get<Article>(["article", userId, id])).value;
   }
@@ -263,10 +285,14 @@ export class KvMetadataStore implements MetadataStore {
 
   // -- episodes -------------------------------------------------------------
 
-  async putEpisode(episode: Episode): Promise<void> {
+  /**
+   * Add the episode and every index entry that points at it to an open
+   * transaction. Shared by `putEpisode` and the article+episode pair so the
+   * index set cannot drift between the two write paths.
+   */
+  static #writeEpisode(tx: KvAtomic, episode: Episode): void {
     const sortKey = descendingKey(episode.createdAt, episode.id);
-    const tx = this.#kv.atomic()
-      .set(["episode", episode.userId, episode.id], episode)
+    tx.set(["episode", episode.userId, episode.id], episode)
       // master feed index
       .set(["episode_by_user", episode.userId, sortKey], episode.id)
       // per-source-and-mode feed index
@@ -291,7 +317,11 @@ export class KvMetadataStore implements MetadataStore {
       tx.delete(["pending_episodes", episode.createdAt, episode.id]);
       tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
     }
+  }
 
+  async putEpisode(episode: Episode): Promise<void> {
+    const tx = this.#kv.atomic();
+    KvMetadataStore.#writeEpisode(tx, episode);
     const result = await tx.commit();
     if (!result.ok) throw new Error(`putEpisode failed for ${episode.id}`);
   }

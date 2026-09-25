@@ -7,7 +7,7 @@
  *
  * No network anywhere: the feed document and the article bodies are both injected.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -18,10 +18,11 @@ import {
   sourceIdForFeed,
 } from "../src/ingest/feed.ts";
 import { makeSource, makeUser } from "./fixtures.ts";
+import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult, GeminiGenerateContentRequest } from "../src/tts/gemini.ts";
 import { GeminiTtsClient, uint8ArrayToBase64 } from "../src/tts/gemini.ts";
-import type { Source } from "../src/types.ts";
+import type { Article, Episode, Source } from "../src/types.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 
 const BASE = "https://audio.example.com";
@@ -171,6 +172,78 @@ Deno.test("a re-poll queues nothing new (dedupe by article URL)", async () => {
   assertEquals(second.queued, 0);
   assertEquals(second.skipped, 2);
   assertEquals((await stores.metadata.listEpisodes({ userId: "user-1" })).length, 2);
+});
+
+Deno.test("a refused episode write leaves no article, so the next poll still makes audio (audio-feed-2th)", async () => {
+  // The bug this test exists to keep dead: the article committed, the episode write
+  // failed, and every later poll then skipped the URL. The item never became audio
+  // and nothing reported it after the first poll. Now the pair is one commit, so a
+  // refusal is invisible to the next poll and the retry succeeds.
+  const { stores, source } = await subscriberSource();
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>One</title>
+      <item><title>Only post</title><link>https://stratechery.com/2026/only</link></item>
+    </channel></rss>`;
+  const deps = { transport: feedTransport(xml), fetchArticle: article("Only post", "Body.") };
+
+  const inner = stores.metadata;
+  let refuse = true;
+  // The seam is "the write that would create this item's episode fails once". It
+  // is deliberately attached to both spellings of that write: `putEpisode` on the
+  // old two-step path, and the pair method on the new one, so the test discriminates
+  // between them instead of only exercising the code that exists today.
+  // Methods are bound to the real instance: a Proxy receiver would break the
+  // store's private fields rather than the behaviour under test.
+  const flaky = new Proxy(inner, {
+    get(target, prop) {
+      if (prop === "insertArticleWithEpisodeIfAbsent" || prop === "putEpisode") {
+        const name = prop;
+        // Both take the same arguments in practice; the tuple type is spelled
+        // per method, so forward through a bound lookup on the real instance.
+        return (args1: unknown, args2: unknown) => {
+          if (refuse) {
+            refuse = false;
+            return Promise.reject(new Error("store unavailable"));
+          }
+          if (name === "putEpisode") {
+            return target.putEpisode(args1 as Parameters<MetadataStore["putEpisode"]>[0]);
+          }
+          return target.insertArticleWithEpisodeIfAbsent(
+            args1 as Article,
+            args2 as Episode,
+          );
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as MetadataStore;
+
+  const first = pollFeedSource(
+    { config, stores: { ...stores, metadata: flaky } },
+    source,
+    deps,
+  );
+  // A refused queue write aborts the poll: `queueItems` runs outside the per-item
+  // catch, which only guards article extraction. That is pre-existing behaviour on
+  // main for both spellings of the write, and this asserts it rather than hiding it.
+  await assertRejects(() => first, Error, "store unavailable");
+  // No tombstone: neither half of the pair survived the refusal.
+  assertEquals(
+    await stores.metadata.findArticleByUrl("user-1", "https://stratechery.com/2026/only"),
+    null,
+  );
+  assertEquals((await stores.metadata.listEpisodes({ userId: "user-1" })).length, 0);
+
+  // The store has healed, and because nothing was recorded the poll treats the item
+  // as new: this is the audio the subscriber would otherwise never have received.
+  const second = await pollFeedSource({ config, stores }, source, deps);
+  assertEquals(second.queued, 1);
+  assertEquals(second.failed, 0);
+  const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+  assertEquals(episodes.length, 1);
+  assertEquals(episodes[0]!.status, "pending");
+  assert(await stores.metadata.getArticle("user-1", episodes[0]!.articleId));
 });
 
 Deno.test("lastPolledAt advances even when the feed is unreachable", async () => {

@@ -336,11 +336,10 @@ async function queueItems(
     };
     // audio-feed-33m: atomic insert-if-absent CAS pattern closes the race between
     // concurrent polls or manual triggers even with identical/immediate timing.
-    const inserted = await ctx.stores.metadata.insertArticleIfAbsent(article);
-    if (!inserted) {
-      result.skipped++;
-      continue;
-    }
+    // audio-feed-2th: the episode joins that same commit. Written as two steps, a
+    // putEpisode that failed after the article committed left a tombstone — the URL
+    // present in the store, no episode, and every later poll skipping it, so no
+    // retry could ever turn that item into audio.
     const episode: Episode = {
       id: newEpisodeId(),
       userId: source.userId,
@@ -354,7 +353,14 @@ async function queueItems(
       description: article.excerpt,
       createdAt: now,
     };
-    await ctx.stores.metadata.putEpisode(episode);
+    const inserted = await ctx.stores.metadata.insertArticleWithEpisodeIfAbsent(
+      article,
+      episode,
+    );
+    if (!inserted) {
+      result.skipped++;
+      continue;
+    }
     result.queued++;
   }
 }
