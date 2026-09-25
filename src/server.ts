@@ -36,8 +36,24 @@ export interface BootstrapOptions {
   //
   //   isDeploy     - without it neither branch is reachable from a test at all
   //   synthesizer  - makes the WORKER gate observable (see above)
-  //   port, stores - hermeticity: no fixed port another lane holds, no default
-  //                  persistent KV opened by a test run
+  //   port         - omitting it binds config.port (8000). Measured by audiofeed-opus:
+  //                    with 8000 held, rebinding is REFUSED with AddrInUse; at port 0 it
+  //                    is accepted. A test that binds a fixed port does not merely risk
+  //                    flakiness, it blocks whichever lane is already serving there -
+  //                    and that lane cannot tell that a test is the cause.
+  //                    (Their first check for this was not evidence: removing port: 0 and
+  //                    seeing tests pass proved only that 8000 happened to be free.)
+  //   stores       - NOT just hermeticity. Measured: openStores() with no kvPath opens
+  //                    the DEFAULT persistent KV. opus wrote a marker, closed, reopened,
+  //                    and the marker PERSISTED - so a test omitting this option writes
+  //                    into the developer's own real store, and the writes outlive the
+  //                    run. Naming the consequence rather than calling it isolation is
+  //                    the point: "hermeticity" reads as nice-to-have, and nice-to-haves
+  //                    are what gets deleted by the next person simplifying this list.
+  //
+  // Do not treat `port` and `stores` as the soft targets of that simplification either:
+  // both were verified by mutation, not asserted, and neither can be caught by a passing
+  // suite - a green run on a free port and an empty KV looks identical to a correct one.
   /**
    * Override Deploy detection. Defaults to the environment check above.
    *
@@ -45,9 +61,22 @@ export interface BootstrapOptions {
    * test could never exercise the `!isDeploy` gates without it (audio-feed-1kw).
    */
   isDeploy?: boolean;
-  /** Bind an ephemeral port with 0. A test must never bind a fixed one. */
+  /**
+   * Port to serve on. Pass 0 in tests to bind ephemerally.
+   *
+   * Defaults to config.port (8000), which is a shared, contested resource on this
+   * machine: a test that omits this can block another lane's live server, and that
+   * lane has no way to discover a test was the cause.
+   */
   port?: number;
-  /** Injected stores. Defaults to the configured backend, which opens real KV. */
+  /**
+   * Injected stores. Defaults to the configured backend.
+   *
+   * That default opens the persistent KV, and writes there SURVIVE the process - so a
+   * test omitting this option is not merely non-hermetic, it mutates the developer's
+   * real data store (audio-feed-wy1, measured by audiofeed-opus). Pass
+   * `await openStores({ kvPath: ":memory:" })`.
+   */
   stores?: Stores;
   /**
    * Injected synthesizer. Defaults to the env-derived one.
