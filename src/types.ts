@@ -134,7 +134,21 @@ export interface VoiceConfig {
   deepdive?: [string, string];
 }
 
-export const DEFAULT_VOICES: VoiceConfig = {
+/**
+ * The VoiceConfig that every optional field falls back TO, so it is precisely the
+ * one that must be COMPLETE - typed `Required`, not `VoiceConfig` (audio-feed-9cz).
+ *
+ * With the plain type, `deepdive` was optional here and the one reader in
+ * `createGeminiSynthesizer` had to write `DEFAULT_VOICES.deepdive!` to satisfy it.
+ * That `!` did not express a guarantee, it switched a compile-time check off: deleting
+ * `deepdive` from this constant type-checked clean and failed at runtime as
+ * "undefined is not iterable" from an array destructure, far from the cause.
+ *
+ * Measured both ways by audiofeed-opus and re-confirmed here: `Required` + no `!`
+ * compiles and passes, and removing `deepdive` then fails at COMPILE time, which is
+ * where a missing default belongs.
+ */
+export const DEFAULT_VOICES: Required<VoiceConfig> = {
   direct: "Charon",
   deepdive: ["Kore", "Puck"],
 };

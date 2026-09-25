@@ -184,7 +184,9 @@ export function createGeminiSynthesizer(
       // - the comment was describing an intention the line did not have, and
       // audio-feed-4xt made this branch reachable in production for the first time,
       // so the two could now disagree while both looked correct.
-      const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive!;
+      // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
+      // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
+      const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
       return await client.synthesizeDialogue({
         title: article.title,
         article: {
