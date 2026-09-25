@@ -10,7 +10,7 @@
  * localhost with a fixed token, which is fine for a driven browser session and
  * wrong for anything else.
  *
- *   deno run --allow-all --unstable-kv var/listen-harness.ts [port]
+ *   deno run --allow-all --unstable-kv scripts/listen-harness.ts [port]
  */
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
