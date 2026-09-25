@@ -17,6 +17,7 @@
  *   POST /api/ingest                          Send-to-Audio URL ingest    [by7]
  *   GET  /api/episodes                        episode listing             [0h8]
  *   POST /api/admin/users/:id/approve         approval gate               [7wn]
+ *   GET  /api/admin/stats                     operational metrics         [ndc]
  *
  * Owned by: audio-feed-0h8.
  */
@@ -65,6 +66,8 @@ export interface AppHandlers {
   /** audio-feed-dsn — manual triggers for background tasks. */
   adminPollNow?: Handler<AppContext>;
   adminSynthesizeNow?: Handler<AppContext>;
+  /** audio-feed-ndc — operational metrics for the admin dashboard. */
+  adminStats?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -171,6 +174,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/synthesize-now",
     handlers.adminSynthesizeNow ?? (() => notImplemented("Admin synthesize now")),
+  );
+  router.get(
+    "/api/admin/stats",
+    handlers.adminStats ?? (() => notImplemented("Admin stats")),
   );
 
   handlers.extra?.(router);

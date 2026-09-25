@@ -64,6 +64,19 @@ function corsHeaders(): Record<string, string> {
   };
 }
 
+/**
+ * The owning user of a canonical audio key, or null (audio-feed-ndc).
+ *
+ * Keys are `audio/<userId>/<mode>/<id>.<ext>` (audio-feed-3hb). A legacy flat
+ * key carries no user, so its requests count toward the total only — an
+ * unattributed request is better than a wrongly attributed one.
+ */
+export function userIdFromBlobKey(key: string): string | null {
+  const parts = key.split("/");
+  if (parts.length < 4 || parts[0] !== "audio") return null;
+  return parts[1] || null;
+}
+
 /** Blob keys are path-shaped; reject anything that tries to escape the prefix. */
 export function isSafeBlobKey(key: string): boolean {
   if (key.length === 0 || key.length > 512) return false;
@@ -134,6 +147,14 @@ export async function handleAudio(
       }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
+        // Counted when the redirect is ISSUED, not when the client finishes —
+        // on a redirecting store the bytes never reach us, so this is the last
+        // point at which anything is observable. The dashboard says
+        // "downloads / redirects" rather than implying a completed download
+        // (audio-feed-ndc).
+        if (!req.headers.get("range")) {
+          await ctx.stores.metadata.recordDownload(userIdFromBlobKey(key));
+        }
         return new Response(null, { status: 302, headers: { location: direct } });
       }
     }
@@ -197,8 +218,15 @@ export async function handleAudio(
     const { start, end, total } = object.range;
     headers.set("content-range", `bytes ${start}-${end}/${total}`);
     headers.set("content-length", String(end - start + 1));
+    // Deliberately NOT counted. A podcast client resuming a download issues
+    // several Range requests for one episode, and HEAD-then-GET is its normal
+    // probe, so counting either inflates the figure two- to threefold
+    // (audio-feed-ndc). One whole-object GET is the closest thing to "a
+    // listener fetched this episode" that this layer can observe.
     return new Response(object.body, { status: 206, headers });
   }
+
+  await ctx.stores.metadata.recordDownload(userIdFromBlobKey(resolvedKey));
 
   headers.set("content-length", String(object.size));
   return new Response(object.body, { status: 200, headers });

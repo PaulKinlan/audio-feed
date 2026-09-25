@@ -18,9 +18,15 @@
  *   from `/api/admin/users*`, which is token-gated server-side. Rendering the
  *   shell without a token reveals nothing, and it means the console can prompt
  *   for the token instead of looking broken.
- * - The admin token lives in `sessionStorage` (per the requirements) and travels
- *   in the `x-admin-token` HEADER, never a query string — same reasoning as the
- *   homepage form: a token in a URL ends up in history and proxy logs.
+ * - The admin token travels in the `x-admin-token` HEADER, never a query string —
+ *   same reasoning as the homepage form: a token in a URL ends up in history and
+ *   proxy logs.
+ * - WHERE it is stored is the admin's choice (audio-feed-ndc). `sessionStorage`
+ *   forgets it when the tab closes, which is safer and was the original default;
+ *   `localStorage` survives a browser restart, which is what an operator
+ *   reopening the console actually wants. The checkbox makes the trade explicit
+ *   rather than deciding it for them, and unchecking it clears the persistent
+ *   copy immediately rather than leaving a token behind.
  * - Subscriber-supplied text (email, display name) is inserted with
  *   `textContent`, never `innerHTML`. A stored-XSS payload in a display name
  *   would otherwise run in the admin's session and read the admin token out of
@@ -35,6 +41,7 @@ import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { jsonForScript } from "./html.ts";
+import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
 export interface AdminPageOptions {
   /** Absolute origin, so the shown feed URL is the one that actually works. */
@@ -145,6 +152,38 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 
   .field { margin-block-end: var(--space-4); }
 
+  /* audio-feed-ndc: a checkbox is the one input that must NOT stretch to 100%,
+     so it is opted out of the shared input rule rather than the rule being
+     narrowed — narrowing it would silently change every other field. */
+  .check { display: flex; gap: var(--space-2); align-items: start; margin-block-end: var(--space-4); }
+  .check input[type="checkbox"] { inline-size: auto; margin-block-start: 0.2rem; flex: none; }
+  .check label { margin: 0; }
+
+  .card-head { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: baseline; justify-content: space-between; }
+  .card-head h2 { margin: 0; }
+
+  h3 { font-size: 1rem; margin-block: var(--space-6) var(--space-3); }
+
+  /* auto-fit rather than a fixed column count: four cards on a desktop, two on a
+     tablet, one on a phone, with no breakpoint to keep in sync. */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: var(--space-3);
+    margin-block: var(--space-4) 0;
+  }
+  .stat {
+    background: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+  }
+  .stat dt { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
+  .stat dd { margin: var(--space-1) 0 0; font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat-note { margin: var(--space-1) 0 0; font-size: 0.8rem; color: var(--text-muted); }
+
+  td.error-text { color: var(--danger); }
+
   button {
     font: inherit;
     padding: 0.5rem 0.9rem;
@@ -214,9 +253,9 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   <section class="card" aria-labelledby="auth-h">
     <h2 id="auth-h">1. Admin token</h2>
     <p class="muted" id="auth-help">
-      Stored in this tab's <code class="mono">sessionStorage</code> and sent as an
-      <code class="mono">x-admin-token</code> request header. It is never put in
-      the URL. Closing the tab forgets it.
+      Sent as an <code class="mono">x-admin-token</code> request header, never in
+      the URL. Remembered on this device it survives a browser restart; otherwise
+      it lives in this tab only and closing the tab forgets it.
     </p>
     <div class="field">
       <label for="adminToken">Admin token
@@ -225,11 +264,68 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       <input id="adminToken" type="password" autocomplete="off" spellcheck="false"
              aria-describedby="auth-help" />
     </div>
+    <div class="check">
+      <input type="checkbox" id="rememberToken" checked />
+      <label for="rememberToken">Remember token on this device
+        <span class="hint">Survives closing the browser. Uncheck on a shared machine.</span>
+      </label>
+    </div>
     <div class="row">
       <button type="button" id="saveToken">Save token</button>
       <button type="button" id="loadUsers" class="secondary" disabled>Load subscribers</button>
     </div>
     <p class="feedback" id="authFeedback" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card" aria-labelledby="stats-h">
+    <div class="card-head">
+      <h2 id="stats-h">Operations</h2>
+      <button type="button" id="refreshStats" class="secondary" disabled>Refresh</button>
+    </div>
+
+    <dl class="stats-grid">
+      <div class="stat">
+        <dt>Downloads / redirects</dt>
+        <dd id="statDownloads">—</dd>
+        <p class="stat-note">Whole-file requests. Range and HEAD probes excluded.</p>
+      </div>
+      <div class="stat">
+        <dt>Last feed poll</dt>
+        <dd id="statLastPoll">—</dd>
+        <p class="stat-note">Cron runs every 15 minutes.</p>
+      </div>
+      <div class="stat">
+        <dt>Avg poll time</dt>
+        <dd id="statPollDuration">—</dd>
+        <p class="stat-note" id="statPollNote">Mean of recent polls.</p>
+      </div>
+      <div class="stat">
+        <dt>Runs recorded</dt>
+        <dd id="statRuns">—</dd>
+        <p class="stat-note">Newest ${RUN_HISTORY_LIMIT} of each job kept.</p>
+      </div>
+    </dl>
+
+    <h3>Background runs</h3>
+    <div class="table-wrap">
+      <table>
+        <caption id="runsCaption">Not loaded.</caption>
+        <thead>
+          <tr><th>When</th><th>Job</th><th>Started by</th><th>Took</th><th>Result</th></tr>
+        </thead>
+        <tbody id="runsBody"></tbody>
+      </table>
+    </div>
+
+    <h3>Downloads by subscriber</h3>
+    <div class="table-wrap">
+      <table>
+        <caption id="downloadsCaption">Not loaded.</caption>
+        <thead><tr><th>Subscriber</th><th>Requests</th></tr></thead>
+        <tbody id="downloadsBody"></tbody>
+      </table>
+    </div>
+    <p class="feedback" id="statsFeedback" role="status" aria-live="polite"></p>
   </section>
 
   <section class="card" aria-labelledby="create-h">
@@ -373,21 +469,51 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   const pollNowBtn = document.getElementById("pollNowBtn");
   const synthesizeNowBtn = document.getElementById("synthesizeNowBtn");
   const triggersFeedback = document.getElementById("triggersFeedback");
+  // audio-feed-ndc
+  const rememberToken = document.getElementById("rememberToken");
+  const refreshStatsBtn = document.getElementById("refreshStats");
+  const statDownloads = document.getElementById("statDownloads");
+  const statLastPoll = document.getElementById("statLastPoll");
+  const statPollDuration = document.getElementById("statPollDuration");
+  const statPollNote = document.getElementById("statPollNote");
+  const statRuns = document.getElementById("statRuns");
+  const runsBody = document.getElementById("runsBody");
+  const runsCaption = document.getElementById("runsCaption");
+  const downloadsBody = document.getElementById("downloadsBody");
+  const downloadsCaption = document.getElementById("downloadsCaption");
+  const statsFeedback = document.getElementById("statsFeedback");
 
   const say = (el, tone, message) => {
     el.dataset.tone = tone;
     el.textContent = message;
   };
 
-  const stored = sessionStorage.getItem("audio-feed-admin-token");
-  if (stored) {
-    tokenInput.value = stored;
+  // audio-feed-ndc: read the persistent copy first, so reopening the browser
+  // finds the token rather than an empty prompt. localStorage is checked before
+  // sessionStorage because it is the explicit "remember me" choice.
+  const TOKEN_KEY = "audio-feed-admin-token";
+  const persisted = localStorage.getItem(TOKEN_KEY);
+  const stored = persisted ?? sessionStorage.getItem(TOKEN_KEY);
+  if (rememberToken) rememberToken.checked = persisted !== null;
+
+  function enableTokenActions() {
     loadUsersBtn.disabled = false;
     if (pollNowBtn) pollNowBtn.disabled = false;
     if (synthesizeNowBtn) synthesizeNowBtn.disabled = false;
-    say(authFeedback, "ok", "Token loaded from this session.");
-    // Auto-load on refresh (audio-feed-e3n)
+    if (refreshStatsBtn) refreshStatsBtn.disabled = false;
+  }
+
+  if (stored) {
+    tokenInput.value = stored;
+    enableTokenActions();
+    say(
+      authFeedback,
+      "ok",
+      persisted ? "Token remembered on this device." : "Token loaded from this session.",
+    );
+    // Auto-load on refresh (audio-feed-e3n), and the dashboard with it (ndc).
     loadUsers();
+    loadStats();
   } else {
     say(authFeedback, "error", "No token yet. Paste it and save.");
   }
@@ -432,12 +558,25 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       tokenInput.focus();
       return;
     }
-    sessionStorage.setItem("audio-feed-admin-token", token());
-    loadUsersBtn.disabled = false;
-    if (pollNowBtn) pollNowBtn.disabled = false;
-    if (synthesizeNowBtn) synthesizeNowBtn.disabled = false;
-    say(authFeedback, "ok", "Token saved for this session.");
+    // Exactly one copy exists at a time. Writing to one store and clearing the
+    // other means unchecking the box actually forgets the token, rather than
+    // leaving a persistent copy that silently outlives the choice (ndc).
+    const remember = rememberToken ? rememberToken.checked : false;
+    if (remember) {
+      localStorage.setItem(TOKEN_KEY, token());
+      sessionStorage.removeItem(TOKEN_KEY);
+    } else {
+      sessionStorage.setItem(TOKEN_KEY, token());
+      localStorage.removeItem(TOKEN_KEY);
+    }
+    enableTokenActions();
+    say(
+      authFeedback,
+      "ok",
+      remember ? "Token remembered on this device." : "Token saved for this session.",
+    );
     loadUsers();
+    loadStats();
   });
 
   pollNowBtn?.addEventListener("click", async () => {
@@ -542,6 +681,95 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     tr.appendChild(actions);
     return tr;
   }
+
+  /** Relative time, because "4 minutes ago" answers "is cron alive?" and a timestamp does not. */
+  function ago(iso) {
+    if (!iso) return "never";
+    const ms = Date.now() - Date.parse(iso);
+    if (!Number.isFinite(ms)) return "unknown";
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + "s ago";
+    const m = Math.round(s / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.round(m / 60);
+    if (h < 48) return h + "h ago";
+    return Math.round(h / 24) + "d ago";
+  }
+
+  function runRow(run) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell(ago(run.startedAt)));
+    tr.appendChild(cell(run.kind === "feed-poll" ? "Feed poll" : "Synthesis"));
+    tr.appendChild(cell(run.trigger));
+    tr.appendChild(cell(run.durationMs + "ms"));
+    // A failed run says so in the same column its counts would occupy, so a
+    // reader scanning for trouble does not have to know which fields are unset.
+    const summary = run.error
+      ? "failed: " + run.error
+      : run.kind === "feed-poll"
+      ? (run.polled ?? 0) + " polled, " + (run.queued ?? 0) + " queued, " + (run.failed ?? 0) +
+        " failed"
+      : (run.ready ?? 0) + " ready, " + (run.failed ?? 0) + " failed, " + (run.deferred ?? 0) +
+        " deferred";
+    tr.appendChild(cell(summary, run.error ? "error-text" : undefined));
+    return tr;
+  }
+
+  async function loadStats() {
+    if (!token()) return;
+    if (refreshStatsBtn) refreshStatsBtn.disabled = true;
+    try {
+      const s = await api("/api/admin/stats");
+      statDownloads.textContent = String(s.downloads.total);
+      statLastPoll.textContent = ago(s.feedProcessing.lastPolledAt);
+      statPollDuration.textContent = s.feedProcessing.averageDurationMs === null
+        ? "—"
+        : s.feedProcessing.averageDurationMs + "ms";
+      // Say how many polls the mean covers. "The last 10" is only true once ten
+      // polls have run (audio-feed-ct1).
+      const polls = s.feedProcessing.sampleSize;
+      statPollNote.textContent = polls === 0
+        ? "No polls recorded yet."
+        : "Mean of the last " + polls + " poll" + (polls === 1 ? "" : "s") + ".";
+      statRuns.textContent = String(s.runs.length);
+
+      // The newest 10 of EACH job, merged by time. Synthesis ticks every 2
+      // minutes and the poll every 15, so the newest 20 overall were almost all
+      // idle synthesis ticks (audio-feed-ct1). s.runs is already newest first.
+      const perJob = new Map();
+      const shown = s.runs.filter((run) => {
+        const seen = perJob.get(run.kind) || 0;
+        perJob.set(run.kind, seen + 1);
+        return seen < 10;
+      });
+      runsBody.replaceChildren();
+      for (const run of shown) runsBody.appendChild(runRow(run));
+      runsCaption.textContent = s.runs.length === 0
+        ? "No background runs recorded yet."
+        : "Showing the newest 10 of each job: " + shown.length + " of " + s.runs.length +
+          " runs kept.";
+
+      downloadsBody.replaceChildren();
+      for (const d of s.downloads.perUser.slice(0, 20)) {
+        const tr = document.createElement("tr");
+        tr.appendChild(cell(d.email || d.userId, d.email ? undefined : "mono"));
+        tr.appendChild(cell(String(d.count)));
+        downloadsBody.appendChild(tr);
+      }
+      downloadsCaption.textContent = s.downloads.perUser.length === 0
+        ? "No enclosure requests recorded yet."
+        : s.downloads.perUser.length + " subscriber" +
+          (s.downloads.perUser.length === 1 ? "" : "s") + " with requests.";
+
+      say(statsFeedback, "ok", "Updated " + new Date().toLocaleTimeString() + ".");
+    } catch (error) {
+      say(statsFeedback, "error", String(error.message || error));
+    } finally {
+      if (refreshStatsBtn) refreshStatsBtn.disabled = false;
+    }
+  }
+
+  refreshStatsBtn?.addEventListener("click", loadStats);
 
   async function loadUsers() {
     if (!token()) return;
