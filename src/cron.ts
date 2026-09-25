@@ -18,6 +18,10 @@ import {
   type Synthesizer,
 } from "./worker/synthesis.ts";
 
+export type ContextProvider =
+  | AppContext
+  | (() => Promise<{ ctx: AppContext; synthesizer?: Synthesizer | null }>);
+
 export interface CronRegistration {
   name: string;
   schedule: string;
@@ -25,7 +29,7 @@ export interface CronRegistration {
 }
 
 export function registerCronJobs(
-  ctx: AppContext,
+  contextOrProvider: ContextProvider,
   deps: {
     cron?: (name: string, schedule: string, handler: () => Promise<void>) => void;
     synthesizer?: Synthesizer;
@@ -44,12 +48,30 @@ export function registerCronJobs(
 
   const registrations: CronRegistration[] = [];
 
+  const resolveContext = async (): Promise<
+    { ctx: AppContext; synthesizer: Synthesizer | null }
+  > => {
+    if (typeof contextOrProvider === "function") {
+      const res = await contextOrProvider();
+      return {
+        ctx: res.ctx,
+        synthesizer: res.synthesizer ??
+          (res.ctx.config.geminiApiKey ? createGeminiSynthesizer(res.ctx) : null),
+      };
+    }
+    const ctx = contextOrProvider;
+    const synthesizer = deps.synthesizer ??
+      (ctx.config.geminiApiKey ? createGeminiSynthesizer(ctx) : null);
+    return { ctx, synthesizer };
+  };
+
   // 1. Poll feeds every 15 minutes
   const pollJob: CronRegistration = {
     name: "audio-feed-poll-feeds",
     schedule: "*/15 * * * *",
     handler: async () => {
       try {
+        const { ctx } = await resolveContext();
         const result = await runFeedPollBatch(ctx);
         console.log(
           `[audio-feed] cron feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
@@ -62,16 +84,18 @@ export function registerCronJobs(
   cronFn(pollJob.name, pollJob.schedule, pollJob.handler);
   registrations.push(pollJob);
 
-  // 2. Synthesize queue every 2 minutes (requires geminiApiKey or explicit synthesizer)
-  const synthesizer = deps.synthesizer ??
-    (ctx.config.geminiApiKey ? createGeminiSynthesizer(ctx) : null);
+  // 2. Synthesize queue every 2 minutes
+  const isStaticUnconfigured = typeof contextOrProvider !== "function" &&
+    !contextOrProvider.config.geminiApiKey && !deps.synthesizer;
 
-  if (synthesizer) {
+  if (!isStaticUnconfigured) {
     const synthJob: CronRegistration = {
       name: "audio-feed-synthesis",
       schedule: "*/2 * * * *",
       handler: async () => {
         try {
+          const { ctx, synthesizer } = await resolveContext();
+          if (!synthesizer) return;
           const result = await runSynthesisBatch(ctx, synthesizer);
           if (result.ready.length || result.failed.length || result.deferred.length) {
             console.log(

@@ -217,6 +217,15 @@ async function queueItems(
       const extracted = deps.fetchArticle
         ? await deps.fetchArticle(item.link, deps.signal)
         : await fetchArticle(item.link, { signal: deps.signal });
+
+      // audio-feed-562: re-check after article extraction to avoid inserting duplicates
+      // if another concurrent poll or manual trigger completed while fetching.
+      const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
+      if (raced) {
+        result.skipped++;
+        continue;
+      }
+
       const now = new Date().toISOString();
       const articleId = newArticleId();
       const article: Article = {

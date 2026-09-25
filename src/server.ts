@@ -8,25 +8,49 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { createApp } from "./app.ts";
+import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
 import { loadConfig, openStores } from "./config.ts";
-import { createGeminiSynthesizer, startSynthesisWorker } from "./worker/synthesis.ts";
+import {
+  createGeminiSynthesizer,
+  startSynthesisWorker,
+  type Synthesizer,
+} from "./worker/synthesis.ts";
 import { startFeedPollWorker } from "./ingest/feed.ts";
 import { registerCronJobs } from "./cron.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
-let serverFetch: ((req: Request) => Promise<Response> | Response) | null = null;
+export interface BootstrapResult {
+  server: Deno.HttpServer;
+  fetch: (req: Request) => Promise<Response> | Response;
+  ctx: AppContext;
+  synthesizer: Synthesizer | null;
+  shutdown: () => Promise<void>;
+}
 
-export async function bootstrap() {
+let bootstrapPromise: Promise<BootstrapResult> | null = null;
+
+/**
+ * Idempotent bootstrap accessor (audio-feed-ncf).
+ * Guarantees bootstrap() runs at most once per isolate, avoiding duplicate
+ * Deno.cron registrations and Port In Use errors during cold-start races.
+ */
+export function getBootstrap(): Promise<BootstrapResult> {
+  return bootstrapPromise ??= bootstrap();
+}
+
+export async function bootstrap(): Promise<BootstrapResult> {
   const config = loadConfig();
   const stores = await openStores();
+  const ctx: AppContext = { config, stores };
+
+  const synthesizer = config.geminiApiKey ? createGeminiSynthesizer(ctx) : null;
 
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
-  const handlers = createHandlers({ config, stores });
-  const app = createApp({ config, stores }, handlers);
-  serverFetch = app.fetch;
+  const handlers = createHandlers(ctx);
+  const app = createApp(ctx, handlers);
+  const serverFetch = app.fetch;
 
   console.log(
     `[audio-feed] ${stores.describe} base=${config.publicBaseUrl ?? "<derived from each request>"}`,
@@ -44,11 +68,14 @@ export async function bootstrap() {
     console.warn("[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable");
   }
 
-  // audio-feed-b3a: drain the ingest queue. Without a key there is nothing to
-  // spend and nothing to do, so the worker simply does not start.
+  // audio-feed-562: on Deno Deploy, isolates sleep between requests and background
+  // processing is handled by native Deno.cron. Running setInterval in Deploy causes
+  // concurrent poll/synthesis races when isolates are awake (polling lacks CAS/leases,
+  // so concurrent polls duplicate articles and double synthesis spend).
+  // In-memory workers run ONLY outside Deploy (!isDeploy).
   const workerAbort = new AbortController();
-  const worker = config.geminiApiKey
-    ? startSynthesisWorker({ config, stores }, createGeminiSynthesizer({ config, stores }), {
+  const worker = !isDeploy && synthesizer
+    ? startSynthesisWorker(ctx, synthesizer, {
       signal: workerAbort.signal,
       onTick: (result) => {
         if (result.ready.length || result.failed.length || result.deferred.length) {
@@ -57,11 +84,6 @@ export async function bootstrap() {
               `${result.deferred.length} deferred (of ${result.considered})`,
           );
         }
-        // Separate line, never folded into a success-shaped one: a tick that
-        // reports "0 ready" while silently discarding paid work is exactly the
-        // failure shape this whole change is about. The held-vs-lease numbers
-        // make it actionable — they say how much too short the lease was, not
-        // merely that it was (audio-feed-vfs / audio-feed-kiq).
         for (const { episodeId, heldMs, leaseMs } of result.superseded) {
           console.warn(
             `[audio-feed] synthesis: episode ${episodeId} superseded after ` +
@@ -73,23 +95,17 @@ export async function bootstrap() {
     })
     : null;
 
-  // audio-feed-2e5: subscribed feeds are polled on an interval, so a feed keeps
-  // producing episodes without anyone pressing anything. Independent of the
-  // synthesis worker: this fetches and queues, it never spends on TTS itself.
   const feedPollAbort = new AbortController();
-  const feedPoller = startFeedPollWorker({ config, stores }, {
-    signal: feedPollAbort.signal,
-    onTick: (result) => {
-      console.log(
-        `[audio-feed] feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
-      );
-    },
-  });
-
-  // audio-feed-dsn: Native Deno.cron background jobs on Deno Deploy.
-  // In serverless edge environments isolates sleep between requests, pausing
-  // in-memory setInterval timers. Deno.cron wakes the isolate on schedule in the cloud.
-  registerCronJobs({ config, stores });
+  const feedPoller = !isDeploy
+    ? startFeedPollWorker(ctx, {
+      signal: feedPollAbort.signal,
+      onTick: (result) => {
+        console.log(
+          `[audio-feed] feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
+        );
+      },
+    })
+    : null;
 
   const server = Deno.serve({ port: config.port }, serverFetch);
 
@@ -97,7 +113,7 @@ export async function bootstrap() {
   const shutdown = async () => {
     workerAbort.abort();
     feedPollAbort.abort();
-    await feedPoller.stop();
+    await feedPoller?.stop();
     await worker?.stop();
     await server.shutdown();
     await stores.metadata.close();
@@ -110,18 +126,23 @@ export async function bootstrap() {
     // Signals not supported in serverless/Deno Deploy environments.
   }
 
-  return { server, fetch: serverFetch, shutdown };
+  return { server, fetch: serverFetch, ctx, synthesizer, shutdown };
 }
 
+// audio-feed-dsn / audio-feed-ncf: Native Deno.cron background jobs on Deno Deploy.
+// Registered at module top-level for Deno Deploy static discovery and single registration.
+registerCronJobs(async () => {
+  const { ctx, synthesizer } = await getBootstrap();
+  return { ctx, synthesizer };
+});
+
 if (import.meta.main || isDeploy) {
-  await bootstrap();
+  await getBootstrap();
 }
 
 export default {
   async fetch(req: Request) {
-    if (!serverFetch) {
-      await bootstrap();
-    }
-    return serverFetch!(req);
+    const { fetch } = await getBootstrap();
+    return fetch(req);
   },
 };

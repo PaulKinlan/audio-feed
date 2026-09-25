@@ -128,6 +128,99 @@ Deno.test("registerCronJobs: handlers execute batch operations and handle errors
   assertEquals(ep?.status, "ready");
 });
 
+Deno.test("registerCronJobs: supports lazy context provider function (audio-feed-ncf)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  await stores.metadata.putArticle(makeArticle({ id: "article-1", userId: "u1" }));
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep1", userId: "u1", status: "pending", mode: "direct" }),
+  );
+
+  const registered: CronRegistration[] = [];
+  const mockCron = (name: string, schedule: string, handler: () => Promise<void>) => {
+    registered.push({ name, schedule, handler });
+  };
+
+  registerCronJobs(() =>
+    Promise.resolve({
+      ctx,
+      synthesizer: () => Promise.resolve(mockAudio()),
+    }), { cron: mockCron });
+
+  assertEquals(registered.length, 2);
+  const synthJob = registered.find((j) => j.name === "audio-feed-synthesis");
+  assert(synthJob);
+  await synthJob.handler();
+  const ep = await stores.metadata.getEpisode("u1", "ep1");
+  assertEquals(ep?.status, "ready");
+});
+
+Deno.test("concurrent feed polls de-duplicate and do not queue duplicate episodes (audio-feed-562)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  const source = makeSource({ id: "s1", userId: "u1", feedUrl: "https://example.com/feed.xml" });
+  await stores.metadata.putSource(source);
+
+  const sampleRss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Feed 1</title>
+  <item>
+    <title>Article One</title>
+    <link>https://example.com/one</link>
+    <pubDate>Mon, 01 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+  <item>
+    <title>Article Two</title>
+    <link>https://example.com/two</link>
+    <pubDate>Tue, 02 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+</channel></rss>`;
+
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(sampleRss, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    fetchArticle: (url: string) =>
+      new Promise<
+        { url: string; title: string; author: null; publishedAt: null; lead: string; body: string }
+      >(
+        (resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                url,
+                title: url.endsWith("one") ? "Article One" : "Article Two",
+                author: null,
+                publishedAt: null,
+                lead: "",
+                body: "Body text.",
+              }),
+            10,
+          ),
+      ),
+  };
+
+  // Two polls running concurrently against the same feed
+  const { pollFeedSource } = await import("../src/ingest/feed.ts");
+  const [resA, resB] = await Promise.all([
+    pollFeedSource(ctx, source, deps),
+    pollFeedSource(ctx, source, deps),
+  ]);
+
+  // Combined queued count must be exactly 2 (the 2 items), never 4
+  assertEquals(
+    resA.queued + resB.queued,
+    2,
+    "exactly 2 episodes must be queued across concurrent polls",
+  );
+  const episodes = await stores.metadata.listEpisodes({ userId: "u1" });
+  assertEquals(episodes.length, 2, "storage must contain exactly 2 distinct episodes");
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/admin/poll-now
 // ---------------------------------------------------------------------------
