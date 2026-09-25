@@ -63,7 +63,14 @@ export interface User {
    * message; serialise `PublicUser` (see `redactUser`) instead.
    */
   feedToken: string;
-  /** Preferred TTS voice preset (Aoede, Charon, Fenrir, Kore, Puck). */
+  /**
+   * Preferred TTS voice preset (Aoede, Charon, Fenrir, Kore, Puck).
+   *
+   * This IS the user-level default (audio-feed-4xt). It was not renamed to
+   * `defaultVoice`: two names for one preference means two places for it to
+   * disagree. Resolution order: source voice, then this, then config `DEFAULT_VOICE`,
+   * then DEFAULT_NARRATION_VOICE.
+   */
   voice?: string;
   /** Source ids this user subscribes to. */
   feeds?: string[];
@@ -110,11 +117,21 @@ export function isSynthesisAuthorized(user: User | null | undefined): boolean {
 // ---------------------------------------------------------------------------
 
 /** Voice assignment for a source. Preset names per PRODUCT.md §2. */
+/**
+ * Voice assignment for a source.
+ *
+ * Both fields are OPTIONAL, and that is load-bearing (audio-feed-4xt). They were
+ * required, and every source was stamped with DEFAULT_VOICES at creation, so a
+ * `source.voices.direct ?? ...` chain could never fall through: the first term was
+ * always a non-empty string and any system or user default was dead code that read
+ * as configured. Absence has to be representable for a default to mean anything.
+ * Resolution order lives in `createGeminiSynthesizer`.
+ */
 export interface VoiceConfig {
-  /** Single narrator for `direct` mode. */
-  direct: string;
-  /** [expert, foil] pair for `deepdive` mode. */
-  deepdive: [string, string];
+  /** Single narrator for `direct` mode. Unset means "resolve a default". */
+  direct?: string;
+  /** [expert, foil] pair for `deepdive` mode. Unset means "resolve a default". */
+  deepdive?: [string, string];
 }
 
 export const DEFAULT_VOICES: VoiceConfig = {

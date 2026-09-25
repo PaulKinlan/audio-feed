@@ -20,25 +20,40 @@ reads and two-voice deep dive analysis.
 
 ## Podcast Feeds & Syndication Topology
 
-`audio-feed` publishes standard podcast RSS 2.0 / iTunes XML feeds with Atom self-links, pubDates, episode durations, and authenticated audio enclosures (`/audio/...`). Feed URLs are secured via the user's secret capability token (`feedToken`).
+`audio-feed` publishes standard podcast RSS 2.0 / iTunes XML feeds with Atom self-links, pubDates,
+episode durations, and authenticated audio enclosures (`/audio/...`). Feed URLs are secured via the
+user's secret capability token (`feedToken`).
 
 ### 1. Master Aggregated Feed (`GET /feed/:token/master.xml`)
 
-The Master Feed consolidates all published audio across all of a user's subscribed RSS feeds and on-demand web ingests into a single unified podcast channel.
+The Master Feed consolidates all published audio across all of a user's subscribed RSS feeds and
+on-demand web ingests into a single unified podcast channel.
 
-- **Unified Catalog:** Combines both Direct Narration and Deep Dive Dialogue episodes from all sources.
-- **Unfiltered by Source:** The master feed represents the user's aggregated library across all subscribed sources.
-- **Query Parameter Tolerance:** Any query parameters appended to the URL (such as `?sourceId=...`, `?t=...`, or client cache-busters) are intentionally ignored rather than rejected with HTTP 400. Real-world podcast clients and aggregators (Apple Podcasts, Overcast, Pocket Casts, AntennaPod) routinely append tracking, timestamp, and cache-busting parameters when polling feeds. Returning 400 would break live subscriber playback. To subscribe to a specific source alone, use its dedicated per-source feed URL instead.
-- **200-Episode Window:** Capped to the newest 200 ready episodes. This follows standard podcast publishing practice for aggregate feeds, preventing multi-megabyte XML payloads, mobile bandwidth exhaustion, and aggregator timeout errors. Older episodes beyond the 200 newest are omitted from the syndicated XML.
+- **Unified Catalog:** Combines both Direct Narration and Deep Dive Dialogue episodes from all
+  sources.
+- **Unfiltered by Source:** The master feed represents the user's aggregated library across all
+  subscribed sources.
+- **Query Parameter Tolerance:** Any query parameters appended to the URL (such as `?sourceId=...`,
+  `?t=...`, or client cache-busters) are intentionally ignored rather than rejected with HTTP 400.
+  Real-world podcast clients and aggregators (Apple Podcasts, Overcast, Pocket Casts, AntennaPod)
+  routinely append tracking, timestamp, and cache-busting parameters when polling feeds. Returning
+  400 would break live subscriber playback. To subscribe to a specific source alone, use its
+  dedicated per-source feed URL instead.
+- **200-Episode Window:** Capped to the newest 200 ready episodes. This follows standard podcast
+  publishing practice for aggregate feeds, preventing multi-megabyte XML payloads, mobile bandwidth
+  exhaustion, and aggregator timeout errors. Older episodes beyond the 200 newest are omitted from
+  the syndicated XML.
 
 ### 2. Per-Source Feeds (`GET /feed/:token/:sourceId/:mode.xml`)
 
-Subscribers who prefer dedicated channels for specific publications or presentation styles can subscribe to individual per-source feeds:
+Subscribers who prefer dedicated channels for specific publications or presentation styles can
+subscribe to individual per-source feeds:
 
 - **Modes:**
   - `:mode = direct` — Single-voice author narration (Stratechery style).
   - `:mode = deepdive` — Two-voice conversational analysis and debate (NotebookLM style).
-- **200-Episode Window:** Each individual per-source feed is likewise capped to its newest 200 ready episodes using the same bounded window.
+- **200-Episode Window:** Each individual per-source feed is likewise capped to its newest 200 ready
+  episodes using the same bounded window.
 
 ## Quickstart
 
@@ -71,9 +86,35 @@ STORAGE_REGION=auto
 # Optional Origin Overrides
 # PUBLIC_BASE_URL=https://audio-feed.paulkinlan-ea.deno.net
 # TRUST_PROXY_HEADERS=1
+
+# Optional: system default narration voice
+# DEFAULT_VOICE=Aoede
 ```
 
-If storage variables are omitted locally, the app defaults to an in-memory blob store for offline development and testing.
+### Default narration voice
+
+When a source does not specify a narrator, the voice is resolved in this order:
+
+1. the source's own `voices.direct`, if it was explicitly set;
+2. the user's `voice` preference (set when the subscriber is created);
+3. `DEFAULT_VOICE` from the environment;
+4. `Charon`.
+
+`DEFAULT_VOICE` must be one of `Aoede`, `Charon`, `Fenrir`, `Kore`, `Puck`. An unrecognised value
+**fails at boot** rather than falling back silently — a typo would otherwise read every article in a
+different voice while the deployment looked healthy.
+
+Two things this deliberately does not do:
+
+- **Deep dive dialogue is not affected.** `DEFAULT_VOICE` is a single name and a deep dive needs a
+  pair (expert, foil); mapping one onto the other is a product decision, so the pair still falls
+  back to `Kore` and `Puck`.
+- **Existing sources keep their voice.** Sources created before this change were stamped with an
+  explicit `Charon` at creation, so they resolve at step 1 and are unaffected. The precedence chain
+  applies to sources created afterwards.
+
+If storage variables are omitted locally, the app defaults to an in-memory blob store for offline
+development and testing.
 
 ---
 
@@ -83,14 +124,17 @@ When configuring Cloudflare R2 for `audio-feed`:
 
 ### 1. Endpoint vs Bucket Name Split
 
-Do not combine the bucket name into the endpoint URL. For a bucket URL such as `https://<account_id>.r2.cloudflarestorage.com/audio-feed`:
+Do not combine the bucket name into the endpoint URL. For a bucket URL such as
+`https://<account_id>.r2.cloudflarestorage.com/audio-feed`:
 
-- **`STORAGE_ENDPOINT`**: `https://<account_id>.r2.cloudflarestorage.com` (host only, no trailing bucket or slash)
+- **`STORAGE_ENDPOINT`**: `https://<account_id>.r2.cloudflarestorage.com` (host only, no trailing
+  bucket or slash)
 - **`STORAGE_BUCKET`**: `audio-feed` (the bucket name)
 
 ### 2. Securing the R2 Bucket & Generating API Credentials
 
-Cloudflare R2 buckets are **100% private by default** — neither public writes nor unauthenticated reads are permitted:
+Cloudflare R2 buckets are **100% private by default** — neither public writes nor unauthenticated
+reads are permitted:
 
 1. In the **Cloudflare Dashboard**, navigate to **R2 Object Storage**.
 2. In the right-hand panel, select **Manage R2 API Tokens**.
@@ -103,17 +147,21 @@ Cloudflare R2 buckets are **100% private by default** — neither public writes 
    - **Access Key ID** → set as `STORAGE_ACCESS_KEY_ID`
    - **Secret Access Key** → set as `STORAGE_SECRET_ACCESS_KEY`
 
-`audio-feed` uses AWS SigV4 via `aws4fetch` to sign every PUT request directly from the Deno Deploy worker using these credentials.
+`audio-feed` uses AWS SigV4 via `aws4fetch` to sign every PUT request directly from the Deno Deploy
+worker using these credentials.
 
 ### 3. Private Bucket Playback
 
-Because the R2 bucket remains completely private, `audio-feed` automatically creates temporary **presigned GET URLs** (expiring in 1 hour) when podcast clients request episode audio. Podcast apps stream seamlessly without exposing public read or write access to the bucket.
+Because the R2 bucket remains completely private, `audio-feed` automatically creates temporary
+**presigned GET URLs** (expiring in 1 hour) when podcast clients request episode audio. Podcast apps
+stream seamlessly without exposing public read or write access to the bucket.
 
 ---
 
 ## Admin Endpoints & User Management
 
-To protect against unauthorized Gemini TTS spending, audio synthesis requires an approved user bearer token (`feedToken`).
+To protect against unauthorized Gemini TTS spending, audio synthesis requires an approved user
+bearer token (`feedToken`).
 
 ### Admin Approval Endpoint
 
@@ -121,6 +169,7 @@ To protect against unauthorized Gemini TTS spending, audio synthesis requires an
 - **Headers:** `x-admin-token: <ADMIN_TOKEN>` (or `Authorization: Bearer <ADMIN_TOKEN>`)
 
 Example:
+
 ```bash
 curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/users/usr_12345/approve \
   -H "x-admin-token: your-secret-admin-passphrase"
@@ -140,17 +189,21 @@ DENO_KV_ACCESS_TOKEN=... deno run -A scripts/create-user.ts you@example.com "You
 ```
 
 This generates and displays:
+
 - The user's secret `feedToken`
 - The personal RSS Master Feed URL (`/feed/<token>/master.xml`)
 - Ready-to-use curl and web submission parameters
 
 ### Background Workers & Manual Triggers
 
-On serverless platforms like Deno Deploy, background workers operate on native `Deno.cron` to ensure tasks run even when the HTTP isolate sleeps:
+On serverless platforms like Deno Deploy, background workers operate on native `Deno.cron` to ensure
+tasks run even when the HTTP isolate sleeps:
+
 - **`audio-feed-poll-feeds` (`*/15 * * * *`)**: Polls due RSS/Atom feeds every 15 minutes.
 - **`audio-feed-synthesis` (`*/2 * * * *`)**: Drains the pending synthesis queue every 2 minutes.
 
-Operators can trigger immediate batch runs on demand via the `/admin` console UI ("Poll Feeds Now" and "Synthesize Queue Now" buttons) or directly via REST API:
+Operators can trigger immediate batch runs on demand via the `/admin` console UI ("Poll Feeds Now"
+and "Synthesize Queue Now" buttons) or directly via REST API:
 
 ```bash
 # Immediately poll all due RSS feeds
@@ -168,8 +221,10 @@ curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/admin/synthesize-now 
 
 Approved users can submit articles to be synthesized:
 
-1. **Web UI:** Open `GET /` (`https://audio-feed.paulkinlan-ea.deno.net/`), enter the article URL, select the mode (*Author narration* or *Two-voice dialogue*), and enter your `feedToken`.
+1. **Web UI:** Open `GET /` (`https://audio-feed.paulkinlan-ea.deno.net/`), enter the article URL,
+   select the mode (_Author narration_ or _Two-voice dialogue_), and enter your `feedToken`.
 2. **REST API:**
+
 ```bash
 curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/ingest \
   -H "content-type: application/json" \

@@ -22,6 +22,7 @@
 import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { originCacheControl, resolveOrigin } from "../origin.ts";
+import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
 
 /** Escapes text interpolated into the document. */
 function esc(value: string): string {
@@ -37,6 +38,15 @@ export interface HomePageOptions {
   publicBaseUrl: string;
   /** Whether synthesis is actually available in this deployment. */
   synthesisConfigured: boolean;
+  /**
+   * The voice a direct read falls back to in THIS deployment (audio-feed-4xt).
+   *
+   * Passed in rather than hard-coded: the page used to say "Default voice: Charon"
+   * unconditionally, so the moment DEFAULT_VOICE became configurable the copy would
+   * have been a prose claim no check can see — a generated-block guard cannot catch
+   * a sentence that contradicts itself. Deriving it keeps the page honest.
+   */
+  defaultVoice: string;
 }
 
 /**
@@ -46,6 +56,7 @@ export interface HomePageOptions {
 export function renderHomePage({
   publicBaseUrl,
   synthesisConfigured,
+  defaultVoice,
 }: HomePageOptions): string {
   const base = esc(publicBaseUrl.replace(/\/+$/, ""));
 
@@ -335,7 +346,7 @@ export function renderHomePage({
         author and publication date first. Clear and uninterrupted — the
         equivalent of the author reading their own piece to you.
       </p>
-      <p class="voices">Default voice: Charon</p>
+      <p class="voices">Default voice: ${esc(defaultVoice)}</p>
     </li>
     <li class="card">
       <h3>Deep dive</h3>
@@ -783,6 +794,9 @@ export function handleHome({ ctx, req }: RouteContext<AppContext>): Response {
   const html = renderHomePage({
     publicBaseUrl: origin.baseUrl,
     synthesisConfigured: Boolean(ctx.config.geminiApiKey),
+    // Resolved, not hard-coded: an operator who sets DEFAULT_VOICE must not be
+    // shown a page that still claims the default is Charon (audio-feed-4xt).
+    defaultVoice: ctx.config.defaultVoice ?? DEFAULT_NARRATION_VOICE,
   });
 
   return new Response(html, {

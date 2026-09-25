@@ -12,6 +12,7 @@ import type { BlobStore, MetadataStore } from "./storage/mod.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "./storage/memory.ts";
 import { KvMetadataStore } from "./storage/kv.ts";
 import { S3BlobStore } from "./storage/s3.ts";
+import { GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tts/gemini.ts";
 
 export interface AppConfig {
   port: number;
@@ -38,6 +39,19 @@ export interface AppConfig {
   /** Present only when TTS is configured; 65u owns its use. */
   geminiApiKey?: string;
   adminToken?: string;
+  /**
+   * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
+   *
+   * Unset means "no system preference", which is different from Charon: the chain
+   * still falls through to DEFAULT_NARRATION_VOICE, but a source or user voice set
+   * later is not shadowed by a value invented here.
+   *
+   * Validated at load, not at synthesis time. An invalid name throws rather than
+   * falling back, because a typo in DEFAULT_VOICE silently reading every article in
+   * a different voice is the kind of wrong that looks healthy — the same reason this
+   * file refuses a half-configured blob store instead of defaulting to memory.
+   */
+  defaultVoice?: GeminiTtsVoice;
 }
 
 function env(name: string): string | undefined {
@@ -52,6 +66,20 @@ export function loadConfig(): AppConfig {
   }
   const trust = env("TRUST_PROXY_HEADERS")?.toLowerCase();
 
+  const defaultVoice = env("DEFAULT_VOICE")?.trim();
+  if (defaultVoice) {
+    // Fail closed at boot. Every voice actually used is validated downstream too,
+    // but catching it here means an operator learns at deploy time, not after the
+    // first paid synthesis of the day sounded wrong.
+    if (!(GEMINI_TTS_VOICES as readonly string[]).includes(defaultVoice)) {
+      throw new Error(
+        `Invalid DEFAULT_VOICE: "${defaultVoice}". Expected one of: ${
+          GEMINI_TTS_VOICES.join(", ")
+        }.`,
+      );
+    }
+  }
+
   return {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
@@ -60,6 +88,7 @@ export function loadConfig(): AppConfig {
     trustProxyHeaders: trust === "1" || trust === "true" || trust === "yes",
     geminiApiKey: env("GEMINI_API_KEY"),
     adminToken: env("ADMIN_TOKEN"),
+    defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
   };
 }
 

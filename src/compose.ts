@@ -502,7 +502,10 @@ export function createIngestHandler(
           userId: user.id,
           title: "Send to Audio",
           modes: ["direct", "deepdive"],
-          voices: { direct: "Charon", deepdive: ["Kore", "Puck"] },
+          // Unspecified on purpose (audio-feed-4xt): the inbox is not a source that
+          // ever chose a voice, so hard-coding "Charon" here would shadow both the
+          // user's own preference and the operator's DEFAULT_VOICE.
+          voices: {},
           createdAt: now,
         });
       }

@@ -37,7 +37,11 @@
  *   counter cannot see — it dies with the process.
  */
 import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
-import { GeminiTtsClient, GeminiTtsTruncatedError } from "../tts/gemini.ts";
+import {
+  DEFAULT_NARRATION_VOICE,
+  GeminiTtsClient,
+  GeminiTtsTruncatedError,
+} from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
 import { audioBlobKey, DEFAULT_CLAIM_LEASE_MS, DEFAULT_MAX_CLAIMS } from "../types.ts";
@@ -146,9 +150,28 @@ function isPermanent(error: unknown): boolean {
   return false;
 }
 
-/** Default synthesizer: the real client, with the source's configured voices. */
-export function createGeminiSynthesizer(ctx: AppContext): Synthesizer {
-  const client = new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
+/**
+ * Default synthesizer: the real client, with voices resolved per audio-feed-4xt.
+ *
+ * Direct-mode narrator order: source voice, then the user's own preference
+ * (`User.voice` — the existing field, not a newly-named `defaultVoice`), then the
+ * system `DEFAULT_VOICE`, then DEFAULT_NARRATION_VOICE. Earlier terms are only
+ * reachable because VoiceConfig fields are now optional and sources are no longer
+ * stamped with a default at creation; with a required field hard-filled at
+ * creation, the first term always won and the rest was decoration.
+ *
+ * Deep dive is deliberately NOT driven by DEFAULT_VOICE. A single default name has
+ * no honest mapping onto a two-voice pair — "use it for the expert and keep Puck"
+ * is a decision about the product, not an implementation detail — so the pair still
+ * falls back to DEFAULT_VOICES.deepdive. Flagged for coord rather than chosen here.
+ */
+export function createGeminiSynthesizer(
+  ctx: AppContext,
+  /** Injectable so a test can drive the real request path with a capturing fetchFn
+   *  instead of asserting on a helper the call site may or may not use. */
+  deps: { client?: GeminiTtsClient } = {},
+): Synthesizer {
+  const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
   return async ({ article, source, episode, mode }) => {
     if (mode === "deepdive") {
       const [expert, foil] = source?.voices.deepdive ?? ["Kore", "Puck"];
@@ -166,13 +189,26 @@ export function createGeminiSynthesizer(ctx: AppContext): Synthesizer {
         ],
       });
     }
+
+    // Only read the user record when nothing above it decided, so the common case
+    // (a source with an explicit voice) costs no extra store read.
+    const sourceVoice = source?.voices.direct;
+    const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
+    // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
+    // "cleared but never set" looks like in stored data, and `??` would hand it to
+    // the API as a voice name — the client's own `||` fallback would then silently
+    // pick Charon and skip both the user preference and DEFAULT_VOICE.
+    const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
+      .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
+      DEFAULT_NARRATION_VOICE;
+
     return await client.synthesizeNarration({
       title: article.title,
       author: article.author,
       publishedAt: article.publishedAt,
       sourceName: source?.title ?? episode.sourceTitle,
       body: article.content,
-      voice: source?.voices.direct,
+      voice,
     });
   };
 }
