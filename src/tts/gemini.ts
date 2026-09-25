@@ -720,8 +720,22 @@ export function formatNarrationPrompt(input: NarrationInput): string {
   return introText || bodyText;
 }
 
+/**
+ * What `formatDialoguePrompt` produces: the structured dialogue that actually
+ * reaches the API.
+ *
+ * There used to be a third field, `prompt` — a ~15-line meta-instruction string
+ * ("You are generating...", "Style guidelines:", "Speak with natural human
+ * cadence...") that was built on every call and then discarded, because
+ * `synthesizeDialogue` destructures only `turns` and `speakers` (audio-feed-9jh).
+ * It is removed rather than renamed or commented, because the dialogue path was
+ * only free of the audio-feed-xad defect BY ACCIDENT, and a field that looks like
+ * an unused bug invites someone to "fix" it by wiring it in - which would read the
+ * instructions aloud. The guard against that is now a test on the outgoing request,
+ * not a comment: see "no meta-instruction reaches the dialogue API" in
+ * tests/tts_test.ts.
+ */
 export interface FormattedDialogue {
-  prompt: string;
   turns: DialogueTurn[];
   speakers: [DialogueSpeaker, DialogueSpeaker];
 }
@@ -778,9 +792,6 @@ export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
   const foil = speakers.find((s) => s.role === "curious_foil" || s.role === "host") ??
     speakers[1];
 
-  const topicOrTitle = input.topic || input.title || input.article?.title ||
-    "today's subject";
-
   let turns: DialogueTurn[] = [];
 
   if (input.turns && input.turns.length > 0) {
@@ -830,21 +841,7 @@ export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
     );
   }
 
-  const promptLines: string[] = [
-    `You are generating a natural, highly engaging two-voice conversational podcast deep dive in the style of NotebookLM.`,
-    `Topic: "${topicOrTitle}".`,
-    `Speakers:`,
-    `- ${expert.name}: The domain expert. Authoritative, analytical, provides deep technical and strategic context, historical grounding, and architectural nuance.`,
-    `- ${foil.name}: The curious interviewer and foil. Sharp, inquisitive, asks real-world clarifying questions, offers accessible analogies, and keeps the conversation dynamic and relatable.`,
-    `Style guidelines:`,
-    `- Speak with natural human cadence, seamless turn-taking, subtle vocal enthusiasm, and authentic conversational flow.`,
-    `- No robotic pauses or unnatural transitions.`,
-    `\n[Dialogue Script]`,
-    ...turns.map((t) => `${t.speaker}: ${t.text}`),
-  ];
-
   return {
-    prompt: promptLines.join("\n"),
     turns,
     speakers,
   };
