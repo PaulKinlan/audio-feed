@@ -24,6 +24,20 @@ import { registerCronJobs } from "./cron.ts";
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
 export interface BootstrapOptions {
+  // Every option here carries a distinct failure mode, and the seam was nearly
+  // narrowed on the assumption that four options was too many for one test. It is
+  // not: dropping `synthesizer` makes the mutant this suite exists to catch
+  // ESCAPE. Measured by audiofeed-opus on audio-feed-1kw - remove the worker's
+  // `!deploy` gate with no synthesizer injected and all tests pass, because
+  // `!deploy && synthesizer` and `synthesizer` both yield null, so the Deploy
+  // assertion cannot observe a removed gate at all. The stub is the only thing
+  // that forces the worker to exist on Deploy, which is what gives that test
+  // teeth. Do not "simplify" any of the four without re-running that mutation.
+  //
+  //   isDeploy     - without it neither branch is reachable from a test at all
+  //   synthesizer  - makes the WORKER gate observable (see above)
+  //   port, stores - hermeticity: no fixed port another lane holds, no default
+  //                  persistent KV opened by a test run
   /**
    * Override Deploy detection. Defaults to the environment check above.
    *
@@ -35,8 +49,13 @@ export interface BootstrapOptions {
   port?: number;
   /** Injected stores. Defaults to the configured backend, which opens real KV. */
   stores?: Stores;
-  /** Injected synthesizer. Defaults to the env-derived one; pass a stub to make
-   *  the worker gate observable without a real GEMINI_API_KEY in the suite. */
+  /**
+   * Injected synthesizer. Defaults to the env-derived one.
+   *
+   * Load-bearing, not convenience: pass a stub so the worker gate has an
+   * observable effect on Deploy. Omitting it in a test silently weakens
+   * "on Deploy, neither worker starts" to something that always passes.
+   */
   synthesizer?: Synthesizer | null;
 }
 
