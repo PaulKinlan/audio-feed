@@ -241,7 +241,13 @@ async function queueItems(
         excerpt: extracted.lead || item.summary,
         ingestedAt: now,
       };
-      await ctx.stores.metadata.putArticle(article);
+      // audio-feed-33m: atomic insert-if-absent CAS pattern closes the race between
+      // concurrent polls or manual triggers even with identical/immediate timing.
+      const inserted = await ctx.stores.metadata.insertArticleIfAbsent(article);
+      if (!inserted) {
+        result.skipped++;
+        continue;
+      }
       const episode: Episode = {
         id: newEpisodeId(),
         userId: source.userId,

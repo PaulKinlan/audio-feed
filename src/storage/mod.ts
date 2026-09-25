@@ -117,6 +117,12 @@ export interface MetadataStore {
 
   // -- articles ---------------------------------------------------------
   putArticle(article: Article): Promise<void>;
+  /**
+   * Atomic first write for an article (audio-feed-33m).
+   * Resolves `true` if the article was inserted, or `false` if an article
+   * with the same URL already exists for this user.
+   */
+  insertArticleIfAbsent(article: Article): Promise<boolean>;
   getArticle(userId: string, id: string): Promise<Article | null>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;

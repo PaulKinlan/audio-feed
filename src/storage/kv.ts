@@ -242,6 +242,15 @@ export class KvMetadataStore implements MetadataStore {
     if (!result.ok) throw new Error(`putArticle failed for ${article.id}`);
   }
 
+  async insertArticleIfAbsent(article: Article): Promise<boolean> {
+    const result = await this.#kv.atomic()
+      .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
+      .set(["article", article.userId, article.id], article)
+      .set(["article_by_url", article.userId, article.url], article.id)
+      .commit();
+    return result.ok;
+  }
+
   async getArticle(userId: string, id: string): Promise<Article | null> {
     return (await this.#kv.get<Article>(["article", userId, id])).value;
   }

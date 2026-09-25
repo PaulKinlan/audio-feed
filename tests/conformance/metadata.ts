@@ -300,6 +300,30 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(await store.findArticleByUrl("user-2", article.url), null);
   });
 
+  test("insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m)", async (store) => {
+    const article1 = makeArticle({ id: "a1", userId: "user-1", url: "https://example.com/item" });
+    const article2 = makeArticle({ id: "a2", userId: "user-1", url: "https://example.com/item" });
+
+    // First insert succeeds
+    assertEquals(await store.insertArticleIfAbsent(article1), true);
+    assertEquals((await store.getArticle("user-1", "a1"))?.url, "https://example.com/item");
+    assertEquals((await store.findArticleByUrl("user-1", "https://example.com/item"))?.id, "a1");
+
+    // Second insert with same URL for same user returns false without overwriting
+    assertEquals(await store.insertArticleIfAbsent(article2), false);
+    assertEquals(await store.getArticle("user-1", "a2"), null);
+    assertEquals((await store.findArticleByUrl("user-1", "https://example.com/item"))?.id, "a1");
+
+    // Same URL for a different user succeeds
+    const user2Article = makeArticle({
+      id: "a3",
+      userId: "user-2",
+      url: "https://example.com/item",
+    });
+    assertEquals(await store.insertArticleIfAbsent(user2Article), true);
+    assertEquals((await store.findArticleByUrl("user-2", "https://example.com/item"))?.id, "a3");
+  });
+
   // -- episodes -------------------------------------------------------------
 
   test("lists episodes newest first", async (store) => {

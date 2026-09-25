@@ -185,6 +185,19 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve();
   }
 
+  insertArticleIfAbsent(article: Article): Promise<boolean> {
+    for (const existing of this.#articles.values()) {
+      if (existing.userId === article.userId && existing.url === article.url) {
+        return Promise.resolve(false);
+      }
+    }
+    this.#articles.set(
+      MemoryMetadataStore.#scoped(article.userId, article.id),
+      structuredClone(article),
+    );
+    return Promise.resolve(true);
+  }
+
   getArticle(userId: string, id: string): Promise<Article | null> {
     const found = this.#articles.get(MemoryMetadataStore.#scoped(userId, id));
     return Promise.resolve(found ? structuredClone(found) : null);

@@ -221,6 +221,60 @@ Deno.test("concurrent feed polls de-duplicate and do not queue duplicate episode
   assertEquals(episodes.length, 2, "storage must contain exactly 2 distinct episodes");
 });
 
+Deno.test("concurrent feed polls with immediate fetchArticle do not duplicate (audio-feed-33m)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  const source = makeSource({ id: "s1", userId: "u1", feedUrl: "https://example.com/feed.xml" });
+  await stores.metadata.putSource(source);
+
+  const sampleRss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Feed 1</title>
+  <item>
+    <title>Article One</title>
+    <link>https://example.com/one</link>
+    <pubDate>Mon, 01 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+  <item>
+    <title>Article Two</title>
+    <link>https://example.com/two</link>
+    <pubDate>Tue, 02 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+</channel></rss>`;
+
+  const deps = {
+    transport: () =>
+      Promise.resolve(
+        new Response(sampleRss, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    // Immediate resolve with no setTimeout / delay (the degenerate case that broke pre-33m)
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: url.endsWith("one") ? "Article One" : "Article Two",
+        author: null,
+        publishedAt: null,
+        lead: "",
+        body: "Body text.",
+      }),
+  };
+
+  const { pollFeedSource } = await import("../src/ingest/feed.ts");
+  const [resA, resB] = await Promise.all([
+    pollFeedSource(ctx, source, deps),
+    pollFeedSource(ctx, source, deps),
+  ]);
+
+  assertEquals(
+    resA.queued + resB.queued,
+    2,
+    "exactly 2 episodes must be queued even with immediate synchronous resolution",
+  );
+  const episodes = await stores.metadata.listEpisodes({ userId: "u1" });
+  assertEquals(episodes.length, 2, "storage must contain exactly 2 distinct episodes");
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/admin/poll-now
 // ---------------------------------------------------------------------------
