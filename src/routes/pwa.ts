@@ -178,11 +178,15 @@ self.addEventListener("fetch", (event) => {
 // Background Fetch, all three events (audio-feed-rqp).
 //
 // audio-feed-4xb wired only the success handler and the page never started a
-// fetch, because the API measured as non-functional. That measurement was taken
-// in HEADLESS Chrome, where 'BackgroundFetchManager' in self is true while
-// 'serviceWorker' in navigator is FALSE: detection passes, registration is
-// impossible. Re-measured in real Chrome against a real origin it works end to
-// end, and audio-feed-98i carries the correction.
+// fetch, because the API measured as non-functional. Re-measured against a real
+// origin it works end to end, and audio-feed-98i carries the correction.
+//
+// An earlier version of this comment blamed headless Chrome for the original
+// finding. That mechanism was wrong and is retracted: headless Chrome 152 on a
+// real origin has a service worker and completes a background fetch. The API
+// looks broken because getIds() is empty BOTH when nothing registered and when
+// a fetch has finished, and because only the first fetch per origin is
+// permitted (audio-feed-zlf) — a refused attempt resolves and never lists.
 self.addEventListener("backgroundfetchsuccess", (event) => {
   event.waitUntil(
     (async () => {
