@@ -43,10 +43,12 @@ function fakeAudio(bytes = 480): DecodedAudioResult {
 }
 
 /** An app with one approved user and one queued episode ready to synthesise. */
-async function queued(userOverrides = {}) {
+async function queued(userOverrides = {}, sourceOverrides = {}) {
   const stores: Stores = memoryStores();
   await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved", ...userOverrides }));
-  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
+  await stores.metadata.putSource(
+    makeSource({ id: "inbox", userId: "user-1", ...sourceOverrides }),
+  );
   await stores.metadata.putArticle(
     makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
   );
@@ -94,6 +96,25 @@ Deno.test("a queued episode is synthesised, stored and marked ready", async () =
 });
 
 Deno.test("the mode chooses the synthesis call and the source voices reach it", async () => {
+  // The source now declares its own narrator. It used to inherit one from the
+  // fixture's DEFAULT_VOICES stamp, so this asserted "Charon" while testing nothing
+  // about a source choosing a voice - the assertion passed because of how the
+  // fixture was built, not because of the behaviour under test (audio-feed-8pt).
+  const { ctx } = await queued({}, { voices: { direct: "Fenrir" } });
+  const seen: Array<{ mode: string; voice?: string }> = [];
+  const spy: Synthesizer = ({ mode, source }) => {
+    seen.push({ mode, voice: source?.voices.direct });
+    return Promise.resolve(fakeAudio());
+  };
+  await runSynthesisBatch(ctx, spy);
+  assertEquals(seen, [{ mode: "direct", voice: "Fenrir" }]);
+});
+
+Deno.test("a source with no chosen voice reaches the synthesizer as unspecified", async () => {
+  // The other half: with the fixture now matching production, this is the shape a
+  // real subscription produces, and the worker must see `undefined` rather than a
+  // value the fixture invented. Resolution is the synthesizer's job (4xt/6ey), not
+  // the fixture's.
   const { ctx } = await queued();
   const seen: Array<{ mode: string; voice?: string }> = [];
   const spy: Synthesizer = ({ mode, source }) => {
@@ -101,7 +122,7 @@ Deno.test("the mode chooses the synthesis call and the source voices reach it", 
     return Promise.resolve(fakeAudio());
   };
   await runSynthesisBatch(ctx, spy);
-  assertEquals(seen, [{ mode: "direct", voice: "Charon" }]);
+  assertEquals(seen, [{ mode: "direct", voice: undefined }]);
 });
 
 Deno.test("a transient failure is retried, and a later attempt wins", async () => {
