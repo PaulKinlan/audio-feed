@@ -175,8 +175,12 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
-// Background Fetch completion is not required for playback (the download is already
-// in cache), but reporting it lets a page show an accurate "downloaded" state.
+// Background Fetch completion. The LISTEN page does not currently start background
+// fetches — the API is exposed in some Chrome builds but registers nothing, so the
+// feature was removed rather than promised (see the 4xb follow-up bead, which carries
+// the measurement). This handler is kept because it is the piece that work needs: a
+// completed background fetch lands in the offline cache, so playback needs no
+// separate code path when the page does start using it.
 self.addEventListener("backgroundfetchsuccess", (event) => {
   event.waitUntil(
     (async () => {

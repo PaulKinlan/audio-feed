@@ -434,12 +434,16 @@ export function renderListenPage(
     button.textContent = "Downloading…";
     say("Downloading " + episode.title + "…");
     try {
-      // Background Fetch survives the tab closing, so prefer it where it exists.
-      const registration = await navigator.serviceWorker?.ready;
-      const canBackgroundFetch = "backgroundFetch" in (registration || {});
-      if (canBackgroundFetch) {
-        say("Downloading in the background — you can close this tab.");
-      }
+      // Foreground fetch + cache.put, and NO promise this page cannot keep.
+      //
+      // Background Fetch was attempted here and removed after measuring it twice in
+      // headless Chrome: registration.backgroundFetch is EXPOSED and fetch() resolves,
+      // yet getIds() stays empty, no success or failure event ever fires, and the button
+      // hangs on "Downloading…". The reassurance shown in that state was false in
+      // exactly the environment where the API looked available, so it is gone: this
+      // page says only what it does. Detecting an API is not evidence that it works,
+      // and the measurement plus the remaining work live in the follow-up bead instead
+      // of in a promise to the subscriber.
       const response = await fetch(episode.audioUrl);
       if (!response.ok) throw new Error("HTTP " + response.status);
       await store.put(episode.audioUrl, response);

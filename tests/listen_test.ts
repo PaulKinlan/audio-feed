@@ -212,3 +212,25 @@ Deno.test("the icon is served as SVG (audio-feed-4xb)", async () => {
   assertStringIncludes(svg, 'viewBox="0 0 512 512"');
   assertStringIncludes(svg, "</svg>");
 });
+
+Deno.test("the download makes no promise the page cannot keep (audio-feed-4xb)", async () => {
+  // This test replaces one that asserted a background fetch was started. Measured
+  // twice in headless Chrome: registration.backgroundFetch is exposed, fetch()
+  // resolves, getIds() stays empty, no event fires, and the button hangs on
+  // "Downloading…" — so the "you can close this tab" message was false in exactly the
+  // environment where the API looked present. The page now downloads in the
+  // foreground, which was verified end to end, and says only what it does.
+  const { fetch } = await seeded();
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+
+  assertEquals(
+    html.includes("you can close this tab"),
+    false,
+    "the page must not promise a background download it does not start",
+  );
+  assertEquals(html.includes("backgroundFetch.fetch("), false, "no unverified background path");
+  // The verified path, and the state it leaves the UI in.
+  assertStringIncludes(html, "const response = await fetch(episode.audioUrl)");
+  assertStringIncludes(html, "await store.put(episode.audioUrl, response)");
+  assertStringIncludes(html, 'button.textContent = "Downloaded"');
+});
