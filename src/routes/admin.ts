@@ -34,27 +34,13 @@
 import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
+import { jsonForScript } from "./html.ts";
 
 export interface AdminPageOptions {
   /** Absolute origin, so the shown feed URL is the one that actually works. */
   publicBaseUrl: string;
   /** Whether ADMIN_TOKEN is configured: without it no action can succeed. */
   adminConfigured: boolean;
-}
-
-/**
- * JSON that is safe inside a `<script>` block.
- *
- * `JSON.stringify` escapes quotes but NOT `<`, so a value containing `</script>`
- * closes the element and everything after it becomes markup. The origin here can
- * be request-derived (a Host header), which makes that an injection path rather
- * than a theoretical one, so `<`, `>` and `&` are escaped as unicode.
- */
-function jsonForScript(value: unknown): string {
-  return JSON.stringify(value)
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/&/g, "\\u0026");
 }
 
 export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOptions): string {
