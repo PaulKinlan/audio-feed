@@ -29,13 +29,7 @@ import { DOMParser } from "npm:linkedom@0.18.12";
 import { type ExtractedArticle, fetchArticle, fetchFeedDocument } from "./url.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
-import {
-  type Article,
-  type AudioMode,
-  DEFAULT_VOICES,
-  type Episode,
-  type Source,
-} from "../types.ts";
+import { type Article, type AudioMode, type Episode, type Source } from "../types.ts";
 
 export interface FeedItem {
   title: string;
@@ -311,7 +305,11 @@ export async function subscribeToFeed(
       }
     })(),
     modes,
-    voices: DEFAULT_VOICES,
+    // No voice stamped at creation (audio-feed-4xt). This used to be
+    // DEFAULT_VOICES, which made every runtime default unreachable: the resolver's
+    // first term was always populated. `{}` means "unspecified" and the synthesizer
+    // resolves source -> user -> DEFAULT_VOICE -> DEFAULT_NARRATION_VOICE.
+    voices: {},
     createdAt: new Date().toISOString(),
   };
   // Validate BEFORE persisting: a user who pastes an article URL or an unreachable

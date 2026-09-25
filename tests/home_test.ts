@@ -112,6 +112,7 @@ Deno.test("interpolated config is escaped", () => {
   const html = renderHomePage({
     publicBaseUrl: `https://x.test/"><script>alert(1)</script>`,
     synthesisConfigured: true,
+    defaultVoice: "Charon",
   });
 
   assert(!html.includes("<script>alert(1)</script>"), "interpolated config must be escaped");
@@ -264,6 +265,7 @@ Deno.test("the homepage renders the RSS subscribe form with secure method and to
   const html = renderHomePage({
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
+    defaultVoice: "Charon",
   });
 
   assertStringIncludes(html, '<form id="subscribe-source" action="/api/sources" method="post">');
