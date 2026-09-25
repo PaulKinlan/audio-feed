@@ -84,8 +84,15 @@ export interface ListPendingResult {
 // Operational stats (audio-feed-ndc)
 // ---------------------------------------------------------------------------
 
+/**
+ * Every background job that records run history. Each keeps its own bounded
+ * history, so the adapters iterate this list; RunKind is derived from it so the
+ * two cannot drift apart (audio-feed-ct1).
+ */
+export const RUN_KINDS = ["feed-poll", "synthesis"] as const;
+
 /** Which background job a run record describes. */
-export type RunKind = "feed-poll" | "synthesis";
+export type RunKind = (typeof RUN_KINDS)[number];
 
 /** How a run was started. `cron` is Deno.cron; `manual` is an admin trigger. */
 export type RunTrigger = "cron" | "manual";
@@ -270,20 +277,48 @@ export interface MetadataStore {
   getDownloadCounts(): Promise<DownloadCounts>;
 
   /**
-   * Append a run to the history, pruning to the newest `RUN_HISTORY_LIMIT`.
+   * Append a run to its job's history, pruning that job to its newest
+   * `RUN_HISTORY_LIMIT`.
    *
    * Bounded on write, deliberately: an unbounded history is the audio-feed-att
    * failure — a scan that is cheap today and a multi-megabyte read later.
+   *
+   * Bounded PER JOB, also deliberately (audio-feed-ct1). One shared cap let the
+   * synthesis cron, which records a run every 2 minutes even when idle, push the
+   * 15-minute feed poll out of the history entirely, and the dashboard then said
+   * a poller that had only stopped had never run.
    */
   recordRun(record: RunRecord): Promise<void>;
-  /** Newest first. */
+  /**
+   * Newest first across every job, ties broken by `compareRunsNewestFirst`. The
+   * default limit returns everything retained.
+   */
   listRuns(limit?: number): Promise<RunRecord[]>;
 
   close(): Promise<void>;
 }
 
-/** How many runs the history keeps. Older records are dropped on write. */
+/** How many runs each job's history keeps. Older records are dropped on write. */
 export const RUN_HISTORY_LIMIT = 50;
+
+/**
+ * Newest first; a same-millisecond tie goes to the lower id.
+ *
+ * Shared by both adapters because merging two jobs' histories makes a tie
+ * reachable, and they used to break it in opposite directions (audio-feed-ct1).
+ * It is the order the KV adapter's descending keys already list in: inverted
+ * time, then the id ascending. An unparseable time sorts as the epoch, as it
+ * does there.
+ */
+export function compareRunsNewestFirst(a: RunRecord, b: RunRecord): number {
+  const time = (r: RunRecord) => {
+    const ms = Date.parse(r.startedAt);
+    return Number.isFinite(ms) ? ms : 0;
+  };
+  const byTime = time(b) - time(a);
+  if (byTime !== 0) return byTime;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Blobs

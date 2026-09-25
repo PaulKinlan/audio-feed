@@ -1029,6 +1029,51 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(all[0]?.id, `r${String(total - 1).padStart(3, "0")}`);
     assertEquals(all.at(-1)?.id, `r${String(total - RUN_HISTORY_LIMIT).padStart(3, "0")}`);
   });
+
+  test("a busy job cannot evict a quiet one's history (audio-feed-ct1)", async (store) => {
+    // The synthesis cron records a run every 2 minutes, idle or not, and the
+    // feed poll one every 15. Under one shared cap the busy job pushed the quiet
+    // one out entirely, and a poller that had only stopped read as one that
+    // never ran. Each job keeps its own newest RUN_HISTORY_LIMIT.
+    await store.recordRun(run({ id: "poll", kind: "feed-poll", startedAt: isoAt(0) }));
+    const busy = RUN_HISTORY_LIMIT + 10;
+    for (let i = 1; i <= busy; i++) {
+      await store.recordRun(
+        run({ id: `s${String(i).padStart(3, "0")}`, kind: "synthesis", startedAt: isoAt(i) }),
+      );
+    }
+
+    const all = await store.listRuns(1_000);
+    assertEquals(
+      all.filter((r) => r.kind === "feed-poll").map((r) => r.id),
+      ["poll"],
+      "the quiet job keeps its history",
+    );
+    assertEquals(
+      all.filter((r) => r.kind === "synthesis").length,
+      RUN_HISTORY_LIMIT,
+      "the busy job is still bounded, on its own",
+    );
+    assertEquals(all[0]?.id, `s${String(busy).padStart(3, "0")}`, "still newest first");
+    assertEquals(all.at(-1)?.id, "poll");
+    assertEquals(
+      (await store.listRuns()).length,
+      RUN_HISTORY_LIMIT + 1,
+      "the default returns every job's history, not one shared window",
+    );
+  });
+
+  test("a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1)", async (store) => {
+    // Merging two jobs' histories makes a tie reachable: both crons can start in
+    // the same millisecond. The two adapters used to break it in opposite
+    // directions. The lower id comes first, everywhere.
+    const at = "2026-09-25T10:00:00.000Z";
+    await store.recordRun(run({ id: "b", kind: "synthesis", startedAt: at }));
+    await store.recordRun(run({ id: "a", kind: "feed-poll", startedAt: at }));
+    await store.recordRun(run({ id: "c", kind: "synthesis", startedAt: at }));
+
+    assertEquals((await store.listRuns()).map((r) => r.id), ["a", "b", "c"]);
+  });
 }
 
 /** Distinct, ordered timestamps for history tests. */

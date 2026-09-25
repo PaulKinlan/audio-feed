@@ -72,6 +72,8 @@ const PAGE_IDS = [
   "statDownloads",
   "statLastPoll",
   "statPollDuration",
+  // audio-feed-ct1: says how many polls the mean actually covers.
+  "statPollNote",
   "statRuns",
   "runsBody",
   "runsCaption",

@@ -39,7 +39,7 @@ import type {
   MetadataStore,
   RunRecord,
 } from "./mod.ts";
-import { RUN_HISTORY_LIMIT } from "./mod.ts";
+import { compareRunsNewestFirst, RUN_HISTORY_LIMIT, RUN_KINDS } from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -623,23 +623,26 @@ export class KvMetadataStore implements MetadataStore {
   }
 
   /**
-   * Newest-first key, then prune past the limit.
+   * Newest-first key under the job's own prefix, then prune that job past the
+   * limit.
    *
    * Bounded on WRITE rather than on read: an unbounded history reads cheaply
    * today and is a multi-megabyte scan a year in, which is the audio-feed-att
    * failure. The prune costs one bounded list per run, and runs are minutes
    * apart.
+   *
+   * Keyed and pruned PER JOB (audio-feed-ct1). Under one shared ["run"] prefix
+   * the synthesis cron's idle ticks evicted every feed poll within about 100
+   * minutes.
    */
   async recordRun(record: RunRecord): Promise<void> {
     try {
-      await this.#kv.set(
-        ["run", descendingKey(record.startedAt, record.id)],
-        record,
-      );
+      const job = ["run", record.kind];
+      await this.#kv.set([...job, descendingKey(record.startedAt, record.id)], record);
       // Drop anything past the limit. `list` is ascending over descending keys,
       // so everything after the first RUN_HISTORY_LIMIT entries is older.
       let seen = 0;
-      for await (const entry of this.#kv.list<RunRecord>({ prefix: ["run"] })) {
+      for await (const entry of this.#kv.list<RunRecord>({ prefix: job })) {
         seen++;
         if (seen > RUN_HISTORY_LIMIT) await this.#kv.delete(entry.key);
       }
@@ -648,14 +651,15 @@ export class KvMetadataStore implements MetadataStore {
     }
   }
 
-  async listRuns(limit = RUN_HISTORY_LIMIT): Promise<RunRecord[]> {
+  /** Every job's newest-first history, merged. No job can contribute more than `limit`. */
+  async listRuns(limit = RUN_HISTORY_LIMIT * RUN_KINDS.length): Promise<RunRecord[]> {
     const out: RunRecord[] = [];
-    for await (
-      const entry of this.#kv.list<RunRecord>({ prefix: ["run"] }, { limit })
-    ) {
-      if (entry.value) out.push(entry.value);
+    for (const kind of RUN_KINDS) {
+      for await (const entry of this.#kv.list<RunRecord>({ prefix: ["run", kind] }, { limit })) {
+        if (entry.value) out.push(entry.value);
+      }
     }
-    return out;
+    return out.sort(compareRunsNewestFirst).slice(0, limit);
   }
 
   close(): Promise<void> {

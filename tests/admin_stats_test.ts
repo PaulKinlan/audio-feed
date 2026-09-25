@@ -162,6 +162,84 @@ Deno.test("manual and cron runs are distinguishable (audio-feed-ndc)", async () 
   ]]);
 });
 
+// -- one job must not starve another (audio-feed-ct1) ---------------------
+
+/**
+ * Production cadence from src/cron.ts: the feed poll every 15 minutes, the
+ * synthesis cron every 2, and the synthesis cron records a run on every tick,
+ * idle or not. At 34 rows an hour a single 50-row history spans about 88
+ * minutes, which is the whole of audio-feed-ct1.
+ */
+async function seedCadence(stores: Stores, minutes: number, pollUntilMinute = minutes) {
+  const t0 = Date.parse("2026-09-25T00:00:00.000Z");
+  const iso = (m: number, ms = 0) => new Date(t0 + m * 60_000 + ms).toISOString();
+  for (let m = 0; m < minutes; m++) {
+    if (m % 15 === 0 && m < pollUntilMinute) {
+      await stores.metadata.recordRun(
+        run({ id: `p${m}`, startedAt: iso(m), durationMs: 1000 + 2 * m }),
+      );
+    }
+    if (m % 2 === 0) {
+      // +250 ms, so a poll and a tick in the same minute never tie.
+      await stores.metadata.recordRun(
+        run({ id: `s${m}`, kind: "synthesis", startedAt: iso(m, 250), durationMs: 30 }),
+      );
+    }
+  }
+}
+
+Deno.test("poll figures survive a busy synthesis cron (audio-feed-ct1)", async () => {
+  // Three healthy hours: 12 polls and 90 idle synthesis ticks. Under one shared
+  // 50-row cap only the newest 5 polls survived, so the card labelled "Mean of
+  // the last 10 polls" averaged 5.
+  const { fetch, stores } = app();
+  await seedCadence(stores, 180);
+
+  const body = await (await fetch(statsRequest())).json();
+  assertEquals(body.feedProcessing.sampleSize, 10, "the mean covers the ten polls it claims");
+  // Polls at minutes 30..165, duration 1000 + 2m: mean 1195.
+  assertEquals(body.feedProcessing.averageDurationMs, 1195);
+  assertEquals(body.feedProcessing.lastPolledAt, "2026-09-25T02:45:00.000Z");
+  assertEquals(body.runs.filter((r: RunRecord) => r.kind === "feed-poll").length, 12);
+  assertEquals(body.runs.filter((r: RunRecord) => r.kind === "synthesis").length, 50);
+});
+
+Deno.test("a stopped poller still shows its last run, not never (audio-feed-ct1)", async () => {
+  // The outage this card exists for: the poll cron's last run was at 00:45 and
+  // synthesis kept ticking to 02:58. Under one shared cap that poll was evicted
+  // about 100 minutes later, and the card said the poller had NEVER run.
+  const { fetch, stores } = app();
+  await seedCadence(stores, 180, 60);
+
+  const body = await (await fetch(statsRequest())).json();
+  assertEquals(body.feedProcessing.lastPolledAt, "2026-09-25T00:45:00.000Z");
+  assertEquals(body.feedProcessing.sampleSize, 4);
+});
+
+Deno.test("the runs table shows the newest runs of EACH job (audio-feed-ct1)", async () => {
+  // Synthesis ticks every 2 minutes and the poll every 15, so the newest 20
+  // runs overall were 18 idle ticks and 2 polls. The table takes the newest 10
+  // of each job instead.
+  const { fetch, stores } = app();
+  await seedCadence(stores, 180);
+  const stats = await (await fetch(statsRequest())).json();
+
+  const harness = await runAdminScript({
+    persistedToken: "admin-secret",
+    respond: (method, path) => {
+      if (method === "GET" && path === "/api/admin/stats") return stats;
+      if (method === "GET" && path === "/api/admin/users") return { users: [] };
+      return { ok: true };
+    },
+  });
+  await harness.flush();
+
+  const jobs = harness.byId("runsBody").children.map((tr) => tr.children[1]?.textContent);
+  assertEquals(jobs.filter((j) => j === "Feed poll").length, 10);
+  assertEquals(jobs.filter((j) => j === "Synthesis").length, 10);
+  assertEquals(harness.byId("statPollNote").textContent, "Mean of the last 10 polls.");
+});
+
 // -- token persistence ----------------------------------------------------
 
 Deno.test("the remembered token is found on a fresh load (audio-feed-ndc)", async () => {

@@ -16,12 +16,14 @@ import {
   type BlobStore,
   type ByteRange,
   collect,
+  compareRunsNewestFirst,
   type DownloadCounts,
   type EpisodeClaim,
   type EpisodeQuery,
   type MetadataStore,
   resolveRange,
   RUN_HISTORY_LIMIT,
+  RUN_KINDS,
   type RunRecord,
   streamOf,
 } from "./mod.ts";
@@ -457,18 +459,19 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve({ total: this.#downloadTotal, perUser });
   }
 
-  /** Newest first, bounded on write — the same contract the KV adapter honours. */
+  /** Newest first, bounded on write per job — the same contract the KV adapter honours. */
   recordRun(record: RunRecord): Promise<void> {
     this.#runs.push(structuredClone(record));
-    this.#runs.sort((a, b) => {
-      if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? 1 : -1;
-      return b.id.localeCompare(a.id);
-    });
-    if (this.#runs.length > RUN_HISTORY_LIMIT) this.#runs.length = RUN_HISTORY_LIMIT;
+    this.#runs.sort(compareRunsNewestFirst);
+    // Per job (audio-feed-ct1): a busy job must not evict a quiet one's history.
+    const sameJob = this.#runs.filter((r) => r.kind === record.kind);
+    for (const stale of sameJob.slice(RUN_HISTORY_LIMIT)) {
+      this.#runs.splice(this.#runs.indexOf(stale), 1);
+    }
     return Promise.resolve();
   }
 
-  listRuns(limit = RUN_HISTORY_LIMIT): Promise<RunRecord[]> {
+  listRuns(limit = RUN_HISTORY_LIMIT * RUN_KINDS.length): Promise<RunRecord[]> {
     return Promise.resolve(this.#runs.slice(0, limit).map((r) => structuredClone(r)));
   }
 

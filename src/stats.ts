@@ -12,7 +12,10 @@
 import type { AppContext } from "./app.ts";
 import type { RunKind, RunRecord, RunTrigger } from "./storage/mod.ts";
 
-/** Short, sortable, collision-resistant enough for a 50-entry history. */
+/**
+ * Short and collision-resistant enough for a job's 50-entry history. Not
+ * time-ordered: runs sort by `startedAt`, and the id only breaks a tie.
+ */
 function newRunId(): string {
   return crypto.randomUUID().slice(0, 8);
 }

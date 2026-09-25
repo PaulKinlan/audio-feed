@@ -1077,9 +1077,9 @@ export function createAdminRotateUserTokenHandler(
 /**
  * `GET /api/admin/stats` — operational metrics for the dashboard (audio-feed-ndc).
  *
- * Every number here is bounded by construction: the run history is capped at
- * write, and the per-user download list only contains users who have had a
- * request. No unbounded scan, which is the audio-feed-att failure.
+ * Every number here is bounded by construction: each job's run history is
+ * capped at write, and the per-user download list only contains users who have
+ * had a request. No unbounded scan, which is the audio-feed-att failure.
  */
 export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStats"] {
   return async ({ req }) => {
@@ -1097,7 +1097,8 @@ export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStat
 
     // Feed processing times come from the poll runs we recorded, not from a
     // separate timer: one source of truth means the dashboard cannot disagree
-    // with the history it is displaying.
+    // with the history it is displaying. `runs` holds each job's own history,
+    // so the synthesis cron's ticks cannot crowd the polls out (audio-feed-ct1).
     const pollRuns = runs.filter((r) => r.kind === "feed-poll");
     const lastPoll = pollRuns[0];
     const recent = pollRuns.slice(0, 10);

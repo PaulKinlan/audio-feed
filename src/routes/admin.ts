@@ -41,6 +41,7 @@ import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { jsonForScript } from "./html.ts";
+import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
 export interface AdminPageOptions {
   /** Absolute origin, so the shown feed URL is the one that actually works. */
@@ -296,12 +297,12 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       <div class="stat">
         <dt>Avg poll time</dt>
         <dd id="statPollDuration">—</dd>
-        <p class="stat-note">Mean of the last 10 polls.</p>
+        <p class="stat-note" id="statPollNote">Mean of recent polls.</p>
       </div>
       <div class="stat">
         <dt>Runs recorded</dt>
         <dd id="statRuns">—</dd>
-        <p class="stat-note">Newest 50 kept.</p>
+        <p class="stat-note">Newest ${RUN_HISTORY_LIMIT} of each job kept.</p>
       </div>
     </dl>
 
@@ -474,6 +475,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   const statDownloads = document.getElementById("statDownloads");
   const statLastPoll = document.getElementById("statLastPoll");
   const statPollDuration = document.getElementById("statPollDuration");
+  const statPollNote = document.getElementById("statPollNote");
   const statRuns = document.getElementById("statRuns");
   const runsBody = document.getElementById("runsBody");
   const runsCaption = document.getElementById("runsCaption");
@@ -723,13 +725,29 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       statPollDuration.textContent = s.feedProcessing.averageDurationMs === null
         ? "—"
         : s.feedProcessing.averageDurationMs + "ms";
+      // Say how many polls the mean covers. "The last 10" is only true once ten
+      // polls have run (audio-feed-ct1).
+      const polls = s.feedProcessing.sampleSize;
+      statPollNote.textContent = polls === 0
+        ? "No polls recorded yet."
+        : "Mean of the last " + polls + " poll" + (polls === 1 ? "" : "s") + ".";
       statRuns.textContent = String(s.runs.length);
 
+      // The newest 10 of EACH job, merged by time. Synthesis ticks every 2
+      // minutes and the poll every 15, so the newest 20 overall were almost all
+      // idle synthesis ticks (audio-feed-ct1). s.runs is already newest first.
+      const perJob = new Map();
+      const shown = s.runs.filter((run) => {
+        const seen = perJob.get(run.kind) || 0;
+        perJob.set(run.kind, seen + 1);
+        return seen < 10;
+      });
       runsBody.replaceChildren();
-      for (const run of s.runs.slice(0, 20)) runsBody.appendChild(runRow(run));
+      for (const run of shown) runsBody.appendChild(runRow(run));
       runsCaption.textContent = s.runs.length === 0
         ? "No background runs recorded yet."
-        : "Showing " + Math.min(20, s.runs.length) + " of " + s.runs.length + " recent runs.";
+        : "Showing the newest 10 of each job: " + shown.length + " of " + s.runs.length +
+          " runs kept.";
 
       downloadsBody.replaceChildren();
       for (const d of s.downloads.perUser.slice(0, 20)) {
