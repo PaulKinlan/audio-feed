@@ -14,7 +14,8 @@ import { DEFAULT_NARRATION_VOICE } from "./tts/gemini.ts";
 export type AudioMode = "direct" | "deepdive";
 
 /** How to handle code blocks in synthesized speech (audio-feed-bdo). */
-export type CodeHandling = "skip" | "explain";
+export const CODE_HANDLINGS = ["skip", "explain"] as const;
+export type CodeHandling = typeof CODE_HANDLINGS[number];
 export const DEFAULT_CODE_HANDLING: CodeHandling = "skip";
 
 export const AUDIO_MODES: readonly AudioMode[] = ["direct", "deepdive"] as const;
@@ -102,10 +103,14 @@ export function redactUser(user: User): PublicUser {
 /** One admin decision. Written atomically with the user it decided. */
 export interface ApprovalRecord {
   userId: string;
-  action: UserStatus;
+  /** A status decision, or `role` for an admin grant or revoke (audio-feed-8fc). */
+  action: UserStatus | "role";
   adminId: string;
   at: string;
   reason?: string;
+  /** Set on `role` records only. */
+  fromRole?: "admin" | "user";
+  toRole?: "admin" | "user";
 }
 
 /**
@@ -364,4 +369,62 @@ export function audioBlobKey(
 ) {
   const name = revision ? `${episode.id}-${revision}` : episode.id;
   return `audio/${episode.userId}/${episode.mode}/${name}.${ext}`;
+}
+
+// ---------------------------------------------------------------------------
+// Accounts: sessions, passkeys, setup links (audio-feed-8fc)
+// ---------------------------------------------------------------------------
+
+/**
+ * A signed-in browser. Keyed by the SHA-256 of the cookie value, never the value
+ * itself: a leaked store dump must not be a list of live sessions.
+ */
+export interface Session {
+  /** Hex SHA-256 of the cookie secret. */
+  idHash: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** A registered WebAuthn credential. Public material only. */
+export interface PasskeyCredential {
+  /** base64url credential id, as the authenticator reports it. */
+  id: string;
+  userId: string;
+  /** base64url COSE public key. */
+  publicKey: string;
+  counter: number;
+  transports?: string[];
+  /** A human label, e.g. "Added 2026-09-26". */
+  name: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+/**
+ * A one-time enrolment or recovery link issued by an admin. Stored by the hash of
+ * its token; the token itself exists only in the URL the admin passes on.
+ */
+export interface SetupLink {
+  tokenHash: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+  issuedBy: string;
+}
+
+/**
+ * A WebAuthn challenge awaiting its response. Single use and short-lived.
+ * `purpose` binds it to the ceremony that minted it, so a sign-in challenge cannot
+ * complete a registration.
+ */
+export interface AuthChallenge {
+  challenge: string;
+  purpose: "register" | "authenticate";
+  /** Registration only: who the new credential belongs to. */
+  userId?: string;
+  /** Registration by setup link: the link consumed when the ceremony completes. */
+  setupTokenHash?: string;
+  expiresAt: string;
 }

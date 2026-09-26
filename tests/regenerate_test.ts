@@ -107,13 +107,13 @@ const post = (path: string, body?: unknown, headers: Record<string, string> = AD
 // promptVersion
 // ---------------------------------------------------------------------------
 
-Deno.test("promptVersion is a short, stable hash of the prompt builders and the model (audio-feed-8oz)", () => {
-  assertEquals(PROMPT_VERSION, computePromptVersion());
+Deno.test("promptVersion is a short, stable hash of the prompt builders and the model (audio-feed-8oz)", async () => {
+  assertEquals(PROMPT_VERSION, await computePromptVersion());
   assert(/^[0-9a-f]{12}$/.test(PROMPT_VERSION), `unexpected shape: ${PROMPT_VERSION}`);
-  assertNotEquals(computePromptVersion({ model: "some-other-tts" }), PROMPT_VERSION);
+  assertNotEquals(await computePromptVersion({ model: "some-other-tts" }), PROMPT_VERSION);
   // A change to prompt-building code changes it without anyone bumping a constant.
   assertNotEquals(
-    computePromptVersion({
+    await computePromptVersion({
       formatNarrationPrompt: (input) => `Read this calmly. ${formatNarrationPrompt(input)}`,
     }),
     PROMPT_VERSION,

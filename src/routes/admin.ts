@@ -40,18 +40,28 @@
 import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
-import { jsonForScript } from "./html.ts";
+import { esc, jsonForScript } from "./html.ts";
+import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
 export interface AdminPageOptions {
   /** Absolute origin, so the shown feed URL is the one that actually works. */
   publicBaseUrl: string;
-  /** Whether ADMIN_TOKEN is configured: without it no action can succeed. */
+  /** Whether ADMIN_TOKEN is configured: the break-glass path needs it. */
   adminConfigured: boolean;
+  /**
+   * The signed-in admin (audio-feed-8fc). Present means the console runs on the
+   * session cookie and the token box is a fallback behind a toggle.
+   */
+  viewer?: Viewer | null;
 }
 
-export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOptions): string {
-  return `<!doctype html>
+export function renderAdminPage(
+  { publicBaseUrl, adminConfigured, viewer = null }: AdminPageOptions,
+): string {
+  const signedIn = Boolean(viewer?.isAdmin);
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -60,21 +70,8 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📻</text></svg>">
 <style>
-  /* ---- tokens (identical to src/routes/home.ts) ------------------------- */
+  /* Colour and type come from the shared shell (src/routes/shell.ts). */
   :root {
-    color-scheme: light dark;
-
-    --bg: #fbfaf9;
-    --surface: #ffffff;
-    --surface-sunken: #f2f0ee;
-    --text: #1b1a18;
-    --text-muted: #55514c;
-    --border: #ddd8d2;
-    --accent: #7a3e12;
-    --accent-text: #ffffff;
-    --danger: #a3261a;
-    --ok: #1e6b3a;
-
     --space-1: 0.25rem;
     --space-2: 0.5rem;
     --space-3: 0.75rem;
@@ -82,42 +79,23 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     --space-6: 1.5rem;
     --space-8: 2rem;
     --space-12: 3rem;
-
     --radius: 10px;
-    --measure: 68ch;
-    --page: 54rem;
-
-    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #171614;
-      --surface: #201e1c;
-      --surface-sunken: #2a2724;
-      --text: #f2efec;
-      --text-muted: #b3aca4;
-      --border: #3a3633;
-      --accent: #e8a866;
-      --accent-text: #201e1c;
-      --danger: #f08a7e;
-      --ok: #7fc99a;
-    }
   }
 
   *, *::before, *::after { box-sizing: border-box; }
 
-  body {
-    margin: 0;
-    padding: var(--space-8) var(--space-4) var(--space-12);
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font);
-    line-height: 1.6;
+  .admin-page { max-inline-size: var(--page); margin-inline: auto;
+    padding: var(--space-8) var(--space-4) var(--space-12); }
+  .signin-card .row { margin-block-start: var(--space-3); }
+  .signin-card a.primary {
+    display: inline-block; text-decoration: none; font-weight: 600;
+    padding: 0.55rem 1.1rem; border-radius: 999px;
+    background: var(--accent); color: var(--accent-ink);
   }
-
-  main { max-inline-size: var(--page); margin-inline: auto; }
+  details.token-toggle { margin-block-start: var(--space-4); }
+  details.token-toggle > summary { cursor: pointer; color: var(--text-muted); }
+  details.token-toggle[open] > summary { margin-block-end: var(--space-3); }
+  #setupLinkBox { margin-block-start: var(--space-4); }
 
   h1 { font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem); line-height: 1.2; margin: 0 0 var(--space-2); }
   h2 { font-size: 1.15rem; margin: 0 0 var(--space-3); }
@@ -205,6 +183,9 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   th, td { text-align: start; padding: var(--space-2) var(--space-3); border-block-end: 1px solid var(--border); vertical-align: top; }
   th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
   td.actions { white-space: nowrap; }
+  /* Five columns at 390px squeezed Result to one character per line: hold a
+     readable width and let .table-wrap scroll instead. */
+  table.runs { min-inline-size: 40rem; }
 
   .status { font-size: 0.8rem; font-weight: 600; padding: 0.1rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); }
   .status[data-status="approved"] { color: var(--ok); border-color: var(--ok); }
@@ -230,7 +211,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 </style>
 </head>
 <body>
-<main>
+<div class="admin-page">
   <h1>Audio Feed admin</h1>
   <p class="muted">
     Create subscribers, approve them, and hand out feed URLs. Subscribers cannot
@@ -239,7 +220,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   </p>
 
   ${
-    adminConfigured ? "" : `<div class="card" role="alert">
+    adminConfigured || signedIn ? "" : `<div class="card" role="alert">
     <h2>Admin token not configured</h2>
     <p>
       This server has no <code class="mono">ADMIN_TOKEN</code> set, so every
@@ -250,31 +231,41 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   </div>`
   }
 
-  <section class="card" aria-labelledby="auth-h">
-    <h2 id="auth-h">1. Admin token</h2>
-    <p class="muted" id="auth-help">
-      Sent as an <code class="mono">x-admin-token</code> request header, never in
-      the URL. Remembered on this device it survives a browser restart; otherwise
-      it lives in this tab only and closing the tab forgets it.
-    </p>
-    <div class="field">
-      <label for="adminToken">Admin token
-        <span class="hint">The value of ADMIN_TOKEN on the server.</span>
-      </label>
-      <input id="adminToken" type="password" autocomplete="off" spellcheck="false"
-             aria-describedby="auth-help" />
-    </div>
-    <div class="check">
-      <input type="checkbox" id="rememberToken" checked />
-      <label for="rememberToken">Remember token on this device
-        <span class="hint">Survives closing the browser. Uncheck on a shared machine.</span>
-      </label>
-    </div>
-    <div class="row">
-      <button type="button" id="saveToken">Save token</button>
-      <button type="button" id="loadUsers" class="secondary" disabled>Load subscribers</button>
-    </div>
-    <p class="feedback" id="authFeedback" role="status" aria-live="polite"></p>
+  <section class="card signin-card" aria-labelledby="auth-h">
+    ${
+    signedIn
+      ? `<h2 id="auth-h">Signed in</h2>
+    <p class="muted">You're signed in as <strong>${esc(viewer!.displayName)}</strong>
+      (${esc(viewer!.email)}) with your passkey. Everything below runs on that session.</p>`
+      : `<h2 id="auth-h">Sign in to administer</h2>
+    <p class="muted">Admins sign in with a passkey, like everyone else.</p>
+    <div class="row"><a class="primary" href="/login?next=%2Fadmin">Sign in with a passkey</a></div>`
+  }
+    <details class="token-toggle">
+      <summary>Use admin token instead</summary>
+      <p class="muted" id="auth-help">
+        The break-glass path. Sent as an <code class="mono">x-admin-token</code> request header,
+        never in the URL. Remembered on this device it survives a browser restart;
+        otherwise it lives in this tab only and closing the tab forgets it.
+      </p>
+      <div class="field">
+        <label for="adminToken">Admin token
+          <span class="hint">The value of ADMIN_TOKEN on the server.</span>
+        </label>
+        <input id="adminToken" type="password" autocomplete="off" spellcheck="false"
+               aria-describedby="auth-help" />
+      </div>
+      <div class="check">
+        <input type="checkbox" id="rememberToken" checked />
+        <label for="rememberToken">Remember token on this device
+          <span class="hint">Survives closing the browser. Uncheck on a shared machine.</span>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" id="saveToken">Save token</button>
+      </div>
+      <p class="feedback" id="authFeedback" role="status" aria-live="polite"></p>
+    </details>
   </section>
 
   <section class="card" aria-labelledby="stats-h">
@@ -308,7 +299,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 
     <h3>Background runs</h3>
     <div class="table-wrap">
-      <table>
+      <table class="runs">
         <caption id="runsCaption">Not loaded.</caption>
         <thead>
           <tr><th>When</th><th>Job</th><th>Started by</th><th>Took</th><th>Result</th></tr>
@@ -359,6 +350,12 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
           <option value="explain">Summarize / explain code</option>
         </select>
       </div>
+      <div class="check">
+        <input type="checkbox" id="newIsAdmin" />
+        <label for="newIsAdmin">Make this person an admin
+          <span class="hint">They can then sign in here and manage everyone.</span>
+        </label>
+      </div>
       <div class="row">
         <button type="submit" id="createUser">Create and approve</button>
       </div>
@@ -368,7 +365,10 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   </section>
 
   <section class="card" aria-labelledby="users-h">
-    <h2 id="users-h">3. Subscribers</h2>
+    <div class="card-head">
+      <h2 id="users-h">3. Subscribers</h2>
+      <button type="button" id="loadUsers" class="secondary" disabled>Load subscribers</button>
+    </div>
     <p class="muted" id="users-help">
       Approve to let a subscriber generate audio; suspend to stop it immediately.
       A suspended subscriber's feed stops serving as well.
@@ -388,6 +388,15 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       </table>
     </div>
     <p class="feedback" id="usersFeedback" role="status" aria-live="polite"></p>
+    <div id="setupLinkBox" class="created" hidden>
+      <label for="setupLinkUrl"><strong>Setup link</strong>
+        <span class="hint" id="setupLinkNote"></span>
+      </label>
+      <div class="copy-row">
+        <input type="text" id="setupLinkUrl" readonly />
+        <button type="button" id="copySetupLink">Copy link</button>
+      </div>
+    </div>
   </section>
 
   <section class="card" aria-labelledby="triggers-h">
@@ -495,12 +504,14 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       <p class="feedback" id="addSourceFeedback" role="status" aria-live="polite"></p>
     </form>
   </section>
-</main>
+</div>
 
 <script>
 (() => {
   "use strict";
   const ORIGIN = ${jsonForScript(publicBaseUrl)};
+  // audio-feed-8fc: a signed-in admin's requests carry the session cookie.
+  const SIGNED_IN = ${signedIn ? "true" : "false"};
   const tokenInput = document.getElementById("adminToken");
   const authFeedback = document.getElementById("authFeedback");
   const usersFeedback = document.getElementById("usersFeedback");
@@ -557,6 +568,11 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     // Auto-load on refresh (audio-feed-e3n), and the dashboard with it (ndc).
     loadUsers();
     loadStats();
+  } else if (SIGNED_IN) {
+    enableTokenActions();
+    say(authFeedback, "ok", "Signed in with your passkey; no token needed.");
+    loadUsers();
+    loadStats();
   } else {
     say(authFeedback, "error", "No token yet. Paste it and save.");
   }
@@ -570,6 +586,11 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 
   function token() {
     return tokenInput.value.trim();
+  }
+
+  /** A session or a token: either lets the console load. */
+  function authorized() {
+    return SIGNED_IN || Boolean(token());
   }
 
   /** Every admin call goes through here, so the header is impossible to forget. */
@@ -687,6 +708,53 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     }
   }
 
+  const setupLinkBox = document.getElementById("setupLinkBox");
+  const setupLinkUrl = document.getElementById("setupLinkUrl");
+  const setupLinkNote = document.getElementById("setupLinkNote");
+
+  /** One-time passkey setup link. Shown once; the server keeps only its hash. */
+  async function issueSetupLink(user, button) {
+    button.disabled = true;
+    try {
+      const res = await api("/api/admin/users/" + encodeURIComponent(user.id) + "/setup-link", {
+        method: "POST",
+      });
+      setupLinkUrl.value = res.url;
+      setupLinkNote.textContent = "For " + user.email + ". Works once, until " +
+        new Date(res.expiresAt).toLocaleDateString() + ". Send it privately.";
+      setupLinkBox.hidden = false;
+      setupLinkUrl.focus();
+      setupLinkUrl.select();
+      say(usersFeedback, "ok", "Setup link ready for " + user.email + ".");
+    } catch (error) {
+      say(usersFeedback, "error", String(error.message || error));
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  document.getElementById("copySetupLink").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(setupLinkUrl.value);
+    say(usersFeedback, "ok", "Setup link copied.");
+  });
+
+  async function setRole(user, isAdmin, button) {
+    if (!isAdmin && !confirm("Remove admin access from " + user.email + "?")) return;
+    button.disabled = true;
+    try {
+      await api("/api/admin/users/" + encodeURIComponent(user.id) + "/role", {
+        method: "POST",
+        body: JSON.stringify({ isAdmin }),
+      });
+      say(usersFeedback, "ok", user.email + (isAdmin ? " is now an admin." : " is no longer an admin."));
+      await loadUsers();
+    } catch (error) {
+      say(usersFeedback, "error", String(error.message || error));
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   function row(user) {
     const tr = document.createElement("tr");
     tr.appendChild(cell(user.email));
@@ -721,6 +789,23 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       suspend.addEventListener("click", () => act(user.id, "suspend", suspend));
       actions.appendChild(suspend);
     }
+
+    // audio-feed-8fc: enrolment/recovery links and admin rights.
+    const setup = document.createElement("button");
+    setup.type = "button";
+    setup.className = "secondary";
+    setup.textContent = "Setup link";
+    setup.setAttribute("aria-label", "Setup link for " + user.email);
+    setup.addEventListener("click", () => issueSetupLink(user, setup));
+    actions.appendChild(setup);
+
+    const role = document.createElement("button");
+    role.type = "button";
+    role.className = "secondary";
+    role.textContent = user.isAdmin ? "Remove admin" : "Make admin";
+    role.setAttribute("aria-label", role.textContent + ": " + user.email);
+    role.addEventListener("click", () => setRole(user, !user.isAdmin, role));
+    actions.appendChild(role);
     tr.appendChild(actions);
     return tr;
   }
@@ -759,7 +844,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   }
 
   async function loadStats() {
-    if (!token()) return;
+    if (!authorized()) return;
     if (refreshStatsBtn) refreshStatsBtn.disabled = true;
     try {
       const s = await api("/api/admin/stats");
@@ -815,7 +900,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
   refreshStatsBtn?.addEventListener("click", loadStats);
 
   async function loadUsers() {
-    if (!token()) return;
+    if (!authorized()) return;
     loadUsersBtn.disabled = true;
     try {
       const body = await api("/api/admin/users");
@@ -926,6 +1011,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
           email,
           displayName: displayName || undefined,
           feedUrl: feedUrl || undefined,
+          isAdmin: document.getElementById("newIsAdmin").checked || undefined,
           codeHandling: feedUrl ? codeHandling : undefined,
         }),
       });
@@ -1281,27 +1367,70 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
 </body>
 </html>
 `;
+  // Rendered as one document above so the markup reads top to bottom; the shell
+  // supplies the header, footer and tokens around its three parts.
+  const css = html.slice(html.indexOf("<style>") + 7, html.indexOf("</style>"));
+  const main = html.slice(html.indexOf("<body>") + 6, html.indexOf("<script>")).trim();
+  const script = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")).trim();
+  return renderShell({
+    title: "Admin — Audio Feed",
+    viewer,
+    current: "admin",
+    css,
+    head: `<meta name="robots" content="noindex, nofollow">`,
+    main,
+    script,
+  });
 }
 
-/** `GET /admin` — the admin console shell (public; all data is token-gated). */
-export function handleAdmin({ ctx, req }: RouteContext<AppContext>): Response {
+/**
+ * `GET /admin` — the admin console (audio-feed-8fc).
+ *
+ * A signed-in admin gets the console on their session. A signed-in non-admin
+ * gets 403: they are somebody, just not an admin. A visitor gets the sign-in
+ * prompt, with the break-glass token box behind a toggle. All data still comes
+ * from /api/admin/*, which is gated independently of this page.
+ */
+export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promise<Response> {
   const origin = resolveOrigin(ctx.config, req);
+  const user = await sessionUser(ctx.stores.metadata, req);
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    // `no-store`: this document is the one place a feed token is displayed, and
+    // it prompts for the admin token. It must never sit in a cache.
+    "cache-control": "no-store",
+    ...(origin.explicit ? {} : { vary: "Host" }),
+    // Not a security boundary by itself, but it keeps the console out of
+    // indexes and stops credentials leaking through referrers.
+    "referrer-policy": "no-referrer",
+  };
+
+  if (user && !isActiveAdmin(user)) {
+    const main = `<div class="wrap narrow">
+  <p class="eyebrow">Admin</p>
+  <h1>This page is for admins</h1>
+  <p class="lede">You're signed in as <strong>${esc(user.email)}</strong>, which is not an
+  admin account. If you expected otherwise, ask an admin to grant access, or sign out
+  and sign in with the right passkey.</p>
+  <div class="actions"><a class="btn" href="/account">Go to your account</a></div>
+</div>`;
+    return new Response(
+      renderShell({
+        title: "Admin — Audio Feed",
+        viewer: viewerOf(user),
+        current: "admin",
+        kit: true,
+        head: `<meta name="robots" content="noindex, nofollow">`,
+        main,
+      }),
+      { status: 403, headers },
+    );
+  }
+
   const html = renderAdminPage({
     publicBaseUrl: origin.baseUrl,
     adminConfigured: Boolean(ctx.config.adminToken),
+    viewer: viewerOf(user),
   });
-
-  return new Response(html, {
-    status: 200,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      // `no-store`: this document is the one place a feed token is displayed, and
-      // it prompts for the admin token. It must never sit in a cache.
-      "cache-control": "no-store",
-      ...(origin.explicit ? {} : { vary: "Host" }),
-      // Not a security boundary by itself, but it keeps the console out of
-      // indexes and stops credentials leaking through referrers.
-      "referrer-policy": "no-referrer",
-    },
-  });
+  return new Response(html, { status: 200, headers });
 }

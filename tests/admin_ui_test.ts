@@ -67,6 +67,14 @@ Deno.test("the admin page renders the console with accessible controls", () => {
   assertEquals(html.includes(ADMIN), false, "the server token must never be in the page");
 });
 
+Deno.test("the background-runs table keeps a readable width on a phone (audio-feed-8fc)", () => {
+  const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
+  // At 390px an unconstrained five-column table squeezed Result to one
+  // character per line; the table now holds a minimum width and scrolls.
+  assertStringIncludes(html, '<table class="runs">');
+  assertStringIncludes(html, "table.runs { min-inline-size: 40rem; }");
+});
+
 Deno.test("GET /admin serves the console and is never cached", async () => {
   const { fetch } = app();
   const res = await fetch(req("/admin"));

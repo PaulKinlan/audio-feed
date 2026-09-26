@@ -57,6 +57,8 @@ import {
   UnknownUserError,
 } from "./auth/users.ts";
 import { INBOX_SOURCE_ID, isAudioMode, isSynthesisAuthorized, type User } from "./types.ts";
+import { isActiveAdmin, issueSetupLink, sameOrigin, sessionUser } from "./auth/sessions.ts";
+import { createAccountHandlers } from "./routes/account_api.ts";
 import { isOutdated, PROMPT_VERSION } from "./tts/prompt_version.ts";
 import type { EpisodeQuery, MetadataStore } from "./storage/mod.ts";
 import type { Episode } from "./types.ts";
@@ -457,7 +459,18 @@ export function createIngestHandler(
     // Identity is the feed token, the same capability the feed routes use.
     authorize: async (request) => {
       const token = presentedToken(request);
-      if (!token) return forbidden("A feed token is required (x-feed-token).");
+      if (!token) {
+        // audio-feed-8fc: a signed-in browser may send without pasting its token,
+        // but a cookie is ambient, so it only counts from this origin.
+        const signedIn = await sessionUser(ctx.stores.metadata, request);
+        if (!signedIn) return forbidden("A feed token is required (x-feed-token).");
+        if (!sameOrigin(request, resolveOrigin(ctx.config, request).baseUrl)) {
+          return forbidden("Cross-origin request refused.");
+        }
+        return signedIn.status === "approved"
+          ? signedIn
+          : forbidden("An approved user is required.");
+      }
       const user = await loadUserByFeedToken(ctx, token);
       if (!user) return forbidden("Unknown feed token.");
       try {
@@ -539,17 +552,33 @@ export function createIngestHandler(
  * exists to prevent (audio-feed-z2s).
  */
 async function adminGate(ctx: AppContext, req: Request): Promise<Response | null> {
+  const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
+    ? req.headers.get("authorization")!.slice(7).trim()
+    : null;
+  const presented = req.headers.get("x-admin-token") ?? bearer;
+
+  // audio-feed-8fc: an admin SESSION is the normal way in. A presented token wins
+  // when there is one, so the break-glass path behaves exactly as before.
+  if (!presented) {
+    const user = await sessionUser(ctx.stores.metadata, req);
+    if (user) {
+      if (!isActiveAdmin(user)) return forbidden("Admin access required.");
+      const safe = req.method === "GET" || req.method === "HEAD";
+      if (!safe && !sameOrigin(req, resolveOrigin(ctx.config, req).baseUrl)) {
+        return forbidden("Cross-origin request refused.");
+      }
+      return null;
+    }
+  }
+
   const expected = ctx.config.adminToken;
   if (!expected) {
     // Fail closed and say why: an unconfigured server must not have open admin
     // endpoints at all.
     return forbidden("ADMIN_TOKEN is not configured on this server.");
   }
-  const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
-    ? req.headers.get("authorization")!.slice(7).trim()
-    : null;
   try {
-    await requireAdminToken(req.headers.get("x-admin-token") ?? bearer, expected);
+    await requireAdminToken(presented, expected);
     return null;
   } catch {
     return Response.json({ error: "Unauthorized: admin token required" }, {
@@ -557,6 +586,71 @@ async function adminGate(ctx: AppContext, req: Request): Promise<Response | null
       headers: { "cache-control": "no-store" },
     });
   }
+}
+
+/**
+ * `POST /api/admin/users/:id/role` — grant or revoke admin (audio-feed-8fc).
+ * Refuses to demote the signed-in caller, and (in the store, atomically) any
+ * change that would leave no approved admin — the token path included. Every
+ * change lands in the approval ledger as a `role` record: who, when, from, to.
+ */
+export function createAdminSetRoleHandler(ctx: AppContext): AppHandlers["adminSetRole"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const body = await req.json().catch(() => ({})) as { isAdmin?: unknown };
+    if (typeof body.isAdmin !== "boolean") {
+      return Response.json({ error: "isAdmin must be true or false." }, { status: 400 });
+    }
+    const target = await ctx.stores.metadata.getUser(params.id ?? "");
+    if (!target) return notFound("Unknown user");
+    const caller = await sessionUser(ctx.stores.metadata, req);
+    if (!body.isAdmin && caller?.id === target.id) {
+      return Response.json({ error: "You cannot remove your own admin access." }, {
+        status: 409,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    const outcome = await ctx.stores.metadata.setAdminRole(target.id, body.isAdmin, {
+      adminId: caller && isActiveAdmin(caller) ? caller.id : "admin-token",
+      at: new Date().toISOString(),
+    });
+    if (outcome === "missing") return notFound("Unknown user");
+    if (outcome === "last-admin") {
+      return Response.json(
+        { error: "That would leave no admins. Make someone else an admin first." },
+        { status: 409, headers: { "cache-control": "no-store" } },
+      );
+    }
+    return Response.json({ id: target.id, isAdmin: body.isAdmin }, {
+      headers: { "cache-control": "no-store" },
+    });
+  };
+}
+
+/**
+ * `POST /api/admin/users/:id/setup-link` — a one-time enrolment or recovery link
+ * (audio-feed-8fc). The secret is in the URL fragment and in this no-store body,
+ * nowhere else: not a Location header, not a log line, not the store.
+ */
+export function createAdminSetupLinkHandler(ctx: AppContext): AppHandlers["adminSetupLink"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const target = await ctx.stores.metadata.getUser(params.id ?? "");
+    if (!target) return notFound("Unknown user");
+    const caller = await sessionUser(ctx.stores.metadata, req);
+    const { token, expiresAt } = await issueSetupLink(
+      ctx.stores.metadata,
+      target.id,
+      caller && isActiveAdmin(caller) ? caller.id : "admin-token",
+    );
+    const base = resolveOrigin(ctx.config, req).baseUrl;
+    return Response.json(
+      { userId: target.id, url: `${base}/login#setup=${token}`, expiresAt },
+      { status: 201, headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } },
+    );
+  };
 }
 
 /** `GET /api/admin/users` — the subscriber list for the console. */
@@ -607,6 +701,7 @@ export function createCreateUserHandler(
       displayName?: unknown;
       voice?: unknown;
       feedUrl?: unknown;
+      isAdmin?: unknown;
       codeHandling?: unknown;
     } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
@@ -626,6 +721,7 @@ export function createCreateUserHandler(
           ? body.displayName.trim()
           : undefined,
         voice: typeof body.voice === "string" ? body.voice : undefined,
+        isAdmin: body.isAdmin === true,
       });
       const approved = await approveUser(ctx.stores.metadata, created.id, "admin");
 
@@ -856,9 +952,22 @@ export function createAdminDeleteUserSourceHandler(
   return async ({ params, req }) => {
     const denied = await adminGate(ctx, req);
     if (denied) return denied;
+    return await deleteUserSource(ctx, req, params.id ?? "", params.sourceId ?? "");
+  };
+}
 
-    const userId = params.id ?? "";
-    const sourceId = params.sourceId ?? "";
+/**
+ * Remove one of `userId`'s sources: the admin console's delete and the account
+ * page's (audio-feed-8fc) share this, so the drain guards below exist once.
+ * Scoped by `userId`, so another user's source id is simply "Unknown source".
+ */
+export async function deleteUserSource(
+  ctx: AppContext,
+  req: Request,
+  userId: string,
+  sourceId: string,
+): Promise<Response> {
+  {
     const user = await ctx.stores.metadata.getUser(userId);
     if (!user) return notFound("Unknown user");
 
@@ -1078,7 +1187,7 @@ export function createAdminDeleteUserSourceHandler(
         },
       { headers: { "cache-control": "no-store" } },
     );
-  };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1211,42 @@ async function regenerableUser(
     return { denied: forbidden(`Regeneration unavailable (status: ${user.status})`) };
   }
   return { user };
+}
+
+/**
+ * Requeue a user's published episodes: every one, or only those made by other
+ * prompts. Shared by the admin console and the account page (audio-feed-ktn).
+ * Callers own the approval gate. Resolves the number queued.
+ */
+export async function regenerateUserEpisodes(
+  metadata: MetadataStore,
+  userId: string,
+  scope: "outdated" | "all",
+  filter: { sourceId?: string; mode?: AudioMode } = {},
+): Promise<number> {
+  // Collect first, then requeue: requeueing moves an episode out of the `ready`
+  // scan being paged, which would shift the scan under its own cursor.
+  const ids: string[] = [];
+  for await (const batch of episodeScan(metadata, { userId, ...filter, status: "ready" })) {
+    for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
+  }
+  let queued = 0;
+  for (const id of ids) {
+    if (await metadata.requeueEpisode(userId, id)) queued++;
+  }
+  return queued;
+}
+
+/** How many of a user's published episodes were made by other prompts. */
+export async function countOutdatedEpisodes(
+  metadata: MetadataStore,
+  userId: string,
+): Promise<number> {
+  let outdated = 0;
+  for await (const batch of episodeScan(metadata, { userId, status: "ready" })) {
+    outdated += batch.filter((e) => isOutdated(e)).length;
+  }
+  return outdated;
 }
 
 /** How many rows the console shows; the counts cover the whole catalogue. */
@@ -1200,23 +1345,10 @@ export function createAdminRegenerateFeedHandler(
     if ("denied" in resolved) return resolved.denied;
     const userId = resolved.user.id;
 
-    // Collect first, then requeue: requeueing moves an episode out of the `ready`
-    // scan being paged, which would shift the scan under its own cursor.
-    const ids: string[] = [];
-    for await (
-      const batch of episodeScan(ctx.stores.metadata, {
-        userId,
-        sourceId: body.sourceId,
-        mode: body.mode,
-        status: "ready",
-      })
-    ) {
-      for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
-    }
-    let queued = 0;
-    for (const id of ids) {
-      if (await ctx.stores.metadata.requeueEpisode(userId, id)) queued++;
-    }
+    const queued = await regenerateUserEpisodes(ctx.stores.metadata, userId, scope, {
+      sourceId: body.sourceId,
+      mode: body.mode,
+    });
     return Response.json(
       { ok: true, scope, queued },
       { headers: { "cache-control": "no-store" } },
@@ -1410,6 +1542,15 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminPollNow: createAdminPollNowHandler(ctx, deps),
     adminStats: createAdminStatsHandler(ctx),
     adminSynthesizeNow: createAdminSynthesizeNowHandler(ctx, deps),
+    adminSetRole: createAdminSetRoleHandler(ctx),
+    adminSetupLink: createAdminSetupLinkHandler(ctx),
+    account: createAccountHandlers(ctx, {
+      feedTransport: deps.feedTransport,
+      fetchArticle: deps.fetchArticle,
+      deleteUserSource: (req, userId, sourceId) => deleteUserSource(ctx, req, userId, sourceId),
+      regenerateOutdated: (userId) =>
+        regenerateUserEpisodes(ctx.stores.metadata, userId, "outdated"),
+    }),
     adminListEpisodes: createAdminListUserEpisodesHandler(ctx),
     adminRegenerateEpisode: createAdminRegenerateEpisodeHandler(ctx),
     adminRegenerateFeed: createAdminRegenerateFeedHandler(ctx),

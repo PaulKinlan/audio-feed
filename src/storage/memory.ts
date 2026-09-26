@@ -6,7 +6,17 @@
  * Owned by: audio-feed-0h8.
  */
 
-import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
+import type {
+  ApprovalRecord,
+  Article,
+  AuthChallenge,
+  Episode,
+  PasskeyCredential,
+  Session,
+  SetupLink,
+  Source,
+  User,
+} from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import type { EpisodePage, EpisodePageResult } from "./mod.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
@@ -98,6 +108,11 @@ export class MemoryMetadataStore implements MetadataStore {
   #downloadTotal = 0;
   readonly #downloadsByUser = new Map<string, number>();
   readonly #runs: RunRecord[] = [];
+  // Accounts (audio-feed-8fc).
+  readonly #sessions = new Map<string, Session>();
+  readonly #credentials = new Map<string, PasskeyCredential>();
+  readonly #setupLinks = new Map<string, SetupLink>();
+  readonly #challenges = new Map<string, AuthChallenge>();
   readonly #orphanBlobs = new Set<string>();
 
   static #scoped(userId: string, id: string) {
@@ -151,6 +166,33 @@ export class MemoryMetadataStore implements MetadataStore {
     this.#users.set(user.id, structuredClone(user));
     this.#approvals.push(structuredClone(record));
     return Promise.resolve();
+  }
+
+  // Single-threaded: the admin count and the write cannot interleave with another call.
+  setAdminRole(
+    userId: string,
+    isAdmin: boolean,
+    by: { adminId: string; at: string },
+  ): Promise<"changed" | "unchanged" | "last-admin" | "missing"> {
+    const target = this.#users.get(userId);
+    if (!target) return Promise.resolve("missing");
+    if (target.isAdmin === isAdmin) return Promise.resolve("unchanged");
+    if (!isAdmin && target.status === "approved") {
+      const others = [...this.#users.values()].filter((u) =>
+        u.id !== userId && u.isAdmin && u.status === "approved"
+      );
+      if (others.length === 0) return Promise.resolve("last-admin");
+    }
+    this.#users.set(userId, { ...target, isAdmin });
+    this.#approvals.push({
+      userId,
+      action: "role",
+      adminId: by.adminId,
+      at: by.at,
+      fromRole: isAdmin ? "user" : "admin",
+      toRole: isAdmin ? "admin" : "user",
+    });
+    return Promise.resolve("changed");
   }
 
   listApprovalLog(): Promise<ApprovalRecord[]> {
@@ -564,9 +606,92 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(this.#runs.slice(0, limit).map((r) => structuredClone(r)));
   }
 
+  // -- accounts (audio-feed-8fc) --------------------------------------------
+
+  putSession(session: Session): Promise<void> {
+    this.#sessions.set(session.idHash, structuredClone(session));
+    return Promise.resolve();
+  }
+
+  getSession(idHash: string): Promise<Session | null> {
+    const found = this.#sessions.get(idHash);
+    return Promise.resolve(found ? structuredClone(found) : null);
+  }
+
+  deleteSession(idHash: string): Promise<void> {
+    this.#sessions.delete(idHash);
+    return Promise.resolve();
+  }
+
+  putCredential(credential: PasskeyCredential): Promise<void> {
+    this.#credentials.set(credential.id, structuredClone(credential));
+    return Promise.resolve();
+  }
+
+  getCredential(id: string): Promise<PasskeyCredential | null> {
+    const found = this.#credentials.get(id);
+    return Promise.resolve(found ? structuredClone(found) : null);
+  }
+
+  listCredentials(userId: string): Promise<PasskeyCredential[]> {
+    return Promise.resolve(
+      [...this.#credentials.values()]
+        .filter((c) => c.userId === userId)
+        .sort(byCreatedThenId)
+        .map((c) => structuredClone(c)),
+    );
+  }
+
+  // Single-threaded: the count and the delete cannot interleave with another call.
+  deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing"> {
+    const found = this.#credentials.get(id);
+    if (!found || found.userId !== userId) return Promise.resolve("missing");
+    const owned = [...this.#credentials.values()].filter((c) => c.userId === userId).length;
+    if (owned <= 1) return Promise.resolve("last");
+    this.#credentials.delete(id);
+    return Promise.resolve("deleted");
+  }
+
+  putSetupLink(link: SetupLink): Promise<void> {
+    this.#setupLinks.set(link.tokenHash, structuredClone(link));
+    return Promise.resolve();
+  }
+
+  getSetupLink(tokenHash: string): Promise<SetupLink | null> {
+    const found = this.#setupLinks.get(tokenHash);
+    return Promise.resolve(found ? structuredClone(found) : null);
+  }
+
+  consumeSetupLink(tokenHash: string): Promise<SetupLink | null> {
+    // Single-threaded: read and delete cannot interleave with another consumer.
+    const found = this.#setupLinks.get(tokenHash);
+    this.#setupLinks.delete(tokenHash);
+    return Promise.resolve(found ?? null);
+  }
+
+  putChallenge(challenge: AuthChallenge): Promise<void> {
+    this.#challenges.set(challenge.challenge, structuredClone(challenge));
+    return Promise.resolve();
+  }
+
+  consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
+    const found = this.#challenges.get(challenge);
+    this.#challenges.delete(challenge);
+    return Promise.resolve(found ?? null);
+  }
+
   close(): Promise<void> {
     return Promise.resolve();
   }
+}
+
+/** Oldest first, tie-broken by id: the passkey list order both adapters share. */
+export function byCreatedThenId(
+  a: Pick<PasskeyCredential, "createdAt" | "id">,
+  b: Pick<PasskeyCredential, "createdAt" | "id">,
+): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /**

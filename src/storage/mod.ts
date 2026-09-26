@@ -17,8 +17,12 @@ import type {
   ApprovalRecord,
   Article,
   AudioMode,
+  AuthChallenge,
   Episode,
   EpisodeStatus,
+  PasskeyCredential,
+  Session,
+  SetupLink,
   Source,
   User,
 } from "../types.ts";
@@ -170,6 +174,17 @@ export interface MetadataStore {
   recordApproval(user: User, record: ApprovalRecord): Promise<void>;
   /** Oldest first. The admin audit trail. */
   listApprovalLog(): Promise<ApprovalRecord[]>;
+  /**
+   * Grant or revoke admin and write a `role` ledger entry in ONE commit
+   * (audio-feed-8fc). Refuses (`last-admin`) any change that would leave no
+   * approved admin, atomically: of two concurrent demotions of the last two
+   * admins exactly one succeeds. `unchanged` writes nothing.
+   */
+  setAdminRole(
+    userId: string,
+    isAdmin: boolean,
+    by: { adminId: string; at: string },
+  ): Promise<"changed" | "unchanged" | "last-admin" | "missing">;
 
   // -- sources ----------------------------------------------------------
   putSource(source: Source): Promise<void>;
@@ -366,6 +381,40 @@ export interface MetadataStore {
    * default limit returns everything retained.
    */
   listRuns(limit?: number): Promise<RunRecord[]>;
+
+  // -- accounts (audio-feed-8fc) -------------------------------------------
+  //
+  // Storage only. Expiry, hashing and ownership rules live in src/auth/, which
+  // checks `expiresAt` on every read; an adapter may also drop expired rows.
+
+  putSession(session: Session): Promise<void>;
+  getSession(idHash: string): Promise<Session | null>;
+  deleteSession(idHash: string): Promise<void>;
+
+  /** Insert or update (the signature counter changes on every sign-in). */
+  putCredential(credential: PasskeyCredential): Promise<void>;
+  getCredential(id: string): Promise<PasskeyCredential | null>;
+  /** Oldest first. */
+  listCredentials(userId: string): Promise<PasskeyCredential[]>;
+  /**
+   * Delete a passkey unless it is the owner's last one, as ONE step: of two
+   * concurrent deletes of a user's last two passkeys exactly one succeeds.
+   * `missing` when the credential does not exist or belongs to someone else.
+   */
+  deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing">;
+
+  putSetupLink(link: SetupLink): Promise<void>;
+  /** Read without consuming, so a page can say whose link it is. */
+  getSetupLink(tokenHash: string): Promise<SetupLink | null>;
+  /**
+   * Take the link and delete it in ONE step. Of two concurrent consumers exactly
+   * one gets the link and the other `null`: a setup link is single use.
+   */
+  consumeSetupLink(tokenHash: string): Promise<SetupLink | null>;
+
+  putChallenge(challenge: AuthChallenge): Promise<void>;
+  /** Single use, with the same exactly-one guarantee as `consumeSetupLink`. */
+  consumeChallenge(challenge: string): Promise<AuthChallenge | null>;
 
   close(): Promise<void>;
 }
