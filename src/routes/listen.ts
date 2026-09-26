@@ -1621,7 +1621,7 @@ export async function handleListen(
  * response would show a subscriber work that finished minutes ago.
  */
 export async function handleListenStatus(
-  { ctx, req, params }: RouteContext<AppContext>,
+  { ctx, params }: RouteContext<AppContext>,
 ): Promise<Response> {
   const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
   if (!token) return notFound("Unknown feed");
