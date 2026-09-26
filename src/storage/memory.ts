@@ -19,7 +19,7 @@ import type {
 } from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import type { EpisodePage, EpisodePageResult } from "./mod.ts";
-import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
+import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -113,6 +113,7 @@ export class MemoryMetadataStore implements MetadataStore {
   readonly #credentials = new Map<string, PasskeyCredential>();
   readonly #setupLinks = new Map<string, SetupLink>();
   readonly #challenges = new Map<string, AuthChallenge>();
+  readonly #orphanBlobs = new Set<string>();
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -476,9 +477,7 @@ export class MemoryMetadataStore implements MetadataStore {
       removeSortedIndex(this.#pendingIndex, oldSortKey);
       removeSortedIndex(this.#synthesizingIndex, oldSortKey);
       this.#episodes.set(key, {
-        ...structuredClone(found),
-        status: "failed",
-        error: `abandoned after ${claim.maxClaims} attempts`,
+        ...unsynthesized(structuredClone(found), `abandoned after ${claim.maxClaims} attempts`),
         claimedAt: undefined,
         claimedBy: undefined,
       });
@@ -514,6 +513,55 @@ export class MemoryMetadataStore implements MetadataStore {
     removeSortedIndex(this.#pendingIndex, sortKey);
     this.#episodes.set(key, structuredClone(episode));
     return Promise.resolve(true);
+  }
+
+  requeueEpisode(userId: string, id: string): Promise<Episode | null> {
+    const found = this.#episodes.get(MemoryMetadataStore.#scoped(userId, id));
+    if (!found || found.status !== "ready" || !isPublishable(found)) {
+      return Promise.resolve(null);
+    }
+    const queued: Episode = {
+      ...structuredClone(found),
+      status: "pending",
+      regenerating: true,
+      attempts: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+      error: undefined,
+    };
+    this.#writeEpisode(queued);
+    return Promise.resolve(structuredClone(queued));
+  }
+
+  cancelRegeneration(userId: string, id: string): Promise<boolean> {
+    const found = this.#episodes.get(MemoryMetadataStore.#scoped(userId, id));
+    if (
+      !found?.regenerating || (found.status !== "pending" && found.status !== "synthesizing")
+    ) {
+      return Promise.resolve(false);
+    }
+    this.#writeEpisode({
+      ...found,
+      status: "ready",
+      regenerating: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+    });
+    return Promise.resolve(true);
+  }
+
+  recordOrphanBlob(key: string): Promise<void> {
+    this.#orphanBlobs.add(key);
+    return Promise.resolve();
+  }
+
+  listOrphanBlobs(limit: number): Promise<string[]> {
+    return Promise.resolve([...this.#orphanBlobs].slice(0, limit));
+  }
+
+  forgetOrphanBlob(key: string): Promise<void> {
+    this.#orphanBlobs.delete(key);
+    return Promise.resolve();
   }
 
   // -- operational stats (audio-feed-ndc) ------------------------------------

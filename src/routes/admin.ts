@@ -341,6 +341,15 @@ export function renderAdminPage(
         </label>
         <input id="feedUrl" name="feedUrl" type="url" placeholder="https://example.com/feed.xml" autocomplete="off" />
       </div>
+      <div class="field">
+        <label for="newFeedCodeHandling">Code handling
+          <span class="hint">How to handle code blocks in speech (audio-feed-bdo).</span>
+        </label>
+        <select id="newFeedCodeHandling">
+          <option value="skip" selected>Skip code blocks (never read aloud)</option>
+          <option value="explain">Summarize / explain code</option>
+        </select>
+      </div>
       <div class="check">
         <input type="checkbox" id="newIsAdmin" />
         <label for="newIsAdmin">Make this person an admin
@@ -429,6 +438,7 @@ export function renderAdminPage(
             <th scope="col">Title</th>
             <th scope="col">Feed URL</th>
             <th scope="col">Mode</th>
+            <th scope="col">Code</th>
             <th scope="col">Status</th>
             <th scope="col">Actions</th>
           </tr>
@@ -437,6 +447,32 @@ export function renderAdminPage(
       </table>
     </div>
     <p class="feedback" id="manageSourcesFeedback" role="status" aria-live="polite"></p>
+
+    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Episodes</h3>
+    <p class="muted" id="manageEpisodesHelp">
+      Regenerate re-synthesises audio with the current TTS prompts. Each episode is a billed
+      TTS call. The old audio keeps playing until the new audio is ready.
+    </p>
+    <div class="row">
+      <button type="button" id="regenOutdated" class="secondary" disabled>Regenerate outdated (0)</button>
+      <button type="button" id="regenAll" class="secondary" disabled>Regenerate all (0)</button>
+    </div>
+    <div class="table-wrap">
+      <table aria-describedby="manageEpisodesHelp">
+        <caption id="manageEpisodesCaption">Loading episodes…</caption>
+        <thead>
+          <tr>
+            <th scope="col">Title</th>
+            <th scope="col">Mode</th>
+            <th scope="col">Status</th>
+            <th scope="col">Prompts</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="manageEpisodesBody"></tbody>
+      </table>
+    </div>
+    <p class="feedback" id="manageEpisodesFeedback" role="status" aria-live="polite"></p>
 
     <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Add feed to subscriber</h3>
     <form id="addSourceForm" novalidate>
@@ -453,6 +489,13 @@ export function renderAdminPage(
         <select id="subFeedMode">
           <option value="direct" selected>Direct read (one voice)</option>
           <option value="deepdive">Deep dive (two voices)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="subFeedCodeHandling">Code handling</label>
+        <select id="subFeedCodeHandling">
+          <option value="skip" selected>Skip code blocks (never read aloud)</option>
+          <option value="explain">Summarize / explain code</option>
         </select>
       </div>
       <div class="row">
@@ -958,6 +1001,8 @@ export function renderAdminPage(
       return;
     }
     const submit = document.getElementById("createUser");
+    const newCodeSelect = document.getElementById("newFeedCodeHandling");
+    const codeHandling = newCodeSelect ? newCodeSelect.value : "skip";
     submit.disabled = true;
     try {
       const user = await api("/api/admin/users", {
@@ -967,6 +1012,7 @@ export function renderAdminPage(
           displayName: displayName || undefined,
           feedUrl: feedUrl || undefined,
           isAdmin: document.getElementById("newIsAdmin").checked || undefined,
+          codeHandling: feedUrl ? codeHandling : undefined,
         }),
       });
       say(
@@ -1082,6 +1128,7 @@ export function renderAdminPage(
         tdUrl.textContent = source.feedUrl || "—";
         tr.appendChild(tdUrl);
         tr.appendChild(cell((source.modes || []).join(", ")));
+        tr.appendChild(cell(source.codeHandling || "skip"));
 
         const tdStatus = document.createElement("td");
         if (source.lastPollError) {
@@ -1147,6 +1194,117 @@ export function renderAdminPage(
     }
   }
 
+  // ---- Regenerate (audio-feed-8oz) ----------------------------------------
+  const manageEpisodesBody = document.getElementById("manageEpisodesBody");
+  const manageEpisodesCaption = document.getElementById("manageEpisodesCaption");
+  const manageEpisodesFeedback = document.getElementById("manageEpisodesFeedback");
+  const regenOutdated = document.getElementById("regenOutdated");
+  const regenAll = document.getElementById("regenAll");
+  let regenCounts = { outdated: 0, all: 0 };
+
+  function plural(n) {
+    return n + " episode" + (n === 1 ? "" : "s");
+  }
+
+  async function loadManageEpisodes(userId) {
+    manageEpisodesBody.replaceChildren();
+    manageEpisodesCaption.textContent = "Loading episodes…";
+    try {
+      const res = await api("/api/admin/users/" + encodeURIComponent(userId) + "/episodes");
+      regenCounts = (res && res.counts) || { outdated: 0, all: 0 };
+      regenOutdated.textContent = "Regenerate outdated (" + regenCounts.outdated + ")";
+      regenAll.textContent = "Regenerate all (" + regenCounts.all + ")";
+      regenOutdated.disabled = regenCounts.outdated === 0;
+      regenAll.disabled = regenCounts.all === 0;
+      const episodes = (res && res.episodes) || [];
+      manageEpisodesBody.replaceChildren();
+      for (const episode of episodes) {
+        const tr = document.createElement("tr");
+        tr.appendChild(cell(episode.title || "—"));
+        tr.appendChild(cell(episode.mode || "—"));
+        tr.appendChild(cell(episode.regenerating ? "regenerating" : episode.status));
+        tr.appendChild(cell(
+          episode.status !== "ready" ? "—" : episode.outdated ? "outdated" : "current",
+        ));
+        const tdActions = document.createElement("td");
+        tdActions.className = "actions";
+        if (episode.status === "ready") {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "secondary";
+          btn.textContent = "Regenerate";
+          btn.setAttribute("aria-label", "Regenerate " + (episode.title || episode.id));
+          btn.addEventListener("click", () => regenerateEpisode(userId, episode, btn));
+          tdActions.appendChild(btn);
+        }
+        tr.appendChild(tdActions);
+        manageEpisodesBody.appendChild(tr);
+      }
+      manageEpisodesCaption.textContent = episodes.length === 0
+        ? "No episodes yet."
+        : "Newest " + plural(episodes.length) + ".";
+    } catch (error) {
+      say(manageEpisodesFeedback, "error", String(error.message || error));
+    }
+  }
+
+  async function regenerateEpisode(userId, episode, button) {
+    if (
+      !confirm(
+        "Regenerate 1 episode (\\"" + (episode.title || episode.id) + "\\")? " +
+          "This is a billed TTS call. The old audio keeps playing until the new audio is ready.",
+      )
+    ) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const res = await api(
+        "/api/admin/users/" + encodeURIComponent(userId) + "/episodes/" +
+          encodeURIComponent(episode.id) + "/regenerate",
+        { method: "POST" },
+      );
+      say(
+        manageEpisodesFeedback,
+        "ok",
+        res && res.queued ? "Queued 1 episode for regeneration." : "Already queued; nothing changed.",
+      );
+      await loadManageEpisodes(userId);
+    } catch (error) {
+      say(manageEpisodesFeedback, "error", String(error.message || error));
+      button.disabled = false;
+    }
+  }
+
+  async function regenerateFeed(scope, button) {
+    if (!currentManagingUser) return;
+    const userId = currentManagingUser.id;
+    const count = scope === "all" ? regenCounts.all : regenCounts.outdated;
+    if (
+      !confirm(
+        "Regenerate " + plural(count) + (scope === "all" ? "" : " made with older prompts") +
+          "? Each is a billed TTS call. The old audio keeps playing until the new audio is ready.",
+      )
+    ) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const res = await api("/api/admin/users/" + encodeURIComponent(userId) + "/regenerate", {
+        method: "POST",
+        body: JSON.stringify({ scope }),
+      });
+      say(manageEpisodesFeedback, "ok", "Queued " + plural((res && res.queued) || 0) + " for regeneration.");
+      await loadManageEpisodes(userId);
+    } catch (error) {
+      say(manageEpisodesFeedback, "error", String(error.message || error));
+      button.disabled = false;
+    }
+  }
+
+  regenOutdated.addEventListener("click", () => regenerateFeed("outdated", regenOutdated));
+  regenAll.addEventListener("click", () => regenerateFeed("all", regenAll));
+
   function openManage(user) {
     currentManagingUser = user;
     manageName.textContent = user.displayName || user.email;
@@ -1157,8 +1315,10 @@ export function renderAdminPage(
     manageFeedUrl.value = feedUrl;
     say(manageSourcesFeedback, "", "");
     say(addSourceFeedback, "", "");
+    say(manageEpisodesFeedback, "", "");
     manageSection.hidden = false;
     loadManageSources(user.id);
+    loadManageEpisodes(user.id);
     manageSection.scrollIntoView({ behavior: "smooth" });
   }
 
@@ -1168,9 +1328,11 @@ export function renderAdminPage(
     const urlInput = document.getElementById("subFeedUrl");
     const titleInput = document.getElementById("subFeedTitle");
     const modeSelect = document.getElementById("subFeedMode");
+    const codeSelect = document.getElementById("subFeedCodeHandling");
     const feedUrl = urlInput.value.trim();
     const title = titleInput.value.trim();
     const mode = modeSelect.value;
+    const codeHandling = codeSelect ? codeSelect.value : "skip";
     if (!feedUrl) {
       say(addSourceFeedback, "error", "Feed URL is required.");
       urlInput.focus();
@@ -1186,6 +1348,7 @@ export function renderAdminPage(
             feedUrl,
             title: title || undefined,
             modes: [mode],
+            codeHandling,
           }),
         },
       );

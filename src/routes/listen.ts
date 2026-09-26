@@ -110,7 +110,7 @@ import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
-import type { AudioMode } from "../types.ts";
+import { type AudioMode, type Episode, isPublishable } from "../types.ts";
 
 /** One row of the player's episode list, with everything the UI renders. */
 export interface ListenEpisode {
@@ -1310,17 +1310,22 @@ export async function handleListen(
     return forbidden(`Feed unavailable (status: ${user.status})`);
   }
 
-  const episodes = await ctx.stores.metadata.listEpisodes({
-    userId: user.id,
-    status: "ready",
-    limit: 100,
-  });
+  // Filtered by publishability, not `status: "ready"`: a regenerating episode is
+  // pending but still plays its old audio (audio-feed-8oz). Paged until 100 are
+  // found, so newer pending or failed episodes cannot push ready ones off the page.
+  const episodes: Episode[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await ctx.stores.metadata.listEpisodePage({ userId: user.id, limit: 100, cursor });
+    episodes.push(...page.episodes.filter(isPublishable));
+    cursor = page.cursor === cursor ? undefined : page.cursor;
+  } while (cursor && episodes.length < 100);
+  episodes.length = Math.min(episodes.length, 100);
   const sources = await ctx.stores.metadata.listSources(user.id);
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
   const rows: ListenEpisode[] = [];
   for (const episode of episodes) {
-    if (!episode.audioKey) continue;
     // The author lives on the article, not the episode; one lookup per row is the
     // price of showing it, and the list is bounded above.
     const article = await ctx.stores.metadata.getArticle(user.id, episode.articleId);

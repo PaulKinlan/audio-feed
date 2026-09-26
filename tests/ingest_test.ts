@@ -665,3 +665,17 @@ Deno.test("url.ts advertises gzip and identity, never ambiguous deflate (audio-f
   equal(urlSource.includes('"Accept-Encoding": "gzip, identity"'), true);
   equal(urlSource.includes('"Accept-Encoding": "gzip, deflate'), false);
 });
+
+Deno.test("extractArticle wraps <pre> blocks in code fences (audio-feed-bdo)", () => {
+  const htmlWithCode = `<!doctype html><html><head><title>Code Post</title></head><body><article>
+    <h1>Code Post</h1>
+    <p>Before the code block.</p>
+    <pre><code>function hello() {\n  return "world";\n}</code></pre>
+    <p>After the code block.</p>
+  </article></body></html>`;
+  const result = extractArticle(htmlWithCode, "https://example.com/code");
+  equal(result.body.includes("```"), true);
+  equal(result.body.includes("function hello()"), true);
+  equal(result.body.includes("Before the code block."), true);
+  equal(result.body.includes("After the code block."), true);
+});

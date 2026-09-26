@@ -17,7 +17,7 @@ import {
   runFeedPollBatch,
   sourceIdForFeed,
 } from "../src/ingest/feed.ts";
-import { makeSource, makeUser } from "./fixtures.ts";
+import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult, GeminiGenerateContentRequest } from "../src/tts/gemini.ts";
@@ -929,4 +929,146 @@ Deno.test("pollFeedSource records lastPollError on source and clears it on succe
 
   const healedSource = await stores.metadata.getSource("user-1", "failing-source");
   assertEquals(healedSource?.lastPollError, undefined, "lastPollError must be cleared on success");
+});
+
+Deno.test("POST /api/sources sets codeHandling and persists it on the source (audio-feed-bdo)", async () => {
+  const { stores, ctx } = await subscriberSource();
+  const user = (await stores.metadata.getUser("user-1"))!;
+  const { fetch } = createApp(ctx, createHandlers(ctx, { feedTransport: feedTransport(RSS) }));
+  const res = await fetch(
+    new Request(`${BASE}/api/sources`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-feed-token": user.feedToken!,
+      },
+      body: JSON.stringify({
+        feedUrl: "https://codefeed.example.com/feed.xml",
+        title: "Code Feed",
+        modes: ["direct"],
+        codeHandling: "explain",
+      }),
+    }),
+  );
+  assertEquals(res.status, 201);
+  const data = await res.json();
+  assertEquals(data.source.codeHandling, "explain");
+
+  const stored = await stores.metadata.getSource(user.id, data.source.id);
+  assertEquals(stored?.codeHandling, "explain");
+});
+
+Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code on skip and using summarizer on explain with fallback (audio-feed-bdo)", async () => {
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+
+  const bodyWithCode =
+    "First paragraph.\n\n```javascript\nconst a = 1;\nconsole.log(a);\n```\n\nLast paragraph.";
+
+  // 1. Source with codeHandling = "skip" (or default)
+  const sourceSkip = makeSource({
+    id: "src-skip",
+    userId: "user-1",
+    codeHandling: "skip",
+  });
+  await stores.metadata.putSource(sourceSkip);
+
+  let capturedPrompt = "";
+  let capturedSystemInstruction = "";
+  const clientSkip = new GeminiTtsClient({
+    apiKey: "test-key",
+    fetchFn: (_url, init) => {
+      const req = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
+      capturedPrompt = req.contents[0]?.parts[0]?.text ?? "";
+      capturedSystemInstruction = req.systemInstruction?.parts[0]?.text ?? "";
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [{
+              content: {
+                parts: [{
+                  inlineData: {
+                    mimeType: "audio/pcm;rate=24000",
+                    data: uint8ArrayToBase64(new Uint8Array(24)),
+                  },
+                }],
+              },
+              finishReason: "STOP",
+            }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    },
+  });
+
+  const synthSkip = createGeminiSynthesizer(ctx, { client: clientSkip });
+  const articleObj: Article = {
+    id: "art-1",
+    userId: "user-1",
+    sourceId: "src-skip",
+    url: "https://example.com/art-1",
+    title: "Code Article",
+    author: "Dev",
+    content: bodyWithCode,
+    ingestedAt: new Date().toISOString(),
+  };
+  await synthSkip({
+    article: articleObj,
+    source: sourceSkip,
+    episode: makeEpisode({ id: "ep-1", userId: "user-1", articleId: "art-1", mode: "direct" }),
+    mode: "direct",
+  });
+
+  // Raw code must NOT reach the model prompt
+  assertEquals(capturedPrompt.includes("const a = 1"), false);
+  assertEquals(capturedPrompt.includes("First paragraph."), true);
+  assertEquals(capturedPrompt.includes("Last paragraph."), true);
+  assertStringIncludes(capturedSystemInstruction, "Skip code blocks");
+
+  // 2. Source with codeHandling = "explain" AND summarizer provided
+  const sourceExplain = makeSource({
+    id: "src-explain",
+    userId: "user-1",
+    codeHandling: "explain",
+  });
+  await stores.metadata.putSource(sourceExplain);
+
+  const synthExplain = createGeminiSynthesizer(ctx, {
+    client: clientSkip,
+    codeSummarizer: (code) => `declares variable in ${code.split("\n")[0]}`,
+  });
+  await synthExplain({
+    article: { ...articleObj, sourceId: "src-explain" },
+    source: sourceExplain,
+    episode: makeEpisode({ id: "ep-2", userId: "user-1", articleId: "art-1", mode: "direct" }),
+    mode: "direct",
+  });
+
+  assertEquals(
+    capturedPrompt.includes("Here is what that code does: declares variable in const a = 1;"),
+    true,
+  );
+  assertEquals(
+    capturedPrompt.includes("["),
+    false,
+    "brackets must not reach spoken prompt (audio-feed-sju)",
+  );
+  assertEquals(capturedPrompt.includes("const a = 1;\nconsole.log(a);"), false);
+  assertStringIncludes(capturedSystemInstruction, "explain or summarize");
+
+  // 3. Source with codeHandling = "explain" BUT NO summarizer provided -> fallback to skip
+  const synthFallback = createGeminiSynthesizer(ctx, { client: clientSkip });
+  await synthFallback({
+    article: { ...articleObj, sourceId: "src-explain" },
+    source: sourceExplain,
+    episode: makeEpisode({ id: "ep-3", userId: "user-1", articleId: "art-1", mode: "direct" }),
+    mode: "direct",
+  });
+
+  // Falls back to skipping raw code completely
+  assertEquals(capturedPrompt.includes("const a = 1"), false);
+  assertEquals(capturedPrompt.includes("First paragraph."), true);
+  assertEquals(capturedPrompt.includes("Last paragraph."), true);
 });

@@ -381,8 +381,12 @@ export const clean = (text: string | null | undefined) => (text ?? "").replace(/
 
 export function plainText(node: Node): string {
   if (node.nodeType === 3) return (node.textContent ?? "").replace(/\s+/g, " ");
+  if (node.nodeName === "PRE") {
+    const raw = (node.textContent ?? "").trim();
+    return raw ? `\n\`\`\`\n${raw}\n\`\`\`\n` : "";
+  }
   const text = Array.from(node.childNodes).map(plainText).join("");
-  return /^(P|DIV|SECTION|H[1-6]|LI|UL|OL|PRE|BLOCKQUOTE|BR|TR)$/.test(node.nodeName)
+  return /^(P|DIV|SECTION|H[1-6]|LI|UL|OL|BLOCKQUOTE|BR|TR)$/.test(node.nodeName)
     ? `\n${text}\n`
     : text;
 }

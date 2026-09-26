@@ -86,6 +86,12 @@ const PAGE_IDS = [
   "setupLinkNote",
   "copySetupLink",
   "newIsAdmin",
+  // audio-feed-8oz
+  "manageEpisodesBody",
+  "manageEpisodesCaption",
+  "manageEpisodesFeedback",
+  "regenOutdated",
+  "regenAll",
 ];
 
 export interface StubElement {

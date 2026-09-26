@@ -1,0 +1,60 @@
+{
+  "chrome": "/home/paulkinlan/.cache/puppeteer/chrome/linux-153.0.8010.36/chrome-linux64/chrome",
+  "oldKey": "audio/sub-1/direct/ep-old.wav",
+  "newKey": "audio/sub-1/direct/ep-old-f66f3f11.wav",
+  "dialogs": [
+    "Regenerate 1 episode (\"Made with the old prompts\")? This is a billed TTS call. The old audio keeps playing until the new audio is ready."
+  ],
+  "checks": [
+    {
+      "step": "before: counts",
+      "ok": true,
+      "detail": "Regenerate outdated (1) / Regenerate all (2); row Made with the old prompts | direct | ready | outdated | Regenerate"
+    },
+    {
+      "step": "before: feed serves the old key",
+      "ok": true,
+      "detail": "audio/sub-1/direct/ep-old.wav"
+    },
+    {
+      "step": "confirm dialog raised and states the spend",
+      "ok": true,
+      "detail": "Regenerate 1 episode (\"Made with the old prompts\")? This is a billed TTS call. The old audio keeps playing until the new audio is ready."
+    },
+    {
+      "step": "queued: feed still serves the old key, old audio plays",
+      "ok": true,
+      "detail": "old key in feed, GET audio/sub-1/direct/ep-old.wav -> 200"
+    },
+    {
+      "step": "during synthesis: old audio still served",
+      "ok": true,
+      "detail": "episode status synthesizing, feed enclosure audio/sub-1/direct/ep-old.wav"
+    },
+    {
+      "step": "after: feed serves a NEW key, same GUID",
+      "ok": true,
+      "detail": "new key audio/sub-1/direct/ep-old-f66f3f11.wav"
+    },
+    {
+      "step": "after: old blob is gone",
+      "ok": true,
+      "detail": "GET audio/sub-1/direct/ep-old.wav -> 404"
+    },
+    {
+      "step": "after: new audio plays",
+      "ok": true,
+      "detail": "GET audio/sub-1/direct/ep-old-f66f3f11.wav -> 200"
+    },
+    {
+      "step": "stub synthesizer called once",
+      "ok": true,
+      "detail": "1 call(s)"
+    },
+    {
+      "step": "after: console shows it current",
+      "ok": true,
+      "detail": "Regenerate outdated (0); row Made with the old prompts | direct | ready | current | Regenerate"
+    }
+  ]
+}
