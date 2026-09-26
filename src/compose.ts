@@ -62,7 +62,7 @@ import type { Episode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
 import type { AppContext, AppHandlers } from "./app.ts";
 import { newArticleId, newEpisodeId } from "./ids.ts";
-import type { Article, AudioMode } from "./types.ts";
+import { type Article, type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "./types.ts";
 
 export { IllegalTransitionError, NotAuthorizedError, UnknownUserError };
 
@@ -343,6 +343,7 @@ export function createListSourcesHandler(ctx: AppContext): AppHandlers["listSour
           feedUrl: source.feedUrl,
           siteUrl: source.siteUrl,
           modes: source.modes,
+          codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
           lastPolledAt: source.lastPolledAt,
           // The per-source feed paths a subscriber would actually poll.
           feedPaths: source.feedUrl
@@ -372,7 +373,7 @@ export function createCreateSourceHandler(
     const resolved = await approvedUserFor(ctx, req);
     if ("denied" in resolved) return resolved.denied;
 
-    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown } = {};
+    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown; codeHandling?: unknown } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
       body = await req.json().catch(() => ({}));
     }
@@ -405,6 +406,8 @@ export function createCreateSourceHandler(
       }
     }
 
+    const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
+
     try {
       const { source, poll } = await subscribeToFeed(
         ctx,
@@ -413,6 +416,7 @@ export function createCreateSourceHandler(
           feedUrl,
           title: typeof body.title === "string" ? body.title : undefined,
           modes,
+          codeHandling,
         },
         { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
       );
@@ -423,6 +427,7 @@ export function createCreateSourceHandler(
             title: source.title,
             feedUrl: source.feedUrl,
             modes: source.modes,
+            codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
           },
           poll,
           // What the user subscribes to next.
@@ -601,6 +606,7 @@ export function createCreateUserHandler(
       displayName?: unknown;
       voice?: unknown;
       feedUrl?: unknown;
+      codeHandling?: unknown;
     } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
       body = await req.json().catch(() => ({}));
@@ -626,16 +632,19 @@ export function createCreateUserHandler(
         id: string;
         title: string;
         feedUrl: string;
+        codeHandling?: CodeHandling;
         queued: number;
       } | undefined;
 
       if (typeof body.feedUrl === "string" && body.feedUrl.trim() !== "") {
         const validatedUrl = articleUrl(body.feedUrl.trim()).href;
+        const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
         const { source, poll } = await subscribeToFeed(
           ctx,
           {
             userId: approved.id,
             feedUrl: validatedUrl,
+            codeHandling,
           },
           { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
         );
@@ -643,6 +652,7 @@ export function createCreateUserHandler(
           id: source.id,
           title: source.title,
           feedUrl: source.feedUrl ?? validatedUrl,
+          codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
           queued: poll.queued,
         };
       }
@@ -740,6 +750,7 @@ export function createAdminListUserSourcesHandler(
           feedUrl: source.feedUrl,
           siteUrl: source.siteUrl,
           modes: source.modes,
+          codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
           lastPolledAt: source.lastPolledAt,
           lastPollError: source.lastPollError,
           feedPaths: source.feedUrl
@@ -765,7 +776,7 @@ export function createAdminCreateUserSourceHandler(
     const user = await ctx.stores.metadata.getUser(userId);
     if (!user) return notFound("Unknown user");
 
-    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown } = {};
+    let body: { feedUrl?: unknown; title?: unknown; modes?: unknown; codeHandling?: unknown } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
       body = await req.json().catch(() => ({}));
     }
@@ -800,6 +811,8 @@ export function createAdminCreateUserSourceHandler(
       }
     }
 
+    const codeHandling: CodeHandling = body.codeHandling === "explain" ? "explain" : "skip";
+
     try {
       const { source, poll } = await subscribeToFeed(
         ctx,
@@ -808,6 +821,7 @@ export function createAdminCreateUserSourceHandler(
           feedUrl,
           title: typeof body.title === "string" ? body.title : undefined,
           modes,
+          codeHandling,
         },
         { transport: deps.feedTransport, fetchArticle: deps.fetchArticle, maxItems: 5 },
       );
@@ -818,6 +832,7 @@ export function createAdminCreateUserSourceHandler(
             title: source.title,
             feedUrl: source.feedUrl,
             modes: source.modes,
+            codeHandling: source.codeHandling ?? DEFAULT_CODE_HANDLING,
           },
           poll,
           feedPaths: source.modes.map((mode) => `/feed/${user.feedToken}/${source.id}/${mode}.xml`),

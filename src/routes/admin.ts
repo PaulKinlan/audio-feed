@@ -350,6 +350,15 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         </label>
         <input id="feedUrl" name="feedUrl" type="url" placeholder="https://example.com/feed.xml" autocomplete="off" />
       </div>
+      <div class="field">
+        <label for="newFeedCodeHandling">Code handling
+          <span class="hint">How to handle code blocks in speech (audio-feed-bdo).</span>
+        </label>
+        <select id="newFeedCodeHandling">
+          <option value="skip" selected>Skip code blocks (never read aloud)</option>
+          <option value="explain">Summarize / explain code</option>
+        </select>
+      </div>
       <div class="row">
         <button type="submit" id="createUser">Create and approve</button>
       </div>
@@ -420,6 +429,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
             <th scope="col">Title</th>
             <th scope="col">Feed URL</th>
             <th scope="col">Mode</th>
+            <th scope="col">Code</th>
             <th scope="col">Status</th>
             <th scope="col">Actions</th>
           </tr>
@@ -444,6 +454,13 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         <select id="subFeedMode">
           <option value="direct" selected>Direct read (one voice)</option>
           <option value="deepdive">Deep dive (two voices)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="subFeedCodeHandling">Code handling</label>
+        <select id="subFeedCodeHandling">
+          <option value="skip" selected>Skip code blocks (never read aloud)</option>
+          <option value="explain">Summarize / explain code</option>
         </select>
       </div>
       <div class="row">
@@ -873,6 +890,8 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
       return;
     }
     const submit = document.getElementById("createUser");
+    const newCodeSelect = document.getElementById("newFeedCodeHandling");
+    const codeHandling = newCodeSelect ? newCodeSelect.value : "skip";
     submit.disabled = true;
     try {
       const user = await api("/api/admin/users", {
@@ -881,6 +900,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
           email,
           displayName: displayName || undefined,
           feedUrl: feedUrl || undefined,
+          codeHandling: feedUrl ? codeHandling : undefined,
         }),
       });
       say(
@@ -996,6 +1016,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
         tdUrl.textContent = source.feedUrl || "—";
         tr.appendChild(tdUrl);
         tr.appendChild(cell((source.modes || []).join(", ")));
+        tr.appendChild(cell(source.codeHandling || "skip"));
 
         const tdStatus = document.createElement("td");
         if (source.lastPollError) {
@@ -1082,9 +1103,11 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
     const urlInput = document.getElementById("subFeedUrl");
     const titleInput = document.getElementById("subFeedTitle");
     const modeSelect = document.getElementById("subFeedMode");
+    const codeSelect = document.getElementById("subFeedCodeHandling");
     const feedUrl = urlInput.value.trim();
     const title = titleInput.value.trim();
     const mode = modeSelect.value;
+    const codeHandling = codeSelect ? codeSelect.value : "skip";
     if (!feedUrl) {
       say(addSourceFeedback, "error", "Feed URL is required.");
       urlInput.focus();
@@ -1100,6 +1123,7 @@ export function renderAdminPage({ publicBaseUrl, adminConfigured }: AdminPageOpt
             feedUrl,
             title: title || undefined,
             modes: [mode],
+            codeHandling,
           }),
         },
       );
