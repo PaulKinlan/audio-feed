@@ -105,7 +105,11 @@ export function clearSessionCookie(): string {
  */
 export function sameOrigin(req: Request, expectedOrigin: string): boolean {
   const origin = req.headers.get("origin");
-  return origin !== null && origin === expectedOrigin;
+  if (origin === expectedOrigin) return true;
+  // A form POST from a page served with Referrer-Policy: no-referrer (account,
+  // admin, login) carries `Origin: null`. Sec-Fetch-Site is set by the browser
+  // and cannot be written by a page, so it settles those, and only those.
+  return origin === "null" && req.headers.get("sec-fetch-site") === "same-origin";
 }
 
 /** Admin rights need the flag AND an approved account: suspending an admin demotes them. */

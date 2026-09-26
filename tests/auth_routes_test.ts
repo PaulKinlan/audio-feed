@@ -497,3 +497,23 @@ Deno.test("ingest: a signed-in user sends without a token, same-origin only (aud
   );
   assertEquals(tokenOnly.status, 202, "the token path is unchanged");
 });
+
+Deno.test("sign out from a no-referrer page: Origin null counts only when the browser says same-origin (audio-feed-8fc)", async () => {
+  // A form POST from a page served with Referrer-Policy: no-referrer carries
+  // `Origin: null`. Sec-Fetch-Site is browser-set and cannot be forged by a page.
+  const { fetch, stores } = app();
+  const user = await seed(stores);
+  const cookie = await cookieFor(stores, user.id);
+  const logout = (site: string) =>
+    fetch(call("/api/auth/logout", {
+      method: "POST",
+      cookie,
+      origin: "null",
+      headers: { "sec-fetch-site": site },
+    }));
+  assertEquals((await logout("cross-site")).status, 403);
+  assertEquals((await logout("same-site")).status, 403);
+  const ok = await logout("same-origin");
+  assertEquals(ok.status, 303);
+  assertEquals(ok.headers.get("location"), "/");
+});
