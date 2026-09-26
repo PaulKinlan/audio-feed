@@ -270,7 +270,8 @@ export async function updatePreferences(
   const updated: User = {
     ...user,
     displayName: patch.displayName?.trim() || user.displayName,
-    voice: patch.voice ?? user.voice,
+    // An empty string clears the preference, so the deployment default applies.
+    voice: patch.voice === "" ? undefined : patch.voice ?? user.voice,
     feeds: patch.feeds ?? user.feeds,
   };
   await store.putUser(updated);

@@ -18,6 +18,8 @@
  *   GET  /api/episodes                        episode listing             [0h8]
  *   POST /api/admin/users/:id/approve         approval gate               [7wn]
  *   GET  /api/admin/stats                     operational metrics         [ndc]
+ *   GET  /login, /account                     passkey sign-in, account    [8fc]
+ *   POST /api/auth/*, /api/account/*          sessions and account API    [8fc]
  *
  * Owned by: audio-feed-0h8.
  */
@@ -32,6 +34,7 @@ import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
+import type { AccountHandlers } from "./routes/account_api.ts";
 
 export interface AppContext {
   config: AppConfig;
@@ -68,6 +71,11 @@ export interface AppHandlers {
   adminSynthesizeNow?: Handler<AppContext>;
   /** audio-feed-ndc — operational metrics for the admin dashboard. */
   adminStats?: Handler<AppContext>;
+  /** audio-feed-8fc — admin roles and one-time passkey setup links. */
+  adminSetRole?: Handler<AppContext>;
+  adminSetupLink?: Handler<AppContext>;
+  /** audio-feed-8fc — passkey sign-in, sessions and the account page's API. */
+  account?: AccountHandlers;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -179,6 +187,29 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     "/api/admin/stats",
     handlers.adminStats ?? (() => notImplemented("Admin stats")),
   );
+
+  router.post(
+    "/api/admin/users/:id/role",
+    handlers.adminSetRole ?? (() => notImplemented("Admin role")),
+  );
+  router.post(
+    "/api/admin/users/:id/setup-link",
+    handlers.adminSetupLink ?? (() => notImplemented("Admin setup link")),
+  );
+
+  // -- accounts (audio-feed-8fc) ----------------------------------------------
+  const account = (name: keyof AccountHandlers): Handler<AppContext> =>
+    handlers.account?.[name] ?? (() => notImplemented("Accounts"));
+  router.post("/api/auth/login/options", account("loginOptions"));
+  router.post("/api/auth/login/verify", account("loginVerify"));
+  router.post("/api/auth/register/options", account("registerOptions"));
+  router.post("/api/auth/register/verify", account("registerVerify"));
+  router.post("/api/auth/logout", account("logout"));
+  router.post("/api/account/profile", account("profile"));
+  router.post("/api/account/rotate-token", account("rotateToken"));
+  router.post("/api/account/sources", account("addSource"));
+  router.delete("/api/account/sources/:sourceId", account("deleteSource"));
+  router.delete("/api/account/passkeys/:id", account("deletePasskey"));
 
   handlers.extra?.(router);
 

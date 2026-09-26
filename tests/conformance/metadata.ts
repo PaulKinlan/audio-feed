@@ -1180,6 +1180,126 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       ["s-idle-2", "s-work", "p-idle", "s-idle", "s-late"],
     );
   });
+
+  // -- accounts (audio-feed-8fc) ---------------------------------------------
+
+  const FUTURE = "2999-01-01T00:00:00.000Z";
+
+  test("round-trips a session and forgets it on delete (audio-feed-8fc)", async (store) => {
+    const session = {
+      idHash: "a".repeat(64),
+      userId: "user-1",
+      createdAt: isoAt(0),
+      expiresAt: FUTURE,
+    };
+    await store.putSession(session);
+    assertEquals(await store.getSession(session.idHash), session);
+    await store.deleteSession(session.idHash);
+    assertEquals(await store.getSession(session.idHash), null);
+    assertEquals(await store.getSession("b".repeat(64)), null);
+  });
+
+  test("stores passkeys per user and updates the counter in place (audio-feed-8fc)", async (store) => {
+    const first = {
+      id: "cred-1",
+      userId: "user-1",
+      publicKey: "pk1",
+      counter: 0,
+      transports: ["internal"],
+      name: "Laptop",
+      createdAt: isoAt(0),
+    };
+    const second = { ...first, id: "cred-2", publicKey: "pk2", createdAt: isoAt(1) };
+    const other = { ...first, id: "cred-3", userId: "user-2", createdAt: isoAt(2) };
+    await store.putCredential(second);
+    await store.putCredential(first);
+    await store.putCredential(other);
+
+    assertEquals((await store.listCredentials("user-1")).map((c) => c.id), ["cred-1", "cred-2"]);
+    assertEquals((await store.listCredentials("user-2")).map((c) => c.id), ["cred-3"]);
+    assertEquals(await store.getCredential("cred-1"), first);
+
+    await store.putCredential({ ...first, counter: 7, lastUsedAt: isoAt(5) });
+    assertEquals((await store.getCredential("cred-1"))?.counter, 7);
+    assertEquals((await store.listCredentials("user-1")).length, 2);
+  });
+
+  test("a passkey can only be deleted by its owner (audio-feed-8fc)", async (store) => {
+    const cred = {
+      id: "cred-1",
+      userId: "user-1",
+      publicKey: "pk",
+      counter: 0,
+      name: "Phone",
+      createdAt: isoAt(0),
+    };
+    await store.putCredential(cred);
+    assertEquals(await store.deleteCredential("user-2", "cred-1"), false);
+    assertEquals((await store.getCredential("cred-1"))?.userId, "user-1");
+    assertEquals(await store.deleteCredential("user-1", "cred-1"), true);
+    assertEquals(await store.getCredential("cred-1"), null);
+    assertEquals(await store.listCredentials("user-1"), []);
+    assertEquals(await store.deleteCredential("user-1", "cred-1"), false);
+  });
+
+  test("a setup link is readable, then consumable exactly once (audio-feed-8fc)", async (store) => {
+    const link = {
+      tokenHash: "c".repeat(64),
+      userId: "user-1",
+      createdAt: isoAt(0),
+      expiresAt: FUTURE,
+      issuedBy: "admin",
+    };
+    await store.putSetupLink(link);
+    assertEquals(await store.getSetupLink(link.tokenHash), link);
+
+    const [a, b] = await Promise.all([
+      store.consumeSetupLink(link.tokenHash),
+      store.consumeSetupLink(link.tokenHash),
+    ]);
+    assertEquals([a, b].filter(Boolean).length, 1, "exactly one concurrent consumer wins");
+    assertEquals(a ?? b, link);
+    assertEquals(await store.getSetupLink(link.tokenHash), null);
+    assertEquals(await store.consumeSetupLink(link.tokenHash), null);
+  });
+
+  test("a WebAuthn challenge is consumable exactly once (audio-feed-8fc)", async (store) => {
+    const challenge = {
+      challenge: "chal-1",
+      purpose: "register" as const,
+      userId: "user-1",
+      expiresAt: FUTURE,
+    };
+    await store.putChallenge(challenge);
+    const [a, b] = await Promise.all([
+      store.consumeChallenge("chal-1"),
+      store.consumeChallenge("chal-1"),
+    ]);
+    assertEquals([a, b].filter(Boolean).length, 1, "exactly one concurrent consumer wins");
+    assertEquals(a ?? b, challenge);
+    assertEquals(await store.consumeChallenge("chal-1"), null);
+    assertEquals(await store.consumeChallenge("never-issued"), null);
+  });
+
+  test("account records never appear as users (audio-feed-8fc)", async (store) => {
+    // KV prefix scans: a session key under ["user", ...] would surface in listUsers.
+    await store.putUser(makeUser());
+    await store.putSession({
+      idHash: "d".repeat(64),
+      userId: "user-1",
+      createdAt: isoAt(0),
+      expiresAt: FUTURE,
+    });
+    await store.putCredential({
+      id: "cred-1",
+      userId: "user-1",
+      publicKey: "pk",
+      counter: 0,
+      name: "x",
+      createdAt: isoAt(0),
+    });
+    assertEquals((await store.listUsers()).map((u) => u.id), ["user-1"]);
+  });
 }
 
 /** Distinct, ordered timestamps for history tests. */

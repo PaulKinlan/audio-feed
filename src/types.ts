@@ -324,3 +324,61 @@ export function isPublishable(
 export function audioBlobKey(episode: Pick<Episode, "userId" | "id" | "mode">, ext = "mp3") {
   return `audio/${episode.userId}/${episode.mode}/${episode.id}.${ext}`;
 }
+
+// ---------------------------------------------------------------------------
+// Accounts: sessions, passkeys, setup links (audio-feed-8fc)
+// ---------------------------------------------------------------------------
+
+/**
+ * A signed-in browser. Keyed by the SHA-256 of the cookie value, never the value
+ * itself: a leaked store dump must not be a list of live sessions.
+ */
+export interface Session {
+  /** Hex SHA-256 of the cookie secret. */
+  idHash: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** A registered WebAuthn credential. Public material only. */
+export interface PasskeyCredential {
+  /** base64url credential id, as the authenticator reports it. */
+  id: string;
+  userId: string;
+  /** base64url COSE public key. */
+  publicKey: string;
+  counter: number;
+  transports?: string[];
+  /** A human label, e.g. "Added 2026-09-26". */
+  name: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+/**
+ * A one-time enrolment or recovery link issued by an admin. Stored by the hash of
+ * its token; the token itself exists only in the URL the admin passes on.
+ */
+export interface SetupLink {
+  tokenHash: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+  issuedBy: string;
+}
+
+/**
+ * A WebAuthn challenge awaiting its response. Single use and short-lived.
+ * `purpose` binds it to the ceremony that minted it, so a sign-in challenge cannot
+ * complete a registration.
+ */
+export interface AuthChallenge {
+  challenge: string;
+  purpose: "register" | "authenticate";
+  /** Registration only: who the new credential belongs to. */
+  userId?: string;
+  /** Registration by setup link: the link consumed when the ceremony completes. */
+  setupTokenHash?: string;
+  expiresAt: string;
+}

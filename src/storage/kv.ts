@@ -23,10 +23,27 @@
  *   ["user_by_feed_token", token] -> id
  *   ["approval_log", at, userId]  the admin audit trail
  *
+ * Accounts (audio-feed-8fc), none under a ["user"] prefix:
+ *   ["session", idHash]                          session, expireIn = its expiry
+ *   ["passkey", credentialId]                    the credential
+ *   ["passkey_by_user", userId, createdAt, id]   -> credentialId
+ *   ["setup_link", tokenHash]                    one-time enrolment link
+ *   ["auth_challenge", challenge]                pending WebAuthn challenge
+ *
  * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
 
-import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
+import type {
+  ApprovalRecord,
+  Article,
+  AuthChallenge,
+  Episode,
+  PasskeyCredential,
+  Session,
+  SetupLink,
+  Source,
+  User,
+} from "../types.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
 import type {
   DownloadCounts,
@@ -58,6 +75,16 @@ export function descendingKey(iso: string, id: string): string {
   const ms = Date.parse(iso);
   const inverted = MAX_TIME - (Number.isFinite(ms) ? ms : 0);
   return `${inverted.toString().padStart(13, "0")}:${id}`;
+}
+
+/**
+ * KV's own expiry for a record that carries `expiresAt`. At least one minute, so
+ * a record written at its deadline is still readable by the policy that rejects
+ * it; the policy's `expiresAt` check is authoritative, this is only cleanup.
+ */
+function expireInMs(expiresAt: string): number {
+  const ms = Date.parse(expiresAt) - Date.now();
+  return Number.isFinite(ms) ? Math.max(ms, 60_000) : 60_000;
 }
 
 export class KvMetadataStore implements MetadataStore {
@@ -719,6 +746,92 @@ export class KvMetadataStore implements MetadataStore {
       }
     }
     return out.sort(compareRunsNewestFirst).slice(0, limit);
+  }
+
+  // -- accounts (audio-feed-8fc) --------------------------------------------
+
+  async putSession(session: Session): Promise<void> {
+    await this.#kv.set(["session", session.idHash], session, {
+      expireIn: expireInMs(session.expiresAt),
+    });
+  }
+
+  async getSession(idHash: string): Promise<Session | null> {
+    return (await this.#kv.get<Session>(["session", idHash])).value;
+  }
+
+  async deleteSession(idHash: string): Promise<void> {
+    await this.#kv.delete(["session", idHash]);
+  }
+
+  async putCredential(credential: PasskeyCredential): Promise<void> {
+    const result = await this.#kv.atomic()
+      .set(["passkey", credential.id], credential)
+      .set(
+        ["passkey_by_user", credential.userId, credential.createdAt, credential.id],
+        credential.id,
+      )
+      .commit();
+    if (!result.ok) throw new Error(`putCredential failed for ${credential.id}`);
+  }
+
+  async getCredential(id: string): Promise<PasskeyCredential | null> {
+    return (await this.#kv.get<PasskeyCredential>(["passkey", id])).value;
+  }
+
+  async listCredentials(userId: string): Promise<PasskeyCredential[]> {
+    const out: PasskeyCredential[] = [];
+    for await (const entry of this.#kv.list<string>({ prefix: ["passkey_by_user", userId] })) {
+      const credential = await this.getCredential(entry.value);
+      if (credential && credential.userId === userId) out.push(credential);
+    }
+    return out;
+  }
+
+  async deleteCredential(userId: string, id: string): Promise<boolean> {
+    const entry = await this.#kv.get<PasskeyCredential>(["passkey", id]);
+    if (!entry.value || entry.value.userId !== userId) return false;
+    const result = await this.#kv.atomic()
+      .check(entry)
+      .delete(["passkey", id])
+      .delete(["passkey_by_user", userId, entry.value.createdAt, id])
+      .commit();
+    return result.ok;
+  }
+
+  async putSetupLink(link: SetupLink): Promise<void> {
+    await this.#kv.set(["setup_link", link.tokenHash], link, {
+      expireIn: expireInMs(link.expiresAt),
+    });
+  }
+
+  async getSetupLink(tokenHash: string): Promise<SetupLink | null> {
+    return (await this.#kv.get<SetupLink>(["setup_link", tokenHash])).value;
+  }
+
+  consumeSetupLink(tokenHash: string): Promise<SetupLink | null> {
+    return this.#consume<SetupLink>(["setup_link", tokenHash]);
+  }
+
+  async putChallenge(challenge: AuthChallenge): Promise<void> {
+    await this.#kv.set(["auth_challenge", challenge.challenge], challenge, {
+      expireIn: expireInMs(challenge.expiresAt),
+    });
+  }
+
+  consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
+    return this.#consume<AuthChallenge>(["auth_challenge", challenge]);
+  }
+
+  /**
+   * Read and delete in one compare-and-swap: of two concurrent consumers the
+   * second commit fails its check, so exactly one gets the value.
+   */
+  async #consume<T>(key: Deno.KvKey): Promise<T | null> {
+    const entry = await this.#kv.get<T>(key);
+    if (entry.value === null) return null;
+    const result = await this.#kv.atomic().check(entry).delete(key).commit();
+    return result.ok ? entry.value : null;
   }
 
   close(): Promise<void> {
