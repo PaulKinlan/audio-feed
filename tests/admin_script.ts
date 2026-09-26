@@ -80,6 +80,12 @@ const PAGE_IDS = [
   "downloadsBody",
   "downloadsCaption",
   "statsFeedback",
+  // audio-feed-8fc: setup links and admin rights.
+  "setupLinkBox",
+  "setupLinkUrl",
+  "setupLinkNote",
+  "copySetupLink",
+  "newIsAdmin",
 ];
 
 export interface StubElement {
@@ -235,6 +241,8 @@ export interface HarnessOptions {
   ) => unknown | null | Promise<unknown | null>;
   /** Admin token pre-seeded into sessionStorage, so the page auto-loads. */
   storedToken?: string | null;
+  /** Render the page for a signed-in admin session (audio-feed-8fc). */
+  signedIn?: boolean;
   /**
    * Admin token pre-seeded into localStorage — the "remembered on this device"
    * case (audio-feed-ndc). Separate from `storedToken` so a test can seed one,
@@ -257,8 +265,14 @@ export interface HarnessOptions {
  * like the console's own IIFE. Any of those failing is a loud error naming what
  * changed, not a silent substitution.
  */
-export function adminScriptSource(publicBaseUrl = "https://audio.example.com"): string {
-  return extractInlineScript(renderAdminPage({ publicBaseUrl, adminConfigured: true }));
+export function adminScriptSource(
+  publicBaseUrl = "https://audio.example.com",
+  signedIn = false,
+): string {
+  const viewer = signedIn
+    ? { displayName: "Admin", email: "admin@example.com", isAdmin: true }
+    : null;
+  return extractInlineScript(renderAdminPage({ publicBaseUrl, adminConfigured: true, viewer }));
 }
 
 /**
@@ -392,7 +406,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
     "confirm",
     "fetch",
     "setTimeout",
-    adminScriptSource(publicBaseUrl),
+    adminScriptSource(publicBaseUrl, options.signedIn ?? false),
   );
   run(
     document,
