@@ -755,7 +755,7 @@ export async function formatCodeForTts(
       try {
         const explanation = await summarizer(m.code.trim());
         if (explanation && explanation.trim()) {
-          result += `\n[Code explanation: ${explanation.trim()}]\n`;
+          result += `\nHere is what that code does: ${explanation.trim()}\n`;
         }
       } catch {
         // Fallback: omit raw code

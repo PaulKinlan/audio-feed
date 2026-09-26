@@ -1047,8 +1047,13 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
   });
 
   assertEquals(
-    capturedPrompt.includes("[Code explanation: declares variable in const a = 1;]"),
+    capturedPrompt.includes("Here is what that code does: declares variable in const a = 1;"),
     true,
+  );
+  assertEquals(
+    capturedPrompt.includes("["),
+    false,
+    "brackets must not reach spoken prompt (audio-feed-sju)",
   );
   assertEquals(capturedPrompt.includes("const a = 1;\nconsole.log(a);"), false);
   assertStringIncludes(capturedSystemInstruction, "explain or summarize");

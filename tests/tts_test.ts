@@ -801,16 +801,21 @@ Deno.test("formatCodeForTts - skips code blocks by default (audio-feed-bdo)", as
   assertEquals(processed.includes("That was the computation."), true);
 });
 
-Deno.test("formatCodeForTts - explains code blocks when summarizer is available (audio-feed-bdo)", async () => {
+Deno.test("formatCodeForTts - explains code blocks when summarizer is available (audio-feed-bdo, audio-feed-sju)", async () => {
   const input = 'Look at this snippet:\n\n```rust\nfn main() { println!("hi"); }\n```\n\nDone.';
   const summarizer = (code: string) => `prints a greeting using ${code.split("\n")[0]}`;
   const processed = await formatCodeForTts(input, "explain", summarizer);
   assertEquals(
-    processed.includes('[Code explanation: prints a greeting using fn main() { println!("hi"); }]'),
+    processed.includes(
+      'Here is what that code does: prints a greeting using fn main() { println!("hi"); }',
+    ),
     true,
   );
   assertEquals(processed.includes("fn main()"), true);
   assertEquals(processed.includes("Look at this snippet:"), true);
+  // Brackets must NOT be present in the spoken text (audio-feed-sju, audio-feed-xad/9dc)
+  assertEquals(processed.includes("["), false);
+  assertEquals(processed.includes("]"), false);
 });
 
 Deno.test("formatCodeForTts - falls back to skip when summarizer throws or is omitted (audio-feed-bdo)", async () => {
