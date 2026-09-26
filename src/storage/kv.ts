@@ -116,10 +116,21 @@ export class KvMetadataStore implements MetadataStore {
       const ep = entry.value;
       if (!ep) continue;
       if (ep.status === "pending") {
-        const indexKey: Deno.KvKey = ["pending_episodes", ep.createdAt, ep.id];
-        const existing = await this.#kv.get(indexKey);
-        if (!existing.value) {
+        // Priority-aware, so a fresh backfill never recreates the single-queue shape (15e).
+        const indexKey: Deno.KvKey = KvMetadataStore.#pendingKey(ep);
+        if (!(await this.#kv.get(indexKey)).value) {
           await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
+          indexed++;
+        }
+        // A pre-15e pointer has no priority segment, and a prefix scan matches BOTH shapes - so
+        // leaving it would list the same episode twice in one tick. Removed only after its
+        // replacement is in place.
+        const legacyKey: Deno.KvKey = ["pending_episodes", ep.createdAt, ep.id];
+        // `.value`, not the response: Deno KV's get() always resolves to an envelope object, so
+        // `if (await get(k))` is true whether or not the key exists — which counted a deletion
+        // that never happened. The audio-feed-7li test caught that.
+        if ((await this.#kv.get(legacyKey)).value) {
+          await this.#kv.delete(legacyKey);
           indexed++;
         }
       } else if (ep.status === "synthesizing") {
@@ -136,11 +147,17 @@ export class KvMetadataStore implements MetadataStore {
 
   async #ensurePendingEpisodesIndexed(): Promise<void> {
     const migrationKey: Deno.KvKey = ["migration", "pending_episodes_reindex_v1"];
-    const marker = await this.#kv.get(migrationKey);
-    if (marker.value) return;
+    if (!(await this.#kv.get(migrationKey)).value) {
+      await this.reindexPendingEpisodes();
+      await this.#kv.set(migrationKey, true);
+    }
 
+    // audio-feed-15e: a second marker, run after the first, so an instance upgrading across both
+    // gets its pointers rewritten into priority segments rather than merely backfilled.
+    const priorityKey: Deno.KvKey = ["migration", "pending_episodes_priority_v2"];
+    if ((await this.#kv.get(priorityKey)).value) return;
     await this.reindexPendingEpisodes();
-    await this.#kv.set(migrationKey, true);
+    await this.#kv.set(priorityKey, true);
   }
 
   // -- users ----------------------------------------------------------------
@@ -382,21 +399,74 @@ export class KvMetadataStore implements MetadataStore {
         episode.id,
       );
 
+    KvMetadataStore.#writeQueueIndexes(tx, episode);
+  }
+
+  /**
+   * The queue key for a pending episode: a priority segment, then createdAt, then id.
+   *
+   * "0" is work the subscriber has never heard. "1" is a regeneration - an episode they can
+   * already play, re-rendered because a prompt changed (audio-feed-15e).
+   *
+   * A regeneration keeps its original createdAt, correctly: that date is the episode's position
+   * in the feed and in the player. Keying one queue by createdAt alone therefore let a
+   * "Regenerate all" after a prompt change put every re-render ahead of anything ingested
+   * afterwards, because the old episodes are all older - the subscriber's newest article waited
+   * behind work on audio they already had.
+   *
+   * Putting a priority segment BEFORE the date fixes that without touching the date, and it stays
+   * a single lexicographic scan: same prefix, same cursor, same `limit` bounds-the-scan
+   * behaviour, and regenerations still run whenever the "0" segment is exhausted.
+   */
+  static #pendingKey(episode: Episode): Deno.KvKey {
+    // Derived from #pendingKeys rather than restating the segments: two definitions of one key
+    // is how the write path and the backfill start disagreeing about where an episode lives.
+    const [newWork, regeneration] = KvMetadataStore.#pendingKeys(episode);
+    return episode.regenerating ? regeneration : newWork;
+  }
+
+  /** Both priority segments for an episode's date, so a flag change can be undone without
+   *  reading the previous record first. */
+  static #pendingKeys(episode: Episode): [Deno.KvKey, Deno.KvKey] {
+    return [
+      ["pending_episodes", "0", episode.createdAt, episode.id],
+      ["pending_episodes", "1", episode.createdAt, episode.id],
+    ];
+  }
+
+  /**
+   * Apply the queue half of an episode write: exactly one pointer, in the priority its flag
+   * selects.
+   *
+   * This is the only place that decision is written, on purpose. Two copies is how an episode
+   * ends up with no pointer - not a visible bug, but an episode that silently never synthesises -
+   * and how it ends up with two, which bills the same work twice.
+   */
+  static #writeQueueIndexes(tx: KvAtomic, episode: Episode): void {
+    const [newWork, regeneration] = KvMetadataStore.#pendingKeys(episode);
+    const own = episode.regenerating ? regeneration : newWork;
+    const other = own === newWork ? regeneration : newWork;
+    const synthesizingKey: Deno.KvKey = [
+      "synthesizing_episodes",
+      episode.createdAt,
+      episode.id,
+    ];
+
     if (episode.status === "pending") {
-      tx.set(["pending_episodes", episode.createdAt, episode.id], {
-        userId: episode.userId,
-        id: episode.id,
-      });
-      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+      tx.set(own, { userId: episode.userId, id: episode.id });
+      // The other segment is cleared rather than left alone: requeueEpisode() and
+      // cancelRegeneration() move an episode between priorities while its createdAt - and so the
+      // remainder of its key - stays the same.
+      tx.delete(other);
+      tx.delete(synthesizingKey);
     } else if (episode.status === "synthesizing") {
-      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
-      tx.set(["synthesizing_episodes", episode.createdAt, episode.id], {
-        userId: episode.userId,
-        id: episode.id,
-      });
+      tx.delete(newWork);
+      tx.delete(regeneration);
+      tx.set(synthesizingKey, { userId: episode.userId, id: episode.id });
     } else {
-      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
-      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
+      tx.delete(newWork);
+      tx.delete(regeneration);
+      tx.delete(synthesizingKey);
     }
   }
 
@@ -422,7 +492,8 @@ export class KvMetadataStore implements MetadataStore {
       .delete(key)
       .delete(["episode_by_user", userId, sortKey])
       .delete(["episode_by_source", userId, ep.sourceId, ep.mode, sortKey])
-      .delete(["pending_episodes", ep.createdAt, ep.id])
+      .delete(["pending_episodes", "0", ep.createdAt, ep.id])
+      .delete(["pending_episodes", "1", ep.createdAt, ep.id])
       .delete(["synthesizing_episodes", ep.createdAt, ep.id])
       .commit();
     if (result.ok) return true;
@@ -441,7 +512,8 @@ export class KvMetadataStore implements MetadataStore {
         retry.value.mode,
         retrySortKey,
       ])
-      .delete(["pending_episodes", retry.value.createdAt, retry.value.id])
+      .delete(["pending_episodes", "0", retry.value.createdAt, retry.value.id])
+      .delete(["pending_episodes", "1", retry.value.createdAt, retry.value.id])
       .delete(["synthesizing_episodes", retry.value.createdAt, retry.value.id])
       .commit();
     return retryResult.ok;
@@ -590,22 +662,7 @@ export class KvMetadataStore implements MetadataStore {
         episode.id,
       );
 
-    if (episode.status === "pending") {
-      tx.set(["pending_episodes", episode.createdAt, episode.id], {
-        userId: episode.userId,
-        id: episode.id,
-      });
-      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
-    } else if (episode.status === "synthesizing") {
-      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
-      tx.set(["synthesizing_episodes", episode.createdAt, episode.id], {
-        userId: episode.userId,
-        id: episode.id,
-      });
-    } else {
-      tx.delete(["pending_episodes", episode.createdAt, episode.id]);
-      tx.delete(["synthesizing_episodes", episode.createdAt, episode.id]);
-    }
+    KvMetadataStore.#writeQueueIndexes(tx, episode);
 
     const result = await tx.commit();
     return result.ok;
@@ -686,6 +743,7 @@ export class KvMetadataStore implements MetadataStore {
     const nextCursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
 
     // Check synthesizing episodes with expired claims only on initial scan (cursor undefined)
+    let mergedExpired = false;
     if (!opts.cursor && (!Number.isFinite(limit) || episodes.length < limit)) {
       for await (
         const entry of this.#kv.list<{ userId: string; id: string }>({
@@ -700,12 +758,23 @@ export class KvMetadataStore implements MetadataStore {
           isClaimExpired(episode, nowMs, leaseMs)
         ) {
           episodes.push(episode);
+          mergedExpired = true;
         }
       }
-      episodes.sort((a, b) => {
-        const timeDiff = a.createdAt.localeCompare(b.createdAt);
-        return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
-      });
+      // Re-sort ONLY when something was merged. The queue scan is already in priority order, and
+      // this sort used to run unconditionally - which silently undid audio-feed-15e, because a
+      // requeued episode's createdAt is old BY DESIGN, so sorting the whole result by date put
+      // every regeneration back in front of the new article the queue key had just moved ahead.
+      // When a merge is needed the order must be the queue's order: priority, then FIFO.
+      if (mergedExpired) {
+        episodes.sort((a, b) => {
+          const ap = a.regenerating ? 1 : 0;
+          const bp = b.regenerating ? 1 : 0;
+          if (ap !== bp) return ap - bp;
+          const timeDiff = a.createdAt.localeCompare(b.createdAt);
+          return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
+        });
+      }
     }
 
     return {

@@ -31,6 +31,48 @@ runBlobConformance({
   create: () => new MemoryBlobStore(),
 });
 
+Deno.test("KvMetadataStore: the backfill moves a legacy pointer into its priority segment, leaving one", async () => {
+  // audio-feed-15e. A deployed instance already has pointers written in the old 3-segment shape,
+  // and a prefix scan matches BOTH shapes — so an un-migrated episode would be listed twice in
+  // one tick and could be claimed and billed twice. This drives the real upgrade path: legacy
+  // pointer written by the previous build, then the backfill.
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  const legacy = makeEpisode({
+    id: "ep-old",
+    userId: "u1",
+    status: "pending",
+    regenerating: true,
+    createdAt: "2026-09-01T00:00:00.000Z",
+  });
+  await kv.set(["episode", "u1", legacy.id], legacy);
+  // The pointer as the pre-15e build wrote it: no priority segment.
+  await kv.set(["pending_episodes", legacy.createdAt, legacy.id], { userId: "u1", id: legacy.id });
+
+  const stats = await store.reindexPendingEpisodes();
+  assertEquals(stats.indexed, 2, "one pointer added in the right segment, the legacy one removed");
+
+  const keys: string[] = [];
+  for await (const entry of kv.list({ prefix: ["pending_episodes"] })) {
+    keys.push(JSON.stringify(entry.key));
+  }
+  assertEquals(keys.length, 1, `exactly one queue pointer must survive, got ${keys.join(" ")}`);
+  assertEquals(
+    keys[0],
+    JSON.stringify(["pending_episodes", "1", legacy.createdAt, legacy.id]),
+    "a regeneration belongs in the lower priority segment",
+  );
+
+  const listed = await store.listPendingEpisodes({ limit: 10 });
+  assertEquals(
+    listed.episodes.map((e) => e.id),
+    ["ep-old"],
+    "and it is still queueable exactly once",
+  );
+  await kv.close();
+});
+
 Deno.test("KvMetadataStore: reindexPendingEpisodes backfills pre-existing un-indexed pending episodes (audio-feed-7li)", async () => {
   const kv = await Deno.openKv(":memory:");
   const store = new KvMetadataStore(kv, { ownsConnection: true });

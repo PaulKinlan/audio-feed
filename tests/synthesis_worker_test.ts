@@ -975,3 +975,97 @@ Deno.test("a superseded worker whose cleanup delete fails records the orphan (au
     `the winner's key must never be orphan-recorded, got ${JSON.stringify(orphans)}`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-15e — a regeneration must not jump the queue in front of new work
+// ---------------------------------------------------------------------------
+
+/**
+ * The pending index is keyed by `createdAt`, and a requeued episode keeps its original
+ * `createdAt` (correctly — it is the episode's date for the feed and for the player). The
+ * consequence is that a "Regenerate all" after a prompt change puts every re-render ahead of
+ * anything ingested afterwards, because the old episodes are all older. The subscriber's newest
+ * article waits behind the entire backlog of work they asked for on episodes they can already hear.
+ */
+async function queuedBacklogWithNewArrival(regenerations: number) {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", sourceId: "inbox" }),
+  );
+  // Six OLD ready episodes, then each is requeued — the real regenerate path, so the
+  // `regenerating` flag and the original createdAt are set by production code, not by me.
+  for (let i = 0; i < regenerations; i++) {
+    await stores.metadata.putEpisode(makeEpisode({
+      id: `regen-${i}`,
+      userId: "user-1",
+      sourceId: "inbox",
+      articleId: "article-1",
+      status: "ready",
+      audioKey: `audio/user-1/direct/regen-${i}.wav`,
+      createdAt: new Date(Date.UTC(2026, 8, 1) + i * 60_000).toISOString(),
+    }));
+    await stores.metadata.requeueEpisode("user-1", `regen-${i}`);
+  }
+  // One genuinely new article, queued AFTER all of them.
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-new", userId: "user-1", sourceId: "inbox" }),
+  );
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "episode-new",
+    userId: "user-1",
+    sourceId: "inbox",
+    articleId: "article-new",
+    status: "pending",
+    audioKey: undefined,
+    createdAt: new Date(Date.UTC(2026, 8, 20)).toISOString(),
+  }));
+  return { ctx: { config, stores }, stores };
+}
+
+Deno.test("a newly ingested article is synthesised ahead of a backlog of regenerations (audio-feed-15e)", async () => {
+  const { ctx } = await queuedBacklogWithNewArrival(6);
+  const order: string[] = [];
+  await runSynthesisBatch(ctx, ({ episode }) => {
+    order.push(episode.id);
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 5 });
+
+  assert(
+    order.includes("episode-new"),
+    `the new article must be served in this tick, not wait behind 6 re-renders; batch was [${order}]`,
+  );
+  assertEquals(order[0], "episode-new", "new work goes first within the batch");
+});
+
+Deno.test("regenerations still run when there is no new work (audio-feed-15e)", async () => {
+  const { ctx } = await queuedBacklogWithNewArrival(6);
+  // Remove the new arrival: the lane must not starve the backlog.
+  const backlogOnly = await ctx.stores.metadata.getEpisode("user-1", "episode-new");
+  assert(backlogOnly, "fixture: the new episode exists");
+  await ctx.stores.metadata.deleteEpisode("user-1", "episode-new");
+
+  const order: string[] = [];
+  await runSynthesisBatch(ctx, ({ episode }) => {
+    order.push(episode.id);
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 5 });
+
+  assertEquals(order.length, 5, "with nothing new queued, regenerations fill the batch");
+  assert(
+    order.every((id) => id.startsWith("regen-")),
+    `only regenerations should run; got [${order}]`,
+  );
+});
+
+Deno.test("a regeneration keeps its date in the feed while it waits behind new work (audio-feed-15e)", async () => {
+  const { stores } = await queuedBacklogWithNewArrival(2);
+  const episode = await stores.metadata.getEpisode("user-1", "regen-0");
+  assertEquals(
+    episode?.createdAt,
+    new Date(Date.UTC(2026, 8, 1)).toISOString(),
+    "queue priority must not be smuggled in by re-dating the episode — createdAt is the episode's date",
+  );
+  assertEquals(episode?.regenerating, true);
+});
