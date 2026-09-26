@@ -368,3 +368,44 @@ Deno.test("the download promises a background fetch only after confirming one (a
   // for a download that had in fact succeeded (measured, audio-feed-98i).
   assertStringIncludes(html, "async function waitForCache(");
 });
+
+Deno.test("the player links back to the source article for read-along (audio-feed-585)", async () => {
+  const { fetch } = await seeded();
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+
+  // The source URL travels with the episode payload, and the page carries both affordances: a
+  // per-row link built from that payload, and the dock link where he is actually listening.
+  assertStringIncludes(html, "https://stratechery.com/2026/an-article/");
+  assertStringIncludes(html, "articleUrl");
+  assertStringIncludes(html, "Read along");
+  assertStringIncludes(html, 'id="nowRead"');
+
+  const dockLink = (html.match(/<a[^>]*id="nowRead"[^>]*>/) ?? [])[0];
+  assert(dockLink, "the dock must carry a read-along link");
+  assertEquals(
+    dockLink.includes('rel="noopener noreferrer"'),
+    true,
+    "a new tab must not keep window.opener",
+  );
+  assertEquals(
+    dockLink.includes('target="_blank"'),
+    true,
+    "read-along opens beside the player, not over it",
+  );
+});
+
+Deno.test("a non-web article URL never becomes a linkback (audio-feed-585)", async () => {
+  const { fetch, stores } = await seeded();
+  // The URL comes from a feed the subscriber chose, so the page only ever sees http(s) — the same
+  // floor ingest applies, enforced again at the point a link is rendered.
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-1",
+      userId: "user-1",
+      sourceId: "stratechery",
+      url: "javascript:alert(1)",
+    }),
+  );
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+  assertEquals(html.includes("javascript:"), false, "only http(s) may reach the page as a link");
+});
