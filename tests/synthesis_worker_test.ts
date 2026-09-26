@@ -7,7 +7,7 @@
  * missing — a queued article becomes an episode that a subscriber can actually
  * play — driven through the real dispatch function.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -83,14 +83,19 @@ Deno.test("a queued episode is synthesised, stored and marked ready", async () =
 
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "ready");
-  assertEquals(episode?.audioKey, "audio/user-1/direct/episode-1.wav");
+  // Every synthesis writes its own revision under the canonical scoping
+  // (audio-feed-xsu): the episode's key is never the bare canonical path.
+  assertMatch(
+    episode?.audioKey ?? "",
+    /^audio\/user-1\/direct\/episode-1-[0-9a-f-]+\.wav$/,
+  );
   assertEquals(episode?.contentType, "audio/wav");
   assertEquals(episode?.byteLength, 524);
   assert(episode?.readyAt, "readyAt must be recorded: the feed sorts on it");
   assert(episode?.error === undefined, "a ready episode must not carry an error");
 
   // The bytes must actually be in the blob store, not just referenced.
-  const blob = await stores.blobs.head("audio/user-1/direct/episode-1.wav");
+  const blob = await stores.blobs.head(episode!.audioKey!);
   assertEquals(blob?.size, 524);
   assertEquals(blob?.contentType, "audio/wav");
 });
@@ -866,12 +871,107 @@ Deno.test("article content exceeding maxInputCharacters fails closed without spe
   assertStringIncludes(episode?.error ?? "", "1000 > 500 chars");
 });
 
-Deno.test("synthesised audio blob key uses canonical audioBlobKey scoping (audio-feed-3hb)", async () => {
+Deno.test("synthesised audio blob key is the canonical scoping plus a per-attempt revision (audio-feed-3hb, -xsu)", async () => {
   const { ctx, stores } = await queued();
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()));
   assertEquals(result.ready.length, 1);
-  const expectedKey = audioBlobKey({ userId: "user-1", id: "episode-1", mode: "direct" }, "wav");
-  assertEquals(result.ready[0]?.audioKey, expectedKey);
-  assertEquals(expectedKey, "audio/user-1/direct/episode-1.wav");
-  assert(await stores.blobs.get(expectedKey));
+  const canonical = audioBlobKey({ userId: "user-1", id: "episode-1", mode: "direct" }, "wav");
+  assertEquals(canonical, "audio/user-1/direct/episode-1.wav");
+  const audioKey = result.ready[0]!.audioKey!;
+  // Same user/mode/name directory scoping, with the attempt's revision attached:
+  // the bare canonical path is never written by a synthesis (audio-feed-xsu).
+  assertEquals(
+    audioKey.replace(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.wav$/, ".wav"),
+    canonical,
+  );
+  assert(audioKey !== canonical);
+  assert(await stores.blobs.get(audioKey));
+  assert(await stores.blobs.get(canonical) === null, "the bare canonical key stays unwritten");
+});
+
+Deno.test("a superseded FIRST synthesis deletes only its own blob — the winner's audio still fetches (audio-feed-xsu)", async () => {
+  const { ctx, stores } = await queuedMany(1);
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  // The winner ran first and its audio lives under the key a first synthesis used
+  // to treat as its own: the deterministic, revision-less canonical key.
+  const canonical = audioBlobKey(episode!, "wav");
+
+  const run = await runSynthesisBatch(ctx, async () => {
+    const current = await stores.metadata.getEpisode("user-1", "ep-0");
+    // The winner is a real worker: it PUT its bytes, then committed the metadata.
+    await stores.blobs.put(canonical, new Uint8Array(999).fill(7), { contentType: "audio/wav" });
+    await stores.metadata.completeEpisode(
+      {
+        ...current!,
+        status: "ready",
+        audioKey: canonical,
+        contentType: "audio/wav",
+        byteLength: 999,
+      },
+      current!.claimedBy!,
+    );
+    // The winner's commit took the claim; this worker's own write must be refused.
+    await stores.metadata.putEpisode({
+      ...(await stores.metadata.getEpisode("user-1", "ep-0"))!,
+      status: "synthesizing",
+      claimedBy: "someone-else",
+      claimedAt: new Date().toISOString(),
+    });
+    return fakeAudio();
+  }, { owner: "slow-worker" });
+
+  assertEquals(run.ready, [], "a superseded worker must not report success");
+  assertEquals(run.superseded.length, 1);
+  // THE ACCEPTANCE: the winner's enclosure still fetches afterwards. Before the
+  // fix both workers wrote the canonical key and the loser's cleanup deleted the
+  // winner's audio with it.
+  const winnerBlob = await stores.blobs.get(canonical);
+  assert(winnerBlob, "the winner's audio must still be in the blob store");
+  assertEquals(winnerBlob.size, 999);
+  // And the loser's own blob (a distinct, revisioned key) is what got cleaned up.
+  const episodeAfter = await stores.metadata.getEpisode("user-1", "ep-0");
+  assertEquals(episodeAfter?.audioKey, canonical, "the feed still points at the winner's audio");
+});
+
+Deno.test("a superseded worker whose cleanup delete fails records the orphan (audio-feed-owq)", async () => {
+  const { ctx, stores } = await queuedMany(1);
+  const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+  const canonical = audioBlobKey(episode!, "wav");
+
+  // Every delete in this batch fails: the superseded worker's cleanup cannot
+  // remove its blob, and the failure must be recorded, not swallowed.
+  stores.blobs.delete = (_key: string) => Promise.reject(new Error("delete exploded"));
+
+  const run = await runSynthesisBatch(ctx, async () => {
+    const current = await stores.metadata.getEpisode("user-1", "ep-0");
+    await stores.metadata.completeEpisode(
+      {
+        ...current!,
+        status: "ready",
+        audioKey: canonical,
+        contentType: "audio/wav",
+        byteLength: 999,
+      },
+      current!.claimedBy!,
+    );
+    await stores.metadata.putEpisode({
+      ...(await stores.metadata.getEpisode("user-1", "ep-0"))!,
+      status: "synthesizing",
+      claimedBy: "someone-else",
+      claimedAt: new Date().toISOString(),
+    });
+    return fakeAudio();
+  }, { owner: "slow-worker" });
+
+  assertEquals(run.superseded.length, 1);
+  const orphans = await stores.metadata.listOrphanBlobs(100);
+  assert(
+    orphans.length >= 1,
+    `a failed cleanup must land on the orphan list, got ${JSON.stringify(orphans)}`,
+  );
+  // The recorded key is the superseded worker's OWN blob, never the winner's.
+  assert(
+    orphans.every((key) => key !== canonical),
+    `the winner's key must never be orphan-recorded, got ${JSON.stringify(orphans)}`,
+  );
 });
