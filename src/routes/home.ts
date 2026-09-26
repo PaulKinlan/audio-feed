@@ -23,6 +23,8 @@ import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { originCacheControl, resolveOrigin } from "../origin.ts";
 import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
+import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { sessionUser } from "../auth/sessions.ts";
 
 /** Escapes text interpolated into the document. */
 function esc(value: string): string {
@@ -47,6 +49,8 @@ export interface HomePageOptions {
    * a sentence that contradicts itself. Deriving it keeps the page honest.
    */
   defaultVoice: string;
+  /** Who is signed in (audio-feed-8fc), for the shared header. */
+  viewer?: Viewer | null;
 }
 
 /**
@@ -57,10 +61,11 @@ export function renderHomePage({
   publicBaseUrl,
   synthesisConfigured,
   defaultVoice,
+  viewer = null,
 }: HomePageOptions): string {
   const base = esc(publicBaseUrl.replace(/\/+$/, ""));
 
-  return `<!doctype html>
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -70,21 +75,8 @@ export function renderHomePage({
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
 <style>
-  /* ---- tokens ---------------------------------------------------------- */
+  /* Colour and type come from the shared shell (src/routes/shell.ts). */
   :root {
-    color-scheme: light dark;
-
-    --bg: #fbfaf9;
-    --surface: #ffffff;
-    --surface-sunken: #f2f0ee;
-    --text: #1b1a18;
-    --text-muted: #55514c;
-    --border: #ddd8d2;
-    --accent: #7a3e12;
-    --accent-text: #ffffff;
-    --danger: #a3261a;
-    --ok: #1e6b3a;
-
     --space-1: 0.25rem;
     --space-2: 0.5rem;
     --space-3: 0.75rem;
@@ -92,28 +84,7 @@ export function renderHomePage({
     --space-6: 1.5rem;
     --space-8: 2rem;
     --space-12: 3rem;
-
     --radius: 10px;
-    --measure: 68ch;
-    --page: 54rem;
-
-    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #171614;
-      --surface: #201e1c;
-      --surface-sunken: #2a2724;
-      --text: #f2efec;
-      --text-muted: #b3aca4;
-      --border: #3a3633;
-      --accent: #e8a866;
-      --accent-text: #201e1c;
-      --danger: #f08a7e;
-      --ok: #7fc99a;
-    }
   }
 
   /* ---- base ------------------------------------------------------------ */
@@ -314,21 +285,13 @@ export function renderHomePage({
     max-inline-size: var(--measure);
   }
 
-  footer {
-    margin-block-start: var(--space-12);
-    padding-block-start: var(--space-4);
-    border-block-start: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 0.875rem;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   }
 </style>
 </head>
 <body>
-<main class="page">
+<div class="page">
 
   <h1>Audio Feed</h1>
   <p class="lede">
@@ -385,6 +348,12 @@ export function renderHomePage({
   </p>
 
   <h2 id="send">Send an article to audio</h2>
+  ${
+    viewer
+      ? `<p class="note" role="status">You're signed in: <a href="/account">send from your
+    account</a> without pasting a token. The form below still works with one.</p>`
+      : ""
+  }
   <p>
     Give it a link and it will be queued, synthesised, and added to your feed.
     Accounts need admin approval before anything is generated, because synthesis
@@ -549,14 +518,7 @@ curl -X POST ${base}/api/sources \\
   -H 'x-feed-token: YOUR_TOKEN' \\
   -d '{"url":"https://example.com/an-article","mode":"direct"}'</code></pre>
 
-  <footer>
-    <p>
-      Service status: <a href="/health">/health</a> ·
-      Source: <a href="https://github.com/PaulKinlan/audio-feed">github.com/PaulKinlan/audio-feed</a>
-    </p>
-  </footer>
-
-</main>
+</div>
 
 <script>
 (() => {
@@ -783,20 +745,37 @@ curl -X POST ${base}/api/sources \\
 </body>
 </html>
 `;
+  // Written as one document so it reads top to bottom; the shared shell
+  // (audio-feed-8fc) supplies the header, footer and tokens around its parts.
+  const css = html.slice(html.indexOf("<style>") + 7, html.indexOf("</style>"));
+  const main = html.slice(html.indexOf("<body>") + 6, html.indexOf("<script>")).trim();
+  const script = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>")).trim();
+  return renderShell({
+    title: "Audio Feed — turn articles into a private podcast",
+    description:
+      "Audio Feed turns articles and RSS sources into a private podcast: single-voice author reads and two-voice deep dive discussions, delivered to any podcast app.",
+    viewer,
+    current: "home",
+    css,
+    main,
+    script,
+  });
 }
 
 /** `GET /` — the human entry point. */
-export function handleHome({ ctx, req }: RouteContext<AppContext>): Response {
+export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promise<Response> {
   // Resolved per request (audio-feed-0k3). An unconfigured deployment used to
   // print `http://localhost:8000/feed/...` as the URL to subscribe to.
   const origin = resolveOrigin(ctx.config, req);
 
+  const viewer = viewerOf(await sessionUser(ctx.stores.metadata, req));
   const html = renderHomePage({
     publicBaseUrl: origin.baseUrl,
     synthesisConfigured: Boolean(ctx.config.geminiApiKey),
     // Resolved, not hard-coded: an operator who sets DEFAULT_VOICE must not be
     // shown a page that still claims the default is Charon (audio-feed-4xt).
     defaultVoice: ctx.config.defaultVoice ?? DEFAULT_NARRATION_VOICE,
+    viewer,
   });
 
   return new Response(html, {
@@ -812,10 +791,14 @@ export function handleHome({ ctx, req }: RouteContext<AppContext>): Response {
       // The max-age is short regardless: the page reports whether synthesis is
       // configured, so a stale copy could claim the service is unavailable
       // after it has been fixed.
-      "cache-control": originCacheControl(origin, 300),
+      //
+      // audio-feed-8fc: the header names whoever is signed in, so a signed-in
+      // response is never stored, and every response varies on Cookie so a
+      // cached signed-out copy is not replayed to someone who just signed in.
+      "cache-control": viewer ? "private, no-store" : originCacheControl(origin, 300),
       // The response body varies with the host that routed the request, so say
       // so: a cache keyed only on path would otherwise be free to mix them.
-      ...(origin.explicit ? {} : { vary: "Host" }),
+      vary: origin.explicit ? "Cookie" : "Host, Cookie",
     },
   });
 }

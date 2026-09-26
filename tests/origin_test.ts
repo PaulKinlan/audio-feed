@@ -288,7 +288,9 @@ Deno.test("the homepage is not publicly cacheable when the origin was derived", 
   const derived = await (await unconfiguredApp())(req(`${DEPLOYED}/`));
   await derived.body?.cancel();
   assertStringIncludes(derived.headers.get("cache-control") ?? "", "private");
-  assertEquals(derived.headers.get("vary"), "Host");
+  // Host because the origin is derived; Cookie because the header names the
+  // signed-in viewer (audio-feed-8fc).
+  assertEquals(derived.headers.get("vary"), "Host, Cookie");
 
   // With an explicit origin the content is host-independent, so it may be shared.
   const configured = await (await unconfiguredApp({ publicBaseUrl: DEPLOYED }))(
