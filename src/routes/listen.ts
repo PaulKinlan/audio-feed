@@ -110,9 +110,36 @@ import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
-import { type AudioMode, type Episode, isPublishable } from "../types.ts";
+import { type AudioMode, type Episode, isPublishable, isSynthesisAuthorized } from "../types.ts";
 
 /** One row of the player's episode list, with everything the UI renders. */
+/**
+ * An episode the subscriber cannot play YET — being generated, or failed (audio-feed-7s2).
+ *
+ * Kept separate from `ListenEpisode` rather than widened with an optional `audioUrl`, because
+ * every consumer of `ListenEpisode` assumes it can be played, downloaded and cached. Making the
+ * unplayable state a different type is what stops that assumption from being quietly optional.
+ */
+export interface ListenActivity {
+  id: string;
+  title: string;
+  source?: string;
+  mode?: AudioMode;
+  /** What the row is doing: waiting, in flight, or terminal-but-retryable. */
+  state: "queued" | "generating" | "failed";
+  /** ISO timestamp for the row's age: how long the subscriber has been waiting. */
+  since?: string;
+  /** Present only for a failed episode, and only from our own synthesis path. */
+  error?: string;
+}
+
+/** The player's activity panel: what is coming, and what needs attention. */
+export interface PlayerActivity {
+  inProgress: ListenActivity[];
+  failed: ListenActivity[];
+  playable: number;
+}
+
 export interface ListenEpisode {
   id: string;
   title: string;
@@ -136,6 +163,8 @@ export interface ListenPageOptions {
   feedUrl: string;
   episodes: ListenEpisode[];
   offlineEnabled: boolean;
+  /** Work in progress and work that failed (audio-feed-7s2). */
+  activity?: PlayerActivity;
 }
 
 const OFFLINE_CACHE = "audio-feed-offline-v1";
@@ -164,7 +193,7 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
 </svg>`;
 
 export function renderListenPage(
-  { token, subscriber, feedUrl, episodes, offlineEnabled }: ListenPageOptions,
+  { token, subscriber, feedUrl, episodes, offlineEnabled, activity }: ListenPageOptions,
 ): string {
   const title = `${subscriber} — Audio Feed`;
   return `<!doctype html>
@@ -327,6 +356,41 @@ export function renderListenPage(
   /* ------------------------------------------------------------------ list */
 
   main { max-inline-size: 48rem; margin-inline: auto; padding: var(--space-5) var(--space-4) var(--space-6); }
+
+  /* audio-feed-7s2 — in-progress and failed rows */
+  .activity { margin-block: 0 var(--space-6); }
+  .activity.hidden { display: none; }
+  .activity-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+  .act {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3);
+    align-items: center; padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--border-2); border-radius: var(--radius);
+    background: color-mix(in srgb, var(--surface) 60%, transparent);
+  }
+  .act-title { font-size: 0.9rem; font-weight: 600; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .act-meta { color: var(--muted); font-size: 0.76rem; }
+  .act-state { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.76rem; font-weight: 600; }
+  .act[data-state="queued"] .act-state, .act[data-state="generating"] .act-state { color: var(--accent); }
+  .act[data-state="failed"] { border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border-2)); }
+  .act[data-state="failed"] .act-state { color: var(--danger, #e5484d); }
+  .act-error { color: var(--muted); font-size: 0.76rem; overflow-wrap: anywhere; }
+  .act-retry {
+    grid-column: 1 / -1; justify-self: start; margin-block-start: var(--space-1);
+    font: inherit; font-size: 0.78rem; font-weight: 600; cursor: pointer;
+    padding: 0.35rem 0.7rem; border-radius: 999px;
+    border: 1px solid var(--border-2); background: transparent; color: var(--text-2);
+  }
+  .act-retry:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  .act-retry[disabled] { cursor: default; opacity: 0.6; }
+  /* A spinner that says nothing the text does not already say is decoration: the pulse is on
+     the dot, and reduced motion (below) leaves the text standing on its own. */
+  .act-dot { inline-size: 0.5rem; block-size: 0.5rem; border-radius: 50%; background: currentColor; }
+  .act[data-state="generating"] .act-dot { animation: act-pulse 1.4s ease-in-out infinite; }
+  @keyframes act-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+  /* The hint carries the waiting time, so a subscriber can tell 'started a minute ago'
+     from 'stuck since this morning'. */
+  #activityHint { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 
   .list-head {
     display: flex; align-items: baseline; justify-content: space-between;
@@ -588,6 +652,7 @@ export function renderListenPage(
   }
 
   \u0040media (prefers-reduced-motion: reduce) {
+
     *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
 </style>
@@ -619,6 +684,19 @@ ${ICON_SPRITE}
 </header>
 
 <main>
+  <!--
+    audio-feed-7s2: work the subscriber could not previously see at all. Above the list, because
+    it is what is happening NOW; the list below is what is finished. Rendered empty and filled
+    from the payload, so the markup is static and only data goes through textContent.
+  -->
+  <section class="activity hidden" id="activity" aria-labelledby="activityHeading">
+    <div class="list-head">
+      <h2 id="activityHeading">In this feed</h2>
+      <span id="activityHint"></span>
+    </div>
+    <ul class="activity-list" id="activityList"></ul>
+  </section>
+
   <div class="list-head">
     <h2>Episodes</h2>
     <span id="savedCount"></span>
@@ -700,6 +778,9 @@ ${ICON_SPRITE}
   const ORIGIN = ${jsonForScript(new URL(feedUrl).origin)};
   const OFFLINE_CACHE = ${jsonForScript(OFFLINE_CACHE)};
   const EPISODES = ${jsonForScript(episodes)};
+  const ACTIVITY = ${
+    jsonForScript(activity ?? { inProgress: [], failed: [], playable: episodes.length })
+  };
   const OFFLINE_ENABLED = ${offlineEnabled ? "true" : "false"};
   const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -933,10 +1014,114 @@ ${ICON_SPRITE}
     return li;
   }
 
+  // ── activity panel (audio-feed-7s2) ────────────────────────────────────────
+  const activitySection = $("activity");
+  const activityList = $("activityList");
+
+  function activityRow(entry, failed) {
+    const li = document.createElement("li");
+    li.className = "act";
+    li.dataset.state = failed ? "failed" : entry.state;
+    li.dataset.episodeId = entry.id;
+
+    const dot = document.createElement("span");
+    dot.className = "act-dot";
+    dot.setAttribute("aria-hidden", "true");
+
+    const body = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "act-title";
+    title.textContent = entry.title;
+    body.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "act-meta";
+    meta.textContent = [entry.source, entry.mode === "deepdive" ? "Deep dive" : "Direct read"]
+      .filter(Boolean).join(" · ");
+    body.appendChild(meta);
+
+    const state = document.createElement("div");
+    state.className = "act-state";
+    state.appendChild(dot);
+    const stateText = document.createElement("span");
+    stateText.textContent = failed
+      ? "Failed"
+      : entry.state === "generating" ? "Generating…" : "Queued";
+    state.appendChild(stateText);
+    body.appendChild(state);
+
+    if (failed) {
+      // The reason is our own synthesis error string, and it is still textContent: a failure
+      // message that quotes subscriber-controlled input (a feed title, an upstream body
+      // fragment) must not be able to become markup.
+      if (entry.error) {
+        const err = document.createElement("div");
+        err.className = "act-error";
+        err.textContent = entry.error;
+        body.appendChild(err);
+      }
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "act-retry";
+      retry.textContent = "Try again";
+      retry.setAttribute("aria-label", "Try again: " + entry.title);
+      retry.addEventListener("click", () => retryEpisode(entry.id, retry));
+      body.appendChild(retry);
+    }
+
+    li.appendChild(body);
+    return li;
+  }
+
+  function renderActivity(payload) {
+    const inProgress = payload.inProgress ?? [];
+    const failed = payload.failed ?? [];
+    activityList.replaceChildren(
+      ...inProgress.map((entry) => activityRow(entry, false)),
+      ...failed.map((entry) => activityRow(entry, true)),
+    );
+    activitySection.classList.toggle("hidden", inProgress.length + failed.length === 0);
+    // Announce only when the set changes, so a 15s poll is not a 15s metronome.
+    const summary = failed.length
+      ? inProgress.length + " in progress, " + failed.length + " needs attention"
+      : inProgress.length
+      ? inProgress.length + " in progress"
+      : "";
+    activitySection.setAttribute("aria-label", summary || "Activity");
+  }
+
+  async function retryEpisode(id, button) {
+    button.disabled = true;
+    try {
+      const res = await fetch(ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/episodes/" + encodeURIComponent(id) + "/retry", { method: "POST" });
+      if (!res.ok) {
+        button.disabled = false;
+        button.textContent = res.status === 404 ? "Gone" : "Could not retry";
+        return;
+      }
+      button.textContent = "Queued";
+      await refreshActivity();
+    } catch {
+      button.disabled = false;
+      button.textContent = "Could not retry";
+    }
+  }
+
+  async function refreshActivity() {
+    try {
+      const res = await fetch(ORIGIN + "/listen/" + encodeURIComponent(TOKEN) + "/status", {
+        headers: { accept: "application/json" },
+      });
+      if (!res.ok) return;
+      renderActivity(await res.json());
+    } catch { /* offline: the next online poll, or a reload, corrects it */ }
+  }
+
   function render() {
     list.replaceChildren();
     for (const episode of EPISODES) list.appendChild(row(episode));
     empty.classList.toggle("hidden", EPISODES.length > 0);
+    renderActivity(ACTIVITY);
     updateCounts();
   }
 
@@ -1297,6 +1482,63 @@ async function resolveTokenValue(ctx: AppContext, raw: string): Promise<string |
   return null;
 }
 
+/**
+ * The episodes that are not playable yet, newest first (audio-feed-7s2).
+ *
+ * Bounded on purpose: this is a status panel, not a queue browser, and an unbounded read of a
+ * backlogged queue would make the player page as expensive as the queue it is reporting.
+ */
+export async function playerActivity(
+  ctx: AppContext,
+  userId: string,
+  limit = 20,
+): Promise<PlayerActivity> {
+  const [pendingPage, synthesizingPage, failedPage, readyPage, sources] = await Promise.all([
+    ctx.stores.metadata.listEpisodePage({ userId, status: "pending", limit: 100 }),
+    ctx.stores.metadata.listEpisodePage({ userId, status: "synthesizing", limit: 100 }),
+    ctx.stores.metadata.listEpisodePage({ userId, status: "failed", limit }),
+    ctx.stores.metadata.listEpisodePage({ userId, status: "ready", limit: 200 }),
+    ctx.stores.metadata.listSources(userId),
+  ]);
+  const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
+
+  // A regenerating episode is pending but STILL PLAYABLE (audio-feed-8oz), so it belongs in the
+  // episode list and must not be doubled up here — a row that appears as both playable and
+  // "generating" is how a subscriber learns to distrust the indicator.
+  const queued = [...pendingPage.episodes, ...synthesizingPage.episodes]
+    .filter((episode) => !isPublishable(episode))
+    .slice(0, limit);
+
+  const toRow = (episode: Episode, state: ListenActivity["state"]): ListenActivity => ({
+    id: episode.id,
+    title: episode.title,
+    source: sourceTitles.get(episode.sourceId),
+    mode: episode.mode,
+    state,
+    since: episode.createdAt,
+    // The reason is our own string (worker/TTS), never subscriber-controlled text — and it is
+    // still rendered with textContent on the client, like every other untrusted value here.
+    error: episode.status === "failed" ? episode.error : undefined,
+  });
+
+  return {
+    inProgress: queued.map((episode) =>
+      toRow(episode, episode.status === "synthesizing" ? "generating" : "queued")
+    ),
+    failed: failedPage.episodes.map((episode) => toRow(episode, "failed")),
+    // Counted with the SAME rule the page lists by: publishable, which includes a regenerating
+    // episode still playing its old audio (audio-feed-8oz). Counting only status "ready" here
+    // made the poll disagree with the page it is refreshing — the player offered an episode the
+    // status endpoint reported as zero playable — so the two definitions had to be unified.
+    // Bounded by the pages fetched: "up to a few hundred" is what this panel is worth.
+    playable: [
+      ...readyPage.episodes,
+      ...pendingPage.episodes,
+      ...synthesizingPage.episodes,
+    ].filter(isPublishable).length,
+  };
+}
+
 /** Resolve the token, load what the player renders, and serve the page. */
 export async function handleListen(
   { ctx, req, params }: RouteContext<AppContext>,
@@ -1345,11 +1587,17 @@ export async function handleListen(
     });
   }
 
+  const activity = await playerActivity(ctx, user.id);
+  // The page's own list is already the authoritative playable set, capped and paged above;
+  // counting it here keeps the header number and the rows in agreement by construction.
+  activity.playable = rows.length;
+
   const html = renderListenPage({
     token,
     subscriber: user.displayName || user.email,
     feedUrl: `${origin.baseUrl}/feed/${encodeURIComponent(token)}/master.xml`,
     episodes: rows,
+    activity,
     // Offline storage needs Cache Storage; without it the page still plays online.
     offlineEnabled: true,
   });
@@ -1362,6 +1610,71 @@ export async function handleListen(
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
     },
+  });
+}
+
+/**
+ * `GET /listen/:token/status` — the activity panel's poll (audio-feed-7s2).
+ *
+ * Same capability as the page itself: the token in the path is the credential, and a caller
+ * without it already cannot read the feed. `no-store` is not a nicety here — a cached status
+ * response would show a subscriber work that finished minutes ago.
+ */
+export async function handleListenStatus(
+  { ctx, req, params }: RouteContext<AppContext>,
+): Promise<Response> {
+  const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
+  if (!token) return notFound("Unknown feed");
+  const user = await getUserByFeedToken(ctx.stores.metadata, token);
+  if (!user) return notFound("Unknown feed");
+  if (user.status !== "approved") {
+    return forbidden(`Feed unavailable (status: ${user.status})`);
+  }
+  const activity = await playerActivity(ctx, user.id);
+  return new Response(JSON.stringify(activity), {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+/**
+ * `POST /listen/:token/episodes/:episodeId/retry` — the subscriber's "try again"
+ * (audio-feed-7s2).
+ *
+ * Scoped by the token that authenticated the page, and the episode is looked up under that
+ * user id, so another subscriber's episode is simply not found: the response is the same 404
+ * as for an id that does not exist at all, which is what keeps a retry route from becoming an
+ * existence oracle over other users' episodes.
+ */
+export async function handleListenRetry(
+  { ctx, params }: RouteContext<AppContext>,
+): Promise<Response> {
+  const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
+  if (!token) return notFound("Unknown feed");
+  const user = await getUserByFeedToken(ctx.stores.metadata, token);
+  if (!user) return notFound("Unknown feed");
+  if (!isSynthesisAuthorized(user)) {
+    return forbidden(`Retry unavailable (status: ${user.status})`);
+  }
+  const episodeId = (params.episodeId ?? "").trim();
+  if (!episodeId) return notFound("Unknown episode");
+
+  const episode = await ctx.stores.metadata.getEpisode(user.id, episodeId);
+  if (!episode) return notFound("Unknown episode");
+  if (episode.status !== "failed") {
+    // 409, not 404: this IS the caller's episode, and the honest answer is that it is not in a
+    // state that can be retried. Requeueing a playable one is a different action with different
+    // semantics, and silently doing it here would drop the old audio out of the feed.
+    return new Response(JSON.stringify({ error: "Episode is not failed" }), {
+      status: 409,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+  const queued = await ctx.stores.metadata.retryEpisode(user.id, episodeId);
+  if (!queued) return notFound("Unknown episode");
+  return new Response(JSON.stringify({ queued: true, episodeId: queued.id }), {
+    status: 202,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
 }
 

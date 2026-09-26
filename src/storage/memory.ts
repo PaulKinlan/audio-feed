@@ -533,6 +533,25 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(structuredClone(queued));
   }
 
+  retryEpisode(userId: string, id: string): Promise<Episode | null> {
+    const key = MemoryMetadataStore.#scoped(userId, id);
+    const found = this.#episodes.get(key);
+    if (!found || found.status !== "failed") return Promise.resolve(null);
+    const queued: Episode = {
+      ...structuredClone(found),
+      status: "pending",
+      attempts: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+      error: undefined,
+      regenerating: undefined,
+    };
+    // No await between the read and the write, so this is as single-stepped as the KV
+    // versionstamp check it is matching (see the note above #writeEpisode).
+    this.#writeEpisode(queued);
+    return Promise.resolve(structuredClone(queued));
+  }
+
   cancelRegeneration(userId: string, id: string): Promise<boolean> {
     const found = this.#episodes.get(MemoryMetadataStore.#scoped(userId, id));
     if (

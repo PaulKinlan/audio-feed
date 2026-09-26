@@ -555,6 +555,26 @@ export class KvMetadataStore implements MetadataStore {
     return (await this.#atomicPutEpisode(queued, entry)) ? queued : null;
   }
 
+  async retryEpisode(userId: string, id: string): Promise<Episode | null> {
+    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
+    const found = entry.value;
+    // `failed` only, and the versionstamp check makes a concurrent claim or requeue win
+    // rather than interleave.
+    if (!found || found.status !== "failed") return null;
+    const queued: Episode = {
+      ...found,
+      status: "pending",
+      attempts: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+      error: undefined,
+      // regenerating is NOT set: a failed render has no audio worth playing while it retries,
+      // and setting it would put those bytes back into the subscriber's feed.
+      regenerating: undefined,
+    };
+    return (await this.#atomicPutEpisode(queued, entry)) ? queued : null;
+  }
+
   async cancelRegeneration(userId: string, id: string): Promise<boolean> {
     const entry = await this.#kv.get<Episode>(["episode", userId, id]);
     const found = entry.value;
