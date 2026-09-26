@@ -20,6 +20,7 @@ import { INBOX_SOURCE_ID } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
+import { countOutdatedEpisodes } from "../compose.ts";
 
 export interface AccountPageData {
   user: User;
@@ -28,6 +29,8 @@ export interface AccountPageData {
   sources: Source[];
   credentials: PasskeyCredential[];
   episodes: Episode[];
+  /** Published episodes made by other prompts, across the whole feed (audio-feed-ktn). */
+  outdatedCount: number;
 }
 
 const CSS = `
@@ -87,8 +90,14 @@ export function renderAccountPage(d: AccountPageData): string {
       <div class="meta">${e.mode === "direct" ? "Read aloud" : "Deep dive"} · ${
       esc(e.sourceTitle ?? e.sourceId)
     } · ${when(e.createdAt)}</div>
-      <!-- REGENERATE (audio-feed-8oz): a per-episode Regenerate button belongs here,
-           once 8oz exposes a user-scoped regenerate endpoint. 8oz is not on main yet. -->
+${
+      approved && e.status === "ready" && !e.regenerating
+        ? `
+      <div class="actions"><button class="btn quiet small" type="button" data-regenerate-episode="${
+          esc(e.id)
+        }" data-title="${esc(e.title)}">Regenerate</button></div>`
+        : ""
+    }
     </li>`
   ).join("");
 
@@ -205,12 +214,20 @@ export function renderAccountPage(d: AccountPageData): string {
   </div>
 
   <section class="panel" aria-labelledby="episodes-h">
-    <h2 id="episodes-h">Recent episodes</h2>
+    <div class="section-title"><h2 id="episodes-h">Recent episodes</h2>${
+    approved
+      ? `<button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
+        d.outdatedCount ? "" : " disabled"
+      }>Regenerate outdated (${d.outdatedCount})</button>`
+      : ""
+  }</div>
+    <p class="sub">Regenerate re-narrates with the current prompts. The old audio stays in your feed until the new one is ready.</p>
     ${
     episodeItems
       ? `<ul class="rows">${episodeItems}</ul>`
       : `<p class="empty">Nothing yet. Send an article above and it appears here.</p>`
   }
+    <p class="feedback" id="regenFeedback" role="status" aria-live="polite"></p>
   </section>
 
   <section class="panel danger-zone" aria-labelledby="rotate-h">
@@ -324,6 +341,36 @@ ${PASSKEY_CLIENT}
     });
   }
 
+  // Regenerating is paid synthesis: every press confirms what it will spend.
+  for (const button of document.querySelectorAll("[data-regenerate-episode]")) {
+    button.addEventListener("click", async () => {
+      if (!confirm("Regenerate " + button.dataset.title + "? This narrates it again (1 episode of synthesis).")) return;
+      button.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.regenerateEpisode) + "/regenerate", {});
+        say($("regenFeedback"), "ok", res.queued ? "Queued for regeneration." : "Already queued.");
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        button.disabled = false;
+      }
+    });
+  }
+  const regenOutdated = $("regenOutdated");
+  if (regenOutdated) {
+    regenOutdated.addEventListener("click", async () => {
+      const count = Number(regenOutdated.dataset.count);
+      if (!confirm("Regenerate " + count + " outdated episode(s)? Each one is narrated again, which is " + count + " episode(s) of synthesis.")) return;
+      regenOutdated.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/regenerate", {});
+        say($("regenFeedback"), "ok", res.queued + " episode(s) queued for regeneration.");
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        regenOutdated.disabled = false;
+      }
+    });
+  }
+
   $("rotateToken").addEventListener("click", async () => {
     if (!confirm("Make a new feed URL? The current one stops working in every podcast app straight away.")) return;
     try {
@@ -391,10 +438,11 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     });
   }
   const baseUrl = resolveOrigin(ctx.config, req).baseUrl;
-  const [sources, credentials, episodes] = await Promise.all([
+  const [sources, credentials, episodes, outdatedCount] = await Promise.all([
     store.listSources(user.id),
     store.listCredentials(user.id),
     store.listEpisodes({ userId: user.id, limit: 10 }),
+    user.status === "approved" ? countOutdatedEpisodes(store, user.id) : 0,
   ]);
   const html = renderAccountPage({
     user,
@@ -403,6 +451,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     sources,
     credentials,
     episodes,
+    outdatedCount,
   });
   return new Response(html, {
     headers: {

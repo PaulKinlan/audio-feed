@@ -20,6 +20,7 @@
  *   GET  /api/admin/stats                     operational metrics         [ndc]
  *   GET  /login, /account                     passkey sign-in, account    [8fc]
  *   POST /api/auth/*, /api/account/*          sessions and account API    [8fc]
+ *   POST /api/account/regenerate, .../episodes/:episodeId/regenerate  own [ktn]
  *   GET  /api/admin/users/:id/episodes        episodes + regenerate counts [8oz]
  *   POST /api/admin/users/:id/regenerate      regenerate a feed           [8oz]
  *   POST /api/admin/users/:id/episodes/:episodeId/regenerate  one episode [8oz]
@@ -222,6 +223,8 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post("/api/account/sources", account("addSource"));
   router.delete("/api/account/sources/:sourceId", account("deleteSource"));
   router.delete("/api/account/passkeys/:id", account("deletePasskey"));
+  router.post("/api/account/episodes/:episodeId/regenerate", account("regenerateEpisode"));
+  router.post("/api/account/regenerate", account("regenerateOutdated"));
 
   router.get(
     "/api/admin/users/:id/episodes",

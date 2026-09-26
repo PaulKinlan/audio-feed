@@ -1213,6 +1213,42 @@ async function regenerableUser(
   return { user };
 }
 
+/**
+ * Requeue a user's published episodes: every one, or only those made by other
+ * prompts. Shared by the admin console and the account page (audio-feed-ktn).
+ * Callers own the approval gate. Resolves the number queued.
+ */
+export async function regenerateUserEpisodes(
+  metadata: MetadataStore,
+  userId: string,
+  scope: "outdated" | "all",
+  filter: { sourceId?: string; mode?: AudioMode } = {},
+): Promise<number> {
+  // Collect first, then requeue: requeueing moves an episode out of the `ready`
+  // scan being paged, which would shift the scan under its own cursor.
+  const ids: string[] = [];
+  for await (const batch of episodeScan(metadata, { userId, ...filter, status: "ready" })) {
+    for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
+  }
+  let queued = 0;
+  for (const id of ids) {
+    if (await metadata.requeueEpisode(userId, id)) queued++;
+  }
+  return queued;
+}
+
+/** How many of a user's published episodes were made by other prompts. */
+export async function countOutdatedEpisodes(
+  metadata: MetadataStore,
+  userId: string,
+): Promise<number> {
+  let outdated = 0;
+  for await (const batch of episodeScan(metadata, { userId, status: "ready" })) {
+    outdated += batch.filter((e) => isOutdated(e)).length;
+  }
+  return outdated;
+}
+
 /** How many rows the console shows; the counts cover the whole catalogue. */
 const ADMIN_EPISODE_ROWS = 50;
 
@@ -1309,23 +1345,10 @@ export function createAdminRegenerateFeedHandler(
     if ("denied" in resolved) return resolved.denied;
     const userId = resolved.user.id;
 
-    // Collect first, then requeue: requeueing moves an episode out of the `ready`
-    // scan being paged, which would shift the scan under its own cursor.
-    const ids: string[] = [];
-    for await (
-      const batch of episodeScan(ctx.stores.metadata, {
-        userId,
-        sourceId: body.sourceId,
-        mode: body.mode,
-        status: "ready",
-      })
-    ) {
-      for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
-    }
-    let queued = 0;
-    for (const id of ids) {
-      if (await ctx.stores.metadata.requeueEpisode(userId, id)) queued++;
-    }
+    const queued = await regenerateUserEpisodes(ctx.stores.metadata, userId, scope, {
+      sourceId: body.sourceId,
+      mode: body.mode,
+    });
     return Response.json(
       { ok: true, scope, queued },
       { headers: { "cache-control": "no-store" } },
@@ -1525,6 +1548,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
       feedTransport: deps.feedTransport,
       fetchArticle: deps.fetchArticle,
       deleteUserSource: (req, userId, sourceId) => deleteUserSource(ctx, req, userId, sourceId),
+      regenerateOutdated: (userId) =>
+        regenerateUserEpisodes(ctx.stores.metadata, userId, "outdated"),
     }),
     adminListEpisodes: createAdminListUserEpisodesHandler(ctx),
     adminRegenerateEpisode: createAdminRegenerateEpisodeHandler(ctx),

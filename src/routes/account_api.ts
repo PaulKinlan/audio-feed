@@ -31,7 +31,7 @@ import { rotateFeedToken, updatePreferences } from "../auth/users.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import { articleUrl, type ExtractedArticle, IngestError } from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
-import { type AudioMode, isAudioMode, type User } from "../types.ts";
+import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
 
 export interface AccountHandlers {
   loginOptions: Handler<AppContext>;
@@ -44,6 +44,8 @@ export interface AccountHandlers {
   addSource: Handler<AppContext>;
   deleteSource: Handler<AppContext>;
   deletePasskey: Handler<AppContext>;
+  regenerateEpisode: Handler<AppContext>;
+  regenerateOutdated: Handler<AppContext>;
 }
 
 export interface AccountDeps {
@@ -51,6 +53,8 @@ export interface AccountDeps {
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
   /** compose.ts's shared source deletion, scoped to `userId`. */
   deleteUserSource: (req: Request, userId: string, sourceId: string) => Promise<Response>;
+  /** compose.ts's shared regenerate, outdated scope; resolves the number queued. */
+  regenerateOutdated: (userId: string) => Promise<number>;
 }
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -259,6 +263,31 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ error: "This is your only passkey. Add another before removing it." }, 409);
       }
       return reply({ ok: true });
+    },
+
+    // Regenerating is TTS spend: owner only, approved only (audio-feed-ktn).
+    regenerateEpisode: async ({ req, params }) => {
+      const user = await signedIn(ctx, req);
+      if (user instanceof Response) return user;
+      if (!isSynthesisAuthorized(user)) {
+        return reply({ error: "Your account is not approved for audio." }, 403);
+      }
+      const episodeId = params.episodeId ?? "";
+      if (!(await store.getEpisode(user.id, episodeId))) {
+        return reply({ error: "Unknown episode." }, 404);
+      }
+      // Idempotent: one already queued (or never published) queues nothing.
+      const queued = await store.requeueEpisode(user.id, episodeId);
+      return reply({ ok: true, queued: queued ? 1 : 0 });
+    },
+
+    regenerateOutdated: async ({ req }) => {
+      const user = await signedIn(ctx, req);
+      if (user instanceof Response) return user;
+      if (!isSynthesisAuthorized(user)) {
+        return reply({ error: "Your account is not approved for audio." }, 403);
+      }
+      return reply({ ok: true, queued: await deps.regenerateOutdated(user.id) });
     },
   };
 }
