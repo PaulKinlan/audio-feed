@@ -509,6 +509,7 @@ export function renderAdminPage(
 <script>
 (() => {
   "use strict";
+  // ── Session identity, the admin token, and the API wrapper ───────────────
   const ORIGIN = ${jsonForScript(publicBaseUrl)};
   // audio-feed-8fc: a signed-in admin's requests carry the session cookie.
   const SIGNED_IN = ${signedIn ? "true" : "false"};
@@ -643,6 +644,7 @@ export function renderAdminPage(
     loadStats();
   });
 
+  // ── Trigger a poll or a synthesis pass now ───────────────────────────────
   pollNowBtn?.addEventListener("click", async () => {
     pollNowBtn.disabled = true;
     say(triggersFeedback, "ok", "Polling due feeds…");
@@ -677,6 +679,7 @@ export function renderAdminPage(
     }
   });
 
+  // ── User rows: cells, the actions a row takes, and what they report ──────
   function cell(text, className) {
     const td = document.createElement("td");
     if (className) td.className = className;
@@ -811,6 +814,7 @@ export function renderAdminPage(
   }
 
   /** Relative time, because "4 minutes ago" answers "is cron alive?" and a timestamp does not. */
+  // ── Runs and stats ───────────────────────────────────────────────────────
   function ago(iso) {
     if (!iso) return "never";
     const ms = Date.now() - Date.parse(iso);
@@ -899,6 +903,7 @@ export function renderAdminPage(
 
   refreshStatsBtn?.addEventListener("click", loadStats);
 
+  // ── Users: the list, the create form, and the one-time link it shows ─────
   async function loadUsers() {
     if (!authorized()) return;
     loadUsersBtn.disabled = true;
@@ -1032,7 +1037,7 @@ export function renderAdminPage(
     }
   });
 
-  // ---- Subscriber Management (audio-feed-e3n) -----------------------------
+  // ── Subscriber management: sources, feed URL and token rotation (audio-feed-e3n) 
   let currentManagingUser = null;
   const manageSection = document.getElementById("manageSection");
   const manageName = document.getElementById("manageName");
@@ -1194,7 +1199,7 @@ export function renderAdminPage(
     }
   }
 
-  // ---- Regenerate (audio-feed-8oz) ----------------------------------------
+  // ── Regenerate: one episode, or the whole feed (audio-feed-8oz) ──────────
   const manageEpisodesBody = document.getElementById("manageEpisodesBody");
   const manageEpisodesCaption = document.getElementById("manageEpisodesCaption");
   const manageEpisodesFeedback = document.getElementById("manageEpisodesFeedback");
@@ -1305,6 +1310,7 @@ export function renderAdminPage(
   regenOutdated.addEventListener("click", () => regenerateFeed("outdated", regenOutdated));
   regenAll.addEventListener("click", () => regenerateFeed("all", regenAll));
 
+  // ── The manage pane: opening it, and adding a source ─────────────────────
   function openManage(user) {
     currentManagingUser = user;
     manageName.textContent = user.displayName || user.email;
