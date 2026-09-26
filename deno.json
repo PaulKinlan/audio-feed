@@ -7,11 +7,11 @@
     "start": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv src/server.ts",
     "test": "deno test --allow-net --allow-env --allow-read --allow-write --unstable-kv",
     "test:cron": "deno test --unstable-cron --allow-net --allow-env --allow-read --allow-write --unstable-kv tests/cron_test.ts",
-    "check": "deno check main.ts src/**/*.ts tests/**/*.ts",
+    "check": "deno check main.ts src tests scripts",
     "fmt": "deno fmt",
     "lint": "deno lint",
     "smoke": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/smoke.ts",
-    "gate": "deno fmt --check && deno lint && deno check main.ts src/**/*.ts tests/**/*.ts && deno test --allow-net --allow-env --allow-read --allow-write --unstable-kv"
+    "gate": "deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --unstable-kv"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1.0.10",
