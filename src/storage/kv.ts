@@ -238,6 +238,45 @@ export class KvMetadataStore implements MetadataStore {
     if (!result.ok) throw new Error(`recordApproval failed for ${user.id}`);
   }
 
+  /**
+   * A demotion `check`s every other approved admin it counted, so of two
+   * concurrent demotions the second commit fails and its retry sees one admin.
+   */
+  async setAdminRole(
+    userId: string,
+    isAdmin: boolean,
+    by: { adminId: string; at: string },
+  ): Promise<"changed" | "unchanged" | "last-admin" | "missing"> {
+    while (true) {
+      const target = await this.#kv.get<User>(["user", userId]);
+      if (!target.value) return "missing";
+      if (target.value.isAdmin === isAdmin) return "unchanged";
+      const tx = this.#kv.atomic().check(target);
+      if (!isAdmin && target.value.status === "approved") {
+        const others: Deno.KvEntry<User>[] = [];
+        for await (const entry of this.#kv.list<User>({ prefix: ["user"] })) {
+          const u = entry.value;
+          if (u.id !== userId && u.isAdmin && u.status === "approved") others.push(entry);
+        }
+        if (others.length === 0) return "last-admin";
+        for (const entry of others) tx.check(entry);
+      }
+      const record: ApprovalRecord = {
+        userId,
+        action: "role",
+        adminId: by.adminId,
+        at: by.at,
+        fromRole: isAdmin ? "user" : "admin",
+        toRole: isAdmin ? "admin" : "user",
+      };
+      const result = await tx
+        .set(["user", userId], { ...target.value, isAdmin })
+        .set(["approval_log", record.at, userId], record)
+        .commit();
+      if (result.ok) return "changed";
+    }
+  }
+
   async listApprovalLog(): Promise<ApprovalRecord[]> {
     const out: ApprovalRecord[] = [];
     // Key order is [at, userId], so an ascending scan is already oldest-first.
@@ -788,15 +827,28 @@ export class KvMetadataStore implements MetadataStore {
     return out;
   }
 
-  async deleteCredential(userId: string, id: string): Promise<boolean> {
-    const entry = await this.#kv.get<PasskeyCredential>(["passkey", id]);
-    if (!entry.value || entry.value.userId !== userId) return false;
-    const result = await this.#kv.atomic()
-      .check(entry)
-      .delete(["passkey", id])
-      .delete(["passkey_by_user", userId, entry.value.createdAt, id])
-      .commit();
-    return result.ok;
+  /**
+   * The count and the delete are one commit: every index row the count read is
+   * `check`ed, so a concurrent delete of a sibling fails this commit and the
+   * retry sees the smaller count.
+   */
+  async deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing"> {
+    while (true) {
+      const entry = await this.#kv.get<PasskeyCredential>(["passkey", id]);
+      if (!entry.value || entry.value.userId !== userId) return "missing";
+      const index: Deno.KvEntry<string>[] = [];
+      for await (const row of this.#kv.list<string>({ prefix: ["passkey_by_user", userId] })) {
+        index.push(row);
+      }
+      if (new Set(index.map((row) => row.value)).size <= 1) return "last";
+      const tx = this.#kv.atomic().check(entry);
+      for (const row of index) tx.check(row);
+      const result = await tx
+        .delete(["passkey", id])
+        .delete(["passkey_by_user", userId, entry.value.createdAt, id])
+        .commit();
+      if (result.ok) return "deleted";
+    }
   }
 
   async putSetupLink(link: SetupLink): Promise<void> {

@@ -174,6 +174,17 @@ export interface MetadataStore {
   recordApproval(user: User, record: ApprovalRecord): Promise<void>;
   /** Oldest first. The admin audit trail. */
   listApprovalLog(): Promise<ApprovalRecord[]>;
+  /**
+   * Grant or revoke admin and write a `role` ledger entry in ONE commit
+   * (audio-feed-8fc). Refuses (`last-admin`) any change that would leave no
+   * approved admin, atomically: of two concurrent demotions of the last two
+   * admins exactly one succeeds. `unchanged` writes nothing.
+   */
+  setAdminRole(
+    userId: string,
+    isAdmin: boolean,
+    by: { adminId: string; at: string },
+  ): Promise<"changed" | "unchanged" | "last-admin" | "missing">;
 
   // -- sources ----------------------------------------------------------
   putSource(source: Source): Promise<void>;
@@ -360,8 +371,12 @@ export interface MetadataStore {
   getCredential(id: string): Promise<PasskeyCredential | null>;
   /** Oldest first. */
   listCredentials(userId: string): Promise<PasskeyCredential[]>;
-  /** Resolves `false` when the credential does not exist or belongs to someone else. */
-  deleteCredential(userId: string, id: string): Promise<boolean>;
+  /**
+   * Delete a passkey unless it is the owner's last one, as ONE step: of two
+   * concurrent deletes of a user's last two passkeys exactly one succeeds.
+   * `missing` when the credential does not exist or belongs to someone else.
+   */
+  deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing">;
 
   putSetupLink(link: SetupLink): Promise<void>;
   /** Read without consuming, so a page can say whose link it is. */

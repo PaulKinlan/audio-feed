@@ -1234,12 +1234,77 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       createdAt: isoAt(0),
     };
     await store.putCredential(cred);
-    assertEquals(await store.deleteCredential("user-2", "cred-1"), false);
+    await store.putCredential({ ...cred, id: "cred-2", createdAt: isoAt(1) });
+    assertEquals(await store.deleteCredential("user-2", "cred-1"), "missing");
     assertEquals((await store.getCredential("cred-1"))?.userId, "user-1");
-    assertEquals(await store.deleteCredential("user-1", "cred-1"), true);
+    assertEquals(await store.deleteCredential("user-1", "cred-1"), "deleted");
     assertEquals(await store.getCredential("cred-1"), null);
-    assertEquals(await store.listCredentials("user-1"), []);
-    assertEquals(await store.deleteCredential("user-1", "cred-1"), false);
+    assertEquals((await store.listCredentials("user-1")).map((c) => c.id), ["cred-2"]);
+    assertEquals(await store.deleteCredential("user-1", "cred-1"), "missing");
+  });
+
+  test("a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc)", async (store) => {
+    const cred = {
+      id: "cred-1",
+      userId: "user-1",
+      publicKey: "pk",
+      counter: 0,
+      name: "Phone",
+      createdAt: isoAt(0),
+    };
+    await store.putCredential(cred);
+    await store.putCredential({ ...cred, id: "cred-2", createdAt: isoAt(1) });
+
+    const results = await Promise.all([
+      store.deleteCredential("user-1", "cred-1"),
+      store.deleteCredential("user-1", "cred-2"),
+    ]);
+    assertEquals(results.filter((r) => r === "deleted").length, 1, `results ${results}`);
+    assertEquals(results.filter((r) => r === "last").length, 1, `results ${results}`);
+    assertEquals((await store.listCredentials("user-1")).length, 1);
+  });
+
+  test("setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc)", async (store) => {
+    await store.putUser(makeUser({ id: "a1", email: "a1@example.com", isAdmin: true }));
+    await store.putUser(makeUser({ id: "a2", email: "a2@example.com", isAdmin: true }));
+    await store.putUser(makeUser({ id: "u1", email: "u1@example.com" }));
+    const by = (adminId: string, index: number) => ({ adminId, at: isoAt(index) });
+
+    assertEquals(await store.setAdminRole("u1", true, by("a1", 0)), "changed");
+    assertEquals((await store.getUser("u1"))?.isAdmin, true);
+    assertEquals(await store.setAdminRole("u1", true, by("a1", 1)), "unchanged");
+    assertEquals(await store.setAdminRole("nope", true, by("a1", 1)), "missing");
+    assertEquals(await store.setAdminRole("u1", false, by("admin-token", 2)), "changed");
+
+    // The last two admins demote each other at once: exactly one may win.
+    const results = await Promise.all([
+      store.setAdminRole("a1", false, by("a2", 3)),
+      store.setAdminRole("a2", false, by("a1", 3)),
+    ]);
+    assertEquals(results.toSorted(), ["changed", "last-admin"], `results ${results}`);
+    const admins = (await store.listUsers()).filter((u) => u.isAdmin);
+    assertEquals(admins.length, 1);
+
+    const log = (await store.listApprovalLog()).filter((r) => r.action === "role");
+    assertEquals(
+      log.map((r) => [r.userId, r.adminId, r.fromRole, r.toRole, r.at]),
+      [
+        ["u1", "a1", "user", "admin", isoAt(0)],
+        ["u1", "admin-token", "admin", "user", isoAt(2)],
+        [admins[0]!.id === "a1" ? "a2" : "a1", admins[0]!.id, "admin", "user", isoAt(3)],
+      ],
+    );
+  });
+
+  test("a suspended admin does not count toward the last active admin (audio-feed-8fc)", async (store) => {
+    await store.putUser(makeUser({ id: "a1", email: "a1@example.com", isAdmin: true }));
+    await store.putUser(
+      makeUser({ id: "a2", email: "a2@example.com", isAdmin: true, status: "suspended" }),
+    );
+    const by = { adminId: "admin-token", at: isoAt(0) };
+    assertEquals(await store.setAdminRole("a1", false, by), "last-admin");
+    assertEquals((await store.getUser("a1"))?.isAdmin, true);
+    assertEquals(await store.setAdminRole("a2", false, by), "changed");
   });
 
   test("a setup link is readable, then consumable exactly once (audio-feed-8fc)", async (store) => {

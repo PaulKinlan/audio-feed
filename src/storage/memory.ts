@@ -167,6 +167,33 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve();
   }
 
+  // Single-threaded: the admin count and the write cannot interleave with another call.
+  setAdminRole(
+    userId: string,
+    isAdmin: boolean,
+    by: { adminId: string; at: string },
+  ): Promise<"changed" | "unchanged" | "last-admin" | "missing"> {
+    const target = this.#users.get(userId);
+    if (!target) return Promise.resolve("missing");
+    if (target.isAdmin === isAdmin) return Promise.resolve("unchanged");
+    if (!isAdmin && target.status === "approved") {
+      const others = [...this.#users.values()].filter((u) =>
+        u.id !== userId && u.isAdmin && u.status === "approved"
+      );
+      if (others.length === 0) return Promise.resolve("last-admin");
+    }
+    this.#users.set(userId, { ...target, isAdmin });
+    this.#approvals.push({
+      userId,
+      action: "role",
+      adminId: by.adminId,
+      at: by.at,
+      fromRole: isAdmin ? "user" : "admin",
+      toRole: isAdmin ? "admin" : "user",
+    });
+    return Promise.resolve("changed");
+  }
+
   listApprovalLog(): Promise<ApprovalRecord[]> {
     const out = this.#approvals.map((record) => structuredClone(record));
     // Oldest first, tie-broken by user so repeated reads cannot swap entries.
@@ -567,11 +594,14 @@ export class MemoryMetadataStore implements MetadataStore {
     );
   }
 
-  deleteCredential(userId: string, id: string): Promise<boolean> {
+  // Single-threaded: the count and the delete cannot interleave with another call.
+  deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing"> {
     const found = this.#credentials.get(id);
-    if (!found || found.userId !== userId) return Promise.resolve(false);
+    if (!found || found.userId !== userId) return Promise.resolve("missing");
+    const owned = [...this.#credentials.values()].filter((c) => c.userId === userId).length;
+    if (owned <= 1) return Promise.resolve("last");
     this.#credentials.delete(id);
-    return Promise.resolve(true);
+    return Promise.resolve("deleted");
   }
 
   putSetupLink(link: SetupLink): Promise<void> {

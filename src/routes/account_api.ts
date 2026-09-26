@@ -251,15 +251,13 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
     deletePasskey: async ({ req, params }) => {
       const user = await signedIn(ctx, req);
       if (user instanceof Response) return user;
-      const id = params.id ?? "";
-      const credential = await store.getCredential(id);
-      if (!credential || credential.userId !== user.id) {
-        return reply({ error: "Unknown passkey." }, 404);
-      }
-      if ((await store.listCredentials(user.id)).length <= 1) {
+      // The last-passkey guard lives in the store, where the count and the
+      // delete are one step; checking here first would race a second delete.
+      const outcome = await store.deleteCredential(user.id, params.id ?? "");
+      if (outcome === "missing") return reply({ error: "Unknown passkey." }, 404);
+      if (outcome === "last") {
         return reply({ error: "This is your only passkey. Add another before removing it." }, 409);
       }
-      await store.deleteCredential(user.id, id);
       return reply({ ok: true });
     },
   };

@@ -98,10 +98,14 @@ export function redactUser(user: User): PublicUser {
 /** One admin decision. Written atomically with the user it decided. */
 export interface ApprovalRecord {
   userId: string;
-  action: UserStatus;
+  /** A status decision, or `role` for an admin grant or revoke (audio-feed-8fc). */
+  action: UserStatus | "role";
   adminId: string;
   at: string;
   reason?: string;
+  /** Set on `role` records only. */
+  fromRole?: "admin" | "user";
+  toRole?: "admin" | "user";
 }
 
 /**

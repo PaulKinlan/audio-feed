@@ -584,8 +584,9 @@ async function adminGate(ctx: AppContext, req: Request): Promise<Response | null
 
 /**
  * `POST /api/admin/users/:id/role` — grant or revoke admin (audio-feed-8fc).
- * Refuses to demote the signed-in caller: that is how the last admin locks
- * everyone out, and the token path is not a reason to allow it.
+ * Refuses to demote the signed-in caller, and (in the store, atomically) any
+ * change that would leave no approved admin — the token path included. Every
+ * change lands in the approval ledger as a `role` record: who, when, from, to.
  */
 export function createAdminSetRoleHandler(ctx: AppContext): AppHandlers["adminSetRole"] {
   return async ({ params, req }) => {
@@ -604,7 +605,17 @@ export function createAdminSetRoleHandler(ctx: AppContext): AppHandlers["adminSe
         headers: { "cache-control": "no-store" },
       });
     }
-    await ctx.stores.metadata.putUser({ ...target, isAdmin: body.isAdmin });
+    const outcome = await ctx.stores.metadata.setAdminRole(target.id, body.isAdmin, {
+      adminId: caller && isActiveAdmin(caller) ? caller.id : "admin-token",
+      at: new Date().toISOString(),
+    });
+    if (outcome === "missing") return notFound("Unknown user");
+    if (outcome === "last-admin") {
+      return Response.json(
+        { error: "That would leave no admins. Make someone else an admin first." },
+        { status: 409, headers: { "cache-control": "no-store" } },
+      );
+    }
     return Response.json({ id: target.id, isAdmin: body.isAdmin }, {
       headers: { "cache-control": "no-store" },
     });

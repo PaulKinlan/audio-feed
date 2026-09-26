@@ -211,6 +211,27 @@ Deno.test("account passkeys: not another user's, and never the last one (audio-f
   assert(await stores.metadata.getCredential("mine-2"));
 });
 
+Deno.test("account passkeys: two concurrent deletes cannot remove both (audio-feed-8fc)", async () => {
+  const { fetch, stores } = app();
+  const me = await seed(stores);
+  for (const [id, at] of [["k1", "2026-09-01"], ["k2", "2026-09-02"]]) {
+    await stores.metadata.putCredential({
+      id: id!,
+      userId: me.id,
+      publicKey: "pk",
+      counter: 0,
+      name: id!,
+      createdAt: `${at}T00:00:00.000Z`,
+    });
+  }
+  const cookie = await cookieFor(stores, me.id);
+  const del = (id: string) =>
+    fetch(call(`/api/account/passkeys/${id}`, { method: "DELETE", cookie, origin: BASE }));
+  const statuses = (await Promise.all([del("k1"), del("k2")])).map((r) => r.status);
+  assertEquals(statuses.toSorted(), [200, 409], `statuses ${statuses}`);
+  assertEquals((await stores.metadata.listCredentials(me.id)).length, 1);
+});
+
 // -- sessions ------------------------------------------------------------------
 
 Deno.test("sign out deletes the session; the cookie is dead afterwards (audio-feed-8fc)", async () => {
@@ -334,6 +355,51 @@ Deno.test("admin role: promote another user, but never demote yourself (audio-fe
   assertEquals((await stores.metadata.getUser(other.id))?.isAdmin, true);
   assertEquals((await role(admin.id, false)).status, 409);
   assertEquals((await stores.metadata.getUser(admin.id))?.isAdmin, true);
+});
+
+Deno.test("admin role: the token cannot demote the only admin, and every change is audited (audio-feed-8fc)", async () => {
+  const { fetch, stores } = app();
+  const admin = await seed(stores, { id: "admin-1", email: "admin@example.com", isAdmin: true });
+  const other = await seed(stores, { id: "user-2", email: "o@example.com" });
+  const token = (id: string, isAdmin: boolean) =>
+    fetch(call(`/api/admin/users/${id}/role`, {
+      json: { isAdmin },
+      headers: { "x-admin-token": "admin-secret" },
+    }));
+
+  assertEquals((await token(admin.id, false)).status, 409, "zero admins locks everyone out");
+  assertEquals((await stores.metadata.getUser(admin.id))?.isAdmin, true);
+
+  const cookie = await cookieFor(stores, admin.id);
+  const promote = await fetch(call(`/api/admin/users/${other.id}/role`, {
+    json: { isAdmin: true },
+    cookie,
+    origin: BASE,
+  }));
+  assertEquals(promote.status, 200);
+  assertEquals((await token(other.id, false)).status, 200);
+
+  const log = (await stores.metadata.listApprovalLog()).filter((r) => r.action === "role");
+  assertEquals(log.map((r) => [r.userId, r.adminId, r.fromRole, r.toRole]), [
+    [other.id, admin.id, "user", "admin"],
+    [other.id, "admin-token", "admin", "user"],
+  ]);
+  for (const record of log) assert(!Number.isNaN(Date.parse(record.at)), "records when");
+});
+
+Deno.test("admin role: the last two admins demoting each other at once leaves one (audio-feed-8fc)", async () => {
+  const { fetch, stores } = app();
+  const a = await seed(stores, { id: "admin-a", email: "a@example.com", isAdmin: true });
+  const b = await seed(stores, { id: "admin-b", email: "b@example.com", isAdmin: true });
+  const demote = async (caller: User, target: User) =>
+    fetch(call(`/api/admin/users/${target.id}/role`, {
+      json: { isAdmin: false },
+      cookie: await cookieFor(stores, caller.id),
+      origin: BASE,
+    }));
+  const statuses = (await Promise.all([demote(a, b), demote(b, a)])).map((r) => r.status);
+  assertEquals(statuses.toSorted(), [200, 409], `statuses ${statuses}`);
+  assertEquals((await stores.metadata.listUsers()).filter((u) => u.isAdmin).length, 1);
 });
 
 Deno.test("admin create user can make an admin (audio-feed-8fc)", async () => {
