@@ -79,6 +79,8 @@ export interface SynthesisWorkerOptions {
   maxClaims?: number;
   /** Worker identity recorded on the claim. Defaults to a per-process id. */
   owner?: string;
+  /** Revision for a regenerated audio key. Injectable so a test can force a repeat. */
+  revision?: () => string;
 }
 
 /**
@@ -96,6 +98,8 @@ const DEFAULTS: Required<SynthesisWorkerOptions> = {
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   owner: WORKER_ID,
+  // A full UUID: 8 hex digits could repeat a key still on the orphan list (audio-feed-8oz).
+  revision: () => crypto.randomUUID(),
 };
 
 export interface SynthesisBatchResult {
@@ -398,7 +402,7 @@ export async function runSynthesisBatch(
     const audioKey = audioBlobKey(
       claimed,
       "wav",
-      previousKey ? crypto.randomUUID().slice(0, 8) : undefined,
+      previousKey ? opts.revision() : undefined,
     );
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
@@ -445,18 +449,47 @@ export async function runSynthesisBatch(
 
   // Retry old blobs a delete failed on, only in a batch that did work: an idle
   // tick stays one read (audio-feed-0ob). A delete that throws keeps the record.
+  // A key an episode references again (a repeated revision) is forgotten, never
+  // deleted: deleting it would leave the feed pointing at a missing file.
   if (claimedAny) {
     for (const key of await metadata.listOrphanBlobs(opts.batchSize)) {
+      const parsed = parseAudioBlobKey(key);
+      if (!parsed) continue; // unparseable: left recorded for a human
       try {
-        await blobs.delete(key);
+        let referenced = false;
+        for (const id of parsed.candidateIds) {
+          const episode = await metadata.getEpisode(parsed.userId, id);
+          if (episode?.audioKey === key) {
+            referenced = true;
+            break;
+          }
+        }
+        if (!referenced) await blobs.delete(key);
         await metadata.forgetOrphanBlob(key);
       } catch {
-        // left recorded for the next batch
+        // a lookup or delete that throws leaves the record for the next batch
       }
     }
   }
 
   return result;
+}
+
+/**
+ * Split `audio/<userId>/<mode>/<id>[-<rev>].<ext>` (see `audioBlobKey`). Ids are
+ * UUIDs and contain hyphens, so every hyphen-boundary prefix of the name is a
+ * candidate id; a wrong candidate can only make a key look referenced, which
+ * keeps a blob rather than deleting one.
+ */
+export function parseAudioBlobKey(
+  key: string,
+): { userId: string; candidateIds: string[] } | null {
+  const match = /^audio\/([^/]+)\/[^/]+\/([^/]+)\.[^./]+$/.exec(key);
+  if (!match?.[1] || !match[2]) return null;
+  const userId = match[1];
+  const parts = match[2].split("-");
+  const candidateIds = parts.map((_, i) => parts.slice(0, parts.length - i).join("-"));
+  return { userId, candidateIds };
 }
 
 export interface SynthesisWorkerHandle {

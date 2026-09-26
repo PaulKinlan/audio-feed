@@ -313,6 +313,70 @@ Deno.test("an idle batch never lists orphan blobs (audio-feed-8oz)", async () =>
   assert(await stores.blobs.head(OLD_KEY), "the orphan waits for a batch that does work");
 });
 
+Deno.test("a repeated revision cannot make the orphan retry delete live audio (audio-feed-8oz)", async () => {
+  const { ctx, stores, fetch } = await published();
+  const deletes = flakyDeletes(stores);
+  const keyA = audioBlobKey({ userId: "user-1", id: "ep-1", mode: "direct" }, "wav", "aaaaaaaa");
+  const regenerate = async (rev: string) => {
+    await stores.metadata.requeueEpisode("user-1", "ep-1");
+    const result = await runSynthesisBatch(ctx, ok, { revision: () => rev });
+    assertEquals(result.ready.length, 1);
+  };
+
+  deletes.failing = false;
+  await regenerate("aaaaaaaa");
+  deletes.failing = true;
+  await regenerate("bbbbbbbb"); // deleting keyA fails, so keyA is recorded
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [keyA]);
+  deletes.failing = false;
+  await regenerate("aaaaaaaa"); // the repeat makes keyA live again, then the retry runs
+
+  const episode = await stores.metadata.getEpisode("user-1", "ep-1");
+  assertEquals(episode?.audioKey, keyA);
+  assert(await stores.blobs.head(keyA), "the retry must not delete the live blob");
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [], "a live key is forgotten");
+  const xml = await masterFeed(fetch);
+  assertStringIncludes(xml, `${BASE}/${keyA}`);
+  const audio = await fetch(new Request(`${BASE}/${keyA}`));
+  assertEquals(audio.status, 200, "the feed's enclosure must still fetch");
+  await audio.body?.cancel();
+});
+
+Deno.test("the orphan retry forgets a referenced key without deleting it, and deletes an unreferenced one (audio-feed-8oz)", async () => {
+  const { ctx, stores } = await published();
+  const gone = "audio/user-1/direct/ep-deleted-cccccccc.wav";
+  await stores.blobs.put(gone, new Uint8Array([1]), { contentType: "audio/wav" });
+  await stores.metadata.recordOrphanBlob(OLD_KEY); // ep-1's current audio
+  await stores.metadata.recordOrphanBlob(gone); // no such episode
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep-2", userId: "user-1", sourceId: "src-a", status: "pending" }),
+  );
+  const result = await runSynthesisBatch(ctx, ok);
+  assertEquals(result.ready.length, 1);
+  assert(await stores.blobs.head(OLD_KEY), "a referenced blob is never deleted");
+  assertEquals(await stores.blobs.head(gone), null, "an unreferenced blob is deleted");
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [], "both are forgotten");
+});
+
+Deno.test("the orphan retry keeps an unparseable key, and one whose lookup throws (audio-feed-8oz)", async () => {
+  const { ctx, stores } = await published();
+  const odd = "not-an-audio-key";
+  const unsure = "audio/user-2/direct/ep-9.wav";
+  await stores.blobs.put(unsure, new Uint8Array([1]), { contentType: "audio/wav" });
+  await stores.metadata.recordOrphanBlob(odd);
+  await stores.metadata.recordOrphanBlob(unsure);
+  const get = stores.metadata.getEpisode.bind(stores.metadata);
+  stores.metadata.getEpisode = (userId: string, id: string) =>
+    userId === "user-2" ? Promise.reject(new Error("metadata unavailable")) : get(userId, id);
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep-2", userId: "user-1", sourceId: "src-a", status: "pending" }),
+  );
+  const result = await runSynthesisBatch(ctx, ok);
+  assertEquals(result.ready.length, 1);
+  assert(await stores.blobs.head(unsure), "a lookup that throws deletes nothing");
+  assertEquals((await stores.metadata.listOrphanBlobs(10)).sort(), [odd, unsure].sort());
+});
+
 // ---------------------------------------------------------------------------
 // the API
 // ---------------------------------------------------------------------------
