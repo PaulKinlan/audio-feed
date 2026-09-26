@@ -11,6 +11,7 @@ import { assert, assertEquals } from "@std/assert";
 import type { EpisodeQuery, MetadataStore, RunRecord } from "../../src/storage/mod.ts";
 import { RUN_HISTORY_LIMIT } from "../../src/storage/mod.ts";
 import type { Episode } from "../../src/types.ts";
+import { unsynthesized } from "../../src/types.ts";
 import { makeApproval, makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 
 export interface MetadataSuiteOptions {
@@ -972,6 +973,80 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       "a cancelled regeneration must leave no queue pointer",
     );
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+  });
+
+  // ── retrying a failed episode (audio-feed-7s2) ───────────────────────────
+  //
+  // A failed episode is terminal today: the player lists playable episodes only, so the
+  // subscriber sees nothing and has no way to try again. These cases pin the transition the
+  // UI depends on for BOTH adapters — a retry that behaved differently between memory and KV
+  // would look fine in tests and strand real episodes in production.
+
+  test("retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2)", async (store) => {
+    await store.putEpisode(makeEpisode({
+      id: "e1",
+      userId: "user-1",
+      status: "failed",
+      error: "TTS upstream returned 503",
+      attempts: 3,
+      audioKey: undefined,
+    }));
+
+    const retried = await store.retryEpisode("user-1", "e1");
+    assert(retried, "a failed episode must be retryable");
+    assertEquals(retried.status, "pending", "it goes back into the queue");
+    assertEquals(retried.error, undefined, "the old failure reason must not follow it in");
+    assertEquals(retried.attempts, undefined, "a manual retry is not the next automatic attempt");
+    assert(!retried.regenerating, "a failed episode has no old audio to keep playing");
+
+    const queued = (await store.listPendingEpisodes({ limit: 10 })).episodes;
+    assertEquals(queued.map((e) => e.id), ["e1"], "and it is queued exactly once");
+  });
+
+  test("retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2)", async (store) => {
+    await store.putEpisode(makeEpisode({
+      id: "ready-1",
+      userId: "user-1",
+      status: "ready",
+      audioKey: "audio/user-1/direct/ready-1.wav",
+      contentType: "audio/wav",
+    }));
+    await store.putEpisode(makeEpisode({
+      id: "pending-1",
+      userId: "user-1",
+      status: "pending",
+      audioKey: undefined,
+    }));
+
+    // A ready episode is requeueEpisode's job, not retryEpisode's: the two transitions have
+    // different preconditions and different audio semantics, and one method accepting both
+    // would quietly drop the old audio out of the feed.
+    assertEquals(await store.retryEpisode("user-1", "ready-1"), null);
+    assertEquals((await store.getEpisode("user-1", "ready-1"))?.status, "ready");
+    // Already queued: nothing to do, and no second pointer.
+    assertEquals(await store.retryEpisode("user-1", "pending-1"), null);
+    assertEquals((await store.listPendingEpisodes({ limit: 10 })).episodes.length, 1);
+    // No such episode.
+    assertEquals(await store.retryEpisode("user-1", "ghost"), null);
+    // Another user's failed episode is not this user's to retry.
+    await store.putEpisode(
+      makeEpisode({ id: "e2", userId: "user-2", status: "failed", error: "x" }),
+    );
+    assertEquals(await store.retryEpisode("user-1", "e2"), null);
+    assertEquals((await store.getEpisode("user-2", "e2"))?.status, "failed");
+  });
+
+  test("a retried episode survives a second failure and can be retried again (audio-feed-7s2)", async (store) => {
+    await store.putEpisode(
+      makeEpisode({ id: "e1", userId: "user-1", status: "failed", error: "boom" }),
+    );
+    assert(await store.retryEpisode("user-1", "e1"));
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed, "a retried episode must be claimable by the worker");
+    assertEquals(claimed.attempts, 1, "the budget restarts rather than continuing the old one");
+    await store.completeEpisode(unsynthesized(claimed, "boom again"), "worker-a");
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "failed");
+    assert(await store.retryEpisode("user-1", "e1"), "and it can be retried again");
   });
 
   test("requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)", async (store) => {

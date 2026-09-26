@@ -102,11 +102,30 @@ Deno.test("the player renders the subscriber's ready episodes (audio-feed-4xb)",
   assertStringIncludes(html, "Deep dive: who captures the value?");
   assertStringIncludes(html, "Ben Thompson");
   assertStringIncludes(html, "Stratechery");
-  // The queued episode must not be offered: there is no audio to play.
-  assertEquals(
-    html.includes("Still being made"),
-    false,
-    "an unsynthesised episode must not be listed",
+  // The queued episode must not be OFFERED: there is no audio to play.
+  //
+  // audio-feed-7s2 deliberately changed what this page displays — an unsynthesised episode now
+  // appears in the activity panel as "Queued", which is what the subscriber was missing when the
+  // player showed nothing at all. So the assertion is scoped to the thing this test actually
+  // guards: the episode must not enter the playable payload, where a row would hand the player an
+  // audio URL that does not exist. Testing "the title appears nowhere" was always a wider claim
+  // than the comment's intent, and it would now fail for a change that is an improvement.
+  const playable = JSON.parse(/const EPISODES = (\[.*?\]);\n/.exec(html)?.[1] ?? "[]");
+  assert(
+    !playable.some((episode: { title: string }) => episode.title === "Still being made"),
+    `an unsynthesised episode must not be offered for playback; playable was ${
+      JSON.stringify(
+        playable.map((episode: { title: string }) => episode.title),
+      )
+    }`,
+  );
+  // And it IS surfaced, as activity, which is the point of 7s2.
+  const activity = JSON.parse(/const ACTIVITY = (\{.*?\});\n/.exec(html)?.[1] ?? "{}");
+  assert(
+    (activity.inProgress ?? []).some((entry: { title: string }) =>
+      entry.title === "Still being made"
+    ),
+    "the queued episode must be visible as in-progress work",
   );
   // The audio element and the enclosure URLs the player will fetch.
   assertStringIncludes(html, '<audio id="audio"');

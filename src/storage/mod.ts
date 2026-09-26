@@ -326,6 +326,26 @@ export interface MetadataStore {
    */
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
   /**
+   * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
+   *
+   * This is the subscriber's "try again", and it is deliberately a different method from
+   * `requeueEpisode` rather than a flag on it, because the two transitions mean different
+   * things: a requeue starts from `ready` and KEEPS the old audio playable while the new
+   * render is made, whereas a retry starts from `failed`, where there is no trustworthy
+   * audio to keep playing. One method accepting both would either strand a failed episode
+   * or, worse, mark a broken render as publishable.
+   *
+   * So the episode returns to `pending` with its error cleared and a fresh claim budget,
+   * and WITHOUT `regenerating` — which is what keeps it out of the feed until it actually
+   * has audio again. The audio fields stay on the record so a partially-written blob is
+   * still reachable by the failed-blob path rather than orphaned here.
+   *
+   * Resolves the queued episode, or `null` when there is nothing to do: not failed (a
+   * ready episode is requeueEpisode's job; a pending or synthesizing one is already
+   * queued), no such episode, or a concurrent write won the race.
+   */
+  retryEpisode(userId: string, id: string): Promise<Episode | null>;
+  /**
    * Queue a published (`ready`) episode for re-synthesis with the current prompts
    * (audio-feed-8oz), atomically. The episode goes back to `pending` with
    * `regenerating` set and a fresh claim budget, KEEPING its audio fields, so it

@@ -35,7 +35,12 @@ import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
 import { handleLogin } from "./routes/login.ts";
 import { handleAccount } from "./routes/account.ts";
-import { handleListen, renderListenLanding } from "./routes/listen.ts";
+import {
+  handleListen,
+  handleListenRetry,
+  handleListenStatus,
+  renderListenLanding,
+} from "./routes/listen.ts";
 import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
@@ -119,6 +124,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
       }),
   );
   router.get("/listen/:token", handleListen);
+  // audio-feed-7s2: the activity panel's poll, and the subscriber's retry. Same capability as
+  // the page itself — the token in the path is the credential.
+  router.get("/listen/:token/status", handleListenStatus);
+  router.post("/listen/:token/episodes/:episodeId/retry", handleListenRetry);
   // PWA surface, served as routes because this app has no static file pipeline.
   router.get("/sw.js", handleServiceWorker);
   router.get("/manifest.json", handleManifest);
