@@ -300,6 +300,31 @@ export interface MetadataStore {
    * "you were superseded", and the caller should discard its result.
    */
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
+  /**
+   * Queue a published (`ready`) episode for re-synthesis with the current prompts
+   * (audio-feed-8oz), atomically. The episode goes back to `pending` with
+   * `regenerating` set and a fresh claim budget, KEEPING its audio fields, so it
+   * stays publishable on the old audio until the worker swaps the new key in.
+   *
+   * Resolves the queued episode, or `null` when there is nothing to do: already
+   * queued or synthesizing (so a repeat is idempotent), no audio, or no episode.
+   */
+  requeueEpisode(userId: string, id: string): Promise<Episode | null>;
+  /**
+   * Abandon a queued or in-flight regeneration, restoring the episode to `ready` on
+   * its old audio. A worker still holding the claim is then refused by
+   * `completeEpisode`. Resolves `false` for anything that is not regenerating.
+   */
+  cancelRegeneration(userId: string, id: string): Promise<boolean>;
+
+  /**
+   * Blobs a delete failed on after they became unreferenced, kept so a later
+   * synthesis batch can retry them (audio-feed-8oz). Recording a key twice keeps
+   * one record; forgetting an unknown key is a no-op.
+   */
+  recordOrphanBlob(key: string): Promise<void>;
+  listOrphanBlobs(limit: number): Promise<string[]>;
+  forgetOrphanBlob(key: string): Promise<void>;
 
   // -- operational stats (audio-feed-ndc) --------------------------------
 

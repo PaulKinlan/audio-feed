@@ -56,7 +56,8 @@ import {
   suspendUser,
   UnknownUserError,
 } from "./auth/users.ts";
-import { INBOX_SOURCE_ID, isAudioMode, type User } from "./types.ts";
+import { INBOX_SOURCE_ID, isAudioMode, isSynthesisAuthorized, type User } from "./types.ts";
+import { isOutdated, PROMPT_VERSION } from "./tts/prompt_version.ts";
 import type { EpisodeQuery, MetadataStore } from "./storage/mod.ts";
 import type { Episode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
@@ -976,6 +977,15 @@ export function createAdminDeleteUserSourceHandler(
           prevFingerprint = fingerprint;
 
           for (const episode of batch) {
+            // A regenerating episode is published on its old audio: cancel the
+            // regeneration and retain it, rather than deleting a playable episode
+            // and orphaning its blob (audio-feed-8oz).
+            if (
+              episode.regenerating &&
+              await ctx.stores.metadata.cancelRegeneration(userId, episode.id)
+            ) {
+              continue;
+            }
             const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
             if (removed) {
               cancelledPendingIds.add(episode.id);
@@ -1066,6 +1076,149 @@ export function createAdminDeleteUserSourceHandler(
           retainedEpisodes,
           cancelledPending: cancelledPendingIds.size,
         },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+// ---------------------------------------------------------------------------
+// regenerate (audio-feed-8oz)
+// ---------------------------------------------------------------------------
+
+const badRequest = (message: string) =>
+  Response.json({ error: message }, { status: 400, headers: { "cache-control": "no-store" } });
+
+/**
+ * The user to regenerate for, or the response to send. Regenerating is TTS spend,
+ * so an unapproved user is refused here as well as deferred by the worker.
+ */
+async function regenerableUser(
+  ctx: AppContext,
+  userId: string,
+): Promise<{ user: User } | { denied: Response }> {
+  const user = await ctx.stores.metadata.getUser(userId);
+  if (!user) return { denied: notFound("Unknown user") };
+  if (!isSynthesisAuthorized(user)) {
+    return { denied: forbidden(`Regeneration unavailable (status: ${user.status})`) };
+  }
+  return { user };
+}
+
+/** How many rows the console shows; the counts cover the whole catalogue. */
+const ADMIN_EPISODE_ROWS = 50;
+
+/** `GET /api/admin/users/:id/episodes` — newest episodes and the regenerate counts. */
+export function createAdminListUserEpisodesHandler(
+  ctx: AppContext,
+): AppHandlers["adminListEpisodes"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const userId = params.id ?? "";
+    if (!await ctx.stores.metadata.getUser(userId)) return notFound("Unknown user");
+
+    const counts = { outdated: 0, all: 0 };
+    for await (
+      const batch of episodeScan(ctx.stores.metadata, { userId, status: "ready" })
+    ) {
+      counts.all += batch.length;
+      counts.outdated += batch.filter((e) => isOutdated(e)).length;
+    }
+    const episodes = await ctx.stores.metadata.listEpisodes({
+      userId,
+      limit: ADMIN_EPISODE_ROWS,
+    });
+    return Response.json(
+      {
+        promptVersion: PROMPT_VERSION,
+        counts,
+        episodes: episodes.map((e) => ({
+          id: e.id,
+          title: e.title,
+          sourceId: e.sourceId,
+          mode: e.mode,
+          status: e.status,
+          regenerating: !!e.regenerating,
+          promptVersion: e.promptVersion ?? null,
+          outdated: isOutdated(e),
+          audioKey: e.audioKey ?? null,
+          error: e.error ?? null,
+        })),
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/** `POST /api/admin/users/:id/episodes/:episodeId/regenerate` — one episode. */
+export function createAdminRegenerateEpisodeHandler(
+  ctx: AppContext,
+): AppHandlers["adminRegenerateEpisode"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const resolved = await regenerableUser(ctx, params.id ?? "");
+    if ("denied" in resolved) return resolved.denied;
+    const episodeId = params.episodeId ?? "";
+    if (!await ctx.stores.metadata.getEpisode(resolved.user.id, episodeId)) {
+      return notFound("Unknown episode");
+    }
+    // Idempotent: an episode already queued (or not yet published) queues nothing.
+    const queued = await ctx.stores.metadata.requeueEpisode(resolved.user.id, episodeId);
+    return Response.json(
+      { ok: true, queued: queued ? 1 : 0 },
+      { headers: { "cache-control": "no-store" } },
+    );
+  };
+}
+
+/**
+ * `POST /api/admin/users/:id/regenerate` — a subscriber's feed.
+ * Body: `{ scope?: "outdated" | "all", sourceId?: string, mode?: AudioMode }`.
+ */
+export function createAdminRegenerateFeedHandler(
+  ctx: AppContext,
+): AppHandlers["adminRegenerateFeed"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+
+    const body: { scope?: unknown; sourceId?: unknown; mode?: unknown } = await req.json()
+      .catch(() => ({}));
+    const scope = body.scope ?? "outdated";
+    if (scope !== "outdated" && scope !== "all") {
+      return badRequest('scope must be "outdated" or "all".');
+    }
+    if (body.sourceId !== undefined && typeof body.sourceId !== "string") {
+      return badRequest("sourceId must be a string.");
+    }
+    if (body.mode !== undefined && !isAudioMode(body.mode)) {
+      return badRequest('mode must be "direct" or "deepdive".');
+    }
+
+    const resolved = await regenerableUser(ctx, params.id ?? "");
+    if ("denied" in resolved) return resolved.denied;
+    const userId = resolved.user.id;
+
+    // Collect first, then requeue: requeueing moves an episode out of the `ready`
+    // scan being paged, which would shift the scan under its own cursor.
+    const ids: string[] = [];
+    for await (
+      const batch of episodeScan(ctx.stores.metadata, {
+        userId,
+        sourceId: body.sourceId,
+        mode: body.mode,
+        status: "ready",
+      })
+    ) {
+      for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
+    }
+    let queued = 0;
+    for (const id of ids) {
+      if (await ctx.stores.metadata.requeueEpisode(userId, id)) queued++;
+    }
+    return Response.json(
+      { ok: true, scope, queued },
       { headers: { "cache-control": "no-store" } },
     );
   };
@@ -1257,5 +1410,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminPollNow: createAdminPollNowHandler(ctx, deps),
     adminStats: createAdminStatsHandler(ctx),
     adminSynthesizeNow: createAdminSynthesizeNowHandler(ctx, deps),
+    adminListEpisodes: createAdminListUserEpisodesHandler(ctx),
+    adminRegenerateEpisode: createAdminRegenerateEpisodeHandler(ctx),
+    adminRegenerateFeed: createAdminRegenerateFeedHandler(ctx),
   };
 }

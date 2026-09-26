@@ -876,6 +876,149 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(all[0]?.status, "ready");
   });
 
+  // -- regeneration (audio-feed-8oz) -------------------------------------------
+  //
+  // Regenerating reuses the pending -> synthesizing claim path, so the lease, the
+  // owner check and the approval gate apply unchanged. What it adds is that the
+  // episode keeps its OLD audio, and stays publishable on it, until new audio
+  // lands - including when the regeneration fails, is abandoned, or is cancelled.
+
+  const published = (over: Partial<Episode> = {}) =>
+    makeEpisode({
+      id: "e1",
+      status: "ready",
+      audioKey: "audio/user-1/direct/e1.wav",
+      contentType: "audio/wav",
+      ...over,
+    });
+
+  test("requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)", async (store) => {
+    await store.putEpisode(published({ attempts: 3, promptVersion: "old-prompts" }));
+
+    const queued = await store.requeueEpisode("user-1", "e1");
+    assert(queued, "a ready episode must be requeueable");
+    assertEquals(queued.status, "pending");
+    assertEquals(queued.regenerating, true);
+    assertEquals(queued.audioKey, "audio/user-1/direct/e1.wav", "the old audio stays");
+    assertEquals(queued.id, "e1", "the episode keeps its id, and so its GUID");
+
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "pending");
+    assertEquals(stored?.regenerating, true);
+    assertEquals(stored?.contentType, "audio/wav");
+
+    // On the worker's queue, with a fresh claim budget: the attempts that made the
+    // old audio must not count against the new synthesis.
+    const pending = await store.listPendingEpisodes({ limit: 10 });
+    assertEquals(pending.episodes.map((e) => e.id), ["e1"]);
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed, "a requeued episode must be claimable");
+    assertEquals(claimed.attempts, 1);
+    assertEquals(claimed.audioKey, "audio/user-1/direct/e1.wav");
+  });
+
+  test("requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz)", async (store) => {
+    await store.putEpisode(published());
+    assert(await store.requeueEpisode("user-1", "e1"));
+    assertEquals(
+      await store.requeueEpisode("user-1", "e1"),
+      null,
+      "regenerating an episode that is already queued changes nothing",
+    );
+    assertEquals((await store.listPendingEpisodes({ limit: 10 })).episodes.length, 1);
+
+    // In synthesis: a requeue must not reset a live claim.
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+    assertEquals(await store.requeueEpisode("user-1", "e1"), null);
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "synthesizing");
+    assertEquals(stored?.claimedBy, "worker-a");
+
+    // Nothing to regenerate: no audio yet, a failure, or no episode at all.
+    await store.putEpisode(queued({ id: "e2" }));
+    await store.putEpisode(makeEpisode({ id: "e3", status: "failed", audioKey: undefined }));
+    assertEquals(await store.requeueEpisode("user-1", "e2"), null);
+    assertEquals(await store.requeueEpisode("user-1", "e3"), null);
+    assertEquals(await store.requeueEpisode("user-1", "ghost"), null);
+    assertEquals((await store.getEpisode("user-1", "e3"))?.status, "failed");
+  });
+
+  test("cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz)", async (store) => {
+    await store.putEpisode(published());
+    assert(await store.requeueEpisode("user-1", "e1"));
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    assertEquals(await store.cancelRegeneration("user-1", "e1"), true);
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "ready");
+    assert(!stored?.regenerating, "a cancelled regeneration is no longer regenerating");
+    assertEquals(stored?.audioKey, "audio/user-1/direct/e1.wav");
+    assertEquals((await store.listPendingEpisodes({ limit: 10 })).episodes, []);
+
+    // The worker that held the claim finishes late: its result must be refused.
+    const late = await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "audio/user-1/direct/e1-new.wav" },
+      "worker-a",
+    );
+    assertEquals(late, false);
+    assertEquals((await store.getEpisode("user-1", "e1"))?.audioKey, "audio/user-1/direct/e1.wav");
+
+    // A first synthesis is not a regeneration; cancelling it is refused.
+    await store.putEpisode(queued({ id: "e2" }));
+    assertEquals(await store.cancelRegeneration("user-1", "e2"), false);
+    assertEquals((await store.getEpisode("user-1", "e2"))?.status, "pending");
+  });
+
+  test("an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz)", async (store) => {
+    await store.putEpisode(published());
+    assert(await store.requeueEpisode("user-1", "e1"));
+    for (let i = 1; i <= 3; i++) {
+      assert(
+        await store.claimEpisode("user-1", "e1", {
+          ...CLAIM,
+          now: `2026-09-20T12:0${i - 1}:00.000Z`,
+        }),
+      );
+    }
+    const fourth = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      now: "2026-09-20T12:10:00.000Z",
+    });
+    assertEquals(fourth, null, "out of claims is out of claims, regeneration or not");
+
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "ready", "the episode was playable before and must stay playable");
+    assertEquals(stored?.audioKey, "audio/user-1/direct/e1.wav");
+    assert(!stored?.regenerating);
+    assert(stored?.error?.includes("attempts"), `expected a readable reason, got ${stored?.error}`);
+    assertEquals((await store.listPendingEpisodes({ limit: 10 })).episodes, []);
+  });
+
+  test("orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)", async (store) => {
+    assertEquals(await store.listOrphanBlobs(10), []);
+    await store.recordOrphanBlob("audio/user-1/direct/e1.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e1.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e2.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e3.wav");
+
+    const all = await store.listOrphanBlobs(10);
+    assertEquals([...all].sort(), [
+      "audio/user-1/direct/e1.wav",
+      "audio/user-1/direct/e2.wav",
+      "audio/user-1/direct/e3.wav",
+    ]);
+    assertEquals((await store.listOrphanBlobs(2)).length, 2);
+
+    await store.forgetOrphanBlob("audio/user-1/direct/e2.wav");
+    await store.forgetOrphanBlob("never-recorded");
+    assertEquals((await store.listOrphanBlobs(10)).sort(), [
+      "audio/user-1/direct/e1.wav",
+      "audio/user-1/direct/e3.wav",
+    ]);
+  });
+
   // -- listPendingEpisodes (audio-feed-bbb) ----------------------------------
 
   test("listPendingEpisodes returns pending episodes oldest first (FIFO)", async (store) => {
