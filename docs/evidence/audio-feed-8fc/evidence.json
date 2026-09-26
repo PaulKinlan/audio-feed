@@ -1,0 +1,90 @@
+{
+  "bead": "audio-feed-8fc",
+  "at": "2026-09-26T19:50:22.487Z",
+  "steps": [
+    {
+      "step": "signed-out /admin offers sign-in",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "step": "setup link: secret scrubbed from the address bar",
+      "ok": true,
+      "detail": "location is /login"
+    },
+    {
+      "step": "register a passkey from the setup link",
+      "ok": true,
+      "detail": "authenticator holds 1 resident credential(s); landed on /account"
+    },
+    {
+      "step": "sign out",
+      "ok": true,
+      "detail": "/account now redirects to /login"
+    },
+    {
+      "step": "sign in with the passkey",
+      "ok": true,
+      "detail": "back on /account as Paul Kinlan"
+    },
+    {
+      "step": "account edits persist across a reload",
+      "ok": true,
+      "detail": "[\"Paul K.\",\"Kore\",\"Paul K.\"]"
+    },
+    {
+      "step": "Send to Audio without a token",
+      "ok": true,
+      "detail": "Queued: An article sent from the account page. It appears in your feed once narrated."
+    },
+    {
+      "step": "admin reaches /admin",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "step": "admin console issues a setup link on the session",
+      "ok": true,
+      "detail": "link shown in the console, not logged"
+    },
+    {
+      "step": "a non-admin gets 403 at /admin",
+      "ok": true,
+      "detail": "status 403, heading \"This page is for admins\""
+    }
+  ],
+  "shots": [
+    "01-home-signed-out-390-light.png",
+    "01-home-signed-out-1280-light.png",
+    "01-home-signed-out-390-dark.png",
+    "01-home-signed-out-1280-dark.png",
+    "02-login-390-light.png",
+    "02-login-1280-light.png",
+    "02-login-390-dark.png",
+    "02-login-1280-dark.png",
+    "03-admin-signed-out-390-light.png",
+    "03-admin-signed-out-1280-light.png",
+    "03-admin-signed-out-390-dark.png",
+    "03-admin-signed-out-1280-dark.png",
+    "04-login-setup-390-light.png",
+    "04-login-setup-1280-light.png",
+    "04-login-setup-390-dark.png",
+    "04-login-setup-1280-dark.png",
+    "05-account-390-light.png",
+    "05-account-1280-light.png",
+    "05-account-390-dark.png",
+    "05-account-1280-dark.png",
+    "06-home-signed-in-390-light.png",
+    "06-home-signed-in-1280-light.png",
+    "06-home-signed-in-390-dark.png",
+    "06-home-signed-in-1280-dark.png",
+    "07-admin-390-light.png",
+    "07-admin-1280-light.png",
+    "07-admin-390-dark.png",
+    "07-admin-1280-dark.png",
+    "08-admin-403-390-light.png",
+    "08-admin-403-1280-light.png",
+    "08-admin-403-390-dark.png",
+    "08-admin-403-1280-dark.png"
+  ]
+}
