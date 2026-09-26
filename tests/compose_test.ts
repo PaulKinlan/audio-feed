@@ -623,3 +623,105 @@ Deno.test("master.xml and per-source feeds cap output to newest 200 episodes (au
   assertEquals(srcItems.length, 200, "per-source feed must also cap at 200 episodes");
   assertStringIncludes(srcXml, "Episode 349");
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-2w8 — the feed cap is a cap on PUBLISHABLE episodes, not on episodes listed
+// ---------------------------------------------------------------------------
+
+/**
+ * The feed is capped to the newest 200 episodes. Listing the newest 200 of ANY status and
+ * filtering afterwards means every pending or failed episode among them silently removes a
+ * playable episode from a subscriber's feed: after a large feed poll, or a large
+ * "Regenerate all", the oldest ready episodes fall off the end even though plenty of ready
+ * work exists to replace them.
+ *
+ * The player was fixed this way in audio-feed-8oz (listen.ts pages until it has its 100);
+ * the RSS builder is the same bug on the other side of the same seam.
+ */
+async function feedWithEpisodes(ready: number, newerUnpublishable: number) {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "stratechery", userId: "user-1" }));
+  // `ready` playable episodes, all OLDER than the ones below. createdAt is the listing key,
+  // so the newest entries are the ones that would push ready episodes off a capped page.
+  for (let i = 0; i < ready; i++) {
+    await stores.metadata.putEpisode(makeEpisode({
+      id: `ready-${i}`,
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-1",
+      title: `Ready article ${i}`,
+      status: "ready",
+      mode: "direct",
+      audioKey: `ready-${i}.mp3`,
+      byteLength: 1024,
+      contentType: "audio/mpeg",
+      createdAt: new Date(Date.UTC(2026, 8, 1) + i * 60_000).toISOString(),
+    }));
+  }
+  // Newer, NOT publishable: pending with no audio yet, and failed.
+  for (let i = 0; i < newerUnpublishable; i++) {
+    await stores.metadata.putEpisode(makeEpisode({
+      id: `pending-${i}`,
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-1",
+      title: `Pending article ${i}`,
+      status: "pending",
+      mode: "direct",
+      audioKey: undefined,
+      byteLength: undefined,
+      createdAt: new Date(Date.UTC(2026, 8, 20) + i * 60_000).toISOString(),
+    }));
+  }
+  const handlers = createHandlers({ config, stores }, {
+    fetchArticle: () => Promise.resolve(ARTICLE),
+  });
+  const { fetch } = createApp({ config, stores }, handlers);
+  return { fetch, stores };
+}
+
+const itemCount = (xml: string) => (xml.match(/<item>/g) ?? []).length;
+
+Deno.test("the master feed carries 200 playable episodes when newer pending ones exist (audio-feed-2w8)", async () => {
+  const { fetch } = await feedWithEpisodes(200, 5);
+  const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
+  assertEquals(
+    itemCount(xml),
+    200,
+    "5 pending episodes must not shrink the feed below its 200 cap — the cap is on playable items",
+  );
+});
+
+Deno.test("a per-source feed carries 200 playable episodes when newer failed ones exist (audio-feed-2w8)", async () => {
+  const { fetch, stores } = await feedWithEpisodes(200, 5);
+  for (let i = 0; i < 5; i++) {
+    await stores.metadata.putEpisode(makeEpisode({
+      id: `failed-${i}`,
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-1",
+      title: `Failed article ${i}`,
+      status: "failed",
+      mode: "direct",
+      error: "synthesis failed",
+      createdAt: new Date(Date.UTC(2026, 8, 25) + i * 60_000).toISOString(),
+    }));
+  }
+  const xml = await (await fetch(req("/feed/token-user-1/stratechery/direct.xml"))).text();
+  assertEquals(
+    itemCount(xml),
+    200,
+    "newer failed episodes must not cost a subscriber 5 playable items",
+  );
+});
+
+Deno.test("the feed stops at the real episode count and does not pad (audio-feed-2w8)", async () => {
+  const { fetch } = await feedWithEpisodes(7, 3);
+  const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
+  assertEquals(
+    itemCount(xml),
+    7,
+    "with fewer than 200 playable episodes the feed carries what exists",
+  );
+});

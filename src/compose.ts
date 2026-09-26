@@ -157,6 +157,13 @@ function loadUserByFeedToken(ctx: AppContext, token: string): Promise<User | nul
  * the IO the projection deliberately does not do — asking the blob store how big
  * a file is when the record predates synthesis recording its size.
  */
+/**
+ * The RSS cap: at most this many PUBLISHABLE episodes per feed. Industry-standard practice is to
+ * bound a feed so a client's first sync stays finite; audio-feed-2w8 is the reminder that the bound
+ * has to count items the subscriber can actually play, not items listed on the way to filtering.
+ */
+const FEED_EPISODE_CAP = 200;
+
 async function publishableEpisodes(
   ctx: AppContext,
   userId: string,
@@ -166,25 +173,41 @@ async function publishableEpisodes(
   baseUrl: string,
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<FeedEpisode[]> {
-  const episodes = await ctx.stores.metadata.listEpisodes({
-    userId,
-    sourceId: filter.sourceId,
-    mode: filter.mode,
-    limit: 200,
-  });
-
+  // Page until `FEED_EPISODE_CAP` PUBLISHABLE episodes are found, instead of listing the newest
+  // 200 of any status and filtering afterwards. Listing-then-filtering meant every pending or
+  // failed episode among the newest 200 silently removed a playable item from a subscriber's feed
+  // (audio-feed-2w8): after a large feed poll, or a large "Regenerate all", the oldest ready
+  // episodes fell off the end even though ready work existed to replace them. This is the same
+  // fix the player got in audio-feed-8oz, on the other side of the same seam.
+  //
+  // `listEpisodePage`'s limit bounds the SCAN, not the matches, so a short page is not the end —
+  // the loop continues while a cursor advances. The cursor guard is not decoration: a store that
+  // hands back the same cursor would otherwise spin here forever.
   const publishable: FeedEpisode[] = [];
-  for (const episode of episodes) {
-    const needsSize = !episode.byteLength || episode.byteLength <= 0;
-    const info = needsSize && episode.audioKey
-      ? await ctx.stores.blobs.head(episode.audioKey)
-      : null;
-    const mapped = toFeedEpisode(episode, {
-      publicBaseUrl: baseUrl,
-      byteLength: info?.size,
+  let cursor: string | undefined;
+  do {
+    const page = await ctx.stores.metadata.listEpisodePage({
+      userId,
+      sourceId: filter.sourceId,
+      mode: filter.mode,
+      limit: FEED_EPISODE_CAP,
+      cursor,
     });
-    if (mapped) publishable.push(mapped);
-  }
+    for (const episode of page.episodes) {
+      if (publishable.length >= FEED_EPISODE_CAP) break;
+      const needsSize = !episode.byteLength || episode.byteLength <= 0;
+      const info = needsSize && episode.audioKey
+        ? await ctx.stores.blobs.head(episode.audioKey)
+        : null;
+      const mapped = toFeedEpisode(episode, {
+        publicBaseUrl: baseUrl,
+        byteLength: info?.size,
+      });
+      if (mapped) publishable.push(mapped);
+    }
+    cursor = page.cursor === cursor ? undefined : page.cursor;
+  } while (cursor && publishable.length < FEED_EPISODE_CAP);
+
   return publishable;
 }
 
@@ -211,7 +234,7 @@ const forbidden = (message: string) =>
 /**
  * `GET /feed/:token/master.xml` — every ready episode for the token's user.
  *
- * Capped to the newest 200 episodes (industry standard RSS practice to avoid
+ * Capped to the newest `FEED_EPISODE_CAP` playable episodes (industry standard RSS practice to avoid
  * multi-megabyte XML payloads and client timeouts). Unfiltered across sources;
  * query parameters (such as ?sourceId= or client tracking/cache-busters) are
  * deliberately ignored rather than rejected with 400 to preserve compatibility
