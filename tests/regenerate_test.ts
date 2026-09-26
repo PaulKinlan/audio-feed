@@ -436,6 +436,52 @@ Deno.test("the player keeps listing an episode while it regenerates (audio-feed-
   assertStringIncludes(await res.text(), "/audio/user-1/direct/ep-1.wav");
 });
 
+/** Episodes newer than ep-1, `i` minutes after it, in the given status. */
+async function putNewer(stores: Stores, count: number, overrides: Partial<Episode>) {
+  for (let i = 0; i < count; i++) {
+    const id = `${overrides.status}-${i}`;
+    await stores.metadata.putEpisode(makeEpisode({
+      id,
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "article-1",
+      audioKey: `audio/user-1/direct/${id}.wav`,
+      createdAt: new Date(Date.UTC(2026, 8, 11) + i * 60_000).toISOString(),
+      ...overrides,
+    }));
+  }
+}
+
+const playerCount = (html: string) => Number(/id="episodeCount">(\d+) episode/.exec(html)?.[1]);
+
+Deno.test("the player lists an older ready episode behind 100 newer pending ones (audio-feed-8oz)", async () => {
+  const { stores, fetch } = await published();
+  await putNewer(stores, 100, { status: "pending", audioKey: undefined });
+  const html = await (await fetch(new Request(`${BASE}/listen/${TOKEN}`))).text();
+  assertStringIncludes(html, "/audio/user-1/direct/ep-1.wav");
+  assertEquals(playerCount(html), 1);
+});
+
+Deno.test("the player still lists 100 ready episodes when newer ones failed (audio-feed-8oz)", async () => {
+  const { stores, fetch } = await published();
+  // ep-1 plus 99 more ready, all older than the failed ones.
+  for (let i = 0; i < 99; i++) {
+    await stores.metadata.putEpisode(makeEpisode({
+      id: `ready-${i}`,
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "article-1",
+      status: "ready",
+      audioKey: `audio/user-1/direct/ready-${i}.wav`,
+      createdAt: new Date(Date.UTC(2026, 8, 10, 9) + i * 60_000).toISOString(),
+    }));
+  }
+  await putNewer(stores, 5, { status: "failed", error: "boom" });
+  const html = await (await fetch(new Request(`${BASE}/listen/${TOKEN}`))).text();
+  assertEquals(playerCount(html), 100);
+  assertStringIncludes(html, "/audio/user-1/direct/ep-1.wav");
+});
+
 // ---------------------------------------------------------------------------
 // the admin console
 // ---------------------------------------------------------------------------
