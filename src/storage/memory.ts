@@ -98,6 +98,7 @@ export class MemoryMetadataStore implements MetadataStore {
   #downloadTotal = 0;
   readonly #downloadsByUser = new Map<string, number>();
   readonly #runs: RunRecord[] = [];
+  readonly #orphanBlobs = new Set<string>();
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -505,6 +506,20 @@ export class MemoryMetadataStore implements MetadataStore {
       claimedBy: undefined,
     });
     return Promise.resolve(true);
+  }
+
+  recordOrphanBlob(key: string): Promise<void> {
+    this.#orphanBlobs.add(key);
+    return Promise.resolve();
+  }
+
+  listOrphanBlobs(limit: number): Promise<string[]> {
+    return Promise.resolve([...this.#orphanBlobs].slice(0, limit));
+  }
+
+  forgetOrphanBlob(key: string): Promise<void> {
+    this.#orphanBlobs.delete(key);
+    return Promise.resolve();
   }
 
   // -- operational stats (audio-feed-ndc) ------------------------------------

@@ -665,6 +665,22 @@ export class KvMetadataStore implements MetadataStore {
     return ["episode_by_user", query.userId];
   }
 
+  async recordOrphanBlob(key: string): Promise<void> {
+    await this.#kv.set(["orphan_blob", key], true);
+  }
+
+  async listOrphanBlobs(limit: number): Promise<string[]> {
+    const keys: string[] = [];
+    for await (const entry of this.#kv.list({ prefix: ["orphan_blob"] }, { limit })) {
+      if (typeof entry.key[1] === "string") keys.push(entry.key[1]);
+    }
+    return keys;
+  }
+
+  async forgetOrphanBlob(key: string): Promise<void> {
+    await this.#kv.delete(["orphan_blob", key]);
+  }
+
   // -- operational stats (audio-feed-ndc) ------------------------------------
 
   /**

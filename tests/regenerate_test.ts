@@ -260,6 +260,59 @@ Deno.test("an unapproved user's regeneration is never synthesised (audio-feed-8o
   assertEquals((await stores.metadata.getEpisode("user-1", "ep-1"))?.audioKey, OLD_KEY);
 });
 
+/** The memory blob store, with `delete` failing while `failing` is set. */
+function flakyDeletes(stores: Stores) {
+  const state = { failing: true };
+  const realDelete = stores.blobs.delete.bind(stores.blobs);
+  stores.blobs.delete = (key: string) =>
+    state.failing ? Promise.reject(new Error("delete unavailable")) : realDelete(key);
+  return state;
+}
+
+Deno.test("a failed delete of the old blob after the swap is recorded as an orphan (audio-feed-8oz)", async () => {
+  const { ctx, stores } = await published();
+  flakyDeletes(stores);
+  await stores.metadata.requeueEpisode("user-1", "ep-1");
+  const result = await runSynthesisBatch(ctx, ok);
+  assertEquals(result.ready.length, 1, "the swap itself still commits");
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [OLD_KEY]);
+  assert(await stores.blobs.head(OLD_KEY), "the old blob is still there to retry");
+});
+
+Deno.test("a later batch that does work deletes a recorded orphan and forgets it (audio-feed-8oz)", async () => {
+  const { ctx, stores } = await published();
+  const deletes = flakyDeletes(stores);
+  await stores.metadata.requeueEpisode("user-1", "ep-1");
+  await runSynthesisBatch(ctx, ok);
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [OLD_KEY]);
+
+  deletes.failing = false;
+  // A key that is already gone counts as deleted.
+  await stores.metadata.recordOrphanBlob("audio/user-1/direct/already-gone.wav");
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep-2", userId: "user-1", sourceId: "src-a", status: "pending" }),
+  );
+  const result = await runSynthesisBatch(ctx, ok);
+  assertEquals(result.ready.length, 1);
+  assertEquals(await stores.blobs.head(OLD_KEY), null, "the orphan is deleted");
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [], "and forgotten");
+});
+
+Deno.test("an idle batch never lists orphan blobs (audio-feed-8oz)", async () => {
+  const { ctx, stores } = await published();
+  await stores.metadata.recordOrphanBlob(OLD_KEY);
+  let listed = 0;
+  const list = stores.metadata.listOrphanBlobs.bind(stores.metadata);
+  stores.metadata.listOrphanBlobs = (limit: number) => {
+    listed++;
+    return list(limit);
+  };
+  const result = await runSynthesisBatch(ctx, ok);
+  assertEquals(result.ready.length + result.failed.length, 0, "nothing to do");
+  assertEquals(listed, 0, "an idle tick stays one read (audio-feed-0ob)");
+  assert(await stores.blobs.head(OLD_KEY), "the orphan waits for a batch that does work");
+});
+
 // ---------------------------------------------------------------------------
 // the API
 // ---------------------------------------------------------------------------

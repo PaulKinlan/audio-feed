@@ -317,6 +317,15 @@ export interface MetadataStore {
    */
   cancelRegeneration(userId: string, id: string): Promise<boolean>;
 
+  /**
+   * Blobs a delete failed on after they became unreferenced, kept so a later
+   * synthesis batch can retry them (audio-feed-8oz). Recording a key twice keeps
+   * one record; forgetting an unknown key is a no-op.
+   */
+  recordOrphanBlob(key: string): Promise<void>;
+  listOrphanBlobs(limit: number): Promise<string[]>;
+  forgetOrphanBlob(key: string): Promise<void>;
+
   // -- operational stats (audio-feed-ndc) --------------------------------
 
   /**

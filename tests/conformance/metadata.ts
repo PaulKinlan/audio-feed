@@ -996,6 +996,29 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.listPendingEpisodes({ limit: 10 })).episodes, []);
   });
 
+  test("orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)", async (store) => {
+    assertEquals(await store.listOrphanBlobs(10), []);
+    await store.recordOrphanBlob("audio/user-1/direct/e1.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e1.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e2.wav");
+    await store.recordOrphanBlob("audio/user-1/direct/e3.wav");
+
+    const all = await store.listOrphanBlobs(10);
+    assertEquals([...all].sort(), [
+      "audio/user-1/direct/e1.wav",
+      "audio/user-1/direct/e2.wav",
+      "audio/user-1/direct/e3.wav",
+    ]);
+    assertEquals((await store.listOrphanBlobs(2)).length, 2);
+
+    await store.forgetOrphanBlob("audio/user-1/direct/e2.wav");
+    await store.forgetOrphanBlob("never-recorded");
+    assertEquals((await store.listOrphanBlobs(10)).sort(), [
+      "audio/user-1/direct/e1.wav",
+      "audio/user-1/direct/e3.wav",
+    ]);
+  });
+
   // -- listPendingEpisodes (audio-feed-bbb) ----------------------------------
 
   test("listPendingEpisodes returns pending episodes oldest first (FIFO)", async (store) => {

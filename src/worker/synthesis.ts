@@ -311,6 +311,7 @@ export async function runSynthesisBatch(
     cursor = nextCursor;
   }
 
+  let claimedAny = false;
   for (const { episode } of pending) {
     // Two approval checks, each for a different job:
     //  - the gather-time filter above decides fairly who gets the batch budget, so a
@@ -344,6 +345,7 @@ export async function runSynthesisBatch(
       result.skipped.push({ episodeId: episode.id, reason: "claimed elsewhere or exhausted" });
       continue;
     }
+    claimedAny = true;
 
     const article = await metadata.getArticle(claimed.userId, claimed.articleId);
     // A regeneration that produces no new audio goes back to ready on its old audio
@@ -426,7 +428,8 @@ export async function runSynthesisBatch(
         try {
           await blobs.delete(previousKey);
         } catch {
-          // best-effort: an orphaned blob costs storage, not correctness
+          // Recorded, so a later batch retries it instead of orphaning it for good.
+          await metadata.recordOrphanBlob(previousKey).catch(() => {});
         }
       }
     } else {
@@ -437,6 +440,19 @@ export async function runSynthesisBatch(
         // best-effort cleanup
       }
       result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+    }
+  }
+
+  // Retry old blobs a delete failed on, only in a batch that did work: an idle
+  // tick stays one read (audio-feed-0ob). A delete that throws keeps the record.
+  if (claimedAny) {
+    for (const key of await metadata.listOrphanBlobs(opts.batchSize)) {
+      try {
+        await blobs.delete(key);
+        await metadata.forgetOrphanBlob(key);
+      } catch {
+        // left recorded for the next batch
+      }
     }
   }
 
