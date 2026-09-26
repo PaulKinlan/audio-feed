@@ -404,15 +404,13 @@ export async function runSynthesisBatch(
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    // A regeneration writes under a NEW key: /audio is served immutable, so reusing
-    // the old one would leave caches on the old bytes. Random per attempt, so a
-    // superseded worker's cleanup below can only ever delete its own blob.
+    // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
+    // /audio is served immutable, and a first attempt used to write the deterministic canonical
+    // key — so a superseded worker and the winner shared one key and the loser's cleanup below
+    // deleted the winner's live audio. With a per-attempt revision the cleanup can only ever
+    // delete this attempt's own blob. A regeneration additionally deletes the old key.
     const previousKey = claimed.regenerating ? claimed.audioKey : undefined;
-    const audioKey = audioBlobKey(
-      claimed,
-      "wav",
-      previousKey ? opts.revision() : undefined,
-    );
+    const audioKey = audioBlobKey(claimed, "wav", opts.revision());
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
     const byteLength = stored.size ?? bytes.length;
@@ -446,11 +444,15 @@ export async function runSynthesisBatch(
         }
       }
     } else {
-      // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk)
+      // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk).
+      // It is this worker's OWN key — a first synthesis is revisioned too (audio-feed-xsu) — so
+      // removing it can never take the winner's audio with it.
       try {
         await blobs.delete(audioKey);
       } catch {
-        // best-effort cleanup
+        // A failed cleanup must not vanish with the worker (audio-feed-owq): the key is
+        // recorded where later batches retry it, exactly like the previousKey swap above.
+        await metadata.recordOrphanBlob(audioKey).catch(() => {});
       }
       result.superseded.push(supersededEntry(claimed, opts.leaseMs));
     }
