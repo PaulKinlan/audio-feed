@@ -17,7 +17,12 @@ import {
   formatDialoguePrompt,
   formatNarrationPrompt,
 } from "./gemini.ts";
-import type { Episode } from "../types.ts";
+import {
+  CODE_HANDLINGS,
+  type CodeHandling,
+  DEFAULT_CODE_HANDLING,
+  type Episode,
+} from "../types.ts";
 
 /**
  * Fixed input: long enough to reach every slice the dialogue builder takes of a
@@ -46,13 +51,15 @@ export interface PromptVersionDeps {
   buildDialogueRequest?: typeof buildDialogueRequest;
   formatCodeForTts?: typeof formatCodeForTts;
   buildNarrationSystemPrompt?: typeof buildNarrationSystemPrompt;
+  defaultCodeHandling?: CodeHandling;
   model?: string;
 }
 
 /**
  * Injectable so a test can show that a changed builder changes the version.
- * Async because code-block handling is: both modes run over the canonical body
- * exactly as the synthesiser runs them (audio-feed-ktn).
+ * Async because code-block handling is: every mode runs over the canonical body
+ * exactly as the synthesiser runs them, and the default mode is hashed too,
+ * because it picks the mode for every feed that sets none (audio-feed-ktn).
  */
 export async function computePromptVersion(deps: PromptVersionDeps = {}): Promise<string> {
   const formatCode = deps.formatCodeForTts ?? formatCodeForTts;
@@ -63,7 +70,7 @@ export async function computePromptVersion(deps: PromptVersionDeps = {}): Promis
   const dialogueRequest = deps.buildDialogueRequest ?? buildDialogueRequest;
 
   const requests: unknown[] = [];
-  for (const mode of ["skip", "explain"] as const) {
+  for (const mode of CODE_HANDLINGS) {
     const body = await formatCode(CANONICAL_BODY, mode, () => CANONICAL_CODE_SUMMARY);
     const system = systemPrompt(mode);
     const narration = narrate({
@@ -91,7 +98,11 @@ export async function computePromptVersion(deps: PromptVersionDeps = {}): Promis
       dialogueRequest(dialogue.turns, dialogue.speakers, undefined, system),
     );
   }
-  const material = JSON.stringify([deps.model ?? DEFAULT_TTS_MODEL, ...requests]);
+  const material = JSON.stringify([
+    deps.model ?? DEFAULT_TTS_MODEL,
+    deps.defaultCodeHandling ?? DEFAULT_CODE_HANDLING,
+    ...requests,
+  ]);
   return createHash("sha256").update(material).digest("hex").slice(0, 12);
 }
 

@@ -14,7 +14,8 @@ import { DEFAULT_NARRATION_VOICE } from "./tts/gemini.ts";
 export type AudioMode = "direct" | "deepdive";
 
 /** How to handle code blocks in synthesized speech (audio-feed-bdo). */
-export type CodeHandling = "skip" | "explain";
+export const CODE_HANDLINGS = ["skip", "explain"] as const;
+export type CodeHandling = typeof CODE_HANDLINGS[number];
 export const DEFAULT_CODE_HANDLING: CodeHandling = "skip";
 
 export const AUDIO_MODES: readonly AudioMode[] = ["direct", "deepdive"] as const;

@@ -11,9 +11,9 @@ import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { computePromptVersion, PROMPT_VERSION } from "../src/tts/prompt_version.ts";
-import { buildNarrationSystemPrompt } from "../src/tts/gemini.ts";
+import { buildNarrationSystemPrompt, formatCodeForTts } from "../src/tts/gemini.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
-import type { Episode, User } from "../src/types.ts";
+import { CODE_HANDLINGS, DEFAULT_CODE_HANDLING, type Episode, type User } from "../src/types.ts";
 
 const BASE = "https://audio.example.com";
 const EVIL = "https://evil.example";
@@ -153,4 +153,36 @@ Deno.test("promptVersion moves when code-block handling or the system prompt cha
     PROMPT_VERSION,
     "the narration system prompt is part of the prompt",
   );
+});
+
+Deno.test("promptVersion moves when the default code-handling mode changes (audio-feed-ktn)", async () => {
+  const others = CODE_HANDLINGS.filter((mode) => mode !== DEFAULT_CODE_HANDLING);
+  assert(others.length > 0);
+  for (const mode of others) {
+    assertNotEquals(
+      await computePromptVersion({ defaultCodeHandling: mode }),
+      PROMPT_VERSION,
+      `default ${DEFAULT_CODE_HANDLING} -> ${mode} changes what most feeds send`,
+    );
+  }
+});
+
+Deno.test("promptVersion moves when any non-default code-handling mode formats code differently (audio-feed-ktn)", async () => {
+  for (const mode of CODE_HANDLINGS.filter((m) => m !== DEFAULT_CODE_HANDLING)) {
+    assertNotEquals(
+      await computePromptVersion({
+        formatCodeForTts: async (text, handling, summarizer) => {
+          const out = await formatCodeForTts(text, handling, summarizer);
+          return handling === mode ? `${out} (changed)` : out;
+        },
+      }),
+      PROMPT_VERSION,
+      `${mode} formatting is part of the prompt`,
+    );
+  }
+});
+
+Deno.test("promptVersion is the same on every computation (audio-feed-ktn)", async () => {
+  assertEquals(await computePromptVersion(), await computePromptVersion());
+  assertEquals(await computePromptVersion(), PROMPT_VERSION);
 });
