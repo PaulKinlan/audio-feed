@@ -18,6 +18,9 @@
  *   GET  /api/episodes                        episode listing             [0h8]
  *   POST /api/admin/users/:id/approve         approval gate               [7wn]
  *   GET  /api/admin/stats                     operational metrics         [ndc]
+ *   GET  /api/admin/users/:id/episodes        episodes + regenerate counts [8oz]
+ *   POST /api/admin/users/:id/regenerate      regenerate a feed           [8oz]
+ *   POST /api/admin/users/:id/episodes/:episodeId/regenerate  one episode [8oz]
  *
  * Owned by: audio-feed-0h8.
  */
@@ -68,6 +71,10 @@ export interface AppHandlers {
   adminSynthesizeNow?: Handler<AppContext>;
   /** audio-feed-ndc — operational metrics for the admin dashboard. */
   adminStats?: Handler<AppContext>;
+  /** audio-feed-8oz — regenerate after the TTS prompts change. */
+  adminListEpisodes?: Handler<AppContext>;
+  adminRegenerateEpisode?: Handler<AppContext>;
+  adminRegenerateFeed?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -178,6 +185,19 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get(
     "/api/admin/stats",
     handlers.adminStats ?? (() => notImplemented("Admin stats")),
+  );
+
+  router.get(
+    "/api/admin/users/:id/episodes",
+    handlers.adminListEpisodes ?? (() => notImplemented("Admin list episodes")),
+  );
+  router.post(
+    "/api/admin/users/:id/episodes/:episodeId/regenerate",
+    handlers.adminRegenerateEpisode ?? (() => notImplemented("Admin regenerate episode")),
+  );
+  router.post(
+    "/api/admin/users/:id/regenerate",
+    handlers.adminRegenerateFeed ?? (() => notImplemented("Admin regenerate feed")),
   );
 
   handlers.extra?.(router);

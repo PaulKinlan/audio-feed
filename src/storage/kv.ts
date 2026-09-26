@@ -27,7 +27,7 @@
  */
 
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
-import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
+import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
 import type {
   DownloadCounts,
   EpisodeClaim,
@@ -437,10 +437,9 @@ export class KvMetadataStore implements MetadataStore {
     if (attempts > claim.maxClaims) {
       // Abandon rather than re-bill. Still checked, so this cannot clobber a
       // worker that legitimately claimed between our read and this write.
+      // A regeneration goes back to ready on its old audio instead (audio-feed-8oz).
       const abandoned: Episode = {
-        ...found,
-        status: "failed",
-        error: `abandoned after ${claim.maxClaims} attempts`,
+        ...unsynthesized(found, `abandoned after ${claim.maxClaims} attempts`),
         claimedAt: undefined,
         claimedBy: undefined,
       };
@@ -471,6 +470,40 @@ export class KvMetadataStore implements MetadataStore {
       return false;
     }
     return await this.#atomicPutEpisode(episode, entry);
+  }
+
+  /** Versionstamp-checked, so it cannot clobber a claim taken between read and write. */
+  async requeueEpisode(userId: string, id: string): Promise<Episode | null> {
+    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
+    const found = entry.value;
+    if (!found || found.status !== "ready" || !isPublishable(found)) return null;
+    const queued: Episode = {
+      ...found,
+      status: "pending",
+      regenerating: true,
+      attempts: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+      error: undefined,
+    };
+    return (await this.#atomicPutEpisode(queued, entry)) ? queued : null;
+  }
+
+  async cancelRegeneration(userId: string, id: string): Promise<boolean> {
+    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
+    const found = entry.value;
+    if (
+      !found?.regenerating || (found.status !== "pending" && found.status !== "synthesizing")
+    ) {
+      return false;
+    }
+    return await this.#atomicPutEpisode({
+      ...found,
+      status: "ready",
+      regenerating: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+    }, entry);
   }
 
   /**

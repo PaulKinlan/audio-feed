@@ -241,6 +241,14 @@ export interface Episode {
   error?: string;
   createdAt: string;
   readyAt?: string;
+  /** Which prompts made the audio (src/tts/prompt_version.ts). Absent means made before 8oz. */
+  promptVersion?: string;
+  /**
+   * Queued for re-synthesis with the current prompts (audio-feed-8oz). While set, the
+   * episode is `pending`/`synthesizing` but still publishes its OLD audio; the worker
+   * swaps in the new key atomically when it is ready.
+   */
+  regenerating?: boolean;
 
   /**
    * Worker lease (audio-feed-vfs / audio-feed-kiq).
@@ -310,17 +318,44 @@ export function isClaimExpired(
   return nowMs - claimedAtMs >= leaseMs;
 }
 
-/** An episode is publishable in a feed only when it has playable audio. */
+/**
+ * An episode is publishable in a feed only when it has playable audio. A regenerating
+ * episode keeps publishing its old audio until the new audio replaces it (audio-feed-8oz).
+ */
 export function isPublishable(
   episode: Episode,
 ): episode is Episode & { audioKey: string; contentType: string } {
-  return episode.status === "ready" && !!episode.audioKey && !!episode.contentType;
+  const live = episode.status === "ready" ||
+    (!!episode.regenerating &&
+      (episode.status === "pending" || episode.status === "synthesizing"));
+  return live && !!episode.audioKey && !!episode.contentType;
+}
+
+/**
+ * The record to write when a claimed synthesis ends without new audio: `failed` for a
+ * first synthesis, but back to `ready` on the old audio for a regeneration, so a
+ * failed or abandoned regeneration never takes a playable episode out of the feed.
+ * Claim fields are left to the caller.
+ */
+export function unsynthesized(episode: Episode, error: string): Episode {
+  if (episode.regenerating && episode.audioKey && episode.contentType) {
+    return { ...episode, status: "ready", regenerating: undefined, error };
+  }
+  return { ...episode, status: "failed", error };
 }
 
 /**
  * Canonical blob key for an episode's audio. Every lane must use this helper so
  * keys stay predictable across adapters.
+ *
+ * `revision` gives regenerated audio a NEW key (audio-feed-8oz): /audio is served
+ * `immutable`, so reusing a key would leave caches serving the old bytes forever.
  */
-export function audioBlobKey(episode: Pick<Episode, "userId" | "id" | "mode">, ext = "mp3") {
-  return `audio/${episode.userId}/${episode.mode}/${episode.id}.${ext}`;
+export function audioBlobKey(
+  episode: Pick<Episode, "userId" | "id" | "mode">,
+  ext = "mp3",
+  revision?: string,
+) {
+  const name = revision ? `${episode.id}-${revision}` : episode.id;
+  return `audio/${episode.userId}/${episode.mode}/${name}.${ext}`;
 }

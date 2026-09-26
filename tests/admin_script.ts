@@ -80,6 +80,12 @@ const PAGE_IDS = [
   "downloadsBody",
   "downloadsCaption",
   "statsFeedback",
+  // audio-feed-8oz
+  "manageEpisodesBody",
+  "manageEpisodesCaption",
+  "manageEpisodesFeedback",
+  "regenOutdated",
+  "regenAll",
 ];
 
 export interface StubElement {

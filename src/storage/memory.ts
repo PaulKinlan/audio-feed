@@ -9,7 +9,7 @@
 import type { ApprovalRecord, Article, Episode, Source, User } from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import type { EpisodePage, EpisodePageResult } from "./mod.ts";
-import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired } from "../types.ts";
+import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -434,9 +434,7 @@ export class MemoryMetadataStore implements MetadataStore {
       removeSortedIndex(this.#pendingIndex, oldSortKey);
       removeSortedIndex(this.#synthesizingIndex, oldSortKey);
       this.#episodes.set(key, {
-        ...structuredClone(found),
-        status: "failed",
-        error: `abandoned after ${claim.maxClaims} attempts`,
+        ...unsynthesized(structuredClone(found), `abandoned after ${claim.maxClaims} attempts`),
         claimedAt: undefined,
         claimedBy: undefined,
       });
@@ -471,6 +469,41 @@ export class MemoryMetadataStore implements MetadataStore {
     removeSortedIndex(this.#synthesizingIndex, sortKey);
     removeSortedIndex(this.#pendingIndex, sortKey);
     this.#episodes.set(key, structuredClone(episode));
+    return Promise.resolve(true);
+  }
+
+  requeueEpisode(userId: string, id: string): Promise<Episode | null> {
+    const found = this.#episodes.get(MemoryMetadataStore.#scoped(userId, id));
+    if (!found || found.status !== "ready" || !isPublishable(found)) {
+      return Promise.resolve(null);
+    }
+    const queued: Episode = {
+      ...structuredClone(found),
+      status: "pending",
+      regenerating: true,
+      attempts: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+      error: undefined,
+    };
+    this.#writeEpisode(queued);
+    return Promise.resolve(structuredClone(queued));
+  }
+
+  cancelRegeneration(userId: string, id: string): Promise<boolean> {
+    const found = this.#episodes.get(MemoryMetadataStore.#scoped(userId, id));
+    if (
+      !found?.regenerating || (found.status !== "pending" && found.status !== "synthesizing")
+    ) {
+      return Promise.resolve(false);
+    }
+    this.#writeEpisode({
+      ...found,
+      status: "ready",
+      regenerating: undefined,
+      claimedAt: undefined,
+      claimedBy: undefined,
+    });
     return Promise.resolve(true);
   }
 

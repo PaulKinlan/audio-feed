@@ -44,11 +44,13 @@ import {
 } from "../tts/gemini.ts";
 import type { DecodedAudioResult } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
+import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import {
   audioBlobKey,
   DEFAULT_CLAIM_LEASE_MS,
   DEFAULT_MAX_CLAIMS,
   DEFAULT_VOICES,
+  unsynthesized,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
@@ -344,9 +346,11 @@ export async function runSynthesisBatch(
     }
 
     const article = await metadata.getArticle(claimed.userId, claimed.articleId);
+    // A regeneration that produces no new audio goes back to ready on its old audio
+    // rather than failing out of the feed (audio-feed-8oz).
     if (!article) {
       const error = "article record is missing";
-      await metadata.completeEpisode({ ...claimed, status: "failed", error }, opts.owner);
+      await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       result.failed.push({ episodeId: claimed.id, error });
       continue;
     }
@@ -354,7 +358,7 @@ export async function runSynthesisBatch(
     if (opts.maxInputCharacters && article.content.length > opts.maxInputCharacters) {
       const error =
         `article content exceeds input limit (${article.content.length} > ${opts.maxInputCharacters} chars)`;
-      await metadata.completeEpisode({ ...claimed, status: "failed", error }, opts.owner);
+      await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       result.failed.push({ episodeId: claimed.id, error });
       continue;
     }
@@ -378,17 +382,22 @@ export async function runSynthesisBatch(
 
     if (!audio) {
       const error = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
-      const wrote = await metadata.completeEpisode(
-        { ...claimed, status: "failed", error },
-        opts.owner,
-      );
+      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) result.failed.push({ episodeId: claimed.id, error });
       else result.superseded.push(supersededEntry(claimed, opts.leaseMs));
       continue;
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    const audioKey = audioBlobKey(claimed, "wav");
+    // A regeneration writes under a NEW key: /audio is served immutable, so reusing
+    // the old one would leave caches on the old bytes. Random per attempt, so a
+    // superseded worker's cleanup below can only ever delete its own blob.
+    const previousKey = claimed.regenerating ? claimed.audioKey : undefined;
+    const audioKey = audioBlobKey(
+      claimed,
+      "wav",
+      previousKey ? crypto.randomUUID().slice(0, 8) : undefined,
+    );
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
     const byteLength = stored.size ?? bytes.length;
@@ -403,12 +412,23 @@ export async function runSynthesisBatch(
       byteLength,
       contentType: "audio/wav",
       durationSeconds: audio.durationSeconds,
-      readyAt: new Date().toISOString(),
+      // A regenerated episode keeps its pubDate, so clients do not re-surface it as new.
+      readyAt: previousKey && claimed.readyAt ? claimed.readyAt : new Date().toISOString(),
+      promptVersion: PROMPT_VERSION,
+      regenerating: undefined,
       error: undefined,
     }, opts.owner);
 
     if (wrote) {
       result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+      // The swap is committed; the old blob is now unreferenced (audio-feed-8oz).
+      if (previousKey && previousKey !== audioKey) {
+        try {
+          await blobs.delete(previousKey);
+        } catch {
+          // best-effort: an orphaned blob costs storage, not correctness
+        }
+      }
     } else {
       // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk)
       try {
