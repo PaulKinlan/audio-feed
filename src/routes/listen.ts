@@ -124,6 +124,8 @@ export interface ListenEpisode {
   mode?: AudioMode;
   durationSeconds?: number;
   byteLength?: number;
+  /** The source article, so a listener can read along (audio-feed-585). http(s) only. */
+  articleUrl?: string;
   /** Stable, non-expiring enclosure URL served by GET /audio/:key. */
   audioUrl: string;
 }
@@ -397,6 +399,19 @@ export function renderListenPage(
   .ep-mode[data-mode="deepdive"] { color: var(--accent-2); }
 
   .ep-actions { display: flex; align-items: center; gap: var(--space-1); }
+  .ep-read {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
+    border-radius: var(--radius-sm); border: 1px solid transparent;
+    color: var(--muted); font-size: .75rem; text-decoration: none;
+  }
+  .ep-read:hover { color: var(--text); background: var(--surface-2); border-color: var(--border-2); }
+  .ep-read:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  .now-read {
+    margin-inline-start: auto; padding: 4px 8px; border-radius: var(--radius-sm);
+    color: var(--muted); font-size: .75rem; text-decoration: none;
+  }
+  .now-read:hover { color: var(--text); background: var(--surface-2); }
+  .now-read:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
   .ep-download {
     inline-size: 2.75rem; block-size: 2.75rem;
     display: grid; place-items: center;
@@ -641,6 +656,7 @@ ${ICON_SPRITE}
         <span class="now-title" id="nowTitle">Nothing playing</span>
         <span class="now-sub" id="nowSub">Pick an episode to start</span>
       </div>
+      <a class="now-read hidden" id="nowRead" target="_blank" rel="noopener noreferrer">Read along</a>
       <span class="now-badge hidden" id="nowOffline">
         <svg class="icon" aria-hidden="true"><use href="#i-saved"/></svg>
         Offline
@@ -703,6 +719,7 @@ ${ICON_SPRITE}
   const fwdBtn = $("fwd");
   const nowTitle = $("nowTitle");
   const nowSub = $("nowSub");
+  const nowRead = $("nowRead");
   const nowTime = $("nowTime");
   const nowDuration = $("nowDuration");
   const nowOffline = $("nowOffline");
@@ -898,6 +915,20 @@ ${ICON_SPRITE}
     }
     download.addEventListener("click", () => downloadEpisode(episode, download));
     actions.appendChild(download);
+    // Read-along linkback (audio-feed-585): a real anchor, so it can be opened in a new tab,
+    // middle-clicked, and read out as a link. The client never trusts the URL further than the
+    // server already did — the server only sends http(s) — and rel=noopener is explicit so the
+    // article cannot reach back through window.opener.
+    if (episode.articleUrl) {
+      const read = document.createElement("a");
+      read.className = "ep-read";
+      read.href = episode.articleUrl;
+      read.target = "_blank";
+      read.rel = "noopener noreferrer";
+      read.setAttribute("aria-label", "Read the article: " + episode.title);
+      read.textContent = "Read along";
+      actions.appendChild(read);
+    }
     li.appendChild(actions);
     return li;
   }
@@ -927,6 +958,18 @@ ${ICON_SPRITE}
     if (episode.source) sub.push(episode.source);
     if (episode.author) sub.push(episode.author);
     nowSub.textContent = sub.join(" — ") || "Audio Feed";
+    // Read-along linkback (audio-feed-585): the dock is where he listens, so the way back to the
+    // article lives here too, not only in the list row.
+    if (nowRead) {
+      if (episode.articleUrl) {
+        nowRead.href = episode.articleUrl;
+        nowRead.setAttribute("aria-label", "Read the article: " + episode.title);
+        nowRead.classList.remove("hidden");
+      } else {
+        nowRead.removeAttribute("href");
+        nowRead.classList.add("hidden");
+      }
+    }
     seek.disabled = false;
 
     for (const li of list.querySelectorAll("li.episode")) {
@@ -1291,6 +1334,9 @@ export async function handleListen(
       durationSeconds: episode.durationSeconds,
       byteLength: episode.byteLength,
       audioUrl: `${origin.baseUrl}/audio/${episode.audioKey}`,
+      // A linkback only when the stored URL is a real web address: the value comes from a feed the
+      // user subscribed to, and a link is not a place to trust it further than ingest did.
+      articleUrl: /^https?:\/\//i.test(article?.url ?? "") ? article?.url : undefined,
     });
   }
 
