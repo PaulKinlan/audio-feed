@@ -29,6 +29,8 @@ import { json, notFound } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
+import { handleLogin } from "./routes/login.ts";
+import { handleAccount } from "./routes/account.ts";
 import { handleListen, renderListenLanding } from "./routes/listen.ts";
 import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts";
 import type { AppConfig, Stores } from "./config.ts";
@@ -91,6 +93,9 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // every byte of that data comes from the token-gated /api/admin/users routes
   // (audio-feed-z2s).
   router.get("/admin", handleAdmin);
+  // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.
+  router.get("/login", handleLogin);
+  router.get("/account", handleAccount);
   // The listener app (audio-feed-4xb): token-fronted, so a subscriber needs no
   // account — the feed token they already hold is the whole credential.
   router.get(

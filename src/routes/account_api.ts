@@ -111,7 +111,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         const user = await finishAuthentication(store, relyingParty(baseUrl(ctx, req)), response);
         return await signInResponse(user);
       } catch (error) {
-        if (error instanceof PasskeyError) return reply({ error: error.message }, 400);
+        if (error instanceof PasskeyError) return reply({ error: error.message }, error.status);
         throw error;
       }
     },
@@ -153,7 +153,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         if (current?.id === user.id) return reply({ ok: true }, 201);
         return await signInResponse(user, 201);
       } catch (error) {
-        if (error instanceof PasskeyError) return reply({ error: error.message }, 400);
+        if (error instanceof PasskeyError) return reply({ error: error.message }, error.status);
         throw error;
       }
     },

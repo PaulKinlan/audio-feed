@@ -109,7 +109,7 @@ export function sameOrigin(req: Request, expectedOrigin: string): boolean {
 }
 
 /** Admin rights need the flag AND an approved account: suspending an admin demotes them. */
-export function isActiveAdmin(user: User | null): user is User {
+export function isActiveAdmin(user: User | null): boolean {
   return Boolean(user?.isAdmin && user.status === "approved");
 }
 

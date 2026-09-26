@@ -34,7 +34,8 @@ export const RP_NAME = "Audio Feed";
 
 /** Every failure a ceremony can have. Routes answer 400 with a generic message. */
 export class PasskeyError extends Error {
-  constructor(message: string) {
+  /** 404 for a credential this site does not know, so the client can signal it. */
+  constructor(message: string, readonly status: 400 | 404 = 400) {
     super(message);
     this.name = "PasskeyError";
   }
@@ -209,7 +210,7 @@ export async function finishAuthentication(
   const credential = typeof response?.id === "string"
     ? await store.getCredential(response.id)
     : null;
-  if (!credential) throw new PasskeyError("That passkey is not registered here.");
+  if (!credential) throw new PasskeyError("That passkey is not registered here.", 404);
 
   let verification;
   try {
