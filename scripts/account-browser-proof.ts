@@ -285,6 +285,43 @@ try {
   );
   await go("/account");
   await sweep("05-account");
+
+  // audio-feed-ktn: self-service Regenerate, each press behind a confirm that
+  // states the synthesis it will spend.
+  const offered = await js(
+    `[document.getElementById("regenOutdated").textContent, document.querySelectorAll("[data-regenerate-episode]").length]`,
+  );
+  await js(`window.__confirms = []; window.confirm = (m) => (window.__confirms.push(m), true)`);
+  await js(`document.querySelector('[data-regenerate-episode="ep-0"]').click()`);
+  await until(
+    `document.getElementById("regenFeedback").textContent === "Queued for regeneration."`,
+    "regenerate one episode",
+  );
+  const firstConfirm = await js(`window.__confirms[0]`);
+  await until(
+    `document.getElementById("regenOutdated").textContent === "Regenerate outdated (1)"`,
+    "count drops after the reload",
+  );
+  await js(
+    `window.__confirms = [${JSON.stringify(firstConfirm)}]; window.confirm = (m) => (window.__confirms.push(m), true)`,
+  );
+  await js(`document.getElementById("regenOutdated").click()`);
+  await until(
+    `document.getElementById("regenFeedback").textContent.includes("queued for regeneration")`,
+    "regenerate outdated",
+  );
+  const regen = await js(
+    `[window.__confirms, document.getElementById("regenFeedback").textContent]`,
+  );
+  await go("/account");
+  const after = await js(`document.getElementById("regenOutdated").textContent`);
+  check(
+    "Regenerate on /account: one episode, then the outdated rest",
+    offered[0] === "Regenerate outdated (2)" && offered[1] === 2 &&
+      regen[0].length === 2 && regen[0][1].includes("1 outdated episode(s)") &&
+      regen[1] === "1 episode(s) queued for regeneration." && after === "Regenerate outdated (0)",
+    JSON.stringify({ offered, confirms: regen[0], feedback: regen[1], after }),
+  );
   await go("/");
   await sweep("06-home-signed-in");
 
@@ -329,7 +366,13 @@ try {
   await Deno.writeTextFile(
     `${OUT}evidence.json`,
     JSON.stringify(
-      { bead: "audio-feed-8fc", at: new Date().toISOString(), steps, shots },
+      {
+        bead: "audio-feed-8fc",
+        also: "audio-feed-ktn",
+        at: new Date().toISOString(),
+        steps,
+        shots,
+      },
       null,
       2,
     ) +

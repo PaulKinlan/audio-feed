@@ -22,11 +22,17 @@ Reproduce:
 | 5 | Sign in with the passkey | back on `/account` |
 | 6 | Account edits persist: display name "Paul K.", voice Kore, reload | `["Paul K.","Kore","Paul K."]` |
 | 7 | Send to Audio from the account page, no token pasted | queued |
+| 7b | audio-feed-ktn: Regenerate on `/account`: one episode, then "Regenerate outdated (N)"; each confirm states the synthesis it spends | offered `(2)`; confirms say 1 then 1 episode(s); after reload `(0)` |
 | 8 | The admin reaches `/admin` on the session | 200, 3 subscribers listed |
 | 9 | The admin console issues Rita a setup link on the session | link shown in the console only |
 | 10 | Rita registers, then a non-admin gets 403 at `/admin` | 403, "This page is for admins" |
 
 `evidence.json` records each step with its detail and the screenshot list.
+
+Re-run on the merged tree (origin/main a0122f7 merged into this branch, with the
+review fixes and audio-feed-ktn): 11/11 steps (the original 10 plus 7b).
+The harness now seeds its two ready episodes as published on older prompts, so
+there is something to regenerate.
 
 ## Screenshots
 
@@ -41,6 +47,14 @@ Every page at 390px and 1280px, in light and dark (the shell supports both):
 - `06-home-signed-in`: the header names the viewer; the "send from your account" note
 - `07-admin`: the console on an admin session, with Setup link and Make/Remove admin
 - `08-admin-403`: a signed-in non-admin at `/admin`
+
+## Review fixes shown here
+
+- `07-admin-390-*`: the background-runs table keeps a minimum width
+  (`table.runs { min-inline-size: 40rem; }`) and scrolls inside its card. Before
+  the fix, Result wrapped one character per line at 390px.
+- `05-account-*`: Regenerate per ready episode and "Regenerate outdated (N)"
+  (audio-feed-ktn).
 
 ## Found by this run
 

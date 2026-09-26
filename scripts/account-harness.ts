@@ -75,6 +75,16 @@ for (const [i, [title, sourceId, sourceTitle, mode, status, h]] of episodes.entr
     status,
     title,
     createdAt: hoursAgo(h),
+    // Published on older prompts, so /account offers Regenerate (audio-feed-ktn).
+    ...(status === "ready"
+      ? {
+        audioKey: `audio/${paul.id}/${mode}/ep-${i}.wav`,
+        contentType: "audio/wav",
+        byteLength: 4,
+        readyAt: hoursAgo(h),
+        promptVersion: "old-prompts",
+      }
+      : {}),
   });
 }
 for (let m = 0; m < 6; m++) {

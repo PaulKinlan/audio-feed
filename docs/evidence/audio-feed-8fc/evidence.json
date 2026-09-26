@@ -1,6 +1,7 @@
 {
   "bead": "audio-feed-8fc",
-  "at": "2026-09-26T19:50:22.487Z",
+  "also": "audio-feed-ktn",
+  "at": "2026-09-26T20:19:53.434Z",
   "steps": [
     {
       "step": "signed-out /admin offers sign-in",
@@ -36,6 +37,11 @@
       "step": "Send to Audio without a token",
       "ok": true,
       "detail": "Queued: An article sent from the account page. It appears in your feed once narrated."
+    },
+    {
+      "step": "Regenerate on /account: one episode, then the outdated rest",
+      "ok": true,
+      "detail": "{\"offered\":[\"Regenerate outdated (2)\",2],\"confirms\":[\"Regenerate The end of the beginning? This narrates it again (1 episode of synthesis).\",\"Regenerate 1 outdated episode(s)? Each one is narrated again, which is 1 episode(s) of synthesis.\"],\"feedback\":\"1 episode(s) queued for regeneration.\",\"after\":\"Regenerate outdated (0)\"}"
     },
     {
       "step": "admin reaches /admin",
