@@ -43,12 +43,14 @@ const auth = { "x-admin-token": ADMIN };
 // The page itself
 // ---------------------------------------------------------------------------
 
-Deno.test("the admin page renders the console with accessible controls", () => {
+Deno.test("the admin page renders the console with accessible controls (audio-feed-0jp)", () => {
   const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
-  // The three things an admin actually needs, present in the document.
+  // The core controls an admin actually needs, present in the document.
   assertStringIncludes(html, 'id="createForm"');
   assertStringIncludes(html, 'id="usersBody"');
-  assertStringIncludes(html, 'id="adminToken"');
+  // Token paste controls are removed in audio-feed-0jp; passkey sign-in is used
+  assertEquals(html.includes('id="adminToken"'), false);
+  assertEquals(html.includes('id="saveToken"'), false);
   assertStringIncludes(html, 'id="pollNowBtn"');
   assertStringIncludes(html, 'id="synthesizeNowBtn"');
   assertStringIncludes(html, 'id="triggersFeedback"');
@@ -58,7 +60,7 @@ Deno.test("the admin page renders the console with accessible controls", () => {
   // scoped headers, and the live regions announce results.
   assertStringIncludes(html, 'for="email"');
   assertStringIncludes(html, 'for="displayName"');
-  assertStringIncludes(html, 'for="adminToken"');
+  assertEquals(html.includes('for="adminToken"'), false);
   assertStringIncludes(html, "<caption");
   assertStringIncludes(html, '<th scope="col">');
   assertStringIncludes(html, 'aria-live="polite"');

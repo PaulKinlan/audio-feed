@@ -913,18 +913,14 @@ Deno.test("admin console page renders subscriber management section and auto-loa
   // clicking Cancel deleted the feed anyway (audio-feed-05b). They are driven
   // for real in tests/admin_confirm_test.ts, which watches for the request.
 
-  // Auto-load on refresh: script calls loadUsers() when a stored token is found.
-  // Both web storages are read, because "remember on this device" writes to one
-  // or the other and the page must find it either way (audio-feed-ndc).
-  // These are markup assertions and prove only that the text is present -- the
-  // behaviour itself (which store wins, what unchecking actually forgets) is
-  // driven for real in tests/admin_confirm_test.ts, for the same reason the
-  // confirm() guards moved out of this file.
-  assertStringIncludes(html, "localStorage.getItem(TOKEN_KEY)");
-  assertStringIncludes(html, "sessionStorage.getItem(TOKEN_KEY)");
+  // Auto-load on sign-in: script calls loadUsers() when SIGNED_IN is true (audio-feed-0jp).
+  // Token-paste controls and storage are removed in favor of passkey session auth.
+  assertStringIncludes(html, "if (SIGNED_IN)");
   assertStringIncludes(html, "loadUsers();");
-  // Enter key support on password input
-  assertStringIncludes(html, 'e.key === "Enter"');
+  assertStringIncludes(html, "loadStats();");
+  assertEquals(html.includes("adminToken"), false);
+  assertEquals(html.includes("saveToken"), false);
+  assertEquals(html.includes("TOKEN_KEY"), false);
 });
 
 Deno.test("POST /api/admin/users/:id/sources with all-invalid modes returns 400", async () => {

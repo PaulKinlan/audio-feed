@@ -33,15 +33,12 @@ import { renderAdminPage } from "../src/routes/admin.ts";
 
 /** Every id the served page defines, so `getElementById` resolves like a browser. */
 const PAGE_IDS = [
-  "adminToken",
-  "authFeedback",
   "usersFeedback",
   "usersBody",
   "usersCaption",
   "created",
   "loadUsers",
   "createForm",
-  "saveToken",
   "createFeedback",
   "email",
   "displayName",
@@ -67,7 +64,6 @@ const PAGE_IDS = [
   "synthesizeNowBtn",
   "triggersFeedback",
   // audio-feed-ndc
-  "rememberToken",
   "refreshStats",
   "statDownloads",
   "statLastPoll",
@@ -273,7 +269,7 @@ export interface HarnessOptions {
  */
 export function adminScriptSource(
   publicBaseUrl = "https://audio.example.com",
-  signedIn = false,
+  signedIn = true,
 ): string {
   const viewer = signedIn
     ? { displayName: "Admin", email: "admin@example.com", isAdmin: true }
@@ -402,6 +398,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
     });
   };
 
+  const signedIn = options.signedIn ?? true;
   // Parameters shadow the globals of the same name, so the script sees the stubs
   // without any global mutation leaking into the test process.
   const run = new Function(
@@ -412,7 +409,7 @@ export async function runAdminScript(options: HarnessOptions): Promise<AdminHarn
     "confirm",
     "fetch",
     "setTimeout",
-    adminScriptSource(publicBaseUrl, options.signedIn ?? false),
+    adminScriptSource(publicBaseUrl, signedIn),
   );
   run(
     document,

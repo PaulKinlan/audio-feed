@@ -32,18 +32,17 @@ function respond(method: string, path: string) {
   return null;
 }
 
-Deno.test("a signed-in admin's console loads with no token at all (audio-feed-8fc)", async () => {
+Deno.test("a signed-in admin's console loads with no token at all (audio-feed-8fc, audio-feed-0jp)", async () => {
   const page = await runAdminScript({ respond, signedIn: true });
   const list = page.requests.find((r) => r.path === "/api/admin/users");
   assert(list, "the subscriber list loads on the session");
-  assertEquals(list.adminToken, "", "no token is sent, only the cookie");
+  assertEquals(list.adminToken, null, "no token is sent, only the cookie");
   assertEquals(page.byId("usersBody").children.length, 1);
 });
 
-// Regression guard, not new behaviour: this already held on main (cd92a70). It
-// keeps the session work from making a signed-out console call the API.
-Deno.test("REGRESSION GUARD: a signed-out console without a token still waits for one (audio-feed-8fc)", async () => {
-  const page = await runAdminScript({ respond });
+// Regression guard, not new behaviour: keeps a signed-out console from making API calls (audio-feed-8fc, audio-feed-0jp).
+Deno.test("REGRESSION GUARD: a signed-out console makes no API calls (audio-feed-8fc, audio-feed-0jp)", async () => {
+  const page = await runAdminScript({ respond, signedIn: false });
   assertEquals(page.requests.length, 0);
 });
 

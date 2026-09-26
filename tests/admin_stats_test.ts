@@ -225,7 +225,7 @@ Deno.test("the runs table shows the newest runs of EACH job (audio-feed-ct1)", a
   const stats = await (await fetch(statsRequest())).json();
 
   const harness = await runAdminScript({
-    persistedToken: "admin-secret",
+    signedIn: true,
     respond: (method, path) => {
       if (method === "GET" && path === "/api/admin/stats") return stats;
       if (method === "GET" && path === "/api/admin/users") return { users: [] };
@@ -240,107 +240,130 @@ Deno.test("the runs table shows the newest runs of EACH job (audio-feed-ct1)", a
   assertEquals(harness.byId("statPollNote").textContent, "Mean of the last 10 polls.");
 });
 
-// -- token persistence ----------------------------------------------------
+// -- sign-in auth and operational lifecycle (audio-feed-0jp) ----------------
 
-Deno.test("the remembered token is found on a fresh load (audio-feed-ndc)", async () => {
-  // The whole point of the feature: reopening the console finds the token
-  // rather than an empty prompt, and the page auto-loads without a click.
+Deno.test("a signed-in admin console auto-loads users and operations on fresh load (audio-feed-0jp)", async () => {
+  // Fresh load on passkey session auto-loads without requiring token entry.
   const harness = await runAdminScript({
-    persistedToken: "admin-secret",
+    signedIn: true,
     respond: (method, path) => {
       if (method === "GET" && path === "/api/admin/users") return { users: [] };
+      if (method === "GET" && path === "/api/admin/stats") {
+        return {
+          downloads: { total: 0, perUser: [] },
+          feedProcessing: { lastPolledAt: null, averageDurationMs: null, sampleSize: 0 },
+          runs: [],
+        };
+      }
       return { ok: true };
     },
   });
 
-  assertEquals(harness.byId("adminToken").value, "admin-secret");
-  assertEquals(harness.byId("rememberToken").checked, true, "the box reflects where it was found");
   assert(
     harness.requests.some((r) => r.path === "/api/admin/users"),
-    "a remembered token must auto-load, with no click",
+    "subscribers must auto-load on signed-in session",
   );
-});
-
-Deno.test("a session-only token still loads, and the box says so (audio-feed-ndc)", async () => {
-  const harness = await runAdminScript({
-    storedToken: "admin-secret",
-    respond: () => ({ users: [] }),
-  });
-
-  assertEquals(harness.byId("adminToken").value, "admin-secret");
+  assert(
+    harness.requests.some((r) => r.path === "/api/admin/stats"),
+    "stats must auto-load on signed-in session",
+  );
   assertEquals(
-    harness.byId("rememberToken").checked,
-    false,
-    "a token found in sessionStorage must not claim to be remembered",
+    harness.requests.every((r) => r.adminToken === null),
+    true,
+    "requests use session cookie authentication, no token header",
   );
 });
 
-Deno.test("checking the box puts the token in localStorage and NOWHERE else (audio-feed-ndc)", async () => {
-  // Exactly one copy must exist. Two copies means unchecking the box later
-  // appears to forget the token while a persistent copy outlives the choice.
-  const harness = await runAdminScript({ respond: () => ({ users: [] }) });
-
-  harness.byId("adminToken").value = "typed-secret";
-  harness.byId("rememberToken").checked = true;
-  harness.byId("saveToken").click();
-  await harness.flush();
-
-  assertEquals(harness.localStore(TOKEN_KEY), "typed-secret");
-  assertEquals(harness.sessionStore(TOKEN_KEY), null, "the session copy must be cleared");
-});
-
-Deno.test("unchecking the box keeps the token in the tab only (audio-feed-ndc)", async () => {
-  const harness = await runAdminScript({ respond: () => ({ users: [] }) });
-
-  harness.byId("adminToken").value = "typed-secret";
-  harness.byId("rememberToken").checked = false;
-  harness.byId("saveToken").click();
-  await harness.flush();
-
-  assertEquals(harness.sessionStore(TOKEN_KEY), "typed-secret");
-  assertEquals(harness.localStore(TOKEN_KEY), null, "nothing may survive the browser closing");
-});
-
-Deno.test("unchecking the box ERASES a previously remembered token (audio-feed-ndc)", async () => {
-  // The security-relevant direction, and the one a naive implementation gets
-  // wrong: on a shared machine, unchecking must actually remove the persistent
-  // copy rather than merely stop writing a new one.
+Deno.test("a signed-out console keeps operations and user actions disabled (audio-feed-0jp)", async () => {
   const harness = await runAdminScript({
-    persistedToken: "old-secret",
-    respond: () => ({ users: [] }),
-  });
-  assertEquals(harness.localStore(TOKEN_KEY), "old-secret");
-
-  harness.byId("adminToken").value = "old-secret";
-  harness.byId("rememberToken").checked = false;
-  harness.byId("saveToken").click();
-  await harness.flush();
-
-  assertEquals(harness.localStore(TOKEN_KEY), null, "the persistent copy must be gone");
-  assertEquals(harness.sessionStore(TOKEN_KEY), "old-secret");
-});
-
-Deno.test("the persistent copy wins when both stores hold a token (audio-feed-ndc)", async () => {
-  // Only reachable if something went wrong earlier, but the page must resolve
-  // it the same way every time rather than depending on read order.
-  const harness = await runAdminScript({
-    persistedToken: "persistent",
-    storedToken: "session",
+    signedIn: false,
     respond: () => ({ users: [] }),
   });
 
-  assertEquals(harness.byId("adminToken").value, "persistent");
-  assertEquals(harness.byId("rememberToken").checked, true);
+  assertEquals(harness.byId("loadUsers").disabled, true);
+  assertEquals(harness.byId("refreshStats").disabled, true);
+  assertEquals(harness.byId("pollNowBtn").disabled, true);
+  assertEquals(harness.byId("synthesizeNowBtn").disabled, true);
 });
 
-Deno.test("saving an empty token stores nothing and asks for one (audio-feed-ndc)", async () => {
-  const harness = await runAdminScript({ respond: () => ({ users: [] }) });
+Deno.test("a signed-out console sends no API requests on load (audio-feed-0jp)", async () => {
+  const harness = await runAdminScript({
+    signedIn: false,
+    respond: () => ({ users: [] }),
+  });
 
-  harness.byId("adminToken").value = "   ";
-  harness.byId("saveToken").click();
+  assertEquals(harness.requests.length, 0, "signed-out console must not issue background requests");
+});
+
+Deno.test("the console UI does not read or write token storage keys (audio-feed-0jp)", async () => {
+  const harness = await runAdminScript({
+    signedIn: true,
+    respond: () => ({ users: [] }),
+  });
+
+  assertEquals(harness.localStore(TOKEN_KEY), null, "no token in local storage");
+  assertEquals(harness.sessionStore(TOKEN_KEY), null, "no token in session storage");
+});
+
+Deno.test("refreshing stats on a signed-in console fetches updated operational data (audio-feed-0jp)", async () => {
+  let statsCalls = 0;
+  const harness = await runAdminScript({
+    signedIn: true,
+    respond: (_method, path) => {
+      if (path === "/api/admin/stats") {
+        statsCalls++;
+        return {
+          downloads: { total: statsCalls, perUser: [] },
+          feedProcessing: { lastPolledAt: null, averageDurationMs: null, sampleSize: 0 },
+          runs: [],
+        };
+      }
+      return { users: [] };
+    },
+  });
+
+  assertEquals(statsCalls, 1, "initial load fetched stats once");
+  harness.byId("refreshStats").click();
   await harness.flush();
+  assertEquals(statsCalls, 2, "refresh button triggered second stats fetch");
+  assertEquals(harness.byId("statDownloads").textContent, "2");
+});
 
-  assertEquals(harness.localStore(TOKEN_KEY), null);
-  assertEquals(harness.sessionStore(TOKEN_KEY), null);
-  assertEquals(harness.requests.length, 0, "no request may go out without a token");
+Deno.test("manual poll and synthesize triggers execute on the signed-in session (audio-feed-0jp)", async () => {
+  const harness = await runAdminScript({
+    signedIn: true,
+    respond: (_method, path) => {
+      if (path === "/api/admin/poll-now") return { polled: 2, queued: 1, failed: 0 };
+      if (path === "/api/admin/synthesize-now") return { ready: 1, failed: 0, deferred: 0 };
+      return { users: [] };
+    },
+  });
+
+  harness.byId("pollNowBtn").click();
+  await harness.flush();
+  assert(harness.requests.some((r) => r.path === "/api/admin/poll-now"));
+
+  harness.byId("synthesizeNowBtn").click();
+  await harness.flush();
+  assert(harness.requests.some((r) => r.path === "/api/admin/synthesize-now"));
+});
+
+Deno.test("load subscribers button re-queries users list on the signed-in session (audio-feed-0jp)", async () => {
+  let userFetches = 0;
+  const harness = await runAdminScript({
+    signedIn: true,
+    respond: (_method, path) => {
+      if (path === "/api/admin/users") {
+        userFetches++;
+        return { users: [{ id: "u1", email: "a@example.com", status: "approved" }] };
+      }
+      return { ok: true };
+    },
+  });
+
+  assertEquals(userFetches, 1, "initial auto-load fetched users once");
+  harness.byId("loadUsers").click();
+  await harness.flush();
+  assertEquals(userFetches, 2, "manual load clicked fetched users again");
+  assertEquals(harness.byId("usersBody").children.length, 1);
 });
