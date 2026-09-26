@@ -349,6 +349,8 @@ ${PASSKEY_CLIENT}
       try {
         const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.regenerateEpisode) + "/regenerate", {});
         say($("regenFeedback"), "ok", res.queued ? "Queued for regeneration." : "Already queued.");
+        // Reload so the outdated count, and the spend its confirm states, stay true.
+        setTimeout(() => location.reload(), 700);
       } catch (error) {
         say($("regenFeedback"), "error", String(error.message || error));
         button.disabled = false;
