@@ -8,6 +8,7 @@ import {
 import {
   base64ToUint8Array,
   buildDialogueRequest,
+  buildNarrationSystemPrompt,
   buildSingleVoiceRequest,
   decodeAudioResponse,
   DEFAULT_EXPERT_VOICE,
@@ -17,6 +18,7 @@ import {
   detectAudioFormat,
   DialogueSpeaker,
   DialogueTurn,
+  formatCodeForTts,
   formatDialoguePrompt,
   formatNarrationIntro,
   formatNarrationPrompt,
@@ -82,7 +84,7 @@ Deno.test("Single-voice narration - builds Ben Thompson style spoken intro", () 
 
   assertEquals(
     intro,
-    "The following is Aggregators and Platforms, written by Ben Thompson, published on September 24, 2026. From Stratechery. Why distribution economics define modern platforms.",
+    "Aggregators and Platforms. Published on September 24, 2026, by Ben Thompson. From Stratechery. Why distribution economics define modern platforms.",
   );
 });
 
@@ -98,7 +100,21 @@ Deno.test("Single-voice narration - custom intro and partial metadata", () => {
     title: "Solo Thought",
     body: "Content...",
   });
-  assertEquals(titleOnly, "The following is Solo Thought.");
+  assertEquals(titleOnly, "Solo Thought.");
+
+  const titleAndAuthor = formatNarrationIntro({
+    title: "Solo Thought",
+    author: "Ben Thompson",
+    body: "Content...",
+  });
+  assertEquals(titleAndAuthor, "Solo Thought. By Ben Thompson.");
+
+  const titleAndDate = formatNarrationIntro({
+    title: "Solo Thought",
+    publishedAt: "2026-09-24T10:00:00Z",
+    body: "Content...",
+  });
+  assertEquals(titleAndDate, "Solo Thought. Published on September 24, 2026.");
 });
 
 Deno.test("Single-voice narration - builds prompt with spoken intro and article text without meta-preamble or bracketed headers (audio-feed-xad, audio-feed-9dc)", () => {
@@ -128,8 +144,9 @@ Deno.test("Single-voice narration - builds prompt with spoken intro and article 
   assertEquals(prompt.includes("[Article Text]"), false);
 
   // Spoken introduction and article text must be present directly
-  assertEquals(prompt.includes("The following is AI Operating Models"), true);
-  assertEquals(prompt.includes("written by Paul Kinlan"), true);
+  assertEquals(prompt.startsWith("AI Operating Models."), true);
+  assertEquals(prompt.includes("Published on September 24, 2026, by Paul Kinlan."), true);
+  assertEquals(prompt.includes("The following is"), false);
   assertEquals(
     prompt.includes(
       "The shift from local agents to fleet swarms is accelerating.",
@@ -138,7 +155,7 @@ Deno.test("Single-voice narration - builds prompt with spoken intro and article 
   );
   assertEquals(
     prompt,
-    "The following is AI Operating Models, written by Paul Kinlan, published on September 24, 2026.\n\nThe shift from local agents to fleet swarms is accelerating.",
+    "AI Operating Models. Published on September 24, 2026, by Paul Kinlan.\n\nThe shift from local agents to fleet swarms is accelerating.",
   );
 });
 
@@ -711,4 +728,170 @@ Deno.test("GeminiTtsClient - handles HTTP 500 error from API", async () => {
     GeminiTtsError,
     "Internal server error in TTS synthesis backend",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 5. Episode Intro & Code Handling in Outgoing Requests (audio-feed-tov, audio-feed-bdo)
+// ---------------------------------------------------------------------------
+
+Deno.test("outgoing single-voice request captures title-first intro and systemInstruction (audio-feed-tov, audio-feed-bdo)", async () => {
+  let capturedRequest: GeminiGenerateContentRequest | null = null;
+  const mockFetch: typeof fetch = (_url, init) => {
+    capturedRequest = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: "audio/pcm;rate=24000",
+                  data: uint8ArrayToBase64(new Uint8Array(48)),
+                },
+              }],
+            },
+            finishReason: "STOP",
+          }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "test-key", fetchFn: mockFetch });
+  await client.synthesizeNarration({
+    title: "Understanding Fleet Topologies",
+    author: "Paul Kinlan",
+    publishedAt: "2026-09-26T12:00:00Z",
+    sourceName: "Platform Architecture",
+    body: "First paragraph.\n\n```ts\nconst agent = new Agent();\n```\n\nFinal paragraph.",
+    codeHandling: "skip",
+  });
+
+  assert(capturedRequest !== null);
+  const req = capturedRequest as GeminiGenerateContentRequest;
+  const promptText = req.contents[0]?.parts[0]?.text ?? "";
+
+  // tov: first words must be title, followed by date, author, source
+  assertEquals(
+    promptText.startsWith(
+      "Understanding Fleet Topologies. Published on September 26, 2026, by Paul Kinlan. From Platform Architecture.",
+    ),
+    true,
+  );
+  assertEquals(promptText.includes("The following is"), false);
+
+  // bdo: raw code block is stripped from prompt text
+  assertEquals(promptText.includes("const agent"), false);
+  assertEquals(promptText.includes("First paragraph."), true);
+  assertEquals(promptText.includes("Final paragraph."), true);
+
+  // bdo: systemInstruction is set and instructs skipping code
+  const sysText = req.systemInstruction?.parts[0]?.text ?? "";
+  assertStringIncludes(sysText, "Skip code blocks");
+  assertStringIncludes(sysText, "Never read raw code");
+});
+
+Deno.test("formatCodeForTts - skips code blocks by default (audio-feed-bdo)", async () => {
+  const input =
+    "Here is some context.\n\n```python\ndef compute(x):\n    return x * 2\n```\n\nThat was the computation.";
+  const processed = await formatCodeForTts(input, "skip");
+  assertEquals(processed.includes("def compute"), false);
+  assertEquals(processed.includes("Here is some context."), true);
+  assertEquals(processed.includes("That was the computation."), true);
+});
+
+Deno.test("formatCodeForTts - explains code blocks when summarizer is available (audio-feed-bdo)", async () => {
+  const input = 'Look at this snippet:\n\n```rust\nfn main() { println!("hi"); }\n```\n\nDone.';
+  const summarizer = (code: string) => `prints a greeting using ${code.split("\n")[0]}`;
+  const processed = await formatCodeForTts(input, "explain", summarizer);
+  assertEquals(
+    processed.includes('[Code explanation: prints a greeting using fn main() { println!("hi"); }]'),
+    true,
+  );
+  assertEquals(processed.includes("fn main()"), true);
+  assertEquals(processed.includes("Look at this snippet:"), true);
+});
+
+Deno.test("formatCodeForTts - falls back to skip when summarizer throws or is omitted (audio-feed-bdo)", async () => {
+  const input = "Snippet:\n\n```js\nconst x = 42;\n```\n\nEnd.";
+
+  // Omitted summarizer
+  const withoutSummarizer = await formatCodeForTts(input, "explain");
+  assertEquals(withoutSummarizer.includes("const x = 42"), false);
+  assertEquals(withoutSummarizer, "Snippet:\n\nEnd.");
+
+  // Throwing summarizer
+  const throwingSummarizer = () => {
+    throw new Error("summarizer backend offline");
+  };
+  const fallbackOnThrow = await formatCodeForTts(input, "explain", throwingSummarizer);
+  assertEquals(fallbackOnThrow.includes("const x = 42"), false);
+  assertEquals(fallbackOnThrow, "Snippet:\n\nEnd.");
+});
+
+Deno.test("buildNarrationSystemPrompt directs code handling without forbidden meta-phrases (audio-feed-bdo)", () => {
+  const skipPrompt = buildNarrationSystemPrompt("skip");
+  assertStringIncludes(skipPrompt, "Skip code blocks");
+  assertStringIncludes(skipPrompt, "Never read raw code");
+
+  const explainPrompt = buildNarrationSystemPrompt("explain");
+  assertStringIncludes(explainPrompt, "explain or summarize");
+  assertStringIncludes(explainPrompt, "Never read raw code");
+
+  // Must not trigger audio-feed-xad / 9jh forbidden phrases
+  for (
+    const forbidden of [
+      "You are generating",
+      "Style guidelines",
+      "Speak with natural human cadence",
+      "No robotic pauses",
+      "in the style of NotebookLM",
+    ]
+  ) {
+    assertEquals(skipPrompt.includes(forbidden), false);
+    assertEquals(explainPrompt.includes(forbidden), false);
+  }
+});
+
+Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body and system instruction (audio-feed-bdo)", async () => {
+  let capturedRequest: GeminiGenerateContentRequest | null = null;
+  const mockFetch: typeof fetch = (_url, init) => {
+    capturedRequest = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: "audio/pcm;rate=24000",
+                  data: uint8ArrayToBase64(new Uint8Array(48)),
+                },
+              }],
+            },
+            finishReason: "STOP",
+          }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "test-key", fetchFn: mockFetch });
+  await client.synthesizeDialogue({
+    title: "Deep Dive on Code",
+    article: {
+      title: "Deep Dive on Code",
+      body: "Opening analysis.\n\n```python\nimport sys\n```\n\nClosing thoughts.",
+    },
+    codeHandling: "skip",
+  });
+
+  assert(capturedRequest !== null);
+  const req = capturedRequest as GeminiGenerateContentRequest;
+  const bodyText = JSON.stringify(req);
+  assertEquals(bodyText.includes("import sys"), false);
+  assert(req.systemInstruction !== undefined);
+  assertStringIncludes(req.systemInstruction.parts[0]?.text ?? "", "Never read raw code");
 });

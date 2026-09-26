@@ -13,6 +13,10 @@ import { DEFAULT_NARRATION_VOICE } from "./tts/gemini.ts";
 /** Audio presentation modes, per PRODUCT.md §1. */
 export type AudioMode = "direct" | "deepdive";
 
+/** How to handle code blocks in synthesized speech (audio-feed-bdo). */
+export type CodeHandling = "skip" | "explain";
+export const DEFAULT_CODE_HANDLING: CodeHandling = "skip";
+
 export const AUDIO_MODES: readonly AudioMode[] = ["direct", "deepdive"] as const;
 
 export function isAudioMode(value: unknown): value is AudioMode {
@@ -175,6 +179,8 @@ export interface Source {
   /** Which feeds this source publishes. */
   modes: AudioMode[];
   voices: VoiceConfig;
+  /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
+  codeHandling?: CodeHandling;
   createdAt: string;
   lastPolledAt?: string;
   lastPollError?: string;

@@ -29,7 +29,14 @@ import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
 import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
-import { type Article, type AudioMode, type Episode, type Source } from "../types.ts";
+import {
+  type Article,
+  type AudioMode,
+  type CodeHandling,
+  DEFAULT_CODE_HANDLING,
+  type Episode,
+  type Source,
+} from "../types.ts";
 
 export interface FeedItem {
   title: string;
@@ -385,7 +392,13 @@ export function sourceIdForFeed(feedUrl: string, taken: Set<string>): string {
 /** Create a subscription and poll it once, so the first episodes appear now. */
 export async function subscribeToFeed(
   ctx: AppContext,
-  input: { userId: string; feedUrl: string; title?: string; modes?: AudioMode[] },
+  input: {
+    userId: string;
+    feedUrl: string;
+    title?: string;
+    modes?: AudioMode[];
+    codeHandling?: CodeHandling;
+  },
   deps: PollDependencies = {},
 ): Promise<{ source: Source; poll: PollResult }> {
   const existing = await ctx.stores.metadata.listSources(input.userId);
@@ -408,6 +421,7 @@ export async function subscribeToFeed(
     // first term was always populated. `{}` means "unspecified" and the synthesizer
     // resolves source -> user -> DEFAULT_VOICE -> DEFAULT_NARRATION_VOICE.
     voices: {},
+    codeHandling: input.codeHandling ?? DEFAULT_CODE_HANDLING,
     createdAt: new Date().toISOString(),
   };
   // Validate BEFORE persisting: a user who pastes an article URL or an unreachable

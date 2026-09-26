@@ -1,3 +1,5 @@
+import type { CodeHandling } from "../types.ts";
+
 /**
  * Gemini 3.8 / 2.5 Flash TTS Client
  *
@@ -89,6 +91,10 @@ export interface NarrationInput {
   voice?: GeminiTtsVoice | string;
   includeIntro?: boolean;
   customIntro?: string;
+  /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
+  codeHandling?: CodeHandling;
+  /** Optional code summarizer function when codeHandling is "explain" (audio-feed-bdo). */
+  codeSummarizer?: (code: string) => string | Promise<string>;
 }
 
 /**
@@ -123,6 +129,10 @@ export interface DialogueInput {
     body: string;
     summary?: string;
   };
+  /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
+  codeHandling?: CodeHandling;
+  /** Optional code summarizer function when codeHandling is "explain" (audio-feed-bdo). */
+  codeSummarizer?: (code: string) => string | Promise<string>;
 }
 
 export interface SpeechMetadata {
@@ -140,6 +150,9 @@ export interface ContentPart {
  * Request payload for Gemini GenerateContent API with Audio modality
  */
 export interface GeminiGenerateContentRequest {
+  systemInstruction?: {
+    parts: Array<{ text: string }>;
+  };
   contents: Array<{
     role?: string;
     parts: Array<ContentPart>;
@@ -670,7 +683,10 @@ export function formatSpokenDate(date: string | Date): string {
 }
 
 /**
- * Build the Stratechery / Ben Thompson style spoken introduction
+ * Build the Stratechery / Ben Thompson style spoken introduction (audio-feed-tov).
+ *
+ * First words are the title, followed by publish date, author, and real metadata.
+ * Awkward boilerplate ("The following is...") is removed.
  */
 export function formatNarrationIntro(input: NarrationInput): string {
   if (input.customIntro) {
@@ -683,13 +699,13 @@ export function formatNarrationIntro(input: NarrationInput): string {
   const dateStr = input.publishedAt ? formatSpokenDate(input.publishedAt) : "";
   const source = input.sourceName?.trim();
 
-  let intro = `The following is ${title}`;
-  if (author && dateStr) {
-    intro += `, written by ${author}, published on ${dateStr}.`;
-  } else if (author) {
-    intro += `, written by ${author}.`;
+  let intro = title;
+  if (dateStr && author) {
+    intro += `. Published on ${dateStr}, by ${author}.`;
   } else if (dateStr) {
-    intro += `, published on ${dateStr}.`;
+    intro += `. Published on ${dateStr}.`;
+  } else if (author) {
+    intro += `. By ${author}.`;
   } else {
     intro += `.`;
   }
@@ -704,6 +720,71 @@ export function formatNarrationIntro(input: NarrationInput): string {
   }
 
   return parts.join(" ");
+}
+
+/**
+ * Format article body for TTS according to the feed's codeHandling setting (audio-feed-bdo).
+ *
+ * If `codeHandling === "skip"`, code blocks (```...```) are removed entirely.
+ * If `codeHandling === "explain"`, an optional `codeSummarizer` is called for each block;
+ * if no summarizer is provided (or if summarization fails/returns empty), it safely
+ * falls back to skipping the code block, ensuring raw code is never read aloud.
+ */
+export async function formatCodeForTts(
+  text: string,
+  codeHandling: CodeHandling = "skip",
+  summarizer?: (code: string) => string | Promise<string>,
+): Promise<string> {
+  const codeBlockRegex = /```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g;
+  if (!codeBlockRegex.test(text)) {
+    return text;
+  }
+  codeBlockRegex.lastIndex = 0;
+
+  if (codeHandling === "explain" && summarizer) {
+    const matches: Array<{ full: string; code: string; index: number }> = [];
+    let match: RegExpExecArray | null;
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      matches.push({ full: match[0], code: match[1] ?? "", index: match.index });
+    }
+
+    let result = "";
+    let lastIndex = 0;
+    for (const m of matches) {
+      result += text.slice(lastIndex, m.index);
+      try {
+        const explanation = await summarizer(m.code.trim());
+        if (explanation && explanation.trim()) {
+          result += `\n[Code explanation: ${explanation.trim()}]\n`;
+        }
+      } catch {
+        // Fallback: omit raw code
+      }
+      lastIndex = m.index + m.full.length;
+    }
+    result += text.slice(lastIndex);
+    return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
+  }
+
+  // Fallback or "skip" mode: strip code blocks completely so raw code is never read aloud.
+  return text
+    .replace(codeBlockRegex, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * System instruction prompt for TTS generation (audio-feed-bdo).
+ *
+ * Directs the voice model on how to handle technical content and code listings.
+ */
+export function buildNarrationSystemPrompt(codeHandling: CodeHandling = "skip"): string {
+  if (codeHandling === "explain") {
+    return "You are an audio narrator. Read the text clearly and naturally. When encountering code explanations or technical listings, explain or summarize their purpose in plain words. Never read raw code, syntax tokens, punctuation, brackets, or code symbols aloud.";
+  }
+  return "You are an audio narrator. Read the text clearly and naturally. Skip code blocks and code listings entirely. Never read raw code, syntax tokens, punctuation, brackets, or code symbols aloud.";
 }
 
 /**
@@ -858,8 +939,9 @@ export function buildSingleVoiceRequest(
   prompt: string,
   voice: GeminiTtsVoice | string = DEFAULT_NARRATION_VOICE,
   temperature = 0.7,
+  systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
-  return {
+  const req: GeminiGenerateContentRequest = {
     contents: [
       {
         parts: [{ text: prompt }],
@@ -877,6 +959,12 @@ export function buildSingleVoiceRequest(
       temperature,
     },
   };
+  if (systemInstructionText) {
+    req.systemInstruction = {
+      parts: [{ text: systemInstructionText }],
+    };
+  }
+  return req;
 }
 
 /**
@@ -887,6 +975,7 @@ export function buildDialogueRequest(
   turnsOrScript: DialogueTurn[] | string,
   speakers: [DialogueSpeaker, DialogueSpeaker],
   temperature = 0.8,
+  systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
   const turns = Array.isArray(turnsOrScript)
     ? turnsOrScript
@@ -902,7 +991,7 @@ export function buildDialogueRequest(
     },
   }));
 
-  return {
+  const req: GeminiGenerateContentRequest = {
     contents: [
       {
         parts,
@@ -935,6 +1024,12 @@ export function buildDialogueRequest(
       temperature,
     },
   };
+  if (systemInstructionText) {
+    req.systemInstruction = {
+      parts: [{ text: systemInstructionText }],
+    };
+  }
+  return req;
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,8 +1227,11 @@ export class GeminiTtsClient {
     options: SynthesisOptions = {},
   ): Promise<DecodedAudioResult> {
     const voice = input.voice || DEFAULT_NARRATION_VOICE;
-    const prompt = formatNarrationPrompt(input);
-    const request = buildSingleVoiceRequest(prompt, voice, options.temperature);
+    const codeHandling = input.codeHandling ?? "skip";
+    const processedBody = await formatCodeForTts(input.body, codeHandling, input.codeSummarizer);
+    const prompt = formatNarrationPrompt({ ...input, body: processedBody });
+    const systemPrompt = buildNarrationSystemPrompt(codeHandling);
+    const request = buildSingleVoiceRequest(prompt, voice, options.temperature, systemPrompt);
     return await this.sendRequest(request, options);
   }
 
@@ -1144,8 +1242,22 @@ export class GeminiTtsClient {
     input: DialogueInput,
     options: SynthesisOptions = {},
   ): Promise<DecodedAudioResult> {
-    const { turns, speakers } = formatDialoguePrompt(input);
-    const request = buildDialogueRequest(turns, speakers, options.temperature);
+    const codeHandling = input.codeHandling ?? "skip";
+    let formattedInput = input;
+    if (input.article) {
+      const processedBody = await formatCodeForTts(
+        input.article.body,
+        codeHandling,
+        input.codeSummarizer,
+      );
+      formattedInput = {
+        ...input,
+        article: { ...input.article, body: processedBody },
+      };
+    }
+    const { turns, speakers } = formatDialoguePrompt(formattedInput);
+    const systemPrompt = buildNarrationSystemPrompt(codeHandling);
+    const request = buildDialogueRequest(turns, speakers, options.temperature, systemPrompt);
     return await this.sendRequest(request, options);
   }
 

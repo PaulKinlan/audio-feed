@@ -47,6 +47,7 @@ import type { AppContext } from "../app.ts";
 import {
   audioBlobKey,
   DEFAULT_CLAIM_LEASE_MS,
+  DEFAULT_CODE_HANDLING,
   DEFAULT_MAX_CLAIMS,
   DEFAULT_VOICES,
 } from "../types.ts";
@@ -174,10 +175,14 @@ export function createGeminiSynthesizer(
   ctx: AppContext,
   /** Injectable so a test can drive the real request path with a capturing fetchFn
    *  instead of asserting on a helper the call site may or may not use. */
-  deps: { client?: GeminiTtsClient } = {},
+  deps: {
+    client?: GeminiTtsClient;
+    codeSummarizer?: (code: string) => string | Promise<string>;
+  } = {},
 ): Synthesizer {
   const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
   return async ({ article, source, episode, mode }) => {
+    const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
       // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
       // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
@@ -199,6 +204,8 @@ export function createGeminiSynthesizer(
           { name: "Alex", role: "expert", voice: expert },
           { name: "Sam", role: "curious_foil", voice: foil },
         ],
+        codeHandling,
+        codeSummarizer: deps.codeSummarizer,
       });
     }
 
@@ -221,6 +228,8 @@ export function createGeminiSynthesizer(
       sourceName: source?.title ?? episode.sourceTitle,
       body: article.content,
       voice,
+      codeHandling,
+      codeSummarizer: deps.codeSummarizer,
     });
   };
 }
