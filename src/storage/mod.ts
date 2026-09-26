@@ -261,8 +261,18 @@ export interface MetadataStore {
    */
   listEpisodePage(query: EpisodePage): Promise<EpisodePageResult>;
   /**
-   * Pending and recoverable episodes, ordered by `createdAt` ascending (FIFO, oldest first).
+   * Pending and recoverable episodes, in the order the synthesis worker must take them.
    * Cross-user queue backing the synthesis worker (audio-feed-bbb).
+   *
+   * Ordering is NOT plain FIFO: new work is served ahead of regenerations, and each of those
+   * two groups is FIFO by `createdAt` (audio-feed-15e). A regeneration keeps the createdAt it
+   * was published with — that date is the episode's position in the feed and in the player —
+   * so a single FIFO queue let a "Regenerate all" after a prompt change place every re-render
+   * ahead of anything ingested afterwards, and the subscriber's newest article waited behind
+   * work on audio they could already hear.
+   *
+   * Regenerations are never starved by this: they are the same scan, in a later segment of the
+   * queue key, so an idle new-work segment simply falls through to them.
    */
   listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult>;
   /**

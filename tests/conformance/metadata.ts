@@ -892,6 +892,88 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       ...over,
     });
 
+  // ── queue priority (audio-feed-15e) ──────────────────────────────────────
+  //
+  // Pinned in the CONFORMANCE suite rather than in a worker test, because the ordering is a
+  // property of the queue: if one adapter served regenerations first, the worker would look
+  // correct in tests and starve new articles in production, which is the exact failure this
+  // suite exists to prevent.
+
+  test("new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-15e)", async (store) => {
+    // Three OLD episodes, published then requeued: the real regenerate path, so the flag and
+    // the original createdAt are set by production code rather than by this test.
+    for (const day of ["01", "02", "03"]) {
+      await store.putEpisode(makeEpisode({
+        id: `old-${day}`,
+        userId: "user-1",
+        status: "ready",
+        createdAt: `2026-09-${day}T00:00:00.000Z`,
+      }));
+      assert(await store.requeueEpisode("user-1", `old-${day}`));
+    }
+    // One genuinely new article, queued after all of them.
+    await store.putEpisode(makeEpisode({
+      id: "fresh",
+      userId: "user-1",
+      status: "pending",
+      audioKey: undefined,
+      createdAt: "2026-09-20T00:00:00.000Z",
+    }));
+
+    const ids = (await store.listPendingEpisodes({ limit: 10 })).episodes.map((e) => e.id);
+    assertEquals(
+      ids[0],
+      "fresh",
+      `the never-heard article must be first, queue was [${ids}]`,
+    );
+    assertEquals(
+      ids,
+      ["fresh", "old-01", "old-02", "old-03"],
+      "regenerations follow, still oldest-first among themselves",
+    );
+  });
+
+  test("regenerations are still served when there is no new work (audio-feed-15e)", async (store) => {
+    for (const day of ["01", "02"]) {
+      await store.putEpisode(makeEpisode({
+        id: `old-${day}`,
+        userId: "user-1",
+        status: "ready",
+        createdAt: `2026-09-${day}T00:00:00.000Z`,
+      }));
+      await store.requeueEpisode("user-1", `old-${day}`);
+    }
+    const ids = (await store.listPendingEpisodes({ limit: 10 })).episodes.map((e) => e.id);
+    assertEquals(ids, ["old-01", "old-02"], "priority must not become starvation");
+  });
+
+  test("an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e)", async (store) => {
+    await store.putEpisode(makeEpisode({
+      id: "e1",
+      userId: "user-1",
+      status: "ready",
+      createdAt: "2026-09-01T00:00:00.000Z",
+    }));
+    // Each transition moves the pointer between priority segments. A leak in either direction
+    // is not cosmetic: two pointers means the same episode can be claimed twice in one tick
+    // and billed twice, and no pointer means it never synthesises at all.
+    await store.requeueEpisode("user-1", "e1");
+    const queued = (await store.listPendingEpisodes({ limit: 10 })).episodes;
+    assertEquals(queued.map((e) => e.id), ["e1"], "requeued: exactly one pointer");
+    assertEquals(queued[0]!.regenerating, true, "and it is the regeneration that is queued");
+
+    // Cancelling returns the episode to `ready` — it still has playable audio — so it leaves the
+    // queue entirely. What must not survive is a pointer: a leftover in either priority segment
+    // would have the worker claim an episode nobody asked about, and bill it.
+    assert(await store.cancelRegeneration("user-1", "e1"));
+    assertEquals(
+      (await store.listPendingEpisodes({ limit: 10 })).episodes.map((e) => e.id),
+      [],
+      "a cancelled regeneration must leave no queue pointer",
+    );
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+  });
+
   test("requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)", async (store) => {
     await store.putEpisode(published({ attempts: 3, promptVersion: "old-prompts" }));
 

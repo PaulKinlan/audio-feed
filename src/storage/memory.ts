@@ -257,20 +257,20 @@ export class MemoryMetadataStore implements MetadataStore {
     const key = MemoryMetadataStore.#scoped(episode.userId, episode.id);
     const existing = this.#episodes.get(key);
     if (existing) {
-      const oldSortKey = `${existing.createdAt}\u0000${existing.id}`;
-      removeSortedIndex(this.#pendingIndex, oldSortKey);
-      removeSortedIndex(this.#synthesizingIndex, oldSortKey);
+      this.#removePendingPointer(existing);
+      removeSortedIndex(this.#synthesizingIndex, `${existing.createdAt}\u0000${existing.id}`);
     }
-    const newSortKey = `${episode.createdAt}\u0000${episode.id}`;
     if (episode.status === "pending") {
       insertSortedIndex(this.#pendingIndex, {
-        sortKey: newSortKey,
+        sortKey: pendingSortKey(episode),
         userId: episode.userId,
         id: episode.id,
       });
     } else if (episode.status === "synthesizing") {
+      // The claim index keeps the plain date key: an in-flight job is not queued work, so it
+      // has no priority segment (audio-feed-15e).
       insertSortedIndex(this.#synthesizingIndex, {
-        sortKey: newSortKey,
+        sortKey: `${episode.createdAt}\u0000${episode.id}`,
         userId: episode.userId,
         id: episode.id,
       });
@@ -292,11 +292,21 @@ export class MemoryMetadataStore implements MetadataStore {
     const key = MemoryMetadataStore.#scoped(userId, id);
     const ep = this.#episodes.get(key);
     if (!ep) return Promise.resolve(false);
-    const sortKey = `${ep.createdAt}\u0000${ep.id}`;
-    removeSortedIndex(this.#pendingIndex, sortKey);
-    removeSortedIndex(this.#synthesizingIndex, sortKey);
+    this.#removePendingPointer(ep);
+    removeSortedIndex(this.#synthesizingIndex, `${ep.createdAt}\u0000${ep.id}`);
     this.#episodes.delete(key);
     return Promise.resolve(true);
+  }
+
+  /** Clear a pending pointer from the queue, whichever priority it was written under. */
+  #removePendingPointer(episode: {
+    createdAt: string;
+    id: string;
+    regenerating?: boolean;
+  }): void {
+    const [newWork, regeneration] = pendingSortKeys(episode);
+    removeSortedIndex(this.#pendingIndex, newWork);
+    removeSortedIndex(this.#pendingIndex, regeneration);
   }
 
   backfillEpisodeSourceTitle(
@@ -432,7 +442,7 @@ export class MemoryMetadataStore implements MetadataStore {
     if (attempts > claim.maxClaims) {
       // Abandon rather than re-bill: an input that keeps killing its host would
       // otherwise be re-claimed forever on lease expiry.
-      removeSortedIndex(this.#pendingIndex, oldSortKey);
+      this.#removePendingPointer(found);
       removeSortedIndex(this.#synthesizingIndex, oldSortKey);
       this.#episodes.set(key, {
         ...unsynthesized(structuredClone(found), `abandoned after ${claim.maxClaims} attempts`),
@@ -449,7 +459,7 @@ export class MemoryMetadataStore implements MetadataStore {
       claimedBy: claim.owner,
       attempts,
     };
-    removeSortedIndex(this.#pendingIndex, oldSortKey);
+    this.#removePendingPointer(found);
     insertSortedIndex(this.#synthesizingIndex, {
       sortKey: oldSortKey,
       userId,
@@ -468,7 +478,7 @@ export class MemoryMetadataStore implements MetadataStore {
     }
     const sortKey = `${current.createdAt}\u0000${current.id}`;
     removeSortedIndex(this.#synthesizingIndex, sortKey);
-    removeSortedIndex(this.#pendingIndex, sortKey);
+    this.#removePendingPointer(current);
     this.#episodes.set(key, structuredClone(episode));
     return Promise.resolve(true);
   }
@@ -590,6 +600,31 @@ interface IndexEntry {
   sortKey: string;
   userId: string;
   id: string;
+}
+
+/**
+ * The pending-index sort keys for an episode's date — BOTH priorities, so a removal can never
+ * miss the pointer it means to clear (audio-feed-15e). The leading segment is what makes new
+ * work sort ahead of regenerations; see `pendingSortKey`.
+ */
+function pendingSortKeys(episode: {
+  createdAt: string;
+  id: string;
+  regenerating?: boolean;
+}): [string, string] {
+  return [
+    `0\u0000${episode.createdAt}\u0000${episode.id}`,
+    `1\u0000${episode.createdAt}\u0000${episode.id}`,
+  ];
+}
+
+/** The one queue key an episode's pending pointer lives under, chosen by its flag. */
+function pendingSortKey(episode: {
+  createdAt: string;
+  id: string;
+  regenerating?: boolean;
+}): string {
+  return episode.regenerating ? pendingSortKeys(episode)[1] : pendingSortKeys(episode)[0];
 }
 
 function compareSortKeys(a: string, b: string): number {
