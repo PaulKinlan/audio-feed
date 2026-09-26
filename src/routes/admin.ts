@@ -15,22 +15,16 @@
  *   between the two pages, which is the established pattern rather than a new
  *   one).
  * - The PAGE is public and holds no data. Every byte of subscriber data comes
- *   from `/api/admin/users*`, which is token-gated server-side. Rendering the
- *   shell without a token reveals nothing, and it means the console can prompt
- *   for the token instead of looking broken.
- * - The admin token travels in the `x-admin-token` HEADER, never a query string —
- *   same reasoning as the homepage form: a token in a URL ends up in history and
- *   proxy logs.
- * - WHERE it is stored is the admin's choice (audio-feed-ndc). `sessionStorage`
- *   forgets it when the tab closes, which is safer and was the original default;
- *   `localStorage` survives a browser restart, which is what an operator
- *   reopening the console actually wants. The checkbox makes the trade explicit
- *   rather than deciding it for them, and unchecking it clears the persistent
- *   copy immediately rather than leaving a token behind.
+ *   from `/api/admin/users*`, which is session-gated (or token-gated) server-side.
+ *   Rendering the shell without a session reveals nothing, and prompts the visitor
+ *   to sign in with a passkey.
+ * - Admins sign in via passkey (audio-feed-8fc); the token-paste UI path is
+ *   deleted (audio-feed-0jp). Session state travels in an HttpOnly secure cookie,
+ *   with no credential stored in web storage. Break-glass admin calls (e.g. curl)
+ *   continue to use the `x-admin-token` request header server-side.
  * - Subscriber-supplied text (email, display name) is inserted with
  *   `textContent`, never `innerHTML`. A stored-XSS payload in a display name
- *   would otherwise run in the admin's session and read the admin token out of
- *   sessionStorage, i.e. one subscriber could take over the console.
+ *   would otherwise run in the admin's session and perform actions on their behalf.
  * - `feedToken` IS shown here, unlike in the approve response. The admin is the
  *   issuer: the token has to be handed to the subscriber somehow, and showing it
  *   once at creation is the only place that is true. The page is therefore
