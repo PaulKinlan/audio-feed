@@ -40,7 +40,9 @@ Deno.test("a signed-in admin's console loads with no token at all (audio-feed-8f
   assertEquals(page.byId("usersBody").children.length, 1);
 });
 
-Deno.test("a signed-out console without a token still waits for one (audio-feed-8fc)", async () => {
+// Regression guard, not new behaviour: this already held on main (cd92a70). It
+// keeps the session work from making a signed-out console call the API.
+Deno.test("REGRESSION GUARD: a signed-out console without a token still waits for one (audio-feed-8fc)", async () => {
   const page = await runAdminScript({ respond });
   assertEquals(page.requests.length, 0);
 });
