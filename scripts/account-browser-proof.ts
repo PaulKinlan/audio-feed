@@ -205,9 +205,9 @@ try {
   await sweep("02-login");
   await go("/admin");
   check(
-    "signed-out /admin offers sign-in",
+    "signed-out /admin offers sign-in with token controls removed (audio-feed-0jp)",
     await js(
-      `!!document.querySelector('a[href="/login?next=%2Fadmin"]') && document.body.innerText.includes("Use admin token instead")`,
+      `!!document.querySelector('a[href="/login?next=%2Fadmin"]') && !document.getElementById("adminToken") && !document.getElementById("saveToken") && !document.body.innerText.includes("Use admin token instead")`,
     ),
     `status ${await status()}`,
   );
@@ -329,6 +329,13 @@ try {
   await go("/admin");
   check("admin reaches /admin", (await status()) === 200, `status ${await status()}`);
   await until(`document.getElementById("usersBody").children.length === 3`, "admin user list");
+  check(
+    "admin console loads subscriber data on session with token controls removed (audio-feed-0jp)",
+    await js(
+      `!document.getElementById("adminToken") && !document.getElementById("saveToken") && document.getElementById("usersBody").children.length === 3`,
+    ),
+    "console loaded 3 users on session, zero token inputs present",
+  );
   await sweep("07-admin");
   await js(
     `[...document.querySelectorAll("#usersBody button")].find((b) => b.getAttribute("aria-label") === "Setup link for rita\u0040example.com").click()`,

@@ -1,10 +1,10 @@
 {
   "bead": "audio-feed-8fc",
   "also": "audio-feed-ktn",
-  "at": "2026-09-26T20:19:53.434Z",
+  "at": "2026-09-26T21:57:33.476Z",
   "steps": [
     {
-      "step": "signed-out /admin offers sign-in",
+      "step": "signed-out /admin offers sign-in with token controls removed (audio-feed-0jp)",
       "ok": true,
       "detail": "status 200"
     },
@@ -47,6 +47,11 @@
       "step": "admin reaches /admin",
       "ok": true,
       "detail": "status 200"
+    },
+    {
+      "step": "admin console loads subscriber data on session with token controls removed (audio-feed-0jp)",
+      "ok": true,
+      "detail": "console loaded 3 users on session, zero token inputs present"
     },
     {
       "step": "admin console issues a setup link on the session",

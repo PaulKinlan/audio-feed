@@ -15,22 +15,16 @@
  *   between the two pages, which is the established pattern rather than a new
  *   one).
  * - The PAGE is public and holds no data. Every byte of subscriber data comes
- *   from `/api/admin/users*`, which is token-gated server-side. Rendering the
- *   shell without a token reveals nothing, and it means the console can prompt
- *   for the token instead of looking broken.
- * - The admin token travels in the `x-admin-token` HEADER, never a query string —
- *   same reasoning as the homepage form: a token in a URL ends up in history and
- *   proxy logs.
- * - WHERE it is stored is the admin's choice (audio-feed-ndc). `sessionStorage`
- *   forgets it when the tab closes, which is safer and was the original default;
- *   `localStorage` survives a browser restart, which is what an operator
- *   reopening the console actually wants. The checkbox makes the trade explicit
- *   rather than deciding it for them, and unchecking it clears the persistent
- *   copy immediately rather than leaving a token behind.
+ *   from `/api/admin/users*`, which is session-gated (or token-gated) server-side.
+ *   Rendering the shell without a session reveals nothing, and prompts the visitor
+ *   to sign in with a passkey.
+ * - Admins sign in via passkey (audio-feed-8fc); the token-paste UI path is
+ *   deleted (audio-feed-0jp). Session state travels in an HttpOnly secure cookie,
+ *   with no credential stored in web storage. Break-glass admin calls (e.g. curl)
+ *   continue to use the `x-admin-token` request header server-side.
  * - Subscriber-supplied text (email, display name) is inserted with
  *   `textContent`, never `innerHTML`. A stored-XSS payload in a display name
- *   would otherwise run in the admin's session and read the admin token out of
- *   sessionStorage, i.e. one subscriber could take over the console.
+ *   would otherwise run in the admin's session and perform actions on their behalf.
  * - `feedToken` IS shown here, unlike in the approve response. The admin is the
  *   issuer: the token has to be handed to the subscriber somehow, and showing it
  *   once at creation is the only place that is true. The page is therefore
@@ -92,9 +86,7 @@ export function renderAdminPage(
     padding: 0.55rem 1.1rem; border-radius: 999px;
     background: var(--accent); color: var(--accent-ink);
   }
-  details.token-toggle { margin-block-start: var(--space-4); }
-  details.token-toggle > summary { cursor: pointer; color: var(--text-muted); }
-  details.token-toggle[open] > summary { margin-block-end: var(--space-3); }
+
   #setupLinkBox { margin-block-start: var(--space-4); }
 
   h1 { font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem); line-height: 1.2; margin: 0 0 var(--space-2); }
@@ -241,31 +233,6 @@ export function renderAdminPage(
     <p class="muted">Admins sign in with a passkey, like everyone else.</p>
     <div class="row"><a class="primary" href="/login?next=%2Fadmin">Sign in with a passkey</a></div>`
   }
-    <details class="token-toggle">
-      <summary>Use admin token instead</summary>
-      <p class="muted" id="auth-help">
-        The break-glass path. Sent as an <code class="mono">x-admin-token</code> request header,
-        never in the URL. Remembered on this device it survives a browser restart;
-        otherwise it lives in this tab only and closing the tab forgets it.
-      </p>
-      <div class="field">
-        <label for="adminToken">Admin token
-          <span class="hint">The value of ADMIN_TOKEN on the server.</span>
-        </label>
-        <input id="adminToken" type="password" autocomplete="off" spellcheck="false"
-               aria-describedby="auth-help" />
-      </div>
-      <div class="check">
-        <input type="checkbox" id="rememberToken" checked />
-        <label for="rememberToken">Remember token on this device
-          <span class="hint">Survives closing the browser. Uncheck on a shared machine.</span>
-        </label>
-      </div>
-      <div class="row">
-        <button type="button" id="saveToken">Save token</button>
-      </div>
-      <p class="feedback" id="authFeedback" role="status" aria-live="polite"></p>
-    </details>
   </section>
 
   <section class="card" aria-labelledby="stats-h">
@@ -513,8 +480,6 @@ export function renderAdminPage(
   const ORIGIN = ${jsonForScript(publicBaseUrl)};
   // audio-feed-8fc: a signed-in admin's requests carry the session cookie.
   const SIGNED_IN = ${signedIn ? "true" : "false"};
-  const tokenInput = document.getElementById("adminToken");
-  const authFeedback = document.getElementById("authFeedback");
   const usersFeedback = document.getElementById("usersFeedback");
   const usersBody = document.getElementById("usersBody");
   const usersCaption = document.getElementById("usersCaption");
@@ -524,8 +489,6 @@ export function renderAdminPage(
   const pollNowBtn = document.getElementById("pollNowBtn");
   const synthesizeNowBtn = document.getElementById("synthesizeNowBtn");
   const triggersFeedback = document.getElementById("triggersFeedback");
-  // audio-feed-ndc
-  const rememberToken = document.getElementById("rememberToken");
   const refreshStatsBtn = document.getElementById("refreshStats");
   const statDownloads = document.getElementById("statDownloads");
   const statLastPoll = document.getElementById("statLastPoll");
@@ -543,64 +506,34 @@ export function renderAdminPage(
     el.textContent = message;
   };
 
-  // audio-feed-ndc: read the persistent copy first, so reopening the browser
-  // finds the token rather than an empty prompt. localStorage is checked before
-  // sessionStorage because it is the explicit "remember me" choice.
-  const TOKEN_KEY = "audio-feed-admin-token";
-  const persisted = localStorage.getItem(TOKEN_KEY);
-  const stored = persisted ?? sessionStorage.getItem(TOKEN_KEY);
-  if (rememberToken) rememberToken.checked = persisted !== null;
-
-  function enableTokenActions() {
+  function enableActions() {
     loadUsersBtn.disabled = false;
     if (pollNowBtn) pollNowBtn.disabled = false;
     if (synthesizeNowBtn) synthesizeNowBtn.disabled = false;
     if (refreshStatsBtn) refreshStatsBtn.disabled = false;
   }
 
-  if (stored) {
-    tokenInput.value = stored;
-    enableTokenActions();
-    say(
-      authFeedback,
-      "ok",
-      persisted ? "Token remembered on this device." : "Token loaded from this session.",
-    );
-    // Auto-load on refresh (audio-feed-e3n), and the dashboard with it (ndc).
-    loadUsers();
-    loadStats();
-  } else if (SIGNED_IN) {
-    enableTokenActions();
-    say(authFeedback, "ok", "Signed in with your passkey; no token needed.");
+  function authorized() {
+    return SIGNED_IN;
+  }
+
+  if (SIGNED_IN) {
+    enableActions();
     loadUsers();
     loadStats();
   } else {
-    say(authFeedback, "error", "No token yet. Paste it and save.");
+    loadUsersBtn.disabled = true;
+    if (pollNowBtn) pollNowBtn.disabled = true;
+    if (synthesizeNowBtn) synthesizeNowBtn.disabled = true;
+    if (refreshStatsBtn) refreshStatsBtn.disabled = true;
   }
 
-  tokenInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      document.getElementById("saveToken").click();
-    }
-  });
-
-  function token() {
-    return tokenInput.value.trim();
-  }
-
-  /** A session or a token: either lets the console load. */
-  function authorized() {
-    return SIGNED_IN || Boolean(token());
-  }
-
-  /** Every admin call goes through here, so the header is impossible to forget. */
+  /** Every admin call goes through here, carrying session cookie auth. */
   async function api(path, options = {}) {
     const response = await fetch(path, {
       ...options,
       headers: {
         "content-type": "application/json",
-        "x-admin-token": token(),
         ...(options.headers || {}),
       },
     });
@@ -616,33 +549,6 @@ export function renderAdminPage(
     }
     return body;
   }
-
-  document.getElementById("saveToken").addEventListener("click", () => {
-    if (!token()) {
-      say(authFeedback, "error", "Enter the admin token first.");
-      tokenInput.focus();
-      return;
-    }
-    // Exactly one copy exists at a time. Writing to one store and clearing the
-    // other means unchecking the box actually forgets the token, rather than
-    // leaving a persistent copy that silently outlives the choice (ndc).
-    const remember = rememberToken ? rememberToken.checked : false;
-    if (remember) {
-      localStorage.setItem(TOKEN_KEY, token());
-      sessionStorage.removeItem(TOKEN_KEY);
-    } else {
-      sessionStorage.setItem(TOKEN_KEY, token());
-      localStorage.removeItem(TOKEN_KEY);
-    }
-    enableTokenActions();
-    say(
-      authFeedback,
-      "ok",
-      remember ? "Token remembered on this device." : "Token saved for this session.",
-    );
-    loadUsers();
-    loadStats();
-  });
 
   // ── Trigger a poll or a synthesis pass now ───────────────────────────────
   pollNowBtn?.addEventListener("click", async () => {

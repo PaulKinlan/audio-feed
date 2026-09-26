@@ -122,13 +122,14 @@ Deno.test("GET /admin: a signed-in non-admin gets 403 (audio-feed-8fc)", async (
   assert(!html.includes('id="usersBody"'), "no console for a non-admin");
 });
 
-Deno.test("GET /admin: a signed-out visitor is offered sign-in, token behind a toggle (audio-feed-8fc)", async () => {
+Deno.test("GET /admin: a signed-out visitor is offered sign-in, token controls removed (audio-feed-8fc, audio-feed-0jp)", async () => {
   const { fetch } = app();
   const res = await get(fetch, "/admin");
   assertEquals(res.status, 200);
   const html = await res.text();
   assertStringIncludes(html, 'href="/login?next=%2Fadmin"');
-  assertStringIncludes(html, "Use admin token instead");
+  assertEquals(html.includes("Use admin token instead"), false);
+  assertEquals(html.includes('id="adminToken"'), false);
   assertStringIncludes(html, "const SIGNED_IN = false");
 });
 

@@ -138,7 +138,11 @@ Deno.test("accepting the Remove dialog sends exactly one DELETE for that feed (a
   const sent = deletes(harness);
   assertEquals(sent.length, 1, "OK must delete, and delete once");
   assertEquals(sent[0]!.path, `/api/admin/users/${USER.id}/sources/${SOURCE.id}`);
-  assertEquals(sent[0]!.adminToken, "admin-secret", "the admin token must travel with it");
+  assertEquals(
+    sent[0]!.adminToken,
+    null,
+    "the session cookie is used rather than a token header (audio-feed-0jp)",
+  );
 });
 
 Deno.test("the Remove dialog names the feed it is about to delete (audio-feed-05b)", async () => {
