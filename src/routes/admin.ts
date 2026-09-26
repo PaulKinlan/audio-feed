@@ -183,6 +183,9 @@ export function renderAdminPage(
   th, td { text-align: start; padding: var(--space-2) var(--space-3); border-block-end: 1px solid var(--border); vertical-align: top; }
   th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
   td.actions { white-space: nowrap; }
+  /* Five columns at 390px squeezed Result to one character per line: hold a
+     readable width and let .table-wrap scroll instead. */
+  table.runs { min-inline-size: 40rem; }
 
   .status { font-size: 0.8rem; font-weight: 600; padding: 0.1rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); }
   .status[data-status="approved"] { color: var(--ok); border-color: var(--ok); }
@@ -296,7 +299,7 @@ export function renderAdminPage(
 
     <h3>Background runs</h3>
     <div class="table-wrap">
-      <table>
+      <table class="runs">
         <caption id="runsCaption">Not loaded.</caption>
         <thead>
           <tr><th>When</th><th>Job</th><th>Started by</th><th>Took</th><th>Result</th></tr>
