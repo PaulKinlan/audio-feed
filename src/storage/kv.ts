@@ -42,9 +42,16 @@ import type {
   Session,
   SetupLink,
   Source,
+  SynthesisCounts,
   User,
 } from "../types.ts";
-import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
+import {
+  DEFAULT_CLAIM_LEASE_MS,
+  isClaimExpired,
+  isPublishable,
+  unsynthesized,
+  utcDayKey,
+} from "../types.ts";
 import type {
   DownloadCounts,
   EpisodeClaim,
@@ -866,6 +873,55 @@ export class KvMetadataStore implements MetadataStore {
     }
     perUser.sort((a, b) => b.count - a.count);
     return { total: Number(total.value?.value ?? 0n), perUser };
+  }
+
+  // Synthesis stats & budget tracking (audio-feed-9mp)
+  async recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
+    try {
+      const day = utcDayKey(at);
+      const tx = this.#kv.atomic()
+        .sum(["synthesis_total"], 1n)
+        .sum(["synthesis_total_bytes"], BigInt(bytes))
+        .sum(["synthesis_by_user", userId], 1n)
+        .sum(["synthesis_bytes_by_user", userId], BigInt(bytes))
+        .sum(["synthesis_daily", userId, day], 1n);
+      await tx.commit();
+    } catch {
+      // Non-fatal counter
+    }
+  }
+
+  async getSynthesisCounts(today = utcDayKey()): Promise<SynthesisCounts> {
+    const [totalEntry, bytesEntry] = await Promise.all([
+      this.#kv.get<Deno.KvU64>(["synthesis_total"]),
+      this.#kv.get<Deno.KvU64>(["synthesis_total_bytes"]),
+    ]);
+    const perUser: { userId: string; count: number; bytes: number; todayCount: number }[] = [];
+    for await (const entry of this.#kv.list<Deno.KvU64>({ prefix: ["synthesis_by_user"] })) {
+      const userId = entry.key[1];
+      if (typeof userId !== "string" || !entry.value) continue;
+      const [userBytes, todayEntry] = await Promise.all([
+        this.#kv.get<Deno.KvU64>(["synthesis_bytes_by_user", userId]),
+        this.#kv.get<Deno.KvU64>(["synthesis_daily", userId, today]),
+      ]);
+      perUser.push({
+        userId,
+        count: Number(entry.value.value),
+        bytes: Number(userBytes.value?.value ?? 0n),
+        todayCount: Number(todayEntry.value?.value ?? 0n),
+      });
+    }
+    perUser.sort((a, b) => b.count - a.count);
+    return {
+      total: Number(totalEntry.value?.value ?? 0n),
+      totalBytes: Number(bytesEntry.value?.value ?? 0n),
+      perUser,
+    };
+  }
+
+  async getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
+    const entry = await this.#kv.get<Deno.KvU64>(["synthesis_daily", userId, day]);
+    return Number(entry.value?.value ?? 0n);
   }
 
   /**

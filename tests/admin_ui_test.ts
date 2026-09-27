@@ -168,6 +168,27 @@ Deno.test("creating a subscriber approves them and returns their feed token once
   assertEquals(stored?.feedToken, created.feedToken);
 });
 
+Deno.test("creating a subscriber accepts dailyEpisodeBudget (audio-feed-9mp)", async () => {
+  const { fetch, stores } = app();
+  const res = await fetch(
+    req("/api/admin/users", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        email: "budgeted@example.com",
+        displayName: "Budgeted",
+        dailyEpisodeBudget: 5,
+      }),
+    }),
+  );
+  assertEquals(res.status, 201);
+  const created = await res.json();
+  assertEquals(created.dailyEpisodeBudget, 5);
+
+  const stored = await stores.metadata.getUser(created.id);
+  assertEquals(stored?.dailyEpisodeBudget, 5);
+});
+
 Deno.test("the subscriber list returns everyone and leaks no capability", async () => {
   const { fetch } = app();
   await fetch(

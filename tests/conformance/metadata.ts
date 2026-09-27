@@ -1341,6 +1341,64 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(counts.perUser.map((d) => d.userId), ["loud"]);
   });
 
+  // -- synthesis stats and budget tracking (audio-feed-9mp) ------------------
+
+  test("an empty store reports no synthesis (audio-feed-9mp)", async (store) => {
+    const s = await store.getSynthesisCounts("2026-09-27");
+    assertEquals(s.total, 0);
+    assertEquals(s.totalBytes, 0);
+    assertEquals(s.perUser, []);
+    assertEquals(await store.getUserDailySynthesisCount("user-a", "2026-09-27"), 0);
+  });
+
+  test("recordSynthesis counts per user, total, and daily window (audio-feed-9mp)", async (store) => {
+    const day = "2026-09-27";
+    const date = new Date("2026-09-27T12:00:00.000Z");
+
+    await store.recordSynthesis("user-a", 1000, date);
+    await store.recordSynthesis("user-a", 2000, date);
+    await store.recordSynthesis("user-b", 500, date);
+
+    const s = await store.getSynthesisCounts(day);
+    assertEquals(s.total, 3);
+    assertEquals(s.totalBytes, 3500);
+    assertEquals(s.perUser.length, 2);
+
+    const userA = s.perUser.find((u) => u.userId === "user-a");
+    assert(userA);
+    assertEquals(userA.count, 2);
+    assertEquals(userA.bytes, 3000);
+    assertEquals(userA.todayCount, 2);
+
+    const userB = s.perUser.find((u) => u.userId === "user-b");
+    assert(userB);
+    assertEquals(userB.count, 1);
+    assertEquals(userB.bytes, 500);
+    assertEquals(userB.todayCount, 1);
+
+    assertEquals(await store.getUserDailySynthesisCount("user-a", day), 2);
+    assertEquals(await store.getUserDailySynthesisCount("user-b", day), 1);
+  });
+
+  test("daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp)", async (store) => {
+    const beforeMidnight = new Date("2026-09-27T23:59:59.999Z");
+    const afterMidnight = new Date("2026-09-28T00:00:00.001Z");
+
+    await store.recordSynthesis("user-c", 1000, beforeMidnight);
+    await store.recordSynthesis("user-c", 1000, afterMidnight);
+
+    assertEquals(await store.getUserDailySynthesisCount("user-c", "2026-09-27"), 1);
+    assertEquals(await store.getUserDailySynthesisCount("user-c", "2026-09-28"), 1);
+
+    const sDay1 = await store.getSynthesisCounts("2026-09-27");
+    assertEquals(sDay1.total, 2);
+    assertEquals(sDay1.perUser.find((u) => u.userId === "user-c")?.todayCount, 1);
+
+    const sDay2 = await store.getSynthesisCounts("2026-09-28");
+    assertEquals(sDay2.total, 2);
+    assertEquals(sDay2.perUser.find((u) => u.userId === "user-c")?.todayCount, 1);
+  });
+
   test("an empty store reports no runs", async (store) => {
     assertEquals(await store.listRuns(), []);
   });

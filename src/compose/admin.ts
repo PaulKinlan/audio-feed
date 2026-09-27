@@ -189,6 +189,7 @@ export function createCreateUserHandler(
       feedUrl?: unknown;
       isAdmin?: unknown;
       codeHandling?: unknown;
+      dailyEpisodeBudget?: unknown;
     } = {};
     if ((req.headers.get("content-type") ?? "").includes("application/json")) {
       body = await req.json().catch(() => ({}));
@@ -201,6 +202,16 @@ export function createCreateUserHandler(
     }
 
     try {
+      const dailyBudgetNum = typeof body.dailyEpisodeBudget === "number"
+        ? body.dailyEpisodeBudget
+        : typeof body.dailyEpisodeBudget === "string" && body.dailyEpisodeBudget.trim() !== ""
+        ? Number(body.dailyEpisodeBudget)
+        : undefined;
+      const dailyEpisodeBudget =
+        typeof dailyBudgetNum === "number" && Number.isFinite(dailyBudgetNum) && dailyBudgetNum >= 0
+          ? dailyBudgetNum
+          : undefined;
+
       const created = await createUser(ctx.stores.metadata, {
         email: body.email,
         displayName: typeof body.displayName === "string" && body.displayName.trim()
@@ -208,6 +219,7 @@ export function createCreateUserHandler(
           : undefined,
         voice: typeof body.voice === "string" ? body.voice : undefined,
         isAdmin: body.isAdmin === true,
+        dailyEpisodeBudget,
       });
       const approved = await approveUser(ctx.stores.metadata, created.id, "admin");
 
@@ -246,6 +258,7 @@ export function createCreateUserHandler(
           email: approved.email,
           displayName: approved.displayName,
           status: approved.status,
+          dailyEpisodeBudget: approved.dailyEpisodeBudget,
           // The one deliberate exposure of a capability: the admin is the issuer.
           feedToken: approved.feedToken,
           initialSource,
@@ -595,8 +608,9 @@ export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStat
     const denied = await adminGate(ctx, req);
     if (denied) return denied;
 
-    const [downloads, runs, users] = await Promise.all([
+    const [downloads, synthesis, runs, users] = await Promise.all([
       ctx.stores.metadata.getDownloadCounts(),
+      ctx.stores.metadata.getSynthesisCounts(),
       ctx.stores.metadata.listRuns(),
       ctx.stores.metadata.listUsers(),
     ]);
@@ -623,6 +637,14 @@ export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStat
           perUser: downloads.perUser.map((d) => ({
             ...d,
             email: emailById.get(d.userId) ?? null,
+          })),
+        },
+        synthesis: {
+          total: synthesis.total,
+          totalBytes: synthesis.totalBytes,
+          perUser: synthesis.perUser.map((s) => ({
+            ...s,
+            email: emailById.get(s.userId) ?? null,
           })),
         },
         feedProcessing: {

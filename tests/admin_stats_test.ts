@@ -84,6 +84,7 @@ Deno.test("an empty deployment reports zeroes, not absences (audio-feed-ndc)", a
 
   assertEquals(body.ok, true);
   assertEquals(body.downloads, { total: 0, perUser: [] });
+  assertEquals(body.synthesis, { total: 0, totalBytes: 0, perUser: [] });
   assertEquals(body.runs, []);
   assertEquals(body.feedProcessing, {
     lastPolledAt: null,
@@ -107,6 +108,24 @@ Deno.test("downloads are resolved to an email, and an unknown id is not invented
     { userId: "user-1", count: 2, email: "paul@example.com" },
     { userId: "ghost", count: 1, email: null },
   ]);
+});
+
+Deno.test("synthesis counts are resolved to email and match the store directly (audio-feed-9mp)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(makeUser({ id: "user-1", email: "paul@example.com" }));
+  await stores.metadata.recordSynthesis("user-1", 12345);
+  await stores.metadata.recordSynthesis("user-1", 67890);
+
+  const directStore = await stores.metadata.getSynthesisCounts();
+  const body = await (await fetch(statsRequest())).json();
+
+  assertEquals(body.synthesis.total, directStore.total);
+  assertEquals(body.synthesis.totalBytes, directStore.totalBytes);
+  assertEquals(body.synthesis.total, 2);
+  assertEquals(body.synthesis.totalBytes, 12345 + 67890);
+  assertEquals(body.synthesis.perUser[0].email, "paul@example.com");
+  assertEquals(body.synthesis.perUser[0].count, 2);
+  assertEquals(body.synthesis.perUser[0].bytes, 12345 + 67890);
 });
 
 Deno.test("feed processing time is derived from the poll runs, not a second timer (audio-feed-ndc)", async () => {

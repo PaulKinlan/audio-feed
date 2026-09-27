@@ -24,8 +24,10 @@ import type {
   Session,
   SetupLink,
   Source,
+  SynthesisCounts,
   User,
 } from "../types.ts";
+export { utcDayKey } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // Metadata
@@ -387,6 +389,14 @@ export interface MetadataStore {
    */
   recordDownload(userId: string | null): Promise<void>;
   getDownloadCounts(): Promise<DownloadCounts>;
+
+  /**
+   * Record synthesis statistics for a user (audio-feed-9mp).
+   * Increments total count, byte length, and daily window count atomically.
+   */
+  recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void>;
+  getSynthesisCounts(today?: string): Promise<SynthesisCounts>;
+  getUserDailySynthesisCount(userId: string, day: string): Promise<number>;
 
   /**
    * Append a run to its job's history, pruning that job to its newest
