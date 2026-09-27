@@ -412,6 +412,123 @@ Deno.test("admin create user can make an admin (audio-feed-8fc)", async () => {
   assertEquals((await stores.metadata.getUserByEmail("new@example.com"))?.isAdmin, true);
 });
 
+// -- admin bootstrap -----------------------------------------------------------
+
+Deno.test("admin bootstrap: timing-safe token validation, requires valid email, refuses cross-origin (audio-feed-8eh)", async () => {
+  const { fetch } = app();
+
+  // Missing Origin / cross-origin is refused (403)
+  const noOrigin = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "admin@example.com", adminToken: "admin-secret" },
+  }));
+  assertEquals(noOrigin.status, 403);
+
+  const cross = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "admin@example.com", adminToken: "admin-secret" },
+    origin: "https://evil.example.com",
+  }));
+  assertEquals(cross.status, 403);
+
+  // Missing or empty admin token is 400
+  const emptyToken = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "admin@example.com", adminToken: "   " },
+    origin: BASE,
+  }));
+  assertEquals(emptyToken.status, 400);
+
+  // Missing or invalid email is 400
+  const invalidEmail = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "not-an-email", adminToken: "admin-secret" },
+    origin: BASE,
+  }));
+  assertEquals(invalidEmail.status, 400);
+
+  // Wrong admin token is 401
+  const wrongToken = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "admin@example.com", adminToken: "wrong-secret" },
+    origin: BASE,
+  }));
+  assertEquals(wrongToken.status, 401);
+
+  // Unconfigured ADMIN_TOKEN is 503
+  const unset = app({ adminToken: undefined });
+  const unconfigured = await unset.fetch(call("/api/auth/bootstrap", {
+    json: { email: "admin@example.com", adminToken: "anything" },
+    origin: BASE,
+  }));
+  assertEquals(unconfigured.status, 503);
+});
+
+Deno.test("admin bootstrap: creates approved admin user and issues setupToken (audio-feed-8eh)", async () => {
+  const { fetch, stores } = app();
+  const res = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "newadmin@example.com", adminToken: "admin-secret" },
+    origin: BASE,
+  }));
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.ok, true);
+  assert(typeof data.setupToken === "string" && data.setupToken.length > 20);
+  assertEquals(data.user.email, "newadmin@example.com");
+  assertEquals(data.user.isAdmin, true);
+
+  // User exists in store, approved, admin
+  const user = await stores.metadata.getUserByEmail("newadmin@example.com");
+  assert(user);
+  assertEquals(user.isAdmin, true);
+  assertEquals(user.status, "approved");
+
+  // Setup link exists in store and is associated with this user
+  const link = await stores.metadata.getSetupLink(await hashSecret(data.setupToken));
+  assert(link);
+  assertEquals(link.userId, user.id);
+  assertEquals(link.issuedBy, "bootstrap");
+});
+
+Deno.test("admin bootstrap: existing non-admin user is promoted to admin and approved (audio-feed-8eh)", async () => {
+  const { fetch, stores } = app();
+  const reader = await seed(stores, {
+    email: "pendingreader@example.com",
+    isAdmin: false,
+    status: "pending",
+  });
+  assertEquals(reader.isAdmin, false);
+  assertEquals(reader.status, "pending");
+
+  const res = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "pendingreader@example.com", adminToken: "admin-secret" },
+    origin: BASE,
+  }));
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.ok, true);
+  assertEquals(data.user.isAdmin, true);
+
+  const updated = await stores.metadata.getUser(reader.id);
+  assert(updated);
+  assertEquals(updated.isAdmin, true);
+  assertEquals(updated.status, "approved");
+});
+
+Deno.test("admin bootstrap: setupToken passes into register/options and issues WebAuthn challenge (audio-feed-8eh)", async () => {
+  const { fetch } = app();
+  const bootRes = await fetch(call("/api/auth/bootstrap", {
+    json: { email: "deviceadmin@example.com", adminToken: "admin-secret" },
+    origin: BASE,
+  }));
+  const { setupToken } = await bootRes.json();
+
+  const regRes = await fetch(call("/api/auth/register/options", {
+    json: { setupToken },
+    origin: BASE,
+  }));
+  assertEquals(regRes.status, 200);
+  const regData = await regRes.json();
+  assertEquals(regData.user.email, "deviceadmin@example.com");
+  assert(regData.options.challenge);
+  assertEquals(regData.options.rp.id, "audio.example.com");
+});
+
 // -- setup links ----------------------------------------------------------------
 
 Deno.test("setup link: admin-only, fragment-borne, stored hashed (audio-feed-8fc)", async () => {

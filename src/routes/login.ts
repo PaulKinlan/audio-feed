@@ -56,6 +56,24 @@ export function renderLoginPage(o: { viewer: Viewer | null; next: string }): str
       Audio Feed for a setup link: it lets you create a passkey on this device, and
       works once, for seven days.</p>
     </details>
+    <details class="more" id="bootstrapDetails">
+      <summary>Admin bootstrap</summary>
+      <form id="bootstrapForm" novalidate style="margin-block-start: 0.75rem;">
+        <p class="sub">Set up your admin passkey directly on this device using your server ADMIN_TOKEN.</p>
+        <div class="field" style="margin-block-end: 0.75rem;">
+          <label for="bootstrapEmail">Admin email</label>
+          <input id="bootstrapEmail" type="email" required placeholder="admin@example.com" autocomplete="email" />
+        </div>
+        <div class="field" style="margin-block-end: 0.75rem;">
+          <label for="bootstrapToken">Admin token</label>
+          <input id="bootstrapToken" type="password" required placeholder="Value of ADMIN_TOKEN" autocomplete="current-password" />
+        </div>
+        <div class="actions" style="margin-block-start: 0.75rem;">
+          <button class="btn" type="submit" id="bootstrapSubmit">${KEY_ICON}<span>Register admin passkey</span></button>
+        </div>
+        <p class="feedback" id="bootstrapFeedback" role="status" aria-live="polite"></p>
+      </form>
+    </details>
   </section>
   <section class="panel" id="setupPanel" hidden aria-labelledby="setupTitle">
     <h2 id="setupTitle">Create your passkey</h2>
@@ -110,6 +128,49 @@ ${PASSKEY_CLIENT}
   // A setup link: /login#setup=<secret>. Take it, then scrub it from the address
   // bar and history before anything else can read or record it.
   const match = /^#setup=([A-Za-z0-9_-]+)$/.exec(location.hash);
+  const bootstrapDetails = $("bootstrapDetails");
+  if (location.hash === "#bootstrap" && bootstrapDetails) {
+    bootstrapDetails.open = true;
+  }
+
+  const bootstrapForm = $("bootstrapForm");
+  const bootstrapBtn = $("bootstrapSubmit");
+  const bootstrapFeedback = $("bootstrapFeedback");
+
+  bootstrapForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!passkeysSupported) {
+      say(bootstrapFeedback, "error", "This browser can't create passkeys.");
+      return;
+    }
+    const email = $("bootstrapEmail").value.trim();
+    const adminToken = $("bootstrapToken").value.trim();
+    if (!email) {
+      say(bootstrapFeedback, "error", "Email is required.");
+      $("bootstrapEmail").focus();
+      return;
+    }
+    if (!adminToken) {
+      say(bootstrapFeedback, "error", "Admin token is required.");
+      $("bootstrapToken").focus();
+      return;
+    }
+    bootstrapBtn.disabled = true;
+    say(bootstrapFeedback, "ok", "Verifying token and preparing passkey…");
+    try {
+      const boot = await post("/api/auth/bootstrap", { email, adminToken });
+      say(bootstrapFeedback, "ok", "Follow your device's prompt to register passkey…");
+      const reg = await post("/api/auth/register/options", { setupToken: boot.setupToken });
+      const cred = await navigator.credentials.create({ publicKey: creationOptions(reg.options) });
+      await post("/api/auth/register/verify", credentialJSON(cred));
+      say(bootstrapFeedback, "ok", "Admin passkey registered. Taking you to /admin…");
+      location.assign("/admin");
+    } catch (error) {
+      say(bootstrapFeedback, "error", ceremonyError(error));
+      bootstrapBtn.disabled = false;
+    }
+  });
+
   if (match) {
     const setupToken = match[1];
     history.replaceState(null, "", location.pathname + location.search);
