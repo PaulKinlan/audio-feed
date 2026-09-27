@@ -215,6 +215,75 @@ Deno.test("POST /api/request-access: approved user resubmission states approval 
   assertEquals(data.feedToken, undefined);
 });
 
+Deno.test("POST /api/request-access: suspended account resubmission clearly states suspension (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "suspended@example.com" }),
+    }),
+  );
+  const user = await stores.metadata.getUserByEmail("suspended@example.com");
+  await stores.metadata.putUser({ ...user!, status: "suspended" });
+
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "suspended@example.com" }),
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.status, "suspended");
+  assertStringIncludes(data.message, "account is suspended");
+});
+
+Deno.test("POST /api/request-access: returns HTML confirmation for browser form post (audio-feed-r97)", async () => {
+  const { fetch } = setup();
+
+  const formData = new URLSearchParams();
+  formData.set("email", "html-user@example.com");
+
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "accept": "text/html",
+      },
+      body: formData.toString(),
+    }),
+  );
+
+  assertEquals(res.status, 201);
+  assertStringIncludes(res.headers.get("content-type") ?? "", "text/html");
+  const html = await res.text();
+  assertStringIncludes(html, "Access Request Received");
+  assertStringIncludes(html, "Return to Audio Feed");
+});
+
+Deno.test("SlidingWindowRateLimiter: evicts expired keys when map grows (audio-feed-r97)", () => {
+  const limiter = new SlidingWindowRateLimiter({
+    maxRequests: 2,
+    windowMs: 1000,
+  });
+
+  const t0 = 10000;
+  // Fill 250 keys at t0
+  for (let i = 0; i < 250; i++) {
+    limiter.check(`key-${i}`, t0);
+  }
+
+  // At t0 + 2000 ms, all previous timestamps have expired
+  limiter.check("fresh-key", t0 + 2000);
+
+  // Expired keys are pruned, map size doesn't leak unbounded
+  assert(limiter.check("fresh-key-2", t0 + 2000).allowed);
+});
+
 Deno.test("POST /api/request-access: spend gate authority & end-to-end access lifecycle (audio-feed-r97)", async () => {
   const { fetch, stores } = setup();
 

@@ -191,7 +191,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     })
     : null;
 
-  const server = Deno.serve({ port: options.port ?? config.port }, serverFetch);
+  const server = Deno.serve(
+    { port: options.port ?? config.port },
+    (req, info) => serverFetch(req, info),
+  );
 
   // Stop the worker before closing KV so no tick writes to a closed handle.
   const shutdown = async () => {

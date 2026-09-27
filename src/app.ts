@@ -311,7 +311,10 @@ function clampLimit(raw: string | null): number {
 export function createApp(
   ctx: AppContext,
   handlers: AppHandlers = {},
-): { router: Router<AppContext>; fetch: (req: Request) => Promise<Response> } {
+): {
+  router: Router<AppContext>;
+  fetch: (req: Request, info?: { remoteAddr?: { hostname?: string } }) => Promise<Response>;
+} {
   const router = createRouter(handlers);
   return { router, fetch: router.fetchHandler(ctx) };
 }

@@ -38,6 +38,15 @@ export class SlidingWindowRateLimiter {
     // Filter out timestamps outside the active window
     const active = timestamps.filter((t) => t > windowStart);
 
+    // Evict expired entries if map grows past 200 keys
+    if (this.#hits.size > 200) {
+      for (const [k, ts] of this.#hits.entries()) {
+        const remaining = ts.filter((t) => t > windowStart);
+        if (remaining.length === 0) this.#hits.delete(k);
+        else this.#hits.set(k, remaining);
+      }
+    }
+
     if (active.length >= this.#config.maxRequests) {
       const oldestActive = active[0] ?? now;
       const resetMs = Math.max(0, oldestActive + this.#config.windowMs - now);
@@ -67,9 +76,17 @@ export class SlidingWindowRateLimiter {
 }
 
 /**
- * Extract client IP from request, honouring trusted proxy headers when configured.
+ * Extract client IP from request.
+ *
+ * Uses the platform remote address as the primary key by default.
+ * When `trustProxy` (TRUST_PROXY_HEADERS) is enabled, honours cf-connecting-ip
+ * and x-forwarded-for from an upstream reverse proxy.
  */
-export function extractClientIp(req: Request, trustProxy = false): string {
+export function extractClientIp(
+  req: Request,
+  trustProxy = false,
+  remoteAddr?: string,
+): string {
   if (trustProxy) {
     const cf = req.headers.get("cf-connecting-ip");
     if (cf) return cf.trim();
@@ -79,5 +96,6 @@ export function extractClientIp(req: Request, trustProxy = false): string {
       if (first) return first;
     }
   }
+  if (remoteAddr) return remoteAddr;
   return "direct";
 }
