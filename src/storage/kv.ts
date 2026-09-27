@@ -946,7 +946,9 @@ export class KvMetadataStore implements MetadataStore {
       .check(existing)
       .set(dedupeKey, notification.id, { expireIn: 14 * 86400 * 1000 })
       .set(["outbox", notification.id], notification, { expireIn: 14 * 86400 * 1000 })
-      .set(["outbox_pending", notification.createdAt, notification.id], notification.id);
+      .set(["outbox_pending", notification.createdAt, notification.id], notification.id, {
+        expireIn: 14 * 86400 * 1000,
+      });
     const res = await tx.commit();
     if (!res.ok) {
       // If atomic commit failed due to race, re-check if dedupe key was set by another worker

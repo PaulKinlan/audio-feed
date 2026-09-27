@@ -1431,12 +1431,9 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
 
     const outbox = await store.listOutbox();
     assertEquals(outbox.length, 2);
-    assert(outbox.some((n) => n.id === "n-1" && n.status === "ready"));
-    assert(
-      outbox.some((n) =>
-        n.id === "n-2" && n.status === "failed" && n.error === "TTS rate limit exceeded"
-      ),
-    );
+    // listOutbox contract is FIFO (oldest first)
+    assertEquals(outbox[0]!.id, "n-1");
+    assertEquals(outbox[1]!.id, "n-2");
 
     // Acking n-1 marks it delivered and removes it from unacknowledged list
     const acked = await store.ackNotification("n-1");

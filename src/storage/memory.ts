@@ -679,8 +679,8 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(
       this.#outbox
         .filter((n) => !n.deliveredAt)
-        .slice(-limit)
-        .reverse()
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .slice(0, limit)
         .map((n) => structuredClone(n)),
     );
   }
