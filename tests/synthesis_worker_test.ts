@@ -1224,3 +1224,41 @@ Deno.test("daily episode budget: unapproved or suspended user is still deferred 
   assertEquals(run.deferred.length, 1);
   assertEquals(run.deferred[0]!.reason, "not authorized");
 });
+
+Deno.test("daily episode budget: fail-closed if daily count verification fails (audio-feed-akm)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "budget-user", status: "approved", dailyEpisodeBudget: 5 }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "src", userId: "budget-user" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art", userId: "budget-user", sourceId: "src" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-0",
+      userId: "budget-user",
+      sourceId: "src",
+      articleId: "art",
+      status: "pending",
+    }),
+  );
+
+  // Stub getUserDailySynthesisCount to simulate store failure
+  stores.metadata.getUserDailySynthesisCount = () => {
+    return Promise.reject(new Error("KV connection timeout"));
+  };
+
+  const ctx = { config, stores };
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+
+  assertEquals(run.ready.length, 0, "fails closed: must not spend when budget cannot be verified");
+  assertEquals(run.deferred.length, 1);
+  assertStringIncludes(
+    run.deferred[0]!.reason,
+    "could not verify daily budget: KV connection timeout",
+  );
+
+  const ep = await stores.metadata.getEpisode("budget-user", "ep-0");
+  assertEquals(ep?.status, "pending", "episode remains pending to try again when store recovers");
+});

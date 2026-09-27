@@ -292,16 +292,23 @@ export async function runSynthesisBatch(
     } catch (error) {
       reason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
     }
-    // Check per-user daily episode budget ceiling (audio-feed-9mp)
+    // Check per-user daily episode budget ceiling (audio-feed-9mp, audio-feed-akm)
     if (reason === null) {
-      const user = await metadata.getUser(userId);
-      if (user && typeof user.dailyEpisodeBudget === "number" && user.dailyEpisodeBudget >= 0) {
-        const today = utcDayKey(new Date(nowMs));
-        const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
-        if (spentToday >= user.dailyEpisodeBudget) {
-          reason =
-            `daily episode budget exceeded (limit: ${user.dailyEpisodeBudget}, used: ${spentToday})`;
+      try {
+        const user = await metadata.getUser(userId);
+        if (user && typeof user.dailyEpisodeBudget === "number" && user.dailyEpisodeBudget >= 0) {
+          const today = utcDayKey(new Date(nowMs));
+          const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
+          if (spentToday >= user.dailyEpisodeBudget) {
+            reason =
+              `daily episode budget exceeded (limit: ${user.dailyEpisodeBudget}, used: ${spentToday})`;
+          }
         }
+      } catch (err) {
+        // Fail closed for spend ceiling: if daily count cannot be verified, defer rather than spending
+        reason = `could not verify daily budget: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
       }
     }
     authCache.set(userId, reason);
@@ -358,20 +365,29 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    // Check budget at spend gate (audio-feed-9mp)
-    const spendUser = await metadata.getUser(episode.userId);
-    if (
-      spendUser && typeof spendUser.dailyEpisodeBudget === "number" &&
-      spendUser.dailyEpisodeBudget >= 0
-    ) {
-      const today = utcDayKey(new Date(nowMs));
-      const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
-      if (spentToday >= spendUser.dailyEpisodeBudget) {
-        const reason =
-          `daily episode budget exceeded (limit: ${spendUser.dailyEpisodeBudget}, used: ${spentToday})`;
-        result.deferred.push({ episodeId: episode.id, reason });
-        continue;
+    // Check budget at spend gate (audio-feed-9mp, audio-feed-akm)
+    try {
+      const spendUser = await metadata.getUser(episode.userId);
+      if (
+        spendUser && typeof spendUser.dailyEpisodeBudget === "number" &&
+        spendUser.dailyEpisodeBudget >= 0
+      ) {
+        const today = utcDayKey(new Date(nowMs));
+        const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
+        if (spentToday >= spendUser.dailyEpisodeBudget) {
+          const reason =
+            `daily episode budget exceeded (limit: ${spendUser.dailyEpisodeBudget}, used: ${spentToday})`;
+          result.deferred.push({ episodeId: episode.id, reason });
+          continue;
+        }
       }
+    } catch (err) {
+      // Fail closed: if budget verification fails, defer rather than spending blindly
+      const reason = `could not verify daily budget: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      result.deferred.push({ episodeId: episode.id, reason });
+      continue;
     }
 
     // Claim just-in-time, not at gather time. Claiming all five up front would
@@ -465,8 +481,16 @@ export async function runSynthesisBatch(
 
     if (wrote) {
       result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
-      // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp)
-      await metadata.recordSynthesis(claimed.userId, byteLength, new Date(nowMs)).catch(() => {});
+      // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp, audio-feed-akm).
+      // A failure here is logged as an operational alert so counter anomalies are visible.
+      try {
+        await metadata.recordSynthesis(claimed.userId, byteLength, new Date(nowMs));
+      } catch (err) {
+        console.error(
+          `[audio-feed] failed to record synthesis for episode ${claimed.id} (user ${claimed.userId}):`,
+          err,
+        );
+      }
       // The swap is committed; the old blob is now unreferenced (audio-feed-8oz).
       if (previousKey && previousKey !== audioKey) {
         try {

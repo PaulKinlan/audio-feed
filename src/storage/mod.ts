@@ -391,8 +391,12 @@ export interface MetadataStore {
   getDownloadCounts(): Promise<DownloadCounts>;
 
   /**
-   * Record synthesis statistics for a user (audio-feed-9mp).
+   * Record synthesis statistics for a user (audio-feed-9mp, audio-feed-akm).
    * Increments total count, byte length, and daily window count atomically.
+   *
+   * Unlike recordDownload (which is telemetry that must never abort audio delivery),
+   * recordSynthesis backs the financial spend ceiling. Failures are retried,
+   * logged loudly via console.error, and propagated to the caller.
    */
   recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void>;
   getSynthesisCounts(today?: string): Promise<SynthesisCounts>;
