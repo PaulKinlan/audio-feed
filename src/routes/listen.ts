@@ -261,6 +261,22 @@ ${ICON_SPRITE}
     <ul class="activity-list" id="activityList"></ul>
   </section>
 
+  <!-- audio-feed-3h1: filter episodes by source and by text -->
+  <section class="filters hidden" id="filterSection" aria-label="Filter episodes" role="search">
+    <div class="filter-controls">
+      <div class="filter-field filter-search">
+        <label for="filterText" class="sr-only">Filter episodes by title or author</label>
+        <input type="search" id="filterText" placeholder="Search episodes…" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="filter-field filter-select">
+        <label for="filterSource" class="sr-only">Filter by publication</label>
+        <select id="filterSource" aria-label="Filter by publication">
+          <option value="">All sources</option>
+        </select>
+      </div>
+    </div>
+  </section>
+
   <div class="list-head">
     <h2>Episodes</h2>
     <span id="savedCount"></span>
@@ -270,6 +286,11 @@ ${ICON_SPRITE}
     <strong>No episodes yet</strong>
     Subscribe a feed or send an article, and finished audio appears here.
   </p>
+  <div class="filter-empty hidden" id="filterEmpty" role="status" aria-live="polite">
+    <p><strong>No matching episodes</strong></p>
+    <p class="sub" id="filterEmptyMessage">No episodes match your filter.</p>
+    <button type="button" class="btn quiet small" id="clearFilterBtn">Clear filters</button>
+  </div>
 </main>
 
 <!--

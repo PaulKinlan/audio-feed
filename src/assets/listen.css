@@ -468,6 +468,69 @@ li.episode[data-current="true"] .ep-play {
   font-weight: 600;
 }
 
+.sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Filters (audio-feed-3h1) */
+.filters {
+  margin-block: var(--space-3) var(--space-4);
+}
+.filter-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.filter-field {
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+}
+.filter-field.filter-select {
+  flex: 0 1 14rem;
+}
+.filter-field input[type="search"],
+.filter-field select {
+  font: inherit;
+  font-size: 0.9rem;
+  inline-size: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-sunken);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.filter-field input[type="search"]:focus-visible,
+.filter-field select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.filter-empty {
+  text-align: center;
+  padding: var(--space-8) var(--space-4);
+  color: var(--text-muted);
+}
+.filter-empty strong {
+  color: var(--text);
+  font-size: 1.05rem;
+}
+.filter-empty .sub {
+  margin-block: var(--space-2) var(--space-4);
+  font-size: 0.9rem;
+}
+.filter-empty button {
+  cursor: pointer;
+}
+
 .ep-actions {
   display: flex;
   align-items: center;
