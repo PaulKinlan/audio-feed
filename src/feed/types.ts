@@ -45,8 +45,6 @@ export interface Episode {
   durationSeconds?: number;
   season?: number;
   episodeNumber?: number;
-  /** Podcast 2.0 chapters JSON URL (deep dives emit chapter markers). */
-  chaptersUrl?: string;
 }
 
 /** Channel-level metadata for a generated feed. */

@@ -155,13 +155,6 @@ function itemXml(episode: Episode, title: string): string {
       }</itunes:episodeType>`,
     );
   }
-  if (episode.chaptersUrl) {
-    lines.push(
-      `      <podcast:chapters url="${
-        escapeXml(episode.chaptersUrl)
-      }" type="application/json+chapters"/>`,
-    );
-  }
 
   lines.push(
     `      <enclosure url="${escapeXml(episode.audioUrl)}" length="${

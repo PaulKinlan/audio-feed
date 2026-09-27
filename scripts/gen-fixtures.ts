@@ -53,7 +53,6 @@ const episodes: Episode[] = [
     sourceId: "stratechery",
     byteLength: 8_100_000,
     durationSeconds: 3610,
-    chaptersUrl: `${ORIGIN}/chapters/stratechery-2026-09-24-deepdive.json`,
   },
   {
     guid: "changelog-2026-09-23-deno",
