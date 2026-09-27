@@ -1,0 +1,841 @@
+:root {
+  color-scheme: dark;
+
+  /* Surfaces climb in even steps so elevation reads as depth, not as noise. */
+  --bg: #0a0a0c;
+  --surface: #131317;
+  --surface-2: #1c1c22;
+  --surface-3: #26262e;
+
+  /* Every one of these is measured against its own background, not guessed:
+     text 16.9:1, text-2 9.9:1, muted 5.5:1 on --bg; muted 5.2:1 on --surface. */
+  --text: #f4f4f5;
+  --text-2: #b4b4bd;
+  --muted: #86868f;
+
+  --border: #24242b;
+  --border-2: #34343e;
+
+  --accent: #a78bfa;
+  --accent-2: #c4b5fd;
+  --accent-dim: #6d5bb0;
+  --accent-ink: #14121c;
+  --ok: #86efac;
+  --danger: #fca5a5;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text",
+            "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+  /* Fallback only. The real value is measured from the dock at runtime (see
+     the ResizeObserver below), because a hand-picked constant drifts the
+     moment a row is added: measured at 186px against a guessed 136px reserve,
+     which hid the last episode behind the dock. This number covers the
+     TALLEST dock measured — 212px at 1280x900 and 210px at 360x740 — so the
+     path with no ResizeObserver and the path with JS disabled both clear it;
+     11.75rem (188px) did neither (audio-feed-c5n). */
+  --dock-h: 13.5rem;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  /* The surfaces nobody draws still carry the design. */
+  scrollbar-color: var(--surface-3) var(--bg);
+  scrollbar-width: thin;
+}
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+html,
+body {
+  margin: 0;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-synthesis-weight: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  line-height: 1.5;
+  /* --dock-h is MEASURED from the dock, whose own padding already contains the
+     safe-area inset, so adding the inset again here would double-count it —
+     invisible at 0px on a desktop, a stripe of dead space on a notched phone.
+     The extra space is a deliberate gap between the last row and the dock. */
+  padding-block-end: calc(var(--dock-h) + var(--space-4));
+  /* A single low, wide wash anchored where the dock sits, so the page has a
+     floor rather than a flat field. Not decoration on the content itself. */
+  background-image: radial-gradient(
+    120% 45% at 50% 100%,
+    color-mix(in srgb, var(--accent) 9%, transparent) 0%,
+    transparent 70%
+  );
+  background-attachment: fixed;
+}
+
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+.icon {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  display: block;
+  flex: none;
+}
+
+a {
+  color: var(--accent-2);
+  text-decoration-color: color-mix(in srgb, var(--accent-2) 40%, transparent);
+  text-underline-offset: 3px;
+}
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+button,
+select {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ---------------------------------------------------------------- header */
+
+header.app {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+  border-block-end: 1px solid var(--border);
+}
+.header-inner {
+  max-inline-size: 48rem;
+  margin-inline: auto;
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.identity {
+  min-inline-size: 0;
+}
+h1 {
+  margin: 0;
+  font-size: clamp(1.35rem, 1.1rem + 1.1vw, 1.7rem);
+  font-weight: 660;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+.subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.subtitle .dot {
+  inline-size: 3px;
+  block-size: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+.header-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* 44px min-block-size, not padding alone: MEASURED at 34px on the first pass,
+   which is under the reachable minimum on the device this app is for. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-block-size: 2.75rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.8rem;
+  font-weight: 550;
+  text-decoration: none;
+  transition: border-color 0.18s var(--ease), color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.chip:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+  background: var(--surface-2);
+}
+.chip .icon {
+  inline-size: 0.95rem;
+  block-size: 0.95rem;
+}
+
+/* ------------------------------------------------------------------ list */
+
+main {
+  max-inline-size: 48rem;
+  margin-inline: auto;
+  padding: var(--space-5) var(--space-4) var(--space-6);
+}
+
+/* audio-feed-7s2 — in-progress and failed rows */
+.activity {
+  margin-block: 0 var(--space-6);
+}
+.activity.hidden {
+  display: none;
+}
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.act {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+.act-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.act-meta {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.act-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.act[data-state="queued"] .act-state,
+.act[data-state="generating"] .act-state {
+  color: var(--accent);
+}
+.act[data-state="failed"] {
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border-2));
+}
+.act[data-state="failed"] .act-state {
+  color: var(--danger, #e5484d);
+}
+.act-error {
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+.act-retry {
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin-block-start: var(--space-1);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: transparent;
+  color: var(--text-2);
+}
+.act-retry:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.act-retry[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+/* A spinner that says nothing the text does not already say is decoration: the pulse is on
+   the dot, and reduced motion (below) leaves the text standing on its own. */
+.act-dot {
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+.act[data-state="generating"] .act-dot {
+  animation: act-pulse 1.4s ease-in-out infinite;
+}
+@keyframes act-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* The hint carries the waiting time, so a subscriber can tell 'started a minute ago'
+   from 'stuck since this morning'. */
+#activityHint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-block-end: var(--space-3);
+}
+.list-head h2 {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+}
+#savedCount {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+ul.episodes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Rows, not cards. A list of episodes IS a list; boxing each one repeats the
+   same container as page structure and costs vertical room a phone needs. */
+li.episode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0 var(--space-3);
+  align-items: start;
+  padding: var(--space-4) var(--space-2);
+  border-block-end: 1px solid var(--border);
+  position: relative;
+  transition: background 0.18s var(--ease);
+}
+li.episode:first-child {
+  border-block-start: 1px solid var(--border);
+}
+li.episode:hover {
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+li.episode[data-current="true"] {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+li.episode[data-current="true"]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+/* The leading control is the play affordance: the row's primary action needs
+   no label to be understood, and a 44px target is the reachable minimum. */
+.ep-play {
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text);
+  transition: transform 0.18s var(--ease), background 0.18s var(--ease),
+    border-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.ep-play:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  transform: scale(1.06);
+}
+.ep-play:active {
+  transform: scale(0.97);
+}
+li.episode[data-current="true"] .ep-play {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.ep-body {
+  min-inline-size: 0;
+}
+.ep-title {
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+  text-wrap: pretty;
+}
+.ep-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.ep-meta .dot {
+  inline-size: 3px;
+  block-size: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+  flex: none;
+}
+.ep-source {
+  color: var(--text-2);
+  font-weight: 550;
+}
+.ep-duration {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Mode is the product's central idea — one voice or two — so it is drawn, not
+   spelled in a pill that looks like every other pill. */
+.ep-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+}
+.ep-mode .icon {
+  inline-size: 0.9rem;
+  block-size: 0.9rem;
+}
+.ep-mode[data-mode="deepdive"] {
+  color: var(--accent-2);
+}
+
+.ep-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.ep-read {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: .75rem;
+  text-decoration: none;
+}
+.ep-read:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border-2);
+}
+.ep-read:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.now-read {
+  margin-inline-start: auto;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: .75rem;
+  text-decoration: none;
+}
+.now-read:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.now-read:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.ep-download {
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  transition: color 0.18s var(--ease), background 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.ep-download:hover:not([disabled]) {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border-2);
+}
+.ep-download[data-state="saved"] {
+  color: var(--ok);
+}
+.ep-download[data-state="working"] {
+  color: var(--accent-2);
+}
+.ep-download[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ep-download .pct {
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  letter-spacing: -0.04em;
+}
+
+.empty {
+  margin: var(--space-6) 0;
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius);
+}
+.empty strong {
+  display: block;
+  color: var(--text-2);
+  font-weight: 600;
+  margin-block-end: var(--space-2);
+}
+
+/* ------------------------------------------------------------------ dock */
+
+.dock {
+  position: fixed;
+  inset-block-end: 0;
+  inset-inline: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(18px) saturate(160%);
+  border-block-start: 1px solid var(--border-2);
+  box-shadow: 0 -12px 32px -18px rgb(0 0 0 / 0.9);
+  padding-block-end: env(safe-area-inset-bottom, 0px);
+}
+/*
+ * minmax(0, 1fr), not the default auto track (audio-feed-cl5).
+ * An auto track sizes to the row's MAX-CONTENT — measured at 523px inside a
+ * 363px container, which pushed the speed control 147px past a 390px viewport
+ * on a fixed bar the document cannot scroll. min-width:0 on the row measured
+ * as a NO-OP because the item was never the binding constraint; the TRACK was.
+ */
+.dock-inner {
+  max-inline-size: 48rem;
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.now {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-inline-size: 0;
+}
+.now-text {
+  min-inline-size: 0;
+  flex: 1 1 auto;
+}
+.now-title {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-sub {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.now-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--ok);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.now-badge .icon {
+  inline-size: 0.85rem;
+  block-size: 0.85rem;
+}
+
+.scrub {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+.scrub .t {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  letter-spacing: -0.03em;
+}
+
+/*
+ * A real track with a filled portion, rather than the platform default in five
+ * different shapes. --progress is set from JS on input and timeupdate.
+ */
+/*
+ * The ELEMENT is 44px tall; the TRACK it paints is the 4px line declared on
+ * ::-webkit-slider-runnable-track below. Scrubbing is the hardest gesture in a
+ * player to land on a phone, and the hit area is the element's box rather than
+ * the painted line — measured at 20px on the first pass, under the reachable
+ * minimum.
+ *
+ * Note for anyone verifying this: getComputedStyle(el, "::-webkit-slider-
+ * runnable-track").height reports the ELEMENT's height (44px), not the track's
+ * declared 4px, so it cannot be used to check this. The rendered screenshot is
+ * the evidence.
+ */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  inline-size: 100%;
+  min-inline-size: 0;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+  block-size: 2.75rem;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  block-size: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+    var(--accent) calc(var(--progress, 0) * 100%),
+    var(--surface-3) calc(var(--progress, 0) * 100%));
+}
+input[type="range"]::-moz-range-track {
+  block-size: 4px;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+input[type="range"]::-moz-range-progress {
+  block-size: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  inline-size: 13px;
+  block-size: 13px;
+  border-radius: 50%;
+  background: var(--text);
+  border: none;
+  margin-block-start: -4.5px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
+  transition: transform 0.15s var(--ease);
+}
+input[type="range"]::-moz-range-thumb {
+  inline-size: 13px;
+  block-size: 13px;
+  border-radius: 50%;
+  background: var(--text);
+  border: none;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.18);
+}
+input[type="range"][disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.t-btn {
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text-2);
+  transition: color 0.18s var(--ease), background 0.18s var(--ease),
+    border-color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.t-btn:hover:not([disabled]) {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+.t-btn:active:not([disabled]) {
+  transform: scale(0.95);
+}
+.t-btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.t-btn .icon {
+  inline-size: 1.4rem;
+  block-size: 1.4rem;
+}
+
+.t-main {
+  inline-size: 3.5rem;
+  block-size: 3.5rem;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 6px 20px -8px color-mix(in srgb, var(--accent) 75%, transparent);
+}
+.t-main:hover:not([disabled]) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: var(--accent-ink);
+}
+.t-main .icon {
+  inline-size: 1.6rem;
+  block-size: 1.6rem;
+}
+
+.rate {
+  margin-inline-start: auto;
+  min-inline-size: 3.6rem;
+  min-block-size: 2.75rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  transition: border-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.rate:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+/* The spacer balances the speed pill so the transport stays optically centred
+   rather than drifting left by the pill's width. */
+.t-spacer {
+  inline-size: 3.6rem;
+  flex: none;
+}
+
+.notice {
+  margin: 0;
+  font-size: 0.78rem;
+  min-block-size: 1.1rem;
+  color: var(--text-2);
+  text-align: center;
+}
+.notice[data-tone="error"] {
+  color: var(--danger);
+}
+.notice[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* -------------------------------------------------------------- narrow */
+
+\u0040media (max-width: 30rem) {
+  li.episode {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-2) var(--space-3);
+    padding-inline: 0;
+  }
+  .ep-actions {
+    grid-column: 2;
+    margin-block-start: var(--space-2);
+  }
+  .header-inner {
+    padding-inline: var(--space-3);
+  }
+  main {
+    padding-inline: var(--space-3);
+  }
+  .dock-inner {
+    padding-inline: var(--space-3);
+  }
+  .t-spacer {
+    display: none;
+  }
+}
+
+\u0040media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
