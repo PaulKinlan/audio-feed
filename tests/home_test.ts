@@ -281,6 +281,36 @@ Deno.test("the homepage renders the RSS subscribe form with secure method and to
   assert(!html.includes("?feedToken="));
 });
 
+Deno.test("the front door links to the web player in header and body without leaking capabilities (audio-feed-ytg)", () => {
+  const html = renderHomePage({
+    publicBaseUrl: "https://audio.example.com",
+    synthesisConfigured: true,
+    defaultVoice: "Charon",
+  });
+
+  // Link in header nav and body
+  assertStringIncludes(html, '<a href="/listen">Web Player</a>');
+  // Returning subscriber banner
+  assertStringIncludes(html, 'id="returningSubscriber"');
+  assertStringIncludes(html, 'href="/listen"');
+
+  // No capability leaks: no token is baked into the rendered HTML
+  assertEquals(html.includes("/listen/token-"), false, "never bake tokens into public links");
+  assertEquals(html.includes("feedToken"), false, "never bake feedToken in public homepage");
+});
+
+Deno.test("homepage script includes open in web player action on submission success (audio-feed-ytg)", () => {
+  const html = renderHomePage({
+    publicBaseUrl: "https://audio.example.com",
+    synthesisConfigured: true,
+    defaultVoice: "Charon",
+  });
+
+  assertStringIncludes(html, "Open in Web Player →");
+  assertStringIncludes(html, "/listen/");
+  assertStringIncludes(html, "encodeURIComponent(token.value.trim())");
+});
+
 Deno.test("adding the homepage did not shadow another route", async () => {
   const fetch = app();
 

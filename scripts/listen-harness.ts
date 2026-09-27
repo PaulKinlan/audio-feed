@@ -185,7 +185,20 @@ export async function createListenHarness(port = 8131) {
     });
   }
 
-  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const { fetch } = createApp(
+    ctx,
+    createHandlers(ctx, {
+      fetchArticle: (url) =>
+        Promise.resolve({
+          url,
+          title: "Sample Article",
+          author: "Sample Author",
+          publishedAt: new Date().toISOString(),
+          lead: "A test article lead.",
+          body: "Article content for the harness.",
+        }),
+    }),
+  );
 
   // Self-assertion (audio-feed-py5): verify that the page listing path returns the seeded episodes.
   // A harness that cannot show a single row must fail loudly rather than serving an empty page.

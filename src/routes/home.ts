@@ -296,7 +296,7 @@ export function renderHomePage({
   <h1>Audio Feed</h1>
   <p class="lede">
     A personal podcast generator. It turns articles and RSS sources into audio you
-    can listen to in any podcast app — read aloud, or discussed by two voices.
+    can listen to in any podcast app or in the <a href="/listen">Web Player</a> — read aloud, or discussed by two voices.
     Speech is synthesised with Gemini&nbsp;3.8 Flash TTS.
   </p>
 
@@ -324,6 +324,7 @@ export function renderHomePage({
 
   <h2>Subscribing</h2>
   <p>
+    Listen in the <a href="/listen">Web Player</a> directly in your browser, or subscribe in a podcast app.
     Every listener gets a private feed token. That token <em>is</em> the
     credential — podcast apps cannot log in, so anyone holding your feed URL can
     read your feed. Treat it like a password and do not share it.
@@ -346,6 +347,11 @@ export function renderHomePage({
     Paste one into Pocket Casts, Apple Podcasts, Overcast or anything else that
     accepts an RSS URL. Episodes appear once synthesis finishes.
   </p>
+
+  <div id="returningSubscriber" class="note" hidden style="margin-block: var(--space-4);">
+    <p><strong>Welcome back!</strong> A saved player was found on this device:
+    <a href="/listen" id="openPlayerLink" style="font-weight: 600; text-decoration: underline;">Open your Web Player &rarr;</a></p>
+  </div>
 
   <h2 id="send">Send an article to audio</h2>
   ${
@@ -555,7 +561,7 @@ curl -X POST ${base}/api/sources \\
     }
   });
 
-  const say = (kind, message, detail) => {
+  const say = (kind, message, detail, playerUrl) => {
     result.className = kind;
     result.innerHTML = "";
     const p = document.createElement("p");
@@ -567,7 +573,28 @@ curl -X POST ${base}/api/sources \\
       d.textContent = detail;
       result.append(d);
     }
+    if (playerUrl) {
+      const linkWrap = document.createElement("p");
+      linkWrap.className = "player-action";
+      linkWrap.style.marginBlockStart = "var(--space-2)";
+      const a = document.createElement("a");
+      a.href = playerUrl;
+      a.className = "player-link";
+      a.style.fontWeight = "600";
+      a.textContent = "Open in Web Player →";
+      linkWrap.appendChild(a);
+      result.append(linkWrap);
+    }
   };
+
+  const returningBox = document.getElementById("returningSubscriber");
+  const storedToken = (() => {
+    try { return localStorage.getItem("audio-feed-token"); } catch { return null; }
+  })();
+  if (storedToken && returningBox) {
+    returningBox.hidden = false;
+    if (!token.value) token.value = storedToken;
+  }
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -603,6 +630,7 @@ curl -X POST ${base}/api/sources \\
           "ok",
           "Queued. It will appear in your feed once synthesis finishes.",
           body.article && body.article.title ? "Article: " + body.article.title : undefined,
+          token.value.trim() ? "/listen/" + encodeURIComponent(token.value.trim()) : undefined,
         );
 
         // Clearing url.value alone is not enough, and the difference is
@@ -645,7 +673,7 @@ curl -X POST ${base}/api/sources \\
   const feedUrl = document.getElementById("feed-url");
   const feedTitle = document.getElementById("feed-title");
 
-  const sayFeed = (kind, message, detail) => {
+  const sayFeed = (kind, message, detail, playerUrl) => {
     feedResult.className = kind;
     feedResult.innerHTML = "";
     const p = document.createElement("p");
@@ -656,6 +684,18 @@ curl -X POST ${base}/api/sources \\
       d.className = "detail";
       d.textContent = detail;
       feedResult.append(d);
+    }
+    if (playerUrl) {
+      const linkWrap = document.createElement("p");
+      linkWrap.className = "player-action";
+      linkWrap.style.marginBlockStart = "var(--space-2)";
+      const a = document.createElement("a");
+      a.href = playerUrl;
+      a.className = "player-link";
+      a.style.fontWeight = "600";
+      a.textContent = "Open in Web Player →";
+      linkWrap.appendChild(a);
+      feedResult.append(linkWrap);
     }
   };
 
@@ -708,11 +748,13 @@ curl -X POST ${base}/api/sources \\
         const detail = feedPath ? "Per-source feed URL: " + ${
     JSON.stringify(base)
   } + feedPath : undefined;
+        const userToken = token.value.trim();
 
         sayFeed(
           "ok",
           "Subscribed to " + sourceTitle + ". " + count + " post(s) queued for synthesis.",
           detail,
+          userToken ? "/listen/" + encodeURIComponent(userToken) : undefined,
         );
 
         const keptMode = feedForm.elements.feedMode.value;
