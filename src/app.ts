@@ -41,6 +41,7 @@ import {
   handleListenStatus,
   renderListenLanding,
 } from "./routes/listen.ts";
+import { handleAsset } from "./routes/assets.ts";
 import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
@@ -123,6 +124,8 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
         },
       }),
   );
+  // audio-feed-3xq: content-addressed static assets (see src/routes/assets.ts).
+  router.get("/assets/:name", handleAsset);
   router.get("/listen/:token", handleListen);
   // audio-feed-7s2: the activity panel's poll, and the subscriber's retry. Same capability as
   // the page itself — the token in the path is the credential.
