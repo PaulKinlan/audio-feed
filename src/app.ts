@@ -115,6 +115,14 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.
   router.get("/login", handleLogin);
   router.get("/account", handleAccount);
+  // audio-feed-ep1: bookmarklet convenience route /add redirecting to /account
+  router.get("/add", ({ req, url, ctx }) => {
+    const origin = resolveOrigin(ctx.config, req).baseUrl;
+    return new Response(null, {
+      status: 303,
+      headers: { location: `${origin}/account${url.search}`, "cache-control": "no-store" },
+    });
+  });
   // The listener app (audio-feed-4xb): token-fronted, so a subscriber needs no
   // account — the feed token they already hold is the whole credential.
   router.get(

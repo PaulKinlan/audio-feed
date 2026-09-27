@@ -471,6 +471,14 @@ export function renderHomePage({
 
   <div id="result" role="status" aria-live="polite"></div>
 
+  <div class="note bookmarklet-box" style="margin-block-start: var(--space-4);">
+    <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link" href="${
+    esc(
+      `javascript:(function(){var u=location.href,t=document.title||'',l=document.querySelector('link[rel="alternate"][type*="rss"],link[rel="alternate"][type*="atom"],link[rel*="alternate"][type*="xml"]'),f=l?l.href:'',dest='${base}/account?add='+encodeURIComponent(u)+'&title='+encodeURIComponent(t)+(f?'&feed='+encodeURIComponent(f):'');window.open(dest,'_blank')||(location.href=dest);})();`,
+    )
+  }" draggable="true" title="Drag to your bookmarks bar" style="font-weight: 600; text-decoration: underline;">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
+  </div>
+
   <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>
   <p>
     Follow an entire publication. Recent posts will be queued and converted to audio as they are published.
@@ -628,6 +636,33 @@ curl -X POST ${base}/api/sources \\
   if (storedToken && returningBox) {
     returningBox.hidden = false;
     if (!token.value) token.value = storedToken;
+  }
+
+  const queryParams = new URLSearchParams(location.search);
+  const addQuery = queryParams.get("add") || queryParams.get("url");
+  const feedQuery = queryParams.get("feed");
+  const titleQuery = queryParams.get("title");
+
+  if (addQuery) {
+    try {
+      const parsed = new URL(addQuery);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        url.value = addQuery;
+      }
+    } catch { /* ignore */ }
+  }
+  if (feedQuery) {
+    try {
+      const parsedFeed = new URL(feedQuery);
+      if (parsedFeed.protocol === "http:" || parsedFeed.protocol === "https:") {
+        const feedInput = document.getElementById("feed-url");
+        if (feedInput) feedInput.value = feedQuery;
+      }
+    } catch { /* ignore */ }
+  }
+  if (titleQuery) {
+    const feedTitleInput = document.getElementById("feed-title");
+    if (feedTitleInput) feedTitleInput.value = titleQuery.slice(0, 100);
   }
 
   form.addEventListener("submit", async (event) => {
