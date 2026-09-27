@@ -38,6 +38,7 @@ import type {
   Article,
   AuthChallenge,
   Episode,
+  OutboxNotification,
   PasskeyCredential,
   Session,
   SetupLink,
@@ -932,6 +933,38 @@ export class KvMetadataStore implements MetadataStore {
   async getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
     const entry = await this.#kv.get<Deno.KvU64>(["synthesis_daily", userId, day]);
     return Number(entry.value?.value ?? 0n);
+  }
+
+  // -- outbox notifications (audio-feed-np5) --------------------------------
+
+  async queueNotification(notification: OutboxNotification): Promise<void> {
+    const tx = this.#kv.atomic()
+      .set(["outbox", notification.id], notification)
+      .set(["outbox_pending", notification.createdAt, notification.id], notification.id);
+    const res = await tx.commit();
+    if (!res.ok) throw new Error(`queueNotification failed for ${notification.id}`);
+  }
+
+  async listOutbox(limit = 50): Promise<OutboxNotification[]> {
+    const notifications: OutboxNotification[] = [];
+    for await (const entry of this.#kv.list<string>({ prefix: ["outbox_pending"] }, { limit })) {
+      const id = entry.value;
+      const n = await this.#kv.get<OutboxNotification>(["outbox", id]);
+      if (n.value && !n.value.deliveredAt) notifications.push(n.value);
+    }
+    return notifications;
+  }
+
+  async ackNotification(id: string): Promise<boolean> {
+    const entry = await this.#kv.get<OutboxNotification>(["outbox", id]);
+    if (!entry.value) return false;
+    const n = entry.value;
+    n.deliveredAt = new Date().toISOString();
+    const tx = this.#kv.atomic()
+      .set(["outbox", id], n)
+      .delete(["outbox_pending", n.createdAt, n.id]);
+    const res = await tx.commit();
+    return res.ok;
   }
 
   /**

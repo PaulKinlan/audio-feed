@@ -10,7 +10,7 @@
 import { assert, assertEquals } from "@std/assert";
 import type { EpisodeQuery, MetadataStore, RunRecord } from "../../src/storage/mod.ts";
 import { RUN_HISTORY_LIMIT } from "../../src/storage/mod.ts";
-import type { Episode } from "../../src/types.ts";
+import type { Episode, OutboxNotification } from "../../src/types.ts";
 import { unsynthesized } from "../../src/types.ts";
 import { makeApproval, makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 
@@ -1397,6 +1397,54 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     const sDay2 = await store.getSynthesisCounts("2026-09-28");
     assertEquals(sDay2.total, 2);
     assertEquals(sDay2.perUser.find((u) => u.userId === "user-c")?.todayCount, 1);
+  });
+
+  // -- outbox notifications (audio-feed-np5) --------------------------------
+
+  test("an empty store reports empty outbox (audio-feed-np5)", async (store) => {
+    assertEquals(await store.listOutbox(), []);
+  });
+
+  test("queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5)", async (store) => {
+    const n1: OutboxNotification = {
+      id: "n-1",
+      userId: "u-1",
+      episodeId: "ep-1",
+      status: "ready",
+      title: "Episode 1",
+      playerUrl: "https://audio.example.com/listen/tok",
+      createdAt: "2026-09-27T10:00:00.000Z",
+    };
+    const n2: OutboxNotification = {
+      id: "n-2",
+      userId: "u-1",
+      episodeId: "ep-2",
+      status: "failed",
+      title: "Episode 2",
+      error: "TTS rate limit exceeded",
+      playerUrl: "https://audio.example.com/listen/tok",
+      createdAt: "2026-09-27T10:01:00.000Z",
+    };
+
+    await store.queueNotification(n1);
+    await store.queueNotification(n2);
+
+    const outbox = await store.listOutbox();
+    assertEquals(outbox.length, 2);
+    assert(outbox.some((n) => n.id === "n-1" && n.status === "ready"));
+    assert(
+      outbox.some((n) =>
+        n.id === "n-2" && n.status === "failed" && n.error === "TTS rate limit exceeded"
+      ),
+    );
+
+    // Acking n-1 marks it delivered and removes it from unacknowledged list
+    const acked = await store.ackNotification("n-1");
+    assertEquals(acked, true);
+
+    const remaining = await store.listOutbox();
+    assertEquals(remaining.length, 1);
+    assertEquals(remaining[0]!.id, "n-2");
   });
 
   test("an empty store reports no runs", async (store) => {

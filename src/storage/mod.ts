@@ -20,6 +20,7 @@ import type {
   AuthChallenge,
   Episode,
   EpisodeStatus,
+  OutboxNotification,
   PasskeyCredential,
   Session,
   SetupLink,
@@ -401,6 +402,15 @@ export interface MetadataStore {
   recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void>;
   getSynthesisCounts(today?: string): Promise<SynthesisCounts>;
   getUserDailySynthesisCount(userId: string, day: string): Promise<number>;
+
+  // -- outbox notifications (audio-feed-np5) --------------------------------
+  /**
+   * Outbox notification queue for on-demand ingest completion.
+   * Delivery failures must not affect synthesis or audio publishing.
+   */
+  queueNotification(notification: OutboxNotification): Promise<void>;
+  listOutbox(limit?: number): Promise<OutboxNotification[]>;
+  ackNotification(id: string): Promise<boolean>;
 
   /**
    * Append a run to its job's history, pruning that job to its newest

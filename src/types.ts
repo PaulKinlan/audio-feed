@@ -124,6 +124,22 @@ export interface SynthesisCounts {
   }[];
 }
 
+/**
+ * Outbox notification for on-demand article ingest completion (audio-feed-np5).
+ * Consumable by chaos-relay or webhooks.
+ */
+export interface OutboxNotification {
+  id: string;
+  userId: string;
+  episodeId: string;
+  status: "ready" | "failed";
+  title: string;
+  playerUrl: string;
+  error?: string;
+  createdAt: string;
+  deliveredAt?: string;
+}
+
 /** One admin decision. Written atomically with the user it decided. */
 export interface ApprovalRecord {
   userId: string;

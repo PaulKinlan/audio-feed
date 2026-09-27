@@ -52,6 +52,8 @@ export interface AppConfig {
    * file refuses a half-configured blob store instead of defaulting to memory.
    */
   defaultVoice?: GeminiTtsVoice;
+  /** Whether outbound notifications for on-demand articles are queued (audio-feed-np5). Defaults to false. */
+  notifyOutboxEnabled?: boolean;
 }
 
 function env(name: string): string | undefined {
@@ -86,6 +88,8 @@ export function loadConfig(): AppConfig {
     // which is the only thing that knows the real origin.
     publicBaseUrl: env("PUBLIC_BASE_URL")?.replace(/\/+$/, ""),
     trustProxyHeaders: trust === "1" || trust === "true" || trust === "yes",
+    notifyOutboxEnabled: env("NOTIFY_OUTBOX_ENABLED") === "true" ||
+      env("NOTIFY_OUTBOX_ENABLED") === "1",
     geminiApiKey: env("GEMINI_API_KEY"),
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,

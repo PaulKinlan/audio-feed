@@ -11,6 +11,7 @@ import type {
   Article,
   AuthChallenge,
   Episode,
+  OutboxNotification,
   PasskeyCredential,
   Session,
   SetupLink,
@@ -120,6 +121,7 @@ export class MemoryMetadataStore implements MetadataStore {
   #synthesisTotalBytes = 0;
   readonly #synthesisByUser = new Map<string, { count: number; bytes: number }>();
   readonly #synthesisByUserAndDay = new Map<string, number>();
+  readonly #outbox: OutboxNotification[] = [];
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -649,6 +651,30 @@ export class MemoryMetadataStore implements MetadataStore {
 
   getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
     return Promise.resolve(this.#synthesisByUserAndDay.get(`${userId}:${day}`) ?? 0);
+  }
+
+  // -- outbox notifications (audio-feed-np5) --------------------------------
+
+  queueNotification(notification: OutboxNotification): Promise<void> {
+    this.#outbox.push(structuredClone(notification));
+    return Promise.resolve();
+  }
+
+  listOutbox(limit = 50): Promise<OutboxNotification[]> {
+    return Promise.resolve(
+      this.#outbox
+        .filter((n) => !n.deliveredAt)
+        .slice(-limit)
+        .reverse()
+        .map((n) => structuredClone(n)),
+    );
+  }
+
+  ackNotification(id: string): Promise<boolean> {
+    const found = this.#outbox.find((n) => n.id === id);
+    if (!found) return Promise.resolve(false);
+    found.deliveredAt = new Date().toISOString();
+    return Promise.resolve(true);
   }
 
   /** Newest first, bounded on write per job — the same contract the KV adapter honours. */

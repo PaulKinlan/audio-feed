@@ -51,6 +51,7 @@ import {
   DEFAULT_CODE_HANDLING,
   DEFAULT_MAX_CLAIMS,
   DEFAULT_VOICES,
+  INBOX_SOURCE_ID,
   unsynthesized,
   utcDayKey,
 } from "../types.ts";
@@ -265,6 +266,30 @@ export async function runSynthesisBatch(
   };
   const { metadata, blobs } = ctx.stores;
   const nowMs = options.nowMs ?? Date.now();
+  const notifyEnabled = ctx.config.notifyOutboxEnabled ?? false;
+
+  const notifyOnDemand = async (episode: Episode, status: "ready" | "failed", error?: string) => {
+    if (!notifyEnabled || episode.sourceId !== INBOX_SOURCE_ID || episode.regenerating) return;
+    try {
+      const user = await metadata.getUser(episode.userId);
+      const base = ctx.config.publicBaseUrl ? ctx.config.publicBaseUrl.replace(/\/+$/, "") : "";
+      const playerUrl = user?.feedToken
+        ? `${base}/listen/${encodeURIComponent(user.feedToken)}`
+        : `${base}/listen`;
+      await metadata.queueNotification({
+        id: crypto.randomUUID(),
+        userId: episode.userId,
+        episodeId: episode.id,
+        status,
+        title: episode.title,
+        playerUrl,
+        error,
+        createdAt: new Date(nowMs).toISOString(),
+      });
+    } catch (err) {
+      console.error(`[audio-feed] failed to queue notification for episode ${episode.id}:`, err);
+    }
+  };
 
   // Cross-user FIFO queue (audio-feed-bbb):
   //
@@ -412,16 +437,26 @@ export async function runSynthesisBatch(
     // rather than failing out of the feed (audio-feed-8oz).
     if (!article) {
       const error = "article record is missing";
-      await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
-      result.failed.push({ episodeId: claimed.id, error });
+      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+      if (wrote) {
+        result.failed.push({ episodeId: claimed.id, error });
+        await notifyOnDemand(claimed, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      }
       continue;
     }
 
     if (opts.maxInputCharacters && article.content.length > opts.maxInputCharacters) {
       const error =
         `article content exceeds input limit (${article.content.length} > ${opts.maxInputCharacters} chars)`;
-      await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
-      result.failed.push({ episodeId: claimed.id, error });
+      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+      if (wrote) {
+        result.failed.push({ episodeId: claimed.id, error });
+        await notifyOnDemand(claimed, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      }
       continue;
     }
 
@@ -445,8 +480,12 @@ export async function runSynthesisBatch(
     if (!audio) {
       const error = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
-      if (wrote) result.failed.push({ episodeId: claimed.id, error });
-      else result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      if (wrote) {
+        result.failed.push({ episodeId: claimed.id, error });
+        await notifyOnDemand(claimed, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      }
       continue;
     }
 
@@ -481,6 +520,7 @@ export async function runSynthesisBatch(
 
     if (wrote) {
       result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+      await notifyOnDemand(claimed, "ready");
       // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp, audio-feed-akm).
       // A failure here is logged as an operational alert so counter anomalies are visible.
       try {
