@@ -229,6 +229,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post("/api/auth/login/verify", account("loginVerify"));
   router.post("/api/auth/register/options", account("registerOptions"));
   router.post("/api/auth/register/verify", account("registerVerify"));
+  router.post("/api/auth/bootstrap", account("bootstrap"));
   router.post("/api/auth/logout", account("logout"));
   router.post("/api/account/profile", account("profile"));
   router.post("/api/account/rotate-token", account("rotateToken"));

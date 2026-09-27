@@ -231,7 +231,10 @@ export function renderAdminPage(
       (${esc(viewer!.email)}) with your passkey. Everything below runs on that session.</p>`
       : `<h2 id="auth-h">Sign in to administer</h2>
     <p class="muted">Admins sign in with a passkey, like everyone else.</p>
-    <div class="row"><a class="primary" href="/login?next=%2Fadmin">Sign in with a passkey</a></div>`
+    <div class="row"><a class="primary" href="/login?next=%2Fadmin">Sign in with a passkey</a></div>
+    <p class="muted" style="margin-block-start: var(--space-3); font-size: 0.88rem;">
+      Need to enroll with your admin token? <a href="/login?next=%2Fadmin#bootstrap">Bootstrap passkey</a>
+    </p>`
   }
   </section>
 

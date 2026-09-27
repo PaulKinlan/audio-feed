@@ -14,6 +14,7 @@ import {
   clearSessionCookie,
   createSession,
   endSession,
+  issueSetupLink,
   peekSetupLink,
   sameOrigin,
   sessionCookie,
@@ -27,7 +28,16 @@ import {
   registrationOptions,
   relyingParty,
 } from "../auth/passkeys.ts";
-import { rotateFeedToken, updatePreferences } from "../auth/users.ts";
+import {
+  approveUser,
+  createUser,
+  getUserByEmail,
+  isValidEmail,
+  normaliseEmail,
+  requireAdminToken,
+  rotateFeedToken,
+  updatePreferences,
+} from "../auth/users.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import { articleUrl, type ExtractedArticle, IngestError } from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
@@ -38,6 +48,7 @@ export interface AccountHandlers {
   loginVerify: Handler<AppContext>;
   registerOptions: Handler<AppContext>;
   registerVerify: Handler<AppContext>;
+  bootstrap: Handler<AppContext>;
   logout: Handler<AppContext>;
   profile: Handler<AppContext>;
   rotateToken: Handler<AppContext>;
@@ -160,6 +171,64 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         if (error instanceof PasskeyError) return reply({ error: error.message }, error.status);
         throw error;
       }
+    },
+
+    bootstrap: async ({ req }) => {
+      const refused = crossOrigin(ctx, req);
+      if (refused) return refused;
+      const { adminToken, email } = await body(req);
+      if (typeof adminToken !== "string" || !adminToken.trim()) {
+        return reply({ error: "Admin token is required." }, 400);
+      }
+      if (typeof email !== "string" || !email.trim()) {
+        return reply({ error: "Email is required." }, 400);
+      }
+      const normalised = normaliseEmail(email.trim());
+      if (!isValidEmail(normalised)) {
+        return reply({ error: "Valid email is required." }, 400);
+      }
+      const expected = ctx.config.adminToken;
+      if (!expected) {
+        return reply({ error: "ADMIN_TOKEN is not configured on this server." }, 503);
+      }
+      try {
+        await requireAdminToken(adminToken.trim(), expected);
+      } catch {
+        return reply({ error: "Invalid admin token." }, 401);
+      }
+
+      let user = await getUserByEmail(store, normalised);
+      if (!user) {
+        user = await createUser(store, {
+          email: normalised,
+          isAdmin: true,
+        });
+        user = await approveUser(store, user.id, "bootstrap");
+      } else {
+        if (!user.isAdmin) {
+          await store.setAdminRole(user.id, true, {
+            adminId: "bootstrap",
+            at: new Date().toISOString(),
+          });
+          user = (await store.getUser(user.id))!;
+        }
+        if (user.status !== "approved") {
+          user = await approveUser(store, user.id, "bootstrap");
+        }
+      }
+
+      const { token: setupToken, expiresAt } = await issueSetupLink(store, user.id, "bootstrap");
+      return reply({
+        ok: true,
+        setupToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          isAdmin: user.isAdmin,
+        },
+        expiresAt,
+      });
     },
 
     logout: async ({ req }) => {

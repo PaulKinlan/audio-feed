@@ -1,0 +1,213 @@
+/**
+ * Browser proof for the admin passkey bootstrap UI (audio-feed-8eh).
+ *
+ * Starts scripts/account-harness.ts, drives real headless Chrome over CDP with a
+ * CDP virtual authenticator, and walks the direct browser bootstrap path:
+ *   1. Visit signed-out /admin -> verify affordance link to bootstrap.
+ *   2. Click through to /login?next=%2Fadmin#bootstrap -> verify accordion opens.
+ *   3. Falsification: submit invalid token -> verify feedback error.
+ *   4. Submit valid ADMIN_TOKEN + email -> navigator.credentials.create() registers passkey.
+ *   5. Session cookie set and browser redirects to /admin.
+ *   6. /admin console loads subscriber data on that new admin session without curl!
+ *
+ *   deno run --allow-all --unstable-kv scripts/bootstrap-browser-proof.ts
+ */
+
+const PORT = 8139;
+const BASE = `http://localhost:${PORT}`;
+const OUT = new URL("../docs/evidence/audio-feed-8eh/", import.meta.url).pathname;
+const HOME = Deno.env.get("HOME")!;
+const PROFILE = `${HOME}/cap-evidence/8eh/chrome-profile`;
+
+function newestChrome(): string {
+  const root = `${HOME}/.cache/puppeteer/chrome`;
+  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
+    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
+  );
+  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// -- harness ------------------------------------------------------------------
+const harness = new Deno.Command(Deno.execPath(), {
+  args: ["run", "--allow-all", "--unstable-kv", "scripts/account-harness.ts", String(PORT)],
+  cwd: new URL("..", import.meta.url).pathname,
+  stdout: "null",
+  stderr: "null",
+}).spawn();
+for (let i = 0; i < 100; i++) {
+  try {
+    if ((await fetch(`${BASE}/health`)).ok) break;
+  } catch { /* not up yet */ }
+  await sleep(100);
+}
+
+// -- chrome -------------------------------------------------------------------
+await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+await Deno.mkdir(PROFILE, { recursive: true });
+await Deno.mkdir(OUT, { recursive: true });
+const chrome = new Deno.Command(newestChrome(), {
+  args: [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${PROFILE}`,
+    "about:blank",
+  ],
+  stdout: "null",
+  stderr: "null",
+}).spawn();
+let port = "";
+for (let i = 0; i < 100 && !port; i++) {
+  await sleep(100);
+  port = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split("\n")[0]!;
+}
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const page = targets.find((t: { type: string }) => t.type === "page");
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+let nextId = 0;
+const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
+ws.addEventListener("message", (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.id && pending.has(msg.id)) {
+    pending.get(msg.id)!(msg);
+    pending.delete(msg.id);
+  }
+});
+
+// deno-lint-ignore no-explicit-any
+async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  const id = ++nextId;
+  ws.send(JSON.stringify({ id, method, params }));
+  const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+  if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
+  return msg.result;
+}
+// deno-lint-ignore no-explicit-any
+async function js(expression: string): Promise<any> {
+  const r = await cdp("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+    userGesture: true,
+  });
+  if (r.exceptionDetails) throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+  return r.result?.value;
+}
+
+const steps: { name: string; pass: boolean; detail: string }[] = [];
+function check(name: string, pass: boolean, detail = "") {
+  steps.push({ name, pass, detail });
+  const tag = pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
+  console.log(`${tag}  ${name}  ${detail}`);
+  if (!pass) throw new Error(`step failed: ${name}`);
+}
+
+async function until(expr: string, desc: string, timeoutMs = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (await js(expr)) return;
+    await sleep(50);
+  }
+  throw new Error(`timed out waiting for: ${desc}`);
+}
+
+async function go(path: string) {
+  await cdp("Page.navigate", { url: `${BASE}${path}` });
+  await until(`document.readyState === "complete"`, `load ${path}`);
+  await sleep(100);
+}
+
+let exitCode = 0;
+try {
+  await cdp("Page.enable");
+  await cdp("Runtime.enable");
+  await cdp("WebAuthn.enable");
+  await cdp("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+    },
+  });
+
+  // 1. Visit signed-out /admin and check bootstrap affordance link
+  await go("/admin");
+  check(
+    "signed-out /admin links to bootstrap",
+    await js(`!!document.querySelector('a[href="/login?next=%2Fadmin#bootstrap"]')`),
+    "found link to /login?next=%2Fadmin#bootstrap",
+  );
+
+  // 2. Click through to /login?next=%2Fadmin#bootstrap
+  await js(`document.querySelector('a[href="/login?next=%2Fadmin#bootstrap"]').click()`);
+  await until(`location.pathname === "/login"`, "login navigation");
+  check(
+    "#bootstrap fragment auto-opens Admin bootstrap details",
+    await js(`document.getElementById("bootstrapDetails")?.open === true`),
+    "accordion is open",
+  );
+
+  // 3. Falsification: invalid token returns 401 and shows error
+  await js(`
+    document.getElementById("bootstrapEmail").value = "bootadmin@example.com";
+    document.getElementById("bootstrapToken").value = "wrong-token";
+    document.getElementById("bootstrapForm").requestSubmit();
+  `);
+  await until(
+    `document.getElementById("bootstrapFeedback").dataset.tone === "error"`,
+    "error on invalid token",
+  );
+  check(
+    "invalid admin token shows error feedback",
+    (await js(`document.getElementById("bootstrapFeedback").textContent`)).includes("Invalid admin token"),
+    await js(`document.getElementById("bootstrapFeedback").textContent`),
+  );
+
+  // 4. Valid bootstrap: enter correct token and submit
+  await js(`
+    document.getElementById("bootstrapToken").value = "harness-admin";
+    document.getElementById("bootstrapSubmit").disabled = false;
+    document.getElementById("bootstrapForm").requestSubmit();
+  `);
+
+  // Wait for WebAuthn ceremony to complete and redirect to /admin
+  await until(`location.pathname === "/admin"`, "redirect to /admin", 10000);
+  check(
+    "bootstrap completes passkey registration and redirects to /admin",
+    (await js(`location.pathname`)) === "/admin",
+    "landed on /admin",
+  );
+
+  // 5. Verify /admin console loaded on session
+  await until(`document.getElementById("usersBody")?.children?.length > 0`, "console subscribers loaded");
+  const adminEmail = await js(`document.querySelector(".signin-card strong")?.textContent || ""`);
+  check(
+    "admin console is signed in as new bootstrap admin",
+    adminEmail.length > 0,
+    `signed in header: ${adminEmail}`,
+  );
+
+  // Capture evidence screenshot
+  const shot = await cdp("Page.captureScreenshot", { format: "png" });
+  await Deno.writeFile(`${OUT}01-admin-bootstrap-success.png`, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
+  console.log(`Saved screenshot to ${OUT}01-admin-bootstrap-success.png`);
+
+  await cdp("WebAuthn.disable");
+} catch (error) {
+  console.error(error);
+  exitCode = 1;
+} finally {
+  try { chrome.kill(); } catch { /* ignore */ }
+  try { harness.kill(); } catch { /* ignore */ }
+  await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+}
+
+Deno.exit(exitCode);

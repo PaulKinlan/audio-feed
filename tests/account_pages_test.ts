@@ -128,9 +128,23 @@ Deno.test("GET /admin: a signed-out visitor is offered sign-in, token controls r
   assertEquals(res.status, 200);
   const html = await res.text();
   assertStringIncludes(html, 'href="/login?next=%2Fadmin"');
+  assertStringIncludes(html, 'href="/login?next=%2Fadmin#bootstrap"');
+  assertStringIncludes(html, "Bootstrap passkey");
   assertEquals(html.includes("Use admin token instead"), false);
   assertEquals(html.includes('id="adminToken"'), false);
   assertStringIncludes(html, "const SIGNED_IN = false");
+});
+
+Deno.test("GET /login: renders Admin bootstrap accordion panel (audio-feed-8eh)", async () => {
+  const { fetch } = app();
+  const res = await get(fetch, "/login");
+  assertEquals(res.status, 200);
+  const html = await res.text();
+  assertStringIncludes(html, 'id="bootstrapDetails"');
+  assertStringIncludes(html, "Admin bootstrap");
+  assertStringIncludes(html, 'id="bootstrapEmail"');
+  assertStringIncludes(html, 'id="bootstrapToken"');
+  assertStringIncludes(html, 'id="bootstrapSubmit"');
 });
 
 Deno.test("GET /admin: an admin session gets the console, signed in (audio-feed-8fc)", async () => {
