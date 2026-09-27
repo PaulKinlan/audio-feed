@@ -52,6 +52,7 @@ import {
   DEFAULT_MAX_CLAIMS,
   DEFAULT_VOICES,
   unsynthesized,
+  utcDayKey,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source } from "../types.ts";
 
@@ -82,6 +83,8 @@ export interface SynthesisWorkerOptions {
   owner?: string;
   /** Revision for a regenerated audio key. Injectable so a test can force a repeat. */
   revision?: () => string;
+  /** Current time in ms since epoch; injectable so tests can advance time deterministically. */
+  nowMs?: number;
 }
 
 /**
@@ -90,7 +93,7 @@ export interface SynthesisWorkerOptions {
  */
 const WORKER_ID = `worker-${crypto.randomUUID()}`;
 
-const DEFAULTS: Required<SynthesisWorkerOptions> = {
+const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
   batchSize: 5,
   intervalMs: 15_000,
   maxAttempts: 3,
@@ -261,7 +264,7 @@ export async function runSynthesisBatch(
     considered: 0,
   };
   const { metadata, blobs } = ctx.stores;
-  const nowMs = Date.now();
+  const nowMs = options.nowMs ?? Date.now();
 
   // Cross-user FIFO queue (audio-feed-bbb):
   //
@@ -288,6 +291,18 @@ export async function runSynthesisBatch(
       await assertAuthorizedForAudio(metadata, userId);
     } catch (error) {
       reason = error instanceof NotAuthorizedError ? "not authorized" : String(error);
+    }
+    // Check per-user daily episode budget ceiling (audio-feed-9mp)
+    if (reason === null) {
+      const user = await metadata.getUser(userId);
+      if (user && typeof user.dailyEpisodeBudget === "number" && user.dailyEpisodeBudget >= 0) {
+        const today = utcDayKey(new Date(nowMs));
+        const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
+        if (spentToday >= user.dailyEpisodeBudget) {
+          reason =
+            `daily episode budget exceeded (limit: ${user.dailyEpisodeBudget}, used: ${spentToday})`;
+        }
+      }
     }
     authCache.set(userId, reason);
     return reason;
@@ -341,6 +356,22 @@ export async function runSynthesisBatch(
       // Deferred, not failed: nothing was spent and a lifted suspension can be served.
       result.deferred.push({ episodeId: episode.id, reason });
       continue;
+    }
+
+    // Check budget at spend gate (audio-feed-9mp)
+    const spendUser = await metadata.getUser(episode.userId);
+    if (
+      spendUser && typeof spendUser.dailyEpisodeBudget === "number" &&
+      spendUser.dailyEpisodeBudget >= 0
+    ) {
+      const today = utcDayKey(new Date(nowMs));
+      const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
+      if (spentToday >= spendUser.dailyEpisodeBudget) {
+        const reason =
+          `daily episode budget exceeded (limit: ${spendUser.dailyEpisodeBudget}, used: ${spentToday})`;
+        result.deferred.push({ episodeId: episode.id, reason });
+        continue;
+      }
     }
 
     // Claim just-in-time, not at gather time. Claiming all five up front would
@@ -434,6 +465,8 @@ export async function runSynthesisBatch(
 
     if (wrote) {
       result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+      // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp)
+      await metadata.recordSynthesis(claimed.userId, byteLength, new Date(nowMs)).catch(() => {});
       // The swap is committed; the old blob is now unreferenced (audio-feed-8oz).
       if (previousKey && previousKey !== audioKey) {
         try {

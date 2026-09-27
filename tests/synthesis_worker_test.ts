@@ -1069,3 +1069,158 @@ Deno.test("a regeneration keeps its date in the feed while it waits behind new w
   );
   assertEquals(episode?.regenerating, true);
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-9mp: spend visibility & per-user daily episode budget
+// ---------------------------------------------------------------------------
+
+Deno.test("daily episode budget: user at budget has new episodes deferred with reason naming budget (audio-feed-9mp)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "budget-user", status: "approved", dailyEpisodeBudget: 2 }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "src", userId: "budget-user" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art", userId: "budget-user", sourceId: "src" }),
+  );
+  for (let i = 0; i < 3; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "budget-user",
+        sourceId: "src",
+        articleId: "art",
+        status: "pending",
+      }),
+    );
+  }
+  const ctx = { config, stores };
+
+  let synthesized = 0;
+  const run = await runSynthesisBatch(ctx, () => {
+    synthesized++;
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 5 });
+
+  assertEquals(synthesized, 2, "exactly 2 episodes synthesized up to the budget");
+  assertEquals(run.ready.length, 2);
+  assertEquals(run.deferred.length, 1);
+  assertStringIncludes(
+    run.deferred[0]!.reason,
+    "daily episode budget exceeded (limit: 2, used: 2)",
+  );
+
+  // The 3rd episode was NOT billed and remains pending
+  const ep2 = await stores.metadata.getEpisode("budget-user", "ep-2");
+  assertEquals(ep2?.status, "pending");
+});
+
+Deno.test("daily episode budget: resets on next UTC day and synthesizes previously deferred episode (audio-feed-9mp)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "budget-user", status: "approved", dailyEpisodeBudget: 1 }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "src", userId: "budget-user" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art", userId: "budget-user", sourceId: "src" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-0",
+      userId: "budget-user",
+      sourceId: "src",
+      articleId: "art",
+      status: "pending",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-1",
+      userId: "budget-user",
+      sourceId: "src",
+      articleId: "art",
+      status: "pending",
+    }),
+  );
+  const ctx = { config, stores };
+
+  // Day 1: 2026-09-27T10:00:00.000Z
+  const day1Ms = Date.parse("2026-09-27T10:00:00.000Z");
+  const runDay1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    batchSize: 5,
+    nowMs: day1Ms,
+  });
+  assertEquals(runDay1.ready.length, 1);
+  assertEquals(runDay1.deferred.length, 1);
+
+  // Day 2: 2026-09-28T00:00:05.000Z (after UTC midnight reset)
+  const day2Ms = Date.parse("2026-09-28T00:00:05.000Z");
+  const runDay2 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    batchSize: 5,
+    nowMs: day2Ms,
+  });
+  assertEquals(runDay2.ready.length, 1, "deferred episode picked up automatically on next UTC day");
+  assertEquals(runDay2.deferred.length, 0);
+
+  const ep1 = await stores.metadata.getEpisode("budget-user", "ep-1");
+  assertEquals(ep1?.status, "ready");
+});
+
+Deno.test("daily episode budget: default undefined budget allows unlimited synthesis (audio-feed-9mp)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "unlimited-user", status: "approved", dailyEpisodeBudget: undefined }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "src", userId: "unlimited-user" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art", userId: "unlimited-user", sourceId: "src" }),
+  );
+  for (let i = 0; i < 4; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "unlimited-user",
+        sourceId: "src",
+        articleId: "art",
+        status: "pending",
+      }),
+    );
+  }
+  const ctx = { config, stores };
+
+  let count = 0;
+  const run = await runSynthesisBatch(ctx, () => {
+    count++;
+    return Promise.resolve(fakeAudio());
+  }, { batchSize: 5 });
+
+  assertEquals(count, 4, "all 4 episodes synthesized with no budget ceiling");
+  assertEquals(run.ready.length, 4);
+  assertEquals(run.deferred.length, 0);
+});
+
+Deno.test("daily episode budget: unapproved or suspended user is still deferred with 'not authorized' (audio-feed-9mp)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "suspended-user", status: "suspended", dailyEpisodeBudget: 10 }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "src", userId: "suspended-user" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art", userId: "suspended-user", sourceId: "src" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-0",
+      userId: "suspended-user",
+      sourceId: "src",
+      articleId: "art",
+      status: "pending",
+    }),
+  );
+  const ctx = { config, stores };
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+  assertEquals(run.ready.length, 0);
+  assertEquals(run.deferred.length, 1);
+  assertEquals(run.deferred[0]!.reason, "not authorized");
+});

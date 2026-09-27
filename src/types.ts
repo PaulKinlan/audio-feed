@@ -84,6 +84,11 @@ export interface User {
   decidedAt?: string;
   decidedBy?: string;
   reason?: string;
+  /**
+   * Optional daily ceiling on synthesised episodes (audio-feed-9mp).
+   * Unset/undefined means unlimited.
+   */
+  dailyEpisodeBudget?: number;
 }
 
 /**
@@ -98,6 +103,25 @@ export type PublicUser = Omit<User, "feedToken">;
 export function redactUser(user: User): PublicUser {
   const { feedToken: _feedToken, ...rest } = user;
   return rest;
+}
+
+/**
+ * Canonical UTC calendar day window for daily budget tracking (audio-feed-9mp).
+ * Formatted as "YYYY-MM-DD". Resets cleanly at 00:00:00.000Z.
+ */
+export function utcDayKey(date: Date = new Date()): string {
+  return date.toISOString().slice(0, 10);
+}
+
+export interface SynthesisCounts {
+  total: number;
+  totalBytes: number;
+  perUser: {
+    userId: string;
+    count: number;
+    bytes: number;
+    todayCount: number;
+  }[];
 }
 
 /** One admin decision. Written atomically with the user it decided. */

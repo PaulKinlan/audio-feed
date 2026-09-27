@@ -15,8 +15,10 @@ import type {
   Session,
   SetupLink,
   Source,
+  SynthesisCounts,
   User,
 } from "../types.ts";
+import { utcDayKey } from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
 import type { EpisodePage, EpisodePageResult } from "./mod.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
@@ -114,6 +116,10 @@ export class MemoryMetadataStore implements MetadataStore {
   readonly #setupLinks = new Map<string, SetupLink>();
   readonly #challenges = new Map<string, AuthChallenge>();
   readonly #orphanBlobs = new Set<string>();
+  #synthesisTotal = 0;
+  #synthesisTotalBytes = 0;
+  readonly #synthesisByUser = new Map<string, { count: number; bytes: number }>();
+  readonly #synthesisByUserAndDay = new Map<string, number>();
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -608,6 +614,41 @@ export class MemoryMetadataStore implements MetadataStore {
       .map(([userId, count]) => ({ userId, count }))
       .sort((a, b) => b.count - a.count);
     return Promise.resolve({ total: this.#downloadTotal, perUser });
+  }
+
+  // Synthesis stats & budget tracking (audio-feed-9mp)
+  recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
+    const day = utcDayKey(at);
+    this.#synthesisTotal++;
+    this.#synthesisTotalBytes += bytes;
+    const userTotal = this.#synthesisByUser.get(userId) ?? { count: 0, bytes: 0 };
+    this.#synthesisByUser.set(userId, {
+      count: userTotal.count + 1,
+      bytes: userTotal.bytes + bytes,
+    });
+    const dayKey = `${userId}:${day}`;
+    this.#synthesisByUserAndDay.set(dayKey, (this.#synthesisByUserAndDay.get(dayKey) ?? 0) + 1);
+    return Promise.resolve();
+  }
+
+  getSynthesisCounts(today = utcDayKey()): Promise<SynthesisCounts> {
+    const perUser = [...this.#synthesisByUser.entries()]
+      .map(([userId, data]) => ({
+        userId,
+        count: data.count,
+        bytes: data.bytes,
+        todayCount: this.#synthesisByUserAndDay.get(`${userId}:${today}`) ?? 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+    return Promise.resolve({
+      total: this.#synthesisTotal,
+      totalBytes: this.#synthesisTotalBytes,
+      perUser,
+    });
+  }
+
+  getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
+    return Promise.resolve(this.#synthesisByUserAndDay.get(`${userId}:${day}`) ?? 0);
   }
 
   /** Newest first, bounded on write per job — the same contract the KV adapter honours. */

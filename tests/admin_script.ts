@@ -88,6 +88,11 @@ const PAGE_IDS = [
   "manageEpisodesFeedback",
   "regenOutdated",
   "regenAll",
+  // audio-feed-9mp: spend visibility & budget
+  "statSynthesis",
+  "synthesisBody",
+  "synthesisCaption",
+  "newDailyBudget",
 ];
 
 export interface StubElement {

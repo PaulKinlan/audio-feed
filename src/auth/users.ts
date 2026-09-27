@@ -82,6 +82,7 @@ export async function createUser(
     voice?: string;
     feeds?: string[];
     isAdmin?: boolean;
+    dailyEpisodeBudget?: number;
   },
 ): Promise<User> {
   const email = normaliseEmail(input.email);
@@ -98,6 +99,7 @@ export async function createUser(
     feedToken: newFeedToken(),
     voice: input.voice,
     feeds: input.feeds ?? [],
+    dailyEpisodeBudget: input.dailyEpisodeBudget,
   };
 
   // Atomic in the store, so two concurrent signups for one email cannot both

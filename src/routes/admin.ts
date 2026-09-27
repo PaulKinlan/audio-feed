@@ -265,6 +265,11 @@ export function renderAdminPage(
         <dd id="statRuns">—</dd>
         <p class="stat-note">Newest ${RUN_HISTORY_LIMIT} of each job kept.</p>
       </div>
+      <div class="stat">
+        <dt>Episodes synthesised</dt>
+        <dd id="statSynthesis">—</dd>
+        <p class="stat-note">Total generated audio (audio-feed-9mp).</p>
+      </div>
     </dl>
 
     <h3>Background runs</h3>
@@ -284,6 +289,15 @@ export function renderAdminPage(
         <caption id="downloadsCaption">Not loaded.</caption>
         <thead><tr><th>Subscriber</th><th>Requests</th></tr></thead>
         <tbody id="downloadsBody"></tbody>
+      </table>
+    </div>
+
+    <h3>Synthesis by subscriber</h3>
+    <div class="table-wrap">
+      <table>
+        <caption id="synthesisCaption">Not loaded.</caption>
+        <thead><tr><th>Subscriber</th><th>Episodes</th><th>Audio generated</th><th>Today</th></tr></thead>
+        <tbody id="synthesisBody"></tbody>
       </table>
     </div>
     <p class="feedback" id="statsFeedback" role="status" aria-live="polite"></p>
@@ -319,6 +333,12 @@ export function renderAdminPage(
           <option value="skip" selected>Skip code blocks (never read aloud)</option>
           <option value="explain">Summarize / explain code</option>
         </select>
+      </div>
+      <div class="field">
+        <label for="newDailyBudget">Daily episode budget (optional)
+          <span class="hint">Ceiling on synthesized episodes per UTC day. Blank for unlimited (audio-feed-9mp).</span>
+        </label>
+        <input id="newDailyBudget" name="dailyBudget" type="number" min="0" placeholder="Unlimited" autocomplete="off" />
       </div>
       <div class="check">
         <input type="checkbox" id="newIsAdmin" />
@@ -498,16 +518,26 @@ export function renderAdminPage(
   const statPollDuration = document.getElementById("statPollDuration");
   const statPollNote = document.getElementById("statPollNote");
   const statRuns = document.getElementById("statRuns");
+  const statSynthesis = document.getElementById("statSynthesis");
   const runsBody = document.getElementById("runsBody");
   const runsCaption = document.getElementById("runsCaption");
   const downloadsBody = document.getElementById("downloadsBody");
   const downloadsCaption = document.getElementById("downloadsCaption");
+  const synthesisBody = document.getElementById("synthesisBody");
+  const synthesisCaption = document.getElementById("synthesisCaption");
   const statsFeedback = document.getElementById("statsFeedback");
 
   const say = (el, tone, message) => {
     el.dataset.tone = tone;
     el.textContent = message;
   };
+
+  function fmtBytes(b) {
+    if (!b || b <= 0) return "0 B";
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+    return (b / (1024 * 1024)).toFixed(1) + " MB";
+  }
 
   function enableActions() {
     loadUsersBtn.disabled = false;
@@ -802,6 +832,25 @@ export function renderAdminPage(
         : s.downloads.perUser.length + " subscriber" +
           (s.downloads.perUser.length === 1 ? "" : "s") + " with requests.";
 
+      if (s.synthesis && synthesisBody) {
+        if (statSynthesis) statSynthesis.textContent = String(s.synthesis.total);
+        synthesisBody.replaceChildren();
+        for (const u of s.synthesis.perUser.slice(0, 20)) {
+          const tr = document.createElement("tr");
+          tr.appendChild(cell(u.email || u.userId, u.email ? undefined : "mono"));
+          tr.appendChild(cell(String(u.count)));
+          tr.appendChild(cell(fmtBytes(u.bytes)));
+          tr.appendChild(cell(String(u.todayCount)));
+          synthesisBody.appendChild(tr);
+        }
+        if (synthesisCaption) {
+          synthesisCaption.textContent = s.synthesis.perUser.length === 0
+            ? "No synthesis recorded yet."
+            : s.synthesis.perUser.length + " subscriber" +
+              (s.synthesis.perUser.length === 1 ? "" : "s") + " with synthesis.";
+        }
+      }
+
       say(statsFeedback, "ok", "Updated " + new Date().toLocaleTimeString() + ".");
     } catch (error) {
       say(statsFeedback, "error", String(error.message || error));
@@ -865,6 +914,9 @@ export function renderAdminPage(
         user.initialSource.title + " (" + user.initialSource.queued + " queued)",
       ]);
     }
+    if (user.dailyEpisodeBudget !== undefined) {
+      listItems.push(["Daily budget", String(user.dailyEpisodeBudget) + " episodes/day"]);
+    }
     for (const [label, value, cls] of listItems) {
       const [dt, dd] = definition(label, value, cls);
       dl.append(dt, dd);
@@ -917,6 +969,11 @@ export function renderAdminPage(
     const submit = document.getElementById("createUser");
     const newCodeSelect = document.getElementById("newFeedCodeHandling");
     const codeHandling = newCodeSelect ? newCodeSelect.value : "skip";
+    const budgetInput = document.getElementById("newDailyBudget");
+    const budgetVal = budgetInput ? budgetInput.value.trim() : "";
+    const dailyEpisodeBudget = budgetVal !== "" && Number.isFinite(Number(budgetVal))
+      ? Number(budgetVal)
+      : undefined;
     submit.disabled = true;
     try {
       const user = await api("/api/admin/users", {
@@ -927,6 +984,7 @@ export function renderAdminPage(
           feedUrl: feedUrl || undefined,
           isAdmin: document.getElementById("newIsAdmin").checked || undefined,
           codeHandling: feedUrl ? codeHandling : undefined,
+          dailyEpisodeBudget,
         }),
       });
       say(
@@ -1012,6 +1070,7 @@ export function renderAdminPage(
       ["Email", user.email],
       ["Display name", user.displayName || "—"],
       ["Status", user.status],
+      ["Daily budget", user.dailyEpisodeBudget !== undefined ? String(user.dailyEpisodeBudget) + " episodes/day" : "Unlimited"],
       ["User ID", user.id, "mono"],
       ["Feed token", user.feedToken || "—", "mono"],
     ]) {
