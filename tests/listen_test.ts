@@ -18,6 +18,7 @@ import { OFFLINE_CACHE } from "../src/routes/pwa.ts";
 import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { playerClient, playerData } from "./listen_client.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -120,7 +121,7 @@ Deno.test("the player renders the subscriber's ready episodes (audio-feed-4xb)",
     }`,
   );
   // And it IS surfaced, as activity, which is the point of 7s2.
-  const activity = JSON.parse(/const ACTIVITY = (\{.*?\});\n/.exec(html)?.[1] ?? "{}");
+  const activity = playerData(html).activity ?? {};
   assert(
     (activity.inProgress ?? []).some((entry: { title: string }) =>
       entry.title === "Still being made"
@@ -133,13 +134,17 @@ Deno.test("the player renders the subscriber's ready episodes (audio-feed-4xb)",
   // Installability and the feed the subscriber can still take to a podcast app.
   assertStringIncludes(html, 'rel="manifest" href="/manifest.json"');
   assertStringIncludes(html, `href="${BASE}/feed/${TOKEN}/master.xml"`);
-  assertStringIncludes(html, "mediaSession");
+  // audio-feed-3xq: the client is a content-addressed asset now, so the assertion follows the link
+  // the page actually renders rather than reading the page as source.
+  const client = await playerClient(fetch, BASE, html);
+  assertStringIncludes(client, "mediaSession");
 });
 
 Deno.test("the player remembers the token so a home-screen launch needs no typing", async () => {
   const { fetch } = await seeded();
   const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
-  assertStringIncludes(html, 'localStorage.setItem("audio-feed-token"');
+  const client = await playerClient(fetch, BASE, html);
+  assertStringIncludes(client, 'localStorage.setItem("audio-feed-token"');
   // …and /listen restores it client-side, since a server cannot read localStorage.
   const landing = await (await fetch(get("/listen"))).text();
   assertStringIncludes(landing, 'localStorage.getItem("audio-feed-token")');
@@ -363,13 +368,18 @@ Deno.test("the download promises a background fetch only after confirming one (a
   const { fetch } = await seeded();
   const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
 
-  const registered = html.indexOf("backgroundFetch.fetch(");
-  const confirmed = html.indexOf("backgroundFetch.getIds()");
-  const promised = html.indexOf("you can close this tab");
+  const client = await playerClient(fetch, BASE, html);
+  // audio-feed-3xq moved the client into an asset, and typing it changed the call spelling from
+  // `backgroundFetch.fetch(` to the optional-chained `backgroundFetch?.fetch?.(`. Searching for the
+  // SHAPE the code now has, in the file that now holds it. The property this test guards is the
+  // ORDER, and that is unchanged.
+  const registered = client.indexOf("backgroundFetch?.fetch?.(");
+  const confirmed = client.indexOf("backgroundFetch?.getIds?.()");
+  const promised = client.indexOf("you can close this tab");
 
-  assert(registered > 0, "the page must attempt a background fetch");
-  assert(confirmed > 0, "the page must confirm the registration exists");
-  assert(promised > 0, "the page tells the subscriber the tab can be closed");
+  assert(registered > 0, "the client must attempt a background fetch");
+  assert(confirmed > 0, "the client must confirm the registration exists");
+  assert(promised > 0, "the client tells the subscriber the tab can be closed");
   assert(
     confirmed < promised,
     "the OS-level promise must come AFTER getIds() confirms the registration, " +
@@ -378,14 +388,14 @@ Deno.test("the download promises a background fetch only after confirming one (a
 
   // The fallback is the path that runs everywhere. Background Fetch is Chrome-only
   // and not Baseline, so this is the MAJORITY path and must not be a stub.
-  assertStringIncludes(html, "const response = await fetch(episode.audioUrl)");
-  assertStringIncludes(html, "await store.put(episode.audioUrl, response)");
+  assertStringIncludes(client, "const response = await fetch(episode.audioUrl)");
+  assertStringIncludes(client, "await store.put(episode.audioUrl, response)");
 
   // And the cache confirmation is a bounded poll, not a single read: the page's
   // `progress` event fires when the RECORD settles, while the service worker
   // writes the cache independently under waitUntil. A single read returned EMPTY
   // for a download that had in fact succeeded (measured, audio-feed-98i).
-  assertStringIncludes(html, "async function waitForCache(");
+  assertStringIncludes(client, "async function waitForCache(");
 });
 
 Deno.test("the player links back to the source article for read-along (audio-feed-585)", async () => {

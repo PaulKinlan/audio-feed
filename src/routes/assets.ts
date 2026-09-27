@@ -16,6 +16,7 @@
  * deploy gets a new URL, with no cache purge step to forget.
  */
 import listenCss from "../assets/listen.css" with { type: "text" };
+import listenJs from "../assets/listen.js" with { type: "text" };
 import type { RouteContext } from "../router.ts";
 
 /**
@@ -36,6 +37,7 @@ function fnv1a(text: string): string {
 /** Every asset this server can hand out, keyed by the name a page asks for. */
 const ASSETS: Record<string, { body: string; contentType: string }> = {
   "listen.css": { body: listenCss, contentType: "text/css; charset=utf-8" },
+  "listen.js": { body: listenJs, contentType: "text/javascript; charset=utf-8" },
 };
 
 /** The URL a page should reference for an asset, content-addressed. */

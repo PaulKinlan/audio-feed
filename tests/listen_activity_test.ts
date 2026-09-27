@@ -14,6 +14,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { playerData } from "./listen_client.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -133,12 +134,13 @@ Deno.test("a regenerating episode stays in the playable list and is NOT doubled 
   assertEquals(body.playable, 1, "and it still counts as playable");
 
   const html = await (await fetch(req(`/listen/${TOKEN}`))).text();
-  const playable = JSON.parse(/const EPISODES = (\[.*?\]);\n/.exec(html)?.[1] ?? "[]");
+  const data = playerData(html);
+  const playable = data.episodes ?? [];
   assert(
     playable.some((episode: { id: string }) => episode.id === "ep-ready"),
     "the player must still offer the old audio",
   );
-  const activity = JSON.parse(/const ACTIVITY = (\{.*?\});\n/.exec(html)?.[1] ?? "{}");
+  const activity = data.activity ?? {};
   assert(
     !(activity.inProgress ?? []).some((entry: { id: string }) => entry.id === "ep-ready"),
     "and the activity panel must not list the same episode a second time",
