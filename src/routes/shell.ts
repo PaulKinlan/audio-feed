@@ -33,7 +33,7 @@ export function viewerOf(user: User | null): Viewer | null {
   };
 }
 
-export type ShellSection = "home" | "login" | "account" | "admin";
+export type ShellSection = "home" | "login" | "account" | "admin" | "player";
 
 /** Colour, type and shape. Spacing scales stay per page; these are the identity. */
 export const SHELL_TOKENS = `
@@ -267,6 +267,7 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
     `<a href="${href}"${current === section ? ` aria-current="page"` : ""}>${label}</a>`;
   const nav = [
     link("/", "Home", "home"),
+    link("/listen", "Web Player", "player"),
     viewer ? link("/account", "Account", "account") : "",
     viewer?.isAdmin ? link("/admin", "Admin", "admin") : "",
   ].join("");
