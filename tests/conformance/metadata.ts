@@ -1442,9 +1442,41 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     const acked = await store.ackNotification("n-1");
     assertEquals(acked, true);
 
+    // Double acking returns false
+    const doubleAcked = await store.ackNotification("n-1");
+    assertEquals(doubleAcked, false);
+
     const remaining = await store.listOutbox();
     assertEquals(remaining.length, 1);
     assertEquals(remaining[0]!.id, "n-2");
+  });
+
+  test("queueNotification deduplicates identical episode notifications (audio-feed-np5)", async (store) => {
+    const n1: OutboxNotification = {
+      id: "n-dup-1",
+      userId: "u-1",
+      episodeId: "ep-dup-1",
+      status: "ready",
+      title: "Episode Dup",
+      playerUrl: "https://audio.example.com/listen/tok",
+      createdAt: "2026-09-27T10:00:00.000Z",
+    };
+    const n2: OutboxNotification = {
+      id: "n-dup-2",
+      userId: "u-1",
+      episodeId: "ep-dup-1",
+      status: "ready",
+      title: "Episode Dup Retry",
+      playerUrl: "https://audio.example.com/listen/tok",
+      createdAt: "2026-09-27T10:00:05.000Z",
+    };
+
+    await store.queueNotification(n1);
+    await store.queueNotification(n2);
+
+    const list = await store.listOutbox();
+    assertEquals(list.length, 1, "only 1 notification queued for same episode and status");
+    assertEquals(list[0]!.id, "n-dup-1");
   });
 
   test("an empty store reports no runs", async (store) => {

@@ -752,7 +752,12 @@ export function createListOutboxHandler(ctx: AppContext): AppHandlers["adminList
   return async ({ req }) => {
     const denied = await adminGate(ctx, req);
     if (denied) return denied;
-    const notifications = await ctx.stores.metadata.listOutbox();
+    const url = new URL(req.url);
+    const parsedLimit = Number(url.searchParams.get("limit") ?? 50);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(1, Math.floor(parsedLimit)), 100)
+      : 50;
+    const notifications = await ctx.stores.metadata.listOutbox(limit);
     return Response.json({ ok: true, notifications }, {
       headers: { "cache-control": "no-store" },
     });

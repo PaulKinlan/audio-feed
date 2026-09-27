@@ -1165,6 +1165,15 @@ Deno.test("GET /api/admin/outbox requires admin token and returns notifications 
   assertEquals(ackRes.status, 200);
   assertEquals((await ackRes.json()).ok, true);
 
+  // Second ack returns 404
+  const secondAckRes = await fetch(
+    new Request(`${BASE}/api/admin/outbox/n-outbox-1/ack`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(secondAckRes.status, 404);
+
   // List again -> 0 pending
   const after = await (await fetch(
     new Request(`${BASE}/api/admin/outbox`, {

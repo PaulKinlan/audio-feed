@@ -938,11 +938,22 @@ export class KvMetadataStore implements MetadataStore {
   // -- outbox notifications (audio-feed-np5) --------------------------------
 
   async queueNotification(notification: OutboxNotification): Promise<void> {
+    const dedupeKey = ["outbox_dedupe", notification.episodeId, notification.status];
+    const existing = await this.#kv.get(dedupeKey);
+    if (existing.value) return; // Deduplicate: already queued for this episode and status
+
     const tx = this.#kv.atomic()
-      .set(["outbox", notification.id], notification)
+      .check(existing)
+      .set(dedupeKey, notification.id, { expireIn: 14 * 86400 * 1000 })
+      .set(["outbox", notification.id], notification, { expireIn: 14 * 86400 * 1000 })
       .set(["outbox_pending", notification.createdAt, notification.id], notification.id);
     const res = await tx.commit();
-    if (!res.ok) throw new Error(`queueNotification failed for ${notification.id}`);
+    if (!res.ok) {
+      // If atomic commit failed due to race, re-check if dedupe key was set by another worker
+      const raced = await this.#kv.get(dedupeKey);
+      if (raced.value) return;
+      throw new Error(`queueNotification failed for ${notification.id}`);
+    }
   }
 
   async listOutbox(limit = 50): Promise<OutboxNotification[]> {
@@ -957,11 +968,12 @@ export class KvMetadataStore implements MetadataStore {
 
   async ackNotification(id: string): Promise<boolean> {
     const entry = await this.#kv.get<OutboxNotification>(["outbox", id]);
-    if (!entry.value) return false;
-    const n = entry.value;
+    if (!entry.value || entry.value.deliveredAt) return false;
+    const n = structuredClone(entry.value);
     n.deliveredAt = new Date().toISOString();
     const tx = this.#kv.atomic()
-      .set(["outbox", id], n)
+      .check(entry)
+      .set(["outbox", id], n, { expireIn: 7 * 86400 * 1000 })
       .delete(["outbox_pending", n.createdAt, n.id]);
     const res = await tx.commit();
     return res.ok;

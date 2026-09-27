@@ -656,7 +656,22 @@ export class MemoryMetadataStore implements MetadataStore {
   // -- outbox notifications (audio-feed-np5) --------------------------------
 
   queueNotification(notification: OutboxNotification): Promise<void> {
+    // Deduplicate: skip if an entry for the same episodeId and status already exists
+    const duplicate = this.#outbox.some(
+      (n) => n.episodeId === notification.episodeId && n.status === notification.status,
+    );
+    if (duplicate) return Promise.resolve();
+
     this.#outbox.push(structuredClone(notification));
+    // Keep outbox bounded in memory to 500 items, pruning delivered items first
+    if (this.#outbox.length > 500) {
+      const deliveredIdx = this.#outbox.findIndex((n) => n.deliveredAt);
+      if (deliveredIdx >= 0) {
+        this.#outbox.splice(deliveredIdx, 1);
+      } else {
+        this.#outbox.shift();
+      }
+    }
     return Promise.resolve();
   }
 
@@ -672,7 +687,7 @@ export class MemoryMetadataStore implements MetadataStore {
 
   ackNotification(id: string): Promise<boolean> {
     const found = this.#outbox.find((n) => n.id === id);
-    if (!found) return Promise.resolve(false);
+    if (!found || found.deliveredAt) return Promise.resolve(false);
     found.deliveredAt = new Date().toISOString();
     return Promise.resolve(true);
   }
