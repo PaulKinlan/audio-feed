@@ -31,6 +31,7 @@
 import { createAccountHandlers } from "./routes/account_api.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
 import { createIngestHandler } from "./compose/ingest.ts";
+import { createRequestAccessHandler } from "./compose/access.ts";
 import {
   createCreateSourceHandler,
   createListSourcesHandler,
@@ -77,6 +78,7 @@ export {
   createSourceFeedHandler,
 } from "./compose/feeds.ts";
 export { createIngestHandler } from "./compose/ingest.ts";
+export { createRequestAccessHandler, type RequestAccessDeps } from "./compose/access.ts";
 export {
   createAckOutboxHandler,
   createAdminCreateUserSourceHandler,
@@ -121,6 +123,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminSetupLink: createAdminSetupLinkHandler(ctx),
     adminListOutbox: createListOutboxHandler(ctx),
     adminAckOutbox: createAckOutboxHandler(ctx),
+    requestAccess: createRequestAccessHandler(ctx, deps.requestAccess),
     account: createAccountHandlers(ctx, {
       feedTransport: deps.feedTransport,
       fetchArticle: deps.fetchArticle,

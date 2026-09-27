@@ -260,22 +260,22 @@ export function renderHomePage({
   button[type="submit"]:hover { filter: brightness(1.1); }
   button[type="submit"][aria-disabled="true"] { opacity: 0.6; cursor: progress; }
 
-  #result {
+  #result, #feed-result, #request-result {
     margin-block-start: var(--space-4);
     max-inline-size: var(--measure);
     overflow-wrap: anywhere;
   }
-  #result:not(:empty) {
+  #result:not(:empty), #feed-result:not(:empty), #request-result:not(:empty) {
     padding: var(--space-3);
     border: 1px solid var(--border);
     border-inline-start: 4px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
   }
-  #result.ok { border-inline-start-color: var(--ok); }
-  #result.bad { border-inline-start-color: var(--danger); }
-  #result p { margin: 0; }
-  #result .detail { color: var(--text-muted); font-size: 0.875rem; margin-block-start: var(--space-1); }
+  #result.ok, #feed-result.ok, #request-result.ok { border-inline-start-color: var(--ok); }
+  #result.bad, #feed-result.bad, #request-result.bad { border-inline-start-color: var(--danger); }
+  #result p, #feed-result p, #request-result p { margin: 0; }
+  #result .detail, #feed-result .detail, #request-result .detail { color: var(--text-muted); font-size: 0.875rem; margin-block-start: var(--space-1); }
 
   .note {
     background: var(--surface-sunken);
@@ -328,6 +328,7 @@ export function renderHomePage({
     Every listener gets a private feed token. That token <em>is</em> the
     credential — podcast apps cannot log in, so anyone holding your feed URL can
     read your feed. Treat it like a password and do not share it.
+    Don't have a token? <a href="#request-access">Request access</a> below to join the preview.
   </p>
   <ul class="urls">
     <li>
@@ -352,6 +353,49 @@ export function renderHomePage({
     <p><strong>Welcome back!</strong> A saved player was found on this device:
     <a href="/listen" id="openPlayerLink" style="font-weight: 600; text-decoration: underline;">Open your Web Player &rarr;</a></p>
   </div>
+
+  <h2 id="request-access">Request access</h2>
+  <p>
+    Audio Feed is currently in private preview. Every account requires administrator approval
+    before audio is synthesised, keeping resource spend within budget. Request access below
+    and an administrator will review your account.
+  </p>
+  <form id="request-access-form" action="/api/request-access" method="post">
+    <div class="field">
+      <label for="request-email">Email address</label>
+      <span class="hint" id="request-email-hint">Where you'll receive your approval notification.</span>
+      <input
+        type="email"
+        id="request-email"
+        name="email"
+        required
+        placeholder="you@example.com"
+        aria-describedby="request-email-hint"
+        aria-errormessage="request-email-error"
+        autocomplete="email"
+        spellcheck="false"
+      >
+      <span class="error" id="request-email-error"><span aria-hidden="true">⚠</span> Enter a valid email address.</span>
+    </div>
+
+    <div class="field">
+      <label for="request-name">Display name (optional)</label>
+      <span class="hint" id="request-name-hint">How you'd like your private feed named.</span>
+      <input
+        type="text"
+        id="request-name"
+        name="displayName"
+        placeholder="e.g. Ada Lovelace"
+        aria-describedby="request-name-hint"
+        autocomplete="name"
+        spellcheck="false"
+      >
+    </div>
+
+    <button type="submit" id="request-submit">Request access</button>
+  </form>
+
+  <div id="request-result" role="status" aria-live="polite"></div>
 
   <h2 id="send">Send an article to audio</h2>
   ${
@@ -782,6 +826,90 @@ curl -X POST ${base}/api/sources \\
       feedButton.textContent = "Subscribe to Feed";
     }
   });
+
+  const requestForm = document.getElementById("request-access-form");
+  const requestSubmit = document.getElementById("request-submit");
+  const requestResult = document.getElementById("request-result");
+  const requestEmail = document.getElementById("request-email");
+  const requestName = document.getElementById("request-name");
+
+  const sayRequest = (kind, message, detail) => {
+    requestResult.className = kind;
+    requestResult.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = message;
+    requestResult.append(p);
+    if (detail) {
+      const d = document.createElement("p");
+      d.className = "detail";
+      d.textContent = detail;
+      requestResult.append(d);
+    }
+  };
+
+  if (requestForm && requestEmail && requestSubmit) {
+    requestEmail.addEventListener("blur", () => sync(requestEmail));
+    requestEmail.addEventListener("input", () => {
+      if (requestEmail.checkValidity()) {
+        requestEmail.removeAttribute("aria-invalid");
+        requestEmail.classList.remove("is-invalid");
+      }
+    });
+
+    requestForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      sync(requestEmail);
+      if (!requestEmail.checkValidity()) {
+        requestEmail.reportValidity();
+        return;
+      }
+
+      requestSubmit.setAttribute("aria-disabled", "true");
+      requestSubmit.textContent = "Submitting…";
+      sayRequest("", "Submitting access request…");
+
+      try {
+        const response = await fetch("/api/request-access", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            email: requestEmail.value.trim(),
+            displayName: requestName.value.trim() || undefined,
+          }),
+        });
+
+        const body = await response.json().catch(() => ({}));
+
+        if (response.status === 201 || response.status === 200) {
+          sayRequest(
+            "ok",
+            body.message || "Access request received! An administrator will review your account.",
+            "Nothing generates until an administrator approves your account.",
+          );
+          requestForm.reset();
+          requestEmail.removeAttribute("aria-invalid");
+          requestEmail.classList.remove("is-invalid");
+        } else if (response.status === 429) {
+          sayRequest(
+            "bad",
+            "Too many requests. Please wait a while before requesting access again.",
+            "Rate limit exceeded.",
+          );
+        } else {
+          sayRequest(
+            "bad",
+            body.error || "The access request could not be processed.",
+            "Status " + response.status,
+          );
+        }
+      } catch (error) {
+        sayRequest("bad", "Could not reach the server.", String(error));
+      } finally {
+        requestSubmit.removeAttribute("aria-disabled");
+        requestSubmit.textContent = "Request access";
+      }
+    });
+  }
 })();
 </script>
 </body>

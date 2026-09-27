@@ -1,0 +1,83 @@
+/**
+ * Rate limiting for unauthenticated public endpoints (audio-feed-r97).
+ *
+ * Prevents denial-of-service, row exhaustion, and spam on public endpoints
+ * like `POST /api/request-access`.
+ *
+ * Implements a memory-backed sliding-window counter per client key (typically IP).
+ */
+
+export interface RateLimitConfig {
+  /** Maximum allowed requests within the time window. */
+  maxRequests: number;
+  /** Sliding window duration in milliseconds. */
+  windowMs: number;
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  resetMs: number;
+}
+
+export class SlidingWindowRateLimiter {
+  readonly #config: RateLimitConfig;
+  readonly #hits = new Map<string, number[]>();
+
+  constructor(config: RateLimitConfig) {
+    this.#config = config;
+  }
+
+  /**
+   * Check whether a key is within the rate limit, recording the attempt.
+   */
+  check(key: string, now = Date.now()): RateLimitResult {
+    const windowStart = now - this.#config.windowMs;
+    const timestamps = this.#hits.get(key) ?? [];
+
+    // Filter out timestamps outside the active window
+    const active = timestamps.filter((t) => t > windowStart);
+
+    if (active.length >= this.#config.maxRequests) {
+      const oldestActive = active[0] ?? now;
+      const resetMs = Math.max(0, oldestActive + this.#config.windowMs - now);
+      this.#hits.set(key, active);
+      return {
+        allowed: false,
+        remaining: 0,
+        resetMs,
+      };
+    }
+
+    active.push(now);
+    this.#hits.set(key, active);
+
+    return {
+      allowed: true,
+      remaining: this.#config.maxRequests - active.length,
+      resetMs: this.#config.windowMs,
+    };
+  }
+
+  /** Reset tracked hits for a key (primarily for tests). */
+  reset(key?: string): void {
+    if (key) this.#hits.delete(key);
+    else this.#hits.clear();
+  }
+}
+
+/**
+ * Extract client IP from request, honouring trusted proxy headers when configured.
+ */
+export function extractClientIp(req: Request, trustProxy = false): string {
+  if (trustProxy) {
+    const cf = req.headers.get("cf-connecting-ip");
+    if (cf) return cf.trim();
+    const xff = req.headers.get("x-forwarded-for");
+    if (xff) {
+      const first = xff.split(",")[0]?.trim();
+      if (first) return first;
+    }
+  }
+  return "direct";
+}
