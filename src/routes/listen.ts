@@ -111,6 +111,7 @@ import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
+import { DESIGN_TOKENS } from "./tokens.ts";
 import { type AudioMode, type Episode, isPublishable, isSynthesisAuthorized } from "../types.ts";
 
 /** One row of the player's episode list, with everything the UI renders. */
@@ -209,7 +210,7 @@ export function renderListenPage(
     offlineEnabled,
   };
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -600,7 +601,7 @@ const forbidden = (message: string) =>
 /** `/listen` without a token: restore from localStorage, or paste a feed URL. */
 export function renderListenLanding(publicBaseUrl: string): string {
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -609,16 +610,7 @@ export function renderListenLanding(publicBaseUrl: string): string {
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
 <style>
-  :root {
-    color-scheme: dark;
-    --bg:#0a0a0c; --surface:#131317; --surface-2:#1c1c22;
-    --text:#f4f4f5; --text-2:#b4b4bd; --muted:#86868f;
-    --border:#24242b; --border-2:#34343e;
-    --accent:#a78bfa; --accent-2:#c4b5fd; --accent-ink:#14121c;
-    --danger:#fca5a5;
-    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  }
+  ${DESIGN_TOKENS}
   * { box-sizing:border-box; }
   ::selection { background: var(--accent); color: var(--accent-ink); }
   body {
