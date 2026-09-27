@@ -232,6 +232,15 @@ const savedCount = $("savedCount");
 const playerNotice = $("playerNotice");
 const installBtn = /** @type {HTMLButtonElement} */ (/** @type {unknown} */ ($("installBtn")));
 
+// audio-feed-3h1: filtering controls
+const filterSection = $("filterSection");
+const filterText = /** @type {HTMLInputElement} */ (/** @type {unknown} */ ($("filterText")));
+const filterSource = /** @type {HTMLSelectElement} */ (/** @type {unknown} */ ($("filterSource")));
+const filterEmpty = $("filterEmpty");
+const filterEmptyMessage = $("filterEmptyMessage");
+const clearFilterBtn = $("clearFilterBtn");
+const episodeCount = $("episodeCount");
+
 const downloaded = new Set();
 /** @type {PlayerEpisode|null} */
 let current = null;
@@ -625,15 +634,153 @@ async function refreshActivity() {
       headers: { accept: "application/json" },
     });
     if (!res.ok) return;
-    renderActivity(await res.json());
+    const data = await res.json();
+    ACTIVITY.inProgress = data.inProgress ?? [];
+    ACTIVITY.failed = data.failed ?? [];
+    render();
   } catch { /* offline: the next online poll, or a reload, corrects it */ }
 }
 
+// ── filtering (audio-feed-3h1) ──────────────────────────────────────────
+const FILTER_KEY = TOKEN ? `audio-feed-filter:${TOKEN}` : "audio-feed-filter";
+
+function loadFilterState() {
+  try {
+    const raw = localStorage.getItem(FILTER_KEY);
+    if (!raw) return { source: "", text: "" };
+    const parsed = JSON.parse(raw);
+    return {
+      source: typeof parsed?.source === "string" ? parsed.source : "",
+      text: typeof parsed?.text === "string" ? parsed.text : "",
+    };
+  } catch {
+    return { source: "", text: "" };
+  }
+}
+
+/**
+ * @param {string} source
+ * @param {string} text
+ */
+function saveFilterState(source, text) {
+  try {
+    if (!source && !text) {
+      localStorage.removeItem(FILTER_KEY);
+    } else {
+      localStorage.setItem(FILTER_KEY, JSON.stringify({ source, text }));
+    }
+  } catch {
+    // Private mode / storage quota exception handled safely
+  }
+}
+
+function populateSourceFilter() {
+  const sources = new Set();
+  for (const ep of EPISODES) {
+    if (ep.source) sources.add(ep.source);
+  }
+  for (const act of (ACTIVITY.inProgress ?? [])) {
+    if (act.source) sources.add(act.source);
+  }
+  for (const act of (ACTIVITY.failed ?? [])) {
+    if (act.source) sources.add(act.source);
+  }
+  const sorted = Array.from(sources).sort((a, b) => String(a).localeCompare(String(b)));
+
+  const currentVal = filterSource.value;
+  filterSource.replaceChildren();
+  const allOpt = document.createElement("option");
+  allOpt.value = "";
+  allOpt.textContent = "All sources";
+  filterSource.appendChild(allOpt);
+
+  for (const s of sorted) {
+    const opt = document.createElement("option");
+    opt.value = String(s);
+    opt.textContent = String(s);
+    filterSource.appendChild(opt);
+  }
+  if (currentVal && sources.has(currentVal)) {
+    filterSource.value = currentVal;
+  }
+}
+
 function render() {
+  populateSourceFilter();
+  const selectedSource = filterSource.value.trim().toLowerCase();
+  const searchText = filterText.value.trim().toLowerCase();
+  const isFiltered = Boolean(selectedSource || searchText);
+
+  /** @param {PlayerEpisode} ep */
+  const matchesEpisode = (ep) => {
+    if (selectedSource && (ep.source || "").toLowerCase() !== selectedSource) return false;
+    if (searchText) {
+      const titleMatch = (ep.title || "").toLowerCase().includes(searchText);
+      const sourceMatch = (ep.source || "").toLowerCase().includes(searchText);
+      const authorMatch = (ep.author || "").toLowerCase().includes(searchText);
+      if (!titleMatch && !sourceMatch && !authorMatch) return false;
+    }
+    return true;
+  };
+
+  /** @param {ActivityEntry} act */
+  const matchesActivity = (act) => {
+    if (selectedSource && (act.source || "").toLowerCase() !== selectedSource) return false;
+    if (searchText) {
+      const titleMatch = (act.title || "").toLowerCase().includes(searchText);
+      const sourceMatch = (act.source || "").toLowerCase().includes(searchText);
+      if (!titleMatch && !sourceMatch) return false;
+    }
+    return true;
+  };
+
+  const filteredEpisodes = EPISODES.filter(matchesEpisode);
+  // Consistent filtering across panels (audio-feed-3h1): activity rows are filtered by the
+  // same active source and text criteria as episodes. This ensures the entire view represents
+  // the user's selected scope rather than showing unrelated publications in the activity banner.
+  const filteredActivity = {
+    inProgress: (ACTIVITY.inProgress ?? []).filter(matchesActivity),
+    failed: (ACTIVITY.failed ?? []).filter(matchesActivity),
+    playable: filteredEpisodes.length,
+  };
+
   list.replaceChildren();
-  for (const episode of EPISODES) list.appendChild(row(episode));
-  empty.classList.toggle("hidden", EPISODES.length > 0);
-  renderActivity(ACTIVITY);
+  for (const episode of filteredEpisodes) list.appendChild(row(episode));
+
+  renderActivity(filteredActivity);
+
+  // Honest empty states (audio-feed-3h1)
+  if (EPISODES.length === 0) {
+    empty.classList.remove("hidden");
+    filterEmpty.classList.add("hidden");
+    filterSection.classList.add("hidden");
+  } else {
+    empty.classList.add("hidden");
+    filterSection.classList.remove("hidden");
+    if (
+      filteredEpisodes.length === 0 &&
+      filteredActivity.inProgress.length === 0 &&
+      filteredActivity.failed.length === 0
+    ) {
+      filterEmpty.classList.remove("hidden");
+      const terms = [];
+      if (filterSource.value) terms.push(`source "${filterSource.value}"`);
+      if (filterText.value.trim()) terms.push(`search "${filterText.value.trim()}"`);
+      filterEmptyMessage.textContent = "No episodes match " + terms.join(" and ") + ".";
+    } else {
+      filterEmpty.classList.add("hidden");
+    }
+  }
+
+  // Update header count honestly (audio-feed-3h1)
+  const total = EPISODES.length;
+  if (!isFiltered) {
+    episodeCount.textContent = total + " episode" + (total === 1 ? "" : "s");
+  } else {
+    episodeCount.textContent = filteredEpisodes.length + " of " + total + " episode" +
+      (total === 1 ? "" : "s");
+  }
+
   updateCounts();
 }
 
@@ -1072,9 +1219,39 @@ installBtn.addEventListener("click", async () => {
   }
 });
 
+// ---- filters (audio-feed-3h1) -------------------------------------------
+filterText.addEventListener("input", () => {
+  saveFilterState(filterSource.value, filterText.value);
+  render();
+});
+filterText.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    filterText.value = "";
+    saveFilterState(filterSource.value, "");
+    render();
+  }
+});
+filterSource.addEventListener("change", () => {
+  saveFilterState(filterSource.value, filterText.value);
+  render();
+});
+clearFilterBtn.addEventListener("click", () => {
+  filterText.value = "";
+  filterSource.value = "";
+  saveFilterState("", "");
+  render();
+});
+
 // ---- boot ---------------------------------------------------------------
 async function boot() {
   await refreshDownloaded();
+
+  // Restore persisted filter state for this token (audio-feed-3h1)
+  const savedFilter = loadFilterState();
+  populateSourceFilter();
+  if (savedFilter.source) filterSource.value = savedFilter.source;
+  if (savedFilter.text) filterText.value = savedFilter.text;
+
   render();
   if (EPISODES.length > 0) {
     // Preselect so the dock shows something playable, without starting audio.
