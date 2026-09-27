@@ -875,20 +875,30 @@ export class KvMetadataStore implements MetadataStore {
     return { total: Number(total.value?.value ?? 0n), perUser };
   }
 
-  // Synthesis stats & budget tracking (audio-feed-9mp)
+  // Synthesis stats & budget tracking (audio-feed-9mp, audio-feed-akm)
   async recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
-    try {
-      const day = utcDayKey(at);
-      const tx = this.#kv.atomic()
-        .sum(["synthesis_total"], 1n)
-        .sum(["synthesis_total_bytes"], BigInt(bytes))
-        .sum(["synthesis_by_user", userId], 1n)
-        .sum(["synthesis_bytes_by_user", userId], BigInt(bytes))
-        .sum(["synthesis_daily", userId, day], 1n);
-      await tx.commit();
-    } catch {
-      // Non-fatal counter
+    const day = utcDayKey(at);
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const tx = this.#kv.atomic()
+          .sum(["synthesis_total"], 1n)
+          .sum(["synthesis_total_bytes"], BigInt(bytes))
+          .sum(["synthesis_by_user", userId], 1n)
+          .sum(["synthesis_bytes_by_user", userId], BigInt(bytes))
+          .sum(["synthesis_daily", userId, day], 1n);
+        const res = await tx.commit();
+        if (res.ok) return;
+        lastError = new Error(`atomic commit failed (attempt ${attempt + 1}/3)`);
+      } catch (err) {
+        lastError = err;
+      }
     }
+    console.error(
+      `[audio-feed] recordSynthesis failed for user ${userId} (${bytes} bytes):`,
+      lastError,
+    );
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   async getSynthesisCounts(today = utcDayKey()): Promise<SynthesisCounts> {
