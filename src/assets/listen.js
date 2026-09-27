@@ -119,6 +119,85 @@ try {
 } catch { /* private mode */ }
 
 /**
+ * @typedef {object} SavedPosition
+ * @property {number} position
+ * @property {number} updatedAt
+ */
+
+// audio-feed-kzi: local-first playback position persistence.
+// Scoped per-token so a shared device with multiple subscribers keeps positions isolated.
+const POSITIONS_KEY = TOKEN ? `audio-feed-positions:${TOKEN}` : "audio-feed-positions";
+
+/** @returns {Record<string, SavedPosition>} */
+function loadPositions() {
+  try {
+    const raw = localStorage.getItem(POSITIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * @param {string} episodeId
+ * @param {number} seconds
+ */
+function savePosition(episodeId, seconds) {
+  if (!episodeId) return;
+  try {
+    const positions = loadPositions();
+    // Seeking to near-zero clears the resume position so it doesn't haunt the item.
+    if (seconds <= 2) {
+      delete positions[episodeId];
+    } else {
+      positions[episodeId] = { position: Math.round(seconds), updatedAt: Date.now() };
+      // Bounded storage: keep newest 50 positions per token.
+      const keys = Object.keys(positions);
+      if (keys.length > 50) {
+        keys
+          .sort((a, b) => (positions[a]?.updatedAt ?? 0) - (positions[b]?.updatedAt ?? 0))
+          .slice(0, keys.length - 50)
+          .forEach((k) => delete positions[k]);
+      }
+    }
+    localStorage.setItem(POSITIONS_KEY, JSON.stringify(positions));
+  } catch {
+    // Private mode / storage quota exception handled safely without breaking player.
+  }
+}
+
+/** @param {string} episodeId */
+function clearPosition(episodeId) {
+  if (!episodeId) return;
+  try {
+    const positions = loadPositions();
+    if (positions[episodeId]) {
+      delete positions[episodeId];
+      localStorage.setItem(POSITIONS_KEY, JSON.stringify(positions));
+    }
+  } catch {
+    // Private mode
+  }
+}
+
+/**
+ * @param {string} episodeId
+ * @returns {number}
+ */
+function getPosition(episodeId) {
+  if (!episodeId) return 0;
+  try {
+    const positions = loadPositions();
+    const entry = positions[episodeId];
+    return entry && typeof entry.position === "number" ? entry.position : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Every id the player looks up is rendered by renderListenPage in the same deploy that serves this
  * file, so a missing element means page and asset are out of step — a broken build, not a runtime
  * state to recover from. Checked once here rather than optional-chained at all 60 uses, because 60
@@ -299,7 +378,12 @@ function row(episode) {
   play.dataset.action = "play";
   play.setAttribute("aria-label", "Play " + episode.title);
   play.appendChild(icon("play"));
-  play.addEventListener("click", () => select(episode, true));
+  play.addEventListener("click", () => {
+    const pos = getPosition(episode.id);
+    const dur = episode.durationSeconds || 0;
+    const isResume = pos > 5 && (dur === 0 || pos < dur - 5);
+    void select(episode, true, isResume ? pos : 0);
+  });
   li.appendChild(play);
 
   const body = document.createElement("div");
@@ -366,7 +450,71 @@ function row(episode) {
     actions.appendChild(read);
   }
   li.appendChild(actions);
+
+  updateRowResumeUI(li, episode);
+
   return li;
+}
+
+/**
+ * @param {HTMLLIElement} li
+ * @param {PlayerEpisode} episode
+ */
+function updateRowResumeUI(li, episode) {
+  const play = /** @type {HTMLButtonElement|null} */ (li.querySelector("button.ep-play"));
+  const meta = li.querySelector(".ep-meta");
+  const actions = li.querySelector(".ep-actions");
+  if (!play || !meta || !actions) return;
+
+  const pos = getPosition(episode.id);
+  const dur = episode.durationSeconds || 0;
+  const isResume = pos > 5 && (dur === 0 || pos < dur - 5);
+
+  play.dataset.action = isResume ? "resume" : "play";
+  play.setAttribute(
+    "aria-label",
+    isResume ? "Resume " + episode.title + " from " + fmt(pos) : "Play " + episode.title,
+  );
+
+  const existingBadge = meta.querySelector(".ep-resume-badge");
+  if (isResume) {
+    if (existingBadge) {
+      existingBadge.textContent = "Resume from " + fmt(pos);
+      existingBadge.setAttribute("data-position", String(pos));
+    } else {
+      const badge = span("Resume from " + fmt(pos), "ep-resume-badge");
+      badge.setAttribute("data-position", String(pos));
+      meta.appendChild(dot());
+      meta.appendChild(badge);
+    }
+  } else if (existingBadge) {
+    const prev = existingBadge.previousElementSibling;
+    if (prev && prev.classList.contains("dot")) prev.remove();
+    existingBadge.remove();
+  }
+
+  const existingRestart = actions.querySelector(".ep-restart");
+  if (isResume) {
+    if (!existingRestart) {
+      const restart = document.createElement("button");
+      restart.type = "button";
+      restart.className = "ep-restart";
+      restart.dataset.action = "restart";
+      restart.setAttribute("aria-label", "Play from start: " + episode.title);
+      restart.textContent = "Play from start";
+      restart.addEventListener("click", () => {
+        savePosition(episode.id, 0);
+        clearPosition(episode.id);
+        updateRowResumeUI(li, episode);
+        void select(episode, true, 0);
+      });
+      const downloadBtn = actions.querySelector(".ep-download");
+      if (downloadBtn) actions.insertBefore(restart, downloadBtn);
+      else actions.appendChild(restart);
+    }
+  } else if (existingRestart) {
+    existingRestart.remove();
+  }
 }
 
 // ── activity panel (audio-feed-7s2) ────────────────────────────────────────
@@ -499,10 +647,13 @@ function updateCounts() {
 
 // ---- selection and transport --------------------------------------------
 
-/** @param {PlayerEpisode} episode @param {boolean} autoplay */
-async function select(episode, autoplay) {
+/** @param {PlayerEpisode} episode @param {boolean} autoplay @param {number} [startPos] */
+async function select(episode, autoplay, startPos) {
   current = episode;
-  audio.src = episode.audioUrl;
+  const isSameSrc = audio.src === episode.audioUrl;
+  if (!isSameSrc) {
+    audio.src = episode.audioUrl;
+  }
   nowTitle.textContent = episode.title;
   const sub = [];
   if (episode.source) sub.push(episode.source);
@@ -530,6 +681,36 @@ async function select(episode, autoplay) {
   }
   nowOffline.classList.toggle("hidden", !downloaded.has(episode.id));
 
+  const seekTarget = typeof startPos === "number" ? startPos : 0;
+  if (seekTarget > 0) {
+    if (audio.readyState >= 1) {
+      audio.currentTime = seekTarget;
+      setProgress();
+    } else {
+      /** @type {() => void} */
+      const onLoaded = () => {
+        audio.removeEventListener("loadedmetadata", onLoaded);
+        if (current?.id === episode.id) {
+          audio.currentTime = seekTarget;
+          setProgress();
+          if ("mediaSession" in navigator && audio.duration) {
+            try {
+              navigator.mediaSession.setPositionState({
+                duration: audio.duration,
+                playbackRate: audio.playbackRate,
+                position: audio.currentTime,
+              });
+            } catch { /* unsupported position state */ }
+          }
+        }
+      };
+      audio.addEventListener("loadedmetadata", onLoaded);
+    }
+  } else {
+    audio.currentTime = 0;
+    setProgress();
+  }
+
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: episode.title,
@@ -551,7 +732,12 @@ async function select(episode, autoplay) {
 function toggle() {
   if (!current) {
     const first = EPISODES[0];
-    if (first) void select(first, true);
+    if (first) {
+      const pos = getPosition(first.id);
+      const dur = first.durationSeconds || 0;
+      const isResume = pos > 5 && (dur === 0 || pos < dur - 5);
+      void select(first, true, isResume ? pos : 0);
+    }
     return;
   }
   if (audio.paused) void audio.play().catch(() => {});
@@ -572,12 +758,28 @@ fwdBtn.addEventListener("click", () => {
   audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
 });
 seek.addEventListener("input", () => {
-  if (Number.isFinite(audio.duration)) audio.currentTime = Number(seek.value);
+  if (Number.isFinite(audio.duration)) {
+    audio.currentTime = Number(seek.value);
+    if (current) {
+      if (audio.currentTime <= 2) {
+        clearPosition(current.id);
+      } else {
+        savePosition(current.id, audio.currentTime);
+      }
+      const rowEl = /** @type {HTMLLIElement|null} */ (list.querySelector(
+        `li[data-episode-id="${current.id}"]`,
+      ));
+      if (rowEl) updateRowResumeUI(rowEl, current);
+    }
+  }
   setProgress();
 });
 rate.addEventListener("change", () => {
   audio.playbackRate = Number(rate.value);
 });
+
+let lastSavedTime = 0;
+let lastSavedRealTime = 0;
 
 audio.addEventListener("play", () => {
   setIcon(playIcon, "pause");
@@ -590,6 +792,22 @@ audio.addEventListener("pause", () => {
   playPause.setAttribute("aria-label", "Play");
   playPause.setAttribute("aria-pressed", "false");
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  if (current && audio.currentTime > 2) {
+    savePosition(current.id, audio.currentTime);
+    const rowEl = /** @type {HTMLLIElement|null} */ (list.querySelector(
+      `li[data-episode-id="${current.id}"]`,
+    ));
+    if (rowEl) updateRowResumeUI(rowEl, current);
+  }
+});
+audio.addEventListener("ended", () => {
+  if (current) {
+    clearPosition(current.id);
+    const rowEl = /** @type {HTMLLIElement|null} */ (list.querySelector(
+      `li[data-episode-id="${current.id}"]`,
+    ));
+    if (rowEl) updateRowResumeUI(rowEl, current);
+  }
 });
 audio.addEventListener("loadedmetadata", () => {
   seek.max = String(audio.duration || 0);
@@ -610,12 +828,32 @@ audio.addEventListener("timeupdate", () => {
       });
     } catch { /* unsupported position state is not fatal */ }
   }
+
+  // Throttle position persistence: at most once every 3s of media or clock time
+  if (current && audio.currentTime > 2) {
+    const now = Date.now();
+    if (Math.abs(audio.currentTime - lastSavedTime) >= 3 || now - lastSavedRealTime >= 3000) {
+      lastSavedTime = audio.currentTime;
+      lastSavedRealTime = now;
+      savePosition(current.id, audio.currentTime);
+      const rowEl = /** @type {HTMLLIElement|null} */ (list.querySelector(
+        `li[data-episode-id="${current.id}"]`,
+      ));
+      if (rowEl) updateRowResumeUI(rowEl, current);
+    }
+  }
 });
 audio.addEventListener("error", () => {
   say(
     "That audio could not be played. If you are offline, download it while online first.",
     "error",
   );
+});
+
+window.addEventListener("beforeunload", () => {
+  if (current && audio.currentTime > 2 && !audio.ended) {
+    savePosition(current.id, audio.currentTime);
+  }
 });
 
 // ---- OS media controls --------------------------------------------------
@@ -841,7 +1079,12 @@ async function boot() {
   if (EPISODES.length > 0) {
     // Preselect so the dock shows something playable, without starting audio.
     const first = EPISODES[0];
-    if (first) await select(first, false);
+    if (first) {
+      const pos = getPosition(first.id);
+      const dur = first.durationSeconds || 0;
+      const isResume = pos > 5 && (dur === 0 || pos < dur - 5);
+      await select(first, false, isResume ? pos : 0);
+    }
   }
   updateCounts();
 

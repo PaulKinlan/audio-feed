@@ -161,9 +161,9 @@ export async function createListenHarness(port = 8131) {
     });
 
     const key = audioBlobKey({ userId: "user-1", id: seed.id, mode: seed.mode }, "wav");
-    // Two seconds of audio regardless of the advertised duration: the page renders
-    // durationSeconds from metadata, and nobody needs a 57-minute fixture.
-    const bytes = wav(2);
+    // Sixty seconds of audio for the harness so seeking and resume can be verified
+    // against real decodable PCM without hitting duration bounds.
+    const bytes = wav(60);
     await stores.blobs.put(key, bytes, { contentType: "audio/wav" });
 
     await stores.metadata.putEpisode({

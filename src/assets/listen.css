@@ -463,10 +463,31 @@ li.episode[data-current="true"] .ep-play {
   color: var(--accent-2);
 }
 
+.ep-resume-badge {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .ep-actions {
   display: flex;
   align-items: center;
   gap: var(--space-1);
+}
+.ep-restart {
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ep-restart:hover {
+  color: var(--text);
+  background: var(--surface-2);
 }
 .ep-read {
   display: inline-flex;
