@@ -22,6 +22,12 @@ import { esc, jsonForScript } from "./html.ts";
 import { PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
 
+export interface PrefillData {
+  url: string;
+  title: string;
+  feedUrl: string;
+}
+
 export interface AccountPageData {
   user: User;
   baseUrl: string;
@@ -31,6 +37,8 @@ export interface AccountPageData {
   episodes: Episode[];
   /** Published episodes made by other prompts, across the whole feed (audio-feed-ktn). */
   outdatedCount: number;
+  /** Optional prefill from query params or bookmarklet (audio-feed-ep1). */
+  prefill?: PrefillData | null;
 }
 
 const CSS = `
@@ -46,6 +54,13 @@ const CSS = `
   @media (min-width: 40rem) { .send-row { grid-template-columns: 1fr auto; align-items: end; } }
   .send .choices { margin-block-start: 0.75rem; }
   .danger-zone { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+  .quick-add { border-inline-start: 4px solid var(--accent); background: var(--surface); margin-block-end: 1.5rem; }
+  .quick-grid { display: grid; gap: 1rem; margin-block: 1rem; }
+  @media (min-width: 44rem) { .quick-grid { grid-template-columns: 1fr 1fr; } }
+  .quick-card { padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem; }
+  .bookmarklet-box { margin-block-start: 1rem; padding: var(--space-4); border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface-2); }
+  .bookmarklet-btn { cursor: grab; display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; text-decoration: none; user-select: none; }
+  .bookmarklet-btn:active { cursor: grabbing; }
 `;
 
 function when(iso: string | undefined): string {
@@ -124,6 +139,68 @@ ${
       user.status === "pending" ? "waiting for approval" : esc(user.status)
     }. Nothing is turned into audio until an admin approves it, because synthesis is the part that costs money.</p>`;
 
+  const bookmarkletCode =
+    `javascript:(function(){var u=location.href,t=document.title||'',l=document.querySelector('link[rel="alternate"][type*="rss"],link[rel="alternate"][type*="atom"],link[rel*="alternate"][type*="xml"]'),f=l?l.href:'',dest='${baseUrl}/account?add='+encodeURIComponent(u)+'&title='+encodeURIComponent(t)+(f?'&feed='+encodeURIComponent(f):'');window.open(dest,'_blank')||(location.href=dest);})();`;
+
+  const quickAddSection = d.prefill
+    ? `
+  <section class="panel quick-add" id="quickAddPanel" aria-labelledby="quick-add-h">
+    <h2 id="quick-add-h">Add to Audio Feed</h2>
+    <p class="sub">URL detected: <strong class="prefill-title">${
+      esc(d.prefill.title || d.prefill.url)
+    }</strong></p>
+    
+    ${
+      d.prefill.feedUrl
+        ? `
+    <div class="quick-grid">
+      <div class="quick-card">
+        <div>
+          <h3 style="margin-top: 0; font-size: 1rem;">🎙️ Option 1: Queue this single page</h3>
+          <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
+          esc(d.prefill.url)
+        }</code></p>
+          <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
+            <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
+            <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
+          </div>
+        </div>
+        <button type="button" class="btn small" id="quickSingleBtn"${
+          approved ? "" : " disabled"
+        }>Queue Single Episode</button>
+      </div>
+
+      <div class="quick-card">
+        <div>
+          <h3 style="margin-top: 0; font-size: 1rem;">📡 Option 2: Subscribe to RSS feed</h3>
+          <p class="meta" style="font-size: 0.85rem; word-break: break-all;">Detected feed: <code>${
+          esc(d.prefill.feedUrl)
+        }</code></p>
+          <p class="sub" style="font-size: 0.85rem; margin-block-start: 0.25rem;">Follow publication for future articles.</p>
+        </div>
+        <button type="button" class="btn quiet small" id="quickSubscribeBtn"${
+          approved ? "" : " disabled"
+        }>Subscribe to RSS Feed</button>
+      </div>
+    </div>`
+        : `
+    <div style="margin-block: 1rem;">
+      <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
+          esc(d.prefill.url)
+        }</code></p>
+      <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
+        <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
+        <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
+      </div>
+      <button type="button" class="btn small" id="quickSingleBtn"${
+          approved ? "" : " disabled"
+        }>Queue for Audio</button>
+    </div>`
+    }
+    <p class="feedback" id="quickFeedback" role="status" aria-live="polite"></p>
+  </section>`
+    : "";
+
   const main = `<div class="wrap">
   <div class="account-head">
     <div>
@@ -136,6 +213,7 @@ ${
     <a class="btn quiet" href="/listen/${esc(user.feedToken)}">Open the player</a>
   </div>
   ${pending}
+  ${quickAddSection}
 
   <section class="panel send" aria-labelledby="send-h">
     <h2 id="send-h">Send an article to audio</h2>
@@ -152,6 +230,19 @@ ${
       </div>
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
+    <div class="bookmarklet-box">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
+        <div>
+          <strong style="display: block; font-size: 0.92rem;">Browser Bookmarklet</strong>
+          <span class="sub" style="font-size: 0.85rem; color: var(--muted);">Drag this button to your bookmarks bar to add articles or feeds from any tab:</span>
+        </div>
+        <a class="btn quiet small bookmarklet-btn" href="${
+    esc(bookmarkletCode)
+  }" draggable="true" title="Drag to your bookmarks bar">
+          <span aria-hidden="true">🎙️</span> Add to Audio Feed
+        </a>
+      </div>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="feeds-h">
@@ -244,9 +335,57 @@ ${
   const USER_HANDLE = ${jsonForScript(base64url(new TextEncoder().encode(user.id)))};
   const CREDENTIAL_IDS = ${jsonForScript(d.credentials.map((c) => c.id))};
   const DISPLAY = ${jsonForScript({ name: user.email, displayName: user.displayName })};
+  const PREFILL = ${jsonForScript(d.prefill ?? null)};
 ${PASSKEY_CLIENT}
   const $ = (id) => document.getElementById(id);
   const say = (el, tone, text) => { el.dataset.tone = tone; el.textContent = text; };
+
+  if (PREFILL && PREFILL.url && $("sendUrl") && !$("sendUrl").value) {
+    $("sendUrl").value = PREFILL.url;
+  }
+
+  const quickSingleBtn = $("quickSingleBtn");
+  if (quickSingleBtn && PREFILL) {
+    quickSingleBtn.addEventListener("click", async () => {
+      const feedback = $("quickFeedback");
+      const modeEl = document.querySelector("input[name=quickMode]:checked");
+      const mode = modeEl ? modeEl.value : "direct";
+      quickSingleBtn.disabled = true;
+      say(feedback, "ok", "Queuing article for audio…");
+      try {
+        const res = await send("POST", "/api/ingest", { url: PREFILL.url, mode });
+        const title = (res && res.article && res.article.title) || PREFILL.title || "Article";
+        say(feedback, "ok", "Queued for synthesis: " + title + ". It will appear in your feed once ready.");
+      } catch (err) {
+        say(feedback, "error", String(err.message || err));
+      } finally {
+        quickSingleBtn.disabled = false;
+      }
+    });
+  }
+
+  const quickSubscribeBtn = $("quickSubscribeBtn");
+  if (quickSubscribeBtn && PREFILL && PREFILL.feedUrl) {
+    quickSubscribeBtn.addEventListener("click", async () => {
+      const feedback = $("quickFeedback");
+      quickSubscribeBtn.disabled = true;
+      say(feedback, "ok", "Subscribing to feed…");
+      try {
+        const res = await send("POST", "/api/account/sources", {
+          feedUrl: PREFILL.feedUrl,
+          title: PREFILL.title || undefined,
+          modes: ["direct", "deepdive"],
+        });
+        const title = (res && res.source && res.source.title) || PREFILL.title || "feed";
+        say(feedback, "ok", "Subscribed to " + title + ". " + ((res && res.poll && res.poll.queued) ?? 0) + " post(s) queued.");
+        setTimeout(() => location.assign("/account"), 1000);
+      } catch (err) {
+        say(feedback, "error", String(err.message || err));
+      } finally {
+        quickSubscribeBtn.disabled = false;
+      }
+    });
+  }
   async function send(method, path, body) {
     const res = await fetch(path, {
       method,
@@ -430,13 +569,25 @@ ${PASSKEY_CLIENT}
   });
 }
 
+function isValidWebUrl(raw: string | null): boolean {
+  if (!raw) return false;
+  try {
+    const u = new URL(raw);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Promise<Response> {
   const store = ctx.stores.metadata;
   const user = await sessionUser(store, req);
+  const reqUrl = new URL(req.url);
   if (!user) {
+    const next = encodeURIComponent(reqUrl.pathname + reqUrl.search);
     return new Response(null, {
       status: 303,
-      headers: { location: "/login?next=%2Faccount", "cache-control": "no-store" },
+      headers: { location: `/login?next=${next}`, "cache-control": "no-store" },
     });
   }
   const baseUrl = resolveOrigin(ctx.config, req).baseUrl;
@@ -446,6 +597,19 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     store.listEpisodes({ userId: user.id, limit: 10 }),
     user.status === "approved" ? countOutdatedEpisodes(store, user.id) : 0,
   ]);
+
+  const rawAdd = reqUrl.searchParams.get("add") || reqUrl.searchParams.get("url");
+  const rawTitle = reqUrl.searchParams.get("title");
+  const rawFeed = reqUrl.searchParams.get("feed");
+
+  const prefill: PrefillData | null = isValidWebUrl(rawAdd)
+    ? {
+      url: rawAdd!,
+      title: rawTitle ? rawTitle.slice(0, 200) : "",
+      feedUrl: isValidWebUrl(rawFeed) ? rawFeed! : "",
+    }
+    : null;
+
   const html = renderAccountPage({
     user,
     baseUrl,
@@ -454,6 +618,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     credentials,
     episodes,
     outdatedCount,
+    prefill,
   });
   return new Response(html, {
     headers: {
