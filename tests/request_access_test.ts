@@ -284,6 +284,60 @@ Deno.test("SlidingWindowRateLimiter: evicts expired keys when map grows (audio-f
   assert(limiter.check("fresh-key-2", t0 + 2000).allowed);
 });
 
+Deno.test("POST /api/request-access: HTML error and confirmation paths escape markup against XSS (audio-feed-hn4)", async () => {
+  const { fetch, stores } = setup();
+
+  // Simulate concurrent signup race: getUserByEmail misses, but insertUser refuses duplicate
+  const maliciousEmail = "<b>probe</b>@example.com";
+  stores.metadata.insertUser = () => Promise.resolve(false);
+
+  // Submit via form with Accept: text/html
+  const formData = new URLSearchParams();
+  formData.set("email", maliciousEmail);
+
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "accept": "text/html",
+      },
+      body: formData.toString(),
+    }),
+  );
+
+  assertEquals(res.status, 400);
+  const html = await res.text();
+  // Must NOT contain raw <b>probe</b> tag
+  assertEquals(html.includes("<b>probe</b>"), false, "raw unescaped HTML tag must not appear");
+  assertStringIncludes(html, "&lt;b&gt;probe&lt;/b&gt;");
+});
+
+Deno.test("POST /api/request-access: HTML 429 response includes Retry-After header (audio-feed-hn4)", async () => {
+  const { fetch } = setup(1);
+
+  const req = () =>
+    fetch(
+      new Request(`${BASE}/api/request-access`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "accept": "text/html",
+        },
+        body: new URLSearchParams({ email: "user@example.com" }).toString(),
+      }),
+    );
+
+  const res1 = await req();
+  assertEquals(res1.status, 201);
+
+  const res2 = await req();
+  assertEquals(res2.status, 429);
+  assertStringIncludes(res2.headers.get("content-type") ?? "", "text/html");
+  const retryAfter = res2.headers.get("retry-after");
+  assert(retryAfter !== null && Number(retryAfter) > 0);
+});
+
 Deno.test("POST /api/request-access: spend gate authority & end-to-end access lifecycle (audio-feed-r97)", async () => {
   const { fetch, stores } = setup();
 
