@@ -259,12 +259,6 @@ export interface Article {
 
 export type EpisodeStatus = "pending" | "synthesizing" | "ready" | "failed";
 
-export interface Chapter {
-  /** Offset from the start of the audio, in seconds. */
-  startSeconds: number;
-  title: string;
-}
-
 export interface Episode {
   id: string;
   userId: string;
@@ -286,7 +280,6 @@ export interface Episode {
   durationSeconds?: number;
   /** e.g. `audio/mpeg`. */
   contentType?: string;
-  chapters?: Chapter[];
   transcript?: string;
   /** Failure reason when `status === "failed"`. */
   error?: string;

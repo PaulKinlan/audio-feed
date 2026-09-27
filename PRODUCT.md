@@ -17,7 +17,7 @@ Converts RSS articles and on-demand web URLs into personalized podcast feeds fea
 2. **Deep Dive Discussion (NotebookLM Style)**
    - Two-voice conversational podcast between a domain expert and a curious interviewer/foil.
    - Supplements article claims with automated ecosystem research, counter-arguments, historical context, and related links.
-   - Dynamic pacing, natural conversational banter, and structured chapter markers.
+   - Dynamic pacing and natural conversational banter.
 
 ### Feed Topology
 - **Master Aggregated Feed:** `https://<domain>/feed/<feed-token>/master.xml` (all subscribed articles in one unified feed across all sources for podcast players like Pocket Casts, Apple Podcasts, Overcast; capped to the newest 200 episodes; tolerates client tracking/cache-busting query parameters).
