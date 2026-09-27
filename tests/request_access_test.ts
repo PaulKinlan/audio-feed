@@ -1,0 +1,288 @@
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { createApp } from "../src/app.ts";
+import { createHandlers } from "../src/compose.ts";
+import { memoryStores } from "../src/config.ts";
+import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import { approveUser } from "../src/auth/users.ts";
+import type { AppConfig, Stores } from "../src/config.ts";
+
+const BASE = "https://audio.example.com";
+const ADMIN_TOKEN = "admin-secret-test";
+
+function setup(rateLimitMax = 5) {
+  const config: AppConfig = {
+    port: 8080,
+    publicBaseUrl: BASE,
+    adminToken: ADMIN_TOKEN,
+    trustProxyHeaders: true,
+  };
+  const stores: Stores = memoryStores();
+  const limiter = new SlidingWindowRateLimiter({
+    maxRequests: rateLimitMax,
+    windowMs: 60 * 1000,
+  });
+
+  const ctx = { config, stores };
+  const handlers = createHandlers(ctx, {
+    requestAccess: { rateLimiter: limiter },
+    fetchArticle: (url) =>
+      Promise.resolve({
+        url,
+        title: "Test Post",
+        author: "Author",
+        publishedAt: new Date().toISOString(),
+        lead: "Lead",
+        body: "Body",
+      }),
+  });
+  const { fetch } = createApp(ctx, handlers);
+  return { ctx, fetch, stores, limiter };
+}
+
+Deno.test("POST /api/request-access: creates pending user without leaking token (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: "alice@example.com",
+        displayName: "Alice In Wonderland",
+      }),
+    }),
+  );
+
+  assertEquals(res.status, 201);
+  const data = await res.json();
+  assertEquals(data.ok, true);
+  assertEquals(data.status, "pending");
+  assertStringIncludes(data.message, "administrator will review");
+  // CRITICAL: no token or capability URL in response
+  assertEquals(data.feedToken, undefined);
+  assertEquals(data.token, undefined);
+  assertEquals(data.playerUrl, undefined);
+
+  // User is stored with pending status
+  const user = await stores.metadata.getUserByEmail("alice@example.com");
+  assert(user !== null);
+  assertEquals(user.displayName, "Alice In Wonderland");
+  assertEquals(user.status, "pending");
+  assert(user.feedToken.length > 10);
+
+  // Appears in pending approvals
+  const allUsers = await stores.metadata.listUsers();
+  assert(allUsers.some((u) => u.email === "alice@example.com" && u.status === "pending"));
+});
+
+Deno.test("POST /api/request-access: supports form urlencoded submission (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  const formData = new URLSearchParams();
+  formData.set("email", "bob@example.com");
+  formData.set("displayName", "Bob The Builder");
+
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: formData.toString(),
+    }),
+  );
+
+  assertEquals(res.status, 201);
+  const user = await stores.metadata.getUserByEmail("bob@example.com");
+  assert(user !== null);
+  assertEquals(user.status, "pending");
+});
+
+Deno.test("POST /api/request-access: validates email input (audio-feed-r97)", async () => {
+  const { fetch } = setup();
+
+  // Missing email
+  const res1 = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "No Email" }),
+    }),
+  );
+  assertEquals(res1.status, 400);
+
+  // Invalid email
+  const res2 = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "not-an-email" }),
+    }),
+  );
+  assertEquals(res2.status, 400);
+});
+
+Deno.test("POST /api/request-access: rate limiter returns 429 when abuse threshold exceeded (audio-feed-r97)", async () => {
+  // Limiter set to 3 requests per IP
+  const { fetch } = setup(3);
+
+  const req = (i: number, ip = "192.168.1.100") =>
+    fetch(
+      new Request(`${BASE}/api/request-access`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": ip,
+        },
+        body: JSON.stringify({ email: `user${i}@example.com` }),
+      }),
+    );
+
+  // Requests 1, 2, 3 succeed
+  assertEquals((await req(1)).status, 201);
+  assertEquals((await req(2)).status, 201);
+  assertEquals((await req(3)).status, 201);
+
+  // Request 4 from same IP is refused with 429
+  const res4 = await req(4);
+  assertEquals(res4.status, 429);
+  const retryAfter = res4.headers.get("retry-after");
+  assert(retryAfter !== null && Number(retryAfter) > 0);
+  const body4 = await res4.json();
+  assertStringIncludes(body4.error, "Too many access requests");
+
+  // Request from a different IP is permitted
+  const resOtherIp = await req(5, "192.168.1.200");
+  assertEquals(resOtherIp.status, 201);
+});
+
+Deno.test("POST /api/request-access: idempotent on re-submission without row duplication (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  // First request
+  const res1 = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "charlie@example.com" }),
+    }),
+  );
+  assertEquals(res1.status, 201);
+
+  // Second request with same email
+  const res2 = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "charlie@example.com" }),
+    }),
+  );
+  assertEquals(res2.status, 200);
+  const data2 = await res2.json();
+  assertEquals(data2.ok, true);
+  assertEquals(data2.status, "pending");
+  assertStringIncludes(data2.message, "already pending");
+
+  // Only one user exists
+  const allUsers = await stores.metadata.listUsers();
+  assertEquals(allUsers.filter((u) => u.email === "charlie@example.com").length, 1);
+});
+
+Deno.test("POST /api/request-access: approved user resubmission states approval without leaking token (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  // Create and approve user
+  await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "diana@example.com" }),
+    }),
+  );
+  const user = await stores.metadata.getUserByEmail("diana@example.com");
+  await approveUser(stores.metadata, user!.id, "admin");
+
+  // Resubmit
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "diana@example.com" }),
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.status, "approved");
+  assertStringIncludes(data.message, "already approved");
+  assertEquals(data.feedToken, undefined);
+});
+
+Deno.test("POST /api/request-access: spend gate authority & end-to-end access lifecycle (audio-feed-r97)", async () => {
+  const { fetch, stores } = setup();
+
+  // 1. Visitor requests access
+  const reqRes = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "eve@example.com" }),
+    }),
+  );
+  assertEquals(reqRes.status, 201);
+
+  const pendingUser = await stores.metadata.getUserByEmail("eve@example.com");
+  assert(pendingUser !== null);
+  const token = pendingUser.feedToken;
+
+  // 2. Pending user CANNOT trigger synthesis via ingest (403 forbidden)
+  const ingestPending = await fetch(
+    new Request(`${BASE}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-feed-token": token,
+      },
+      body: JSON.stringify({ url: "https://example.com/some-article" }),
+    }),
+  );
+  assertEquals(ingestPending.status, 403);
+  const ingestErr = await ingestPending.json();
+  assertEquals(ingestErr.error, "An approved user is required.");
+
+  // 3. Pending user CANNOT access player (403 forbidden)
+  const playerPending = await fetch(new Request(`${BASE}/listen/${token}`));
+  assertEquals(playerPending.status, 403);
+
+  // 4. Pending user CANNOT access master feed (403 forbidden)
+  const feedPending = await fetch(new Request(`${BASE}/feed/${token}/master.xml`));
+  assertEquals(feedPending.status, 403);
+
+  // 5. Admin approves user
+  const approveRes = await fetch(
+    new Request(`${BASE}/api/admin/users/${pendingUser.id}/approve`, {
+      method: "POST",
+      headers: { "x-admin-token": ADMIN_TOKEN },
+    }),
+  );
+  assertEquals(approveRes.status, 200);
+
+  // 6. Now the token works end-to-end!
+  // Player loads 200
+  const playerApproved = await fetch(new Request(`${BASE}/listen/${token}`));
+  assertEquals(playerApproved.status, 200);
+
+  // Master feed loads 200
+  const feedApproved = await fetch(new Request(`${BASE}/feed/${token}/master.xml`));
+  assertEquals(feedApproved.status, 200);
+
+  // Ingest accepts 202
+  const ingestApproved = await fetch(
+    new Request(`${BASE}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-feed-token": token,
+      },
+      body: JSON.stringify({ url: "https://example.com/some-article" }),
+    }),
+  );
+  assertEquals(ingestApproved.status, 202);
+});

@@ -311,6 +311,31 @@ Deno.test("homepage script includes open in web player action on submission succ
   assertStringIncludes(html, "encodeURIComponent(token.value.trim())");
 });
 
+Deno.test("the homepage renders the request access form with accessible labels, hints, and secure action (audio-feed-r97)", () => {
+  const html = renderHomePage({
+    publicBaseUrl: "https://audio.example.com",
+    synthesisConfigured: true,
+    defaultVoice: "Charon",
+  });
+
+  assertStringIncludes(html, 'id="request-access"');
+  assertStringIncludes(
+    html,
+    '<form id="request-access-form" action="/api/request-access" method="post">',
+  );
+  assertStringIncludes(html, 'id="request-email"');
+  assertStringIncludes(html, 'name="email"');
+  assertStringIncludes(html, 'type="email"');
+  assertStringIncludes(html, 'aria-describedby="request-email-hint"');
+  assertStringIncludes(html, 'aria-errormessage="request-email-error"');
+  assertStringIncludes(html, 'id="request-name"');
+  assertStringIncludes(html, 'name="displayName"');
+  assertStringIncludes(html, 'id="request-submit"');
+  assertStringIncludes(html, 'id="request-result"');
+  assertStringIncludes(html, 'fetch("/api/request-access"');
+  assertStringIncludes(html, '<a href="#request-access">Request access</a>');
+});
+
 Deno.test("adding the homepage did not shadow another route", async () => {
   const fetch = app();
 

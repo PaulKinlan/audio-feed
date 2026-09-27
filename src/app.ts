@@ -89,6 +89,8 @@ export interface AppHandlers {
   /** audio-feed-np5 — outbox notifications for chaos-relay. */
   adminListOutbox?: Handler<AppContext>;
   adminAckOutbox?: Handler<AppContext>;
+  /** audio-feed-r97 — request access from the front door. */
+  requestAccess?: Handler<AppContext>;
   /** audio-feed-8fc — passkey sign-in, sessions and the account page's API. */
   account?: AccountHandlers;
   /** audio-feed-8oz — regenerate after the TTS prompts change. */
@@ -222,6 +224,11 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/outbox/:id/ack",
     handlers.adminAckOutbox ?? (() => notImplemented("Ack outbox")),
+  );
+
+  router.post(
+    "/api/request-access",
+    handlers.requestAccess ?? (() => notImplemented("Request access")),
   );
 
   router.post(

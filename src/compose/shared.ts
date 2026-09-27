@@ -11,6 +11,7 @@ import type { User } from "../types.ts";
 import type { FeedPollOptions, PollDependencies } from "../ingest/feed.ts";
 import type { ExtractedArticle } from "../ingest/url.ts";
 import type { SynthesisWorkerOptions, Synthesizer } from "../worker/synthesis.ts";
+import type { RequestAccessDeps } from "./access.ts";
 
 /** Extraction of the capability token a podcast client can actually send. */
 const TOKEN_HEADERS = ["x-feed-token", "x-user-token"] as const;
@@ -89,6 +90,8 @@ export interface ComposeDeps {
   feedPollOptions?: PollDependencies & FeedPollOptions;
   /** Test seam: synthesis worker options (audio-feed-dsn). */
   synthesisOptions?: SynthesisWorkerOptions;
+  /** Test seam: request access options / rate limiter (audio-feed-r97). */
+  requestAccess?: RequestAccessDeps;
 }
 
 export const badRequest = (message: string) =>
