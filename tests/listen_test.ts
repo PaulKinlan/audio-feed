@@ -438,3 +438,25 @@ Deno.test("a non-web article URL never becomes a linkback (audio-feed-585)", asy
   const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
   assertEquals(html.includes("javascript:"), false, "only http(s) may reach the page as a link");
 });
+
+Deno.test("listen harness: seeds 5 publishable episodes and page renders all 5 (audio-feed-py5)", async () => {
+  const { createListenHarness } = await import("../scripts/listen-harness.ts");
+  const h = await createListenHarness(8136);
+  const res = await h.fetch(new Request(`${h.base}/listen/${h.token}`));
+  assertEquals(res.status, 200);
+  const html = await res.text();
+
+  assertStringIncludes(html, '<span id="episodeCount">5 episodes</span>');
+  const match = /<script type="application\/json" id="player-data">([\s\S]*?)<\/script>/.exec(html);
+  assert(match, "player-data script tag must exist");
+  const data = JSON.parse(match[1]!);
+  assertEquals(data.episodes.length, 5);
+
+  // Each episode must have a valid audio URL that returns audio/wav
+  for (const ep of data.episodes) {
+    assert(ep.audioUrl, "each episode must have an audioUrl");
+    const audioRes = await h.fetch(new Request(ep.audioUrl));
+    assertEquals(audioRes.status, 200);
+    assertStringIncludes(audioRes.headers.get("content-type") ?? "", "audio/wav");
+  }
+});
