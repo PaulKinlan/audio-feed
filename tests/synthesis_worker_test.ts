@@ -14,7 +14,7 @@ import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
 import { GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
-import { audioBlobKey } from "../src/types.ts";
+import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
@@ -1261,4 +1261,188 @@ Deno.test("daily episode budget: fail-closed if daily count verification fails (
 
   const ep = await stores.metadata.getEpisode("budget-user", "ep-0");
   assertEquals(ep?.status, "pending", "episode remains pending to try again when store recovers");
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-np5: outbox notifications for on-demand ingested articles
+// ---------------------------------------------------------------------------
+
+Deno.test("notify on-demand article: ready episode places entry in outbox with title and playerUrl (audio-feed-np5)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-abc" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: INBOX_SOURCE_ID, userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "art-1",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      title: "Important Article",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-inbox",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      articleId: "art-1",
+      title: "Important Article",
+      status: "pending",
+    }),
+  );
+
+  const notifyConfig = { ...config, notifyOutboxEnabled: true };
+  const ctx = { config: notifyConfig, stores };
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+  assertEquals(run.ready.length, 1);
+
+  const outbox = await stores.metadata.listOutbox();
+  assertEquals(outbox.length, 1);
+  assertEquals(outbox[0]!.title, "Important Article");
+  assertEquals(outbox[0]!.status, "ready");
+  assertEquals(outbox[0]!.playerUrl, "https://audio.example.com/listen/tok-abc");
+});
+
+Deno.test("notify on-demand article: feed poll episodes do NOT generate outbox entries (audio-feed-np5)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-abc" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: "rss-feed", userId: "user-1" }));
+  for (let i = 0; i < 5; i++) {
+    await stores.metadata.putArticle(
+      makeArticle({
+        id: `art-${i}`,
+        userId: "user-1",
+        sourceId: "rss-feed",
+        title: `Feed Post ${i}`,
+      }),
+    );
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${i}`,
+        userId: "user-1",
+        sourceId: "rss-feed",
+        articleId: `art-${i}`,
+        title: `Feed Post ${i}`,
+        status: "pending",
+      }),
+    );
+  }
+
+  const notifyConfig = { ...config, notifyOutboxEnabled: true };
+  const ctx = { config: notifyConfig, stores };
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+  assertEquals(run.ready.length, 5);
+
+  const outbox = await stores.metadata.listOutbox();
+  assertEquals(outbox.length, 0, "feed poll episodes must not spam notifications");
+});
+
+Deno.test("notify on-demand article: permanently failed episode notifies once with error reason (audio-feed-np5)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-abc" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: INBOX_SOURCE_ID, userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "art-fail",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      title: "Failed Article",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fail",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      articleId: "art-fail",
+      title: "Failed Article",
+      status: "pending",
+    }),
+  );
+
+  const notifyConfig = { ...config, notifyOutboxEnabled: true };
+  const ctx = { config: notifyConfig, stores };
+
+  let attempts = 0;
+  const run = await runSynthesisBatch(ctx, () => {
+    attempts++;
+    return Promise.reject(new Error("Gemini quota exhausted"));
+  }, { batchSize: 5, maxAttempts: 3 });
+
+  assertEquals(attempts, 3, "retried 3 times internally");
+  assertEquals(run.failed.length, 1);
+
+  const outbox = await stores.metadata.listOutbox();
+  assertEquals(outbox.length, 1, "notifies exactly once on permanent failure, not per attempt");
+  assertEquals(outbox[0]!.status, "failed");
+  assertEquals(outbox[0]!.title, "Failed Article");
+  assertStringIncludes(outbox[0]!.error ?? "", "Gemini quota exhausted");
+});
+
+Deno.test("notify on-demand article: delivery/outbox write failure does not break synthesis (audio-feed-np5)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-abc" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: INBOX_SOURCE_ID, userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-1", userId: "user-1", sourceId: INBOX_SOURCE_ID, title: "Article" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-1",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      articleId: "art-1",
+      title: "Article",
+      status: "pending",
+    }),
+  );
+
+  // Make outbox queue throw
+  stores.metadata.queueNotification = () => Promise.reject(new Error("outbox disk full"));
+
+  const notifyConfig = { ...config, notifyOutboxEnabled: true };
+  const ctx = { config: notifyConfig, stores };
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+  assertEquals(run.ready.length, 1, "synthesis succeeds and marks ready even if outbox fails");
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-1"))?.status, "ready");
+});
+
+Deno.test("notify on-demand article: outbound is OFF by default when unconfigured (audio-feed-np5)", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", status: "approved", feedToken: "tok-abc" }),
+  );
+  await stores.metadata.putSource(makeSource({ id: INBOX_SOURCE_ID, userId: "user-1" }));
+  await stores.metadata.putArticle(
+    makeArticle({ id: "art-1", userId: "user-1", sourceId: INBOX_SOURCE_ID, title: "Article" }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-1",
+      userId: "user-1",
+      sourceId: INBOX_SOURCE_ID,
+      articleId: "art-1",
+      title: "Article",
+      status: "pending",
+    }),
+  );
+
+  // Default config: notifyOutboxEnabled is undefined / false
+  const ctx = { config, stores };
+
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+  assertEquals(run.ready.length, 1);
+
+  const outbox = await stores.metadata.listOutbox();
+  assertEquals(outbox.length, 0, "no notifications queued when disabled");
 });

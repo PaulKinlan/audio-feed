@@ -746,3 +746,34 @@ export function createAdminSynthesizeNowHandler(
     );
   };
 }
+
+/** `GET /api/admin/outbox` — notifications for chaos-relay (audio-feed-np5). */
+export function createListOutboxHandler(ctx: AppContext): AppHandlers["adminListOutbox"] {
+  return async ({ req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const url = new URL(req.url);
+    const parsedLimit = Number(url.searchParams.get("limit") ?? 50);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(1, Math.floor(parsedLimit)), 100)
+      : 50;
+    const notifications = await ctx.stores.metadata.listOutbox(limit);
+    return Response.json({ ok: true, notifications }, {
+      headers: { "cache-control": "no-store" },
+    });
+  };
+}
+
+/** `POST /api/admin/outbox/:id/ack` — acknowledge delivery of outbox notification (audio-feed-np5). */
+export function createAckOutboxHandler(ctx: AppContext): AppHandlers["adminAckOutbox"] {
+  return async ({ params, req }) => {
+    const denied = await adminGate(ctx, req);
+    if (denied) return denied;
+    const id = params.id ?? "";
+    const acked = await ctx.stores.metadata.ackNotification(id);
+    return Response.json({ ok: acked }, {
+      status: acked ? 200 : 404,
+      headers: { "cache-control": "no-store" },
+    });
+  };
+}

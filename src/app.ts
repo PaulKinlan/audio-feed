@@ -86,6 +86,9 @@ export interface AppHandlers {
   /** audio-feed-8fc — admin roles and one-time passkey setup links. */
   adminSetRole?: Handler<AppContext>;
   adminSetupLink?: Handler<AppContext>;
+  /** audio-feed-np5 — outbox notifications for chaos-relay. */
+  adminListOutbox?: Handler<AppContext>;
+  adminAckOutbox?: Handler<AppContext>;
   /** audio-feed-8fc — passkey sign-in, sessions and the account page's API. */
   account?: AccountHandlers;
   /** audio-feed-8oz — regenerate after the TTS prompts change. */
@@ -211,6 +214,14 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get(
     "/api/admin/stats",
     handlers.adminStats ?? (() => notImplemented("Admin stats")),
+  );
+  router.get(
+    "/api/admin/outbox",
+    handlers.adminListOutbox ?? (() => notImplemented("List outbox")),
+  );
+  router.post(
+    "/api/admin/outbox/:id/ack",
+    handlers.adminAckOutbox ?? (() => notImplemented("Ack outbox")),
   );
 
   router.post(

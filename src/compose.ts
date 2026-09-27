@@ -39,6 +39,7 @@ import {
 } from "./compose/feeds.ts";
 import { deleteUserSource, regenerateUserEpisodes } from "./compose/account.ts";
 import {
+  createAckOutboxHandler,
   createAdminCreateUserSourceHandler,
   createAdminDeleteUserSourceHandler,
   createAdminListUserEpisodesHandler,
@@ -53,6 +54,7 @@ import {
   createAdminSynthesizeNowHandler,
   createApproveUserHandler,
   createCreateUserHandler,
+  createListOutboxHandler,
   createListUsersHandler,
   createSuspendUserHandler,
 } from "./compose/admin.ts";
@@ -76,6 +78,7 @@ export {
 } from "./compose/feeds.ts";
 export { createIngestHandler } from "./compose/ingest.ts";
 export {
+  createAckOutboxHandler,
   createAdminCreateUserSourceHandler,
   createAdminDeleteUserSourceHandler,
   createAdminListUserEpisodesHandler,
@@ -90,6 +93,7 @@ export {
   createAdminSynthesizeNowHandler,
   createApproveUserHandler,
   createCreateUserHandler,
+  createListOutboxHandler,
   createListUsersHandler,
   createSuspendUserHandler,
 } from "./compose/admin.ts";
@@ -115,6 +119,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     adminSynthesizeNow: createAdminSynthesizeNowHandler(ctx, deps),
     adminSetRole: createAdminSetRoleHandler(ctx),
     adminSetupLink: createAdminSetupLinkHandler(ctx),
+    adminListOutbox: createListOutboxHandler(ctx),
+    adminAckOutbox: createAckOutboxHandler(ctx),
     account: createAccountHandlers(ctx, {
       feedTransport: deps.feedTransport,
       fetchArticle: deps.fetchArticle,

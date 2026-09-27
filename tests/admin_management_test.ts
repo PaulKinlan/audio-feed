@@ -1126,3 +1126,59 @@ Deno.test("cascade reports blobs it could not delete, and leaves them in place (
     );
   }
 });
+
+Deno.test("GET /api/admin/outbox requires admin token and returns notifications (audio-feed-np5)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.queueNotification({
+    id: "n-outbox-1",
+    userId: "user-1",
+    episodeId: "ep-1",
+    status: "ready",
+    title: "Notified Article",
+    playerUrl: "https://audio.example.com/listen/tok",
+    createdAt: new Date().toISOString(),
+  });
+
+  // Refuses without token
+  assertEquals((await fetch(new Request(`${BASE}/api/admin/outbox`))).status, 401);
+
+  // Succeeds with token
+  const res = await fetch(
+    new Request(`${BASE}/api/admin/outbox`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  assertEquals(data.ok, true);
+  assertEquals(data.notifications.length, 1);
+  assertEquals(data.notifications[0].id, "n-outbox-1");
+  assertEquals(data.notifications[0].title, "Notified Article");
+
+  // Ack notification
+  const ackRes = await fetch(
+    new Request(`${BASE}/api/admin/outbox/n-outbox-1/ack`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(ackRes.status, 200);
+  assertEquals((await ackRes.json()).ok, true);
+
+  // Second ack returns 404
+  const secondAckRes = await fetch(
+    new Request(`${BASE}/api/admin/outbox/n-outbox-1/ack`, {
+      method: "POST",
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  );
+  assertEquals(secondAckRes.status, 404);
+
+  // List again -> 0 pending
+  const after = await (await fetch(
+    new Request(`${BASE}/api/admin/outbox`, {
+      headers: { "x-admin-token": "admin-secret" },
+    }),
+  )).json();
+  assertEquals(after.notifications.length, 0);
+});
