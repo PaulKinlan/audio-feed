@@ -865,6 +865,7 @@ curl -X POST ${base}/api/sources \\
       }
 
       requestSubmit.setAttribute("aria-disabled", "true");
+      requestSubmit.disabled = true;
       requestSubmit.textContent = "Submitting…";
       sayRequest("", "Submitting access request…");
 
@@ -882,17 +883,23 @@ curl -X POST ${base}/api/sources \\
 
         if (response.status === 201 || response.status === 200) {
           sayRequest(
-            "ok",
+            body.ok ? "ok" : "bad",
             body.message || "Access request received! An administrator will review your account.",
-            "Nothing generates until an administrator approves your account.",
+            body.ok ? "Nothing generates until an administrator approves your account." : undefined,
           );
-          requestForm.reset();
-          requestEmail.removeAttribute("aria-invalid");
-          requestEmail.classList.remove("is-invalid");
+          if (body.ok) {
+            requestForm.reset();
+            requestEmail.removeAttribute("aria-invalid");
+            requestEmail.classList.remove("is-invalid");
+          }
         } else if (response.status === 429) {
+          const retryAfter = response.headers.get("retry-after");
+          const retryMsg = retryAfter
+            ? "Please wait " + retryAfter + " second(s) before trying again."
+            : "Please wait a while before requesting access again.";
           sayRequest(
             "bad",
-            "Too many requests. Please wait a while before requesting access again.",
+            "Too many requests. " + retryMsg,
             "Rate limit exceeded.",
           );
         } else {
@@ -906,6 +913,7 @@ curl -X POST ${base}/api/sources \\
         sayRequest("bad", "Could not reach the server.", String(error));
       } finally {
         requestSubmit.removeAttribute("aria-disabled");
+        requestSubmit.disabled = false;
         requestSubmit.textContent = "Request access";
       }
     });

@@ -14,6 +14,7 @@ export interface RouteContext<Ctx> {
   params: Params;
   url: URL;
   ctx: Ctx;
+  remoteAddr?: string;
 }
 
 export type Handler<Ctx> = (c: RouteContext<Ctx>) => Response | Promise<Response>;
@@ -61,12 +62,17 @@ export class Router<Ctx> {
     return this.#routes.map(({ method, pathname }) => ({ method, pathname }));
   }
 
-  async handle(req: Request, ctx: Ctx): Promise<Response> {
+  async handle(
+    req: Request,
+    ctx: Ctx,
+    info?: { remoteAddr?: { hostname?: string } },
+  ): Promise<Response> {
     const url = new URL(req.url);
     // `HEAD` is served by the `GET` handler; the runtime drops the body.
     const method = (req.method === "HEAD" ? "GET" : req.method) as Method;
 
     const pathMatches: Route<Ctx>[] = [];
+    const remoteAddr = info?.remoteAddr?.hostname;
 
     for (const route of this.#routes) {
       const match = route.pattern.exec({ pathname: url.pathname });
@@ -80,6 +86,7 @@ export class Router<Ctx> {
           params: match.pathname.groups,
           url,
           ctx,
+          remoteAddr,
         });
       } catch (error) {
         if (error instanceof HttpError) return error.response;
@@ -100,10 +107,15 @@ export class Router<Ctx> {
    * Wrap the dispatcher so an unexpected throw becomes a 500 instead of a
    * dropped connection, and is logged once with the request that caused it.
    */
-  fetchHandler(ctx: Ctx): (req: Request) => Promise<Response> {
-    return async (req) => {
+  fetchHandler(
+    ctx: Ctx,
+  ): (
+    req: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ) => Promise<Response> {
+    return async (req, info) => {
       try {
-        return await this.handle(req, ctx);
+        return await this.handle(req, ctx, info);
       } catch (error) {
         console.error(`[audio-feed] unhandled error for ${req.method} ${req.url}:`, error);
         return problem({ status: 500, title: "internal_error" });
