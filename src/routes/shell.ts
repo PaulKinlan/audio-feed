@@ -16,6 +16,7 @@
 
 import type { User } from "../types.ts";
 import { esc } from "./html.ts";
+import { DESIGN_TOKENS } from "./tokens.ts";
 
 /** Who the header says is signed in. `null` for a visitor. */
 export interface Viewer {
@@ -35,58 +36,8 @@ export function viewerOf(user: User | null): Viewer | null {
 
 export type ShellSection = "home" | "login" | "account" | "admin" | "player";
 
-/** Colour, type and shape. Spacing scales stay per page; these are the identity. */
-export const SHELL_TOKENS = `
-  :root {
-    color-scheme: light dark;
-    --bg: #f7f6fb;
-    --surface: #ffffff;
-    --surface-2: #efedf6;
-    --surface-3: #e3e0ee;
-    --text: #17151f;
-    --text-2: #3d3a4a;
-    --muted: #5f5b6e;
-    --border: #dcd8e8;
-    --border-2: #c7c2d9;
-    --accent: #5b3fc4;
-    --accent-2: #4a31a8;
-    --accent-ink: #ffffff;
-    --ok: #17703d;
-    --danger: #b3261e;
-    --radius: 14px;
-    --radius-sm: 10px;
-    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text",
-            "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
-    --ease: cubic-bezier(0.22, 1, 0.36, 1);
-    --page: 58rem;
-    --measure: 68ch;
-
-    /* Names the older pages use. One value, two names, no drift. */
-    --text-muted: var(--muted);
-    --surface-sunken: var(--surface-2);
-    --accent-text: var(--accent-ink);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      /* The player's palette, value for value. */
-      --bg: #0a0a0c;
-      --surface: #131317;
-      --surface-2: #1c1c22;
-      --surface-3: #26262e;
-      --text: #f4f4f5;
-      --text-2: #b4b4bd;
-      --muted: #9a9aa4;
-      --border: #24242b;
-      --border-2: #34343e;
-      --accent: #a78bfa;
-      --accent-2: #c4b5fd;
-      --accent-ink: #14121c;
-      --ok: #86efac;
-      --danger: #fca5a5;
-    }
-  }
-`;
+/** Colour, type, spacing and shape unified in src/routes/tokens.ts (audio-feed-vpw). */
+export const SHELL_TOKENS = DESIGN_TOKENS;
 
 /** Header, footer and the components the account and login pages share. */
 export const SHELL_CSS = `
