@@ -786,10 +786,12 @@ Deno.test("outgoing single-voice request captures title-first intro and systemIn
   assertEquals(promptText.includes("First paragraph."), true);
   assertEquals(promptText.includes("Final paragraph."), true);
 
-  // bdo: systemInstruction is set and instructs skipping code
-  const sysText = req.systemInstruction?.parts[0]?.text ?? "";
-  assertStringIncludes(sysText, "Skip code blocks");
-  assertStringIncludes(sysText, "Never read raw code");
+  // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
+  assertEquals(
+    req.systemInstruction,
+    undefined,
+    "systemInstruction must NOT be attached to audio requests",
+  );
 });
 
 Deno.test("formatCodeForTts - skips code blocks by default (audio-feed-bdo)", async () => {
@@ -897,6 +899,44 @@ Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body
   const req = capturedRequest as GeminiGenerateContentRequest;
   const bodyText = JSON.stringify(req);
   assertEquals(bodyText.includes("import sys"), false);
-  assert(req.systemInstruction !== undefined);
-  assertStringIncludes(req.systemInstruction.parts[0]?.text ?? "", "Never read raw code");
+  // audio-feed-2ob: systemInstruction must NOT be attached to dialogue audio requests
+  assertEquals(
+    req.systemInstruction,
+    undefined,
+    "systemInstruction must NOT be attached to dialogue requests",
+  );
+});
+
+Deno.test("formatCodeForTts - handles code block variants including tildes, multiline CRLF, and HTML pre tags (audio-feed-2ob)", async () => {
+  const input = [
+    "Intro text.",
+    "````js\nconst quad = 4;\n````",
+    "Middle text.",
+    "~~~python\r\ndef tilde():\r\n    return True\r\n~~~",
+    "Between text.",
+    "<pre><code>const inPre = 'html';</code></pre>",
+    "Another text.",
+    "<pre>rawPreCode();</pre>",
+    "Outro text.",
+  ].join("\n\n");
+
+  const skipped = await formatCodeForTts(input, "skip");
+  assertEquals(skipped.includes("const quad"), false);
+  assertEquals(skipped.includes("def tilde"), false);
+  assertEquals(skipped.includes("const inPre"), false);
+  assertEquals(skipped.includes("rawPreCode"), false);
+  assertEquals(skipped.includes("Intro text."), true);
+  assertEquals(skipped.includes("Middle text."), true);
+  assertEquals(skipped.includes("Between text."), true);
+  assertEquals(skipped.includes("Another text."), true);
+  assertEquals(skipped.includes("Outro text."), true);
+
+  const explained = await formatCodeForTts(
+    input,
+    "explain",
+    (code) => `code block with ${code.length} chars`,
+  );
+  assertEquals(explained.includes("Here is what that code does: code block with"), true);
+  assertEquals(explained.includes("const quad"), false);
+  assertEquals(explained.includes("def tilde"), false);
 });

@@ -735,7 +735,8 @@ export async function formatCodeForTts(
   codeHandling: CodeHandling = "skip",
   summarizer?: (code: string) => string | Promise<string>,
 ): Promise<string> {
-  const codeBlockRegex = /```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g;
+  const codeBlockRegex =
+    /(?:```+|~~~+)(?:[^\n\r]*\r?\n)?([\s\S]*?)(?:```+|~~~+)|<pre\b[^>]*>(?:<code\b[^>]*>)?([\s\S]*?)(?:<\/code>)?<\/pre>/gi;
   if (!codeBlockRegex.test(text)) {
     return text;
   }
@@ -745,7 +746,8 @@ export async function formatCodeForTts(
     const matches: Array<{ full: string; code: string; index: number }> = [];
     let match: RegExpExecArray | null;
     while ((match = codeBlockRegex.exec(text)) !== null) {
-      matches.push({ full: match[0], code: match[1] ?? "", index: match.index });
+      const code = (match[1] ?? match[2] ?? "").trim();
+      matches.push({ full: match[0], code, index: match.index });
     }
 
     let result = "";
@@ -753,7 +755,7 @@ export async function formatCodeForTts(
     for (const m of matches) {
       result += text.slice(lastIndex, m.index);
       try {
-        const explanation = await summarizer(m.code.trim());
+        const explanation = await summarizer(m.code);
         if (explanation && explanation.trim()) {
           result += `\nHere is what that code does: ${explanation.trim()}\n`;
         }
@@ -939,9 +941,9 @@ export function buildSingleVoiceRequest(
   prompt: string,
   voice: GeminiTtsVoice | string = DEFAULT_NARRATION_VOICE,
   temperature = 0.7,
-  systemInstructionText?: string,
+  _systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
-  const req: GeminiGenerateContentRequest = {
+  return {
     contents: [
       {
         parts: [{ text: prompt }],
@@ -959,12 +961,6 @@ export function buildSingleVoiceRequest(
       temperature,
     },
   };
-  if (systemInstructionText) {
-    req.systemInstruction = {
-      parts: [{ text: systemInstructionText }],
-    };
-  }
-  return req;
 }
 
 /**
@@ -975,7 +971,7 @@ export function buildDialogueRequest(
   turnsOrScript: DialogueTurn[] | string,
   speakers: [DialogueSpeaker, DialogueSpeaker],
   temperature = 0.8,
-  systemInstructionText?: string,
+  _systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
   const turns = Array.isArray(turnsOrScript)
     ? turnsOrScript
@@ -991,7 +987,7 @@ export function buildDialogueRequest(
     },
   }));
 
-  const req: GeminiGenerateContentRequest = {
+  return {
     contents: [
       {
         parts,
@@ -1024,12 +1020,6 @@ export function buildDialogueRequest(
       temperature,
     },
   };
-  if (systemInstructionText) {
-    req.systemInstruction = {
-      parts: [{ text: systemInstructionText }],
-    };
-  }
-  return req;
 }
 
 // ---------------------------------------------------------------------------

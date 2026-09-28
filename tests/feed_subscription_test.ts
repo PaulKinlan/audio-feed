@@ -1025,7 +1025,8 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
   assertEquals(capturedPrompt.includes("const a = 1"), false);
   assertEquals(capturedPrompt.includes("First paragraph."), true);
   assertEquals(capturedPrompt.includes("Last paragraph."), true);
-  assertStringIncludes(capturedSystemInstruction, "Skip code blocks");
+  // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
+  assertEquals(capturedSystemInstruction, "");
 
   // 2. Source with codeHandling = "explain" AND summarizer provided
   const sourceExplain = makeSource({
@@ -1056,7 +1057,8 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
     "brackets must not reach spoken prompt (audio-feed-sju)",
   );
   assertEquals(capturedPrompt.includes("const a = 1;\nconsole.log(a);"), false);
-  assertStringIncludes(capturedSystemInstruction, "explain or summarize");
+  // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
+  assertEquals(capturedSystemInstruction, "");
 
   // 3. Source with codeHandling = "explain" BUT NO summarizer provided -> fallback to skip
   const synthFallback = createGeminiSynthesizer(ctx, { client: clientSkip });
