@@ -112,7 +112,13 @@ import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
-import { type AudioMode, type Episode, isPublishable, isSynthesisAuthorized } from "../types.ts";
+import {
+  type AudioMode,
+  type Episode,
+  isPublishable,
+  isSynthesisAuthorized,
+  type Source,
+} from "../types.ts";
 
 /** One row of the player's episode list, with everything the UI renders. */
 /**
@@ -398,30 +404,72 @@ async function resolveTokenValue(ctx: AppContext, raw: string): Promise<string |
 }
 
 /**
- * The episodes that are not playable yet, newest first (audio-feed-7s2).
+ * The bounded newest-first window both the page's rows and the activity panel are derived from
+ * (audio-feed-3jb).
  *
- * Bounded on purpose: this is a status panel, not a queue browser, and an unbounded read of a
- * backlogged queue would make the player page as expensive as the queue it is reporting.
+ * Before this, one `/listen/*` load fired FOUR status-filtered scans (pending 100, synthesizing
+ * 100, failed 20, ready 200); in kv.ts each entry in each scan cost a serial `getEpisode`
+ * roundtrip, so a 200-episode feed meant 400-800 remote KV reads for one page. The panel is a
+ * status indicator: the newest episodes are the ones that describe current activity, so one
+ * bounded traversal is both cheaper and more honest than fanning out across statuses at depth.
  */
-export async function playerActivity(
-  ctx: AppContext,
-  userId: string,
-  limit = 20,
-): Promise<PlayerActivity> {
-  const [pendingPage, synthesizingPage, failedPage, readyPage, sources] = await Promise.all([
-    ctx.stores.metadata.listEpisodePage({ userId, status: "pending", limit: 100 }),
-    ctx.stores.metadata.listEpisodePage({ userId, status: "synthesizing", limit: 100 }),
-    ctx.stores.metadata.listEpisodePage({ userId, status: "failed", limit }),
-    ctx.stores.metadata.listEpisodePage({ userId, status: "ready", limit: 200 }),
-    ctx.stores.metadata.listSources(userId),
-  ]);
+export const LISTEN_RECENT_SCAN = 300;
+
+/**
+ * The publishable rows the page pages until it has (audio-feed-2w8's 200-episode cap):
+ * paging — over the now-batched reads — is what keeps newer pending or failed episodes from
+ * pushing ready ones off the page.
+ */
+export const LISTEN_ROW_CAP = 200;
+
+/** How many episodes one paging request asks for. */
+const LISTEN_PAGE_SIZE = 100;
+
+interface PlayerWindow {
+  /** Newest first, capped at LISTEN_RECENT_SCAN: the panel's window. */
+  scanned: Episode[];
+  /** Publishable, newest first, capped at LISTEN_ROW_CAP: the page's rows. */
+  rows: Episode[];
+}
+
+/**
+ * ONE newest-first traversal serving both the page rows and the panel window (audio-feed-3jb).
+ * `listEpisodePage` batches its reads, so a deep row set costs pages of `getMany` chunks rather
+ * than one remote roundtrip per entry.
+ */
+async function loadPlayerWindow(ctx: AppContext, userId: string): Promise<PlayerWindow> {
+  const scanned: Episode[] = [];
+  const rows: Episode[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await ctx.stores.metadata.listEpisodePage({
+      userId,
+      limit: LISTEN_PAGE_SIZE,
+      cursor,
+    });
+    if (page.episodes.length === 0) break;
+    for (const episode of page.episodes) {
+      if (scanned.length < LISTEN_RECENT_SCAN) scanned.push(episode);
+      if (rows.length < LISTEN_ROW_CAP && isPublishable(episode)) rows.push(episode);
+    }
+    cursor = page.cursor === cursor ? undefined : page.cursor;
+    if (!cursor) break;
+    if (scanned.length >= LISTEN_RECENT_SCAN && rows.length >= LISTEN_ROW_CAP) break;
+  }
+  return { scanned, rows };
+}
+
+/** The activity panel, derived IN MEMORY from the one scanned window — no extra store reads. */
+function activityFrom(episodes: Episode[], sources: Source[], limit = 20): PlayerActivity {
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
   // A regenerating episode is pending but STILL PLAYABLE (audio-feed-8oz), so it belongs in the
   // episode list and must not be doubled up here — a row that appears as both playable and
   // "generating" is how a subscriber learns to distrust the indicator.
-  const queued = [...pendingPage.episodes, ...synthesizingPage.episodes]
-    .filter((episode) => !isPublishable(episode))
+  const queued = episodes
+    .filter((episode) =>
+      !isPublishable(episode) && (episode.status === "pending" || episode.status === "synthesizing")
+    )
     .slice(0, limit);
 
   const toRow = (episode: Episode, state: ListenActivity["state"]): ListenActivity => ({
@@ -440,18 +488,35 @@ export async function playerActivity(
     inProgress: queued.map((episode) =>
       toRow(episode, episode.status === "synthesizing" ? "generating" : "queued")
     ),
-    failed: failedPage.episodes.map((episode) => toRow(episode, "failed")),
+    failed: episodes
+      .filter((episode) => episode.status === "failed")
+      .slice(0, limit)
+      .map((episode) => toRow(episode, "failed")),
     // Counted with the SAME rule the page lists by: publishable, which includes a regenerating
     // episode still playing its old audio (audio-feed-8oz). Counting only status "ready" here
     // made the poll disagree with the page it is refreshing — the player offered an episode the
     // status endpoint reported as zero playable — so the two definitions had to be unified.
-    // Bounded by the pages fetched: "up to a few hundred" is what this panel is worth.
-    playable: [
-      ...readyPage.episodes,
-      ...pendingPage.episodes,
-      ...synthesizingPage.episodes,
-    ].filter(isPublishable).length,
+    // Bounded by the scanned window: "up to a few hundred" is what this panel is worth.
+    playable: episodes.filter(isPublishable).length,
   };
+}
+
+/** One structured duration line per listen request (audio-feed-3jb) — never the token. */
+function logListenTiming(route: string, fields: Record<string, number>): void {
+  console.log(JSON.stringify({ event: "listen.timing", route, ...fields }));
+}
+
+/** The activity panel for the status poll: the same one-window derivation (audio-feed-3jb). */
+export async function playerActivity(
+  ctx: AppContext,
+  userId: string,
+  limit = 20,
+): Promise<PlayerActivity> {
+  const [window, sources] = await Promise.all([
+    loadPlayerWindow(ctx, userId),
+    ctx.stores.metadata.listSources(userId),
+  ]);
+  return activityFrom(window.scanned, sources, limit);
 }
 
 /** Resolve the token, load what the player renders, and serve the page. */
@@ -467,26 +532,27 @@ export async function handleListen(
     return forbidden(`Feed unavailable (status: ${user.status})`);
   }
 
-  // Filtered by publishability, not `status: "ready"`: a regenerating episode is
-  // pending but still plays its old audio (audio-feed-8oz). Paged until 100 are
-  // found, so newer pending or failed episodes cannot push ready ones off the page.
-  const episodes: Episode[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await ctx.stores.metadata.listEpisodePage({ userId: user.id, limit: 100, cursor });
-    episodes.push(...page.episodes.filter(isPublishable));
-    cursor = page.cursor === cursor ? undefined : page.cursor;
-  } while (cursor && episodes.length < 100);
-  episodes.length = Math.min(episodes.length, 100);
-  const sources = await ctx.stores.metadata.listSources(user.id);
+  // ONE newest-first traversal serves the page rows and the panel window (audio-feed-3jb). Rows
+  // are publishable, not `status: "ready"`: a regenerating episode is pending but still plays its
+  // old audio (audio-feed-8oz). Paging continues to LISTEN_ROW_CAP so newer pending or failed
+  // episodes cannot push ready ones off the page.
+  const dbStart = performance.now();
+  const [{ scanned, rows: publishable }, sources] = await Promise.all([
+    loadPlayerWindow(ctx, user.id),
+    ctx.stores.metadata.listSources(user.id),
+  ]);
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
-  const rows: ListenEpisode[] = [];
-  for (const episode of episodes) {
-    // The author lives on the article, not the episode; one lookup per row is the
-    // price of showing it, and the list is bounded above.
-    const article = await ctx.stores.metadata.getArticle(user.id, episode.articleId);
-    rows.push({
+  // The author lives on the article, not the episode. These lookups are BATCHED (one `getMany`
+  // per chunk, audio-feed-3jb): a per-row await here was another serial remote read per row.
+  const articles = await ctx.stores.metadata.getArticles(
+    user.id,
+    publishable.map((episode) => episode.articleId),
+  );
+
+  const rows: ListenEpisode[] = publishable.map((episode, index) => {
+    const article = articles[index] ?? null;
+    return {
       id: episode.id,
       title: episode.title,
       author: article?.author,
@@ -499,14 +565,16 @@ export async function handleListen(
       // A linkback only when the stored URL is a real web address: the value comes from a feed the
       // user subscribed to, and a link is not a place to trust it further than ingest did.
       articleUrl: /^https?:\/\//i.test(article?.url ?? "") ? article?.url : undefined,
-    });
-  }
+    };
+  });
 
-  const activity = await playerActivity(ctx, user.id);
-  // The page's own list is already the authoritative playable set, capped and paged above;
-  // counting it here keeps the header number and the rows in agreement by construction.
+  const activity = activityFrom(scanned, sources);
+  // The page's own list is already the authoritative playable set, paged above; counting it here
+  // keeps the header number and the rows in agreement by construction.
   activity.playable = rows.length;
+  const dbMs = performance.now() - dbStart;
 
+  const renderStart = performance.now();
   const html = renderListenPage({
     token,
     subscriber: user.displayName || user.email,
@@ -516,6 +584,15 @@ export async function handleListen(
     // Offline storage needs Cache Storage; without it the page still plays online.
     offlineEnabled: true,
   });
+  const renderMs = performance.now() - renderStart;
+  logListenTiming("page", {
+    dbMs,
+    renderMs,
+    rows: rows.length,
+    scanned: scanned.length,
+    inProgress: activity.inProgress.length,
+    failed: activity.failed.length,
+  });
 
   return new Response(html, {
     status: 200,
@@ -524,6 +601,7 @@ export async function handleListen(
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
     },
   });
 }
@@ -545,10 +623,28 @@ export async function handleListenStatus(
   if (user.status !== "approved") {
     return forbidden(`Feed unavailable (status: ${user.status})`);
   }
+  const dbStart = performance.now();
   const activity = await playerActivity(ctx, user.id);
-  return new Response(JSON.stringify(activity), {
+  const dbMs = performance.now() - dbStart;
+
+  const renderStart = performance.now();
+  const body = JSON.stringify(activity);
+  const renderMs = performance.now() - renderStart;
+  logListenTiming("status", {
+    dbMs,
+    renderMs,
+    inProgress: activity.inProgress.length,
+    failed: activity.failed.length,
+    playable: activity.playable,
+  });
+
+  return new Response(body, {
     status: 200,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
+    },
   });
 }
 
