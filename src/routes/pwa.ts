@@ -284,3 +284,29 @@ export function handleIcon(_ctx: RouteContext<AppContext>): Response {
     },
   });
 }
+
+/**
+ * `GET /robots.txt` (audio-feed-0mv).
+ *
+ * The capability routes are token-fronted, so a crawler that follows one cannot
+ * read anything — but it can still spend our KV budget asking, and an indexed
+ * `/listen/<token>` URL is a subscriber's credential in a search result. The
+ * disallow list is explicit rather than a bare `Disallow: /` so the public
+ * surfaces stay crawlable.
+ */
+export const ROBOTS_TXT = `User-agent: *
+Disallow: /listen/
+Disallow: /admin
+Disallow: /api/
+Allow: /
+Allow: /assets/
+`;
+
+export function handleRobots(_ctx: RouteContext<AppContext>): Response {
+  return new Response(ROBOTS_TXT, {
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    },
+  });
+}

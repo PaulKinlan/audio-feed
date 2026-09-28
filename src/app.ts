@@ -42,7 +42,7 @@ import {
   renderListenLanding,
 } from "./routes/listen.ts";
 import { handleAsset } from "./routes/assets.ts";
-import { handleIcon, handleManifest, handleServiceWorker } from "./routes/pwa.ts";
+import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
@@ -147,6 +147,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // PWA surface, served as routes because this app has no static file pipeline.
   router.get("/sw.js", handleServiceWorker);
   router.get("/manifest.json", handleManifest);
+  router.get("/robots.txt", handleRobots);
   router.get("/icon.svg", handleIcon);
 
   router.get("/health", ({ ctx }) =>
