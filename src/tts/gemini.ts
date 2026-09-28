@@ -730,12 +730,23 @@ export function formatNarrationIntro(input: NarrationInput): string {
  * if no summarizer is provided (or if summarization fails/returns empty), it safely
  * falls back to skipping the code block, ensuring raw code is never read aloud.
  */
+function decodeHtmlEntities(html: string): string {
+  return html
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
 export async function formatCodeForTts(
   text: string,
   codeHandling: CodeHandling = "skip",
   summarizer?: (code: string) => string | Promise<string>,
 ): Promise<string> {
-  const codeBlockRegex = /```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g;
+  const codeBlockRegex =
+    /(?:```+|~~~+)(?:[^\n\r]*\r?\n)?([\s\S]*?)(?:```+|~~~+)|<pre\b[^>]*>(?:<code\b[^>]*>)?([\s\S]*?)(?:<\/code>)?<\/pre>/gi;
   if (!codeBlockRegex.test(text)) {
     return text;
   }
@@ -745,7 +756,9 @@ export async function formatCodeForTts(
     const matches: Array<{ full: string; code: string; index: number }> = [];
     let match: RegExpExecArray | null;
     while ((match = codeBlockRegex.exec(text)) !== null) {
-      matches.push({ full: match[0], code: match[1] ?? "", index: match.index });
+      const rawCode = match[1] ?? (match[2] ? decodeHtmlEntities(match[2]) : "");
+      const code = rawCode.trim();
+      matches.push({ full: match[0], code, index: match.index });
     }
 
     let result = "";
@@ -753,7 +766,7 @@ export async function formatCodeForTts(
     for (const m of matches) {
       result += text.slice(lastIndex, m.index);
       try {
-        const explanation = await summarizer(m.code.trim());
+        const explanation = await summarizer(m.code);
         if (explanation && explanation.trim()) {
           result += `\nHere is what that code does: ${explanation.trim()}\n`;
         }
@@ -941,10 +954,16 @@ export function buildSingleVoiceRequest(
   temperature = 0.7,
   systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
-  const req: GeminiGenerateContentRequest = {
+  const parts: ContentPart[] = [];
+  if (systemInstructionText && systemInstructionText.trim()) {
+    parts.push({ text: systemInstructionText.trim() });
+  }
+  parts.push({ text: prompt });
+
+  return {
     contents: [
       {
-        parts: [{ text: prompt }],
+        parts,
       },
     ],
     generationConfig: {
@@ -959,12 +978,6 @@ export function buildSingleVoiceRequest(
       temperature,
     },
   };
-  if (systemInstructionText) {
-    req.systemInstruction = {
-      parts: [{ text: systemInstructionText }],
-    };
-  }
-  return req;
 }
 
 /**
@@ -981,17 +994,24 @@ export function buildDialogueRequest(
     ? turnsOrScript
     : parseScriptIntoTurns(turnsOrScript, speakers);
 
-  const parts: ContentPart[] = turns.map((turn) => ({
-    text: turn.text,
-    speech_metadata: {
-      speaker: turn.speaker,
-    },
-    speechMetadata: {
-      speaker: turn.speaker,
-    },
-  }));
+  const parts: ContentPart[] = [];
+  if (systemInstructionText && systemInstructionText.trim()) {
+    parts.push({ text: systemInstructionText.trim() });
+  }
 
-  const req: GeminiGenerateContentRequest = {
+  for (const turn of turns) {
+    parts.push({
+      text: turn.text,
+      speech_metadata: {
+        speaker: turn.speaker,
+      },
+      speechMetadata: {
+        speaker: turn.speaker,
+      },
+    });
+  }
+
+  return {
     contents: [
       {
         parts,
@@ -1024,12 +1044,6 @@ export function buildDialogueRequest(
       temperature,
     },
   };
-  if (systemInstructionText) {
-    req.systemInstruction = {
-      parts: [{ text: systemInstructionText }],
-    };
-  }
-  return req;
 }
 
 // ---------------------------------------------------------------------------
