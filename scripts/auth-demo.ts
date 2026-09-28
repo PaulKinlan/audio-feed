@@ -58,7 +58,14 @@ const json = (body: unknown, status = 200) =>
 const port = Number(Deno.args[0] ?? 8942);
 const origin = `http://localhost:${port}`;
 
-Deno.serve({ port }, async (request) => {
+Deno.serve(
+  {
+    port,
+    onListen: ({ port: assignedPort }) => {
+      console.log(`READY port=${assignedPort} base=http://localhost:${assignedPort}`);
+    },
+  },
+  async (request) => {
   const url = new URL(request.url);
   if (request.method === "OPTIONS") {
     // 204 must be bodiless, so CORS headers are set directly here.

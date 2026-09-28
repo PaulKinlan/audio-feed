@@ -33,8 +33,9 @@ function wav(fill: number, bytes = 4800): Uint8Array {
   return raw;
 }
 
-export async function startRegenerateHarness(port = 8133, autoReleaseMs?: number) {
-  const base = `http://localhost:${port}`;
+export async function startRegenerateHarness(port = 0, autoReleaseMs?: number) {
+  let resolvedPort = port;
+  const config = { port, publicBaseUrl: "", adminToken: HARNESS_ADMIN_TOKEN };
   const stores = memoryStores();
   const now = "2026-09-20T09:00:00.000Z";
 
@@ -123,9 +124,25 @@ export async function startRegenerateHarness(port = 8133, autoReleaseMs?: number
     return audio;
   };
 
-  const ctx = { config: { port, publicBaseUrl: base, adminToken: HARNESS_ADMIN_TOKEN }, stores };
+  const ctx = { config, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx, { synthesizer }));
-  const server = Deno.serve({ port, onListen: () => {} }, fetch);
+  const server = Deno.serve(
+    {
+      port,
+      hostname: "localhost",
+      onListen: ({ port: assignedPort }) => {
+        resolvedPort = assignedPort;
+        config.port = assignedPort;
+        config.publicBaseUrl = `http://localhost:${assignedPort}`;
+      },
+    },
+    fetch,
+  );
+  const actualPort = (server.addr as Deno.NetAddr).port || resolvedPort;
+  const base = `http://localhost:${actualPort}`;
+  config.port = actualPort;
+  config.publicBaseUrl = base;
+
   return {
     base,
     stores,

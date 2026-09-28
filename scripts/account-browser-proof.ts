@@ -15,39 +15,20 @@
  *   deno run --allow-all --unstable-kv scripts/account-browser-proof.ts
  */
 
-const PORT = 8133;
-const BASE = `http://localhost:${PORT}`;
-const OUT = new URL("../docs/evidence/audio-feed-8fc/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
-const PROFILE = `${HOME}/cap-evidence/8fc/chrome-profile`;
+import {
+  createTempChromeProfile,
+  newestChrome,
+  spawnHarness,
+} from "./proof-helper.ts";
 
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-account-");
+const harness = await spawnHarness("scripts/account-harness.ts");
+const BASE = harness.base;
+const OUT = new URL("../docs/evidence/audio-feed-8fc/", import.meta.url).pathname;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// -- harness ------------------------------------------------------------------
-const harness = new Deno.Command(Deno.execPath(), {
-  args: ["run", "--allow-all", "--unstable-kv", "scripts/account-harness.ts", String(PORT)],
-  cwd: new URL("..", import.meta.url).pathname,
-  stdout: "null",
-  stderr: "null",
-}).spawn();
-for (let i = 0; i < 100; i++) {
-  try {
-    if ((await fetch(`${BASE}/health`)).ok) break;
-  } catch { /* not up yet */ }
-  await sleep(100);
-}
-
 // -- chrome -------------------------------------------------------------------
-await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
-await Deno.mkdir(PROFILE, { recursive: true });
 await Deno.mkdir(OUT, { recursive: true });
 const chrome = new Deno.Command(newestChrome(), {
   args: [
@@ -386,8 +367,9 @@ try {
       "\n",
   );
   ws.close();
-  chrome.kill("SIGKILL");
-  harness.kill("SIGTERM");
-  await Promise.allSettled([chrome.status, harness.status]);
+  try { chrome.kill("SIGKILL"); } catch { /* ignore */ }
+  harness.kill();
+  await Promise.allSettled([chrome.status, harness.process.status]);
+  await cleanup();
 }
 Deno.exit(exitCode);

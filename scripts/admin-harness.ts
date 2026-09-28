@@ -65,8 +65,17 @@ for (let m = 0; m < MINUTES; m++) {
 }
 
 const { fetch } = createApp(ctx, createHandlers(ctx));
-Deno.serve({ port }, fetch);
-const scenario = stopped
-  ? "poll cron stopped 1 h in, synthesis still ticking"
-  : "both crons healthy";
-console.log(`admin harness: ${base}/admin  token: harness-admin  (${scenario})`);
+Deno.serve(
+  {
+    port,
+    hostname: "localhost",
+    onListen: ({ port: assignedPort }) => {
+      console.log(`READY port=${assignedPort} base=http://localhost:${assignedPort}`);
+      const scenario = stopped
+        ? "poll cron stopped 1 h in, synthesis still ticking"
+        : "both crons healthy";
+      console.log(`admin harness: http://localhost:${assignedPort}/admin  token: harness-admin  (${scenario})`);
+    },
+  },
+  fetch,
+);
