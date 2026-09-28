@@ -199,23 +199,25 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ error: "ADMIN_TOKEN is not configured on this server." }, 503);
       }
 
-      // audio-feed-bns: throttle failed admin auth attempts
+      // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
       const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
       const limiter = deps.adminAuthLimiter ?? getSharedAdminAuthLimiter();
-      const lock = limiter.isLockedOut(clientIp);
-      if (!lock.allowed) {
-        const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
-        return reply(
-          { error: "Too many failed admin authentication attempts. Please try again later." },
-          429,
-          { "retry-after": retryAfterSec.toString() },
-        );
-      }
 
       try {
         await requireAdminToken(adminToken.trim(), expected);
         limiter.reset(clientIp);
       } catch {
+        // Token is invalid. Check if client IP is currently locked out.
+        const lock = limiter.isLockedOut(clientIp);
+        if (!lock.allowed) {
+          const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
+          return reply(
+            { error: "Too many failed admin authentication attempts. Please try again later." },
+            429,
+            { "retry-after": retryAfterSec.toString() },
+          );
+        }
+
         const fail = limiter.recordFailure(clientIp);
         const headers: Record<string, string> = {};
         if (!fail.allowed) {

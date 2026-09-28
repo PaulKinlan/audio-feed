@@ -89,28 +89,30 @@ async function adminGate(
     });
   }
 
-  // audio-feed-bns: throttle failed admin auth attempts
+  // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
   const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
-  const lock = limiter.isLockedOut(clientIp);
-  if (!lock.allowed) {
-    const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
-    return Response.json(
-      { error: "Too many failed admin authentication attempts. Please try again later." },
-      {
-        status: 429,
-        headers: {
-          "retry-after": retryAfterSec.toString(),
-          "cache-control": "no-store",
-        },
-      },
-    );
-  }
 
   try {
     await requireAdminToken(presented, expected);
     limiter.reset(clientIp);
     return null;
   } catch {
+    // Token is invalid. Check if client IP is currently locked out.
+    const lock = limiter.isLockedOut(clientIp);
+    if (!lock.allowed) {
+      const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
+      return Response.json(
+        { error: "Too many failed admin authentication attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "retry-after": retryAfterSec.toString(),
+            "cache-control": "no-store",
+          },
+        },
+      );
+    }
+
     const fail = limiter.recordFailure(clientIp);
     const headers: Record<string, string> = { "cache-control": "no-store" };
     if (!fail.allowed) {

@@ -216,7 +216,7 @@ export function renderAdminPage(
   }
 
   ${
-    adminTokenShort
+    signedIn && adminTokenShort
       ? `<div class="card" role="status" style="border-inline-start: 4px solid var(--accent); margin-block-end: var(--space-4);">
     <h2>Security Advisory: Short ADMIN_TOKEN</h2>
     <p>

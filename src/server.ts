@@ -92,7 +92,10 @@ export interface BootstrapOptions {
 
 export interface BootstrapResult {
   server: Deno.HttpServer;
-  fetch: (req: Request) => Promise<Response> | Response;
+  fetch: (
+    req: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ) => Promise<Response> | Response;
   ctx: AppContext;
   synthesizer: Synthesizer | null;
   /**
@@ -245,8 +248,8 @@ if (import.meta.main || isDeploy) {
 }
 
 export default {
-  async fetch(req: Request) {
+  async fetch(req: Request, info?: { remoteAddr?: { hostname?: string } }) {
     const { fetch } = await getBootstrap();
-    return fetch(req);
+    return fetch(req, info);
   },
 };

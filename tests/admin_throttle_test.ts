@@ -19,6 +19,8 @@ import type { AppContext } from "../src/app.ts";
 import { FailedAuthLimiter } from "../src/auth/rate_limit.ts";
 import { handleAdmin } from "../src/routes/admin.ts";
 import { bootstrap } from "../src/server.ts";
+import { approveUser, createUser } from "../src/auth/users.ts";
+import { createSession, sessionCookie } from "../src/auth/sessions.ts";
 
 const BASE = "https://audio.example.com";
 const ADMIN_SECRET = "super-secret-admin-passphrase-123";
@@ -195,27 +197,149 @@ Deno.test("admin throttle: unauthenticated requests (no token) do not count as f
   assertEquals(success.status, 200);
 });
 
-Deno.test("admin token length: short token (< 16 chars) is WARNED but NEVER refused", async () => {
-  const shortToken = "short-pass"; // 10 chars (< 16)
-  const { fetch, ctx } = testApp({ adminToken: shortToken });
+Deno.test("admin throttle: valid credentials are NEVER locked out by prior failures", async () => {
+  const limiter = new FailedAuthLimiter({ maxFailures: 3, windowMs: 60_000 });
+  const { fetch } = testApp({}, limiter);
 
-  // 1. Success with short token is accepted (not refused!)
-  const res = await fetch(
+  // 3 wrong token attempts on this client IP -> triggers lockout for bad tokens
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        headers: { "x-admin-token": "wrong" },
+      }),
+    );
+    assertEquals(res.status, 401);
+  }
+
+  // 4th wrong attempt is blocked with 429
+  const blocked = await fetch(
     new Request(`${BASE}/api/admin/users`, {
-      headers: { "x-admin-token": shortToken },
+      headers: { "x-admin-token": "still-wrong" },
     }),
   );
-  assertEquals(res.status, 200);
+  assertEquals(blocked.status, 429);
 
-  // 2. GET /admin page renders security advisory warning banner
-  const adminPageRes = await handleAdmin({
+  // BUT valid credentials must NEVER be locked out: real admin presents correct token and succeeds (200)
+  const validRes = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      headers: { "x-admin-token": ADMIN_SECRET },
+    }),
+  );
+  assertEquals(validRes.status, 200, "valid admin token must never be locked out (anti-DoS)");
+
+  // And presenting valid credentials resets the failure counter for the IP
+  const postResetWrong = await fetch(
+    new Request(`${BASE}/api/admin/users`, {
+      headers: { "x-admin-token": "wrong-again" },
+    }),
+  );
+  assertEquals(postResetWrong.status, 401, "failure count was reset by valid auth");
+});
+
+Deno.test("admin throttle: integration test driving server.fetch with real connection info", async () => {
+  const stores: Stores = memoryStores();
+  let booted;
+  try {
+    booted = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      config: { adminToken: ADMIN_SECRET },
+    });
+
+    const client1 = { remoteAddr: { hostname: "10.0.0.1" } };
+    const client2 = { remoteAddr: { hostname: "10.0.0.2" } };
+
+    // Client 1 sends 10 bad guesses to bootstrap
+    for (let i = 0; i < 10; i++) {
+      const res = await booted.fetch(
+        new Request(`${BASE}/api/auth/bootstrap`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "origin": BASE },
+          body: JSON.stringify({ email: "admin@example.com", adminToken: `wrong-${i}` }),
+        }),
+        client1,
+      );
+      assertEquals(res.status, 401);
+    }
+
+    // Client 1's 11th bad guess is locked out (429)
+    const blocked1 = await booted.fetch(
+      new Request(`${BASE}/api/auth/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "origin": BASE },
+        body: JSON.stringify({ email: "admin@example.com", adminToken: "wrong-11" }),
+      }),
+      client1,
+    );
+    assertEquals(blocked1.status, 429);
+    assertStringIncludes(await blocked1.text(), "Too many failed admin authentication attempts");
+
+    // Client 2 (different IP) is unaffected
+    const client2Res = await booted.fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        headers: { "x-admin-token": ADMIN_SECRET },
+      }),
+      client2,
+    );
+    assertEquals(client2Res.status, 200, "independent IP must not be affected by client1");
+
+    // Client 1 with CORRECT token is accepted (not locked out!)
+    const client1Valid = await booted.fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        headers: { "x-admin-token": ADMIN_SECRET },
+      }),
+      client1,
+    );
+    assertEquals(client1Valid.status, 200, "valid token on client1 succeeds and clears lockout");
+  } finally {
+    if (booted) await booted.shutdown();
+  }
+});
+
+Deno.test("admin token length: anonymous visitor to /admin does NOT see short token advisory (no info leak)", async () => {
+  const shortToken = "short-pass"; // 10 chars (< 16)
+  const { ctx } = testApp({ adminToken: shortToken });
+
+  // Anonymous request to /admin (not signed in)
+  const res = await handleAdmin({
     req: new Request(`${BASE}/admin`),
     ctx,
     params: {},
     url: new URL(`${BASE}/admin`),
   });
-  assertEquals(adminPageRes.status, 200);
-  const html = await adminPageRes.text();
+  assertEquals(res.status, 200);
+  const html = await res.text();
+  assertEquals(
+    html.includes("Security Advisory: Short ADMIN_TOKEN"),
+    false,
+    "must not leak token policy to anonymous visitors",
+  );
+});
+
+Deno.test("admin token length: authenticated admin sees advisory when token is short (< 16 chars)", async () => {
+  const shortToken = "short-pass"; // 10 chars (< 16)
+  const { ctx, stores } = testApp({ adminToken: shortToken });
+
+  // Create an approved admin user and session
+  const rawAdmin = await createUser(stores.metadata, {
+    email: "admin@example.com",
+    isAdmin: true,
+  });
+  const admin = await approveUser(stores.metadata, rawAdmin.id, "admin");
+  const secret = await createSession(stores.metadata, admin.id);
+
+  // Authenticated request to /admin
+  const res = await handleAdmin({
+    req: new Request(`${BASE}/admin`, {
+      headers: { cookie: sessionCookie(secret) },
+    }),
+    ctx,
+    params: {},
+    url: new URL(`${BASE}/admin`),
+  });
+  assertEquals(res.status, 200);
+  const html = await res.text();
   assertStringIncludes(html, "Security Advisory: Short ADMIN_TOKEN");
   assertStringIncludes(html, "shorter than 16 characters");
 });
