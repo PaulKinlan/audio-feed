@@ -730,6 +730,16 @@ export function formatNarrationIntro(input: NarrationInput): string {
  * if no summarizer is provided (or if summarization fails/returns empty), it safely
  * falls back to skipping the code block, ensuring raw code is never read aloud.
  */
+function decodeHtmlEntities(html: string): string {
+  return html
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
 export async function formatCodeForTts(
   text: string,
   codeHandling: CodeHandling = "skip",
@@ -746,7 +756,8 @@ export async function formatCodeForTts(
     const matches: Array<{ full: string; code: string; index: number }> = [];
     let match: RegExpExecArray | null;
     while ((match = codeBlockRegex.exec(text)) !== null) {
-      const code = (match[1] ?? match[2] ?? "").trim();
+      const rawCode = match[1] ?? (match[2] ? decodeHtmlEntities(match[2]) : "");
+      const code = rawCode.trim();
       matches.push({ full: match[0], code, index: match.index });
     }
 
@@ -941,12 +952,18 @@ export function buildSingleVoiceRequest(
   prompt: string,
   voice: GeminiTtsVoice | string = DEFAULT_NARRATION_VOICE,
   temperature = 0.7,
-  _systemInstructionText?: string,
+  systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
+  const parts: ContentPart[] = [];
+  if (systemInstructionText && systemInstructionText.trim()) {
+    parts.push({ text: systemInstructionText.trim() });
+  }
+  parts.push({ text: prompt });
+
   return {
     contents: [
       {
-        parts: [{ text: prompt }],
+        parts,
       },
     ],
     generationConfig: {
@@ -971,21 +988,28 @@ export function buildDialogueRequest(
   turnsOrScript: DialogueTurn[] | string,
   speakers: [DialogueSpeaker, DialogueSpeaker],
   temperature = 0.8,
-  _systemInstructionText?: string,
+  systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
   const turns = Array.isArray(turnsOrScript)
     ? turnsOrScript
     : parseScriptIntoTurns(turnsOrScript, speakers);
 
-  const parts: ContentPart[] = turns.map((turn) => ({
-    text: turn.text,
-    speech_metadata: {
-      speaker: turn.speaker,
-    },
-    speechMetadata: {
-      speaker: turn.speaker,
-    },
-  }));
+  const parts: ContentPart[] = [];
+  if (systemInstructionText && systemInstructionText.trim()) {
+    parts.push({ text: systemInstructionText.trim() });
+  }
+
+  for (const turn of turns) {
+    parts.push({
+      text: turn.text,
+      speech_metadata: {
+        speaker: turn.speaker,
+      },
+      speechMetadata: {
+        speaker: turn.speaker,
+      },
+    });
+  }
 
   return {
     contents: [

@@ -765,7 +765,7 @@ Deno.test("feed fallback strips the markup off a bare-fragment content:encoded b
       apiKey: "test-key-not-real",
       fetchFn: (_input, init) => {
         const body = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
-        prompt = body.contents?.[0]?.parts?.[0]?.text ?? "";
+        prompt = body.contents?.[0]?.parts?.map((p) => p.text).join("\n\n") ?? "";
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -980,7 +980,7 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
     apiKey: "test-key",
     fetchFn: (_url, init) => {
       const req = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
-      capturedPrompt = req.contents[0]?.parts[0]?.text ?? "";
+      capturedPrompt = req.contents[0]?.parts.map((p) => p.text).join("\n\n") ?? "";
       capturedSystemInstruction = req.systemInstruction?.parts[0]?.text ?? "";
       return Promise.resolve(
         new Response(
@@ -1025,7 +1025,8 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
   assertEquals(capturedPrompt.includes("const a = 1"), false);
   assertEquals(capturedPrompt.includes("First paragraph."), true);
   assertEquals(capturedPrompt.includes("Last paragraph."), true);
-  // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
+  // audio-feed-2ob: instruction folded into content parts, systemInstruction omitted
+  assertStringIncludes(capturedPrompt, "Skip code blocks");
   assertEquals(capturedSystemInstruction, "");
 
   // 2. Source with codeHandling = "explain" AND summarizer provided
@@ -1057,7 +1058,8 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
     "brackets must not reach spoken prompt (audio-feed-sju)",
   );
   assertEquals(capturedPrompt.includes("const a = 1;\nconsole.log(a);"), false);
-  // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
+  // audio-feed-2ob: instruction folded into content parts, systemInstruction omitted
+  assertStringIncludes(capturedPrompt, "explain or summarize");
   assertEquals(capturedSystemInstruction, "");
 
   // 3. Source with codeHandling = "explain" BUT NO summarizer provided -> fallback to skip
