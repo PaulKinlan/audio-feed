@@ -69,6 +69,15 @@ import { compareRunsNewestFirst, RUN_HISTORY_LIMIT, RUN_KINDS } from "./mod.ts";
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
 /**
+ * How many index entries one `listEpisodePage` / `getArticles` call fetches per `getMany`
+ * (audio-feed-3jb). The cap is Deno KV's own: `getMany` accepts AT MOST 10 ranges, and asking
+ * for more fails the whole read with "Too many ranges (max 10)" — so the batch size IS that limit.
+ * The N+1 this replaces awaited one remote `getEpisode` PER ENTRY; the index value already names
+ * the episode, so a chunk is one read for up to ten episodes.
+ */
+export const EPISODE_READ_BATCH = 10;
+
+/**
  * An open `kv.atomic()` builder. Derived from the method rather than named: Deno
  * does not export the transaction type under a stable `Deno.*` name, so this
  * cannot go stale when it renames.
@@ -381,6 +390,20 @@ export class KvMetadataStore implements MetadataStore {
 
   async getArticle(userId: string, id: string): Promise<Article | null> {
     return (await this.#kv.get<Article>(["article", userId, id])).value;
+  }
+
+  async getArticles(userId: string, ids: string[]): Promise<(Article | null)[]> {
+    if (ids.length === 0) return [];
+    const articles: (Article | null)[] = [];
+    for (let start = 0; start < ids.length; start += EPISODE_READ_BATCH) {
+      const chunk = ids.slice(start, start + EPISODE_READ_BATCH);
+      const rows =
+        (await this.#kv.getMany(chunk.map((id) => ["article", userId, id]))) as Deno.KvEntryMaybe<
+          Article
+        >[];
+      for (const row of rows) articles.push(row.value);
+    }
+    return articles;
   }
 
   async findArticleByUrl(userId: string, url: string): Promise<Article | null> {
@@ -722,23 +745,38 @@ export class KvMetadataStore implements MetadataStore {
     const limit = query.limit ?? 50;
     const prefix = this.#indexPrefix(query);
 
-    const episodes: Episode[] = [];
     const iter = this.#kv.list<string>({ prefix }, {
       cursor: query.cursor,
       limit: Number.isFinite(limit) ? limit : undefined,
     });
     // Keys are stored newest-first, so a plain ascending scan is already ordered.
-    for await (const entry of iter) {
-      const episode = await this.getEpisode(query.userId, entry.value);
-      if (!episode) continue;
-      if (query.sourceId && episode.sourceId !== query.sourceId) continue;
-      if (query.mode && episode.mode !== query.mode) continue;
-      if (query.status && episode.status !== query.status) continue;
-      episodes.push(episode);
+    //
+    // BATCHED reads (audio-feed-3jb): drain the (limit-bounded) index first, then fetch the
+    // episodes in `getMany` chunks. Draining before fetching keeps the cursor semantics exactly
+    // as they were — the cursor names the position after the last index entry this page
+    // considered — while a page of N entries costs ceil(N / EPISODE_READ_BATCH) remote reads
+    // instead of N serial `getEpisode` awaits.
+    const ids: string[] = [];
+    for await (const entry of iter) ids.push(entry.value);
+    const cursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
+
+    const episodes: Episode[] = [];
+    for (let start = 0; start < ids.length; start += EPISODE_READ_BATCH) {
+      const chunk = ids.slice(start, start + EPISODE_READ_BATCH);
+      const keys: Deno.KvKey[] = chunk.map((id) => ["episode", query.userId, id]);
+      const rows = (await this.#kv.getMany(keys)) as Deno.KvEntryMaybe<Episode>[];
+      for (const row of rows) {
+        const episode = row.value;
+        if (!episode) continue;
+        if (query.sourceId && episode.sourceId !== query.sourceId) continue;
+        if (query.mode && episode.mode !== query.mode) continue;
+        if (query.status && episode.status !== query.status) continue;
+        episodes.push(episode);
+        if (episodes.length >= limit) break;
+      }
       if (episodes.length >= limit) break;
     }
 
-    const cursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
     return { episodes, cursor };
   }
 

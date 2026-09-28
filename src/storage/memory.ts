@@ -295,6 +295,13 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve(found ? structuredClone(found) : null);
   }
 
+  getArticles(userId: string, ids: string[]): Promise<(Article | null)[]> {
+    return Promise.resolve(ids.map((id) => {
+      const found = this.#articles.get(MemoryMetadataStore.#scoped(userId, id));
+      return found ? structuredClone(found) : null;
+    }));
+  }
+
   findArticleByUrl(userId: string, url: string): Promise<Article | null> {
     const id = this.#articleByUrl.get(`${userId}\u0000${url}`);
     if (!id) return Promise.resolve(null);

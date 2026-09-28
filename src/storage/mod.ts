@@ -240,6 +240,12 @@ export interface MetadataStore {
    */
   putArticleWithEpisode(article: Article, episode: Episode): Promise<void>;
   getArticle(userId: string, id: string): Promise<Article | null>;
+  /**
+   * Batched `getArticle` (audio-feed-3jb): the player resolves the author for every row it
+   * lists, so a per-row await was up to 200 serial remote reads behind one page. The result
+   * order matches `ids`; a missing article is `null` in its slot.
+   */
+  getArticles(userId: string, ids: string[]): Promise<(Article | null)[]>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;
 
