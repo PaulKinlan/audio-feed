@@ -951,3 +951,29 @@ Deno.test("formatCodeForTts - handles code block variants including tildes, mult
   assertEquals(explained.includes("const quad"), false);
   assertEquals(explained.includes("def tilde"), false);
 });
+
+Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to avoid double-decoding (audio-feed-91r)", async () => {
+  // Escaped entity representation (e.g. teaching how to write &lt; in HTML)
+  // must become literal &lt;, NOT double-decoded to <.
+  const sample = "Demonstration: <pre><code>esc &amp;lt;b&amp;gt; here</code></pre>";
+  let capturedCode = "";
+  await formatCodeForTts(sample, "explain", (code) => {
+    capturedCode = code;
+    return `[explained: ${code}]`;
+  });
+  assertEquals(
+    capturedCode,
+    "esc &lt;b&gt; here",
+    "&amp;lt; must decode to literal &lt;, not raw <",
+  );
+
+  // Single-level entities decode as expected
+  const single =
+    "<pre><code>x &amp;&amp; y &lt; 10 &gt; 2 &quot;quoted&quot; &#39;single&#39; &nbsp;end</code></pre>";
+  let singleCaptured = "";
+  await formatCodeForTts(single, "explain", (code) => {
+    singleCaptured = code;
+    return `[explained: ${code}]`;
+  });
+  assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
+});

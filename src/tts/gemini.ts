@@ -731,13 +731,15 @@ export function formatNarrationIntro(input: NarrationInput): string {
  * falls back to skipping the code block, ensuring raw code is never read aloud.
  */
 function decodeHtmlEntities(html: string): string {
+  // audio-feed-91r: decode specific entities first, and &amp; LAST to prevent double-decoding
+  // (e.g. &amp;lt; should become &lt;, NOT double-decoded to <).
   return html
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ");
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
 }
 
 export async function formatCodeForTts(
