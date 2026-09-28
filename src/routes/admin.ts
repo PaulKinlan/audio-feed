@@ -44,6 +44,8 @@ export interface AdminPageOptions {
   publicBaseUrl: string;
   /** Whether ADMIN_TOKEN is configured: the break-glass path needs it. */
   adminConfigured: boolean;
+  /** Whether configured ADMIN_TOKEN is short (< 16 chars). Warn-only advisory (audio-feed-bns). */
+  adminTokenShort?: boolean;
   /**
    * The signed-in admin (audio-feed-8fc). Present means the console runs on the
    * session cookie and the token box is a fallback behind a toggle.
@@ -52,7 +54,7 @@ export interface AdminPageOptions {
 }
 
 export function renderAdminPage(
-  { publicBaseUrl, adminConfigured, viewer = null }: AdminPageOptions,
+  { publicBaseUrl, adminConfigured, adminTokenShort = false, viewer = null }: AdminPageOptions,
 ): string {
   const signedIn = Boolean(viewer?.isAdmin);
   const html = `<!doctype html>
@@ -211,6 +213,18 @@ export function renderAdminPage(
       approval endpoint.
     </p>
   </div>`
+  }
+
+  ${
+    adminTokenShort
+      ? `<div class="card" role="status" style="border-inline-start: 4px solid var(--accent); margin-block-end: var(--space-4);">
+    <h2>Security Advisory: Short ADMIN_TOKEN</h2>
+    <p>
+      The configured <code class="mono">ADMIN_TOKEN</code> is shorter than 16 characters.
+      A multi-word passphrase of at least 16 characters is recommended to prevent brute-force attacks.
+    </p>
+  </div>`
+      : ""
   }
 
   <section class="card signin-card" aria-labelledby="auth-h">
@@ -1391,9 +1405,11 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     );
   }
 
+  const adminTokenShort = Boolean(ctx.config.adminToken && ctx.config.adminToken.length < 16);
   const html = renderAdminPage({
     publicBaseUrl: origin.baseUrl,
     adminConfigured: Boolean(ctx.config.adminToken),
+    adminTokenShort,
     viewer: viewerOf(user),
   });
   return new Response(html, { status: 200, headers });

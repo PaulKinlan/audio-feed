@@ -19,6 +19,11 @@ import {
   suspendUser,
   UnknownUserError,
 } from "../auth/users.ts";
+import {
+  extractClientIp,
+  type FailedAuthLimiter,
+  getSharedAdminAuthLimiter,
+} from "../auth/rate_limit.ts";
 import { isAudioMode } from "../types.ts";
 import { isActiveAdmin, issueSetupLink, sameOrigin, sessionUser } from "../auth/sessions.ts";
 import { isOutdated, PROMPT_VERSION } from "../tts/prompt_version.ts";
@@ -36,8 +41,21 @@ import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../typ
  * they may. One helper rather than four copies, so a new admin route cannot be
  * added without the token check by accident — the failure mode this whole surface
  * exists to prevent (audio-feed-z2s).
+ *
+ * Rate limiting & throttle (audio-feed-bns):
+ * Both the header path (`x-admin-token` / Bearer) and the bootstrap path
+ * (`POST /api/auth/bootstrap`) share the same failed-attempt rate limiter
+ * (FailedAuthLimiter). Previously, both paths allowed unbounded rapid guessing
+ * (~2,400 to 3,000 attempts/sec). Failed attempts are now throttled per client IP
+ * with sliding window lockout (HTTP 429), while successful admin auth resets the
+ * counter.
  */
-async function adminGate(ctx: AppContext, req: Request): Promise<Response | null> {
+async function adminGate(
+  ctx: AppContext,
+  req: Request,
+  remoteAddr?: string,
+  limiter: FailedAuthLimiter = getSharedAdminAuthLimiter(),
+): Promise<Response | null> {
   const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
     ? req.headers.get("authorization")!.slice(7).trim()
     : null;
@@ -63,13 +81,44 @@ async function adminGate(ctx: AppContext, req: Request): Promise<Response | null
     // endpoints at all.
     return forbidden("ADMIN_TOKEN is not configured on this server.");
   }
-  try {
-    await requireAdminToken(presented, expected);
-    return null;
-  } catch {
+
+  if (!presented) {
     return Response.json({ error: "Unauthorized: admin token required" }, {
       status: 401,
       headers: { "cache-control": "no-store" },
+    });
+  }
+
+  // audio-feed-bns: throttle failed admin auth attempts
+  const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
+  const lock = limiter.isLockedOut(clientIp);
+  if (!lock.allowed) {
+    const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
+    return Response.json(
+      { error: "Too many failed admin authentication attempts. Please try again later." },
+      {
+        status: 429,
+        headers: {
+          "retry-after": retryAfterSec.toString(),
+          "cache-control": "no-store",
+        },
+      },
+    );
+  }
+
+  try {
+    await requireAdminToken(presented, expected);
+    limiter.reset(clientIp);
+    return null;
+  } catch {
+    const fail = limiter.recordFailure(clientIp);
+    const headers: Record<string, string> = { "cache-control": "no-store" };
+    if (!fail.allowed) {
+      headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();
+    }
+    return Response.json({ error: "Unauthorized: admin token required" }, {
+      status: 401,
+      headers,
     });
   }
 }
@@ -80,9 +129,12 @@ async function adminGate(ctx: AppContext, req: Request): Promise<Response | null
  * change that would leave no approved admin — the token path included. Every
  * change lands in the approval ledger as a `role` record: who, when, from, to.
  */
-export function createAdminSetRoleHandler(ctx: AppContext): AppHandlers["adminSetRole"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+export function createAdminSetRoleHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminSetRole"] {
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const body = await req.json().catch(() => ({})) as { isAdmin?: unknown };
     if (typeof body.isAdmin !== "boolean") {
@@ -119,9 +171,12 @@ export function createAdminSetRoleHandler(ctx: AppContext): AppHandlers["adminSe
  * (audio-feed-8fc). The secret is in the URL fragment and in this no-store body,
  * nowhere else: not a Location header, not a log line, not the store.
  */
-export function createAdminSetupLinkHandler(ctx: AppContext): AppHandlers["adminSetupLink"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+export function createAdminSetupLinkHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminSetupLink"] {
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const target = await ctx.stores.metadata.getUser(params.id ?? "");
     if (!target) return notFound("Unknown user");
@@ -140,9 +195,12 @@ export function createAdminSetupLinkHandler(ctx: AppContext): AppHandlers["admin
 }
 
 /** `GET /api/admin/users` — the subscriber list for the console. */
-export function createListUsersHandler(ctx: AppContext): AppHandlers["listUsers"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+export function createListUsersHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["listUsers"] {
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const users = await listUsers(ctx.stores.metadata);
     return Response.json(
@@ -178,8 +236,8 @@ export function createCreateUserHandler(
   ctx: AppContext,
   deps: ComposeDeps = {},
 ): AppHandlers["createUser"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     let body: {
@@ -278,9 +336,12 @@ export function createCreateUserHandler(
 }
 
 /** `POST /api/admin/users/:id/suspend` — stop a subscriber's synthesis and feed. */
-export function createSuspendUserHandler(ctx: AppContext): AppHandlers["suspendUser"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+export function createSuspendUserHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["suspendUser"] {
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     try {
       const updated = await suspendUser(ctx.stores.metadata, params.id ?? "", "admin");
@@ -299,9 +360,12 @@ export function createSuspendUserHandler(ctx: AppContext): AppHandlers["suspendU
 }
 
 /** `POST /api/admin/users/:id/approve` — admin queue, token-gated. */
-export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveUser"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+export function createApproveUserHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["approveUser"] {
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     try {
@@ -327,9 +391,10 @@ export function createApproveUserHandler(ctx: AppContext): AppHandlers["approveU
 /** `GET /api/admin/users/:id/sources` — list feeds for a subscriber. */
 export function createAdminListUserSourcesHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminListSources"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const userId = params.id ?? "";
@@ -364,8 +429,8 @@ export function createAdminCreateUserSourceHandler(
   ctx: AppContext,
   deps: ComposeDeps = {},
 ): AppHandlers["adminCreateSource"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const userId = params.id ?? "";
@@ -447,9 +512,10 @@ export function createAdminCreateUserSourceHandler(
 /** `DELETE /api/admin/users/:id/sources/:sourceId` — remove a feed from a user. */
 export function createAdminDeleteUserSourceHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminDeleteSource"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     return await deleteUserSource(ctx, req, params.id ?? "", params.sourceId ?? "");
   };
@@ -470,9 +536,10 @@ const ADMIN_EPISODE_ROWS = 50;
 /** `GET /api/admin/users/:id/episodes` — newest episodes and the regenerate counts. */
 export function createAdminListUserEpisodesHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminListEpisodes"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const userId = params.id ?? "";
     if (!await ctx.stores.metadata.getUser(userId)) return notFound("Unknown user");
@@ -513,9 +580,10 @@ export function createAdminListUserEpisodesHandler(
 /** `POST /api/admin/users/:id/episodes/:episodeId/regenerate` — one episode. */
 export function createAdminRegenerateEpisodeHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminRegenerateEpisode"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const resolved = await regenerableUser(ctx, params.id ?? "");
     if ("denied" in resolved) return resolved.denied;
@@ -538,9 +606,10 @@ export function createAdminRegenerateEpisodeHandler(
  */
 export function createAdminRegenerateFeedHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminRegenerateFeed"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const body: { scope?: unknown; sourceId?: unknown; mode?: unknown } = await req.json()
@@ -574,9 +643,10 @@ export function createAdminRegenerateFeedHandler(
 /** `POST /api/admin/users/:id/rotate-token` — rotate a user's feed token. */
 export function createAdminRotateUserTokenHandler(
   ctx: AppContext,
+  deps: ComposeDeps = {},
 ): AppHandlers["adminRotateToken"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const userId = params.id ?? "";
@@ -603,9 +673,12 @@ export function createAdminRotateUserTokenHandler(
  * capped at write, and the per-user download list only contains users who have
  * had a request. No unbounded scan, which is the audio-feed-att failure.
  */
-export function createAdminStatsHandler(ctx: AppContext): AppHandlers["adminStats"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+export function createAdminStatsHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminStats"] {
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const [downloads, synthesis, runs, users] = await Promise.all([
@@ -665,8 +738,8 @@ export function createAdminPollNowHandler(
   ctx: AppContext,
   deps: ComposeDeps = {},
 ): AppHandlers["adminPollNow"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     // Recorded in the same history as the cron runs, tagged `manual`, so the
@@ -701,8 +774,8 @@ export function createAdminSynthesizeNowHandler(
   ctx: AppContext,
   deps: ComposeDeps = {},
 ): AppHandlers["adminSynthesizeNow"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
 
     const synthesizer = deps.synthesizer ??
@@ -748,9 +821,12 @@ export function createAdminSynthesizeNowHandler(
 }
 
 /** `GET /api/admin/outbox` — notifications for chaos-relay (audio-feed-np5). */
-export function createListOutboxHandler(ctx: AppContext): AppHandlers["adminListOutbox"] {
-  return async ({ req }) => {
-    const denied = await adminGate(ctx, req);
+export function createListOutboxHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminListOutbox"] {
+  return async ({ req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const url = new URL(req.url);
     const parsedLimit = Number(url.searchParams.get("limit") ?? 50);
@@ -765,9 +841,12 @@ export function createListOutboxHandler(ctx: AppContext): AppHandlers["adminList
 }
 
 /** `POST /api/admin/outbox/:id/ack` — acknowledge delivery of outbox notification (audio-feed-np5). */
-export function createAckOutboxHandler(ctx: AppContext): AppHandlers["adminAckOutbox"] {
-  return async ({ params, req }) => {
-    const denied = await adminGate(ctx, req);
+export function createAckOutboxHandler(
+  ctx: AppContext,
+  deps: ComposeDeps = {},
+): AppHandlers["adminAckOutbox"] {
+  return async ({ params, req, remoteAddr }) => {
+    const denied = await adminGate(ctx, req, remoteAddr, deps.adminAuthLimiter);
     if (denied) return denied;
     const id = params.id ?? "";
     const acked = await ctx.stores.metadata.ackNotification(id);
