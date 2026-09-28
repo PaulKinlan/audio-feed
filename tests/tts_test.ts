@@ -664,14 +664,18 @@ Deno.test("GeminiTtsClient - synthesizeDialogue executes multi-speaker request",
     "Sam",
   );
 
-  // Assert per-part speech_metadata.speaker
-  assertEquals(capturedBody?.contents[0]?.parts.length, 2);
-  assertEquals(
-    capturedBody?.contents[0]?.parts[0]?.speech_metadata?.speaker,
-    "Alex",
+  // Assert per-part speech_metadata.speaker (with leading instruction part)
+  assertEquals(capturedBody?.contents[0]?.parts.length, 3);
+  assertStringIncludes(
+    capturedBody?.contents[0]?.parts[0]?.text ?? "",
+    "Never read raw code",
   );
   assertEquals(
     capturedBody?.contents[0]?.parts[1]?.speech_metadata?.speaker,
+    "Alex",
+  );
+  assertEquals(
+    capturedBody?.contents[0]?.parts[2]?.speech_metadata?.speaker,
     "Sam",
   );
 
@@ -770,21 +774,22 @@ Deno.test("outgoing single-voice request captures title-first intro and systemIn
 
   assert(capturedRequest !== null);
   const req = capturedRequest as GeminiGenerateContentRequest;
-  const promptText = req.contents[0]?.parts[0]?.text ?? "";
+  const instructionPart = req.contents[0]?.parts[0]?.text ?? "";
+  const promptPart = req.contents[0]?.parts[1]?.text ?? "";
 
   // tov: first words must be title, followed by date, author, source
   assertEquals(
-    promptText.startsWith(
+    promptPart.startsWith(
       "Understanding Fleet Topologies. Published on September 26, 2026, by Paul Kinlan. From Platform Architecture.",
     ),
     true,
   );
-  assertEquals(promptText.includes("The following is"), false);
+  assertEquals(promptPart.includes("The following is"), false);
 
   // bdo: raw code block is stripped from prompt text
-  assertEquals(promptText.includes("const agent"), false);
-  assertEquals(promptText.includes("First paragraph."), true);
-  assertEquals(promptText.includes("Final paragraph."), true);
+  assertEquals(promptPart.includes("const agent"), false);
+  assertEquals(promptPart.includes("First paragraph."), true);
+  assertEquals(promptPart.includes("Final paragraph."), true);
 
   // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
   assertEquals(
@@ -792,6 +797,9 @@ Deno.test("outgoing single-voice request captures title-first intro and systemIn
     undefined,
     "systemInstruction must NOT be attached to audio requests",
   );
+  // audio-feed-2ob: instruction text is folded into content parts as fallback guardrail
+  assertStringIncludes(instructionPart, "Skip code blocks");
+  assertStringIncludes(instructionPart, "Never read raw code");
 });
 
 Deno.test("formatCodeForTts - skips code blocks by default (audio-feed-bdo)", async () => {
@@ -905,6 +913,9 @@ Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body
     undefined,
     "systemInstruction must NOT be attached to dialogue requests",
   );
+  // audio-feed-2ob: instruction text is folded into dialogue content parts as fallback guardrail
+  const firstPartText = req.contents[0]?.parts[0]?.text ?? "";
+  assertStringIncludes(firstPartText, "Never read raw code");
 });
 
 Deno.test("formatCodeForTts - handles code block variants including tildes, multiline CRLF, and HTML pre tags (audio-feed-2ob)", async () => {
