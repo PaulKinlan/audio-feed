@@ -416,11 +416,12 @@ async function resolveTokenValue(ctx: AppContext, raw: string): Promise<string |
 export const LISTEN_RECENT_SCAN = 300;
 
 /**
- * The publishable rows the page pages until it has (audio-feed-2w8's 200-episode cap):
- * paging — over the now-batched reads — is what keeps newer pending or failed episodes from
- * pushing ready ones off the page.
+ * The publishable rows the page lists: its EXISTING cap, left unchanged by this refactor
+ * (the 200-episode cap is the feed builder's, audio-feed-2w8; a perf change must not change
+ * user-visible page size). Paging — over the now-batched reads — is what keeps newer pending or
+ * failed episodes from pushing ready ones off the page.
  */
-export const LISTEN_ROW_CAP = 200;
+export const LISTEN_ROW_CAP = 100;
 
 /** How many episodes one paging request asks for. */
 const LISTEN_PAGE_SIZE = 100;
