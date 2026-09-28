@@ -73,7 +73,7 @@ Set the following environment variables on Deno Deploy or in your local `.env`:
 # Gemini TTS Synthesis (Required)
 GEMINI_API_KEY=<your-google-ai-studio-api-key>
 
-# Admin Security Token (Required for user approvals)
+# Admin Security Token (Required for user approvals; 16+ chars recommended)
 ADMIN_TOKEN=<your-secret-admin-passphrase>
 
 # Object Storage: Cloudflare R2 / S3 (Required in production)
@@ -167,6 +167,8 @@ bearer token (`feedToken`).
 
 - **URL:** `POST /api/admin/users/:id/approve`
 - **Headers:** `x-admin-token: <ADMIN_TOKEN>` (or `Authorization: Bearer <ADMIN_TOKEN>`)
+
+Failed admin token attempts on header routes and `/api/auth/bootstrap` are rate-limited per client IP (10 failed attempts per 5-minute sliding window) to prevent brute-force attacks. Tokens under 16 characters emit a startup/admin advisory warning.
 
 Example:
 

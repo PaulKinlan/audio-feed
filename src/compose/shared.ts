@@ -12,6 +12,7 @@ import type { FeedPollOptions, PollDependencies } from "../ingest/feed.ts";
 import type { ExtractedArticle } from "../ingest/url.ts";
 import type { SynthesisWorkerOptions, Synthesizer } from "../worker/synthesis.ts";
 import type { RequestAccessDeps } from "./access.ts";
+import type { FailedAuthLimiter } from "../auth/rate_limit.ts";
 
 /** Extraction of the capability token a podcast client can actually send. */
 const TOKEN_HEADERS = ["x-feed-token", "x-user-token"] as const;
@@ -92,6 +93,8 @@ export interface ComposeDeps {
   synthesisOptions?: SynthesisWorkerOptions;
   /** Test seam: request access options / rate limiter (audio-feed-r97). */
   requestAccess?: RequestAccessDeps;
+  /** Test seam: shared failed admin auth rate limiter (audio-feed-bns). */
+  adminAuthLimiter?: FailedAuthLimiter;
 }
 
 export const badRequest = (message: string) =>

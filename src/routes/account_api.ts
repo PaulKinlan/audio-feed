@@ -38,6 +38,11 @@ import {
   rotateFeedToken,
   updatePreferences,
 } from "../auth/users.ts";
+import {
+  extractClientIp,
+  type FailedAuthLimiter,
+  getSharedAdminAuthLimiter,
+} from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import { articleUrl, type ExtractedArticle, IngestError } from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
@@ -66,6 +71,8 @@ export interface AccountDeps {
   deleteUserSource: (req: Request, userId: string, sourceId: string) => Promise<Response>;
   /** compose.ts's shared regenerate, outdated scope; resolves the number queued. */
   regenerateOutdated: (userId: string) => Promise<number>;
+  /** Test seam: shared failed admin auth rate limiter (audio-feed-bns). */
+  adminAuthLimiter?: FailedAuthLimiter;
 }
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -173,7 +180,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       }
     },
 
-    bootstrap: async ({ req }) => {
+    bootstrap: async ({ req, remoteAddr }) => {
       const refused = crossOrigin(ctx, req);
       if (refused) return refused;
       const { adminToken, email } = await body(req);
@@ -191,10 +198,32 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (!expected) {
         return reply({ error: "ADMIN_TOKEN is not configured on this server." }, 503);
       }
+
+      // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
+      const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
+      const limiter = deps.adminAuthLimiter ?? getSharedAdminAuthLimiter();
+
       try {
         await requireAdminToken(adminToken.trim(), expected);
+        limiter.reset(clientIp);
       } catch {
-        return reply({ error: "Invalid admin token." }, 401);
+        // Token is invalid. Check if client IP is currently locked out.
+        const lock = limiter.isLockedOut(clientIp);
+        if (!lock.allowed) {
+          const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
+          return reply(
+            { error: "Too many failed admin authentication attempts. Please try again later." },
+            429,
+            { "retry-after": retryAfterSec.toString() },
+          );
+        }
+
+        const fail = limiter.recordFailure(clientIp);
+        const headers: Record<string, string> = {};
+        if (!fail.allowed) {
+          headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();
+        }
+        return reply({ error: "Invalid admin token." }, 401, headers);
       }
 
       let user = await getUserByEmail(store, normalised);

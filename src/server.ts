@@ -10,7 +10,7 @@
 
 import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
-import { loadConfig, openStores } from "./config.ts";
+import { type AppConfig, loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
   startSynthesisWorker,
@@ -86,11 +86,16 @@ export interface BootstrapOptions {
    * "on Deploy, neither worker starts" to something that always passes.
    */
   synthesizer?: Synthesizer | null;
+  /** Injected config overrides (audio-feed-bns). */
+  config?: Partial<AppConfig>;
 }
 
 export interface BootstrapResult {
   server: Deno.HttpServer;
-  fetch: (req: Request) => Promise<Response> | Response;
+  fetch: (
+    req: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ) => Promise<Response> | Response;
   ctx: AppContext;
   synthesizer: Synthesizer | null;
   /**
@@ -121,7 +126,8 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // Read the decision per call, not once at module load: that is what lets the
   // gates below be exercised at all (audio-feed-1kw).
   const deploy = options.isDeploy ?? isDeploy;
-  const config = loadConfig();
+  const config = { ...loadConfig(), ...options.config };
+  if (options.port !== undefined) config.port = options.port;
   const stores = options.stores ?? await openStores();
   const ctx: AppContext = { config, stores };
 
@@ -150,6 +156,11 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   }
   if (!config.adminToken) {
     console.warn("[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable");
+  } else if (config.adminToken.length < 16) {
+    console.warn(
+      `[audio-feed] WARNING: ADMIN_TOKEN is short (${config.adminToken.length} chars). ` +
+        "A minimum of 16 characters (or a strong multi-word passphrase) is recommended.",
+    );
   }
 
   // audio-feed-562: on Deno Deploy, isolates sleep between requests and background
@@ -237,8 +248,8 @@ if (import.meta.main || isDeploy) {
 }
 
 export default {
-  async fetch(req: Request) {
+  async fetch(req: Request, info?: { remoteAddr?: { hostname?: string } }) {
     const { fetch } = await getBootstrap();
-    return fetch(req);
+    return fetch(req, info);
   },
 };

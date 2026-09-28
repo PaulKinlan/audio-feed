@@ -68,6 +68,29 @@ export class SlidingWindowRateLimiter {
     };
   }
 
+  /** Check whether a key is currently rate-limited without recording a new hit. */
+  peek(key: string, now = Date.now()): RateLimitResult {
+    const windowStart = now - this.#config.windowMs;
+    const timestamps = this.#hits.get(key) ?? [];
+    const active = timestamps.filter((t) => t > windowStart);
+
+    if (active.length >= this.#config.maxRequests) {
+      const oldestActive = active[0] ?? now;
+      const resetMs = Math.max(0, oldestActive + this.#config.windowMs - now);
+      return {
+        allowed: false,
+        remaining: 0,
+        resetMs,
+      };
+    }
+
+    return {
+      allowed: true,
+      remaining: this.#config.maxRequests - active.length,
+      resetMs: this.#config.windowMs,
+    };
+  }
+
   /** Reset tracked hits for a key (primarily for tests). */
   reset(key?: string): void {
     if (key) this.#hits.delete(key);
@@ -98,4 +121,50 @@ export function extractClientIp(
   }
   if (remoteAddr) return remoteAddr;
   return "direct";
+}
+
+/**
+ * Shared throttle for failed admin authentication attempts (audio-feed-bns).
+ *
+ * Prevents rapid guessing attacks against ADMIN_TOKEN on both:
+ *   - The header path (`x-admin-token`, `authorization: bearer ...` via adminGate)
+ *   - The bootstrap path (`POST /api/auth/bootstrap` via account_api)
+ */
+export interface FailedAuthLimiterOptions {
+  /** Maximum failed attempts within window before lockout. Default: 10 */
+  maxFailures?: number;
+  /** Sliding window duration in milliseconds. Default: 5 minutes */
+  windowMs?: number;
+}
+
+export class FailedAuthLimiter {
+  readonly #limiter: SlidingWindowRateLimiter;
+
+  constructor(options: FailedAuthLimiterOptions = {}) {
+    this.#limiter = new SlidingWindowRateLimiter({
+      maxRequests: options.maxFailures ?? 10,
+      windowMs: options.windowMs ?? 5 * 60 * 1000,
+    });
+  }
+
+  /** Check if client key has reached failure threshold without incrementing. */
+  isLockedOut(key: string, now = Date.now()): RateLimitResult {
+    return this.#limiter.peek(key, now);
+  }
+
+  /** Record a failed authentication attempt. */
+  recordFailure(key: string, now = Date.now()): RateLimitResult {
+    return this.#limiter.check(key, now);
+  }
+
+  /** Reset failure count for a key upon successful authentication. */
+  reset(key?: string): void {
+    this.#limiter.reset(key);
+  }
+}
+
+const SHARED_ADMIN_AUTH_LIMITER = new FailedAuthLimiter();
+
+export function getSharedAdminAuthLimiter(): FailedAuthLimiter {
+  return SHARED_ADMIN_AUTH_LIMITER;
 }
