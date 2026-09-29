@@ -1194,6 +1194,7 @@ async function downloadEpisode(episode, button) {
     markSaved(episode, button);
     say("Saved for offline listening.", "ok");
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return;
     setDownloadState(button, "idle");
     const errMsg = String(error instanceof Error ? error.message : error);
     say("Download failed: " + errMsg, "error");
