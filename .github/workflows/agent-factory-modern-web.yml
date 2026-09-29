@@ -55,9 +55,12 @@ jobs:
 
       - name: Set up Beads Database
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "Initializing and restoring Beads Dolt database..."
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
           git fetch origin refs/dolt/data:refs/dolt/data || true
           bd init --prefix audio-feed || true
           bd dolt pull origin
@@ -97,11 +100,14 @@ jobs:
       - name: Sync Beads Database
         if: always()
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [ -d ".beads" ] && command -v bd >/dev/null 2>&1; then
             echo "Syncing Beads Dolt database to origin..."
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
             bd dolt push origin
           fi
