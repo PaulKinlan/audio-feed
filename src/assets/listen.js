@@ -649,6 +649,7 @@ function updateRowResumeUI(li, episode) {
 // ── activity panel (audio-feed-7s2) ────────────────────────────────────────
 const activitySection = $("activity");
 const activityList = $("activityList");
+const activityHint = $("activityHint");
 
 // audio-feed-cls: user dismissal for activity failure notifications
 const DISMISSED_ACTIVITY_KEY = TOKEN ? `audio-feed-dismissed:${TOKEN}` : "audio-feed-dismissed";
@@ -746,6 +747,19 @@ function activityRow(entry, failed) {
     dismiss.addEventListener("click", () => {
       dismissActivity(entry.id);
       li.remove();
+      const remainingFailed = activityList.querySelectorAll(".act[data-state='failed']");
+      if (remainingFailed.length <= 1) {
+        activityHint.replaceChildren();
+      } else {
+        const dismissAllBtn = activityHint.querySelector(".act-dismiss-all");
+        if (dismissAllBtn) {
+          dismissAllBtn.textContent = "Dismiss all (" + remainingFailed.length + ")";
+          dismissAllBtn.setAttribute(
+            "aria-label",
+            "Dismiss all " + remainingFailed.length + " failure notices",
+          );
+        }
+      }
       if (activityList.children.length === 0) {
         activitySection.classList.add("hidden");
       }
@@ -764,6 +778,28 @@ function renderActivity(payload) {
   const inProgress = payload.inProgress ?? [];
   const dismissed = loadDismissedActivity();
   const failed = (payload.failed ?? []).filter((entry) => !dismissed.has(entry.id));
+
+  // audio-feed-j8o: when multiple failures exist, offer a one-click "Dismiss all" button
+  activityHint.replaceChildren();
+  if (failed.length > 1) {
+    const dismissAllBtn = document.createElement("button");
+    dismissAllBtn.type = "button";
+    dismissAllBtn.className = "act-dismiss-all";
+    dismissAllBtn.textContent = "Dismiss all (" + failed.length + ")";
+    dismissAllBtn.setAttribute("aria-label", "Dismiss all " + failed.length + " failure notices");
+    dismissAllBtn.addEventListener("click", () => {
+      for (const entry of failed) {
+        dismissActivity(entry.id);
+      }
+      activityList.querySelectorAll(".act[data-state='failed']").forEach((el) => el.remove());
+      activityHint.replaceChildren();
+      if (activityList.children.length === 0) {
+        activitySection.classList.add("hidden");
+      }
+    });
+    activityHint.appendChild(dismissAllBtn);
+  }
+
   activityList.replaceChildren(
     ...inProgress.map((entry) => activityRow(entry, false)),
     ...failed.map((entry) => activityRow(entry, true)),

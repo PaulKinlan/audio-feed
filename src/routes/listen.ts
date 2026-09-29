@@ -500,7 +500,7 @@ function activityFrom(
     }
   }
 
-  // audio-feed-cls: filter out stale failures that have already been reprocessed into ready/queued episodes
+  // audio-feed-cls, audio-feed-j8o: filter out stale failures that have already been reprocessed into ready/queued episodes
   const isSuperceded = (failed: Episode) => {
     return episodes.some((live) => {
       if (live.id === failed.id) return false;
@@ -510,13 +510,19 @@ function activityFrom(
       // F1: Only supersede when the live/publishable episode is strictly NEWER than the failure
       const isNewer = live.createdAt > failed.createdAt;
       if (!isNewer) return false;
-      const sameArticleAndTitle = Boolean(
-        live.articleId && failed.articleId && live.articleId === failed.articleId &&
-          live.title && failed.title && live.title === failed.title,
-      );
       // F2: Mode equality — absence is not agreement; require exact mode match or both missing
       const sameMode = live.mode === failed.mode;
-      return sameArticleAndTitle && sameMode;
+      if (!sameMode) return false;
+      // audio-feed-j8o: match across re-minted articleId via title and source
+      const sameTitle = Boolean(live.title && failed.title && live.title === failed.title);
+      if (!sameTitle) return false;
+      const sameIdentity = Boolean(
+        live.articleId && failed.articleId && live.articleId === failed.articleId,
+      ) || Boolean(
+        (live.sourceId && failed.sourceId && live.sourceId === failed.sourceId) ||
+          (live.sourceTitle && failed.sourceTitle && live.sourceTitle === failed.sourceTitle),
+      );
+      return sameIdentity;
     });
   };
 

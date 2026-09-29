@@ -267,6 +267,30 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
     createdAt: "2026-09-10T08:00:00.000Z",
   }));
 
+  // 4. Re-ingested/re-sent article with a newly minted articleId (audio-feed-j8o):
+  // Matching title, source, mode, and newer createdAt -> must supersede older failure despite distinct articleIds
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-old-fail-reingested",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-fail-1",
+    title: "Re-ingested Article Title",
+    mode: "direct",
+    status: "failed",
+    error: "Failed during first ingest",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-ready-reingested",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-ready-2", // newly minted articleId!
+    title: "Re-ingested Article Title",
+    mode: "direct",
+    status: "ready",
+    createdAt: "2026-09-10T08:30:00.000Z",
+  }));
+
   const res = await fetch(req(`/listen/${TOKEN}/status`));
   assertEquals(res.status, 200);
   const body = await res.json();
@@ -288,6 +312,21 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
     failedIds.includes("ep-deepdive-fail"),
     "different mode failure must remain visible",
   );
+  // ep-old-fail-reingested has different articleId but same title/source/mode and older createdAt -> filtered
+  assert(
+    !failedIds.includes("ep-old-fail-reingested"),
+    "re-ingested article with new articleId must supersede older failure via title/source (audio-feed-j8o)",
+  );
+});
+
+Deno.test("listen.js and listen.css define Dismiss All button for multi-failure activity (audio-feed-j8o)", async () => {
+  const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
+  const css = await Deno.readTextFile(new URL("../src/assets/listen.css", import.meta.url));
+
+  assertStringIncludes(js, "act-dismiss-all");
+  assertStringIncludes(js, "Dismiss all (");
+  assertStringIncludes(js, "activityHint.replaceChildren");
+  assertStringIncludes(css, ".act-dismiss-all {");
 });
 
 Deno.test("listen HTML template does not leak raw JS comment syntax (audio-feed-cls)", async () => {

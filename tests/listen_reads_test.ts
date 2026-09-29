@@ -108,14 +108,16 @@ async function seed(stores: Stores, specs: EpisodeSpec[]): Promise<void> {
   let minute = 0;
   for (const spec of specs) {
     const articleId = `art-${spec.id}`;
+    const title = `Article ${spec.id}`;
     await stores.metadata.putArticle(
-      makeArticle({ id: articleId, userId: "user-1", sourceId: "src-a" }),
+      makeArticle({ id: articleId, userId: "user-1", sourceId: "src-a", title }),
     );
     await stores.metadata.putEpisode(makeEpisode({
       id: spec.id,
       userId: "user-1",
       sourceId: "src-a",
       articleId,
+      title,
       status: spec.status,
       regenerating: spec.regenerating,
       createdAt: minutesAgo(minute++),
