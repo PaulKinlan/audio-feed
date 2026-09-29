@@ -44,6 +44,13 @@ export class PasskeyError extends Error {
 /**
  * Known public suffixes / platform eTLDs where multiple unrelated applications
  * reside under shared domains (audio-feed-1o2).
+ *
+ * NOTE: The primary, load-bearing security control in this codebase is that
+ * relyingParty() strictly defaults rpID to the exact service hostname (e.g.
+ * audio-feed.paulkinlan-ea.deno.net), preventing cross-app passkey clashes by default.
+ * This public suffix check serves as defense-in-depth against explicit misconfigurations
+ * or deployments directly onto a bare shared domain.
+ *
  * Browsers consult the Public Suffix List (PSL) and reject WebAuthn RP IDs that match
  * a public suffix with a SecurityError DOMException.
  */
