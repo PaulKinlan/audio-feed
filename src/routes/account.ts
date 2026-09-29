@@ -11,6 +11,7 @@
  */
 
 import type { AppContext } from "../app.ts";
+import { bookmarkletHref } from "./bookmarklet.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { base64url, sessionUser } from "../auth/sessions.ts";
@@ -60,6 +61,7 @@ const CSS = `
   .quick-add { border-inline-start: 4px solid var(--accent); background: var(--surface); margin-block-end: 1.5rem; }
   .quick-grid { display: grid; gap: 1rem; margin-block: 1rem; }
   @media (min-width: 44rem) { .quick-grid { grid-template-columns: 1fr 1fr; } }
+  .quick-card[hidden] { display: none; }
   .quick-card { padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem; }
   .bookmarklet-box { margin-block-start: 1rem; padding: var(--space-4); border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface-2); }
   .bookmarklet-btn { cursor: grab; display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; text-decoration: none; user-select: none; }
@@ -161,83 +163,47 @@ ${
       user.status === "pending" ? "waiting for approval" : esc(user.status)
     }. Nothing is turned into audio until an admin approves it, because synthesis is the part that costs money.</p>`;
 
-  const bookmarkletCode =
-    `javascript:(function(){var u=location.href,t=document.title||'',l=document.querySelector('link[rel="alternate"][type*="rss"],link[rel="alternate"][type*="atom"],link[rel*="alternate"][type*="xml"]'),f=l?l.href:'',dest='${baseUrl}/account?add='+encodeURIComponent(u)+'&title='+encodeURIComponent(t)+(f?'&feed='+encodeURIComponent(f):'');window.open(dest,'_blank')||(location.href=dest);})();`;
+  const bookmarkletCode = bookmarkletHref(baseUrl);
 
-  const quickAddSection = d.prefill
-    ? `
+  const unifiedCard = `
   <section class="panel quick-add" id="quickAddPanel" aria-labelledby="quick-add-h">
     <h2 id="quick-add-h">Add to Audio Feed</h2>
     <p class="sub">URL detected: <strong class="prefill-title">${
-      esc(d.prefill.title || d.prefill.url)
-    }</strong></p>
-    
-    ${
-      d.prefill.feedUrl
-        ? `
+    esc(d.prefill?.title || d.prefill?.url || "")
+  }</strong></p>
     <div class="quick-grid">
       <div class="quick-card">
         <div>
-          <h3 style="margin-top: 0; font-size: 1rem;">🎙️ Option 1: Queue this single page</h3>
+          <h3 style="margin-top: 0; font-size: 1rem;">Queue this single page</h3>
           <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
-          esc(d.prefill.url)
-        }</code></p>
+    esc(d.prefill?.url || "")
+  }</code></p>
           <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
             <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
             <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
           </div>
         </div>
         <button type="button" class="btn small" id="quickSingleBtn"${
-          approved ? "" : " disabled"
-        }>Queue Single Episode</button>
+    approved ? "" : " disabled"
+  }>Queue Single Episode</button>
       </div>
-
-      <div class="quick-card">
+      <div class="quick-card" id="detectedFeed"${d.prefill?.feedUrl ? "" : " hidden"}>
         <div>
-          <h3 style="margin-top: 0; font-size: 1rem;">📡 Option 2: Subscribe to RSS feed</h3>
-          <p class="meta" style="font-size: 0.85rem; word-break: break-all;">Detected feed: <code>${
-          esc(d.prefill.feedUrl)
-        }</code></p>
-          <p class="sub" style="font-size: 0.85rem; margin-block-start: 0.25rem;">Follow publication for future articles.</p>
+          <h3 style="margin-top: 0; font-size: 1rem;">Subscribe to the feed</h3>
+          <p class="meta" style="font-size: 0.85rem; word-break: break-all;">${
+    d.prefill?.feedUrl ? "Detected feed: " : "This page advertises: "
+  }<code id="detectedFeedUrl">${esc(d.prefill?.feedUrl || "")}</code></p>
+          <p class="sub" style="font-size: 0.85rem; margin-block-start: 0.25rem;">Follow the publication for future articles.</p>
         </div>
         <button type="button" class="btn quiet small" id="quickSubscribeBtn"${
-          approved ? "" : " disabled"
-        }>Subscribe to RSS Feed</button>
+    approved ? "" : " disabled"
+  }>Subscribe to RSS Feed</button>
       </div>
-    </div>`
-        : `
-    <div style="margin-block: 1rem;">
-      <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
-          esc(d.prefill.url)
-        }</code></p>
-      <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
-        <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
-        <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
-      </div>
-      <button type="button" class="btn small" id="quickSingleBtn"${
-          approved ? "" : " disabled"
-        }>Queue for Audio</button>
-    </div>`
-    }
-    <p class="feedback" id="quickFeedback" role="status" aria-live="polite"></p>
-  </section>`
-    : "";
-
-  const main = `<div class="wrap">
-  <div class="account-head">
-    <div>
-      <p class="eyebrow">Your account</p>
-      <h1>${esc(user.displayName)}</h1>
-      <p class="meta">${esc(user.email)} <span class="badge" data-status="${esc(user.status)}">${
-    esc(user.status)
-  }</span></p>
     </div>
-    <a class="btn quiet" href="/listen/${esc(user.feedToken)}">Open the player</a>
-  </div>
-  ${pending}
-  ${quickAddSection}
+    <p class="feedback" id="quickFeedback" role="status" aria-live="polite"></p>
+  </section>`;
 
-  <section class="panel send" aria-labelledby="send-h">
+  const sendSection = d.prefill ? "" : `<section class="panel send" aria-labelledby="send-h">
     <h2 id="send-h">Send an article to audio</h2>
     <p class="sub">Paste a link. It's queued, narrated, and added to your feed.</p>
     <form id="sendForm">
@@ -265,7 +231,25 @@ ${
         </a>
       </div>
     </div>
-  </section>
+  </section>`;
+
+  const main = `<div class="wrap">
+  <div class="account-head">
+    <div>
+      <p class="eyebrow">Your account</p>
+      <h1>${esc(user.displayName)}</h1>
+      <p class="meta">${esc(user.email)} <span class="badge" data-status="${esc(user.status)}">${
+    esc(user.status)
+  }</span></p>
+    </div>
+    <a class="btn quiet" href="/listen/${esc(user.feedToken)}">Open the player</a>
+  </div>
+  ${pending}
+  ${d.prefill ? unifiedCard : ""}
+
+${sendSection}
+
+
 
   <section class="panel" aria-labelledby="feeds-h">
     <div class="section-title"><h2 id="feeds-h">Your feeds</h2></div>
@@ -365,9 +349,9 @@ ${PASSKEY_CLIENT}
   const $ = (id) => document.getElementById(id);
   const say = (el, tone, text) => { el.dataset.tone = tone; el.textContent = text; };
 
-  if (PREFILL && PREFILL.url && $("sendUrl") && !$("sendUrl").value) {
-    $("sendUrl").value = PREFILL.url;
-  }
+  // The prefill is DISPLAYED by the unified card; it is never copied into a
+  // second input, which is what produced two populated forms (audio-feed-6hw).
+  let feedUrl = (PREFILL && PREFILL.feedUrl) || null;
 
   const quickSingleBtn = $("quickSingleBtn");
   if (quickSingleBtn && PREFILL) {
@@ -390,14 +374,15 @@ ${PASSKEY_CLIENT}
   }
 
   const quickSubscribeBtn = $("quickSubscribeBtn");
-  if (quickSubscribeBtn && PREFILL && PREFILL.feedUrl) {
+  if (quickSubscribeBtn && PREFILL) {
     quickSubscribeBtn.addEventListener("click", async () => {
       const feedback = $("quickFeedback");
+      if (!feedUrl) return;
       quickSubscribeBtn.disabled = true;
       say(feedback, "ok", "Subscribing to feed…");
       try {
         const res = await send("POST", "/api/account/sources", {
-          feedUrl: PREFILL.feedUrl,
+          feedUrl: feedUrl,
           title: PREFILL.title || undefined,
           modes: ["direct", "deepdive"],
         });
@@ -411,6 +396,23 @@ ${PASSKEY_CLIENT}
       }
     });
   }
+  // Feed autodiscovery (audio-feed-6hw): when the bookmarklet found no feed, ask
+  // the server to read the page's own declaration. Discovery is an OFFER, so a
+  // refusal is silent: the single-page action already works without a feed.
+  if (PREFILL && PREFILL.url && !feedUrl) {
+    send("GET", "/api/account/discover-feed?url=" + encodeURIComponent(PREFILL.url))
+      .then((found) => {
+        const feed = found && found.feeds && found.feeds[0];
+        if (!feed) return;
+        feedUrl = feed.url;
+        const detected = $("detectedFeed");
+        const label = $("detectedFeedUrl");
+        if (label) label.textContent = feed.title ? (feed.title + " — " + feed.url) : feed.url;
+        if (detected) detected.hidden = false;
+      })
+      .catch(() => {});
+  }
+
   async function send(method, path, body) {
     const res = await fetch(path, {
       method,
@@ -442,7 +444,8 @@ ${PASSKEY_CLIENT}
     });
   }
 
-  $("sendForm").addEventListener("submit", async (event) => {
+  const sendForm = $("sendForm");
+  if (sendForm) sendForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const feedback = $("sendFeedback");
     const mode = document.querySelector("input[name=sendMode]:checked").value;

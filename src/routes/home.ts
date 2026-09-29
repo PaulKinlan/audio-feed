@@ -20,6 +20,7 @@
  */
 
 import type { AppContext } from "../app.ts";
+import { bookmarkletHref } from "./bookmarklet.ts";
 import type { RouteContext } from "../router.ts";
 import { originCacheControl, resolveOrigin } from "../origin.ts";
 import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
@@ -473,9 +474,7 @@ export function renderHomePage({
 
   <div class="note bookmarklet-box" style="margin-block-start: var(--space-4);">
     <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link" href="${
-    esc(
-      `javascript:(function(){var u=location.href,t=document.title||'',l=document.querySelector('link[rel="alternate"][type*="rss"],link[rel="alternate"][type*="atom"],link[rel*="alternate"][type*="xml"]'),f=l?l.href:'',dest='${base}/account?add='+encodeURIComponent(u)+'&title='+encodeURIComponent(t)+(f?'&feed='+encodeURIComponent(f):'');window.open(dest,'_blank')||(location.href=dest);})();`,
-    )
+    esc(bookmarkletHref(base))
   }" draggable="true" title="Drag to your bookmarks bar" style="font-weight: 600; text-decoration: underline;">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
   </div>
 

@@ -373,6 +373,197 @@ export async function fetchFeedDocument(
 }
 
 /**
+ * The feed-link SHAPES, in one place (audio-feed-6hw): the bookmarklet
+ * (`src/routes/bookmarklet.ts`) and server-side discovery
+ * (`discoverFeeds`) both read them, so a shape added for one is a shape the
+ * other knows. `rel~=` matches the whitespace-separated list rather than a
+ * substring; the anchor shapes are narrowed past "/feedback" to feed-ish names.
+ */
+export const FEED_LINK_SELECTOR = [
+  'link[rel~="alternate"][type*="rss"]',
+  'link[rel~="alternate"][type*="atom"]',
+  'link[rel~="alternate"][type*="feed"]',
+  'link[rel~="alternate"][type*="json"]',
+  'link[rel~="alternate"][type*="xml"]',
+].join(",");
+
+export const FEED_ANCHOR_SELECTOR = [
+  'a[href*="/feed"]',
+  'a[href*="/rss"]',
+  'a[href$=".xml"]',
+  'a[href$=".rss"]',
+  'a[href$=".atom"]',
+].join(",");
+
+export interface DiscoveredFeed {
+  url: string;
+  title: string;
+  type: string;
+}
+
+const MAX_DISCOVERED_FEEDS = 8;
+
+function feedTypeOf(rawType: string, href: string): string {
+  const declared = rawType.trim().toLowerCase();
+  if (declared) return declared;
+  const lowered = href.toLowerCase();
+  if (/\.rss(?:$|[?#])/.test(lowered) || /\/rss(?:$|[?#])/.test(lowered)) {
+    return "application/rss+xml";
+  }
+  if (/\.atom(?:$|[?#])/.test(lowered) || /atom/.test(lowered)) return "application/atom+xml";
+  return "application/octet-stream";
+}
+
+/**
+ * Extract the feed candidates a page declares — PURE, so the shapes are unit
+ * testable without a socket. Every candidate is resolved against the page URL and
+ * then put through `articleUrl`, which is what keeps the answer http(s)-only:
+ * `javascript:`, `data:`, credential-bearing, non-standard-port and
+ * private/link-local literal hosts are DROPPED here rather than returned to a
+ * page. (A public hostname that resolves privately is refused later, at the
+ * socket, by `publicLookup`.)
+ */
+export function discoverFeedLinks(
+  html: string,
+  pageUrl: string,
+): { url: string; title: string; feeds: DiscoveredFeed[] } {
+  const { document } = parseHTML(html);
+  const title = clean(document.querySelector("title")?.textContent ?? "");
+  const candidates: Array<{ href: string; title: string; type: string }> = [];
+  for (const node of document.querySelectorAll(FEED_LINK_SELECTOR)) {
+    candidates.push({
+      href: node.getAttribute("href") ?? "",
+      title: clean(node.getAttribute("title") ?? ""),
+      type: node.getAttribute("type") ?? "",
+    });
+  }
+  // Anchors come second on purpose: the declared link is the publication's own
+  // answer, an anchor is a guess, and the bookmarklet prefers the same one.
+  for (const node of document.querySelectorAll(FEED_ANCHOR_SELECTOR)) {
+    candidates.push({
+      href: node.getAttribute("href") ?? "",
+      title: clean(node.getAttribute("title") ?? node.textContent ?? ""),
+      type: "",
+    });
+  }
+
+  const feeds: DiscoveredFeed[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate.href) continue;
+    let resolved: URL;
+    try {
+      resolved = articleUrl(new URL(candidate.href, pageUrl).href);
+    } catch {
+      continue; // a shape the guard refuses is a shape that is not returned
+    }
+    if (seen.has(resolved.href)) continue;
+    seen.add(resolved.href);
+    feeds.push({
+      url: resolved.href,
+      title: candidate.title,
+      type: feedTypeOf(candidate.type, resolved.href),
+    });
+    if (feeds.length >= MAX_DISCOVERED_FEEDS) break;
+  }
+  return { url: pageUrl, title, feeds };
+}
+
+/**
+ * Feed autodiscovery for the account page (audio-feed-6hw).
+ *
+ * Same security surface as `fetchArticle` and `fetchFeedDocument`, and it reuses
+ * their guards rather than restating them: `articleUrl` validates the target,
+ * `requestPublic` resolves the socket through `publicLookup` (refusing
+ * non-public addresses), every redirect is re-validated, and the read is bounded
+ * by the same 2 MiB, 15 s and 5-redirect caps. A URL that is already a feed
+ * answers with itself, so a subscription page does not need to be HTML.
+ */
+export async function discoverFeeds(
+  input: string,
+  options: { transport?: Transport; signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<{ url: string; title: string; feeds: DiscoveredFeed[] }> {
+  let url = articleUrl(input);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  try {
+    for (let hop = 0; hop <= 5; hop++) {
+      const response = await (options.transport ?? requestPublic)(url, signal, {
+        headers: {
+          "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+        },
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        await response.body?.cancel();
+        const location = response.headers.get("location");
+        if (!location || hop === 5) {
+          throw new IngestError(422, "Page has an invalid or excessive redirect chain.");
+        }
+        url = articleUrl(new URL(location, url).href);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new IngestError(422, "Page is unavailable or requires a subscription.");
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      const encoding = response.headers.get("content-encoding");
+      if (FEED_CONTENT_TYPE.test(contentType)) {
+        // The URL is the feed: the page's own declaration is stronger than a parse.
+        await response.body?.cancel();
+        return {
+          url: url.href,
+          title: "",
+          feeds: [{ url: url.href, title: "", type: contentType }],
+        };
+      }
+      if (!/^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(contentType)) {
+        await response.body?.cancel();
+        throw new IngestError(422, "Feed discovery needs an HTML page or a feed.");
+      }
+      if (Number(response.headers.get("content-length")) > MAX_HTML_BYTES) {
+        await response.body?.cancel();
+        throw new IngestError(413, "Page exceeds the 2 MiB size limit.");
+      }
+
+      let decompressedBody: ReadableStream<Uint8Array> | null;
+      try {
+        decompressedBody = decompressBody(response.body, encoding, "Article");
+      } catch (err) {
+        await response.body?.cancel();
+        throw err instanceof IngestError ? err : new IngestError(422, "Page decompression failed.");
+      }
+
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBounded(decompressedBody, MAX_HTML_BYTES, 413, signal);
+      } catch (err) {
+        if (err instanceof IngestError) throw err;
+        throw new IngestError(422, "Page decompression failed.");
+      }
+      const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
+      let html: string;
+      try {
+        html = new TextDecoder(charset).decode(bytes);
+      } catch {
+        throw new IngestError(422, "Page uses an unsupported character encoding.");
+      }
+      return discoverFeedLinks(html, url.href);
+    }
+    throw new IngestError(422, "Page could not be fetched.");
+  } catch (error) {
+    if (signal.aborted) throw new IngestError(504, "Feed discovery timed out or was cancelled.");
+    if (error instanceof IngestError) throw error;
+    throw new IngestError(502, "Unable to discover feeds on that page.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * DOM text helpers, exported for the feed-fallback path: an item's embedded HTML
  * must become the same shape of text as a fetched article's, or the two paths
  * disagree about what an article body looks like (audio-feed-8g0).

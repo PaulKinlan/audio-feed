@@ -29,6 +29,7 @@
  */
 
 import { createAccountHandlers } from "./routes/account_api.ts";
+import { discoverFeeds } from "./ingest/url.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
 import { createIngestHandler } from "./compose/ingest.ts";
 import { createRequestAccessHandler } from "./compose/access.ts";
@@ -127,6 +128,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     account: createAccountHandlers(ctx, {
       feedTransport: deps.feedTransport,
       fetchArticle: deps.fetchArticle,
+      discoverFeeds: deps.discoverFeeds ?? ((url, signal) => discoverFeeds(url, { signal })),
       deleteUserSource: (req, userId, sourceId) => deleteUserSource(ctx, req, userId, sourceId),
       regenerateOutdated: (userId, scope = "outdated") =>
         regenerateUserEpisodes(ctx.stores.metadata, userId, scope),
