@@ -468,6 +468,7 @@ function activityFrom(
   sources: Source[],
   limit = 20,
   failedEpisodes?: Episode[],
+  articleUrlMap?: Map<string, string>,
 ): PlayerActivity {
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
@@ -507,22 +508,37 @@ function activityFrom(
       const isLive = isPublishable(live) || live.status === "pending" ||
         live.status === "synthesizing";
       if (!isLive) return false;
-      // F1: Only supersede when the live/publishable episode is strictly NEWER than the failure
+      // J4: Only supersede when the live/publishable episode is strictly NEWER than the failure
       const isNewer = live.createdAt > failed.createdAt;
       if (!isNewer) return false;
-      // F2: Mode equality — absence is not agreement; require exact mode match or both missing
+      // S4: Strict mode equality — direct and deepdive do not supersede each other
       const sameMode = live.mode === failed.mode;
       if (!sameMode) return false;
-      // audio-feed-j8o: match across re-minted articleId via title and source
+
+      // Must have the same title to be the same article
       const sameTitle = Boolean(live.title && failed.title && live.title === failed.title);
       if (!sameTitle) return false;
-      const sameIdentity = Boolean(
-        live.articleId && failed.articleId && live.articleId === failed.articleId,
-      ) || Boolean(
-        (live.sourceId && failed.sourceId && live.sourceId === failed.sourceId) ||
-          (live.sourceTitle && failed.sourceTitle && live.sourceTitle === failed.sourceTitle),
-      );
-      return sameIdentity;
+
+      // S1: Exact articleId match (same article record)
+      if (
+        live.articleId && failed.articleId && live.articleId === failed.articleId
+      ) {
+        return true;
+      }
+
+      // J1 vs J2: Same article URL across re-minted articleIds (J1 matches, J2 with different URLs does not)
+      // J3: Requires identical sourceId when matching via URL
+      const failedUrl = failed.articleId && articleUrlMap
+        ? articleUrlMap.get(failed.articleId)
+        : undefined;
+      const liveUrl = live.articleId && articleUrlMap
+        ? articleUrlMap.get(live.articleId)
+        : undefined;
+      if (failedUrl && liveUrl && failedUrl === liveUrl && live.sourceId === failed.sourceId) {
+        return true;
+      }
+
+      return false;
     });
   };
 
@@ -560,7 +576,24 @@ export async function playerActivity(
     ctx.stores.metadata.listSources(userId),
     ctx.stores.metadata.listEpisodes({ userId, status: "failed", limit }),
   ]);
-  return activityFrom(window.scanned, sources, limit, failedEpisodes);
+  const liveEpisodes = window.scanned.filter(
+    (e) => isPublishable(e) || e.status === "pending" || e.status === "synthesizing",
+  );
+  const neededArticleIds = [
+    ...new Set([
+      ...liveEpisodes.map((e) => e.articleId),
+      ...failedEpisodes.map((e) => e.articleId),
+    ].filter(Boolean)),
+  ];
+  const articles = neededArticleIds.length > 0
+    ? await ctx.stores.metadata.getArticles(userId, neededArticleIds)
+    : [];
+  const articleUrlMap = new Map<string, string>();
+  for (let i = 0; i < neededArticleIds.length; i++) {
+    const art = articles[i];
+    if (art) articleUrlMap.set(neededArticleIds[i]!, art.url);
+  }
+  return activityFrom(window.scanned, sources, limit, failedEpisodes, articleUrlMap);
 }
 
 /** Resolve the token, load what the player renders, and serve the page. */
@@ -596,6 +629,23 @@ export async function handleListen(
     publishable.map((episode) => episode.articleId),
   );
 
+  const failedArticleIds = [
+    ...new Set(failedEpisodes.map((e) => e.articleId).filter(Boolean)),
+  ];
+  const failedArticles = failedArticleIds.length > 0
+    ? await ctx.stores.metadata.getArticles(user.id, failedArticleIds)
+    : [];
+
+  const articleUrlMap = new Map<string, string>();
+  for (let i = 0; i < publishable.length; i++) {
+    const art = articles[i];
+    if (art) articleUrlMap.set(publishable[i]!.articleId, art.url);
+  }
+  for (let i = 0; i < failedArticleIds.length; i++) {
+    const art = failedArticles[i];
+    if (art) articleUrlMap.set(failedArticleIds[i]!, art.url);
+  }
+
   const rows: ListenEpisode[] = publishable.map((episode, index) => {
     const article = articles[index] ?? null;
     return {
@@ -614,7 +664,7 @@ export async function handleListen(
     };
   });
 
-  const activity = activityFrom(scanned, sources, 20, failedEpisodes);
+  const activity = activityFrom(scanned, sources, 20, failedEpisodes, articleUrlMap);
   // The page's own list is already the authoritative playable set, paged above; counting it here
   // keeps the header number and the rows in agreement by construction.
   activity.playable = rows.length;
