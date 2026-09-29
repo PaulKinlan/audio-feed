@@ -108,26 +108,33 @@ export async function spawnHarness(
     }
 
     if (assignedPort) {
+      let res: Response | null = null;
       try {
-        const res = await fetch(`http://localhost:${assignedPort}${healthPath}`);
-        if (res.ok) {
-          if (exited) {
-            throw new Error(
-              `Harness '${scriptRelPath}' exited with code ${exitCode} immediately after answering health check.`,
-            );
-          }
-          return {
-            port: assignedPort,
-            base: `http://localhost:${assignedPort}`,
-            process,
-            getLogs: () => ({ stdout: stdoutBuf, stderr: stderrBuf }),
-            kill: () => {
-              try { process.kill(); } catch { /* ignore */ }
-            },
-          };
-        }
+        res = await fetch(`http://localhost:${assignedPort}${healthPath}`);
       } catch {
-        // Not responding yet
+        // Socket not open or not responding yet
+      }
+
+      if (res && res.ok) {
+        // Note: A process dying immediately after answering health check is inherently racy;
+        // if the status handler already settled, detect premature exit and fail fast.
+        if (exited) {
+          throw new Error(
+            `Harness '${scriptRelPath}' exited with code ${exitCode} immediately after answering health check.\n` +
+              `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
+          );
+        }
+        return {
+          port: assignedPort,
+          base: `http://localhost:${assignedPort}`,
+          process,
+          getLogs: () => ({ stdout: stdoutBuf, stderr: stderrBuf }),
+          kill: () => {
+            try {
+              process.kill();
+            } catch { /* ignore */ }
+          },
+        };
       }
     }
 

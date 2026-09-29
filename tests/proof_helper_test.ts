@@ -25,7 +25,10 @@ Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes tem
 
 Deno.test("proof-helper: spawnHarness binds ephemeral port 0 and answers health check", async () => {
   const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) return;
+  if (!hasRun) {
+    console.log("SKIP: spawnHarness test requires --allow-run (run via deno task test:proof)");
+    return;
+  }
   const harness = await spawnHarness("scripts/account-harness.ts");
   try {
     assertEquals(harness.port > 0, true, `assigned port ${harness.port} must be > 0`);
@@ -41,7 +44,10 @@ Deno.test("proof-helper: spawnHarness binds ephemeral port 0 and answers health 
 
 Deno.test("proof-helper: spawnHarness fails fast if child process exits prematurely", async () => {
   const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) return;
+  if (!hasRun) {
+    console.log("SKIP: spawnHarness test requires --allow-run (run via deno task test:proof)");
+    return;
+  }
   // Test with non-existent or failing script argument
   await assertRejects(
     async () => {
