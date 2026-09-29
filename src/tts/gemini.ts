@@ -985,22 +985,19 @@ export function buildSingleVoiceRequest(
 /**
  * Build Gemini GenerateContent request for two-voice dialogue.
  * Attaches speech_metadata.speaker to each part in contents as required by Gemini 3.8 Flash TTS.
+ * In multi-speaker requests, 100% of parts must specify speech_metadata.speaker matching
+ * declared speakerVoiceConfigs (audio-feed-9pc).
  */
 export function buildDialogueRequest(
   turnsOrScript: DialogueTurn[] | string,
   speakers: [DialogueSpeaker, DialogueSpeaker],
   temperature = 0.8,
-  systemInstructionText?: string,
 ): GeminiGenerateContentRequest {
   const turns = Array.isArray(turnsOrScript)
     ? turnsOrScript
     : parseScriptIntoTurns(turnsOrScript, speakers);
 
   const parts: ContentPart[] = [];
-  if (systemInstructionText && systemInstructionText.trim()) {
-    parts.push({ text: systemInstructionText.trim() });
-  }
-
   for (const turn of turns) {
     parts.push({
       text: turn.text,
@@ -1272,8 +1269,7 @@ export class GeminiTtsClient {
       };
     }
     const { turns, speakers } = formatDialoguePrompt(formattedInput);
-    const systemPrompt = buildNarrationSystemPrompt(codeHandling);
-    const request = buildDialogueRequest(turns, speakers, options.temperature, systemPrompt);
+    const request = buildDialogueRequest(turns, speakers, options.temperature);
     return await this.sendRequest(request, options);
   }
 
