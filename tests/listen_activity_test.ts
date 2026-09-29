@@ -15,6 +15,8 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerData } from "./listen_client.ts";
+import { renderListenPage } from "../src/routes/listen.ts";
+import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -221,4 +223,217 @@ Deno.test("failed episodes are always included in activity panel regardless of w
   );
   const ancient = body.failed.find((e: { id: string }) => e.id === "ep-ancient-fail");
   assertEquals(ancient.error, "Ancient LLM error");
+});
+
+Deno.test("reprocessed or superseded failed episodes are filtered from activity (audio-feed-cls)", async () => {
+  const { stores, fetch, req } = await seeded();
+
+  // 1. Stale failure (failed@08:00, ready@08:10): live episode is strictly newer, so failure is superseded
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-old-fail-playable-one",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "The playable one",
+    mode: "direct",
+    status: "failed",
+    error: "Stale failure before successful retry",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+
+  // 2. Fresh failure (failed@08:20, ready@08:10): failure is newer than live episode (e.g. failed re-narrate), must stay visible (F1)
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-fresh-fail-playable-one",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "The playable one",
+    mode: "direct",
+    status: "failed",
+    error: "Fresh failure after previous success",
+    createdAt: "2026-09-10T08:20:00.000Z",
+  }));
+
+  // 3. Different mode failure (deepdive failed@08:00 alongside direct ready@08:10): must stay visible (F2)
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-deepdive-fail",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "The playable one",
+    mode: "deepdive",
+    status: "failed",
+    error: "Deep dive failure",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+
+  const res = await fetch(req(`/listen/${TOKEN}/status`));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  const failedIds = body.failed.map((e: { id: string }) => e.id);
+  // ep-failed (title "The one that failed") is STILL failed, so it must be present
+  assert(failedIds.includes("ep-failed"), "unresolved failure must be included");
+  // ep-old-fail-playable-one is older than ep-ready, so it must be filtered
+  assert(
+    !failedIds.includes("ep-old-fail-playable-one"),
+    "stale failure older than playable episode must be filtered from activity",
+  );
+  // ep-fresh-fail-playable-one is newer than ep-ready, so it must remain visible
+  assert(
+    failedIds.includes("ep-fresh-fail-playable-one"),
+    "fresh failure newer than playable episode must remain visible",
+  );
+  // ep-deepdive-fail has a different mode, so it must remain visible
+  assert(
+    failedIds.includes("ep-deepdive-fail"),
+    "different mode failure must remain visible",
+  );
+});
+
+Deno.test("listen HTML template does not leak raw JS comment syntax (audio-feed-cls)", async () => {
+  const { fetch, req } = await seeded();
+  const res = await fetch(req(`/listen/${TOKEN}`));
+  const html = await res.text();
+  assert(!html.includes("// audio-feed-3xq"), "stray JS comment must not be rendered in HTML");
+});
+
+Deno.test({
+  name:
+    "player page mobile layout: zero horizontal blowout at 390px with long activity titles/errors (audio-feed-cls)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const html = renderListenPage({
+      token: "test-token",
+      subscriber: "Paul",
+      feedUrl: "https://example.com/feed.xml",
+      episodes: [
+        {
+          id: "ep-1",
+          title:
+            "Extremely Long Article Title That Could Potentially Wrap Across Many Lines And Test Mobile Boundaries",
+          audioUrl: "https://example.com/audio/ep-1.wav",
+          date: new Date().toISOString(),
+          durationSeconds: 120,
+        },
+      ],
+      offlineEnabled: true,
+      activity: {
+        inProgress: [
+          {
+            id: "act-1",
+            title:
+              "Very Long In Progress Episode Title That Needs Adequate Ellipsis Or Word Wrapping Without Blowing Out Horizontal Width",
+            state: "generating",
+          },
+        ],
+        failed: [
+          {
+            id: "act-2",
+            title:
+              "Very Long Failed Episode Title That Also Has A Super Long Error String Below It",
+            state: "failed",
+            error:
+              "Google Generative AI Error: 429 Resource has been exhausted (e.g. check quota) - please check your plan and billing details at console.cloud.google.com/billing and try again later after exponential backoff.",
+          },
+        ],
+        playable: 1,
+      },
+    });
+
+    const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    await Deno.writeTextFile(tempHtmlFile, html);
+
+    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-player-fix-proof-");
+    const chrome = new Deno.Command(newestChrome(), {
+      args: [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profileDir}`,
+        "about:blank",
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let port = "";
+    for (let i = 0; i < 50 && !port; i++) {
+      await sleep(100);
+      port = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => "")).split(
+        "\n",
+      )[0]!;
+    }
+
+    try {
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      // deno-lint-ignore no-explicit-any
+      const page = targets.find((t: any) => t.type === "page");
+      const ws = new WebSocket(page.webSocketDebuggerUrl);
+      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+      let nextId = 0;
+      // deno-lint-ignore no-explicit-any
+      const pending = new Map<number, (v: any) => void>();
+      ws.addEventListener("message", (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.id && pending.has(msg.id)) {
+          pending.get(msg.id)!(msg);
+          pending.delete(msg.id);
+        }
+      });
+      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+        const id = ++nextId;
+        ws.send(JSON.stringify({ id, method, params }));
+        return new Promise((resolve) => pending.set(id, resolve));
+      };
+
+      await cdp("Page.enable");
+      await cdp("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 3,
+        mobile: true,
+      });
+      await cdp("Page.navigate", { url: `file://${tempHtmlFile}` });
+      await sleep(600);
+
+      // deno-lint-ignore no-explicit-any
+      const evalRes: any = await cdp("Runtime.evaluate", {
+        expression: `(() => {
+          return JSON.stringify({
+            scrollWidth: document.documentElement.scrollWidth,
+            clientWidth: document.documentElement.clientWidth,
+            hasOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
+          });
+        })()`,
+      });
+
+      const metrics = JSON.parse(evalRes.result.result.value);
+      assertEquals(
+        metrics.scrollWidth,
+        390,
+        `scrollWidth must be 390px, got ${metrics.scrollWidth}`,
+      );
+      assertEquals(
+        metrics.clientWidth,
+        390,
+        `clientWidth must be 390px, got ${metrics.clientWidth}`,
+      );
+      assertEquals(
+        metrics.hasOverflow,
+        false,
+        "390px mobile viewport must have zero horizontal overflow",
+      );
+
+      ws.close();
+    } finally {
+      try {
+        chrome.kill();
+      } catch { /* ignore */ }
+      await cleanup();
+      await Deno.remove(tempHtmlFile).catch(() => {});
+    }
+  },
 });

@@ -181,7 +181,9 @@ main {
 }
 .act {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  min-inline-size: 0;
+  max-inline-size: 100%;
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-3) var(--space-4);
@@ -189,17 +191,21 @@ main {
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface) 60%, transparent);
 }
+.act > div {
+  min-inline-size: 0;
+  overflow: hidden;
+}
 .act-title {
   font-size: 0.9rem;
   font-weight: 600;
   min-inline-size: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .act-meta {
   color: var(--muted);
   font-size: 0.76rem;
+  overflow-wrap: anywhere;
 }
 .act-state {
   display: inline-flex;
@@ -223,17 +229,23 @@ main {
   font-size: 0.78rem;
   margin-block-start: var(--space-1);
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .ep-download-error {
   color: var(--danger, #e5484d);
   font-size: 0.78rem;
   margin-block-start: var(--space-1);
   overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.act-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-block-start: var(--space-2);
 }
 .act-retry {
-  grid-column: 1 / -1;
-  justify-self: start;
-  margin-block-start: var(--space-1);
   font: inherit;
   font-size: 0.78rem;
   font-weight: 600;
@@ -243,6 +255,12 @@ main {
   border: 1px solid var(--border-2);
   background: transparent;
   color: var(--text-2);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.act-retry:hover:not([disabled]) {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
 }
 .act-retry:focus-visible {
   outline: 2px solid var(--accent-2);
@@ -251,6 +269,26 @@ main {
 .act-retry[disabled] {
   cursor: default;
   opacity: 0.6;
+}
+.act-dismiss {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.act-dismiss:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.act-dismiss:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
 }
 /* A spinner that says nothing the text does not already say is decoration: the pulse is on
    the dot, and reduced motion (below) leaves the text standing on its own. */
