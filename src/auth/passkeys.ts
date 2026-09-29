@@ -162,7 +162,7 @@ export async function finishRegistration(
   const user = challenge.userId ? await store.getUser(challenge.userId) : null;
   if (!user) throw new PasskeyError("Unknown account.");
 
-  const { credential } = verification.registrationInfo;
+  const { credential, aaguid } = verification.registrationInfo;
   if (await store.getCredential(credential.id)) {
     throw new PasskeyError("That passkey is already registered.");
   }
@@ -175,6 +175,7 @@ export async function finishRegistration(
     transports: credential.transports,
     name: `Passkey added ${now.slice(0, 10)}`,
     createdAt: now,
+    aaguid: aaguid || undefined,
   });
   return user;
 }
