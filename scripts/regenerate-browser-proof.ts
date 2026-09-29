@@ -27,7 +27,7 @@ await Deno.mkdir(outDir, { recursive: true });
 await Deno.remove(profileDir, { recursive: true }).catch(() => {});
 await Deno.mkdir(profileDir, { recursive: true });
 
-const h = await startRegenerateHarness(8133);
+const h = await startRegenerateHarness(0);
 const feedUrl = `${h.base}/feed/${HARNESS_FEED_TOKEN}/master.xml`;
 const checks: { step: string; ok: boolean; detail: string }[] = [];
 const check = (step: string, ok: boolean, detail: string) => {

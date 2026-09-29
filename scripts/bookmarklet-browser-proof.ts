@@ -2,7 +2,8 @@
  * Browser verification proof for draggable bookmarklet and prefilled form (audio-feed-ep1).
  *
  * Drives real headless Chrome over CDP:
- *   1. Starts app server on port 8148 with an approved subscriber.
+ *   1. Starts app server on an ephemeral port (0, read back from the listener) with an
+ *      approved subscriber.
  *   2. Desktop (1280x900):
  *      - Logs in and visits /account.
  *      - Verifies draggable bookmarklet button and bookmarklet JS payload.
@@ -30,22 +31,12 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { discoverFeeds as discoverFeedsOnPage } from "../src/ingest/url.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { createTempChromeProfile, newestChrome } from "./proof-helper.ts";
 
-const PORT = 8148;
-const BASE = `http://localhost:${PORT}`;
 const TOKEN = "subscriber-token-ep1";
 const OUT = new URL("../docs/evidence/audio-feed-ep1/", import.meta.url).pathname;
 const OUT6HW = new URL("../docs/evidence/audio-feed-6hw/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
-const PROFILE = `${HOME}/cap-evidence/ep1/chrome-profile`;
-
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-bookmarklet-");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -54,8 +45,7 @@ await Deno.mkdir(OUT6HW, { recursive: true });
 
 // -- start in-process server --------------------------------------------------
 const config: AppConfig = {
-  port: PORT,
-  publicBaseUrl: BASE,
+  port: 0,
   adminToken: "admin-token-ep1",
 };
 const stores: Stores = memoryStores();
@@ -109,11 +99,13 @@ const handlers = createHandlers(ctx, {
 });
 const { fetch: appFetch } = createApp(ctx, handlers);
 
-const server = Deno.serve({ port: PORT, onListen: () => {} }, (req, info) => appFetch(req, info));
+const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+const PORT = (server.addr as Deno.NetAddr).port;
+const BASE = `http://localhost:${PORT}`;
+config.port = PORT;
+config.publicBaseUrl = BASE;
 
 // -- launch chrome ------------------------------------------------------------
-await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
-await Deno.mkdir(PROFILE, { recursive: true });
 
 const chrome = new Deno.Command(newestChrome(), {
   args: [
@@ -529,7 +521,7 @@ Report version: audio-feed-ep1 + audio-feed-6hw.
     chrome.kill();
   } catch { /* ignore */ }
   await server.shutdown().catch(() => {});
-  await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+  await cleanup();
 }
 
 Deno.exit(exitCode);

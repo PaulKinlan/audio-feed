@@ -18,41 +18,20 @@
  *   deno run --allow-all --unstable-kv scripts/home-player-link-browser-proof.ts
  */
 
-const PORT = 8141;
-const BASE = `http://localhost:${PORT}`;
-const OUT = new URL("../docs/evidence/audio-feed-ytg/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
-const PROFILE = `${HOME}/cap-evidence/ytg/chrome-profile`;
+import {
+  createTempChromeProfile,
+  newestChrome,
+  spawnHarness,
+} from "./proof-helper.ts";
 
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-home-player-");
+const harness = await spawnHarness("scripts/listen-harness.ts");
+const BASE = harness.base;
+const OUT = new URL("../docs/evidence/audio-feed-ytg/", import.meta.url).pathname;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// -- start harness ------------------------------------------------------------
-const harness = new Deno.Command(Deno.execPath(), {
-  args: ["run", "--allow-all", "--unstable-kv", "scripts/listen-harness.ts", String(PORT)],
-  cwd: new URL("..", import.meta.url).pathname,
-  stdout: "null",
-  stderr: "inherit",
-}).spawn();
-
-for (let i = 0; i < 100; i++) {
-  try {
-    const r = await fetch(`${BASE}/health`);
-    if (r.ok) break;
-  } catch { /* wait */ }
-  await sleep(100);
-}
-
 // -- launch chrome ------------------------------------------------------------
-await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
-await Deno.mkdir(PROFILE, { recursive: true });
 await Deno.mkdir(OUT, { recursive: true });
 
 const chrome = new Deno.Command(newestChrome(), {
@@ -231,8 +210,8 @@ try {
   exitCode = 1;
 } finally {
   try { chrome.kill(); } catch { /* ignore */ }
-  try { harness.kill(); } catch { /* ignore */ }
-  await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+  harness.kill();
+  await cleanup();
 }
 
 Deno.exit(exitCode);

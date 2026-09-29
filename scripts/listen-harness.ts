@@ -241,12 +241,21 @@ export async function createListenHarness(port = 8131) {
 if (import.meta.main) {
   const numeric = (value: string | undefined) =>
     value && /^\d+$/.test(value) ? Number(value) : undefined;
-  const port = numeric(Deno.args.find((a) => /^\d+$/.test(a))) ?? 8131;
+  const port = numeric(Deno.args.find((a) => /^\d+$/.test(a))) ?? 0;
   try {
     const h = await createListenHarness(port);
-    Deno.serve({ port }, h.fetch);
-    console.log(`listen harness: ${h.base}/listen/${h.token}`);
-    console.log(`  episodes: ${h.seeds.length}`);
+    Deno.serve(
+      {
+        port,
+        hostname: "localhost",
+        onListen: ({ port: assignedPort }) => {
+          console.log(`READY port=${assignedPort} base=http://localhost:${assignedPort}`);
+          console.log(`listen harness: http://localhost:${assignedPort}/listen/${h.token}`);
+          console.log(`  episodes: ${h.seeds.length}`);
+        },
+      },
+      h.fetch,
+    );
   } catch (err) {
     console.error(err);
     Deno.exit(1);

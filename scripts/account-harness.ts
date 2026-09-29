@@ -116,5 +116,14 @@ const handlers = createHandlers(ctx, {
     }),
 });
 const { fetch } = createApp(ctx, handlers);
-Deno.serve({ port, hostname: "localhost", onListen: () => {} }, fetch);
-console.log(`account harness: http://localhost:${port}/  admin token: harness-admin`);
+Deno.serve(
+  {
+    port,
+    hostname: "localhost",
+    onListen: ({ port: assignedPort }) => {
+      console.log(`READY port=${assignedPort} base=http://localhost:${assignedPort}`);
+      console.log(`account harness: http://localhost:${assignedPort}/  admin token: harness-admin`);
+    },
+  },
+  fetch,
+);

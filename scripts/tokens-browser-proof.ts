@@ -19,21 +19,11 @@ import { memoryStores } from "../src/config.ts";
 import { createUser, approveUser } from "../src/auth/users.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { createTempChromeProfile, newestChrome } from "./proof-helper.ts";
 
-const PORT = 8147;
-const BASE = `http://localhost:${PORT}`;
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-tokens-");
 const TOKEN = "subscriber-token-vpw";
 const OUT = new URL("../docs/evidence/audio-feed-vpw/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
-const PROFILE = `${HOME}/cap-evidence/vpw/chrome-profile`;
-
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -41,8 +31,7 @@ await Deno.mkdir(OUT, { recursive: true });
 
 // -- start in-process server --------------------------------------------------
 const config: AppConfig = {
-  port: PORT,
-  publicBaseUrl: BASE,
+  port: 0,
   adminToken: "admin-token-vpw",
 };
 const stores: Stores = memoryStores();
@@ -75,11 +64,13 @@ await stores.metadata.putEpisode(
 const handlers = createHandlers(ctx);
 const { fetch: appFetch } = createApp(ctx, handlers);
 
-const server = Deno.serve({ port: PORT, onListen: () => {} }, (req, info) => appFetch(req, info));
+const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+const PORT = (server.addr as Deno.NetAddr).port;
+const BASE = `http://localhost:${PORT}`;
+config.port = PORT;
+config.publicBaseUrl = BASE;
 
 // -- launch chrome ------------------------------------------------------------
-await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
-await Deno.mkdir(PROFILE, { recursive: true });
 
 const chrome = new Deno.Command(newestChrome(), {
   args: [
@@ -295,7 +286,7 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join(
 } finally {
   try { chrome.kill(); } catch { /* ignore */ }
   await server.shutdown().catch(() => {});
-  await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+  await cleanup();
 }
 
 Deno.exit(exitCode);
