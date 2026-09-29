@@ -10,6 +10,7 @@ import type { AppContext } from "../app.ts";
 import type { User } from "../types.ts";
 import type { FeedPollOptions, PollDependencies } from "../ingest/feed.ts";
 import type { DiscoveredFeed, ExtractedArticle } from "../ingest/url.ts";
+import type { VoiceSampleClient } from "../tts/voice-samples.ts";
 import type { SynthesisWorkerOptions, Synthesizer } from "../worker/synthesis.ts";
 import type { RequestAccessDeps } from "./access.ts";
 import type { FailedAuthLimiter } from "../auth/rate_limit.ts";
@@ -85,6 +86,9 @@ export interface ComposeDeps {
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
   /** Test seam: fetches a feed document without real network (audio-feed-2e5). */
   feedTransport?: (url: URL, signal: AbortSignal) => Promise<Response>;
+  /** Test seam for voice audition samples (audio-feed-msw); production builds the
+   *  real Gemini client from config.geminiApiKey. */
+  ttsClient?: VoiceSampleClient;
   /** Test seam for feed discovery (audio-feed-6hw); production reads the real
    * SSRF-guarded helper. */
   discoverFeeds?: (

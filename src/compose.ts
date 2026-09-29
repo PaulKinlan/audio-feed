@@ -29,6 +29,7 @@
  */
 
 import { createAccountHandlers } from "./routes/account_api.ts";
+import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { discoverFeeds } from "./ingest/url.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
 import { createIngestHandler } from "./compose/ingest.ts";
@@ -134,6 +135,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
         regenerateUserEpisodes(ctx.stores.metadata, userId, scope),
       adminAuthLimiter: deps.adminAuthLimiter,
     }),
+    voiceSample: createVoiceSampleHandler(ctx, { client: deps.ttsClient }),
     adminListEpisodes: createAdminListUserEpisodesHandler(ctx, deps),
     adminRegenerateEpisode: createAdminRegenerateEpisodeHandler(ctx, deps),
     adminRegenerateFeed: createAdminRegenerateFeedHandler(ctx, deps),
