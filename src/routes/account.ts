@@ -165,45 +165,48 @@ ${
 
   const bookmarkletCode = bookmarkletHref(baseUrl);
 
-  const unifiedCard = `
+  const prefill = d.prefill;
+  const unifiedCard = prefill
+    ? `
   <section class="panel quick-add" id="quickAddPanel" aria-labelledby="quick-add-h">
     <h2 id="quick-add-h">Add to Audio Feed</h2>
     <p class="sub">URL detected: <strong class="prefill-title">${
-    esc(d.prefill?.title || d.prefill?.url || "")
-  }</strong></p>
+      esc(prefill.title || prefill.url)
+    }</strong></p>
     <div class="quick-grid">
       <div class="quick-card">
         <div>
           <h3 style="margin-top: 0; font-size: 1rem;">Queue this single page</h3>
           <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
-    esc(d.prefill?.url || "")
-  }</code></p>
+      esc(prefill.url)
+    }</code></p>
           <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
             <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
             <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
           </div>
         </div>
         <button type="button" class="btn small" id="quickSingleBtn"${
-    approved ? "" : " disabled"
-  }>Queue Single Episode</button>
+      approved ? "" : " disabled"
+    }>Queue Single Episode</button>
       </div>
-      <div class="quick-card" id="detectedFeed"${d.prefill?.feedUrl ? "" : " hidden"}>
+      <div class="quick-card" id="detectedFeed"${prefill.feedUrl ? "" : " hidden"}>
         <div>
           <h3 style="margin-top: 0; font-size: 1rem;">Subscribe to the feed</h3>
           <p class="meta" style="font-size: 0.85rem; word-break: break-all;">${
-    d.prefill?.feedUrl ? "Detected feed: " : "This page advertises: "
-  }<code id="detectedFeedUrl">${esc(d.prefill?.feedUrl || "")}</code></p>
+      prefill.feedUrl ? "Detected feed: " : "This page advertises: "
+    }<code id="detectedFeedUrl">${esc(prefill.feedUrl ?? "")}</code></p>
           <p class="sub" style="font-size: 0.85rem; margin-block-start: 0.25rem;">Follow the publication for future articles.</p>
         </div>
         <button type="button" class="btn quiet small" id="quickSubscribeBtn"${
-    approved ? "" : " disabled"
-  }>Subscribe to RSS Feed</button>
+      approved ? "" : " disabled"
+    }>Subscribe to RSS Feed</button>
       </div>
     </div>
     <p class="feedback" id="quickFeedback" role="status" aria-live="polite"></p>
-  </section>`;
+  </section>`
+    : "";
 
-  const sendSection = d.prefill ? "" : `<section class="panel send" aria-labelledby="send-h">
+  const sendSection = prefill ? "" : `<section class="panel send" aria-labelledby="send-h">
     <h2 id="send-h">Send an article to audio</h2>
     <p class="sub">Paste a link. It's queued, narrated, and added to your feed.</p>
     <form id="sendForm">
@@ -245,7 +248,7 @@ ${
     <a class="btn quiet" href="/listen/${esc(user.feedToken)}">Open the player</a>
   </div>
   ${pending}
-  ${d.prefill ? unifiedCard : ""}
+  ${unifiedCard}
 
 ${sendSection}
 
