@@ -46,14 +46,11 @@ Deno.test("DESIGN_TOKENS: @view-transition is strictly scoped to no-preference m
   );
 });
 
-Deno.test("view-transitions: link click engages transition under no-preference and suppresses under reduce (audio-feed-rra, audio-feed-81q)", async () => {
-  const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) {
-    console.log("SKIP: browser view transitions test requires --allow-run");
-    return;
-  }
-
-  const pageA = `<!doctype html>
+Deno.test({
+  name: "view-transitions: link click engages transition under no-preference and suppresses under reduce (audio-feed-rra, audio-feed-81q)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const pageA = `<!doctype html>
 <html>
 <head>
 <style>${DESIGN_TOKENS}</style>
@@ -186,6 +183,7 @@ Deno.test("view-transitions: link click engages transition under no-preference a
     await cleanup();
     await server.shutdown();
   }
+},
 });
 
 Deno.test("shell & player define persistent view-transition-name identifiers (audio-feed-rra)", async () => {
