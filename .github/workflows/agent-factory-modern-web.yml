@@ -1,0 +1,80 @@
+name: 'Agent Factory - Modern Web Audit'
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  modern-web:
+    name: 'Modern Web Audit (DeepSeek)'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify DeepSeek API Key Secret
+        shell: bash
+        env:
+          KEY: ${{ secrets.DEEPSEEK_API_KEY || secrets.deepseek_api_key }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY secret is not configured in repository secrets."
+            exit 1
+          fi
+
+      - name: Install Beads CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installing bd (Beads CLI v1.3.0)..."
+          curl -fsSL https://github.com/gastownhall/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin bd
+          sudo chmod +x /usr/local/bin/bd
+          bd --version
+
+      - name: Set up Beads Database
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Initializing and restoring Beads Dolt database..."
+          git fetch origin refs/dolt/data:refs/dolt/data || true
+          bd init --prefix audio-feed || true
+          bd dolt pull origin
+          bd list >/dev/null
+          bd ready || true
+
+      - name: Run Modern Web Factory Agent
+        uses: PaulKinlan/agents/.github/actions/factory@397bc0b088777612e68526a183d77b6062cf20d0
+        with:
+          agent: modern-web
+          target: '.'
+          engine: deepseek
+          sink: 'github-issues,beads'
+          deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY || secrets.deepseek_api_key }}
+          deepseek_model: 'deepseek-chat'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          factory_ref: '397bc0b088777612e68526a183d77b6062cf20d0'
+
+      - name: Sync Beads Database
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d ".beads" ] && command -v bd >/dev/null 2>&1; then
+            echo "Syncing Beads Dolt database to origin..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            bd dolt push origin
+          fi
