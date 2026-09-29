@@ -128,6 +128,65 @@ try {
 // Scoped per-token so a shared device with multiple subscribers keeps positions isolated.
 const POSITIONS_KEY = TOKEN ? `audio-feed-positions:${TOKEN}` : "audio-feed-positions";
 
+// audio-feed-n07: PWA App Badging API for unread / ready episodes.
+// Per Modern Web Guidance:
+// - Feature-detects navigator.setAppBadge and navigator.clearAppBadge
+// - Displays the count of unread / ready episodes on the app icon
+// - Clears the badge (navigator.clearAppBadge) when count is 0
+// - Suppresses errors on unsupported or denied permission contexts
+// TODO(baseline/badging): keep setAppBadge/clearAppBadge; silently ignored on unsupported browsers.
+const PLAYED_KEY = TOKEN ? `audio-feed-played:${TOKEN}` : "audio-feed-played";
+
+/** @returns {Set<string>} */
+function loadPlayed() {
+  try {
+    const raw = localStorage.getItem(PLAYED_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/** @param {Set<string>} playedSet */
+function savePlayed(playedSet) {
+  try {
+    localStorage.setItem(PLAYED_KEY, JSON.stringify([...playedSet].slice(-200)));
+  } catch {
+    // Private mode / storage quota exception handled safely.
+  }
+}
+
+function getUnreadCount() {
+  const played = loadPlayed();
+  return EPISODES.filter((ep) => !played.has(ep.id)).length;
+}
+
+/**
+ * Updates the PWA app icon badge with unread episode count (audio-feed-n07).
+ * @param {number} [count]
+ */
+async function updateAppBadge(count) {
+  if (typeof navigator === "undefined") return;
+  const num = typeof count === "number" ? count : getUnreadCount();
+  try {
+    if (num > 0) {
+      if (typeof navigator.setAppBadge === "function") {
+        await navigator.setAppBadge(num);
+      }
+    } else {
+      if (typeof navigator.clearAppBadge === "function") {
+        await navigator.clearAppBadge();
+      } else if (typeof navigator.setAppBadge === "function") {
+        await navigator.setAppBadge(0);
+      }
+    }
+  } catch {
+    // Unsupported context, notification permission denied, or iframe restriction: ignore safely.
+  }
+}
+
 /** @returns {Record<string, SavedPosition>} */
 function loadPositions() {
   try {
@@ -567,6 +626,12 @@ function updateRowResumeUI(li, episode) {
       restart.setAttribute("aria-label", "Play from start: " + episode.title);
       restart.textContent = "Play from start";
       restart.addEventListener("click", () => {
+        const played = loadPlayed();
+        if (played.has(episode.id)) {
+          played.delete(episode.id);
+          savePlayed(played);
+          void updateAppBadge();
+        }
         savePosition(episode.id, 0);
         clearPosition(episode.id);
         updateRowResumeUI(li, episode);
@@ -692,7 +757,11 @@ async function refreshActivity() {
     const data = await res.json();
     ACTIVITY.inProgress = data.inProgress ?? [];
     ACTIVITY.failed = data.failed ?? [];
+    if (typeof data.playable === "number") {
+      ACTIVITY.playable = data.playable;
+    }
     render();
+    void updateAppBadge();
   } catch { /* offline: the next online poll, or a reload, corrects it */ }
 }
 
@@ -1004,6 +1073,10 @@ audio.addEventListener("pause", () => {
 });
 audio.addEventListener("ended", () => {
   if (current) {
+    const played = loadPlayed();
+    played.add(current.id);
+    savePlayed(played);
+    void updateAppBadge();
     clearPosition(current.id);
     const rowEl = /** @type {HTMLLIElement|null} */ (list.querySelector(
       `li[data-episode-id="${current.id}"]`,
@@ -1336,6 +1409,7 @@ async function boot() {
     }
   }
   updateCounts();
+  void updateAppBadge();
 
   if ("serviceWorker" in navigator) {
     try {
