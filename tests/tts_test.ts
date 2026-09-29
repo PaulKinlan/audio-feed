@@ -664,18 +664,14 @@ Deno.test("GeminiTtsClient - synthesizeDialogue executes multi-speaker request",
     "Sam",
   );
 
-  // Assert per-part speech_metadata.speaker (with leading instruction part)
-  assertEquals(capturedBody?.contents[0]?.parts.length, 3);
-  assertStringIncludes(
-    capturedBody?.contents[0]?.parts[0]?.text ?? "",
-    "Never read raw code",
-  );
+  // Assert per-part speech_metadata.speaker (100% of parts have speaker attribution, audio-feed-9pc)
+  assertEquals(capturedBody?.contents[0]?.parts.length, 2);
   assertEquals(
-    capturedBody?.contents[0]?.parts[1]?.speech_metadata?.speaker,
+    capturedBody?.contents[0]?.parts[0]?.speech_metadata?.speaker,
     "Alex",
   );
   assertEquals(
-    capturedBody?.contents[0]?.parts[2]?.speech_metadata?.speaker,
+    capturedBody?.contents[0]?.parts[1]?.speech_metadata?.speaker,
     "Sam",
   );
 
@@ -913,9 +909,21 @@ Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body
     undefined,
     "systemInstruction must NOT be attached to dialogue requests",
   );
-  // audio-feed-2ob: instruction text is folded into dialogue content parts as fallback guardrail
-  const firstPartText = req.contents[0]?.parts[0]?.text ?? "";
-  assertStringIncludes(firstPartText, "Never read raw code");
+  // audio-feed-9pc: 100% of parts must carry speech_metadata.speaker matching declared speakerVoiceConfigs
+  const speakerNames = new Set(
+    req.generationConfig.speechConfig.multiSpeakerVoiceConfig!.speakerVoiceConfigs.map((
+      s,
+    ) => s.speaker),
+  );
+  assertEquals(req.contents[0]!.parts.length > 0, true);
+  for (const part of req.contents[0]!.parts) {
+    assert(part.speech_metadata, "every part in multi-speaker dialogue must have speech_metadata");
+    assert(part.speech_metadata.speaker, "every part must have speech_metadata.speaker");
+    assert(
+      speakerNames.has(part.speech_metadata.speaker),
+      `speaker ${part.speech_metadata.speaker} must be declared in speakerVoiceConfigs`,
+    );
+  }
 });
 
 Deno.test("formatCodeForTts - handles code block variants including tildes, multiline CRLF, and HTML pre tags (audio-feed-2ob)", async () => {
@@ -976,4 +984,29 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
     return `[explained: ${code}]`;
   });
   assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
+});
+
+Deno.test("buildDialogueRequest - guarantees 100% of parts specify speech_metadata.speaker matching speakerVoiceConfigs (audio-feed-9pc)", () => {
+  const speakers: [DialogueSpeaker, DialogueSpeaker] = [
+    { name: "Alex", role: "expert", voice: "Kore" },
+    { name: "Sam", role: "curious_foil", voice: "Puck" },
+  ];
+  const turns: DialogueTurn[] = [
+    { speaker: "Alex", text: "Turn 1" },
+    { speaker: "Sam", text: "Turn 2" },
+    { speaker: "Alex", text: "Turn 3" },
+  ];
+
+  const req = buildDialogueRequest(turns, speakers);
+  assertEquals(req.contents[0]!.parts.length, 3);
+  for (const part of req.contents[0]!.parts) {
+    assertEquals(Boolean(part.speech_metadata?.speaker), true);
+    assertEquals(Boolean(part.speechMetadata?.speaker), true);
+    assertEquals(
+      part.speech_metadata?.speaker === "Alex" || part.speech_metadata?.speaker === "Sam",
+      true,
+    );
+  }
+  // System instruction is undefined
+  assertEquals(req.systemInstruction, undefined);
 });

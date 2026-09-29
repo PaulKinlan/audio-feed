@@ -96,7 +96,7 @@ export async function computePromptVersion(deps: PromptVersionDeps = {}): Promis
     requests.push(
       system,
       single(narration, "Charon", undefined, system),
-      dialogueRequest(dialogue.turns, dialogue.speakers, undefined, system),
+      dialogueRequest(dialogue.turns, dialogue.speakers, undefined),
     );
   }
   const material = JSON.stringify([
