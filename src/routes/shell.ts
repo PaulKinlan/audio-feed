@@ -144,6 +144,48 @@ export const SHELL_CSS = `
   }
   .site-footer a { color: var(--text-2); }
 
+  /* Native Accessible Modal Dialog (audio-feed-ytl) */
+  dialog.confirm-dialog {
+    padding: 0;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 20px 40px -15px rgb(0 0 0 / 0.7);
+    max-inline-size: min(28rem, calc(100vw - 2rem));
+    margin: auto;
+  }
+  dialog.confirm-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+  }
+  dialog.confirm-dialog .confirm-form {
+    padding: 1.5rem;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  dialog.confirm-dialog .confirm-title {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+  dialog.confirm-dialog .confirm-message {
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--text-2);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+  }
+  dialog.confirm-dialog .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-block-start: 0.5rem;
+  }
 `;
 
 /**
@@ -239,6 +281,84 @@ export const SHELL_KIT_CSS = `
   details.more[open] > summary { margin-block-end: 0.6rem; }
 `;
 
+/**
+ * Native Accessible Modal Dialog HTML (audio-feed-ytl).
+ * Follows Modern Web Guidance:
+ * - Uses native <dialog> with closedby="any" for declarative light-dismiss
+ * - Form with method="dialog" closes dialog and sets returnValue without custom JS
+ * - autofocus on Cancel button prevents accidental confirmation
+ * - aria-labelledby and aria-describedby for full screen reader accessibility
+ */
+export const CONFIRM_DIALOG_HTML = `
+<dialog id="confirmDialog" class="confirm-dialog" closedby="any" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+  <form method="dialog" class="confirm-form">
+    <h3 id="confirmTitle" class="confirm-title">Confirm Action</h3>
+    <p id="confirmMessage" class="confirm-message"></p>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" class="btn secondary" id="confirmCancelBtn" autofocus>Cancel</button>
+      <button type="submit" value="confirm" class="btn danger" id="confirmOkBtn">Confirm</button>
+    </div>
+  </form>
+</dialog>`;
+
+/**
+ * Client-side confirmation helper using native <dialog> (audio-feed-ytl).
+ * Modern Web Guidance teachable moment:
+ * "I was going to write custom JavaScript event listeners to close the dialog
+ * and resolve promises manually. What I didn't know was that native
+ * <form method='dialog'> closes the <dialog> automatically and sets .returnValue
+ * to the clicked submit button's value, which drastically simplifies state tracking.
+ * Combining closedby='any' with an autofocus on the non-destructive Cancel button
+ * guarantees keyboard and light-dismiss safety out of the box."
+ */
+export const CONFIRM_DIALOG_CLIENT = `
+  const confirmDialog = document.getElementById("confirmDialog");
+  if (confirmDialog && typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
+    // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
+    // Light-dismiss fallback for browsers without native closedby support (Modern Web Guidance)
+    confirmDialog.addEventListener("click", (event) => {
+      if (event.target !== confirmDialog) return;
+      const rect = confirmDialog.getBoundingClientRect();
+      const isInside =
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width;
+      if (!isInside) confirmDialog.close("cancel");
+    });
+  }
+
+  function askConfirm(message, options) {
+    const opts = options || {};
+    if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
+      return Promise.resolve(confirm(message));
+    }
+    const titleEl = document.getElementById("confirmTitle");
+    const msgEl = document.getElementById("confirmMessage");
+    const okEl = document.getElementById("confirmOkBtn");
+    const cancelEl = document.getElementById("confirmCancelBtn");
+    if (titleEl) titleEl.textContent = opts.title || "Confirm Action";
+    if (msgEl) msgEl.textContent = message;
+    if (okEl) {
+      okEl.textContent = opts.confirmText || "Confirm";
+      if (opts.danger === false) {
+        okEl.className = "btn primary";
+      } else {
+        okEl.className = "btn danger";
+      }
+    }
+    if (cancelEl) cancelEl.textContent = opts.cancelText || "Cancel";
+    return new Promise((resolve) => {
+      const onClose = () => {
+        confirmDialog.removeEventListener("close", onClose);
+        resolve(confirmDialog.returnValue === "confirm");
+      };
+      confirmDialog.addEventListener("close", onClose);
+      confirmDialog.showModal();
+    });
+  }
+`;
+
 const MARK =
   `<svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--accent)"/><g stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"><path d="M9 13v6"/><path d="M13.5 9v14"/><path d="M18 12v8"/><path d="M22.5 14.5v3"/></g></svg>`;
 
@@ -309,6 +429,7 @@ ${renderHeader(o.viewer, o.current)}
 ${o.main}
 </main>
 ${renderFooter()}
+${CONFIRM_DIALOG_HTML}
 ${o.script ? `<script>\n${o.script}\n</script>` : ""}
 </body>
 </html>
