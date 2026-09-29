@@ -159,14 +159,10 @@ Deno.test("GET /.well-known/webauthn: unconfigured returns empty origins with no
 });
 
 Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poisoning with byte-identical responses (audio-feed-1o2)", async () => {
+  // publicBaseUrl UNSET (where the Host header fallback path lived)
   const config: AppConfig = {
     port: 8080,
-    publicBaseUrl: BASE,
     adminToken: "admin-secret",
-    webAuthnRelatedOrigins: [
-      "https://audio.paulkinlan.com",
-      "not a valid url",
-    ],
   };
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
@@ -188,13 +184,10 @@ Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poison
   );
   const body2 = await res2.text();
 
-  // Both responses are byte-identical, ignoring any client Host header
+  // Both responses are byte-identical and equal to {"origins":[]}, ignoring any client Host header
   assertEquals(body1, body2);
-  assertEquals(res1.headers.get("cache-control"), "public, max-age=3600");
-  assertEquals(res2.headers.get("cache-control"), "public, max-age=3600");
-  const parsed = JSON.parse(body1) as { origins: string[] };
-  assertEquals(parsed.origins.includes(BASE), true);
-  assertEquals(parsed.origins.includes("https://audio.paulkinlan.com"), true);
-  assertEquals(parsed.origins.includes("https://victim.com"), false);
-  assertEquals(parsed.origins.includes("https://attacker-evil.com"), false);
+  assertEquals(res1.headers.get("cache-control"), "no-store");
+  assertEquals(res2.headers.get("cache-control"), "no-store");
+  assertEquals(JSON.parse(body1), { origins: [] });
+  assertEquals(JSON.parse(body2), { origins: [] });
 });
