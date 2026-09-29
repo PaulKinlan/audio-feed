@@ -314,6 +314,7 @@ export const SHELL_KIT_CSS = `
       grid-column: 1 / -1;
     }
 
+    /* <=480px: intentional collapse; trailing controls stack */
     @media (max-width: 480px) {
       .rows {
         grid-template-columns: 1fr;
