@@ -36,6 +36,33 @@ export function viewerOf(user: User | null): Viewer | null {
 
 export type ShellSection = "home" | "login" | "account" | "admin" | "player";
 
+/**
+ * Speculation Rules API for instant same-origin page navigations (audio-feed-nvj).
+ * Per Modern Web Guidance (improve-next-page-load-performance):
+ * Uses document rules with moderate eagerness to prefetch same-origin HTML documents
+ * on link hover, while strictly excluding API mutations and admin routes.
+ */
+export const SPECULATION_RULES = `<script type="speculationrules">
+{
+  "prefetch": [
+    {
+      "source": "document",
+      "where": {
+        "and": [
+          { "href_matches": "/*" },
+          { "not": { "href_matches": "/api/*" } },
+          { "not": { "href_matches": "/admin*" } },
+          { "not": { "href_matches": "*/logout" } },
+          { "not": { "selector_matches": "[data-no-prefetch]" } },
+          { "not": { "selector_matches": "[rel~=nofollow]" } }
+        ]
+      },
+      "eagerness": "moderate"
+    }
+  ]
+}
+</script>`;
+
 /** Colour, type, spacing and shape unified in src/routes/tokens.ts (audio-feed-vpw). */
 export const SHELL_TOKENS = DESIGN_TOKENS;
 
@@ -270,7 +297,7 @@ export function renderShell(o: ShellOptions): string {
 ${o.description ? `<meta name="description" content="${esc(o.description)}">` : ""}
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="/icon.svg">
-${o.head ?? ""}
+${o.current !== "admin" ? SPECULATION_RULES : ""}${o.head ?? ""}
 <style>${SHELL_TOKENS}${SHELL_CSS}${o.kit ? SHELL_KIT_CSS : ""}${o.css ?? ""}</style>
 </head>
 <body class="shell">
