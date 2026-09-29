@@ -468,3 +468,25 @@ Deno.test("the player client retains download failure reasons on the episode row
   assertStringIncludes(client, ".ep-download-error");
   assertStringIncludes(client, "Download failed:");
 });
+
+Deno.test("the player renders i-share icon symbol in page sprite (audio-feed-zcw)", async () => {
+  const { fetch } = await seeded();
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+  assertStringIncludes(html, '<symbol id="i-share"');
+});
+
+Deno.test("the player client wires native Web Share API with clipboard fallback on episode rows (audio-feed-zcw)", async () => {
+  const { fetch } = await seeded();
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+  const client = await playerClient(fetch, BASE, html);
+  assertStringIncludes(client, '"ep-share"');
+  assertStringIncludes(client, 'dataset.action = "share"');
+  assertStringIncludes(client, '"Share episode: "');
+  assertStringIncludes(client, '"Link copied for: "');
+  assertStringIncludes(client, "navigator.canShare");
+  assertStringIncludes(client, "navigator.share");
+  assertStringIncludes(client, "AbortError");
+  assertStringIncludes(client, "navigator.clipboard.writeText");
+  assertStringIncludes(client, '"Link copied to clipboard."');
+  assertStringIncludes(client, "TODO(baseline/share)");
+});
