@@ -204,7 +204,7 @@ The following actionable items are filed in Beads (`bd`):
 | `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Landed | Supersedes 05b; native dialog with closedby="any" and form[method="dialog"] |
 | `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Landed | App icon counter for installed PWA via setAppBadge/clearAppBadge |
 | `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Landed | OS native share sheet on mobile with clipboard fallback |
-| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Implemented | Subgrid on grid-template-columns with flex fallback and 480px collapse |
+| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Landed | Subgrid on grid-template-columns with flex fallback and 480px collapse |
 
 ---
 
