@@ -981,7 +981,7 @@ Deno.test("POST /api/sources sets codeHandling and persists it on the source (au
   assertEquals(stored?.codeHandling, "explain");
 });
 
-Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code on skip and using summarizer on explain with fallback (audio-feed-bdo)", async () => {
+Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code on skip and using summarizer on explain with fallback (audio-feed-bdo, audio-feed-bjt)", async () => {
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
   await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));

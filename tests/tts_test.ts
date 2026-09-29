@@ -160,7 +160,7 @@ Deno.test("Single-voice narration - builds prompt with spoken intro and article 
   );
 });
 
-Deno.test("Single-voice narration - request builder creates valid Gemini payload", () => {
+Deno.test("Single-voice narration - request builder creates valid Gemini payload (audio-feed-bjt)", () => {
   const req = buildSingleVoiceRequest("Test article prompt", "Charon", 0.7);
 
   assertEquals(req.contents[0]?.parts.length, 1);
