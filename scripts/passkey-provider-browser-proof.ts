@@ -223,6 +223,26 @@ try {
     `found ${iconCount} SVGs`,
   );
 
+  // Scroll passkeys panel into view so rows are clearly visible in screenshot (audio-feed-6wk)
+  await js(
+    `document.querySelector("[aria-labelledby='passkeys-h']")?.scrollIntoView({ block: "center", behavior: "instant" })`,
+  );
+  await sleep(100);
+
+  const desktopCardVisible = Boolean(
+    await js(`(() => {
+      const el = document.querySelector("[aria-labelledby='passkeys-h']");
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= window.innerHeight;
+    })()`),
+  );
+  check(
+    "passkeys card is scrolled into view on desktop",
+    desktopCardVisible,
+    "passkeys card centered in desktop viewport",
+  );
+
   const shotDesktop = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
   await Deno.writeFile(
     `${OUT}01-account-passkey-providers-desktop.png`,
@@ -245,6 +265,26 @@ try {
     "mobile passkey list has zero horizontal overflow",
     overflow === false,
     "no horizontal scroll at 390px",
+  );
+
+  // Scroll passkeys panel into view on mobile as well (audio-feed-6wk)
+  await js(
+    `document.querySelector("[aria-labelledby='passkeys-h']")?.scrollIntoView({ block: "center", behavior: "instant" })`,
+  );
+  await sleep(100);
+
+  const mobileCardVisible = Boolean(
+    await js(`(() => {
+      const el = document.querySelector("[aria-labelledby='passkeys-h']");
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top < window.innerHeight && rect.bottom > 0;
+    })()`),
+  );
+  check(
+    "passkeys card is scrolled into view on mobile",
+    mobileCardVisible,
+    "passkeys card visible in mobile viewport",
   );
 
   const shotMobile = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
