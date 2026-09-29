@@ -41,16 +41,109 @@ export class PasskeyError extends Error {
   }
 }
 
+/**
+ * Known public suffixes / platform eTLDs where multiple unrelated applications
+ * reside under shared domains (audio-feed-1o2).
+ * Browsers consult the Public Suffix List (PSL) and reject WebAuthn RP IDs that match
+ * a public suffix with a SecurityError DOMException.
+ */
+export const KNOWN_PUBLIC_SUFFIXES = new Set([
+  // Cloud platform shared domains
+  "deno.net",
+  "deno.dev",
+  "pages.dev",
+  "workers.dev",
+  "github.io",
+  "gitlab.io",
+  "vercel.app",
+  "netlify.app",
+  "fly.dev",
+  "onrender.com",
+  "glitch.me",
+  "herokuapp.com",
+  "azurewebsites.net",
+  "cloudfront.net",
+  "appspot.com",
+  "web.app",
+  "firebaseapp.com",
+  // Common multi-part ccTLD public suffixes
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "ne.jp",
+  "co.nz",
+  "com.br",
+  "co.in",
+  "com.sg",
+]);
+
+/**
+ * Check whether a hostname is a Public Suffix / eTLD (audio-feed-1o2).
+ * WebAuthn spec §5.1.2 strictly forbids setting RP ID to an eTLD/Public Suffix.
+ */
+export function isPublicSuffix(hostname: string): boolean {
+  const norm = hostname.toLowerCase().trim().replace(/^\.+|\.+$/g, "");
+  if (!norm) return true;
+  // IPv4 / IPv6 addresses are not public suffixes
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(norm) || norm.includes(":")) return false;
+  // Localhost is valid for local development
+  if (norm === "localhost" || norm.endsWith(".localhost")) return false;
+  // Single label without dot (e.g. "com", "org", "net")
+  if (!norm.includes(".")) return true;
+  return KNOWN_PUBLIC_SUFFIXES.has(norm);
+}
+
 export interface RelyingParty {
   /** e.g. `https://audio.example.com`. */
   origin: string;
-  /** The origin's hostname. */
+  /** The origin's exact hostname or an authorized registrable domain suffix. */
   rpID: string;
 }
 
-export function relyingParty(baseUrl: string): RelyingParty {
+/**
+ * Derive the WebAuthn Relying Party configuration (audio-feed-1o2).
+ *
+ * Scoping rules per web.dev/articles/webauthn-rp-id:
+ * 1. Default: RP ID is strictly the exact hostname of baseUrl (e.g. audio-feed.paulkinlan-ea.deno.net)
+ *    to prevent cross-app passkey clashes with other apps across *.paulkinlan-ea.deno.net.
+ * 2. Guard: RP ID must NEVER be a Public Suffix / eTLD (e.g. deno.net, pages.dev, github.io),
+ *    which causes browser SecurityError DOMExceptions.
+ * 3. Configuration: An optional configured RP ID (WEBAUTHN_RP_ID) allows intentional
+ *    custom domain pins (e.g. paulkinlan.com for audio-feed.paulkinlan.com), provided it is
+ *    not a Public Suffix and is a valid suffix of the origin host.
+ */
+export function relyingParty(baseUrl: string, configuredRpId?: string): RelyingParty {
   const url = new URL(baseUrl);
-  return { origin: url.origin, rpID: url.hostname };
+  const host = url.hostname.toLowerCase();
+
+  let rpID: string;
+  if (configuredRpId && configuredRpId.trim()) {
+    rpID = configuredRpId.trim().toLowerCase();
+    if (isPublicSuffix(rpID)) {
+      throw new PasskeyError(
+        `Configured WebAuthn RP ID cannot be a public suffix ("${rpID}").`,
+      );
+    }
+    if (host !== rpID && !host.endsWith("." + rpID)) {
+      throw new PasskeyError(
+        `Configured WebAuthn RP ID "${rpID}" is not a valid suffix of origin host "${host}".`,
+      );
+    }
+  } else {
+    rpID = host;
+    if (isPublicSuffix(rpID)) {
+      throw new PasskeyError(
+        `WebAuthn RP ID cannot be a public suffix ("${rpID}"). Deploy to a dedicated subdomain or configure WEBAUTHN_RP_ID.`,
+      );
+    }
+  }
+
+  return { origin: url.origin, rpID };
 }
 
 function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
