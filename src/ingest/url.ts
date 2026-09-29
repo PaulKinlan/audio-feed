@@ -32,6 +32,7 @@ export class IngestError extends Error {
 
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 export const MAX_PDF_BYTES = 10 * 1024 * 1024;
+export const PDF_PARSE_TIMEOUT_MS = 10_000;
 export const MAX_ARTICLE_CONTENT_CHARS = 100_000;
 const TIMEOUT_MS = 15_000;
 
@@ -260,7 +261,7 @@ export async function fetchArticle(
       }
 
       if (isPdf) {
-        return await extractPdfArticle(bytes, url.href);
+        return await extractPdfArticle(bytes, url.href, { timeoutMs: options.timeoutMs });
       }
 
       const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
@@ -667,13 +668,78 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
 }
 
 /**
- * Extract structured text and metadata from PDF bytes (audio-feed-w9n).
+ * Run pdf-parse with bounded wall-clock execution and suppressed PDF.js log noise (audio-feed-a3y).
+ * Note on cancellation: pdf-parse does not accept an AbortSignal into its worker loop,
+ * so a timed-out parse promise will continue running in the background until the isolate
+ * finishes or garbage-collects; bounding with Promise.race protects the request pipeline
+ * from hanging indefinitely.
+ */
+async function parsePdfBounded(
+  bytes: Uint8Array,
+  timeoutMs = PDF_PARSE_TIMEOUT_MS,
+): Promise<{ text: string; numpages: number; info?: Record<string, unknown> }> {
+  if (timeoutMs <= 0) {
+    throw new IngestError(504, "PDF parsing timed out.");
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new IngestError(
+            504,
+            `PDF parsing timed out after ${Math.round(timeoutMs / 1000)} seconds.`,
+          ),
+        ),
+      timeoutMs,
+    );
+  });
+
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].startsWith("Warning: Indexing all PDF objects")) {
+      return;
+    }
+    origLog(...args);
+  };
+
+  try {
+    return await Promise.race([pdfParse(bytes), timeoutPromise]);
+  } catch (err) {
+    if (err instanceof IngestError) throw err;
+    throw new IngestError(
+      422,
+      `Unable to parse PDF document: ${(err as Error)?.message || "corrupt or invalid format"}.`,
+    );
+  } finally {
+    clearTimeout(timer);
+    console.log = origLog;
+  }
+}
+
+function sanitizeMetadataText(text: string, maxLength: number): string {
+  let cleanStr = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 32 && code !== 127) {
+      cleanStr += text[i];
+    } else {
+      cleanStr += " ";
+    }
+  }
+  return cleanStr.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+/**
+ * Extract structured text and metadata from PDF bytes (audio-feed-w9n, audio-feed-a3y).
  * Uses pdf-parse to extract text, document metadata (Title, Author, CreationDate),
  * and generates clean body paragraphs suitable for TTS narration and dialogue synthesis.
  */
 export async function extractPdfArticle(
   bytes: Uint8Array,
   sourceUrl: string,
+  options: { timeoutMs?: number } = {},
 ): Promise<ExtractedArticle> {
   const url = articleUrl(sourceUrl).href;
   if (bytes.byteLength > MAX_PDF_BYTES) {
@@ -686,19 +752,7 @@ export async function extractPdfArticle(
     throw new IngestError(422, "Invalid PDF: document does not start with %PDF- header.");
   }
 
-  let data: {
-    text: string;
-    numpages: number;
-    info?: Record<string, unknown>;
-  };
-  try {
-    data = await pdfParse(bytes);
-  } catch (err) {
-    throw new IngestError(
-      422,
-      `Unable to parse PDF document: ${(err as Error)?.message || "corrupt or invalid format"}.`,
-    );
-  }
+  const data = await parsePdfBounded(bytes, options.timeoutMs);
 
   const rawText = data.text ?? "";
 
@@ -727,20 +781,20 @@ export async function extractPdfArticle(
   // 1. info.Title if meaningful
   // 2. First short line without sentence-ending punctuation (< 120 chars)
   // 3. Derived from URL pathname
-  let title = "";
+  let rawTitle = "";
   const infoTitle = typeof data.info?.Title === "string" ? clean(data.info.Title) : "";
   if (infoTitle && !/^(untitled|document|pdf)$/i.test(infoTitle)) {
-    title = infoTitle;
+    rawTitle = infoTitle;
   }
 
-  if (!title && lines.length > 0) {
+  if (!rawTitle && lines.length > 0) {
     const candidate = lines[0]!;
     if (candidate.length <= 120 && !/[.?!]$/.test(candidate)) {
-      title = candidate;
+      rawTitle = candidate;
     }
   }
 
-  if (!title) {
+  if (!rawTitle) {
     try {
       const pathname = new URL(url).pathname;
       const basename = pathname.split("/").filter(Boolean).pop()?.replace(/\.pdf$/i, "") ?? "";
@@ -748,7 +802,7 @@ export async function extractPdfArticle(
         const decoded = decodeURIComponent(basename).replace(/[-_]+/g, " ").replace(/\s+/g, " ")
           .trim();
         if (decoded) {
-          title = decoded.charAt(0).toUpperCase() + decoded.slice(1);
+          rawTitle = decoded.charAt(0).toUpperCase() + decoded.slice(1);
         }
       }
     } catch {
@@ -756,9 +810,12 @@ export async function extractPdfArticle(
     }
   }
 
-  if (!title) {
-    title = "PDF Document";
+  if (!rawTitle) {
+    rawTitle = "PDF Document";
   }
+
+  // Strip control chars, newlines, tabs, and cap to 200 chars max (audio-feed-a3y)
+  const title = sanitizeMetadataText(rawTitle, 200) || "PDF Document";
 
   // Body construction:
   // If lines are separated by empty lines in rawText, keep paragraph breaks
@@ -776,10 +833,10 @@ export async function extractPdfArticle(
 
   const body = contentParagraphs.join("\n\n");
 
-  // Author extraction
+  // Author extraction (sanitized & capped, audio-feed-a3y)
   let author: string | null = null;
   if (typeof data.info?.Author === "string" && clean(data.info.Author)) {
-    author = clean(data.info.Author).replace(/^by\s+/i, "");
+    author = sanitizeMetadataText(data.info.Author.replace(/^by\s+/i, ""), 100) || null;
   }
 
   // Published date extraction from PDF metadata CreationDate (e.g. D:20260929100000Z or ISO)
