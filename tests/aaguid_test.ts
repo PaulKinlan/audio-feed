@@ -70,6 +70,17 @@ Deno.test("aaguid: maps known provider AAGUIDs to names and SVG icons", () => {
   }
 });
 
+Deno.test("aaguid: Google provider renders canonical cubic Bézier G logo (audio-feed-vgn)", () => {
+  const res = resolvePasskeyProvider("ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4");
+  assertEquals(res.name, "Google Password Manager");
+  // Asserts the exact canonical cubic Bézier path and four brand fills
+  assertStringIncludes(res.iconSvg, 'd="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92');
+  assertStringIncludes(res.iconSvg, 'fill="#4285F4"');
+  assertStringIncludes(res.iconSvg, 'fill="#34A853"');
+  assertStringIncludes(res.iconSvg, 'fill="#FBBC05"');
+  assertStringIncludes(res.iconSvg, 'fill="#EA4335"');
+});
+
 Deno.test("aaguid: case-insensitive and trims whitespace", () => {
   const upper = "  EA9B8D66-4D01-1D21-3CE4-B6B48CB575D4  ";
   const res = resolvePasskeyProvider(upper);
