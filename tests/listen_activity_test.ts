@@ -228,25 +228,65 @@ Deno.test("failed episodes are always included in activity panel regardless of w
 Deno.test("reprocessed or superseded failed episodes are filtered from activity (audio-feed-cls)", async () => {
   const { stores, fetch, req } = await seeded();
 
-  // Plant a failure for an article that already has a playable episode ("The playable one")
+  // 1. Stale failure (failed@08:00, ready@08:10): live episode is strictly newer, so failure is superseded
   await stores.metadata.putEpisode(makeEpisode({
     id: "ep-old-fail-playable-one",
     userId: "user-1",
     sourceId: "src-a",
     articleId: "art-1",
     title: "The playable one",
+    mode: "direct",
     status: "failed",
     error: "Stale failure before successful retry",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+
+  // 2. Fresh failure (failed@08:20, ready@08:10): failure is newer than live episode (e.g. failed re-narrate), must stay visible (F1)
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-fresh-fail-playable-one",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "The playable one",
+    mode: "direct",
+    status: "failed",
+    error: "Fresh failure after previous success",
+    createdAt: "2026-09-10T08:20:00.000Z",
+  }));
+
+  // 3. Different mode failure (deepdive failed@08:00 alongside direct ready@08:10): must stay visible (F2)
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-deepdive-fail",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "The playable one",
+    mode: "deepdive",
+    status: "failed",
+    error: "Deep dive failure",
+    createdAt: "2026-09-10T08:00:00.000Z",
   }));
 
   const res = await fetch(req(`/listen/${TOKEN}/status`));
   assertEquals(res.status, 200);
   const body = await res.json();
   const failedIds = body.failed.map((e: { id: string }) => e.id);
+  // ep-failed (title "The one that failed") is STILL failed, so it must be present
   assert(failedIds.includes("ep-failed"), "unresolved failure must be included");
+  // ep-old-fail-playable-one is older than ep-ready, so it must be filtered
   assert(
     !failedIds.includes("ep-old-fail-playable-one"),
-    "reprocessed failure matching a playable episode must be filtered from activity",
+    "stale failure older than playable episode must be filtered from activity",
+  );
+  // ep-fresh-fail-playable-one is newer than ep-ready, so it must remain visible
+  assert(
+    failedIds.includes("ep-fresh-fail-playable-one"),
+    "fresh failure newer than playable episode must remain visible",
+  );
+  // ep-deepdive-fail has a different mode, so it must remain visible
+  assert(
+    failedIds.includes("ep-deepdive-fail"),
+    "different mode failure must remain visible",
   );
 });
 

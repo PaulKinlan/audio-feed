@@ -507,11 +507,15 @@ function activityFrom(
       const isLive = isPublishable(live) || live.status === "pending" ||
         live.status === "synthesizing";
       if (!isLive) return false;
+      // F1: Only supersede when the live/publishable episode is strictly NEWER than the failure
+      const isNewer = live.createdAt > failed.createdAt;
+      if (!isNewer) return false;
       const sameArticleAndTitle = Boolean(
         live.articleId && failed.articleId && live.articleId === failed.articleId &&
           live.title && failed.title && live.title === failed.title,
       );
-      const sameMode = !live.mode || !failed.mode || live.mode === failed.mode;
+      // F2: Mode equality — absence is not agreement; require exact mode match or both missing
+      const sameMode = live.mode === failed.mode;
       return sameArticleAndTitle && sameMode;
     });
   };
