@@ -43,6 +43,7 @@ import {
 } from "./routes/listen.ts";
 import { handleAsset } from "./routes/assets.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
+import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { isAudioMode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
@@ -151,6 +152,8 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get("/manifest.json", handleManifest);
   router.get("/robots.txt", handleRobots);
   router.get("/icon.svg", handleIcon);
+  // WebAuthn Related Origin Requests (audio-feed-1o2)
+  router.get("/.well-known/webauthn", handleWebAuthnRelatedOrigins);
   // Not /audio/:key+ — that route is an episode enclosure with Range semantics,
   // and this is a preview generated on demand (audio-feed-msw).
   router.get(

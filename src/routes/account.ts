@@ -767,7 +767,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
   const html = renderAccountPage({
     user,
     baseUrl,
-    rpId: relyingParty(baseUrl).rpID,
+    rpId: relyingParty(baseUrl, ctx.config.webAuthnRpId).rpID,
     sources,
     credentials,
     episodes,

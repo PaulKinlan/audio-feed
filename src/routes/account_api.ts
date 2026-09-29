@@ -157,7 +157,12 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
     loginOptions: async ({ req }) => {
       const refused = crossOrigin(ctx, req);
       if (refused) return refused;
-      return reply(await authenticationOptions(store, relyingParty(baseUrl(ctx, req))));
+      return reply(
+        await authenticationOptions(
+          store,
+          relyingParty(baseUrl(ctx, req), ctx.config.webAuthnRpId),
+        ),
+      );
     },
 
     loginVerify: async ({ req }) => {
@@ -166,7 +171,11 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       try {
         // deno-lint-ignore no-explicit-any
         const response = (await body(req)) as any;
-        const user = await finishAuthentication(store, relyingParty(baseUrl(ctx, req)), response);
+        const user = await finishAuthentication(
+          store,
+          relyingParty(baseUrl(ctx, req), ctx.config.webAuthnRpId),
+          response,
+        );
         return await signInResponse(user);
       } catch (error) {
         if (error instanceof PasskeyError) return reply({ error: error.message }, error.status);
@@ -178,7 +187,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       const refused = crossOrigin(ctx, req);
       if (refused) return refused;
       const { setupToken } = await body(req);
-      const rp = relyingParty(baseUrl(ctx, req));
+      const rp = relyingParty(baseUrl(ctx, req), ctx.config.webAuthnRpId);
       let user: User | null;
       let token: string | undefined;
       if (typeof setupToken === "string" && setupToken) {
@@ -205,7 +214,11 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       try {
         // deno-lint-ignore no-explicit-any
         const response = (await body(req)) as any;
-        const user = await finishRegistration(store, relyingParty(baseUrl(ctx, req)), response);
+        const user = await finishRegistration(
+          store,
+          relyingParty(baseUrl(ctx, req), ctx.config.webAuthnRpId),
+          response,
+        );
         // Already signed in as this user (adding a passkey): keep the session.
         const current = await sessionUser(store, req);
         if (current?.id === user.id) return reply({ ok: true }, 201);

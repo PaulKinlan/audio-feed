@@ -54,6 +54,17 @@ export interface AppConfig {
   defaultVoice?: GeminiTtsVoice;
   /** Whether outbound notifications for on-demand articles are queued (audio-feed-np5). Defaults to false. */
   notifyOutboxEnabled?: boolean;
+  /**
+   * Optional WebAuthn Relying Party ID override (audio-feed-1o2).
+   * When unset, defaults to exact hostname (e.g. audio-feed.paulkinlan-ea.deno.net)
+   * preventing cross-app clashes.
+   */
+  webAuthnRpId?: string;
+  /**
+   * Optional Related Origin Requests (ROR) origins list (audio-feed-1o2).
+   * Served at GET /.well-known/webauthn to allow cross-origin passkey recognition.
+   */
+  webAuthnRelatedOrigins?: string[];
 }
 
 function env(name: string): string | undefined {
@@ -93,6 +104,11 @@ export function loadConfig(): AppConfig {
     geminiApiKey: env("GEMINI_API_KEY"),
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
+    webAuthnRpId: env("WEBAUTHN_RP_ID"),
+    webAuthnRelatedOrigins: env("WEBAUTHN_RELATED_ORIGINS")
+      ?.split(",")
+      .map((s) => s.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
   };
 }
 
