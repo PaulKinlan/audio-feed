@@ -56,7 +56,7 @@ jobs:
           bd ready || true
 
       - name: Run Modern Web Factory Agent
-        uses: PaulKinlan/agents/.github/actions/factory@397bc0b088777612e68526a183d77b6062cf20d0
+        uses: PaulKinlan/agents/.github/actions/factory@1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b
         with:
           agent: modern-web
           target: '.'
@@ -65,7 +65,7 @@ jobs:
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY || secrets.deepseek_api_key }}
           deepseek_model: 'deepseek-chat'
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          factory_ref: '397bc0b088777612e68526a183d77b6062cf20d0'
+          factory_ref: '1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b'
 
       - name: Sync Beads Database
         if: always()
