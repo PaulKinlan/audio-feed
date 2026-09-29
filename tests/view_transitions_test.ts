@@ -19,6 +19,7 @@ import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
+import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
 
 const BASE = "https://audio.example.com";
 
@@ -28,10 +29,160 @@ Deno.test("DESIGN_TOKENS: declares @view-transition navigation: auto under no-pr
   assertStringIncludes(DESIGN_TOKENS, "navigation: auto;");
 });
 
-Deno.test("DESIGN_TOKENS: respects reduced-motion preference (audio-feed-rra)", () => {
-  assertStringIncludes(DESIGN_TOKENS, "@media (prefers-reduced-motion: reduce)");
-  assertStringIncludes(DESIGN_TOKENS, "animation-duration: 0.01ms !important;");
-  assertStringIncludes(DESIGN_TOKENS, "transition-duration: 0.01ms !important;");
+Deno.test("DESIGN_TOKENS: @view-transition is strictly scoped to no-preference motion (audio-feed-rra, audio-feed-81q)", () => {
+  const pattern =
+    /@media\s*\(prefers-reduced-motion:\s*no-preference\)\s*\{[\s\S]*?@view-transition\s*\{[\s\S]*?navigation:\s*auto;[\s\S]*?\}\s*\}/;
+  assertEquals(
+    pattern.test(DESIGN_TOKENS),
+    true,
+    "view transition declaration must be nested inside @media (prefers-reduced-motion: no-preference)",
+  );
+
+  const withoutScopedVt = DESIGN_TOKENS.replace(pattern, "");
+  assertEquals(
+    withoutScopedVt.includes("@view-transition"),
+    false,
+    "no unconstrained @view-transition allowed outside prefers-reduced-motion: no-preference",
+  );
+});
+
+Deno.test("view-transitions: link click engages transition under no-preference and suppresses under reduce (audio-feed-rra, audio-feed-81q)", async () => {
+  const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
+  if (!hasRun) return;
+
+  const pageA = `<!doctype html>
+<html>
+<head>
+<style>${DESIGN_TOKENS}</style>
+</head>
+<body>
+  <h1>Page A</h1>
+  <a id="linkToB" href="/b">Go to B</a>
+</body>
+</html>`;
+
+  const pageB = `<!doctype html>
+<html>
+<head>
+<style>${DESIGN_TOKENS}</style>
+<script>
+  window.revealedTransition = null;
+  window.addEventListener("pagereveal", (e) => {
+    window.revealedTransition = Boolean(e.viewTransition);
+  });
+</script>
+</head>
+<body>
+  <h1>Page B</h1>
+  <a id="linkToA" href="/a">Go to A</a>
+</body>
+</html>`;
+
+  const server = Deno.serve({ port: 0 }, (req) => {
+    const url = new URL(req.url);
+    if (url.pathname === "/a") {
+      return new Response(pageA, { headers: { "content-type": "text/html" } });
+    }
+    if (url.pathname === "/b") {
+      return new Response(pageB, { headers: { "content-type": "text/html" } });
+    }
+    return new Response("Not found", { status: 404 });
+  });
+
+  const port = server.addr.port;
+  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-vt-proof-");
+  const chrome = new Deno.Command(newestChrome(), {
+    args: [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profileDir}`,
+      "about:blank",
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let cdpPort = "";
+  for (let i = 0; i < 50 && !cdpPort; i++) {
+    await sleep(100);
+    cdpPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => "")).split(
+      "\n",
+    )[0]!;
+  }
+
+  try {
+    const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
+    // deno-lint-ignore no-explicit-any
+    const page = targets.find((t: any) => t.type === "page");
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+    let nextId = 0;
+    // deno-lint-ignore no-explicit-any
+    const pending = new Map<number, (v: any) => void>();
+    ws.addEventListener("message", (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.id && pending.has(msg.id)) {
+        pending.get(msg.id)!(msg);
+        pending.delete(msg.id);
+      }
+    });
+    const cdp = (method: string, params: Record<string, unknown> = {}) => {
+      const id = ++nextId;
+      ws.send(JSON.stringify({ id, method, params }));
+      return new Promise((resolve) => pending.set(id, resolve));
+    };
+
+    await cdp("Page.enable");
+    await cdp("Runtime.enable");
+
+    // 1. Emulate no-preference: link click must engage view transition
+    await cdp("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+    });
+    await cdp("Page.navigate", { url: `http://localhost:${port}/a` });
+    await sleep(300);
+    await cdp("Runtime.evaluate", { expression: `document.getElementById("linkToB").click()` });
+    await sleep(500);
+    // deno-lint-ignore no-explicit-any
+    const resNoPref: any = await cdp("Runtime.evaluate", {
+      expression: `window.revealedTransition`,
+    });
+    assertEquals(
+      resNoPref.result.result.value,
+      true,
+      "view transition must be engaged under no-preference motion",
+    );
+
+    // 2. Emulate reduce: link click must suppress view transition
+    await cdp("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    await cdp("Page.navigate", { url: `http://localhost:${port}/a` });
+    await sleep(300);
+    await cdp("Runtime.evaluate", { expression: `document.getElementById("linkToB").click()` });
+    await sleep(500);
+    // deno-lint-ignore no-explicit-any
+    const resReduce: any = await cdp("Runtime.evaluate", {
+      expression: `window.revealedTransition`,
+    });
+    assertEquals(
+      resReduce.result.result.value,
+      false,
+      "view transition must NOT be engaged under reduced motion",
+    );
+
+    ws.close();
+  } finally {
+    try {
+      chrome.kill();
+    } catch { /* ignore */ }
+    await cleanup();
+    await server.shutdown();
+  }
 });
 
 Deno.test("shell & player define persistent view-transition-name identifiers (audio-feed-rra)", async () => {
