@@ -267,6 +267,82 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
     createdAt: "2026-09-10T08:00:00.000Z",
   }));
 
+  // 4. Re-ingested/re-sent article with a newly minted articleId and same URL (J1):
+  // Matching URL, source, mode, and newer createdAt -> must supersede older failure despite distinct articleIds
+  await stores.metadata.putArticle(makeArticle({
+    id: "art-fail-1",
+    userId: "user-1",
+    sourceId: "src-a",
+    url: "https://example.com/reingested-post",
+    title: "Re-ingested Article Title",
+  }));
+  await stores.metadata.putArticle(makeArticle({
+    id: "art-ready-2",
+    userId: "user-1",
+    sourceId: "src-a",
+    url: "https://example.com/reingested-post",
+    title: "Re-ingested Article Title",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-old-fail-reingested",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-fail-1",
+    title: "Re-ingested Article Title",
+    mode: "direct",
+    status: "failed",
+    error: "Failed during first ingest",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-ready-reingested",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-ready-2", // newly minted articleId!
+    title: "Re-ingested Article Title",
+    mode: "direct",
+    status: "ready",
+    createdAt: "2026-09-10T08:30:00.000Z",
+  }));
+
+  // 5. Recurring title with different article URLs (J2):
+  // "Weekly Roundup" with edition=1 vs edition=2 must NOT supersede (failure stays visible)
+  await stores.metadata.putArticle(makeArticle({
+    id: "art-weekly-1",
+    userId: "user-1",
+    sourceId: "src-a",
+    url: "https://example.com/weekly?edition=1",
+    title: "Weekly Roundup",
+  }));
+  await stores.metadata.putArticle(makeArticle({
+    id: "art-weekly-2",
+    userId: "user-1",
+    sourceId: "src-a",
+    url: "https://example.com/weekly?edition=2",
+    title: "Weekly Roundup",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-weekly-fail",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-weekly-1",
+    title: "Weekly Roundup",
+    mode: "direct",
+    status: "failed",
+    error: "Weekly edition 1 failed",
+    createdAt: "2026-09-10T08:00:00.000Z",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-weekly-ready",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-weekly-2",
+    title: "Weekly Roundup",
+    mode: "direct",
+    status: "ready",
+    createdAt: "2026-09-10T08:30:00.000Z",
+  }));
+
   const res = await fetch(req(`/listen/${TOKEN}/status`));
   assertEquals(res.status, 200);
   const body = await res.json();
@@ -288,6 +364,26 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
     failedIds.includes("ep-deepdive-fail"),
     "different mode failure must remain visible",
   );
+  // ep-old-fail-reingested has different articleId but same URL/source/mode and older createdAt -> filtered (J1)
+  assert(
+    !failedIds.includes("ep-old-fail-reingested"),
+    "re-ingested article with new articleId must supersede older failure via same URL (J1)",
+  );
+  // ep-weekly-fail has same title and source, but different article URL -> must stay visible (J2)
+  assert(
+    failedIds.includes("ep-weekly-fail"),
+    "recurring title with different article URL must remain visible (J2)",
+  );
+});
+
+Deno.test("listen.js and listen.css define Dismiss All button for multi-failure activity (audio-feed-j8o)", async () => {
+  const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
+  const css = await Deno.readTextFile(new URL("../src/assets/listen.css", import.meta.url));
+
+  assertStringIncludes(js, "act-dismiss-all");
+  assertStringIncludes(js, "Dismiss all (");
+  assertStringIncludes(js, "activityHint.replaceChildren");
+  assertStringIncludes(css, ".act-dismiss-all {");
 });
 
 Deno.test("listen HTML template does not leak raw JS comment syntax (audio-feed-cls)", async () => {

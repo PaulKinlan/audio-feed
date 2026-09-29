@@ -290,6 +290,27 @@ main {
   outline: 2px solid var(--accent-2);
   outline-offset: 2px;
 }
+.act-dismiss-all {
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: transparent;
+  color: var(--muted);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.act-dismiss-all:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.act-dismiss-all:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
 /* A spinner that says nothing the text does not already say is decoration: the pulse is on
    the dot, and reduced motion (below) leaves the text standing on its own. */
 .act-dot {
