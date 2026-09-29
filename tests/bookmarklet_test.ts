@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -29,7 +29,17 @@ async function setup() {
   return { ctx, fetch, stores, user, session };
 }
 
-Deno.test("GET /account: renders draggable bookmarklet button (audio-feed-ep1)", async () => {
+/** The bookmarklet href as the page emits it, entities decoded. */
+function bookmarkletHrefIn(html: string): string {
+  const raw = html.match(/href="(javascript:[^"]*)"/)?.[1] ?? "";
+  return raw
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+Deno.test("GET /account and /: one bookmarklet builder with the widened feed shapes (audio-feed-6hw)", async () => {
   const { fetch, session } = await setup();
 
   const res = await fetch(
@@ -44,11 +54,35 @@ Deno.test("GET /account: renders draggable bookmarklet button (audio-feed-ep1)",
   assertStringIncludes(html, 'draggable="true"');
   assertStringIncludes(html, "Add to Audio Feed");
   assertStringIncludes(html, "javascript:(function()");
-  assertStringIncludes(html, "link[rel=");
   assertStringIncludes(html, "/account?add=");
+
+  // ONE builder (audio-feed-6hw): the account page and the front door emit the
+  // same href, so a shape fixed for one is fixed for both.
+  const home = await fetch(new Request(`${BASE}/`));
+  const homeHtml = await home.text();
+  const accountHref = bookmarkletHrefIn(html);
+  const homeHref = bookmarkletHrefIn(homeHtml);
+  assert(accountHref.length > 0, "account page carries a bookmarklet href");
+  assertEquals(accountHref, homeHref);
+
+  // The widened shapes: a declared feed of any of these types, or a link that
+  // names one, all reach the account page with a feed rather than none.
+  for (
+    const shape of [
+      'link[rel~="alternate"][type*="rss"]',
+      'link[rel~="alternate"][type*="atom"]',
+      'link[rel~="alternate"][type*="feed"]',
+      'link[rel~="alternate"][type*="json"]',
+      'link[rel~="alternate"][type*="xml"]',
+      'a[href*="/feed"]',
+      'a[href$=".xml"]',
+    ]
+  ) {
+    assertStringIncludes(accountHref, shape);
+  }
 });
 
-Deno.test("GET /account?add=<url>: renders prefilled quick-add panel for single article (audio-feed-ep1)", async () => {
+Deno.test("GET /account?add=<url>: renders ONE unified card and no second form (audio-feed-6hw)", async () => {
   const { fetch, session } = await setup();
 
   const targetUrl = "https://example.com/great-article";
@@ -67,17 +101,26 @@ Deno.test("GET /account?add=<url>: renders prefilled quick-add panel for single 
   assertEquals(res.status, 200);
   const html = await res.text();
 
-  // Quick-add panel is present
+  // ONE unified card, and the plain send panel is GONE: the duplicate was the
+  // always-on form rendering next to the prefilled panel (audio-feed-6hw).
   assertStringIncludes(html, 'id="quickAddPanel"');
   assertStringIncludes(html, targetUrl);
   assertStringIncludes(html, targetTitle);
   assertStringIncludes(html, 'id="quickSingleBtn"');
+  assertEquals(
+    html.split('id="quickAddPanel"').length - 1,
+    1,
+    "exactly one send/queue card when the page arrives with a URL",
+  );
+  assertEquals(html.includes('id="sendForm"'), false, "no second form");
+  assertEquals(html.includes('id="sendUrl"'), false, "no second URL input");
 
-  // When no feed is provided, feed subscribe option is not shown
-  assertEquals(html.includes("Option 2: Subscribe to RSS feed"), false);
+  // No feed was passed, so the subscribe half waits for server-side discovery
+  // rather than being shown empty.
+  assertStringIncludes(html, 'id="detectedFeed" hidden');
 });
 
-Deno.test("GET /account?add=<url>&feed=<feed>: renders both single page and RSS subscribe options (audio-feed-ep1)", async () => {
+Deno.test("GET /account?add=<url>&feed=<feed>: the subscribe choice lives inside the one card (audio-feed-6hw)", async () => {
   const { fetch, session } = await setup();
 
   const targetUrl = "https://example.com/blog/post-1";
@@ -96,11 +139,15 @@ Deno.test("GET /account?add=<url>&feed=<feed>: renders both single page and RSS 
   const html = await res.text();
 
   assertStringIncludes(html, 'id="quickAddPanel"');
-  assertStringIncludes(html, "Option 1: Queue this single page");
-  assertStringIncludes(html, "Option 2: Subscribe to RSS feed");
+  assertStringIncludes(html, "Queue this single page");
+  assertStringIncludes(html, "Subscribe to the feed");
   assertStringIncludes(html, feedUrl);
   assertStringIncludes(html, 'id="quickSingleBtn"');
   assertStringIncludes(html, 'id="quickSubscribeBtn"');
+  assertEquals(html.split('id="quickAddPanel"').length - 1, 1, "still exactly one card");
+  assertEquals(html.includes('id="sendForm"'), false, "still no second form");
+  // A feed the bookmarklet already found is shown at once, no round trip.
+  assertEquals(html.includes('id="detectedFeed" hidden'), false);
 });
 
 Deno.test("GET /account: sanitizes hostile HTML in title and rejects invalid URLs (audio-feed-ep1)", async () => {
@@ -138,6 +185,13 @@ Deno.test("GET /account: sanitizes hostile HTML in title and rejects invalid URL
   );
   const htmlBad = await resBadUrl.text();
   assertEquals(htmlBad.includes('id="quickAddPanel"'), false, "malicious scheme must be ignored");
+  assertEquals(
+    htmlBad.includes("javascript:alert(1)"),
+    false,
+    "the bad URL is not rendered at all",
+  );
+  // Invalid prefill = no prefill: the plain form is the right page, once.
+  assertStringIncludes(htmlBad, 'id="sendForm"');
 });
 
 Deno.test("GET /add: redirects to /account with query parameters preserved (audio-feed-ep1)", async () => {

@@ -44,7 +44,13 @@ import {
   getSharedAdminAuthLimiter,
 } from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
-import { articleUrl, type ExtractedArticle, IngestError } from "../ingest/url.ts";
+import {
+  articleUrl,
+  type DiscoveredFeed,
+  discoverFeeds as discoverFeedsOnPage,
+  type ExtractedArticle,
+  IngestError,
+} from "../ingest/url.ts";
 import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
 import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
 
@@ -58,6 +64,7 @@ export interface AccountHandlers {
   profile: Handler<AppContext>;
   rotateToken: Handler<AppContext>;
   addSource: Handler<AppContext>;
+  discoverFeed: Handler<AppContext>;
   deleteSource: Handler<AppContext>;
   deletePasskey: Handler<AppContext>;
   regenerateEpisode: Handler<AppContext>;
@@ -67,6 +74,11 @@ export interface AccountHandlers {
 export interface AccountDeps {
   feedTransport?: (url: URL, signal: AbortSignal) => Promise<Response>;
   fetchArticle?: (url: string, signal?: AbortSignal) => Promise<ExtractedArticle>;
+  /** Test seam for the discovery read; production uses the SSRF-safe helper. */
+  discoverFeeds?: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<{ url: string; title: string; feeds: DiscoveredFeed[] }>;
   /** compose.ts's shared source deletion, scoped to `userId`. */
   deleteUserSource: (req: Request, userId: string, sourceId: string) => Promise<Response>;
   /** compose.ts's shared regenerate, outdated scope; resolves the number queued. */
@@ -97,6 +109,30 @@ async function signedIn(ctx: AppContext, req: Request): Promise<User | Response>
   const user = await sessionUser(ctx.stores.metadata, req);
   if (!user) return reply({ error: "Sign in first." }, 401);
   return crossOrigin(ctx, req) ?? user;
+}
+
+/**
+ * The signed-in user for a READ (audio-feed-6hw): 401 without a session, 403
+ * from elsewhere. It cannot reuse `signedIn`'s Origin test, because browsers send
+ * no Origin on a same-origin GET, so that test would refuse every real
+ * discovery. The cross-site evidence that IS present is `Sec-Fetch-Site`, which a
+ * page cannot set: `cross-site`/`same-site` is refused, `same-origin` is the
+ * browser's own word for it. A request with NEITHER header is a non-browser
+ * client (curl, tests) that no page can steer, so the session cookie is the whole
+ * wall; an attacker page cannot strip the two headers the browser adds.
+ */
+async function readSignedIn(ctx: AppContext, req: Request): Promise<User | Response> {
+  const user = await sessionUser(ctx.stores.metadata, req);
+  if (!user) return reply({ error: "Sign in first." }, 401);
+  const site = req.headers.get("sec-fetch-site");
+  if (site === "cross-site" || site === "same-site") {
+    return reply({ error: "Cross-origin request refused." }, 403);
+  }
+  const origin = req.headers.get("origin");
+  if (origin !== null && origin !== baseUrl(ctx, req)) {
+    return reply({ error: "Cross-origin request refused." }, 403);
+  }
+  return user;
 }
 
 async function body(req: Request): Promise<Record<string, unknown>> {
@@ -341,6 +377,42 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ source: { id: source.id, title: source.title }, poll }, 201);
       } catch (error) {
         return reply({ error: String((error as Error)?.message ?? error) }, 422);
+      }
+    },
+
+    /**
+     * Read-only feed discovery for the account page (audio-feed-6hw). It fetches
+     * a page the SIGNED-IN person asked for, through the same guards as article
+     * fetching (`articleUrl` + `publicLookup` + bounded read), and answers with
+     * feed URLs only. Same session and same-origin wall as every sibling here:
+     * without it a cross-site GET could make a signed-in browser read a page on
+     * the attacker's behalf.
+     */
+    discoverFeed: async ({ req }) => {
+      const user = await readSignedIn(ctx, req);
+      if (user instanceof Response) return user;
+      const target = new URL(req.url).searchParams.get("url") ?? "";
+      try {
+        const page = articleUrl(target);
+        const found = await (deps.discoverFeeds ?? discoverFeedsOnPage)(page.href);
+        // The helper already validates every candidate; this re-validates at the
+        // boundary so a future seam cannot widen what a page reads back — the
+        // check that matters is `articleUrl` (public http(s), no credentials or
+        // odd port), not a scheme prefix.
+        const feeds = (found.feeds ?? []).flatMap((feed) => {
+          try {
+            return [{ ...feed, url: articleUrl(feed.url).href }];
+          } catch {
+            return [];
+          }
+        });
+        return reply({ url: found.url, title: found.title, feeds });
+      } catch (error) {
+        const status = error instanceof IngestError ? error.status : 400;
+        const message = error instanceof IngestError
+          ? error.message
+          : "That does not look like a page to read feeds from.";
+        return reply({ error: message }, status);
       }
     },
 

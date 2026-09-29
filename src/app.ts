@@ -261,6 +261,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post("/api/account/profile", account("profile"));
   router.post("/api/account/rotate-token", account("rotateToken"));
   router.post("/api/account/sources", account("addSource"));
+  router.get("/api/account/discover-feed", account("discoverFeed"));
   router.delete("/api/account/sources/:sourceId", account("deleteSource"));
   router.delete("/api/account/passkeys/:id", account("deletePasskey"));
   router.post("/api/account/episodes/:episodeId/regenerate", account("regenerateEpisode"));
