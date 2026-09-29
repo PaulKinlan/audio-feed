@@ -1041,6 +1041,10 @@ function markSaved(episode, button) {
   downloaded.add(episode.id);
   setDownloadState(button, "saved");
   button.setAttribute("aria-label", "Saved offline: " + episode.title);
+  const rowEl = list.querySelector(`li[data-episode-id="${episode.id}"]`);
+  if (rowEl) {
+    rowEl.querySelector(".ep-download-error")?.remove();
+  }
   if (current && current.id === episode.id) nowOffline.classList.remove("hidden");
   updateCounts();
 }
@@ -1190,8 +1194,21 @@ async function downloadEpisode(episode, button) {
     markSaved(episode, button);
     say("Saved for offline listening.", "ok");
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return;
     setDownloadState(button, "idle");
-    say("Download failed: " + String(error instanceof Error ? error.message : error), "error");
+    const errMsg = String(error instanceof Error ? error.message : error);
+    say("Download failed: " + errMsg, "error");
+    const rowEl = list.querySelector(`li[data-episode-id="${episode.id}"]`);
+    if (rowEl) {
+      let errEl = rowEl.querySelector(".ep-download-error");
+      if (!errEl) {
+        errEl = document.createElement("div");
+        errEl.className = "ep-download-error";
+        const bodyEl = rowEl.querySelector(".ep-body") || rowEl;
+        bodyEl.appendChild(errEl);
+      }
+      errEl.textContent = "Download failed: " + errMsg;
+    }
   }
 }
 

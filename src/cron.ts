@@ -109,7 +109,12 @@ export function registerCronJobs(
           "feed-poll",
           "cron",
           () => runFeedPollBatch(ctx),
-          (r) => ({ polled: r.polled, queued: r.queued, failed: r.failed }),
+          (r) => ({
+            polled: r.polled,
+            queued: r.queued,
+            failed: r.failed,
+            errors: r.errors,
+          }),
         );
         console.log(
           `[audio-feed] cron feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
@@ -143,6 +148,13 @@ export function registerCronJobs(
               ready: r.ready.length,
               failed: r.failed.length,
               deferred: r.deferred.length,
+              errors: r.failed.length > 0
+                ? r.failed.slice(0, 10).map((f) =>
+                  f.title
+                    ? `Episode ${f.episodeId} ("${f.title}"): ${f.error}`
+                    : `Episode ${f.episodeId}: ${f.error}`
+                )
+                : undefined,
             }),
             // Nothing finished and nothing failed: an idle tick (audio-feed-0ob). A
             // tick that only deferred is idle too; the kept row carries the latest

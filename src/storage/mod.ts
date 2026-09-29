@@ -127,6 +127,8 @@ export interface RunRecord {
   deferred?: number;
   /** Present only when the run threw. */
   error?: string;
+  /** Individual item failure reasons (bounded to e.g. first 10, audio-feed-e1d). */
+  errors?: string[];
   /**
    * A scheduled tick that did nothing (audio-feed-0ob). A run of idle ticks is
    * kept as one row, the latest, so a job that is nearly always idle does not

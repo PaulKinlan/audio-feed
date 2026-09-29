@@ -1481,7 +1481,14 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
   });
 
   test("a run round-trips every field", async (store) => {
-    const record = run({ id: "r1", kind: "synthesis", trigger: "manual", ready: 4, deferred: 1 });
+    const record = run({
+      id: "r1",
+      kind: "synthesis",
+      trigger: "manual",
+      ready: 4,
+      deferred: 1,
+      errors: ["Episode ep-1: Gemini API error: 400 Bad Request"],
+    });
     await store.recordRun(record);
 
     const [stored] = await store.listRuns();

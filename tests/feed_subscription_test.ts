@@ -294,6 +294,29 @@ Deno.test("the batch poller only picks up sources that are due", async () => {
   assertEquals(due.queued, 2);
 });
 
+Deno.test("runFeedPollBatch captures extraction errors when article fetch fails (audio-feed-e1d)", async () => {
+  const { stores, ctx, source } = await subscriberSource();
+  await stores.metadata.putSource({
+    ...source,
+    title: "Broken Tech Blog",
+    lastPolledAt: new Date(Date.now() - 3_600_000).toISOString(),
+  });
+
+  const failingDeps = {
+    transport: feedTransport(RSS),
+    fetchArticle: () => Promise.reject(new Error("403 Forbidden: Cloudflare protection")),
+  };
+
+  const res = await runFeedPollBatch(ctx, failingDeps);
+  assertEquals(res.polled, 1);
+  assertEquals(res.queued, 0);
+  assertEquals(res.failed, 2);
+  assert(Array.isArray(res.errors), "errors must be present on batch result");
+  assertEquals(res.errors?.length, 2);
+  assertStringIncludes(res.errors![0]!, "Broken Tech Blog");
+  assertStringIncludes(res.errors![0]!, "403 Forbidden: Cloudflare protection");
+});
+
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------

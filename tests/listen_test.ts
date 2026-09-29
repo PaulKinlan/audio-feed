@@ -460,3 +460,11 @@ Deno.test("listen harness: seeds 5 publishable episodes and page renders all 5 (
     assertStringIncludes(audioRes.headers.get("content-type") ?? "", "audio/wav");
   }
 });
+
+Deno.test("the player client retains download failure reasons on the episode row (audio-feed-e1d)", async () => {
+  const { fetch } = await seeded();
+  const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
+  const client = await playerClient(fetch, BASE, html);
+  assertStringIncludes(client, ".ep-download-error");
+  assertStringIncludes(client, "Download failed:");
+});

@@ -94,3 +94,25 @@ Deno.test("seeking still works through a per-key store", async () => {
   assertEquals(res.headers.get("content-range"), `bytes 0-3/${BYTES.length}`);
   assert((await res.bytes()).length === 4);
 });
+
+Deno.test("audio route 404 logs diagnostic warnings with requested key and candidate lookups (audio-feed-e1d)", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    const { fetch } = await app(perKeyStore);
+    const res = await fetch(new Request(`${BASE}/audio/missing-track.wav`));
+    assertEquals(res.status, 404);
+
+    const warn = warnings.find((w) =>
+      w.includes('audio GET 404: key "missing-track.wav" not found')
+    );
+    assert(warn, "console.warn must log the missing key and candidate keys tried");
+    assert(warn.includes("audio/missing-track.wav, missing-track.wav"));
+  } finally {
+    console.warn = originalWarn;
+  }
+});
