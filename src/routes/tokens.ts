@@ -120,4 +120,13 @@ export const DESIGN_TOKENS = `
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Cross-Document View Transitions (audio-feed-rra) per Modern Web Guidance:
+   Enables smooth app-like transitions across same-origin navigations.
+   Respects user's reduced-motion preference. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
 `;
