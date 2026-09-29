@@ -84,6 +84,7 @@ header.app {
   background: color-mix(in srgb, var(--bg) 82%, transparent);
   backdrop-filter: blur(14px) saturate(140%);
   border-block-end: 1px solid var(--border);
+  view-transition-name: app-header;
 }
 .header-inner {
   max-inline-size: 48rem;
@@ -608,6 +609,7 @@ li.episode[data-current="true"] .ep-play {
   border-block-start: 1px solid var(--border-2);
   box-shadow: 0 -12px 32px -18px rgb(0 0 0 / 0.9);
   padding-block-end: env(safe-area-inset-bottom, 0px);
+  view-transition-name: player-dock;
 }
 /*
  * minmax(0, 1fr), not the default auto track (audio-feed-cl5).

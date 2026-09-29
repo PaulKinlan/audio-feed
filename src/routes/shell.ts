@@ -97,6 +97,7 @@ export const SHELL_CSS = `
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: saturate(1.4) blur(10px);
     position: sticky; inset-block-start: 0; z-index: 5;
+    view-transition-name: app-header;
   }
   .site-header .bar {
     max-inline-size: var(--page); margin-inline: auto;
@@ -107,6 +108,7 @@ export const SHELL_CSS = `
     display: inline-flex; align-items: center; gap: 0.55rem;
     color: var(--text); text-decoration: none; font-weight: 700; letter-spacing: -0.02em;
     margin-inline-end: auto;
+    view-transition-name: app-brand;
   }
   .brand svg { inline-size: 1.6rem; block-size: 1.6rem; flex: none; }
   .site-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; }
