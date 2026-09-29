@@ -87,6 +87,7 @@ const PAGE_IDS = [
   "manageEpisodesCaption",
   "manageEpisodesFeedback",
   "regenOutdated",
+  "regenFailed",
   "regenAll",
   // audio-feed-9mp: spend visibility & budget
   "statSynthesis",

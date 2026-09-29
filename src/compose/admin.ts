@@ -546,12 +546,18 @@ export function createAdminListUserEpisodesHandler(
     const userId = params.id ?? "";
     if (!await ctx.stores.metadata.getUser(userId)) return notFound("Unknown user");
 
-    const counts = { outdated: 0, all: 0 };
+    const counts = { outdated: 0, all: 0, failed: 0 };
     for await (
       const batch of episodeScan(ctx.stores.metadata, { userId, status: "ready" })
     ) {
       counts.all += batch.length;
       counts.outdated += batch.filter((e) => isOutdated(e)).length;
+    }
+    for await (
+      const batch of episodeScan(ctx.stores.metadata, { userId, status: "failed" })
+    ) {
+      counts.failed += batch.length;
+      counts.all += batch.length;
     }
     const episodes = await ctx.stores.metadata.listEpisodes({
       userId,
@@ -590,11 +596,14 @@ export function createAdminRegenerateEpisodeHandler(
     const resolved = await regenerableUser(ctx, params.id ?? "");
     if ("denied" in resolved) return resolved.denied;
     const episodeId = params.episodeId ?? "";
-    if (!await ctx.stores.metadata.getEpisode(resolved.user.id, episodeId)) {
+    const ep = await ctx.stores.metadata.getEpisode(resolved.user.id, episodeId);
+    if (!ep) {
       return notFound("Unknown episode");
     }
-    // Idempotent: an episode already queued (or not yet published) queues nothing.
-    const queued = await ctx.stores.metadata.requeueEpisode(resolved.user.id, episodeId);
+    // audio-feed-6y9: retry failed episodes or requeue ready episodes
+    const queued = ep.status === "failed"
+      ? await ctx.stores.metadata.retryEpisode(resolved.user.id, episodeId)
+      : await ctx.stores.metadata.requeueEpisode(resolved.user.id, episodeId);
     return Response.json(
       { ok: true, queued: queued ? 1 : 0 },
       { headers: { "cache-control": "no-store" } },
@@ -617,8 +626,8 @@ export function createAdminRegenerateFeedHandler(
     const body: { scope?: unknown; sourceId?: unknown; mode?: unknown } = await req.json()
       .catch(() => ({}));
     const scope = body.scope ?? "outdated";
-    if (scope !== "outdated" && scope !== "all") {
-      return badRequest('scope must be "outdated" or "all".');
+    if (scope !== "outdated" && scope !== "all" && scope !== "failed") {
+      return badRequest('scope must be "outdated", "all", or "failed".');
     }
     if (body.sourceId !== undefined && typeof body.sourceId !== "string") {
       return badRequest("sourceId must be a string.");

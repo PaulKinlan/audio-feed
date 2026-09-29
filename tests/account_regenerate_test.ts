@@ -48,11 +48,20 @@ async function setup(status: User["status"] = "approved") {
   const { fetch } = createApp(ctx, createHandlers(ctx));
   const cookie = async (userId: string) =>
     `${SESSION_COOKIE}=${await createSession(stores.metadata, userId)}`;
-  const post = (path: string, opts: { cookie?: string; origin?: string | null } = {}) => {
+  const post = (
+    path: string,
+    opts: { cookie?: string; origin?: string | null; body?: unknown } = {},
+  ) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (opts.cookie) headers.cookie = opts.cookie;
     if (opts.origin !== null) headers.origin = opts.origin ?? BASE;
-    return fetch(new Request(`${BASE}${path}`, { method: "POST", headers, body: "{}" }));
+    return fetch(
+      new Request(`${BASE}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(opts.body ?? {}),
+      }),
+    );
   };
   const regenerating = async (id: string) =>
     !!(await stores.metadata.getEpisode(me.id, id))?.regenerating;
@@ -79,6 +88,41 @@ Deno.test("account regenerate: the owner regenerates their outdated episodes onl
   assert(await t.regenerating("ep-old-1"));
   assert(await t.regenerating("ep-old-2"));
   assert(!(await t.regenerating("ep-current")), "current prompts are not re-spent");
+});
+
+Deno.test("account regenerate: retry single failed episode and bulk retry failed (audio-feed-6y9)", async () => {
+  const t = await setup();
+  const cookie = await t.cookie(t.me.id);
+
+  // Add failed episode
+  await t.stores.metadata.putEpisode(makeEpisode({
+    id: "ep-failed-user",
+    userId: t.me.id,
+    sourceId: "src-1",
+    articleId: "art-fail",
+    title: "Failed Episode",
+    status: "failed",
+    error: "Synthesis timeout",
+  }));
+
+  // 1. Retry via /retry endpoint
+  const res = await t.post("/api/account/episodes/ep-failed-user/retry", { cookie });
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).queued, 1);
+
+  const ep = await t.stores.metadata.getEpisode(t.me.id, "ep-failed-user");
+  assertEquals(ep?.status, "pending");
+
+  // Re-fail it
+  await t.stores.metadata.putEpisode({ ...ep!, status: "failed", error: "fail 2" });
+
+  // 2. Retry via /account/regenerate with scope: "failed"
+  const bulkRes = await t.post("/api/account/regenerate", { cookie, body: { scope: "failed" } });
+  assertEquals(bulkRes.status, 200);
+  assertEquals((await bulkRes.json()).queued, 1);
+
+  const ep2 = await t.stores.metadata.getEpisode(t.me.id, "ep-failed-user");
+  assertEquals(ep2?.status, "pending");
 });
 
 Deno.test("account regenerate: another user cannot regenerate your episode (audio-feed-ktn)", async () => {

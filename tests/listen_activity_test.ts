@@ -195,3 +195,30 @@ Deno.test("retry cannot touch another subscriber, a playable episode, or an unkn
     404,
   );
 });
+
+Deno.test("failed episodes are always included in activity panel regardless of window paging (audio-feed-6y9)", async () => {
+  const { stores, fetch, req } = await seeded();
+  // Plant an older failed episode with a timestamp older than other episodes
+  const oldDate = new Date(Date.now() - 365 * 86400 * 1000).toISOString();
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-ancient-fail",
+    userId: "user-1",
+    sourceId: "src-a",
+    articleId: "art-1",
+    title: "Ancient Failed Episode",
+    status: "failed",
+    error: "Ancient LLM error",
+    createdAt: oldDate,
+  }));
+
+  const res = await fetch(req(`/listen/${TOKEN}/status`));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  const failedIds = body.failed.map((e: { id: string }) => e.id);
+  assert(
+    failedIds.includes("ep-ancient-fail"),
+    "failed episode must always be included in activity panel",
+  );
+  const ancient = body.failed.find((e: { id: string }) => e.id === "ep-ancient-fail");
+  assertEquals(ancient.error, "Ancient LLM error");
+});

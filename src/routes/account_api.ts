@@ -70,7 +70,7 @@ export interface AccountDeps {
   /** compose.ts's shared source deletion, scoped to `userId`. */
   deleteUserSource: (req: Request, userId: string, sourceId: string) => Promise<Response>;
   /** compose.ts's shared regenerate, outdated scope; resolves the number queued. */
-  regenerateOutdated: (userId: string) => Promise<number>;
+  regenerateOutdated: (userId: string, scope?: "outdated" | "all" | "failed") => Promise<number>;
   /** Test seam: shared failed admin auth rate limiter (audio-feed-bns). */
   adminAuthLimiter?: FailedAuthLimiter;
 }
@@ -363,7 +363,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       return reply({ ok: true });
     },
 
-    // Regenerating is TTS spend: owner only, approved only (audio-feed-ktn).
+    // Regenerating is TTS spend: owner only, approved only (audio-feed-ktn, audio-feed-6y9).
     regenerateEpisode: async ({ req, params }) => {
       const user = await signedIn(ctx, req);
       if (user instanceof Response) return user;
@@ -371,11 +371,14 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ error: "Your account is not approved for audio." }, 403);
       }
       const episodeId = params.episodeId ?? "";
-      if (!(await store.getEpisode(user.id, episodeId))) {
+      const ep = await store.getEpisode(user.id, episodeId);
+      if (!ep) {
         return reply({ error: "Unknown episode." }, 404);
       }
-      // Idempotent: one already queued (or never published) queues nothing.
-      const queued = await store.requeueEpisode(user.id, episodeId);
+      // audio-feed-6y9: retry failed episodes or requeue ready episodes
+      const queued = ep.status === "failed"
+        ? await store.retryEpisode(user.id, episodeId)
+        : await store.requeueEpisode(user.id, episodeId);
       return reply({ ok: true, queued: queued ? 1 : 0 });
     },
 
@@ -385,7 +388,9 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (!isSynthesisAuthorized(user)) {
         return reply({ error: "Your account is not approved for audio." }, 403);
       }
-      return reply({ ok: true, queued: await deps.regenerateOutdated(user.id) });
+      const b = await req.json().catch(() => ({})) as { scope?: unknown };
+      const scope = b.scope === "failed" ? "failed" : b.scope === "all" ? "all" : "outdated";
+      return reply({ ok: true, queued: await deps.regenerateOutdated(user.id, scope) });
     },
   };
 }

@@ -511,12 +511,100 @@ Deno.test("GET episodes gives the console its outdated and all counts (audio-fee
   assertEquals(res.status, 200);
   const body = await res.json();
   assertEquals(body.promptVersion, PROMPT_VERSION);
-  assertEquals(body.counts, { outdated: 2, all: 4 });
+  assertEquals(body.counts, { outdated: 2, all: 4, failed: 0 });
   const byId = new Map(body.episodes.map((e: { id: string }) => [e.id, e]));
   assertEquals(byId.size, 5);
   assertEquals((byId.get("ep-1") as { outdated: boolean }).outdated, true);
   assertEquals((byId.get("ep-2") as { outdated: boolean }).outdated, false);
   assertEquals((byId.get("ep-5") as { status: string }).status, "pending");
+});
+
+Deno.test("POST regenerate with scope 'failed' and 'all' retries failed episodes (audio-feed-6y9)", async () => {
+  const setup = await published();
+  const { stores, fetch } = setup;
+  // Seed two failed episodes alongside ready ep-1
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fail-1",
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "article-fail-1",
+      status: "failed",
+      title: "Failed Episode 1",
+      error: "Gemini 500 error",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fail-2",
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "article-fail-2",
+      status: "failed",
+      title: "Failed Episode 2",
+      error: "403 Paywall",
+    }),
+  );
+
+  // Check counts
+  const countRes = await fetch(
+    new Request(`${BASE}/api/admin/users/user-1/episodes`, { headers: ADMIN }),
+  );
+  const countBody = await countRes.json();
+  assertEquals(countBody.counts.failed, 2);
+  assertEquals(countBody.counts.all, 3); // 1 ready + 2 failed
+
+  // Scope: failed -> retries 2 failed episodes
+  const failRes = await fetch(post("/api/admin/users/user-1/regenerate", { scope: "failed" }));
+  assertEquals(failRes.status, 200);
+  assertEquals((await failRes.json()).queued, 2);
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-fail-1");
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-fail-2");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep2?.status, "pending");
+
+  // Re-fail one episode
+  await stores.metadata.putEpisode({ ...ep1!, status: "failed", error: "fail again" });
+
+  // Scope: all -> queues ready ep-1 AND failed ep-fail-1
+  const allRes = await fetch(post("/api/admin/users/user-1/regenerate", { scope: "all" }));
+  assertEquals(allRes.status, 200);
+  assertEquals((await allRes.json()).queued, 2); // ep-1 (ready) + ep-fail-1 (failed)
+});
+
+Deno.test("POST regenerate/retry on single failed episode re-queues it for synthesis (audio-feed-6y9)", async () => {
+  const setup = await published();
+  const { stores, fetch } = setup;
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fail",
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "article-fail",
+      status: "failed",
+      title: "Single Failed",
+      error: "LLM error",
+    }),
+  );
+
+  // Both /regenerate and /retry work for failed episodes
+  const res = await fetch(post("/api/admin/users/user-1/episodes/ep-fail/regenerate"));
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).queued, 1);
+
+  const queuedEp = await stores.metadata.getEpisode("user-1", "ep-fail");
+  assertEquals(queuedEp?.status, "pending");
+  assertEquals(queuedEp?.error, undefined);
+
+  // Re-fail and test /retry route
+  await stores.metadata.putEpisode({ ...queuedEp!, status: "failed", error: "again" });
+  const retryRes = await fetch(post("/api/admin/users/user-1/episodes/ep-fail/retry"));
+  assertEquals(retryRes.status, 200);
+  assertEquals((await retryRes.json()).queued, 1);
+
+  const retriedEp = await stores.metadata.getEpisode("user-1", "ep-fail");
+  assertEquals(retriedEp?.status, "pending");
 });
 
 // ---------------------------------------------------------------------------

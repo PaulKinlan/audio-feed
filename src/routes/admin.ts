@@ -449,6 +449,7 @@ export function renderAdminPage(
     </p>
     <div class="row">
       <button type="button" id="regenOutdated" class="secondary" disabled>Regenerate outdated (0)</button>
+      <button type="button" id="regenFailed" class="secondary" disabled>Retry failed (0)</button>
       <button type="button" id="regenAll" class="secondary" disabled>Regenerate all (0)</button>
     </div>
     <div class="table-wrap">
@@ -1171,13 +1172,14 @@ export function renderAdminPage(
     }
   }
 
-  // ── Regenerate: one episode, or the whole feed (audio-feed-8oz) ──────────
+  // ── Regenerate: one episode, or the whole feed (audio-feed-8oz, audio-feed-6y9) ───
   const manageEpisodesBody = document.getElementById("manageEpisodesBody");
   const manageEpisodesCaption = document.getElementById("manageEpisodesCaption");
   const manageEpisodesFeedback = document.getElementById("manageEpisodesFeedback");
   const regenOutdated = document.getElementById("regenOutdated");
+  const regenFailed = document.getElementById("regenFailed");
   const regenAll = document.getElementById("regenAll");
-  let regenCounts = { outdated: 0, all: 0 };
+  let regenCounts = { outdated: 0, all: 0, failed: 0 };
 
   function plural(n) {
     return n + " episode" + (n === 1 ? "" : "s");
@@ -1188,18 +1190,40 @@ export function renderAdminPage(
     manageEpisodesCaption.textContent = "Loading episodes…";
     try {
       const res = await api("/api/admin/users/" + encodeURIComponent(userId) + "/episodes");
-      regenCounts = (res && res.counts) || { outdated: 0, all: 0 };
-      regenOutdated.textContent = "Regenerate outdated (" + regenCounts.outdated + ")";
-      regenAll.textContent = "Regenerate all (" + regenCounts.all + ")";
-      regenOutdated.disabled = regenCounts.outdated === 0;
-      regenAll.disabled = regenCounts.all === 0;
+      regenCounts = (res && res.counts) || { outdated: 0, all: 0, failed: 0 };
+      regenOutdated.textContent = "Regenerate outdated (" + (regenCounts.outdated || 0) + ")";
+      if (regenFailed) {
+        regenFailed.textContent = "Retry failed (" + (regenCounts.failed || 0) + ")";
+        regenFailed.disabled = !regenCounts.failed;
+      }
+      regenAll.textContent = "Regenerate all (" + (regenCounts.all || 0) + ")";
+      regenOutdated.disabled = !regenCounts.outdated;
+      regenAll.disabled = !regenCounts.all;
       const episodes = (res && res.episodes) || [];
       manageEpisodesBody.replaceChildren();
       for (const episode of episodes) {
         const tr = document.createElement("tr");
         tr.appendChild(cell(episode.title || "—"));
         tr.appendChild(cell(episode.mode || "—"));
-        tr.appendChild(cell(episode.regenerating ? "regenerating" : episode.status));
+
+        const statusTd = document.createElement("td");
+        if (episode.status === "failed") {
+          const badge = document.createElement("span");
+          badge.className = "status";
+          badge.dataset.status = "suspended";
+          badge.textContent = "failed";
+          statusTd.appendChild(badge);
+          if (episode.error) {
+            const errDiv = document.createElement("div");
+            errDiv.className = "error-detail";
+            errDiv.textContent = episode.error;
+            statusTd.appendChild(errDiv);
+          }
+        } else {
+          statusTd.textContent = episode.regenerating ? "regenerating" : episode.status;
+        }
+        tr.appendChild(statusTd);
+
         tr.appendChild(cell(
           episode.status !== "ready" ? "—" : episode.outdated ? "outdated" : "current",
         ));
@@ -1212,6 +1236,14 @@ export function renderAdminPage(
           btn.textContent = "Regenerate";
           btn.setAttribute("aria-label", "Regenerate " + (episode.title || episode.id));
           btn.addEventListener("click", () => regenerateEpisode(userId, episode, btn));
+          tdActions.appendChild(btn);
+        } else if (episode.status === "failed") {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "primary";
+          btn.textContent = "Retry";
+          btn.setAttribute("aria-label", "Retry " + (episode.title || episode.id));
+          btn.addEventListener("click", () => retrySingleEpisode(userId, episode, btn));
           tdActions.appendChild(btn);
         }
         tr.appendChild(tdActions);
@@ -1253,16 +1285,49 @@ export function renderAdminPage(
     }
   }
 
+  async function retrySingleEpisode(userId, episode, button) {
+    if (
+      !confirm(
+        "Retry failed episode (\\"" + (episode.title || episode.id) + "\\")? " +
+          "This will re-queue it for synthesis.",
+      )
+    ) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const res = await api(
+        "/api/admin/users/" + encodeURIComponent(userId) + "/episodes/" +
+          encodeURIComponent(episode.id) + "/regenerate",
+        { method: "POST" },
+      );
+      if (res && res.queued) {
+        say(manageEpisodesFeedback, "ok", "Queued \\"" + (episode.title || episode.id) + "\\" for retry.");
+      } else {
+        say(manageEpisodesFeedback, "ok", "Episode was already queued or cannot be retried.");
+      }
+      await loadManageEpisodes(userId);
+    } catch (error) {
+      say(manageEpisodesFeedback, "error", String(error.message || error));
+      button.disabled = false;
+    }
+  }
+
   async function regenerateFeed(scope, button) {
     if (!currentManagingUser) return;
     const userId = currentManagingUser.id;
-    const count = scope === "all" ? regenCounts.all : regenCounts.outdated;
-    if (
-      !confirm(
-        "Regenerate " + plural(count) + (scope === "all" ? "" : " made with older prompts") +
-          "? Each is a billed TTS call. The old audio keeps playing until the new audio is ready.",
-      )
-    ) {
+    const count = scope === "all"
+      ? regenCounts.all
+      : scope === "failed"
+      ? regenCounts.failed
+      : regenCounts.outdated;
+    if (!count) return;
+    const promptMessage = scope === "failed"
+      ? "Retry " + plural(count) + " failed? This will re-queue each failed episode for synthesis."
+      : scope === "all"
+      ? "Regenerate and retry " + plural(count) + "? Each ready episode is re-narrated with current prompts and failed episodes are retried."
+      : "Regenerate " + plural(count) + " made with older prompts? Each is a billed TTS call. The old audio keeps playing until the new audio is ready.";
+    if (!confirm(promptMessage)) {
       return;
     }
     button.disabled = true;
@@ -1271,7 +1336,12 @@ export function renderAdminPage(
         method: "POST",
         body: JSON.stringify({ scope }),
       });
-      say(manageEpisodesFeedback, "ok", "Queued " + plural((res && res.queued) || 0) + " for regeneration.");
+      say(
+        manageEpisodesFeedback,
+        "ok",
+        "Queued " + plural((res && res.queued) || 0) + " for " +
+          (scope === "failed" ? "retry." : "regeneration."),
+      );
       await loadManageEpisodes(userId);
     } catch (error) {
       say(manageEpisodesFeedback, "error", String(error.message || error));
@@ -1280,6 +1350,7 @@ export function renderAdminPage(
   }
 
   regenOutdated.addEventListener("click", () => regenerateFeed("outdated", regenOutdated));
+  if (regenFailed) regenFailed.addEventListener("click", () => regenerateFeed("failed", regenFailed));
   regenAll.addEventListener("click", () => regenerateFeed("all", regenAll));
 
   // ── The manage pane: opening it, and adding a source ─────────────────────

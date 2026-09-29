@@ -264,6 +264,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.delete("/api/account/sources/:sourceId", account("deleteSource"));
   router.delete("/api/account/passkeys/:id", account("deletePasskey"));
   router.post("/api/account/episodes/:episodeId/regenerate", account("regenerateEpisode"));
+  router.post("/api/account/episodes/:episodeId/retry", account("regenerateEpisode"));
   router.post("/api/account/regenerate", account("regenerateOutdated"));
 
   router.get(
@@ -273,6 +274,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.post(
     "/api/admin/users/:id/episodes/:episodeId/regenerate",
     handlers.adminRegenerateEpisode ?? (() => notImplemented("Admin regenerate episode")),
+  );
+  router.post(
+    "/api/admin/users/:id/episodes/:episodeId/retry",
+    handlers.adminRegenerateEpisode ?? (() => notImplemented("Admin retry episode")),
   );
   router.post(
     "/api/admin/users/:id/regenerate",

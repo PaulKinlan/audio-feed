@@ -258,26 +258,42 @@ export async function regenerableUser(
   return { user };
 }
 /**
- * Requeue a user's published episodes: every one, or only those made by other
- * prompts. Shared by the admin console and the account page (audio-feed-ktn).
+ * Requeue a user's published or failed episodes: every one, only those made by other
+ * prompts, or failed ones. Shared by the admin console and the account page (audio-feed-ktn, audio-feed-6y9).
  * Callers own the approval gate. Resolves the number queued.
  */
 export async function regenerateUserEpisodes(
   metadata: MetadataStore,
   userId: string,
-  scope: "outdated" | "all",
+  scope: "outdated" | "all" | "failed",
   filter: { sourceId?: string; mode?: AudioMode } = {},
 ): Promise<number> {
-  // Collect first, then requeue: requeueing moves an episode out of the `ready`
+  // Collect first, then requeue/retry: state changes move an episode out of the
   // scan being paged, which would shift the scan under its own cursor.
-  const ids: string[] = [];
-  for await (const batch of episodeScan(metadata, { userId, ...filter, status: "ready" })) {
-    for (const e of batch) if (scope === "all" || isOutdated(e)) ids.push(e.id);
-  }
   let queued = 0;
-  for (const id of ids) {
-    if (await metadata.requeueEpisode(userId, id)) queued++;
+
+  // 1. Ready episodes (for "outdated" and "all")
+  if (scope === "outdated" || scope === "all") {
+    const readyIds: string[] = [];
+    for await (const batch of episodeScan(metadata, { userId, ...filter, status: "ready" })) {
+      for (const e of batch) if (scope === "all" || isOutdated(e)) readyIds.push(e.id);
+    }
+    for (const id of readyIds) {
+      if (await metadata.requeueEpisode(userId, id)) queued++;
+    }
   }
+
+  // 2. Failed episodes (for "failed" and "all", audio-feed-6y9)
+  if (scope === "failed" || scope === "all") {
+    const failedIds: string[] = [];
+    for await (const batch of episodeScan(metadata, { userId, ...filter, status: "failed" })) {
+      for (const e of batch) failedIds.push(e.id);
+    }
+    for (const id of failedIds) {
+      if (await metadata.retryEpisode(userId, id)) queued++;
+    }
+  }
+
   return queued;
 }
 /** How many of a user's published episodes were made by other prompts. */

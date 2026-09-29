@@ -128,8 +128,8 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
       feedTransport: deps.feedTransport,
       fetchArticle: deps.fetchArticle,
       deleteUserSource: (req, userId, sourceId) => deleteUserSource(ctx, req, userId, sourceId),
-      regenerateOutdated: (userId) =>
-        regenerateUserEpisodes(ctx.stores.metadata, userId, "outdated"),
+      regenerateOutdated: (userId, scope = "outdated") =>
+        regenerateUserEpisodes(ctx.stores.metadata, userId, scope),
       adminAuthLimiter: deps.adminAuthLimiter,
     }),
     adminListEpisodes: createAdminListUserEpisodesHandler(ctx, deps),
