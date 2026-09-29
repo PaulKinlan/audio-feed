@@ -13,7 +13,9 @@ PASS  renders Google Password Manager with label  Google Password Manager presen
 PASS  renders iCloud Keychain with label  iCloud Keychain present
 PASS  renders generic Passkey fallback for unknown AAGUID  Passkey fallback present
 PASS  every passkey row renders an inline SVG provider icon  found 3 SVGs
+PASS  passkeys card is scrolled into view on desktop  passkeys card centered in desktop viewport
 PASS  mobile passkey list has zero horizontal overflow  no horizontal scroll at 390px
+PASS  passkeys card is scrolled into view on mobile  passkeys card visible in mobile viewport
 ```
 
 ## Screenshots
