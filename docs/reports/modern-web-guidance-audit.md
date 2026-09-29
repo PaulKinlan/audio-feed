@@ -203,7 +203,7 @@ The following actionable items are filed in Beads (`bd`):
 | `audio-feed-nvj` | feat(perf): add Speculation Rules prefetching for instant player loading | P3 | Performance | Landed | Chromium / progressive enhancement (landed at `8d72438`) |
 | `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Landed | Supersedes 05b; native dialog with closedby="any" and form[method="dialog"] |
 | `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Open | App icon counter for installed PWA |
-| `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Implemented | OS native share sheet on mobile with clipboard fallback |
+| `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Landed | OS native share sheet on mobile with clipboard fallback |
 | `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Open | Unverified premise; requires 390px test |
 
 ---
