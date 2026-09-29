@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { Readability } from "npm:@mozilla/readability@0.6.0";
 import ipaddr from "npm:ipaddr.js@2.2.0";
 import { parseHTML } from "npm:linkedom@0.18.12";
+import pdfParse from "npm:pdf-parse@1.1.1";
 import { type AudioMode, isAudioMode, isSynthesisAuthorized, type User } from "../types.ts";
 
 export interface ExtractedArticle {
@@ -30,6 +31,7 @@ export class IngestError extends Error {
 }
 
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
+export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 export const MAX_ARTICLE_CONTENT_CHARS = 100_000;
 const TIMEOUT_MS = 15_000;
 
@@ -130,7 +132,7 @@ export const requestPublic: Transport = (url, signal, init) => {
 function decompressBody(
   body: ReadableStream<Uint8Array> | null,
   encoding: string | null,
-  kind: "Article" | "Feed",
+  kind: "Article" | "Feed" | "PDF",
 ): ReadableStream<Uint8Array> | null {
   if (!body || !encoding) return body;
   const normalized = encoding.trim().toLowerCase();
@@ -190,7 +192,7 @@ async function readBounded(
   return bytes;
 }
 
-/** Fetch only server-rendered public HTML; never execute scripts or bypass a paywall. */
+/** Fetch only server-rendered public HTML or PDF documents (audio-feed-w9n); never execute scripts or bypass a paywall. */
 export async function fetchArticle(
   input: string,
   options: { transport?: Transport; signal?: AbortSignal; timeoutMs?: number } = {},
@@ -205,7 +207,8 @@ export async function fetchArticle(
     for (let hop = 0; hop <= 5; hop++) {
       const response = await (options.transport ?? requestPublic)(url, signal, {
         headers: {
-          "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+          "Accept":
+            "text/html, application/xhtml+xml, application/pdf;q=0.9, application/xml;q=0.8, */*;q=0.7",
         },
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -223,32 +226,43 @@ export async function fetchArticle(
       }
       const contentType = response.headers.get("content-type") ?? "";
       const encoding = response.headers.get("content-encoding");
-      if (!/^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(contentType)) {
+      const isPdf = /^application\/pdf(?:;|$)/i.test(contentType);
+      const isHtml = /^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(contentType);
+      if (!isHtml && !isPdf) {
         await response.body?.cancel();
-        throw new IngestError(422, "Article must be an HTML page.");
+        throw new IngestError(422, "Article must be an HTML page or a PDF document.");
       }
-      if (Number(response.headers.get("content-length")) > MAX_HTML_BYTES) {
+      const maxBytes = isPdf ? MAX_PDF_BYTES : MAX_HTML_BYTES;
+      if (Number(response.headers.get("content-length")) > maxBytes) {
         await response.body?.cancel();
-        throw new IngestError(413, "Article exceeds the 2 MiB size limit.");
+        throw new IngestError(
+          413,
+          isPdf ? "PDF exceeds the 10 MiB size limit." : "Article exceeds the 2 MiB size limit.",
+        );
       }
 
       let decompressedBody: ReadableStream<Uint8Array> | null;
       try {
-        decompressedBody = decompressBody(response.body, encoding, "Article");
+        decompressedBody = decompressBody(response.body, encoding, isPdf ? "PDF" : "Article");
       } catch (err) {
         await response.body?.cancel();
         throw err instanceof IngestError
           ? err
-          : new IngestError(422, "Article decompression failed.");
+          : new IngestError(422, `${isPdf ? "PDF" : "Article"} decompression failed.`);
       }
 
       let bytes: Uint8Array;
       try {
-        bytes = await readBounded(decompressedBody, MAX_HTML_BYTES, 413, signal);
+        bytes = await readBounded(decompressedBody, maxBytes, 413, signal);
       } catch (err) {
         if (err instanceof IngestError) throw err;
-        throw new IngestError(422, "Article decompression failed.");
+        throw new IngestError(422, `${isPdf ? "PDF" : "Article"} decompression failed.`);
       }
+
+      if (isPdf) {
+        return await extractPdfArticle(bytes, url.href);
+      }
+
       const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? "utf-8";
       let html: string;
       try {
@@ -648,6 +662,152 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     author: clean(result.byline || byline).replace(/^by\s+/i, "") || null,
     publishedAt,
     lead: clean(content.querySelector("p")?.textContent) || body.split("\n\n")[0] || body,
+    body,
+  };
+}
+
+/**
+ * Extract structured text and metadata from PDF bytes (audio-feed-w9n).
+ * Uses pdf-parse to extract text, document metadata (Title, Author, CreationDate),
+ * and generates clean body paragraphs suitable for TTS narration and dialogue synthesis.
+ */
+export async function extractPdfArticle(
+  bytes: Uint8Array,
+  sourceUrl: string,
+): Promise<ExtractedArticle> {
+  const url = articleUrl(sourceUrl).href;
+  if (bytes.byteLength > MAX_PDF_BYTES) {
+    throw new IngestError(413, "PDF exceeds the 10 MiB size limit.");
+  }
+
+  // Verify PDF header magic bytes "%PDF-"
+  const header = new TextDecoder("ascii", { fatal: false }).decode(bytes.subarray(0, 8));
+  if (!header.startsWith("%PDF-")) {
+    throw new IngestError(422, "Invalid PDF: document does not start with %PDF- header.");
+  }
+
+  let data: {
+    text: string;
+    numpages: number;
+    info?: Record<string, unknown>;
+  };
+  try {
+    data = await pdfParse(bytes);
+  } catch (err) {
+    throw new IngestError(
+      422,
+      `Unable to parse PDF document: ${(err as Error)?.message || "corrupt or invalid format"}.`,
+    );
+  }
+
+  const rawText = data.text ?? "";
+
+  // Check lines for a candidate heading
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((l) => clean(l))
+    .filter(Boolean);
+
+  const fullText = lines.join(" ");
+  if (fullText.length < 80) {
+    throw new IngestError(
+      422,
+      "No readable text found in PDF document; scanned image or password-protected PDFs are not supported.",
+    );
+  }
+
+  if (fullText.length > MAX_ARTICLE_CONTENT_CHARS) {
+    throw new IngestError(
+      413,
+      `Article content exceeds the character limit (${fullText.length} > ${MAX_ARTICLE_CONTENT_CHARS}).`,
+    );
+  }
+
+  // Title extraction:
+  // 1. info.Title if meaningful
+  // 2. First short line without sentence-ending punctuation (< 120 chars)
+  // 3. Derived from URL pathname
+  let title = "";
+  const infoTitle = typeof data.info?.Title === "string" ? clean(data.info.Title) : "";
+  if (infoTitle && !/^(untitled|document|pdf)$/i.test(infoTitle)) {
+    title = infoTitle;
+  }
+
+  if (!title && lines.length > 0) {
+    const candidate = lines[0]!;
+    if (candidate.length <= 120 && !/[.?!]$/.test(candidate)) {
+      title = candidate;
+    }
+  }
+
+  if (!title) {
+    try {
+      const pathname = new URL(url).pathname;
+      const basename = pathname.split("/").filter(Boolean).pop()?.replace(/\.pdf$/i, "") ?? "";
+      if (basename) {
+        const decoded = decodeURIComponent(basename).replace(/[-_]+/g, " ").replace(/\s+/g, " ")
+          .trim();
+        if (decoded) {
+          title = decoded.charAt(0).toUpperCase() + decoded.slice(1);
+        }
+      }
+    } catch {
+      // ignore URL parse errors
+    }
+  }
+
+  if (!title) {
+    title = "PDF Document";
+  }
+
+  // Body construction:
+  // If lines are separated by empty lines in rawText, keep paragraph breaks
+  const rawParagraphs = rawText
+    .split(/\r?\n\s*\r?\n/)
+    .map((p) => clean(p))
+    .filter(Boolean);
+
+  const paragraphs = rawParagraphs.length > 1 ? rawParagraphs : lines;
+
+  const contentParagraphs =
+    (paragraphs[0] === title && paragraphs.slice(1).join("\n\n").length >= 80)
+      ? paragraphs.slice(1)
+      : paragraphs;
+
+  const body = contentParagraphs.join("\n\n");
+
+  // Author extraction
+  let author: string | null = null;
+  if (typeof data.info?.Author === "string" && clean(data.info.Author)) {
+    author = clean(data.info.Author).replace(/^by\s+/i, "");
+  }
+
+  // Published date extraction from PDF metadata CreationDate (e.g. D:20260929100000Z or ISO)
+  let publishedAt: string | null = null;
+  const rawCreation = typeof data.info?.CreationDate === "string" ? data.info.CreationDate : null;
+  if (rawCreation) {
+    const match = rawCreation.match(/^D:(\d{4})(\d{2})(\d{2})/);
+    if (match) {
+      publishedAt = `${match[1]}-${match[2]}-${match[3]}`;
+    } else {
+      const parsed = Date.parse(rawCreation);
+      if (!Number.isNaN(parsed)) {
+        publishedAt = new Date(parsed).toISOString();
+      }
+    }
+  }
+
+  // Lead extraction:
+  const lead = paragraphs[0] && paragraphs[0] !== title
+    ? paragraphs[0].slice(0, 300)
+    : paragraphs[1]?.slice(0, 300) ?? paragraphs[0]?.slice(0, 300) ?? "";
+
+  return {
+    url,
+    title,
+    author: author || null,
+    publishedAt,
+    lead,
     body,
   };
 }
