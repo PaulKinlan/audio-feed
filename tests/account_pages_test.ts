@@ -9,7 +9,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
-import { makeSource, makeUser } from "./fixtures.ts";
+import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
 
 const BASE = "https://audio.example.com";
@@ -80,6 +80,37 @@ Deno.test("GET /account shows the signed-in user's own account, uncached (audio-
   assert(!html.includes("Theirs"), "another user's source never appears");
   assert(!html.includes(other.feedToken), "another user's token never appears");
   assert(/<option value="Kore" selected>/.test(html), "the saved voice is selected");
+});
+
+Deno.test("GET /account renders Retry failed button and per-episode Retry button on failed rows (audio-feed-6y9)", async () => {
+  const { fetch, stores } = app();
+  const me = await seed(stores, { displayName: "Paul", status: "approved" });
+  await stores.metadata.putSource(makeSource({ id: "mine", userId: me.id, title: "My Blog" }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-ready",
+    userId: me.id,
+    sourceId: "mine",
+    title: "Ready Episode",
+    status: "ready",
+    audioKey: "audio/ready.wav",
+  }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "ep-fail",
+    userId: me.id,
+    sourceId: "mine",
+    title: "Failed Episode",
+    status: "failed",
+    error: "Gemini quota exceeded",
+  }));
+
+  const res = await get(fetch, "/account", stores, me.id);
+  assertEquals(res.status, 200);
+  const html = await res.text();
+
+  assertStringIncludes(html, 'id="retryFailed"');
+  assertStringIncludes(html, "Retry failed (1)");
+  assertStringIncludes(html, 'data-retry-episode="ep-fail"');
+  assertStringIncludes(html, "Gemini quota exceeded");
 });
 
 Deno.test("GET /account tells a pending user why nothing is generated (audio-feed-8fc)", async () => {

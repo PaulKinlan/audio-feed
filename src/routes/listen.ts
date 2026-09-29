@@ -461,7 +461,12 @@ async function loadPlayerWindow(ctx: AppContext, userId: string): Promise<Player
 }
 
 /** The activity panel, derived IN MEMORY from the one scanned window — no extra store reads. */
-function activityFrom(episodes: Episode[], sources: Source[], limit = 20): PlayerActivity {
+function activityFrom(
+  episodes: Episode[],
+  sources: Source[],
+  limit = 20,
+  failedEpisodes?: Episode[],
+): PlayerActivity {
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
   // A regenerating episode is pending but STILL PLAYABLE (audio-feed-8oz), so it belongs in the
@@ -485,12 +490,19 @@ function activityFrom(episodes: Episode[], sources: Source[], limit = 20): Playe
     error: episode.status === "failed" ? episode.error : undefined,
   });
 
+  // audio-feed-6y9: ensure failed episodes are always visible regardless of window paging
+  const allFailed = [...(failedEpisodes ?? [])];
+  for (const ep of episodes) {
+    if (ep.status === "failed" && !allFailed.some((f) => f.id === ep.id)) {
+      allFailed.push(ep);
+    }
+  }
+
   return {
     inProgress: queued.map((episode) =>
       toRow(episode, episode.status === "synthesizing" ? "generating" : "queued")
     ),
-    failed: episodes
-      .filter((episode) => episode.status === "failed")
+    failed: allFailed
       .slice(0, limit)
       .map((episode) => toRow(episode, "failed")),
     // Counted with the SAME rule the page lists by: publishable, which includes a regenerating
@@ -513,11 +525,12 @@ export async function playerActivity(
   userId: string,
   limit = 20,
 ): Promise<PlayerActivity> {
-  const [window, sources] = await Promise.all([
+  const [window, sources, failedEpisodes] = await Promise.all([
     loadPlayerWindow(ctx, userId),
     ctx.stores.metadata.listSources(userId),
+    ctx.stores.metadata.listEpisodes({ userId, status: "failed", limit }),
   ]);
-  return activityFrom(window.scanned, sources, limit);
+  return activityFrom(window.scanned, sources, limit, failedEpisodes);
 }
 
 /** Resolve the token, load what the player renders, and serve the page. */
@@ -537,10 +550,12 @@ export async function handleListen(
   // are publishable, not `status: "ready"`: a regenerating episode is pending but still plays its
   // old audio (audio-feed-8oz). Paging continues to LISTEN_ROW_CAP so newer pending or failed
   // episodes cannot push ready ones off the page.
+  // Explicitly fetch failed episodes so they are never missed by the activity panel (audio-feed-6y9).
   const dbStart = performance.now();
-  const [{ scanned, rows: publishable }, sources] = await Promise.all([
+  const [{ scanned, rows: publishable }, sources, failedEpisodes] = await Promise.all([
     loadPlayerWindow(ctx, user.id),
     ctx.stores.metadata.listSources(user.id),
+    ctx.stores.metadata.listEpisodes({ userId: user.id, status: "failed", limit: 20 }),
   ]);
   const sourceTitles = new Map(sources.map((source) => [source.id, source.title]));
 
@@ -569,7 +584,7 @@ export async function handleListen(
     };
   });
 
-  const activity = activityFrom(scanned, sources);
+  const activity = activityFrom(scanned, sources, 20, failedEpisodes);
   // The page's own list is already the authoritative playable set, paged above; counting it here
   // keeps the header number and the rows in agreement by construction.
   activity.playable = rows.length;

@@ -318,3 +318,81 @@ Deno.test("manage sources renders status and error details for failing feed (aud
   assertStringIncludes(text, "Error");
   assertStringIncludes(text, "HTTP 403 Forbidden Cloudflare");
 });
+
+Deno.test("manage episodes renders Retry button on failed episode and Retry failed button in header (audio-feed-6y9)", async () => {
+  const harness = await runAdminScript({
+    storedToken: "admin-secret",
+    respond: (method, path) => {
+      if (method === "GET" && path === "/api/admin/users") return { users: [USER] };
+      if (method === "GET" && path === `/api/admin/users/${USER.id}/sources`) {
+        return { feedToken: USER.feedToken, sources: [] };
+      }
+      if (method === "GET" && path === `/api/admin/users/${USER.id}/episodes`) {
+        return {
+          promptVersion: "abc123abc123",
+          counts: { outdated: 0, all: 2, failed: 1 },
+          episodes: [
+            { id: "ep-ready", title: "Playable", mode: "direct", status: "ready", outdated: false },
+            {
+              id: "ep-fail",
+              title: "Broken Synth",
+              mode: "direct",
+              status: "failed",
+              error: "LLM quota error",
+            },
+          ],
+        };
+      }
+      if (method === "POST" && path.includes("/episodes/ep-fail/regenerate")) {
+        return { ok: true, queued: 1 };
+      }
+      if (method === "POST" && path.includes("/regenerate")) {
+        return { ok: true, queued: 1 };
+      }
+      return { ok: true };
+    },
+  });
+
+  const manage = harness.buttons(harness.byId("usersBody"), "Manage");
+  manage[0]!.click();
+  await harness.flush();
+
+  // 1. Verify "Retry failed (1)" button in header
+  const retryFailedBtn = harness.byId("regenFailed");
+  assertEquals(retryFailedBtn.textContent, "Retry failed (1)");
+  assertEquals(retryFailedBtn.disabled, false);
+
+  // 2. Verify table rows: "Playable" gets "Regenerate", "Broken Synth" gets "Retry"
+  const tbody = harness.byId("manageEpisodesBody");
+  const retryButtons = harness.buttons(tbody, "Retry");
+  assertEquals(retryButtons.length, 1, "failed episode must have an inline Retry button");
+  assertEquals(retryButtons[0]!.attributes["aria-label"], "Retry Broken Synth");
+
+  const regenButtons = harness.buttons(tbody, "Regenerate");
+  assertEquals(regenButtons.length, 1, "ready episode must have Regenerate button");
+
+  // 3. Status column shows error detail
+  const text = tbody.descendants().map((d) => d.textContent).join(" ");
+  assertStringIncludes(text, "failed");
+  assertStringIncludes(text, "LLM quota error");
+
+  // 4. Click Retry -> confirms and sends POST
+  harness.setConfirmAnswer(true);
+  retryButtons[0]!.click();
+  await harness.flush();
+
+  const retryReq = harness.requests.find((r) =>
+    r.path === `/api/admin/users/${USER.id}/episodes/ep-fail/regenerate`
+  );
+  assert(retryReq, "POST to regenerate/retry episode must be sent");
+
+  // 5. Click "Retry failed (1)" -> confirms and sends POST with { scope: "failed" }
+  retryFailedBtn.click();
+  await harness.flush();
+
+  const bulkRetryReq = harness.requests.find((r) =>
+    r.path === `/api/admin/users/${USER.id}/regenerate`
+  );
+  assert(bulkRetryReq, "POST to regenerate feed must be sent");
+  assertEquals(bulkRetryReq.body, { scope: "failed" });
+});

@@ -37,6 +37,8 @@ export interface AccountPageData {
   episodes: Episode[];
   /** Published episodes made by other prompts, across the whole feed (audio-feed-ktn). */
   outdatedCount: number;
+  /** Failed episodes across the user's feed that can be retried (audio-feed-6y9). */
+  failedCount: number;
   /** Optional prefill from query params or bookmarklet (audio-feed-ep1). */
   prefill?: PrefillData | null;
 }
@@ -105,12 +107,18 @@ export function renderAccountPage(d: AccountPageData): string {
       <div class="meta">${e.mode === "direct" ? "Read aloud" : "Deep dive"} · ${
       esc(e.sourceTitle ?? e.sourceId)
     } · ${when(e.createdAt)}</div>
+${e.status === "failed" && e.error ? `<div class="error-detail">${esc(e.error)}</div>` : ""}
 ${
       approved && e.status === "ready" && !e.regenerating
         ? `
       <div class="actions"><button class="btn quiet small" type="button" data-regenerate-episode="${
           esc(e.id)
         }" data-title="${esc(e.title)}">Regenerate</button></div>`
+        : approved && e.status === "failed"
+        ? `
+      <div class="actions"><button class="btn quiet small" type="button" data-retry-episode="${
+          esc(e.id)
+        }" data-title="${esc(e.title)}">Retry</button></div>`
         : ""
     }
     </li>`
@@ -307,9 +315,12 @@ ${
   <section class="panel" aria-labelledby="episodes-h">
     <div class="section-title"><h2 id="episodes-h">Recent episodes</h2>${
     approved
-      ? `<button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
+      ? `<div class="row" style="gap: var(--space-2);"><button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
         d.outdatedCount ? "" : " disabled"
-      }>Regenerate outdated (${d.outdatedCount})</button>`
+      }>Regenerate outdated (${d.outdatedCount})</button>
+      <button class="btn quiet small" type="button" id="retryFailed" data-count="${d.failedCount}"${
+        d.failedCount ? "" : " disabled"
+      }>Retry failed (${d.failedCount})</button></div>`
       : ""
   }</div>
     <p class="sub">Regenerate re-narrates with the current prompts. The old audio stays in your feed until the new one is ready.</p>
@@ -496,6 +507,38 @@ ${PASSKEY_CLIENT}
       }
     });
   }
+
+  for (const button of document.querySelectorAll("[data-retry-episode]")) {
+    button.addEventListener("click", async () => {
+      if (!confirm("Retry failed episode " + button.dataset.title + "? This will re-queue it for synthesis.")) return;
+      button.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.retryEpisode) + "/retry", {});
+        say($("regenFeedback"), "ok", res.queued ? "Queued for retry." : "Already queued.");
+        setTimeout(() => location.reload(), 700);
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        button.disabled = false;
+      }
+    });
+  }
+
+  const retryFailed = $("retryFailed");
+  if (retryFailed) {
+    retryFailed.addEventListener("click", async () => {
+      const count = Number(retryFailed.dataset.count);
+      if (!confirm("Retry " + count + " failed episode(s)? This will re-queue each failed episode for synthesis.")) return;
+      retryFailed.disabled = true;
+      try {
+        const res = await send("POST", "/api/account/regenerate", { scope: "failed" });
+        say($("regenFeedback"), "ok", res.queued + " episode(s) queued for retry.");
+        setTimeout(() => location.reload(), 700);
+      } catch (error) {
+        say($("regenFeedback"), "error", String(error.message || error));
+        retryFailed.disabled = false;
+      }
+    });
+  }
   const regenOutdated = $("regenOutdated");
   if (regenOutdated) {
     regenOutdated.addEventListener("click", async () => {
@@ -591,11 +634,14 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     });
   }
   const baseUrl = resolveOrigin(ctx.config, req).baseUrl;
-  const [sources, credentials, episodes, outdatedCount] = await Promise.all([
+  const [sources, credentials, episodes, outdatedCount, failedEpisodes] = await Promise.all([
     store.listSources(user.id),
     store.listCredentials(user.id),
     store.listEpisodes({ userId: user.id, limit: 10 }),
     user.status === "approved" ? countOutdatedEpisodes(store, user.id) : 0,
+    user.status === "approved"
+      ? store.listEpisodes({ userId: user.id, status: "failed", limit: 50 })
+      : [],
   ]);
 
   const rawAdd = reqUrl.searchParams.get("add") || reqUrl.searchParams.get("url");
@@ -618,6 +664,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     credentials,
     episodes,
     outdatedCount,
+    failedCount: failedEpisodes.length,
     prefill,
   });
   return new Response(html, {
