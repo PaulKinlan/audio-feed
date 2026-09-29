@@ -174,7 +174,7 @@ Despite strong foundational adoption, several modern web capabilities can dramat
 * **Impact**: One-tap native mobile sharing across iOS and Android while preserving clipboard fallback on desktop.
 
 ### Opportunity 6: CSS Subgrid for Tabular & List Alignment (`audio-feed-b6z`)
-* **Premise Status**: *Unverified / Layout Proposal*.
+* **Status**: *Implemented & Verified*.
 * **Current Layout**: Lists on `/account` (sources, passkeys, episodes) and `/admin` currently use flexbox rows with `justify-content: space-between`. When titles wrap or have variable lengths, action buttons and timestamps can sit at slightly staggered horizontal positions across rows.
 * **Modern Solution**: Adopt CSS `grid-template-columns: subgrid` where parent list defines columns and each `li` adopts them:
   ```css
@@ -204,7 +204,7 @@ The following actionable items are filed in Beads (`bd`):
 | `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Landed | Supersedes 05b; native dialog with closedby="any" and form[method="dialog"] |
 | `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Landed | App icon counter for installed PWA via setAppBadge/clearAppBadge |
 | `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Landed | OS native share sheet on mobile with clipboard fallback |
-| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Open | Unverified premise; requires 390px test |
+| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Implemented | Subgrid on grid-template-columns with flex fallback and 480px collapse |
 
 ---
 

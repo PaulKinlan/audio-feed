@@ -279,6 +279,51 @@ export const SHELL_KIT_CSS = `
   .empty { color: var(--muted); font-size: 0.92rem; margin: 0; }
   details.more > summary { cursor: pointer; color: var(--text-2); font-size: 0.92rem; }
   details.more[open] > summary { margin-block-end: 0.6rem; }
+
+  /* CSS Subgrid list alignment (audio-feed-b6z) per Modern Web Guidance */
+  @supports (grid-template-columns: subgrid) {
+    .rows {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .rows > li {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: subgrid;
+      row-gap: 0.25rem;
+    }
+    .rows > li > .row-head {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: subgrid;
+      align-items: baseline;
+      gap: 0.35rem 0.75rem;
+    }
+    .rows > li > .row-head > :first-child {
+      grid-column: 1;
+      min-inline-size: 0;
+    }
+    .rows > li > .row-head > :nth-child(2) {
+      grid-column: 2;
+      justify-self: end;
+    }
+    .rows > li > .meta,
+    .rows > li > .feed-paths,
+    .rows > li > .actions,
+    .rows > li > .error-detail {
+      grid-column: 1 / -1;
+    }
+
+    @media (max-width: 480px) {
+      .rows {
+        grid-template-columns: 1fr;
+      }
+      .rows > li > .row-head {
+        display: flex;
+        flex-wrap: wrap;
+      }
+    }
+  }
 `;
 
 /**
