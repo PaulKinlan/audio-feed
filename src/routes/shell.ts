@@ -314,6 +314,7 @@ export const CONFIRM_DIALOG_HTML = `
 export const CONFIRM_DIALOG_CLIENT = `
   const confirmDialog = document.getElementById("confirmDialog");
   if (confirmDialog && typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
+    // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
     // Light-dismiss fallback for browsers without native closedby support (Modern Web Guidance)
     confirmDialog.addEventListener("click", (event) => {
       if (event.target !== confirmDialog) return;
