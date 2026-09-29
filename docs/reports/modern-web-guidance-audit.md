@@ -199,8 +199,8 @@ The following actionable items are filed in Beads (`bd`):
 
 | Issue Key | Title | Priority | Category | Status | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `audio-feed-rra` | feat(ui): add cross-document view transitions across home, account, and player | P2 | CSS / UX | Open | Baseline Newly Available |
-| `audio-feed-nvj` | feat(perf): add Speculation Rules prefetching for instant player loading | P3 | Performance | Open | Chromium / progressive enhancement |
+| `audio-feed-rra` | feat(ui): add cross-document view transitions across home, account, and player | P2 | CSS / UX | Landed | Baseline Newly Available (`@view-transition { navigation: auto; }`) |
+| `audio-feed-nvj` | feat(perf): add Speculation Rules prefetching for instant player loading | P3 | Performance | Landed | Chromium / progressive enhancement (landed at `8d72438`) |
 | `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Open | Supersedes 05b; changes confirm stub surface |
 | `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Open | App icon counter for installed PWA |
 | `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Open | OS native share sheet on mobile |
