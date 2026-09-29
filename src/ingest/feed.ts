@@ -204,6 +204,11 @@ export async function pollFeedSource(
     );
   } catch (error) {
     const errorMsg = String((error as Error)?.message ?? error);
+    console.error(
+      `[audio-feed] feed poll failed for source "${
+        source.title || source.id
+      }" (${source.feedUrl}): ${errorMsg}`,
+    );
     result.errors.push(errorMsg);
     // lastPolledAt still moves: a permanently broken feed must not be retried on
     // every tick forever.
@@ -311,8 +316,14 @@ async function queueItems(
         };
       } else {
         result.failed++;
-        if (result.errors.length < 3) {
-          result.errors.push(`${item.link}: ${String((error as Error)?.message ?? error)}`);
+        const errMsg = String((error as Error)?.message ?? error);
+        console.error(
+          `[audio-feed] article extraction failed for "${item.link}" in source "${
+            source.title || source.id
+          }": ${errMsg}`,
+        );
+        if (result.errors.length < 5) {
+          result.errors.push(`${item.link}: ${errMsg}`);
         }
         continue;
       }
@@ -453,10 +464,17 @@ const DEFAULT_MIN_INTERVAL_MS = 15 * 60 * 1000;
  * duplicate poll, and dedupe by article URL means a duplicate poll queues
  * nothing new.
  */
+export interface FeedPollBatchResult {
+  polled: number;
+  queued: number;
+  failed: number;
+  errors?: string[];
+}
+
 export async function runFeedPollBatch(
   ctx: AppContext,
   deps: PollDependencies & FeedPollOptions = {},
-): Promise<{ polled: number; queued: number; failed: number }> {
+): Promise<FeedPollBatchResult> {
   const minInterval = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const batchSize = deps.batchSize ?? 5;
   const cutoff = Date.now() - minInterval;
@@ -475,6 +493,7 @@ export async function runFeedPollBatch(
 
   let queued = 0;
   let failed = 0;
+  const errors: string[] = [];
   for (const source of due) {
     const result = await pollFeedSource(ctx, source, {
       ...deps,
@@ -482,8 +501,15 @@ export async function runFeedPollBatch(
     });
     queued += result.queued;
     failed += result.failed;
+    if (result.errors && result.errors.length > 0) {
+      for (const err of result.errors) {
+        if (errors.length < 10) {
+          errors.push(`[${source.title || source.id}] ${err}`);
+        }
+      }
+    }
   }
-  return { polled: due.length, queued, failed };
+  return { polled: due.length, queued, failed, errors: errors.length > 0 ? errors : undefined };
 }
 
 export interface FeedPollWorkerHandle {
@@ -502,7 +528,7 @@ export interface FeedPollWorkerHandle {
 export function startFeedPollWorker(
   ctx: AppContext,
   options: FeedPollOptions & {
-    onTick?: (result: { polled: number; queued: number; failed: number }) => void;
+    onTick?: (result: FeedPollBatchResult) => void;
   } = {},
 ): FeedPollWorkerHandle {
   const intervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;

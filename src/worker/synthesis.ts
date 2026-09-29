@@ -111,7 +111,7 @@ export interface SynthesisBatchResult {
   /** Episodes that became ready this tick. */
   ready: Array<{ episodeId: string; audioKey: string; byteLength: number }>;
   /** Episodes recorded as failed, with the reason a human will read. */
-  failed: Array<{ episodeId: string; error: string }>;
+  failed: Array<{ episodeId: string; error: string; title?: string }>;
   /** Jobs not attempted because the owner may not spend (left pending). */
   deferred: Array<{ episodeId: string; reason: string }>;
   /**
@@ -437,9 +437,12 @@ export async function runSynthesisBatch(
     // rather than failing out of the feed (audio-feed-8oz).
     if (!article) {
       const error = "article record is missing";
+      console.error(
+        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
+      );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
-        result.failed.push({ episodeId: claimed.id, error });
+        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
         result.superseded.push(supersededEntry(claimed, opts.leaseMs));
@@ -450,9 +453,12 @@ export async function runSynthesisBatch(
     if (opts.maxInputCharacters && article.content.length > opts.maxInputCharacters) {
       const error =
         `article content exceeds input limit (${article.content.length} > ${opts.maxInputCharacters} chars)`;
+      console.error(
+        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
+      );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
-        result.failed.push({ episodeId: claimed.id, error });
+        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
         result.superseded.push(supersededEntry(claimed, opts.leaseMs));
@@ -479,9 +485,12 @@ export async function runSynthesisBatch(
 
     if (!audio) {
       const error = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
+      console.error(
+        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
+      );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
-        result.failed.push({ episodeId: claimed.id, error });
+        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
         result.superseded.push(supersededEntry(claimed, opts.leaseMs));

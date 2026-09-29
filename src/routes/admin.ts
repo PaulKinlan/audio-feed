@@ -189,6 +189,12 @@ export function renderAdminPage(
   .copy-row input { flex: 1 1 22rem; min-inline-size: 0; }
   .error-detail { font-size: 0.75rem; color: var(--danger); margin-block-start: var(--space-1); word-break: break-all; }
 
+  .run-errors { margin: 0; }
+  .run-errors summary { cursor: pointer; color: var(--danger); font-weight: 600; }
+  .run-errors summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .run-errors-list { margin: var(--space-2) 0 0 0; padding-inline-start: var(--space-4); font-size: 0.8rem; color: var(--text-muted); max-inline-size: 32rem; overflow-wrap: anywhere; }
+  .run-errors-list li { margin-block-end: var(--space-1); }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -778,16 +784,39 @@ export function renderAdminPage(
     tr.appendChild(cell(run.kind === "feed-poll" ? "Feed poll" : "Synthesis"));
     tr.appendChild(cell(run.trigger));
     tr.appendChild(cell(run.durationMs + "ms"));
-    // A failed run says so in the same column its counts would occupy, so a
-    // reader scanning for trouble does not have to know which fields are unset.
-    const summary = run.error
-      ? "failed: " + run.error
-      : run.kind === "feed-poll"
-      ? (run.polled ?? 0) + " polled, " + (run.queued ?? 0) + " queued, " + (run.failed ?? 0) +
-        " failed"
-      : (run.ready ?? 0) + " ready, " + (run.failed ?? 0) + " failed, " + (run.deferred ?? 0) +
-        " deferred";
-    tr.appendChild(cell(summary, run.error ? "error-text" : undefined));
+
+    const resultTd = document.createElement("td");
+    if (run.error) {
+      resultTd.className = "error-text";
+      resultTd.textContent = "failed: " + run.error;
+    } else {
+      const summaryText = run.kind === "feed-poll"
+        ? (run.polled ?? 0) + " polled, " + (run.queued ?? 0) + " queued, " + (run.failed ?? 0) +
+          " failed"
+        : (run.ready ?? 0) + " ready, " + (run.failed ?? 0) + " failed, " + (run.deferred ?? 0) +
+          " deferred";
+
+      if (run.failed && run.failed > 0 && Array.isArray(run.errors) && run.errors.length > 0) {
+        const details = document.createElement("details");
+        details.className = "run-errors";
+        const summary = document.createElement("summary");
+        summary.className = "error-text";
+        summary.textContent = summaryText + " (view log)";
+        details.appendChild(summary);
+        const ul = document.createElement("ul");
+        ul.className = "run-errors-list";
+        for (const err of run.errors) {
+          const li = document.createElement("li");
+          li.textContent = err;
+          ul.appendChild(li);
+        }
+        details.appendChild(ul);
+        resultTd.appendChild(details);
+      } else {
+        resultTd.textContent = summaryText;
+      }
+    }
+    tr.appendChild(resultTd);
     return tr;
   }
 

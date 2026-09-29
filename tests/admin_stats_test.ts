@@ -259,6 +259,62 @@ Deno.test("the runs table shows the newest runs of EACH job (audio-feed-ct1)", a
   assertEquals(harness.byId("statPollNote").textContent, "Mean of the last 10 polls.");
 });
 
+Deno.test('admin dashboard: failed runs render expandable failure logs (<details class="run-errors">) (audio-feed-e1d)', async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.recordRun(run({
+    id: "run-failed-synth",
+    kind: "synthesis",
+    trigger: "cron",
+    ready: 1,
+    failed: 2,
+    deferred: 0,
+    errors: [
+      'Episode ep-1 ("First Article"): Gemini API error: 429 Quota Exceeded',
+      'Episode ep-2 ("Second Article"): article content exceeds input limit',
+    ],
+  }));
+
+  const stats = await (await fetch(statsRequest())).json();
+  const synthRun = stats.runs.find((r: RunRecord) => r.id === "run-failed-synth");
+  assert(synthRun, "run must be returned in stats.runs");
+  assertEquals(synthRun.errors.length, 2);
+
+  const harness = await runAdminScript({
+    signedIn: true,
+    respond: (method, path) => {
+      if (method === "GET" && path === "/api/admin/stats") return stats;
+      if (method === "GET" && path === "/api/admin/users") return { users: [] };
+      return { ok: true };
+    },
+  });
+  await harness.flush();
+
+  const rows = harness.byId("runsBody").children;
+  const synthRow = rows.find((r) => r.children[1]?.textContent === "Synthesis");
+  assert(synthRow, "synthesis row must be present in runs table");
+  const details = synthRow.descendants().find((e) =>
+    e.tag === "details" && e.className === "run-errors"
+  );
+  assert(details, '<details class="run-errors"> must be rendered for failed items');
+
+  const summary = details.children.find((c) => c.tag === "summary");
+  assert(summary, "<summary> element must be present");
+  assert(summary.textContent.includes("2 failed"));
+  assert(summary.textContent.includes("(view log)"));
+
+  const list = details.children.find((c) => c.tag === "ul");
+  assert(list, "<ul> list of error messages must be present");
+  assertEquals(list.children.length, 2);
+  assertEquals(
+    list.children[0]?.textContent,
+    'Episode ep-1 ("First Article"): Gemini API error: 429 Quota Exceeded',
+  );
+  assertEquals(
+    list.children[1]?.textContent,
+    'Episode ep-2 ("Second Article"): article content exceeds input limit',
+  );
+});
+
 // -- sign-in auth and operational lifecycle (audio-feed-0jp) ----------------
 
 Deno.test("a signed-in admin console auto-loads users and operations on fresh load (audio-feed-0jp)", async () => {

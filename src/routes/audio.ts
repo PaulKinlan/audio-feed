@@ -89,7 +89,10 @@ export async function handleAudio(
   { req, params, ctx }: RouteContext<AppContext>,
 ): Promise<Response> {
   const rawKey = params.key;
-  if (!rawKey || !isSafeBlobKey(rawKey)) return notFound("Unknown audio object");
+  if (!rawKey || !isSafeBlobKey(rawKey)) {
+    console.warn(`[audio-feed] audio 404: unsafe or empty key "${rawKey}"`);
+    return notFound("Unknown audio object");
+  }
 
   const isHead = req.method === "HEAD";
 
@@ -111,7 +114,14 @@ export async function handleAudio(
         break;
       }
     }
-    if (!info || !resolvedKey) return notFound("Unknown audio object");
+    if (!info || !resolvedKey) {
+      console.warn(
+        `[audio-feed] audio HEAD 404: key "${rawKey}" not found (candidates: ${
+          candidateKeys.join(", ")
+        })`,
+      );
+      return notFound("Unknown audio object");
+    }
 
     return headResponse(info.size, {
       "content-type": info.contentType,
@@ -168,6 +178,11 @@ export async function handleAudio(
     // would 404 objects that exist (audio-feed-gxn). Existence is then decided by
     // the get() loop below, which costs one get() on a genuine miss.
     if (everyKeyHasDirectUrl) {
+      console.warn(
+        `[audio-feed] audio direct-url 404: key "${rawKey}" not found (candidates: ${
+          candidateKeys.join(", ")
+        })`,
+      );
       return notFound("Unknown audio object");
     }
   }
@@ -199,7 +214,14 @@ export async function handleAudio(
     }
   }
 
-  if (!object || !resolvedKey) return notFound("Unknown audio object");
+  if (!object || !resolvedKey) {
+    console.warn(
+      `[audio-feed] audio GET 404: key "${rawKey}" not found in storage (candidates: ${
+        candidateKeys.join(", ")
+      })`,
+    );
+    return notFound("Unknown audio object");
+  }
 
   const headers = new Headers({
     "content-type": object.contentType,

@@ -218,8 +218,15 @@ main {
   color: var(--danger, #e5484d);
 }
 .act-error {
-  color: var(--muted);
-  font-size: 0.76rem;
+  color: var(--danger, #e5484d);
+  font-size: 0.78rem;
+  margin-block-start: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.ep-download-error {
+  color: var(--danger, #e5484d);
+  font-size: 0.78rem;
+  margin-block-start: var(--space-1);
   overflow-wrap: anywhere;
 }
 .act-retry {
