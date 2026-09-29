@@ -43,14 +43,21 @@ This audit evaluates how modern web standards and guidelines (per `web.dev`, W3C
 - **Playback Position Memory (`audio-feed-kzi`)**:
   - The web player persists playback progress per episode in client-side storage, resuming smoothly across sessions.
 
-### 2.3 Progressive Web App (PWA) & Offline Capabilities
+### 2.3 Media Session API Integration (Baseline Widely Available)
+- **Native OS Media Controls (`src/assets/listen.js:1007`)**:
+  - Integrates core `navigator.mediaSession` capabilities per web standards.
+  - Sets `MediaMetadata` with `title`, `artist` (author), `album` (source publication), and scalable SVG artwork.
+  - Registers action handlers for `play`, `pause`, `seekbackward` (-15s), `seekforward` (+30s), and `seekto`.
+  - Synchronizes playback state (`playing`, `paused`) and updates real-time track position via `navigator.mediaSession.setPositionState()` on `loadedmetadata` and `timeupdate`.
+
+### 2.4 Progressive Web App (PWA) & Offline Capabilities
 - **Web App Manifest (`src/routes/pwa.ts`)**:
   - Serves `GET /manifest.json` with `display: "standalone"`, `theme_color`, `background_color`, and vector icons.
 - **Service Worker (`src/routes/pwa.ts:handleServiceWorker`)**:
   - Caches core app shell assets for offline access.
   - Integrates with the Background Fetch API (`background-fetch`) for reliable downloading of large audio enclosures in the background without requiring the tab to stay active.
 
-### 2.4 Modern CSS & Design Tokens
+### 2.5 Modern CSS & Design Tokens
 - **Single Source of Design Tokens (`audio-feed-vpw`, `src/routes/tokens.ts`)**:
   - Unified CSS custom properties (`:root`) for colors, surfaces, borders, typography, and spacing shared across `/`, `/admin`, `/account`, and `/listen/*`.
 - **Theme Adaptation & Color Scheme**:
@@ -60,7 +67,7 @@ This audit evaluates how modern web standards and guidelines (per `web.dev`, W3C
 - **Reduced Motion Support**:
   - Media query `@media (prefers-reduced-motion: reduce)` globally disables unnecessary transitions and animations for users with vestibular sensitivities.
 
-### 2.5 Security, SSRF & Resource Boundaries
+### 2.6 Security, SSRF & Resource Boundaries
 - **Strict SSRF Protections (`src/ingest/url.ts`)**:
   - Uses `ipaddr.js` to inspect resolved DNS IP addresses before connecting, refusing loopback (`127.0.0.0/8`, `::1`), private LAN (`10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`), link-local (`169.254.0.0/16`), carrier-grade NAT (`100.64.0.0/10`), and IPv6 transition addresses.
 - **Stream Bounds & Content Types**:
@@ -78,34 +85,7 @@ This audit evaluates how modern web standards and guidelines (per `web.dev`, W3C
 
 Despite strong foundational adoption, several modern web capabilities can dramatically enhance Audio Feed's mobile and desktop experience. Each opportunity below is categorized by specification status (Baseline Widely Available vs. Baseline Newly Available).
 
-### Opportunity 1: Media Session API Integration (Baseline Widely Available)
-* **Problem**: When playing podcast episodes in the web player (`/listen/:token`), the browser notification, lock screen, and OS media centers show either generic browser audio or nothing. Hardware media keys (play/pause, skip backward/forward 15s) and Bluetooth headphones cannot control playback.
-* **Modern Solution**: Wire `navigator.mediaSession` in `src/assets/listen.js`:
-  ```js
-  if ("mediaSession" in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: activeEpisode.title,
-      artist: activeEpisode.author || "Audio Feed",
-      album: activeEpisode.sourceTitle || "Personal Podcast",
-      artwork: [
-        { src: "/icon.svg", sizes: "512x512", type: "image/svg+xml" }
-      ]
-    });
-    navigator.mediaSession.setActionHandler("play", () => audio.play());
-    navigator.mediaSession.setActionHandler("pause", () => audio.pause());
-    navigator.mediaSession.setActionHandler("seekbackward", (details) => {
-      audio.currentTime = Math.max(audio.currentTime - (details.seekOffset || 15), 0);
-    });
-    navigator.mediaSession.setActionHandler("seekforward", (details) => {
-      audio.currentTime = Math.min(audio.currentTime + (details.seekOffset || 15), audio.duration);
-    });
-    navigator.mediaSession.setActionHandler("previoustrack", () => playPrevious());
-    navigator.mediaSession.setActionHandler("nexttrack", () => playNext());
-  }
-  ```
-* **Impact**: Native lock-screen controls on iOS and Android, Apple Watch / Wear OS media controls, keyboard media keys, and Bluetooth headset integration.
-
-### Opportunity 2: Cross-Document View Transitions (Baseline Newly Available)
+### Opportunity 1: Cross-Document View Transitions (Baseline Newly Available) (`audio-feed-rra`)
 * **Problem**: Navigating between the homepage (`/`), account dashboard (`/account`), and player (`/listen/:token`) causes full-page browser document refreshes.
 * **Modern Solution**: Add declarative cross-document view transitions in `src/routes/tokens.ts`:
   ```css
@@ -124,7 +104,7 @@ Despite strong foundational adoption, several modern web capabilities can dramat
   ```
 * **Impact**: Smooth, app-like morphing transitions during page navigations without adding a client-side routing framework.
 
-### Opportunity 3: Speculation Rules API for Instant Player Navigation
+### Opportunity 2: Speculation Rules API for Instant Player Navigation (`audio-feed-nvj`)
 * **Problem**: When a user clicks "Open the player" on `/account` or clicks an episode link, navigation latency depends on network round-trip.
 * **Modern Solution**: Inject speculative prefetching/prerendering rules in `src/routes/account.ts` and `src/routes/home.ts`:
   ```html
@@ -142,8 +122,11 @@ Despite strong foundational adoption, several modern web capabilities can dramat
   ```
 * **Impact**: The web player loads with near-zero latency (0ms perceived load time).
 
-### Opportunity 4: Native `<dialog>` and Popover API for Accessible Modals
+### Opportunity 3: Native `<dialog>` and Popover API for Accessible Modals (`audio-feed-ytl`)
 * **Problem**: Destructive or confirmation actions (regenerating episodes, rotating feed URLs, removing sources, retrying failed batches) currently call synchronous, blocking `window.confirm()`.
+* **Architectural Impact & Superseding Note**:
+  - `audio-feed-ytl` **supersedes the deliberate `window.confirm()` choice from `audio-feed-05b`** (which kept confirm() to avoid heavyweight modal frameworks).
+  - It modifies the test surface in `tests/admin_script.ts` and `/account`, replacing `window.confirm = () => true` stubs with `<dialog>` form submission or `.showModal()`.
 * **Modern Solution**: Replace `window.confirm()` with native HTML `<dialog>` elements or `popover="auto"`:
   ```html
   <dialog id="confirmDialog" class="modal-dialog">
@@ -159,7 +142,7 @@ Despite strong foundational adoption, several modern web capabilities can dramat
   ```
 * **Impact**: Accessible keyboard focus trapping, Escape-key dismissal, light-dismiss, custom styling matching design tokens, and non-blocking asynchronous interaction.
 
-### Opportunity 5: App Badging API for Unread / Ready Episodes
+### Opportunity 4: App Badging API for Unread / Ready Episodes (`audio-feed-n07`)
 * **Problem**: When Audio Feed is installed as a PWA on mobile or desktop, users have no visual cue when new episodes have finished synthesizing.
 * **Modern Solution**: Use `navigator.setAppBadge()` and `navigator.clearAppBadge()`:
   ```js
@@ -173,9 +156,10 @@ Despite strong foundational adoption, several modern web capabilities can dramat
   ```
 * **Impact**: Native app-icon badge notification on Android, macOS Dock, and Windows taskbar.
 
-### Opportunity 6: Web Share API (`navigator.share`)
-* **Problem**: Sharing an episode or an article link from the player requires manual URL copying.
-* **Modern Solution**: Add a "Share" action on episode rows in `src/assets/listen.js`:
+### Opportunity 5: Web Share API (`navigator.share`) (`audio-feed-zcw`)
+* **Problem & Overlap Analysis**: Episode rows currently provide a "Copy link" button that copies the direct audio URL to the clipboard. On desktop this is efficient, but on mobile it requires leaving the browser, opening another app, and pasting manually.
+* **What Native Share Adds on Mobile**: `navigator.share()` invokes the operating system's native share sheet (AirDrop, Messages, WhatsApp, Mail, Telegram, Notes, social apps), directly bridging the podcast player into the user's communications workflow without clipboard friction.
+* **Modern Solution**: Enhance the share action on episode rows in `src/assets/listen.js`:
   ```js
   if (navigator.share) {
     await navigator.share({
@@ -187,11 +171,12 @@ Despite strong foundational adoption, several modern web capabilities can dramat
     await navigator.clipboard.writeText(episode.articleUrl);
   }
   ```
-* **Impact**: Seamless native mobile sharing to messaging apps, social networks, and notes.
+* **Impact**: One-tap native mobile sharing across iOS and Android while preserving clipboard fallback on desktop.
 
-### Opportunity 7: CSS Subgrid for Tabular & List Alignment
-* **Problem**: Episode rows and passkey list items contain multi-column components (icon, titles, timestamps, action buttons) that use flexbox or separate grids, meaning column widths do not align vertically across rows when titles wrap.
-* **Modern Solution**: Adopt CSS `grid-template-columns: subgrid` in list layouts (`src/assets/listen.css`, `src/routes/account.ts`):
+### Opportunity 6: CSS Subgrid for Tabular & List Alignment (`audio-feed-b6z`)
+* **Premise Status**: *Unverified / Layout Proposal*.
+* **Current Layout**: Lists on `/account` (sources, passkeys, episodes) and `/admin` currently use flexbox rows with `justify-content: space-between`. When titles wrap or have variable lengths, action buttons and timestamps can sit at slightly staggered horizontal positions across rows.
+* **Modern Solution**: Adopt CSS `grid-template-columns: subgrid` where parent list defines columns and each `li` adopts them:
   ```css
   .rows {
     display: grid;
@@ -204,26 +189,25 @@ Despite strong foundational adoption, several modern web capabilities can dramat
     align-items: center;
   }
   ```
-* **Impact**: Perfectly aligned columns across all variable-length list items with zero JavaScript overhead.
+* **Verification Required**: Before landing `audio-feed-b6z`, verify in headless Chrome that subgrid does not cause unwanted vertical stretching on mobile viewports (390px) where rows collapse into single-column cards.
 
 ---
 
 ## 4. Prioritized Action Plan & Beads Issues
 
-The following actionable items have been prepared for issue creation in Beads (`bd`):
+The following actionable items are filed in Beads (`bd`):
 
-| Issue Key | Title | Priority | Category | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| `audio-feed-3jf` | feat(player): integrate Media Session API for lock-screen & headphone playback controls | P2 | Web APIs | Filed (open) |
-| `audio-feed-rra` | feat(ui): add cross-document view transitions across home, account, and player | P2 | CSS / UX | Filed (open) |
-| `audio-feed-nvj` | feat(perf): add Speculation Rules prefetching for instant player loading | P3 | Performance | Filed (open) |
-| `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Filed (open) |
-| `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Filed (open) |
-| `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Filed (open) |
-| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Filed (open) |
+| Issue Key | Title | Priority | Category | Status | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `audio-feed-rra` | feat(ui): add cross-document view transitions across home, account, and player | P2 | CSS / UX | Open | Baseline Newly Available |
+| `audio-feed-nvj` | feat(perf): add Speculation Rules prefetching for instant player loading | P3 | Performance | Open | Chromium / progressive enhancement |
+| `audio-feed-ytl` | feat(ui): replace blocking window.confirm with native accessible `<dialog>` | P3 | Accessibility | Open | Supersedes 05b; changes confirm stub surface |
+| `audio-feed-n07` | feat(pwa): update app icon badge with unread episode count via Badging API | P3 | PWA | Open | App icon counter for installed PWA |
+| `audio-feed-zcw` | feat(player): add native Web Share API support on episode rows | P3 | Web APIs | Open | OS native share sheet on mobile |
+| `audio-feed-b6z` | feat(css): adopt CSS subgrid for aligned list rows on account and admin | P3 | CSS | Open | Unverified premise; requires 390px test |
 
 ---
 
 ## 5. Conclusion
 
-Audio Feed already exhibits strong compliance with modern web best practices in its authentication, security boundaries, and streaming architecture. Implementing the Media Session API, View Transitions, Speculation Rules, and Native Dialogs will transform the web application into an exceptional, platform-integrated podcast experience matching or exceeding native mobile applications.
+Audio Feed already exhibits strong compliance with modern web best practices in its authentication, security boundaries, and streaming architecture. Implementing View Transitions, Speculation Rules, Native Dialogs, and Badging will transform the web application into an exceptional, platform-integrated podcast experience matching or exceeding native mobile applications.
