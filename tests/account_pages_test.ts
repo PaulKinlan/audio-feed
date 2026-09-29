@@ -79,7 +79,9 @@ Deno.test("GET /account shows the signed-in user's own account, uncached (audio-
   assert(!html.includes("<b>Reader</b>"), "display name is escaped");
   assert(!html.includes("Theirs"), "another user's source never appears");
   assert(!html.includes(other.feedToken), "another user's token never appears");
-  assert(/<option value="Kore" selected>/.test(html), "the saved voice is selected");
+  // The picker became radio cards with an audition player per voice
+  // (audio-feed-msw); the saved voice is still the one that comes up chosen.
+  assert(/name="voice" value="Kore" checked/.test(html), "the saved voice is checked");
 });
 
 Deno.test("GET /account renders Retry failed button and per-episode Retry button on failed rows (audio-feed-6y9)", async () => {

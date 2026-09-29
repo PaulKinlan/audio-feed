@@ -59,6 +59,8 @@ export interface AppContext {
  * another, and `main` is always runnable.
  */
 export interface AppHandlers {
+  /** audio-feed-msw — audition samples for the preferred-voice picker. */
+  voiceSample?: Handler<AppContext>;
   /** audio-feed-7w6 — RSS 2.0 / iTunes feed generation. */
   masterFeed?: Handler<AppContext>;
   sourceFeed?: Handler<AppContext>;
@@ -149,6 +151,12 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get("/manifest.json", handleManifest);
   router.get("/robots.txt", handleRobots);
   router.get("/icon.svg", handleIcon);
+  // Not /audio/:key+ — that route is an episode enclosure with Range semantics,
+  // and this is a preview generated on demand (audio-feed-msw).
+  router.get(
+    "/assets/voices/:voice",
+    handlers.voiceSample ?? (() => notImplemented("Voice samples")),
+  );
 
   router.get("/health", ({ ctx }) =>
     json({

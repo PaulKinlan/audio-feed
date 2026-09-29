@@ -16,7 +16,7 @@ import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { base64url, sessionUser } from "../auth/sessions.ts";
 import { relyingParty } from "../auth/passkeys.ts";
-import { GEMINI_TTS_VOICES } from "../tts/gemini.ts";
+import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
 import { INBOX_SOURCE_ID } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
@@ -63,6 +63,17 @@ const CSS = `
   @media (min-width: 44rem) { .quick-grid { grid-template-columns: 1fr 1fr; } }
   .quick-card[hidden] { display: none; }
   .quick-card { padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); display: flex; flex-direction: column; justify-content: space-between; gap: 0.75rem; }
+  /* One column: this panel shares the row with Passkeys, so a two-column grid
+     crushed the style text and wrapped every button onto two lines. */
+  .voice-grid { display: grid; gap: 0.5rem; margin-block-start: 0.4rem; }
+  .voice-card { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+  .voice-play { white-space: nowrap; }
+  .voice-pick { display: flex; flex-direction: column; gap: 0.1rem; cursor: pointer; }
+  .voice-pick input { margin-inline-end: 0.4rem; }
+  .voice-name { font-weight: 600; }
+  .voice-style { font-size: 0.8rem; color: var(--muted); }
+  .voice-play[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  #voiceSampleAudio { display: none; }
   .bookmarklet-box { margin-block-start: 1rem; padding: var(--space-4); border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface-2); }
   .bookmarklet-btn { cursor: grab; display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; text-decoration: none; user-select: none; }
   .bookmarklet-btn:active { cursor: grabbing; }
@@ -150,11 +161,35 @@ ${
       <div class="meta">Added ${when(c.createdAt)} · last used ${when(c.lastUsedAt)}</div></li>`;
   }).join("");
 
-  const voiceOptions = [
-    `<option value=""${user.voice ? "" : " selected"}>Deployment default</option>`,
-    ...GEMINI_TTS_VOICES.map((v) =>
-      `<option value="${v}"${user.voice === v ? " selected" : ""}>${v}</option>`
-    ),
+  /**
+   * The voice picker (audio-feed-msw) is a radio-card grid rather than a <select>,
+   * because a voice is chosen by EAR: each card carries a play button next to the
+   * name and the style description, and the radio keeps the existing form contract
+   * (`name="voice"`, same POST). The buttons all drive ONE <audio> element, which is
+   * what makes "exactly one sample plays at a time" structural instead of bookkeeping.
+   */
+  const voiceCards = [
+    `<div class="voice-card">
+      <label class="voice-pick">
+        <span><input type="radio" name="voice" value=""${
+      user.voice ? "" : " checked"
+    }> <span class="voice-name">Deployment default</span></span>
+        <span class="voice-style">Whatever this server was configured with</span>
+      </label>
+    </div>`,
+    ...GEMINI_TTS_VOICES.map((v) => {
+      const profile = VOICE_PROFILES[v];
+      return `<div class="voice-card">
+      <label class="voice-pick">
+        <span><input type="radio" name="voice" value="${v}"${
+        user.voice === v ? " checked" : ""
+      }> <span class="voice-name">${v}</span></span>
+        <span class="voice-style">${esc(profile.style)}</span>
+      </label>
+      <button type="button" class="btn quiet small voice-play" data-voice-sample="${v}"
+        aria-pressed="false" aria-label="Play a sample of ${v}">▶ Play sample</button>
+    </div>`;
+    }),
   ].join("");
 
   const pending = approved
@@ -295,8 +330,13 @@ ${sendSection}
           <input id="displayName" type="text" maxlength="80" required value="${
     esc(user.displayName)
   }" autocomplete="name"></div>
-        <div class="field"><label for="voice">Preferred voice <span class="hint">for read-aloud episodes</span></label>
-          <select id="voice">${voiceOptions}</select></div>
+        <div class="field">
+          <span class="legend">Preferred voice <span class="hint">for read-aloud episodes</span></span>
+          <div class="voice-grid" role="radiogroup" aria-label="Preferred voice for read-aloud episodes">
+            ${voiceCards}
+          </div>
+          <audio id="voiceSampleAudio" preload="none"></audio>
+        </div>
         <div class="actions"><button class="btn" type="submit">Save profile</button></div>
         <p class="feedback" id="profileFeedback" role="status" aria-live="polite"></p>
       </form>
@@ -447,6 +487,54 @@ ${PASSKEY_CLIENT}
     });
   }
 
+  // -- voice audition (audio-feed-msw) ---------------------------------------
+  const voiceAudio = $("voiceSampleAudio");
+  const voiceButtons = Array.from(document.querySelectorAll("[data-voice-sample]"));
+  const voiceChoice = () => {
+    const picked = document.querySelector("input[name=voice]:checked");
+    return picked ? picked.value : "";
+  };
+  const setVoiceButton = (button, playing) => {
+    const voice = button.dataset.voiceSample;
+    button.setAttribute("aria-pressed", String(playing));
+    button.textContent = playing ? "■ Stop sample" : "▶ Play sample";
+    button.setAttribute("aria-label", (playing ? "Stop the sample of " : "Play a sample of ") + voice);
+  };
+  const stopVoiceSamples = (except) => {
+    for (const button of voiceButtons) if (button !== except) setVoiceButton(button, false);
+    if (voiceAudio && !voiceAudio.paused) voiceAudio.pause();
+  };
+  if (voiceAudio) {
+    for (const button of voiceButtons) {
+      button.addEventListener("click", async () => {
+        const voice = button.dataset.voiceSample;
+        const wasPlaying = button.getAttribute("aria-pressed") === "true";
+        stopVoiceSamples(button);
+        if (wasPlaying) {
+          setVoiceButton(button, false);
+          return;
+        }
+        setVoiceButton(button, true);
+        say($("profileFeedback"), "ok", "Loading the " + voice + " sample…");
+        voiceAudio.src = "/assets/voices/" + encodeURIComponent(voice);
+        try {
+          await voiceAudio.play();
+          say($("profileFeedback"), "ok", "Playing the " + voice + " sample.");
+        } catch (error) {
+          // Autoplay refusal, a 401 after sign-out, a 503 with no key: the person
+          // gets a sentence rather than a button that looks stuck.
+          setVoiceButton(button, false);
+          say($("profileFeedback"), "error", "That sample is unavailable right now.");
+        }
+      });
+    }
+    voiceAudio.addEventListener("ended", () => stopVoiceSamples(null));
+    voiceAudio.addEventListener("error", () => {
+      stopVoiceSamples(null);
+      say($("profileFeedback"), "error", "That sample could not be played.");
+    });
+  }
+
   const sendForm = $("sendForm");
   if (sendForm) sendForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -467,7 +555,7 @@ ${PASSKEY_CLIENT}
     const feedback = $("profileFeedback");
     try {
       const saved = await send("POST", "/api/account/profile", {
-        displayName: $("displayName").value.trim(), voice: $("voice").value,
+        displayName: $("displayName").value.trim(), voice: voiceChoice(),
       });
       if (window.PublicKeyCredential && PublicKeyCredential.signalCurrentUserDetails) {
         PublicKeyCredential.signalCurrentUserDetails({
