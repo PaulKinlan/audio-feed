@@ -301,3 +301,66 @@ Deno.test("audioPayload: prepares direct narration and deepdive payloads from PD
   assertEquals(deepdive.mode, "deepdive");
   assertEquals(deepdive.article.title, "Attention Is All You Need");
 });
+
+Deno.test("extractPdfArticle: strips newlines, control characters, and caps title at 200 chars (audio-feed-a3y)", async () => {
+  const multilineTitle = "A".repeat(150) + "\n\r\tMalicious\nInjected\r\nNewline\x00Control" +
+    "B".repeat(100);
+  const bytes = makeSyntheticPdf({
+    title: multilineTitle,
+    author: "Author\nWith\rNewlines\x07",
+    lines: [LONG_PARA_1, LONG_PARA_2],
+  });
+
+  const article = await extractPdfArticle(bytes, "https://example.com/sanitized.pdf");
+  // Asserts title is capped at 200 chars max
+  assertEquals(article.title.length <= 200, true);
+  // Asserts no non-printable / control characters (C0, DEL, C1) exist in title or author
+  for (let i = 0; i < article.title.length; i++) {
+    const code = article.title.charCodeAt(i);
+    assertEquals(code >= 32 && code !== 127 && !(code >= 128 && code <= 159), true);
+  }
+  for (let i = 0; i < article.author!.length; i++) {
+    const code = article.author!.charCodeAt(i);
+    assertEquals(code >= 32 && code !== 127 && !(code >= 128 && code <= 159), true);
+  }
+  assertEquals(article.author, "Author With Newlines");
+});
+
+Deno.test("extractPdfArticle: suppresses PDF.js indexing warnings during parse (audio-feed-a3y)", async () => {
+  const bytes = makeSyntheticPdf({
+    title: "Quiet Parse",
+    lines: [LONG_PARA_1, LONG_PARA_2],
+  });
+
+  let printedWarning = false;
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].includes("Indexing all PDF objects")) {
+      printedWarning = true;
+    }
+    origLog(...args);
+  };
+
+  try {
+    await extractPdfArticle(bytes, "https://example.com/quiet.pdf");
+  } finally {
+    console.log = origLog;
+  }
+
+  assertEquals(printedWarning, false, "PDF.js indexing warning must be suppressed");
+});
+
+Deno.test("extractPdfArticle: enforces bounded parse timeout (audio-feed-a3y)", async () => {
+  const bytes = makeSyntheticPdf({
+    title: "Timed Out Document",
+    lines: [LONG_PARA_1, LONG_PARA_2],
+  });
+
+  // Calling with timeoutMs: 0 causes immediate timeout
+  const err = await assertRejects(
+    () => extractPdfArticle(bytes, "https://example.com/timeout.pdf", { timeoutMs: 0 }),
+    IngestError,
+  );
+  assertEquals(err.status, 504);
+  assertStringIncludes(err.message, "PDF parsing timed out");
+});
