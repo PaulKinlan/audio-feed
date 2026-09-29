@@ -433,6 +433,8 @@ export interface PasskeyCredential {
   name: string;
   createdAt: string;
   lastUsedAt?: string;
+  /** Authenticator Attestation GUID (RFC 4122 UUID, audio-feed-25t). */
+  aaguid?: string;
 }
 
 /**

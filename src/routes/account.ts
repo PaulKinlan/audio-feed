@@ -21,6 +21,7 @@ import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
+import { resolvePasskeyProvider } from "../auth/aaguid.ts";
 
 export interface PrefillData {
   url: string;
@@ -63,6 +64,11 @@ const CSS = `
   .bookmarklet-box { margin-block-start: 1rem; padding: var(--space-4); border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface-2); }
   .bookmarklet-btn { cursor: grab; display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; text-decoration: none; user-select: none; }
   .bookmarklet-btn:active { cursor: grabbing; }
+  .passkey-info { display: flex; align-items: center; gap: var(--space-3); }
+  .provider-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; flex-shrink: 0; }
+  .provider-icon svg { width: 100%; height: 100%; display: block; }
+  .passkey-text { display: flex; flex-direction: column; gap: 0.1rem; }
+  .passkey-label { font-size: 0.82rem; color: var(--text-muted); }
 `;
 
 function when(iso: string | undefined): string {
@@ -124,15 +130,23 @@ ${
     </li>`
   ).join("");
 
-  const passkeyItems = d.credentials.map((c) =>
-    `<li><div class="row-head"><span class="row-title">${esc(c.name)}</span>
+  const passkeyItems = d.credentials.map((c) => {
+    const provider = resolvePasskeyProvider(c.aaguid);
+    return `<li><div class="row-head">
+      <div class="passkey-info">
+        <span class="provider-icon" aria-hidden="true">${provider.iconSvg}</span>
+        <div class="passkey-text">
+          <span class="row-title">${esc(provider.name)}</span>
+          <span class="passkey-label">${esc(c.name)}</span>
+        </div>
+      </div>
       <button class="btn danger small" type="button" data-remove-passkey="${esc(c.id)}"${
       d.credentials.length <= 1
         ? ` disabled title="Add another passkey before removing this one"`
         : ""
     }>Remove</button></div>
-      <div class="meta">Added ${when(c.createdAt)} · last used ${when(c.lastUsedAt)}</div></li>`
-  ).join("");
+      <div class="meta">Added ${when(c.createdAt)} · last used ${when(c.lastUsedAt)}</div></li>`;
+  }).join("");
 
   const voiceOptions = [
     `<option value=""${user.voice ? "" : " selected"}>Deployment default</option>`,

@@ -1650,6 +1650,7 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       transports: ["internal"],
       name: "Laptop",
       createdAt: isoAt(0),
+      aaguid: "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4",
     };
     const second = { ...first, id: "cred-2", publicKey: "pk2", createdAt: isoAt(1) };
     const other = { ...first, id: "cred-3", userId: "user-2", createdAt: isoAt(2) };
