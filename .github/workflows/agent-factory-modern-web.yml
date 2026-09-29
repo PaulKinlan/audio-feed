@@ -47,9 +47,12 @@ jobs:
       - name: Set up Beads Database
         shell: bash
         run: |
-          echo "Fetching and syncing Beads Dolt database..."
+          set -euo pipefail
+          echo "Initializing and restoring Beads Dolt database..."
           git fetch origin refs/dolt/data:refs/dolt/data || true
-          bd dolt pull origin || bd init --prefix audio-feed || true
+          bd init --prefix audio-feed || true
+          bd dolt pull origin
+          bd list >/dev/null
           bd ready || true
 
       - name: Run Modern Web Factory Agent
@@ -68,9 +71,10 @@ jobs:
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           if [ -d ".beads" ] && command -v bd >/dev/null 2>&1; then
             echo "Syncing Beads Dolt database to origin..."
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            bd dolt push origin || true
+            bd dolt push origin
           fi
