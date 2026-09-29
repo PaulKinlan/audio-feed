@@ -10,6 +10,10 @@ permissions:
   contents: write
   issues: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   modern-web:
     name: 'Modern Web Audit (DeepSeek)'
@@ -40,8 +44,13 @@ jobs:
         run: |
           set -euo pipefail
           echo "Installing bd (Beads CLI v1.3.0)..."
-          curl -fsSL https://github.com/gastownhall/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin bd
+          EXPECTED_SHA256="2f92b904ecf35b607e44dc5c39229173af69c54f1183e8d709f1773540cdcf3b"
+          TARBALL="$RUNNER_TEMP/beads_1.3.0_linux_amd64.tar.gz"
+          curl -fsSL "https://github.com/gastownhall/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz" -o "$TARBALL"
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+          sudo tar -xz -C /usr/local/bin -f "$TARBALL" bd
           sudo chmod +x /usr/local/bin/bd
+          rm -f "$TARBALL"
           bd --version
 
       - name: Set up Beads Database
@@ -56,6 +65,7 @@ jobs:
           bd ready || true
 
       - name: Run Modern Web Factory Agent
+        id: factory-agent
         uses: PaulKinlan/agents/.github/actions/factory@1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b
         with:
           agent: modern-web
@@ -66,6 +76,24 @@ jobs:
           deepseek_model: 'deepseek-chat'
           github_token: ${{ secrets.GITHUB_TOKEN }}
           factory_ref: '1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b'
+
+      - name: Verify Audit Report Production
+        shell: bash
+        env:
+          DELTA_REPORT: ${{ steps.factory-agent.outputs.delta_report }}
+          RUN_STATUS: ${{ steps.factory-agent.outputs.status }}
+        run: |
+          set -euo pipefail
+          echo "Verifying modern-web audit produced findings report..."
+          if [ -z "$DELTA_REPORT" ]; then
+            echo "::error::Factory agent completed with no report output (silent no-op)."
+            exit 1
+          fi
+          if [ ! -f "$DELTA_REPORT" ]; then
+            echo "::error::Report file '$DELTA_REPORT' was declared but does not exist on disk."
+            exit 1
+          fi
+          echo "Report verified: $DELTA_REPORT ($(wc -l < "$DELTA_REPORT") lines)"
 
       - name: Sync Beads Database
         if: always()
