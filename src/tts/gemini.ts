@@ -91,6 +91,8 @@ export interface NarrationInput {
   voice?: GeminiTtsVoice | string;
   includeIntro?: boolean;
   customIntro?: string;
+  /** Style/tone direction for speech_metadata.style (audio-feed-bjt). Defaults to DEFAULT_NARRATION_STYLE. */
+  style?: string;
   /** How to handle code blocks in TTS generation (audio-feed-bdo). Defaults to "skip". */
   codeHandling?: CodeHandling;
   /** Optional code summarizer function when codeHandling is "explain" (audio-feed-bdo). */
@@ -112,6 +114,8 @@ export interface DialogueSpeaker {
 export interface DialogueTurn {
   speaker: string;
   text: string;
+  /** Optional style/tone direction for speech_metadata.style (audio-feed-bjt). */
+  style?: string;
 }
 
 /**
@@ -947,25 +951,31 @@ export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
 // Request Builders
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_NARRATION_STYLE = "natural, engaging narration";
+
 /**
- * Build Gemini GenerateContent request for single-voice narration
+ * Build Gemini GenerateContent request for single-voice narration.
+ * Gemini TTS treats parts[].text strictly as a verbatim transcript to be read aloud.
+ * Sustained acting, tone, and style instructions belong in speech_metadata.style,
+ * never in parts.text (audio-feed-bjt).
  */
 export function buildSingleVoiceRequest(
   prompt: string,
   voice: GeminiTtsVoice | string = DEFAULT_NARRATION_VOICE,
   temperature = 0.7,
-  systemInstructionText?: string,
+  style: string = DEFAULT_NARRATION_STYLE,
 ): GeminiGenerateContentRequest {
-  const parts: ContentPart[] = [];
-  if (systemInstructionText && systemInstructionText.trim()) {
-    parts.push({ text: systemInstructionText.trim() });
-  }
-  parts.push({ text: prompt });
+  const speechMetadata: SpeechMetadata = { style };
+  const part: ContentPart = {
+    text: prompt,
+    speech_metadata: speechMetadata,
+    speechMetadata,
+  };
 
   return {
     contents: [
       {
-        parts,
+        parts: [part],
       },
     ],
     generationConfig: {
@@ -1243,8 +1253,8 @@ export class GeminiTtsClient {
     const codeHandling = input.codeHandling ?? "skip";
     const processedBody = await formatCodeForTts(input.body, codeHandling, input.codeSummarizer);
     const prompt = formatNarrationPrompt({ ...input, body: processedBody });
-    const systemPrompt = buildNarrationSystemPrompt(codeHandling);
-    const request = buildSingleVoiceRequest(prompt, voice, options.temperature, systemPrompt);
+    const style = input.style ?? DEFAULT_NARRATION_STYLE;
+    const request = buildSingleVoiceRequest(prompt, voice, options.temperature, style);
     return await this.sendRequest(request, options);
   }
 

@@ -13,6 +13,7 @@ import {
   decodeAudioResponse,
   DEFAULT_EXPERT_VOICE,
   DEFAULT_FOIL_VOICE,
+  DEFAULT_NARRATION_STYLE,
   DEFAULT_NARRATION_VOICE,
   DEFAULT_TTS_MODEL,
   detectAudioFormat,
@@ -162,7 +163,10 @@ Deno.test("Single-voice narration - builds prompt with spoken intro and article 
 Deno.test("Single-voice narration - request builder creates valid Gemini payload", () => {
   const req = buildSingleVoiceRequest("Test article prompt", "Charon", 0.7);
 
+  assertEquals(req.contents[0]?.parts.length, 1);
   assertEquals(req.contents[0]?.parts[0]?.text, "Test article prompt");
+  assertEquals(req.contents[0]?.parts[0]?.speech_metadata?.style, DEFAULT_NARRATION_STYLE);
+  assertEquals(req.contents[0]?.parts[0]?.speechMetadata?.style, DEFAULT_NARRATION_STYLE);
   assertEquals(req.generationConfig.responseModalities, ["AUDIO"]);
   assertEquals(
     req.generationConfig.speechConfig.voiceConfig?.prebuiltVoiceConfig
@@ -734,7 +738,7 @@ Deno.test("GeminiTtsClient - handles HTTP 500 error from API", async () => {
 // 5. Episode Intro & Code Handling in Outgoing Requests (audio-feed-tov, audio-feed-bdo)
 // ---------------------------------------------------------------------------
 
-Deno.test("outgoing single-voice request captures title-first intro and systemInstruction (audio-feed-tov, audio-feed-bdo)", async () => {
+Deno.test("outgoing single-voice request captures title-first intro and keeps parts strictly verbatim without meta-instructions (audio-feed-tov, audio-feed-bdo, audio-feed-bjt)", async () => {
   let capturedRequest: GeminiGenerateContentRequest | null = null;
   const mockFetch: typeof fetch = (_url, init) => {
     capturedRequest = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
@@ -770,8 +774,10 @@ Deno.test("outgoing single-voice request captures title-first intro and systemIn
 
   assert(capturedRequest !== null);
   const req = capturedRequest as GeminiGenerateContentRequest;
-  const instructionPart = req.contents[0]?.parts[0]?.text ?? "";
-  const promptPart = req.contents[0]?.parts[1]?.text ?? "";
+
+  // Exactly 1 part: the verbatim article prompt (audio-feed-bjt)
+  assertEquals(req.contents[0]?.parts.length, 1);
+  const promptPart = req.contents[0]?.parts[0]?.text ?? "";
 
   // tov: first words must be title, followed by date, author, source
   assertEquals(
@@ -787,15 +793,23 @@ Deno.test("outgoing single-voice request captures title-first intro and systemIn
   assertEquals(promptPart.includes("First paragraph."), true);
   assertEquals(promptPart.includes("Final paragraph."), true);
 
+  // audio-feed-bjt: parts.text contains ONLY verbatim transcript and NEVER meta-instructions
+  const fullText = req.contents[0]?.parts.map((p) => p.text).join(" ") ?? "";
+  assertEquals(fullText.includes("You are an audio narrator"), false);
+  assertEquals(fullText.includes("Skip code blocks"), false);
+  assertEquals(fullText.includes("Never read raw code"), false);
+
+  // Style instruction rides in speech_metadata.style / speechMetadata.style
+  const part = req.contents[0]?.parts[0];
+  assertEquals(part?.speech_metadata?.style, DEFAULT_NARRATION_STYLE);
+  assertEquals(part?.speechMetadata?.style, DEFAULT_NARRATION_STYLE);
+
   // audio-feed-2ob: systemInstruction must NOT be attached to audio requests
   assertEquals(
     req.systemInstruction,
     undefined,
     "systemInstruction must NOT be attached to audio requests",
   );
-  // audio-feed-2ob: instruction text is folded into content parts as fallback guardrail
-  assertStringIncludes(instructionPart, "Skip code blocks");
-  assertStringIncludes(instructionPart, "Never read raw code");
 });
 
 Deno.test("formatCodeForTts - skips code blocks by default (audio-feed-bdo)", async () => {
@@ -1060,4 +1074,82 @@ Deno.test("GeminiTtsClient - synthesizeDialogue guarantees 100% of parts specify
 
   // 3. req.systemInstruction is undefined (rejected by Gemini audio endpoints)
   assertEquals(req.systemInstruction, undefined);
+
+  // audio-feed-bjt: dialogue parts.text contains ONLY verbatim dialogue turns and NEVER meta-instructions
+  const allDialogueText = parts.map((p) => p.text).join(" ");
+  assertEquals(allDialogueText.includes("You are an audio narrator"), false);
+  assertEquals(allDialogueText.includes("Skip code blocks"), false);
+  assertEquals(allDialogueText.includes("Never read raw code"), false);
+});
+
+Deno.test("Gemini TTS requests guarantee parts.text contains ONLY verbatim transcript without meta-instructions in single and dialogue (audio-feed-bjt)", async () => {
+  const capturedRequests: GeminiGenerateContentRequest[] = [];
+  const mockFetch: typeof fetch = (_url, init) => {
+    capturedRequests.push(JSON.parse(String(init?.body)) as GeminiGenerateContentRequest);
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: "audio/pcm;rate=24000",
+                  data: uint8ArrayToBase64(new Uint8Array(48)),
+                },
+              }],
+            },
+            finishReason: "STOP",
+          }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "test-key", fetchFn: mockFetch });
+
+  // 1. Single-voice narration
+  await client.synthesizeNarration({
+    title: "Article Title",
+    body: "Paragraph one.\n\nParagraph two.",
+    codeHandling: "skip",
+  });
+
+  // 2. Multi-speaker dialogue
+  await client.synthesizeDialogue({
+    turns: [
+      { speaker: "Alex", text: "Turn 1" },
+      { speaker: "Sam", text: "Turn 2" },
+    ],
+    speakers: [
+      { name: "Alex", role: "expert", voice: "Kore" },
+      { name: "Sam", role: "curious_foil", voice: "Puck" },
+    ],
+  });
+
+  assertEquals(capturedRequests.length, 2);
+
+  // Single-voice check
+  const singleReq = capturedRequests[0]!;
+  assertEquals(singleReq.contents[0]?.parts.length, 1);
+  const singleText = singleReq.contents[0]?.parts[0]?.text ?? "";
+  assertEquals(singleText.includes("You are an audio narrator"), false);
+  assertEquals(singleText.includes("Skip code blocks"), false);
+  assertEquals(singleText.includes("Never read raw code"), false);
+  assertStringIncludes(singleText, "Article Title");
+  assertStringIncludes(singleText, "Paragraph one.");
+  assertEquals(
+    singleReq.contents[0]?.parts[0]?.speech_metadata?.style,
+    DEFAULT_NARRATION_STYLE,
+  );
+
+  // Dialogue check
+  const dialogueReq = capturedRequests[1]!;
+  assertEquals(dialogueReq.contents[0]?.parts.length, 2);
+  for (const part of dialogueReq.contents[0]!.parts) {
+    assertEquals(part.text.includes("You are an audio narrator"), false);
+    assertEquals(part.text.includes("Skip code blocks"), false);
+    assertEquals(part.text.includes("Never read raw code"), false);
+    assert(Boolean(part.speech_metadata?.speaker));
+  }
 });
