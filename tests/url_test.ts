@@ -314,14 +314,14 @@ Deno.test("extractPdfArticle: strips newlines, control characters, and caps titl
   const article = await extractPdfArticle(bytes, "https://example.com/sanitized.pdf");
   // Asserts title is capped at 200 chars max
   assertEquals(article.title.length <= 200, true);
-  // Asserts no non-printable / control characters exist in title or author
+  // Asserts no non-printable / control characters (C0, DEL, C1) exist in title or author
   for (let i = 0; i < article.title.length; i++) {
     const code = article.title.charCodeAt(i);
-    assertEquals(code >= 32 && code !== 127, true);
+    assertEquals(code >= 32 && code !== 127 && !(code >= 128 && code <= 159), true);
   }
   for (let i = 0; i < article.author!.length; i++) {
     const code = article.author!.charCodeAt(i);
-    assertEquals(code >= 32 && code !== 127, true);
+    assertEquals(code >= 32 && code !== 127 && !(code >= 128 && code <= 159), true);
   }
   assertEquals(article.author, "Author With Newlines");
 });

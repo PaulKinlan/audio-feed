@@ -704,8 +704,12 @@ async function parsePdfBounded(
     origLog(...args);
   };
 
+  const parsePromise = pdfParse(bytes);
+  // Attach no-op catch so a later rejection after timeout loss is explicitly handled
+  parsePromise.catch(() => {});
+
   try {
-    return await Promise.race([pdfParse(bytes), timeoutPromise]);
+    return await Promise.race([parsePromise, timeoutPromise]);
   } catch (err) {
     if (err instanceof IngestError) throw err;
     throw new IngestError(
@@ -722,7 +726,8 @@ function sanitizeMetadataText(text: string, maxLength: number): string {
   let cleanStr = "";
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
-    if (code >= 32 && code !== 127) {
+    // Strip C0 controls (< 32), DEL (127), and C1 controls (128-159)
+    if (code >= 32 && code !== 127 && !(code >= 128 && code <= 159)) {
       cleanStr += text[i];
     } else {
       cleanStr += " ";
