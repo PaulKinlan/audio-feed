@@ -66,7 +66,7 @@ jobs:
 
       - name: Run Modern Web Factory Agent
         id: factory_agent
-        uses: PaulKinlan/agents/.github/actions/factory@1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b
+        uses: PaulKinlan/agents/.github/actions/factory@c7363b49d2957323b3ae8b60560d44a93379c316
         with:
           agent: modern-web
           target: '.'
@@ -75,7 +75,7 @@ jobs:
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY || secrets.deepseek_api_key }}
           deepseek_model: 'deepseek-chat'
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          factory_ref: '1cbddeeff89687c93d2b1bf3ca595e1eeba4a79b'
+          factory_ref: 'c7363b49d2957323b3ae8b60560d44a93379c316'
 
       - name: Verify Audit Report Production
         shell: bash
