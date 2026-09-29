@@ -112,6 +112,7 @@ import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
+import { SPECULATION_RULES } from "./shell.ts";
 import {
   type AudioMode,
   type Episode,
@@ -227,6 +228,7 @@ export function renderListenPage(
 <link rel="icon" href="/icon.svg">
 <link rel="alternate" type="application/rss+xml" title="${esc(title)}" href="${esc(feedUrl)}">
 <link rel="stylesheet" href="${assetUrl("listen.css")}">
+${SPECULATION_RULES}
 </head>
 <body>
 ${ICON_SPRITE}
@@ -721,6 +723,7 @@ export function renderListenLanding(publicBaseUrl: string): string {
 <meta name="theme-color" content="#0a0a0c">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
+${SPECULATION_RULES}
 <style>
   ${DESIGN_TOKENS}
   * { box-sizing:border-box; }
