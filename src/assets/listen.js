@@ -444,6 +444,61 @@ function row(episode) {
   }
   download.addEventListener("click", () => downloadEpisode(episode, download));
   actions.appendChild(download);
+
+  // Native Web Share API with clipboard fallback (audio-feed-zcw)
+  // Per Modern Web Guidance: checks navigator.canShare, provides clipboard fallback with
+  // visual feedback, and updates accessible labels for screen readers.
+  // TODO(baseline/share): keep navigator.share; clipboard writeText is the fallback for browsers without Web Share support.
+  const share = document.createElement("button");
+  share.type = "button";
+  share.className = "ep-share";
+  share.dataset.action = "share";
+  share.setAttribute("aria-label", "Share episode: " + episode.title);
+  share.appendChild(icon("share"));
+  share.addEventListener("click", async () => {
+    const shareUrl = episode.articleUrl || episode.audioUrl || window.location.href;
+    const shareData = {
+      title: episode.title,
+      text: episode.source
+        ? `Listen to "${episode.title}" (${episode.source}) on Audio Feed`
+        : `Listen to "${episode.title}" on Audio Feed`,
+      url: shareUrl,
+    };
+
+    let shared = false;
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+      try {
+        if (!navigator.canShare || navigator.canShare(shareData)) {
+          await navigator.share(shareData);
+          shared = true;
+        }
+      } catch (err) {
+        // User dismissed / cancelled native share sheet
+        if (err && /** @type {Error} */ (err).name === "AbortError") {
+          return;
+        }
+      }
+    }
+
+    if (!shared) {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        share.dataset.state = "copied";
+        share.setAttribute("aria-label", "Link copied for: " + episode.title);
+        setIcon(share, "saved");
+        say("Link copied to clipboard.", "ok");
+        setTimeout(() => {
+          delete share.dataset.state;
+          share.setAttribute("aria-label", "Share episode: " + episode.title);
+          setIcon(share, "share");
+        }, 2000);
+      } catch {
+        say("Could not copy link to clipboard.", "error");
+      }
+    }
+  });
+  actions.appendChild(share);
+
   // Read-along linkback (audio-feed-585): a real anchor, so it can be opened in a new tab,
   // middle-clicked, and read out as a link. The client never trusts the URL further than the
   // server already did — the server only sends http(s) — and rel=noopener is explicit so the

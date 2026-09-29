@@ -581,6 +581,30 @@ li.episode[data-current="true"] .ep-play {
   font-family: var(--mono);
   letter-spacing: -0.04em;
 }
+.ep-share {
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.ep-share:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border-2);
+}
+.ep-share:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.ep-share[data-state="copied"] {
+  color: var(--ok);
+}
 
 .empty {
   margin: var(--space-6) 0;

@@ -198,6 +198,7 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
     <symbol id="i-rss" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M5 11.2a7.8 7.8 0 0 1 7.8 7.8"/><path d="M5 5.6A13.4 13.4 0 0 1 18.4 19"/></g><circle cx="5.6" cy="18.4" r="1.7" fill="currentColor"/></symbol>
     <symbol id="i-voice-one" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 4.8v14.4"/><path d="M7.4 8.6v6.8"/><path d="M16.6 8.6v6.8"/></g></symbol>
     <symbol id="i-voice-two" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M8.6 4.8v14.4"/><path d="M15.4 4.8v14.4"/><path d="M4.4 9.4v5.2"/><path d="M19.6 9.4v5.2"/></g></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></g></symbol>
   </defs>
 </svg>`;
 
