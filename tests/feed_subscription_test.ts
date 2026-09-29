@@ -1048,8 +1048,9 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
   assertEquals(capturedPrompt.includes("const a = 1"), false);
   assertEquals(capturedPrompt.includes("First paragraph."), true);
   assertEquals(capturedPrompt.includes("Last paragraph."), true);
-  // audio-feed-2ob: instruction folded into content parts, systemInstruction omitted
-  assertStringIncludes(capturedPrompt, "Skip code blocks");
+  // audio-feed-bjt: parts.text contains ONLY article text, NEVER system instructions
+  assertEquals(capturedPrompt.includes("Skip code blocks"), false);
+  assertEquals(capturedPrompt.includes("You are an audio narrator"), false);
   assertEquals(capturedSystemInstruction, "");
 
   // 2. Source with codeHandling = "explain" AND summarizer provided
@@ -1081,8 +1082,9 @@ Deno.test("createGeminiSynthesizer respects source codeHandling, stripping code 
     "brackets must not reach spoken prompt (audio-feed-sju)",
   );
   assertEquals(capturedPrompt.includes("const a = 1;\nconsole.log(a);"), false);
-  // audio-feed-2ob: instruction folded into content parts, systemInstruction omitted
-  assertStringIncludes(capturedPrompt, "explain or summarize");
+  // audio-feed-bjt: parts.text contains ONLY article text, NEVER system instructions
+  assertEquals(capturedPrompt.includes("explain or summarize"), false);
+  assertEquals(capturedPrompt.includes("You are an audio narrator"), false);
   assertEquals(capturedSystemInstruction, "");
 
   // 3. Source with codeHandling = "explain" BUT NO summarizer provided -> fallback to skip
