@@ -23,37 +23,35 @@ Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes tem
   );
 });
 
-Deno.test("proof-helper: spawnHarness binds ephemeral port 0 and answers health check", async () => {
-  const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) {
-    console.log("SKIP: spawnHarness test requires --allow-run (run via deno task test:proof)");
-    return;
-  }
-  const harness = await spawnHarness("scripts/account-harness.ts");
-  try {
-    assertEquals(harness.port > 0, true, `assigned port ${harness.port} must be > 0`);
-    const health = await fetch(`${harness.base}/health`);
-    assertEquals(health.ok, true);
+Deno.test({
+  name: "proof-helper: spawnHarness binds ephemeral port 0 and answers health check",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const harness = await spawnHarness("scripts/account-harness.ts");
+    try {
+      assertEquals(harness.port > 0, true, `assigned port ${harness.port} must be > 0`);
+      const health = await fetch(`${harness.base}/health`);
+      assertEquals(health.ok, true);
 
-    const logs = harness.getLogs();
-    assertStringIncludes(logs.stdout, `READY port=${harness.port}`);
-  } finally {
-    harness.kill();
-  }
+      const logs = harness.getLogs();
+      assertStringIncludes(logs.stdout, `READY port=${harness.port}`);
+    } finally {
+      harness.kill();
+    }
+  },
 });
 
-Deno.test("proof-helper: spawnHarness fails fast if child process exits prematurely", async () => {
-  const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) {
-    console.log("SKIP: spawnHarness test requires --allow-run (run via deno task test:proof)");
-    return;
-  }
-  // Test with non-existent or failing script argument
-  await assertRejects(
-    async () => {
-      await spawnHarness("scripts/non-existent-script.ts", [], { timeoutMs: 3000 });
-    },
-    Error,
-    "exited prematurely",
-  );
+Deno.test({
+  name: "proof-helper: spawnHarness fails fast if child process exits prematurely",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // Test with non-existent or failing script argument
+    await assertRejects(
+      async () => {
+        await spawnHarness("scripts/non-existent-script.ts", [], { timeoutMs: 3000 });
+      },
+      Error,
+      "exited prematurely",
+    );
+  },
 });
