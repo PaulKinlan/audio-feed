@@ -38,7 +38,7 @@ Deno.test("aaguid: maps known provider AAGUIDs to names and SVG icons", () => {
     {
       aaguid: "08987058-cadc-4b81-b6e1-30de50dcbe96",
       expectedName: "Windows Hello",
-      iconKeyword: "#00A4EF",
+      iconKeyword: "#0078D4",
     },
     {
       aaguid: "bada5566-a7aa-401f-bd96-45619a55120d",
@@ -118,8 +118,57 @@ Deno.test("aaguid: falls back cleanly for unknown, empty, or all-zeroes AAGUID",
     assertEquals(res.name, "Passkey");
     assertEquals(res.id, "generic");
     assertStringIncludes(res.iconSvg, "<svg");
-    assertStringIncludes(res.iconSvg, 'stroke="currentColor"');
+    assertStringIncludes(res.iconSvg, 'fill="currentColor"');
+    assertStringIncludes(res.iconSvg, 'd="M7.5 12a4.5 4.5 0 1 1 0-9');
   }
+});
+
+Deno.test("aaguid: all provider SVGs use canonical official vector paths (audio-feed-f6r)", () => {
+  // 1. Generic Passkey (official FIDO Alliance logo)
+  const passkey = resolvePasskeyProvider(undefined);
+  assertEquals(passkey.name, "Passkey");
+  assertStringIncludes(passkey.iconSvg, 'd="M7.5 12a4.5 4.5 0 1 1 0-9');
+
+  // 2. Windows Hello (official Microsoft 4-square grid)
+  const windows = resolvePasskeyProvider("08987058-cadc-4b81-b6e1-30de50dcbe96");
+  assertEquals(windows.name, "Windows Hello");
+  assertStringIncludes(
+    windows.iconSvg,
+    'd="M2 2h9v9H2V2zm11 0h9v9h-9V2zM2 13h9v9H2v-9zm11 0h9v9h-9v-9z"',
+  );
+  assertStringIncludes(windows.iconSvg, 'fill="#0078D4"');
+
+  // 3. 1Password (official keyhole badge)
+  const onepassword = resolvePasskeyProvider("bada5566-a7aa-401f-bd96-45619a55120d");
+  assertEquals(onepassword.name, "1Password");
+  assertStringIncludes(onepassword.iconSvg, 'fill="#0A85EA"');
+  assertStringIncludes(onepassword.iconSvg, 'd="M12 7a3 3 0 0 0-1.8 5.4V15');
+
+  // 4. Bitwarden (official shield and cutout)
+  const bitwarden = resolvePasskeyProvider("d548826e-79b4-db40-a3d8-11116f7e8349");
+  assertEquals(bitwarden.name, "Bitwarden");
+  assertStringIncludes(bitwarden.iconSvg, 'd="M12 2.5 4 5.7v6.6c0 5 3.4 9.7 8 10.7');
+  assertStringIncludes(bitwarden.iconSvg, 'fill="#175DDC"');
+
+  // 5. Dashlane (official D stripes)
+  const dashlane = resolvePasskeyProvider("531126d6-e717-415c-9320-3d9aa6981239");
+  assertEquals(dashlane.name, "Dashlane");
+  assertStringIncludes(dashlane.iconSvg, 'd="M3 4h8.5C16.7 4 21 8.3 21 13.5');
+  assertStringIncludes(dashlane.iconSvg, 'fill="#00A389"');
+
+  // 6. Yubico (official key Y)
+  const yubico = resolvePasskeyProvider("0a357157-9b18-4c8a-920e-d156e972b2f8");
+  assertEquals(yubico.name, "YubiKey");
+  assertStringIncludes(yubico.iconSvg, 'fill="#54BA37"');
+  assertStringIncludes(
+    yubico.iconSvg,
+    'd="M8.5 7h2.2l2.3 4.5L15.3 7h2.2l-3.6 6.8V18h-2v-4.2L8.5 7z"',
+  );
+
+  // 7. Apple (canonical silhouette)
+  const apple = resolvePasskeyProvider("fbfc3007-154e-4ecc-8c0b-6e020557d7bd");
+  assertEquals(apple.name, "iCloud Keychain");
+  assertStringIncludes(apple.iconSvg, 'd="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47');
 });
 
 Deno.test("aaguid: /account renders provider icon and provider name next to passkey", async () => {
