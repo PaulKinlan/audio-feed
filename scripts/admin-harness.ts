@@ -70,6 +70,8 @@ Deno.serve(
     port,
     hostname: "localhost",
     onListen: ({ port: assignedPort }) => {
+      config.port = assignedPort;
+      config.publicBaseUrl = `http://localhost:${assignedPort}`;
       console.log(`READY port=${assignedPort} base=http://localhost:${assignedPort}`);
       const scenario = stopped
         ? "poll cron stopped 1 h in, synthesis still ticking"

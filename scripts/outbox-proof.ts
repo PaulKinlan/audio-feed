@@ -19,8 +19,7 @@ import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 
-const PORT = 8145;
-const BASE = `http://localhost:${PORT}`;
+const requestedPort = Number(Deno.args.find((a) => /^\d+$/.test(a)) ?? 0);
 const TOKEN = "subscriber-token-123";
 const ADMIN_TOKEN = "admin-secret-999";
 const OUT = new URL("../docs/evidence/audio-feed-np5/", import.meta.url).pathname;
@@ -47,8 +46,8 @@ function fakeAudio(): DecodedAudioResult {
 }
 
 const config: AppConfig = {
-  port: PORT,
-  publicBaseUrl: BASE,
+  port: requestedPort,
+  publicBaseUrl: requestedPort ? `http://localhost:${requestedPort}` : "http://localhost",
   adminToken: ADMIN_TOKEN,
   notifyOutboxEnabled: true,
 };
@@ -66,7 +65,20 @@ const handlers = createHandlers(ctx, {
       body: "Full article body for on-demand testing.",
     }),
 });
-const { fetch } = createApp(ctx, handlers);
+const app = createApp(ctx, handlers);
+const server = Deno.serve(
+  {
+    port: requestedPort,
+    hostname: "localhost",
+    onListen: () => {},
+  },
+  (req) => app.fetch(req),
+);
+const PORT = (server.addr as Deno.NetAddr).port;
+const BASE = `http://localhost:${PORT}`;
+config.port = PORT;
+config.publicBaseUrl = BASE;
+const fetch = (input: RequestInfo | URL, init?: RequestInit) => app.fetch(new Request(input, init));
 
 const checks: { step: string; ok: boolean; detail: string }[] = [];
 const check = (step: string, ok: boolean, detail: string) => {
@@ -228,3 +240,5 @@ ${checks.map((c) => `${c.ok ? "PASS" : "FAIL"} ${c.step}: ${c.detail}`).join("\n
 
 await Deno.writeTextFile(`${OUT}README.md`, summary);
 console.log(`Saved report to ${OUT}README.md`);
+
+await server.shutdown();
