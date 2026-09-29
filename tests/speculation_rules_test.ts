@@ -51,7 +51,7 @@ Deno.test("SPECULATION_RULES: definition is valid JSON adhering to WICG document
 
   assert(excludedHrefs.includes("/api/*"), "must exclude /api/* mutations");
   assert(excludedHrefs.includes("/admin*"), "must exclude /admin*");
-  assert(excludedHrefs.includes("*/logout"), "must exclude logout");
+  assert(excludedHrefs.includes("/logout*"), "must exclude /logout*");
 });
 
 Deno.test("pages render speculation rules on public and user surfaces (audio-feed-nvj)", async () => {

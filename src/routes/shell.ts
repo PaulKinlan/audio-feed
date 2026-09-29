@@ -52,7 +52,7 @@ export const SPECULATION_RULES = `<script type="speculationrules">
           { "href_matches": "/*" },
           { "not": { "href_matches": "/api/*" } },
           { "not": { "href_matches": "/admin*" } },
-          { "not": { "href_matches": "*/logout" } },
+          { "not": { "href_matches": "/logout*" } },
           { "not": { "selector_matches": "[data-no-prefetch]" } },
           { "not": { "selector_matches": "[rel~=nofollow]" } }
         ]
