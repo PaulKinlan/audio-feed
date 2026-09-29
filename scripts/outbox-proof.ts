@@ -133,7 +133,7 @@ const n1 = outboxData.notifications[0];
 check(
   "notification names episode title and player URL",
   n1.title === "On-Demand Read Article" && n1.playerUrl === `${BASE}/listen/${TOKEN}` && n1.status === "ready",
-  `title='${n1.title}', playerUrl='${n1.playerUrl}', status='${n1.status}'`,
+  `title='${n1.title}', playerUrl='http://localhost:<ephemeral>/listen/${TOKEN}', status='${n1.status}'`,
 );
 
 // 5. Feed poll: seed 3 feed episodes from an RSS source
