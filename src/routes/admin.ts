@@ -35,7 +35,7 @@ import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { esc, jsonForScript } from "./html.ts";
-import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { CONFIRM_DIALOG_CLIENT, renderShell, type Viewer, viewerOf } from "./shell.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
@@ -510,6 +510,7 @@ export function renderAdminPage(
 <script>
 (() => {
   "use strict";
+${CONFIRM_DIALOG_CLIENT}
   // ── Session identity, the admin token, and the API wrapper ───────────────
   const ORIGIN = ${jsonForScript(publicBaseUrl)};
   // audio-feed-8fc: a signed-in admin's requests carry the session cookie.
@@ -692,7 +693,13 @@ export function renderAdminPage(
   });
 
   async function setRole(user, isAdmin, button) {
-    if (!isAdmin && !confirm("Remove admin access from " + user.email + "?")) return;
+    if (!isAdmin) {
+      const ok = await askConfirm("Remove admin access from " + user.email + "?", {
+        title: "Revoke Admin Access",
+        confirmText: "Revoke",
+      });
+      if (!ok) return;
+    }
     button.disabled = true;
     try {
       await api("/api/admin/users/" + encodeURIComponent(user.id) + "/role", {
@@ -1072,11 +1079,14 @@ export function renderAdminPage(
 
   rotateManageToken.addEventListener("click", async () => {
     if (!currentManagingUser) return;
-    if (
-      !confirm(
-        "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working.",
-      )
-    ) {
+    const ok = await askConfirm(
+      "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working.",
+      {
+        title: "Rotate Feed Token",
+        confirmText: "Rotate Token",
+      },
+    );
+    if (!ok) {
       return;
     }
     rotateManageToken.disabled = true;
@@ -1171,7 +1181,11 @@ export function renderAdminPage(
         delBtn.textContent = "Remove";
         delBtn.setAttribute("aria-label", "Remove feed " + source.title);
         delBtn.addEventListener("click", async () => {
-          if (!confirm("Remove feed subscription \\"" + source.title + "\\"?")) return;
+          const ok = await askConfirm("Remove feed subscription \\"" + source.title + "\\"?", {
+            title: "Remove Feed Subscription",
+            confirmText: "Remove",
+          });
+          if (!ok) return;
           delBtn.disabled = true;
           try {
             const res = await api(
@@ -1287,12 +1301,15 @@ export function renderAdminPage(
   }
 
   async function regenerateEpisode(userId, episode, button) {
-    if (
-      !confirm(
-        "Regenerate 1 episode (\\"" + (episode.title || episode.id) + "\\")? " +
-          "This is a billed TTS call. The old audio keeps playing until the new audio is ready.",
-      )
-    ) {
+    const ok = await askConfirm(
+      "Regenerate 1 episode (\\"" + (episode.title || episode.id) + "\\")? " +
+        "This is a billed TTS call. The old audio keeps playing until the new audio is ready.",
+      {
+        title: "Regenerate Episode",
+        confirmText: "Regenerate",
+      },
+    );
+    if (!ok) {
       return;
     }
     button.disabled = true;
@@ -1315,12 +1332,15 @@ export function renderAdminPage(
   }
 
   async function retrySingleEpisode(userId, episode, button) {
-    if (
-      !confirm(
-        "Retry failed episode (\\"" + (episode.title || episode.id) + "\\")? " +
-          "This will re-queue it for synthesis.",
-      )
-    ) {
+    const ok = await askConfirm(
+      "Retry failed episode (\\"" + (episode.title || episode.id) + "\\")? " +
+        "This will re-queue it for synthesis.",
+      {
+        title: "Retry Failed Episode",
+        confirmText: "Retry",
+      },
+    );
+    if (!ok) {
       return;
     }
     button.disabled = true;
@@ -1356,7 +1376,11 @@ export function renderAdminPage(
       : scope === "all"
       ? "Regenerate and retry " + plural(count) + "? Each ready episode is re-narrated with current prompts and failed episodes are retried."
       : "Regenerate " + plural(count) + " made with older prompts? Each is a billed TTS call. The old audio keeps playing until the new audio is ready.";
-    if (!confirm(promptMessage)) {
+    const ok = await askConfirm(promptMessage, {
+      title: scope === "failed" ? "Retry Failed Episodes" : "Regenerate Episodes",
+      confirmText: scope === "failed" ? "Retry All" : "Regenerate",
+    });
+    if (!ok) {
       return;
     }
     button.disabled = true;

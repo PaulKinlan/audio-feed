@@ -20,7 +20,7 @@ import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
 import { INBOX_SOURCE_ID } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
-import { PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
+import { CONFIRM_DIALOG_CLIENT, PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
 import { resolvePasskeyProvider } from "../auth/aaguid.ts";
 
@@ -389,6 +389,7 @@ ${sendSection}
   const DISPLAY = ${jsonForScript({ name: user.email, displayName: user.displayName })};
   const PREFILL = ${jsonForScript(d.prefill ?? null)};
 ${PASSKEY_CLIENT}
+${CONFIRM_DIALOG_CLIENT}
   const $ = (id) => document.getElementById(id);
   const say = (el, tone, text) => { el.dataset.tone = tone; el.textContent = text; };
 
@@ -587,7 +588,11 @@ ${PASSKEY_CLIENT}
 
   for (const button of document.querySelectorAll("[data-remove-source]")) {
     button.addEventListener("click", async () => {
-      if (!confirm("Remove " + button.dataset.title + "? Episodes already made stay in your feed.")) return;
+      const ok = await askConfirm("Remove " + button.dataset.title + "? Episodes already made stay in your feed.", {
+        title: "Remove Feed Source",
+        confirmText: "Remove",
+      });
+      if (!ok) return;
       button.disabled = true;
       try {
         await send("DELETE", "/api/account/sources/" + encodeURIComponent(button.dataset.removeSource));
@@ -602,7 +607,11 @@ ${PASSKEY_CLIENT}
   // Regenerating is paid synthesis: every press confirms what it will spend.
   for (const button of document.querySelectorAll("[data-regenerate-episode]")) {
     button.addEventListener("click", async () => {
-      if (!confirm("Regenerate " + button.dataset.title + "? This narrates it again (1 episode of synthesis).")) return;
+      const ok = await askConfirm("Regenerate " + button.dataset.title + "? This narrates it again (1 episode of synthesis).", {
+        title: "Regenerate Episode",
+        confirmText: "Regenerate",
+      });
+      if (!ok) return;
       button.disabled = true;
       try {
         const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.regenerateEpisode) + "/regenerate", {});
@@ -618,7 +627,11 @@ ${PASSKEY_CLIENT}
 
   for (const button of document.querySelectorAll("[data-retry-episode]")) {
     button.addEventListener("click", async () => {
-      if (!confirm("Retry failed episode " + button.dataset.title + "? This will re-queue it for synthesis.")) return;
+      const ok = await askConfirm("Retry failed episode " + button.dataset.title + "? This will re-queue it for synthesis.", {
+        title: "Retry Failed Episode",
+        confirmText: "Retry",
+      });
+      if (!ok) return;
       button.disabled = true;
       try {
         const res = await send("POST", "/api/account/episodes/" + encodeURIComponent(button.dataset.retryEpisode) + "/retry", {});
@@ -635,7 +648,11 @@ ${PASSKEY_CLIENT}
   if (retryFailed) {
     retryFailed.addEventListener("click", async () => {
       const count = Number(retryFailed.dataset.count);
-      if (!confirm("Retry " + count + " failed episode(s)? This will re-queue each failed episode for synthesis.")) return;
+      const ok = await askConfirm("Retry " + count + " failed episode(s)? This will re-queue each failed episode for synthesis.", {
+        title: "Retry Failed Episodes",
+        confirmText: "Retry All",
+      });
+      if (!ok) return;
       retryFailed.disabled = true;
       try {
         const res = await send("POST", "/api/account/regenerate", { scope: "failed" });
@@ -651,7 +668,11 @@ ${PASSKEY_CLIENT}
   if (regenOutdated) {
     regenOutdated.addEventListener("click", async () => {
       const count = Number(regenOutdated.dataset.count);
-      if (!confirm("Regenerate " + count + " outdated episode(s)? Each one is narrated again, which is " + count + " episode(s) of synthesis.")) return;
+      const ok = await askConfirm("Regenerate " + count + " outdated episode(s)? Each one is narrated again, which is " + count + " episode(s) of synthesis.", {
+        title: "Regenerate Outdated Episodes",
+        confirmText: "Regenerate All",
+      });
+      if (!ok) return;
       regenOutdated.disabled = true;
       try {
         const res = await send("POST", "/api/account/regenerate", {});
@@ -664,7 +685,11 @@ ${PASSKEY_CLIENT}
   }
 
   $("rotateToken").addEventListener("click", async () => {
-    if (!confirm("Make a new feed URL? The current one stops working in every podcast app straight away.")) return;
+    const ok = await askConfirm("Make a new feed URL? The current one stops working in every podcast app straight away.", {
+      title: "Rotate Feed URL",
+      confirmText: "Make New URL",
+    });
+    if (!ok) return;
     try {
       await send("POST", "/api/account/rotate-token", {});
       location.reload();
@@ -695,7 +720,11 @@ ${PASSKEY_CLIENT}
 
   for (const button of document.querySelectorAll("[data-remove-passkey]")) {
     button.addEventListener("click", async () => {
-      if (!confirm("Remove this passkey? You won't be able to sign in with it again.")) return;
+      const ok = await askConfirm("Remove this passkey? You won't be able to sign in with it again.", {
+        title: "Remove Passkey",
+        confirmText: "Remove",
+      });
+      if (!ok) return;
       button.disabled = true;
       try {
         await send("DELETE", "/api/account/passkeys/" + encodeURIComponent(button.dataset.removePasskey));

@@ -94,6 +94,12 @@ const PAGE_IDS = [
   "synthesisBody",
   "synthesisCaption",
   "newDailyBudget",
+  // audio-feed-ytl: native accessible modal dialog
+  "confirmDialog",
+  "confirmTitle",
+  "confirmMessage",
+  "confirmOkBtn",
+  "confirmCancelBtn",
 ];
 
 export interface StubElement {
@@ -117,6 +123,7 @@ export interface StubElement {
   replaceChildren(...children: StubElement[]): void;
   setAttribute(name: string, value: string): void;
   addEventListener(type: string, fn: (event: StubEvent) => unknown): void;
+  removeEventListener(type: string, fn: (event: StubEvent) => unknown): void;
   focus(): void;
   select(): void;
   scrollIntoView(): void;
@@ -124,6 +131,11 @@ export interface StubElement {
   click(): unknown;
   /** Fire a submit listener, as pressing the form's submit button would. */
   submit(): unknown;
+  /** audio-feed-ytl — native dialog methods and properties */
+  open?: boolean;
+  returnValue?: string;
+  showModal?: () => void;
+  close?: (val?: string) => void;
   /** Every element at or below this one, depth first. */
   descendants(): StubElement[];
 }
@@ -179,6 +191,12 @@ function makeElement(tag: string, id = ""): StubElement {
     addEventListener(type, fn) {
       const list = el.listeners.get(type) ?? [];
       list.push(fn);
+      el.listeners.set(type, list);
+    },
+    removeEventListener(type, fn) {
+      const list = el.listeners.get(type) ?? [];
+      const idx = list.indexOf(fn);
+      if (idx >= 0) list.splice(idx, 1);
       el.listeners.set(type, list);
     },
     focus() {},
@@ -328,11 +346,31 @@ export function extractInlineScript(html: string): string {
 export async function runAdminScript(options: HarnessOptions): Promise<AdminHarness> {
   const publicBaseUrl = options.publicBaseUrl ?? "https://audio.example.com";
   const elements = new Map<string, StubElement>();
-  for (const id of PAGE_IDS) elements.set(id, makeElement("div", id));
+  for (const id of PAGE_IDS) {
+    elements.set(id, makeElement(id === "confirmDialog" ? "dialog" : "div", id));
+  }
 
   const requests: RecordedRequest[] = [];
   const confirms: ConfirmCall[] = [];
   let confirmAnswer = true;
+
+  const confirmDialogEl = elements.get("confirmDialog");
+  if (confirmDialogEl) {
+    confirmDialogEl.showModal = () => {
+      confirmDialogEl.open = true;
+      const msgEl = elements.get("confirmMessage");
+      const msg = msgEl ? msgEl.textContent : "";
+      confirms.push({ message: msg, answer: confirmAnswer });
+      confirmDialogEl.returnValue = confirmAnswer ? "confirm" : "cancel";
+      confirmDialogEl.open = false;
+      fire(confirmDialogEl, "close");
+    };
+    confirmDialogEl.close = (val?: string) => {
+      confirmDialogEl.open = false;
+      if (val !== undefined) confirmDialogEl.returnValue = val;
+      fire(confirmDialogEl, "close");
+    };
+  }
 
   const document = {
     getElementById(id: string): StubElement {
