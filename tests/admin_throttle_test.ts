@@ -275,7 +275,21 @@ Deno.test("admin throttle: integration test driving server.fetch with real conne
     assertEquals(blocked1.status, 429);
     assertStringIncludes(await blocked1.text(), "Too many failed admin authentication attempts");
 
-    // Client 2 (different IP) is unaffected
+    // Client 2 (different IP) sends an INVALID token: must return 401 (attempt 1), NOT 429 (inherited lockout).
+    // This proves client 2 does not share client 1's locked-out bucket (audio-feed-dt2).
+    const client2Wrong = await booted.fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        headers: { "x-admin-token": "wrong-client2" },
+      }),
+      client2,
+    );
+    assertEquals(
+      client2Wrong.status,
+      401,
+      "client 2 must receive 401 on wrong token, proving isolated bucket from locked-out client 1",
+    );
+
+    // Client 2 with valid token succeeds
     const client2Res = await booted.fetch(
       new Request(`${BASE}/api/admin/users`, {
         headers: { "x-admin-token": ADMIN_SECRET },
