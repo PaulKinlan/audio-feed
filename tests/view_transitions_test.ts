@@ -48,7 +48,10 @@ Deno.test("DESIGN_TOKENS: @view-transition is strictly scoped to no-preference m
 
 Deno.test("view-transitions: link click engages transition under no-preference and suppresses under reduce (audio-feed-rra, audio-feed-81q)", async () => {
   const hasRun = (await Deno.permissions.query({ name: "run" })).state === "granted";
-  if (!hasRun) return;
+  if (!hasRun) {
+    console.log("SKIP: browser view transitions test requires --allow-run");
+    return;
+  }
 
   const pageA = `<!doctype html>
 <html>
