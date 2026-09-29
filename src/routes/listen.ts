@@ -366,9 +366,8 @@ ${ICON_SPRITE}
   </div>
 </section>
 
-  // audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
-  // one JSON document. Data in the page, code in a file — so the code is visible to deno check and
-  // deno lint, which is what let a 670-line browser module ship bugs no tool could see.
+  <!-- audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
+       one JSON document. Data in the page, code in a file. -->
   <script type="application/json" id="player-data">${jsonForScript(playerData)}</script>
   <script type="module" src="${assetUrl("listen.js")}"></script>
 </body>
@@ -501,11 +500,29 @@ function activityFrom(
     }
   }
 
+  // audio-feed-cls: filter out stale failures that have already been reprocessed into ready/queued episodes
+  const isSuperceded = (failed: Episode) => {
+    return episodes.some((live) => {
+      if (live.id === failed.id) return false;
+      const isLive = isPublishable(live) || live.status === "pending" ||
+        live.status === "synthesizing";
+      if (!isLive) return false;
+      const sameArticleAndTitle = Boolean(
+        live.articleId && failed.articleId && live.articleId === failed.articleId &&
+          live.title && failed.title && live.title === failed.title,
+      );
+      const sameMode = !live.mode || !failed.mode || live.mode === failed.mode;
+      return sameArticleAndTitle && sameMode;
+    });
+  };
+
+  const activeFailed = allFailed.filter((f) => !isSuperceded(f));
+
   return {
     inProgress: queued.map((episode) =>
       toRow(episode, episode.status === "synthesizing" ? "generating" : "queued")
     ),
-    failed: allFailed
+    failed: activeFailed
       .slice(0, limit)
       .map((episode) => toRow(episode, "failed")),
     // Counted with the SAME rule the page lists by: publishable, which includes a regenerating

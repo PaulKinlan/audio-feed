@@ -650,6 +650,38 @@ function updateRowResumeUI(li, episode) {
 const activitySection = $("activity");
 const activityList = $("activityList");
 
+// audio-feed-cls: user dismissal for activity failure notifications
+const DISMISSED_ACTIVITY_KEY = TOKEN ? `audio-feed-dismissed:${TOKEN}` : "audio-feed-dismissed";
+
+/** @returns {Set<string>} */
+function loadDismissedActivity() {
+  try {
+    const raw = localStorage.getItem(DISMISSED_ACTIVITY_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/** @param {Set<string>} dismissed */
+function saveDismissedActivity(dismissed) {
+  try {
+    localStorage.setItem(DISMISSED_ACTIVITY_KEY, JSON.stringify([...dismissed].slice(-100)));
+  } catch {
+    // Private mode
+  }
+}
+
+/** @param {string} id */
+function dismissActivity(id) {
+  if (!id) return;
+  const dismissed = loadDismissedActivity();
+  dismissed.add(id);
+  saveDismissedActivity(dismissed);
+}
+
 /** @param {ActivityEntry} entry @param {boolean} failed */
 function activityRow(entry, failed) {
   const li = document.createElement("li");
@@ -695,13 +727,32 @@ function activityRow(entry, failed) {
       err.textContent = entry.error;
       body.appendChild(err);
     }
+    const actActions = document.createElement("div");
+    actActions.className = "act-actions";
+
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "act-retry";
     retry.textContent = "Try again";
     retry.setAttribute("aria-label", "Try again: " + entry.title);
     retry.addEventListener("click", () => retryEpisode(entry.id, retry));
-    body.appendChild(retry);
+    actActions.appendChild(retry);
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "act-dismiss";
+    dismiss.textContent = "Dismiss";
+    dismiss.setAttribute("aria-label", "Dismiss failure for " + entry.title);
+    dismiss.addEventListener("click", () => {
+      dismissActivity(entry.id);
+      li.remove();
+      if (activityList.children.length === 0) {
+        activitySection.classList.add("hidden");
+      }
+    });
+    actActions.appendChild(dismiss);
+
+    body.appendChild(actActions);
   }
 
   li.appendChild(body);
@@ -711,7 +762,8 @@ function activityRow(entry, failed) {
 /** @param {PlayerActivity} payload */
 function renderActivity(payload) {
   const inProgress = payload.inProgress ?? [];
-  const failed = payload.failed ?? [];
+  const dismissed = loadDismissedActivity();
+  const failed = (payload.failed ?? []).filter((entry) => !dismissed.has(entry.id));
   activityList.replaceChildren(
     ...inProgress.map((entry) => activityRow(entry, false)),
     ...failed.map((entry) => activityRow(entry, true)),
@@ -741,6 +793,11 @@ async function retryEpisode(id, button) {
       return;
     }
     button.textContent = "Queued";
+    const dismissed = loadDismissedActivity();
+    if (dismissed.has(id)) {
+      dismissed.delete(id);
+      saveDismissedActivity(dismissed);
+    }
     await refreshActivity();
   } catch {
     button.disabled = false;
