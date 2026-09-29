@@ -865,7 +865,7 @@ Deno.test("buildNarrationSystemPrompt directs code handling without forbidden me
   }
 });
 
-Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body and system instruction (audio-feed-bdo)", async () => {
+Deno.test("GeminiTtsClient - synthesizeDialogue passes code-handled article body without un-attributed instructions (audio-feed-bdo, audio-feed-9pc)", async () => {
   let capturedRequest: GeminiGenerateContentRequest | null = null;
   const mockFetch: typeof fetch = (_url, init) => {
     capturedRequest = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
@@ -986,27 +986,78 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
   assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
 });
 
-Deno.test("buildDialogueRequest - guarantees 100% of parts specify speech_metadata.speaker matching speakerVoiceConfigs (audio-feed-9pc)", () => {
-  const speakers: [DialogueSpeaker, DialogueSpeaker] = [
-    { name: "Alex", role: "expert", voice: "Kore" },
-    { name: "Sam", role: "curious_foil", voice: "Puck" },
-  ];
-  const turns: DialogueTurn[] = [
-    { speaker: "Alex", text: "Turn 1" },
-    { speaker: "Sam", text: "Turn 2" },
-    { speaker: "Alex", text: "Turn 3" },
-  ];
+Deno.test("GeminiTtsClient - synthesizeDialogue guarantees 100% of parts specify speech_metadata.speaker with zero bare parts (audio-feed-9pc)", async () => {
+  let capturedRequest: GeminiGenerateContentRequest | null = null;
+  const mockFetch: typeof fetch = (_url, init) => {
+    capturedRequest = JSON.parse(String(init?.body)) as GeminiGenerateContentRequest;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: "audio/pcm;rate=24000",
+                  data: uint8ArrayToBase64(new Uint8Array(48)),
+                },
+              }],
+            },
+            finishReason: "STOP",
+          }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  };
 
-  const req = buildDialogueRequest(turns, speakers);
-  assertEquals(req.contents[0]!.parts.length, 3);
-  for (const part of req.contents[0]!.parts) {
-    assertEquals(Boolean(part.speech_metadata?.speaker), true);
-    assertEquals(Boolean(part.speechMetadata?.speaker), true);
-    assertEquals(
-      part.speech_metadata?.speaker === "Alex" || part.speech_metadata?.speaker === "Sam",
-      true,
+  const client = new GeminiTtsClient({ apiKey: "test-key", fetchFn: mockFetch });
+  // Call synthesizeDialogue with article and codeHandling - this generated the bare system prompt on main!
+  await client.synthesizeDialogue({
+    title: "Deep Dive on Dialogue",
+    article: {
+      title: "Deep Dive on Dialogue",
+      body: "First turn topic.\n\n```ts\nconst x = 1;\n```\n\nSecond turn topic.",
+    },
+    codeHandling: "skip",
+    speakers: [
+      { name: "Alex", role: "expert", voice: "Kore" },
+      { name: "Sam", role: "curious_foil", voice: "Puck" },
+    ],
+  });
+
+  assert(capturedRequest !== null);
+  const req = capturedRequest as GeminiGenerateContentRequest;
+  const parts = req.contents[0]?.parts ?? [];
+  assert(parts.length > 0, "dialogue must have at least one turn part");
+
+  const declaredSpeakers = new Set(
+    req.generationConfig.speechConfig.multiSpeakerVoiceConfig!.speakerVoiceConfigs.map((s) =>
+      s.speaker
+    ),
+  );
+
+  // 1. 100% of parts must specify speech_metadata.speaker and speechMetadata.speaker matching declared configs
+  // On main, this fails because part 0 was a bare { text: "You are an audio narrator..." } with no speaker!
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    assert(
+      part.speech_metadata?.speaker,
+      `part[${i}] must have speech_metadata.speaker (got text: "${part.text.slice(0, 30)}...")`,
+    );
+    assert(
+      part.speechMetadata?.speaker,
+      `part[${i}] must have speechMetadata.speaker (got text: "${part.text.slice(0, 30)}...")`,
+    );
+    assert(
+      declaredSpeakers.has(part.speech_metadata.speaker),
+      `speaker "${part.speech_metadata.speaker}" must match declared speakerVoiceConfigs`,
     );
   }
-  // System instruction is undefined
+
+  // 2. Zero bare text parts without speaker metadata
+  const bareParts = parts.filter((p) => !p.speech_metadata?.speaker);
+  assertEquals(bareParts.length, 0, "zero bare text parts allowed in multi-speaker requests");
+
+  // 3. req.systemInstruction is undefined (rejected by Gemini audio endpoints)
   assertEquals(req.systemInstruction, undefined);
 });
