@@ -42,6 +42,17 @@ export const MANIFEST = {
     { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" },
   ],
   shortcuts: [{ name: "Listen", url: "/listen" }],
+  // TODO(baseline/web-share-target): web app manifest share_target is supported in Chrome/Edge, awaiting Firefox/Safari for Baseline
+  // TODO(baseline/app-share-targets): canonical web-features ID
+  share_target: {
+    action: "/share",
+    method: "GET",
+    params: {
+      title: "title",
+      text: "text",
+      url: "url",
+    },
+  },
 };
 
 /** A dark, rounded podcast mark: concentric "sound" arcs over a filled circle. */
