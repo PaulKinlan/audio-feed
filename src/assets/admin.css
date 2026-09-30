@@ -109,6 +109,50 @@ summary:focus-visible {
   }
 }
 
+/* audio-feed-d6l: adopt customizable select using appearance: base-select and ::picker(select).
+   Degrades gracefully on engines without base-select support to the standard OS dropdown. */
+/* TODO(baseline/customizable-select): drop the @supports guard when customizable-select reaches Baseline */
+@supports (appearance: base-select) {
+  select,
+  select::picker(select) {
+    appearance: base-select;
+  }
+
+  select::picker(select) {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: var(--space-1);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  }
+
+  select option {
+    padding: var(--space-2) var(--space-3);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  select option:hover,
+  select option:focus-visible {
+    background: var(--surface-2);
+  }
+
+  select option:checked {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  select::picker-icon {
+    color: var(--text-muted);
+  }
+
+  select:open::picker-icon {
+    color: var(--accent);
+  }
+}
+
 /* audio-feed-ndc: a checkbox is the one input that must NOT stretch to 100%,
    so it is opted out of the shared input rule rather than the rule being
    narrowed — narrowing it would silently change every other field. */
