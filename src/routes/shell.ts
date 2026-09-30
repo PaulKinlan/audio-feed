@@ -453,6 +453,12 @@ export interface ShellOptions {
   main: string;
   /** The page's own script, if it has one. The shell never adds another. */
   script?: string;
+  /**
+   * External stylesheet URLs, emitted AFTER the inline <style> on purpose. Page CSS used to be
+   * appended inside that same style element, so it came last and won equal-specificity ties; a link
+   * placed before it would silently reverse that cascade (audio-feed-3xq part 3).
+   */
+  stylesheets?: string[];
 }
 
 export function renderShell(o: ShellOptions): string {
@@ -467,6 +473,7 @@ ${o.description ? `<meta name="description" content="${esc(o.description)}">` : 
 <link rel="icon" href="/icon.svg">
 ${o.current !== "admin" ? SPECULATION_RULES : ""}${o.head ?? ""}
 <style>${SHELL_TOKENS}${SHELL_CSS}${o.kit ? SHELL_KIT_CSS : ""}${o.css ?? ""}</style>
+${(o.stylesheets ?? []).map((href) => `<link rel="stylesheet" href="${href}">`).join("\n")}
 </head>
 <body class="shell">
 <a class="skip" href="#main">Skip to content</a>

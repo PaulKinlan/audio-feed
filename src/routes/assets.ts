@@ -17,6 +17,7 @@
  */
 import listenCss from "../assets/listen.css" with { type: "text" };
 import listenJs from "../assets/listen.js" with { type: "text" };
+import adminCss from "../assets/admin.css" with { type: "text" };
 import { DESIGN_TOKENS } from "./tokens.ts";
 import type { RouteContext } from "../router.ts";
 
@@ -42,6 +43,10 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
     contentType: "text/css; charset=utf-8",
   },
   "listen.js": { body: listenJs, contentType: "text/javascript; charset=utf-8" },
+  // No DESIGN_TOKENS prepend here, unlike listen.css: the admin block already carries the rules that
+  // resolve against the shell's tokens, and prepending a second copy would change the cascade. This is
+  // a verbatim move — de-duplicating the token block is separate work with its own rendering risk.
+  "admin.css": { body: adminCss, contentType: "text/css; charset=utf-8" },
 };
 
 /** The URL a page should reference for an asset, content-addressed. */
@@ -49,6 +54,15 @@ export function assetUrl(name: string): string {
   const asset = ASSETS[name];
   if (!asset) throw new Error(`unknown asset: ${name}`);
   return `/assets/${fnv1a(asset.body)}.${name}`;
+}
+
+/**
+ * The exact bytes `assetUrl(name)` names. Exported for tests that assert on what a page delivers to the
+ * browser: once a stylesheet moved out of the template string, reading the inline <style> alone stopped
+ * being the whole answer, and a test that checks only half the CSS is how an extraction "passes".
+ */
+export function assetBody(name: string): string | null {
+  return ASSETS[name]?.body ?? null;
 }
 
 /** The URL shape this module both produces and accepts: /assets/<hash>.<name>. */

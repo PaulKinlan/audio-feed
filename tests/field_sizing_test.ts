@@ -13,6 +13,7 @@
 // released, the Chrome-only property is guarded, and only the two agreed fields opt in.
 import { assertEquals } from "@std/assert";
 import { renderAdminPage } from "../src/routes/admin.ts";
+import { shippedCss } from "./admin_css.ts";
 
 const adminHtml = renderAdminPage({
   publicBaseUrl: "https://example.com",
@@ -20,8 +21,8 @@ const adminHtml = renderAdminPage({
   viewer: { displayName: "Paul Kinlan", email: "paul@example.com", isAdmin: true },
 });
 
-/** The stylesheet the admin page actually ships — whatever renderAdminPage inlined. */
-const adminCss = adminHtml.slice(adminHtml.indexOf("<style>") + 7, adminHtml.indexOf("</style>"));
+/** The stylesheet the admin page actually ships: inline <style> plus every linked asset, resolved. */
+const adminCss = shippedCss(adminHtml);
 
 /** Body of the @supports guard that carries the .field-auto rule, or null if it is absent/unguarded. */
 function guardedRule(css: string): string | null {
@@ -32,8 +33,9 @@ function guardedRule(css: string): string | null {
 }
 
 Deno.test("the field-auto rule reaches the rendered admin page", () => {
-  // This is the assertion that would have caught the shell.ts placement mistake: the rule must be in the
-  // page's own CSS, not merely in some module the page does not import.
+  // This is the assertion that would have caught the shell.ts placement mistake: the rule must reach the
+  // page, not merely sit in some module the page does not import. Since 3xq moved admin CSS into a
+  // linked asset, "reaches the page" means inline style OR a resolved link — hence shippedCss().
   assertEquals(
     adminCss.includes(".field-auto"),
     true,
