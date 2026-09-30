@@ -42,6 +42,7 @@ import {
   renderListenLanding,
 } from "./routes/listen.ts";
 import { handleAsset } from "./routes/assets.ts";
+import { handleShare } from "./routes/share.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import type { AppConfig, Stores } from "./config.ts";
@@ -126,6 +127,8 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
       headers: { location: `${origin}/account${url.search}`, "cache-control": "no-store" },
     });
   });
+  // audio-feed-vtiy: W3C Web Share Target API endpoint
+  router.get("/share", handleShare);
   // The listener app (audio-feed-4xb): token-fronted, so a subscriber needs no
   // account — the feed token they already hold is the whole credential.
   router.get(
