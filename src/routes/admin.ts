@@ -123,6 +123,7 @@ export function renderAdminPage(
      anything at all: with inline-size: 100% the property is inert (measured unchanged at 1224px before
      and after typing), which is the trap this started from. min-inline-size keeps an empty field
      clickable; max-inline-size keeps a long value inside its container. */
+  /* TODO(baseline/field-sizing): drop the @supports guard and keep the declarations. */
   @supports (field-sizing: content) {
     input.field-auto {
       field-sizing: content;
