@@ -552,3 +552,117 @@ Deno.test("KvMetadataStore: F2 hydration refusal - missing chunk throws naming i
     await kv.close();
   }
 });
+
+Deno.test("KvMetadataStore: multi-batch atomic write rollback, retry, and base-atomic rollback (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  let commitCount = 0;
+  let failCommitOn = 2; // fail the 2nd atomic commit
+  const wrappedKv = new Proxy(kv, {
+    get(target, prop, receiver) {
+      if (prop === "atomic") {
+        return () => {
+          const tx = target.atomic();
+          const origCommit = tx.commit.bind(tx);
+          tx.commit = async () => {
+            commitCount++;
+            if (commitCount === failCommitOn) {
+              return { ok: false };
+            }
+            return await origCommit();
+          };
+          return tx;
+        };
+      }
+      const val = Reflect.get(target, prop, receiver);
+      return typeof val === "function"
+        ? (val as (...args: unknown[]) => unknown).bind(target)
+        : val;
+    },
+  });
+
+  const store = new KvMetadataStore(wrappedKv as unknown as Deno.Kv, { ownsConnection: false });
+
+  try {
+    // 22-chunk article: batches 10 / 10 / 2
+    const content = "A".repeat(22 * ARTICLE_CHUNK_SIZE);
+    const article = makeArticle({
+      id: "art-inject-22",
+      userId: "u-inject",
+      url: "https://example.com/inject-22",
+      content,
+    });
+
+    // 1. Fault injection: batch 1 commits (chunks 0-9), batch 2 fails -> throws
+    commitCount = 0;
+    failCommitOn = 2;
+    const err = await assertRejects(
+      () => store.putArticle(article),
+      Error,
+    );
+    assertStringIncludes(err.message, "Failed to commit article chunks for art-inject-22");
+
+    // Assert: chunk keys afterwards === 0 (batch 1's ten keys cleaned up)
+    const chunksAfterFail = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u-inject", "art-inject-22"] }),
+    );
+    assertEquals(
+      chunksAfterFail.length,
+      0,
+      "batch 1's committed chunks must be rolled back on batch 2 failure",
+    );
+
+    // Assert: base record absent
+    const baseAfterFail = await kv.get(["article", "u-inject", "art-inject-22"]);
+    assertEquals(baseAfterFail.value, null, "base record must be absent after failed chunk write");
+
+    // 2. Trap 2: Retry after failure succeeds completely without leftover corruption
+    failCommitOn = -1; // disable fault injection
+    await store.putArticle(article);
+
+    const retrieved = await store.getArticle("u-inject", "art-inject-22");
+    assert(retrieved !== null);
+    assertEquals(retrieved.content.length, 22 * ARTICLE_CHUNK_SIZE);
+    assertEquals(retrieved.content, content);
+    assertEquals(retrieved.chunkCount, 22);
+
+    // Trap 1: Normal 22-chunk write keeps all 22 chunks in KV
+    const chunksAfterSuccess = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u-inject", "art-inject-22"] }),
+    );
+    assertEquals(
+      chunksAfterSuccess.length,
+      22,
+      "successful 22-chunk write must keep all 22 chunks",
+    );
+
+    // 3. Trap 3: Base-atomic rollback path still works when chunk writes succeed but base commit fails
+    // A 22-chunk article has 3 chunk batches (commits 1, 2, 3) + 1 base commit (commit 4)
+    commitCount = 0;
+    failCommitOn = 4; // fail the 4th commit (the base article commit!)
+    const article2 = makeArticle({
+      id: "art-base-fail",
+      userId: "u-inject",
+      url: "https://example.com/base-fail",
+      content,
+    });
+    const baseErr = await assertRejects(
+      () => store.putArticle(article2),
+      Error,
+    );
+    assertStringIncludes(baseErr.message, "putArticle failed for art-base-fail");
+
+    // Assert: base atomic rollback cleaned up all 22 chunks
+    const chunksAfterBaseFail = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u-inject", "art-base-fail"] }),
+    );
+    assertEquals(
+      chunksAfterBaseFail.length,
+      0,
+      "base commit failure must roll back all written chunks",
+    );
+    const baseRecord2 = await kv.get(["article", "u-inject", "art-base-fail"]);
+    assertEquals(baseRecord2.value, null);
+  } finally {
+    await kv.close();
+  }
+});

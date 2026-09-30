@@ -426,14 +426,23 @@ export class KvMetadataStore implements MetadataStore {
   }
 
   async #writeArticleChunks(userId: string, id: string, chunks: string[]): Promise<void> {
-    for (let i = 0; i < chunks.length; i += 10) {
-      const tx = this.#kv.atomic();
-      const end = Math.min(i + 10, chunks.length);
-      for (let j = i; j < end; j++) {
-        tx.set(["article_chunk", userId, id, j], chunks[j]);
+    let writtenCount = 0;
+    try {
+      for (let i = 0; i < chunks.length; i += 10) {
+        const tx = this.#kv.atomic();
+        const end = Math.min(i + 10, chunks.length);
+        for (let j = i; j < end; j++) {
+          tx.set(["article_chunk", userId, id, j], chunks[j]);
+        }
+        const res = await tx.commit();
+        if (!res.ok) throw new Error(`Failed to commit article chunks for ${id}`);
+        writtenCount = end;
       }
-      const res = await tx.commit();
-      if (!res.ok) throw new Error(`Failed to commit article chunks for ${id}`);
+    } catch (err) {
+      if (writtenCount > 0) {
+        await this.#deleteArticleChunks(userId, id, writtenCount);
+      }
+      throw err;
     }
   }
 
@@ -606,12 +615,13 @@ export class KvMetadataStore implements MetadataStore {
 
   async deleteArticle(userId: string, id: string): Promise<void> {
     const article = (await this.#kv.get<Article>(["article", userId, id])).value;
-    if (!article) return;
-    await this.#deleteArticleChunks(userId, id, article.chunkCount);
-    await this.#kv.atomic()
-      .delete(["article", userId, id])
-      .delete(["article_by_url", userId, article.url])
-      .commit();
+    await this.#deleteArticleChunks(userId, id, article?.chunkCount);
+    if (article) {
+      await this.#kv.atomic()
+        .delete(["article", userId, id])
+        .delete(["article_by_url", userId, article.url])
+        .commit();
+    }
   }
 
   // -- episodes -------------------------------------------------------------
