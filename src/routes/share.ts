@@ -5,8 +5,7 @@
  * (share_target declaration in manifest.json), resolves the article link,
  * and routes authenticated subscribers to their unified quick-add panel.
  *
- * TODO(baseline/web-share-target): drop when Web Share Target reaches Baseline.
- * TODO(baseline/app-share-targets): canonical web-features ID.
+ * TODO(baseline/app-share-targets): drop when Web Share Target reaches Baseline.
  */
 import type { RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
