@@ -250,6 +250,7 @@ export interface MetadataStore {
   getArticles(userId: string, ids: string[]): Promise<(Article | null)[]>;
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;
+  deleteArticle(userId: string, id: string): Promise<void>;
 
   // -- episodes ---------------------------------------------------------
   putEpisode(episode: Episode): Promise<void>;

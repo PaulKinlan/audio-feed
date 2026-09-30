@@ -33,7 +33,7 @@ export class IngestError extends Error {
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 export const PDF_PARSE_TIMEOUT_MS = 10_000;
-export const MAX_ARTICLE_CONTENT_CHARS = 100_000;
+export const MAX_ARTICLE_CONTENT_CHARS = 2_000_000;
 const TIMEOUT_MS = 15_000;
 
 /** Only global unicast addresses: deny loopback, LAN, metadata and transition ranges. */

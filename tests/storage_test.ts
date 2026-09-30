@@ -5,13 +5,13 @@
  * external service and stays runnable in CI and on a laptop.
  */
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { runMetadataConformance } from "./conformance/metadata.ts";
 import { runBlobConformance } from "./conformance/blobs.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "../src/storage/memory.ts";
-import { KvMetadataStore } from "../src/storage/kv.ts";
+import { ARTICLE_CHUNK_SIZE, KvMetadataStore } from "../src/storage/kv.ts";
 import { RUN_HISTORY_LIMIT, type RunRecord } from "../src/storage/mod.ts";
-import { makeEpisode } from "./fixtures.ts";
+import { makeArticle, makeEpisode } from "./fixtures.ts";
 
 runMetadataConformance({
   name: "MemoryMetadataStore",
@@ -223,5 +223,171 @@ Deno.test("KvMetadataStore: recording an idle tick reads one entry, not the job'
     assertEquals(ids.length, RUN_HISTORY_LIMIT, "still bounded");
   } finally {
     kv.close();
+  }
+});
+
+Deno.test("KvMetadataStore: chunks and reconstitutes 150,000 character article with 100% fidelity (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  try {
+    // Generate 150,000 chars of recognizable, verifiable content
+    const sentence =
+      "The edge architecture enables streaming transformations and real-time audio synthesis at scale. ";
+    const fullContent = sentence.repeat(Math.ceil(150_000 / sentence.length)).slice(0, 150_000);
+    assertEquals(fullContent.length, 150_000);
+
+    const article = makeArticle({
+      id: "art-large-150k",
+      userId: "u-large",
+      url: "https://example.com/large-post",
+      title: "Scale Architecture Document",
+      content: fullContent,
+    });
+
+    await store.putArticle(article);
+
+    // Verify low-level KV base record has content: "" and chunkCount: 4
+    const expectedChunks = Math.ceil(150_000 / ARTICLE_CHUNK_SIZE);
+    assertEquals(expectedChunks, 4);
+
+    const rawBase = await kv.get(["article", "u-large", "art-large-150k"]);
+    assert(rawBase.value !== null);
+    const baseValue = rawBase.value as { content: string; chunkCount: number };
+    assertEquals(baseValue.content, "", "base KV entry must store empty content when chunked");
+    assertEquals(baseValue.chunkCount, expectedChunks, "base KV entry must record chunkCount");
+
+    // Verify raw chunk entries exist in KV
+    for (let i = 0; i < expectedChunks; i++) {
+      const chunkEntry = await kv.get(["article_chunk", "u-large", "art-large-150k", i]);
+      assert(chunkEntry.value !== null, `chunk ${i} must exist in KV`);
+      const expectedSlice = fullContent.slice(i * ARTICLE_CHUNK_SIZE, (i + 1) * ARTICLE_CHUNK_SIZE);
+      assertEquals(chunkEntry.value, expectedSlice);
+    }
+
+    // 1. Verify getArticle reconstructs full content
+    const retrieved = await store.getArticle("u-large", "art-large-150k");
+    assert(retrieved !== null);
+    assertEquals(retrieved.id, "art-large-150k");
+    assertEquals(retrieved.content.length, 150_000);
+    assertEquals(retrieved.content, fullContent, "reconstructed content must match 100%");
+
+    // 2. Verify getArticles batches and hydrates
+    const batch = await store.getArticles("u-large", ["art-large-150k", "non-existent"]);
+    assertEquals(batch.length, 2);
+    assertEquals(batch[0]?.content, fullContent);
+    assertEquals(batch[1], null);
+
+    // 3. Verify findArticleByUrl hydrates
+    const byUrl = await store.findArticleByUrl("u-large", "https://example.com/large-post");
+    assertEquals(byUrl?.content, fullContent);
+
+    // 4. Verify deleteArticle deletes base article, url index, and all chunks
+    await store.deleteArticle("u-large", "art-large-150k");
+    assertEquals(await store.getArticle("u-large", "art-large-150k"), null);
+    assertEquals(await store.findArticleByUrl("u-large", "https://example.com/large-post"), null);
+
+    const remainingChunks = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u-large", "art-large-150k"] }),
+    );
+    assertEquals(remainingChunks.length, 0, "all chunk keys must be deleted");
+  } finally {
+    await kv.close();
+  }
+});
+
+Deno.test("KvMetadataStore: supports multi-batch atomic chunking for 2,000,000 character article (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  try {
+    const hugeContent = "X".repeat(2_000_000);
+    const expectedChunks = Math.ceil(2_000_000 / ARTICLE_CHUNK_SIZE);
+    assertEquals(expectedChunks, 42);
+
+    const article = makeArticle({
+      id: "art-huge-2m",
+      userId: "u-huge",
+      url: "https://example.com/huge-2m",
+      title: "Two Million Character Document",
+      content: hugeContent,
+    });
+
+    // Must not throw "Total mutation size too large (max 819200 bytes)"
+    await store.putArticle(article);
+
+    const retrieved = await store.getArticle("u-huge", "art-huge-2m");
+    assert(retrieved !== null);
+    assertEquals(retrieved.content.length, 2_000_000);
+    assertEquals(retrieved.content, hugeContent);
+
+    // Clean up
+    await store.deleteArticle("u-huge", "art-huge-2m");
+    const remainingChunks = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u-huge", "art-huge-2m"] }),
+    );
+    assertEquals(remainingChunks.length, 0);
+  } finally {
+    await kv.close();
+  }
+});
+
+Deno.test("KvMetadataStore: insertArticleIfAbsent and insertArticleWithEpisodeIfAbsent support chunking (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  try {
+    const content = "B".repeat(120_000);
+    const art1 = makeArticle({
+      id: "art-absent-1",
+      userId: "u1",
+      url: "https://example.com/absent-1",
+      content,
+    });
+
+    // 1. insertArticleIfAbsent succeeds
+    const inserted = await store.insertArticleIfAbsent(art1);
+    assertEquals(inserted, true);
+    const retrieved1 = await store.getArticle("u1", "art-absent-1");
+    assertEquals(retrieved1?.content, content);
+
+    // 2. duplicate insertArticleIfAbsent with same URL fails without corrupting or leaving orphan chunks
+    const art1Dup = makeArticle({
+      id: "art-absent-dup",
+      userId: "u1",
+      url: "https://example.com/absent-1",
+      content: "C".repeat(120_000),
+    });
+    const dupResult = await store.insertArticleIfAbsent(art1Dup);
+    assertEquals(dupResult, false);
+
+    // Ensure no orphan chunks for art-absent-dup
+    const orphanChunks = await Array.fromAsync(
+      kv.list({ prefix: ["article_chunk", "u1", "art-absent-dup"] }),
+    );
+    assertEquals(orphanChunks.length, 0, "failed insert must not leave orphan chunks");
+
+    // 3. insertArticleWithEpisodeIfAbsent with chunked article
+    const ep = makeEpisode({
+      id: "ep-pair-1",
+      userId: "u1",
+      articleId: "art-pair-1",
+      status: "pending",
+    });
+    const artPair = makeArticle({
+      id: "art-pair-1",
+      userId: "u1",
+      url: "https://example.com/pair-large",
+      content,
+    });
+    const pairResult = await store.insertArticleWithEpisodeIfAbsent(artPair, ep);
+    assertEquals(pairResult, true);
+
+    const retrievedPair = await store.getArticle("u1", "art-pair-1");
+    assertEquals(retrievedPair?.content, content);
+    const retrievedEp = await store.getEpisode("u1", "ep-pair-1");
+    assertEquals(retrievedEp?.id, "ep-pair-1");
+  } finally {
+    await kv.close();
   }
 });

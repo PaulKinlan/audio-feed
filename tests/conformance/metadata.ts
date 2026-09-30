@@ -394,6 +394,18 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.getEpisode("user-1", "e2"))?.articleId, "a2");
   });
 
+  test("deleteArticle: removes article and its URL index (audio-feed-cei)", async (store) => {
+    const url = "https://example.com/to-delete";
+    const article = makeArticle({ id: "a-del", userId: "user-1", url, content: "Delete me" });
+    await store.putArticle(article);
+    assertEquals((await store.getArticle("user-1", "a-del"))?.id, "a-del");
+    assertEquals((await store.findArticleByUrl("user-1", url))?.id, "a-del");
+
+    await store.deleteArticle("user-1", "a-del");
+    assertEquals(await store.getArticle("user-1", "a-del"), null);
+    assertEquals(await store.findArticleByUrl("user-1", url), null);
+  });
+
   // -- episodes -------------------------------------------------------------
 
   test("lists episodes newest first", async (store) => {
