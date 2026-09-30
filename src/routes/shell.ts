@@ -224,6 +224,50 @@ export const SHELL_KIT_CSS = `
     padding: 0.6rem 0.75rem; inline-size: 100%; min-inline-size: 0;
   }
   .shell input:user-invalid { border-color: var(--danger); }
+
+  /* audio-feed-d6l: adopt customizable select using appearance: base-select and ::picker(select).
+     Degrades gracefully on engines without base-select support to the standard OS dropdown. */
+  /* TODO(baseline/customizable-select): drop the @supports guard when customizable-select reaches Baseline */
+  @supports (appearance: base-select) {
+    .shell select,
+    .shell select::picker(select) {
+      appearance: base-select;
+    }
+
+    .shell select::picker(select) {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius-sm);
+      padding: var(--space-1);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+    }
+
+    .shell select option {
+      padding: var(--space-2) var(--space-3);
+      border-radius: calc(var(--radius-sm) - 2px);
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .shell select option:hover,
+    .shell select option:focus-visible {
+      background: var(--surface-2);
+    }
+
+    .shell select option:checked {
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+
+    .shell select::picker-icon {
+      color: var(--muted);
+    }
+
+    .shell select:open::picker-icon {
+      color: var(--accent);
+    }
+  }
   .choices { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; }
   .choices label { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; }
   .shell input[type="radio"], .shell input[type="checkbox"] { accent-color: var(--accent); inline-size: 1.05rem; block-size: 1.05rem; }
