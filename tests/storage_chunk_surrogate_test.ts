@@ -62,7 +62,7 @@ Deno.test("pure astral content round-trips", async () => {
   assertEquals(await roundTrip(content, "emoji-only"), content);
 });
 
-Deno.test("progress invariant throws rather than spinning when a chunk cannot advance", async () => {
+Deno.test("chunking completes promptly rather than spinning when a chunk cannot advance", async () => {
   // Prove the safety net itself works: a lone surrogate as the very last code unit, with the body sized
   // so the final slice is exactly one code unit. Before the fix this shape never returned.
   const content = "z".repeat(OVER) + "\ud800";
