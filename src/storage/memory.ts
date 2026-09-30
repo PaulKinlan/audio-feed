@@ -308,6 +308,16 @@ export class MemoryMetadataStore implements MetadataStore {
     return this.getArticle(userId, id);
   }
 
+  deleteArticle(userId: string, id: string): Promise<void> {
+    const key = MemoryMetadataStore.#scoped(userId, id);
+    const existing = this.#articles.get(key);
+    if (existing) {
+      this.#articles.delete(key);
+      this.#articleByUrl.delete(`${userId}\u0000${existing.url}`);
+    }
+    return Promise.resolve();
+  }
+
   // -- episodes -------------------------------------------------------------
 
   #writeEpisode(episode: Episode): void {

@@ -521,8 +521,8 @@ Deno.test("queue failure is not reported as success and does not leak internal e
   equal((await response.text()).includes("credential"), false);
 });
 
-Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_CHARS (audio-feed-9yk)", () => {
-  const hugeText = "Word ".repeat(25_000); // 125,000 chars
+Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_CHARS (audio-feed-9yk, audio-feed-cei)", () => {
+  const hugeText = "Word ".repeat(400_005); // > 2,000,000 chars
   const html =
     `<!doctype html><html><head><title>Huge Article</title></head><body><article><p>${hugeText}</p></article></body></html>`;
   throws(
@@ -537,6 +537,49 @@ Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_
       return true;
     },
   );
+});
+
+Deno.test("extractArticle processes 150,000 character article with clean text, code fences, and zero HTML tags (audio-feed-cei)", () => {
+  // Simulates a large article like Paul's 131k character article
+  const paragraphs: string[] = [];
+  const basePara =
+    "In this section, we analyze the performance and architecture of edge runtimes under heavy concurrency. ";
+  for (let i = 0; i < 1500; i++) {
+    paragraphs.push(`<p>${basePara} Section ${i} details.</p>`);
+  }
+  const codeBlock =
+    `<pre><code>function calculateThroughput(reqs, duration) {\n  return reqs / duration;\n}</code></pre>`;
+  const html =
+    `<!doctype html><html><head><title>Large Architecture Document</title><meta name="author" content="Paul Kinlan"></head><body>
+    <nav><a href="/">Home</a><a href="/docs">Docs</a></nav>
+    <article>
+      <h1>Large Architecture Document</h1>
+      <p class="byline">By Paul Kinlan</p>
+      ${paragraphs.slice(0, 750).join("\n")}
+      ${codeBlock}
+      ${paragraphs.slice(750).join("\n")}
+    </article>
+    <div class="ad">Sidebar Advertisement</div>
+    <footer>Site Footer &amp; Copyright 2026</footer>
+  </body></html>`;
+
+  const extracted = extractArticle(html, "https://example.com/large-article");
+  equal(extracted.title, "Large Architecture Document");
+  equal(extracted.author, "Paul Kinlan");
+  equal(
+    extracted.body.length > 150_000,
+    true,
+    `Expected > 150,000 chars, got ${extracted.body.length}`,
+  );
+
+  // Zero HTML tags must survive in the extracted body
+  equal(/<[^>]+>/.test(extracted.body), false, "Extracted body must contain zero HTML tags");
+  // Navigation, ads, footers must not survive
+  equal(extracted.body.includes("Sidebar Advertisement"), false);
+  equal(extracted.body.includes("Site Footer"), false);
+  // Code block must be wrapped in markdown fences
+  equal(extracted.body.includes("```"), true);
+  equal(extracted.body.includes("calculateThroughput"), true);
 });
 
 Deno.test("fetchArticle: decompresses gzip and deflate responses (audio-feed-dcj)", async () => {

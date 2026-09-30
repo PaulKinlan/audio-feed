@@ -187,11 +187,11 @@ Deno.test("extractPdfArticle: rejects oversized PDF (> 10 MiB) (audio-feed-w9n)"
   assertStringIncludes(err.message, "10 MiB size limit");
 });
 
-Deno.test("extractPdfArticle: rejects content exceeding character limit (> 100,000 chars) (audio-feed-w9n)", async () => {
-  // Generate many repeated lines that parse cleanly to > 100,000 chars
+Deno.test("extractPdfArticle: rejects content exceeding character limit (> 2,000,000 chars) (audio-feed-w9n, audio-feed-cei)", async () => {
+  // Generate many repeated lines that parse cleanly to > 2,000,000 chars
   const lines: string[] = [];
   const line = "A".repeat(80);
-  for (let i = 0; i < 1300; i++) {
+  for (let i = 0; i < 26_000; i++) {
     lines.push(`${line} ${i}`);
   }
 

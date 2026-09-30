@@ -33,6 +33,7 @@
  * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
 
+import v8 from "node:v8";
 import type {
   ApprovalRecord,
   Article,
@@ -76,6 +77,16 @@ const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real cre
  * the episode, so a chunk is one read for up to ten episodes.
  */
 export const EPISODE_READ_BATCH = 10;
+
+/**
+ * Maximum character/byte length of an article chunk in KV (audio-feed-cei).
+ * Deno KV limits single values to 65,536 bytes. 48,000 bytes provides headroom for
+ * V8 serialization overhead and index keys.
+ */
+export const ARTICLE_CHUNK_SIZE = 48_000;
+
+/** Maximum V8 serialized bytes allowed per chunk to guarantee Deno KV acceptance. */
+const MAX_KV_VALUE_BYTES = 60_000;
 
 /**
  * An open `kv.atomic()` builder. Derived from the method rather than named: Deno
@@ -344,20 +355,181 @@ export class KvMetadataStore implements MetadataStore {
 
   // -- articles -------------------------------------------------------------
 
+  static #splitArticleForStorage(article: Article): { baseArticle: Article; chunks: string[] } {
+    const encoder = new TextEncoder();
+    const totalUtf8Bytes = encoder.encode(article.content).length;
+    const totalV8Bytes = v8.serialize(article.content).byteLength;
+    // An article whose UTF-8 bytes and V8 serialized bytes fit within limits needs no chunking.
+    if (totalUtf8Bytes <= ARTICLE_CHUNK_SIZE && totalV8Bytes <= MAX_KV_VALUE_BYTES) {
+      return {
+        baseArticle: {
+          ...article,
+          chunkCount: 0,
+        },
+        chunks: [],
+      };
+    }
+
+    const chunks: string[] = [];
+    let startIndex = 0;
+    const text = article.content;
+
+    while (startIndex < text.length) {
+      let sliceLength = Math.min(text.length - startIndex, ARTICLE_CHUNK_SIZE);
+      let slice = text.slice(startIndex, startIndex + sliceLength);
+      let utf8Bytes = encoder.encode(slice).length;
+      let v8Bytes = v8.serialize(slice).byteLength;
+
+      while ((utf8Bytes > ARTICLE_CHUNK_SIZE || v8Bytes > MAX_KV_VALUE_BYTES) && sliceLength > 1) {
+        const ratio = Math.min(ARTICLE_CHUNK_SIZE / utf8Bytes, MAX_KV_VALUE_BYTES / v8Bytes);
+        sliceLength = Math.max(1, Math.floor(sliceLength * ratio));
+        slice = text.slice(startIndex, startIndex + sliceLength);
+
+        // Do not split surrogate pair
+        const lastCode = slice.charCodeAt(slice.length - 1);
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+          sliceLength--;
+          slice = text.slice(startIndex, startIndex + sliceLength);
+        }
+
+        utf8Bytes = encoder.encode(slice).length;
+        v8Bytes = v8.serialize(slice).byteLength;
+      }
+
+      const lastCode = slice.charCodeAt(slice.length - 1);
+      if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+        sliceLength--;
+        slice = text.slice(startIndex, startIndex + sliceLength);
+      }
+
+      // Invariant assertion: must strictly fit in Deno KV (65,536 bytes)
+      const finalV8 = v8.serialize(slice).byteLength;
+      const finalUtf8 = encoder.encode(slice).length;
+      if (finalV8 > 65_536 || finalUtf8 > 65_536) {
+        throw new Error(
+          `Chunk ${chunks.length} of article ${article.id} exceeds max KV value size (v8=${finalV8}, utf8=${finalUtf8} > 65536 bytes)`,
+        );
+      }
+
+      chunks.push(slice);
+      startIndex += sliceLength;
+    }
+
+    return {
+      baseArticle: {
+        ...article,
+        content: "",
+        chunkCount: chunks.length,
+      },
+      chunks,
+    };
+  }
+
+  async #writeArticleChunks(userId: string, id: string, chunks: string[]): Promise<void> {
+    let writtenCount = 0;
+    try {
+      for (let i = 0; i < chunks.length; i += 10) {
+        const tx = this.#kv.atomic();
+        const end = Math.min(i + 10, chunks.length);
+        for (let j = i; j < end; j++) {
+          tx.set(["article_chunk", userId, id, j], chunks[j]);
+        }
+        const res = await tx.commit();
+        if (!res.ok) throw new Error(`Failed to commit article chunks for ${id}`);
+        writtenCount = end;
+      }
+    } catch (err) {
+      if (writtenCount > 0) {
+        await this.#deleteArticleChunks(userId, id, writtenCount);
+      }
+      throw err;
+    }
+  }
+
+  async #deleteArticleChunks(userId: string, id: string, chunkCount?: number): Promise<void> {
+    if (typeof chunkCount === "number" && chunkCount > 0) {
+      for (let i = 0; i < chunkCount; i += 10) {
+        const tx = this.#kv.atomic();
+        const end = Math.min(i + 10, chunkCount);
+        for (let j = i; j < end; j++) {
+          tx.delete(["article_chunk", userId, id, j]);
+        }
+        await tx.commit();
+      }
+    } else {
+      for await (const entry of this.#kv.list({ prefix: ["article_chunk", userId, id] })) {
+        await this.#kv.delete(entry.key);
+      }
+    }
+  }
+
+  async #hydrateArticle(userId: string, article: Article): Promise<Article> {
+    if (!article.chunkCount || article.chunkCount <= 0) {
+      return article;
+    }
+    const chunkKeys: Deno.KvKey[] = [];
+    for (let i = 0; i < article.chunkCount; i++) {
+      chunkKeys.push(["article_chunk", userId, article.id, i]);
+    }
+    const chunkPieces: string[] = [];
+    for (let start = 0; start < chunkKeys.length; start += 10) {
+      const batch = chunkKeys.slice(start, start + 10);
+      const rows = (await this.#kv.getMany(batch)) as Deno.KvEntryMaybe<string>[];
+      for (const row of rows) {
+        if (typeof row.value === "string") {
+          chunkPieces.push(row.value);
+        }
+      }
+    }
+    if (chunkPieces.length !== article.chunkCount) {
+      throw new Error(
+        `Corrupted article storage for ${article.id}: expected ${article.chunkCount} chunks, found ${chunkPieces.length}`,
+      );
+    }
+    return {
+      ...article,
+      content: chunkPieces.join(""),
+    };
+  }
+
   async putArticle(article: Article): Promise<void> {
+    const existing = (await this.#kv.get<Article>(["article", article.userId, article.id])).value;
+    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
+    if (chunks.length > 0) {
+      await this.#writeArticleChunks(article.userId, article.id, chunks);
+    }
     const result = await this.#kv.atomic()
-      .set(["article", article.userId, article.id], article)
-      .set(["article_by_url", article.userId, article.url], article.id)
+      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
+      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id)
       .commit();
-    if (!result.ok) throw new Error(`putArticle failed for ${article.id}`);
+    if (!result.ok) {
+      if (chunks.length > 0) {
+        await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
+      }
+      throw new Error(`putArticle failed for ${article.id}`);
+    }
+    if (existing?.chunkCount && existing.chunkCount > chunks.length) {
+      for (let i = chunks.length; i < existing.chunkCount; i++) {
+        await this.#kv.delete(["article_chunk", article.userId, article.id, i]);
+      }
+    }
   }
 
   async insertArticleIfAbsent(article: Article): Promise<boolean> {
+    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
+    if (chunks.length > 0) {
+      const existing = await this.#kv.get(["article_by_url", article.userId, article.url]);
+      if (existing.value !== null) return false;
+      await this.#writeArticleChunks(article.userId, article.id, chunks);
+    }
     const result = await this.#kv.atomic()
       .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
-      .set(["article", article.userId, article.id], article)
-      .set(["article_by_url", article.userId, article.url], article.id)
+      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
+      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id)
       .commit();
+    if (!result.ok && chunks.length > 0) {
+      await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
+    }
     return result.ok;
   }
 
@@ -368,28 +540,55 @@ export class KvMetadataStore implements MetadataStore {
     // One transaction, so the pair either exists together or does not exist at
     // all (audio-feed-2th). The URL check is the audio-feed-33m guard: a losing
     // commit writes neither record.
+    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
+    if (chunks.length > 0) {
+      const existing = await this.#kv.get(["article_by_url", article.userId, article.url]);
+      if (existing.value !== null) return false;
+      await this.#writeArticleChunks(article.userId, article.id, chunks);
+    }
     const tx = this.#kv.atomic()
       .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
-      .set(["article", article.userId, article.id], article)
-      .set(["article_by_url", article.userId, article.url], article.id);
+      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
+      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id);
     KvMetadataStore.#writeEpisode(tx, episode);
-    return (await tx.commit()).ok;
+    const result = await tx.commit();
+    if (!result.ok && chunks.length > 0) {
+      await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
+    }
+    return result.ok;
   }
 
   async putArticleWithEpisode(article: Article, episode: Episode): Promise<void> {
     // Same single-commit guarantee as the dedupe variant, without the URL check
     // (audio-feed-d8q): the inbox re-write of a URL is a new episode by request, but
     // it must never be half a pair.
+    const existing = (await this.#kv.get<Article>(["article", article.userId, article.id])).value;
+    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
+    if (chunks.length > 0) {
+      await this.#writeArticleChunks(article.userId, article.id, chunks);
+    }
     const tx = this.#kv.atomic()
-      .set(["article", article.userId, article.id], article)
-      .set(["article_by_url", article.userId, article.url], article.id);
+      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
+      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id);
     KvMetadataStore.#writeEpisode(tx, episode);
     const result = await tx.commit();
-    if (!result.ok) throw new Error(`putArticleWithEpisode failed for ${article.id}`);
+    if (!result.ok) {
+      if (chunks.length > 0) {
+        await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
+      }
+      throw new Error(`putArticleWithEpisode failed for ${article.id}`);
+    }
+    if (existing?.chunkCount && existing.chunkCount > chunks.length) {
+      for (let i = chunks.length; i < existing.chunkCount; i++) {
+        await this.#kv.delete(["article_chunk", article.userId, article.id, i]);
+      }
+    }
   }
 
   async getArticle(userId: string, id: string): Promise<Article | null> {
-    return (await this.#kv.get<Article>(["article", userId, id])).value;
+    const entry = await this.#kv.get<Article>(["article", userId, id]);
+    if (!entry.value) return null;
+    return await this.#hydrateArticle(userId, entry.value);
   }
 
   async getArticles(userId: string, ids: string[]): Promise<(Article | null)[]> {
@@ -403,13 +602,26 @@ export class KvMetadataStore implements MetadataStore {
         >[];
       for (const row of rows) articles.push(row.value);
     }
-    return articles;
+    return await Promise.all(
+      articles.map((art) => art ? this.#hydrateArticle(userId, art) : Promise.resolve(null)),
+    );
   }
 
   async findArticleByUrl(userId: string, url: string): Promise<Article | null> {
     const pointer = await this.#kv.get<string>(["article_by_url", userId, url]);
     if (!pointer.value) return null;
     return await this.getArticle(userId, pointer.value);
+  }
+
+  async deleteArticle(userId: string, id: string): Promise<void> {
+    const article = (await this.#kv.get<Article>(["article", userId, id])).value;
+    await this.#deleteArticleChunks(userId, id, article?.chunkCount);
+    if (article) {
+      await this.#kv.atomic()
+        .delete(["article", userId, id])
+        .delete(["article_by_url", userId, article.url])
+        .commit();
+    }
   }
 
   // -- episodes -------------------------------------------------------------

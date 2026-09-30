@@ -74,7 +74,7 @@ export interface SynthesisWorkerOptions {
   maxAttempts?: number;
   /** Base backoff between attempts. */
   retryBaseDelayMs?: number;
-  /** Maximum article content length in characters allowed for synthesis before spend (audio-feed-3hb). Default 100,000. */
+  /** Maximum article content length in characters allowed for synthesis before spend (audio-feed-3hb, audio-feed-cei). Default 2,000,000. */
   maxInputCharacters?: number;
   /** How long a claim is honoured before another worker may take the episode. */
   leaseMs?: number;
@@ -99,7 +99,7 @@ const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
   intervalMs: 15_000,
   maxAttempts: 3,
   retryBaseDelayMs: 500,
-  maxInputCharacters: 100_000,
+  maxInputCharacters: 2_000_000,
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   owner: WORKER_ID,

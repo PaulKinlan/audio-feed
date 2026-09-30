@@ -251,6 +251,8 @@ export interface Article {
   content: string;
   excerpt?: string;
   ingestedAt: string;
+  /** Number of chunks stored in KV when content exceeds ARTICLE_CHUNK_SIZE (audio-feed-cei). */
+  chunkCount?: number;
 }
 
 // ---------------------------------------------------------------------------
