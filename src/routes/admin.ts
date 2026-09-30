@@ -114,6 +114,25 @@ export function renderAdminPage(
 
   .field { margin-block-end: var(--space-4); }
 
+  /* audio-feed-u54: two short-value fields grow to their content. Opt-in per field, deliberately not
+     applied to the shared 'input, select { inline-size: 100% }' above — every other field here
+     is better off full width, and a long email or URL in a search box is not something you want to
+     shrink. Chrome 123+ only and not Baseline, so the whole rule sits behind @supports: without the
+     guard, Safari and Firefox get inline-size:auto with no content sizing, which measured 185px —
+     narrower than the 100% they get today. inline-size must be released to auto for field-sizing to do
+     anything at all: with inline-size: 100% the property is inert (measured unchanged at 1224px before
+     and after typing), which is the trap this started from. min-inline-size keeps an empty field
+     clickable; max-inline-size keeps a long value inside its container. */
+  /* TODO(baseline/field-sizing): drop the @supports guard and keep the declarations. */
+  @supports (field-sizing: content) {
+    input.field-auto {
+      field-sizing: content;
+      inline-size: auto;
+      min-inline-size: 12ch;
+      max-inline-size: 100%;
+    }
+  }
+
   /* audio-feed-ndc: a checkbox is the one input that must NOT stretch to 100%,
      so it is opted out of the shared input rule rather than the rule being
      narrowed — narrowing it would silently change every other field. */
@@ -327,7 +346,7 @@ export function renderAdminPage(
         <label for="displayName">Display name
           <span class="hint">Shown as the podcast title, e.g. "Paul's Audio Feed".</span>
         </label>
-        <input id="displayName" name="displayName" type="text" autocomplete="off" />
+        <input id="displayName" name="displayName" type="text" class="field-auto" autocomplete="off" />
       </div>
       <div class="field">
         <label for="feedUrl">Initial RSS feed URL (optional)
@@ -348,7 +367,7 @@ export function renderAdminPage(
         <label for="newDailyBudget">Daily episode budget (optional)
           <span class="hint">Ceiling on synthesized episodes per UTC day. Blank for unlimited (audio-feed-9mp).</span>
         </label>
-        <input id="newDailyBudget" name="dailyBudget" type="number" min="0" placeholder="Unlimited" autocomplete="off" />
+        <input id="newDailyBudget" name="dailyBudget" type="number" min="0" class="field-auto" placeholder="Unlimited" autocomplete="off" />
       </div>
       <div class="check">
         <input type="checkbox" id="newIsAdmin" />
