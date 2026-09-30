@@ -33,6 +33,7 @@
  * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
 
+import v8 from "node:v8";
 import type {
   ApprovalRecord,
   Article,
@@ -78,11 +79,14 @@ const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real cre
 export const EPISODE_READ_BATCH = 10;
 
 /**
- * Maximum character length of a single article content chunk in KV (audio-feed-cei).
- * Deno KV limits single values to 65,536 bytes. 48,000 characters is safely below this
- * limit even with UTF-8 encodings.
+ * Maximum character/byte length of an article chunk in KV (audio-feed-cei).
+ * Deno KV limits single values to 65,536 bytes. 48,000 bytes provides headroom for
+ * V8 serialization overhead and index keys.
  */
 export const ARTICLE_CHUNK_SIZE = 48_000;
+
+/** Maximum V8 serialized bytes allowed per chunk to guarantee Deno KV acceptance. */
+const MAX_KV_VALUE_BYTES = 60_000;
 
 /**
  * An open `kv.atomic()` builder. Derived from the method rather than named: Deno
@@ -352,29 +356,72 @@ export class KvMetadataStore implements MetadataStore {
   // -- articles -------------------------------------------------------------
 
   static #splitArticleForStorage(article: Article): { baseArticle: Article; chunks: string[] } {
-    if (article.content.length > ARTICLE_CHUNK_SIZE) {
-      const chunkCount = Math.ceil(article.content.length / ARTICLE_CHUNK_SIZE);
-      const chunks: string[] = [];
-      for (let i = 0; i < chunkCount; i++) {
-        chunks.push(
-          article.content.slice(i * ARTICLE_CHUNK_SIZE, (i + 1) * ARTICLE_CHUNK_SIZE),
-        );
-      }
+    const encoder = new TextEncoder();
+    const totalUtf8Bytes = encoder.encode(article.content).length;
+    const totalV8Bytes = v8.serialize(article.content).byteLength;
+    // An article whose UTF-8 bytes and V8 serialized bytes fit within limits needs no chunking.
+    if (totalUtf8Bytes <= ARTICLE_CHUNK_SIZE && totalV8Bytes <= MAX_KV_VALUE_BYTES) {
       return {
         baseArticle: {
           ...article,
-          content: "",
-          chunkCount,
+          chunkCount: 0,
         },
-        chunks,
+        chunks: [],
       };
     }
+
+    const chunks: string[] = [];
+    let startIndex = 0;
+    const text = article.content;
+
+    while (startIndex < text.length) {
+      let sliceLength = Math.min(text.length - startIndex, ARTICLE_CHUNK_SIZE);
+      let slice = text.slice(startIndex, startIndex + sliceLength);
+      let utf8Bytes = encoder.encode(slice).length;
+      let v8Bytes = v8.serialize(slice).byteLength;
+
+      while ((utf8Bytes > ARTICLE_CHUNK_SIZE || v8Bytes > MAX_KV_VALUE_BYTES) && sliceLength > 1) {
+        const ratio = Math.min(ARTICLE_CHUNK_SIZE / utf8Bytes, MAX_KV_VALUE_BYTES / v8Bytes);
+        sliceLength = Math.max(1, Math.floor(sliceLength * ratio));
+        slice = text.slice(startIndex, startIndex + sliceLength);
+
+        // Do not split surrogate pair
+        const lastCode = slice.charCodeAt(slice.length - 1);
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+          sliceLength--;
+          slice = text.slice(startIndex, startIndex + sliceLength);
+        }
+
+        utf8Bytes = encoder.encode(slice).length;
+        v8Bytes = v8.serialize(slice).byteLength;
+      }
+
+      const lastCode = slice.charCodeAt(slice.length - 1);
+      if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+        sliceLength--;
+        slice = text.slice(startIndex, startIndex + sliceLength);
+      }
+
+      // Invariant assertion: must strictly fit in Deno KV (65,536 bytes)
+      const finalV8 = v8.serialize(slice).byteLength;
+      const finalUtf8 = encoder.encode(slice).length;
+      if (finalV8 > 65_536 || finalUtf8 > 65_536) {
+        throw new Error(
+          `Chunk ${chunks.length} of article ${article.id} exceeds max KV value size (v8=${finalV8}, utf8=${finalUtf8} > 65536 bytes)`,
+        );
+      }
+
+      chunks.push(slice);
+      startIndex += sliceLength;
+    }
+
     return {
       baseArticle: {
         ...article,
-        chunkCount: 0,
+        content: "",
+        chunkCount: chunks.length,
       },
-      chunks: [],
+      chunks,
     };
   }
 
@@ -424,6 +471,11 @@ export class KvMetadataStore implements MetadataStore {
           chunkPieces.push(row.value);
         }
       }
+    }
+    if (chunkPieces.length !== article.chunkCount) {
+      throw new Error(
+        `Corrupted article storage for ${article.id}: expected ${article.chunkCount} chunks, found ${chunkPieces.length}`,
+      );
     }
     return {
       ...article,

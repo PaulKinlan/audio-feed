@@ -5,7 +5,7 @@
  * external service and stays runnable in CI and on a laptop.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { runMetadataConformance } from "./conformance/metadata.ts";
 import { runBlobConformance } from "./conformance/blobs.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "../src/storage/memory.ts";
@@ -387,6 +387,167 @@ Deno.test("KvMetadataStore: insertArticleIfAbsent and insertArticleWithEpisodeIf
     assertEquals(retrievedPair?.content, content);
     const retrievedEp = await store.getEpisode("u1", "ep-pair-1");
     assertEquals(retrievedEp?.id, "ep-pair-1");
+  } finally {
+    await kv.close();
+  }
+});
+
+Deno.test("KvMetadataStore: F1 acceptance matrix - byte-safe chunking across non-ASCII, CJK, and emoji (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  try {
+    // 1. 48,000 ASCII: stores whole, 0 chunks, identity true
+    const ascii48k = "A".repeat(48_000);
+    const art48k = makeArticle({
+      id: "art-48k",
+      userId: "u",
+      url: "https://example.com/48k",
+      content: ascii48k,
+    });
+    await store.putArticle(art48k);
+    const raw48k = (await kv.get(["article", "u", "art-48k"])).value as { chunkCount: number };
+    assertEquals(raw48k.chunkCount, 0, "48k ASCII must store whole with chunkCount: 0");
+    assertEquals((await store.getArticle("u", "art-48k"))?.content, ascii48k);
+
+    // 2. 48,001 ASCII: 2 chunks, identity true
+    const ascii48k1 = "A".repeat(48_001);
+    const art48k1 = makeArticle({
+      id: "art-48k1",
+      userId: "u",
+      url: "https://example.com/48k1",
+      content: ascii48k1,
+    });
+    await store.putArticle(art48k1);
+    const raw48k1 = (await kv.get(["article", "u", "art-48k1"])).value as { chunkCount: number };
+    assertEquals(raw48k1.chunkCount, 2);
+    assertEquals((await store.getArticle("u", "art-48k1"))?.content, ascii48k1);
+
+    // 3. 96,000 ASCII: 2 chunks, identity true
+    const ascii96k = "A".repeat(96_000);
+    const art96k = makeArticle({
+      id: "art-96k",
+      userId: "u",
+      url: "https://example.com/96k",
+      content: ascii96k,
+    });
+    await store.putArticle(art96k);
+    const raw96k = (await kv.get(["article", "u", "art-96k"])).value as { chunkCount: number };
+    assertEquals(raw96k.chunkCount, 2);
+    assertEquals((await store.getArticle("u", "art-96k"))?.content, ascii96k);
+
+    // 4. 2,000,000 ASCII: identity true, chunkCount === ceil(len / CHUNK_SIZE)
+    const ascii2m = "A".repeat(2_000_000);
+    const art2m = makeArticle({
+      id: "art-2m",
+      userId: "u",
+      url: "https://example.com/2m",
+      content: ascii2m,
+    });
+    await store.putArticle(art2m);
+    const raw2m = (await kv.get(["article", "u", "art-2m"])).value as { chunkCount: number };
+    assertEquals(raw2m.chunkCount, Math.ceil(2_000_000 / ARTICLE_CHUNK_SIZE));
+    assertEquals((await store.getArticle("u", "art-2m"))?.content, ascii2m);
+
+    // 5. 48,000 CJK (144,000 B): stores and round-trips identically without error
+    const cjk48k = "漢".repeat(48_000);
+    const artCjk = makeArticle({
+      id: "art-cjk",
+      userId: "u",
+      url: "https://example.com/cjk",
+      content: cjk48k,
+    });
+    await store.putArticle(artCjk);
+    const rawCjk = (await kv.get(["article", "u", "art-cjk"])).value as { chunkCount: number };
+    assertEquals(rawCjk.chunkCount, 3, "144,000 B CJK must split into 3 chunks");
+    assertEquals((await store.getArticle("u", "art-cjk"))?.content, cjk48k);
+
+    // 6. 48,000 Cyrillic (96,000 B): stores and round-trips identically without error
+    const cyr48k = "Я".repeat(48_000);
+    const artCyr = makeArticle({
+      id: "art-cyr",
+      userId: "u",
+      url: "https://example.com/cyr",
+      content: cyr48k,
+    });
+    await store.putArticle(artCyr);
+    const rawCyr = (await kv.get(["article", "u", "art-cyr"])).value as { chunkCount: number };
+    assertEquals(rawCyr.chunkCount, 2, "96,000 B Cyrillic must split into 2 chunks");
+    assertEquals((await store.getArticle("u", "art-cyr"))?.content, cyr48k);
+
+    // 7. 30,000 emoji (120,000 B): stores and round-trips identically without error
+    const emoji30k = "😀".repeat(30_000);
+    const artEmoji = makeArticle({
+      id: "art-emoji",
+      userId: "u",
+      url: "https://example.com/emoji",
+      content: emoji30k,
+    });
+    await store.putArticle(artEmoji);
+    const rawEmoji = (await kv.get(["article", "u", "art-emoji"])).value as { chunkCount: number };
+    assertEquals(rawEmoji.chunkCount, 3, "120,000 B emoji must split into 3 chunks");
+    assertEquals((await store.getArticle("u", "art-emoji"))?.content, emoji30k);
+
+    // 8. Mixed ASCII + CJK + emoji crossing chunk boundary: round-trips; no chunk > 65,536 bytes
+    const mixed = "A".repeat(47_990) + "😀" + "漢" + "B".repeat(100);
+    const artMixed = makeArticle({
+      id: "art-mixed",
+      userId: "u",
+      url: "https://example.com/mixed",
+      content: mixed,
+    });
+    await store.putArticle(artMixed);
+    assertEquals((await store.getArticle("u", "art-mixed"))?.content, mixed);
+
+    // Assert every chunk across all stored articles is strictly <= 65,536 bytes
+    const encoder = new TextEncoder();
+    for await (const entry of kv.list({ prefix: ["article_chunk"] })) {
+      const byteLen = encoder.encode(entry.value as string).length;
+      assert(
+        byteLen <= 65_536,
+        `Chunk key ${JSON.stringify(entry.key)} size ${byteLen} exceeds 65536 bytes`,
+      );
+    }
+  } finally {
+    await kv.close();
+  }
+});
+
+Deno.test("KvMetadataStore: F2 hydration refusal - missing chunk throws naming id, expected and found count (audio-feed-cei)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+
+  try {
+    const content =
+      "The edge architecture enables streaming transformations and real-time audio synthesis at scale. ";
+    const fullContent = content.repeat(Math.ceil(150_000 / content.length)).slice(0, 150_000);
+    const article = makeArticle({
+      id: "art-corrupt-test",
+      userId: "u-corrupt",
+      url: "https://example.com/corrupt",
+      content: fullContent,
+    });
+
+    await store.putArticle(article);
+
+    // Delete 1 of 4 chunks to simulate partial/corrupted storage
+    await kv.delete(["article_chunk", "u-corrupt", "art-corrupt-test", 2]);
+
+    // getArticle must throw naming article id, expected count, and found count
+    const err = await assertRejects(
+      () => store.getArticle("u-corrupt", "art-corrupt-test"),
+      Error,
+    );
+    assertStringIncludes(err.message, "Corrupted article storage for art-corrupt-test");
+    assertStringIncludes(err.message, "expected 4 chunks");
+    assertStringIncludes(err.message, "found 3");
+
+    // getArticles must also throw rather than returning partial text
+    const batchErr = await assertRejects(
+      () => store.getArticles("u-corrupt", ["art-corrupt-test"]),
+      Error,
+    );
+    assertStringIncludes(batchErr.message, "Corrupted article storage for art-corrupt-test");
   } finally {
     await kv.close();
   }
