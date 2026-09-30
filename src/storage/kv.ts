@@ -375,6 +375,7 @@ export class KvMetadataStore implements MetadataStore {
     const text = article.content;
 
     while (startIndex < text.length) {
+      const loopStart = startIndex;
       let sliceLength = Math.min(text.length - startIndex, ARTICLE_CHUNK_SIZE);
       let slice = text.slice(startIndex, startIndex + sliceLength);
       let utf8Bytes = encoder.encode(slice).length;
@@ -397,7 +398,10 @@ export class KvMetadataStore implements MetadataStore {
       }
 
       const lastCode = slice.charCodeAt(slice.length - 1);
-      if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+      // Only step back when there is something to step back to. At sliceLength === 1 the decrement made
+      // the slice empty and startIndex never advanced, so the loop spun forever on an article ending in
+      // an unpaired high surrogate (audio-feed-64wu). A lone surrogate is emitted as its own chunk.
+      if (lastCode >= 0xd800 && lastCode <= 0xdbff && sliceLength > 1) {
         sliceLength--;
         slice = text.slice(startIndex, startIndex + sliceLength);
       }
@@ -413,6 +417,14 @@ export class KvMetadataStore implements MetadataStore {
 
       chunks.push(slice);
       startIndex += sliceLength;
+      // Progress invariant, not a size limit: any future edit that lets a chunk consume nothing must
+      // surface as a thrown error rather than a permanently pinned core. The loop is synchronous, so no
+      // timer, watchdog or Promise.race on this isolate could observe a stall (audio-feed-64wu).
+      if (startIndex <= loopStart) {
+        throw new Error(
+          `Article chunking stalled for ${article.id} at index ${startIndex} (sliceLength=${sliceLength})`,
+        );
+      }
     }
 
     return {
