@@ -542,12 +542,15 @@ Deno.test("KvMetadataStore: F2 hydration refusal - missing chunk throws naming i
     assertStringIncludes(err.message, "expected 4 chunks");
     assertStringIncludes(err.message, "found 3");
 
-    // getArticles must also throw rather than returning partial text
-    const batchErr = await assertRejects(
-      () => store.getArticles("u-corrupt", ["art-corrupt-test"]),
-      Error,
-    );
-    assertStringIncludes(batchErr.message, "Corrupted article storage for art-corrupt-test");
+    // getArticles degrades the damaged row to null rather than rejecting the whole batch
+    // (audio-feed-jnor). The invariant this line used to protect — never hand back partial text — is
+    // asserted directly now, which is stronger than asserting the throw: a rejection and a null both
+    // prove "no partial content", but only null proves the batch survives. Rejecting the batch was the
+    // mechanism that turned one lost chunk into a dead /listen page, because listen.ts awaits this call
+    // bare and Promise.all let a single hydration failure take every other article down with it.
+    const batch = await store.getArticles("u-corrupt", ["art-corrupt-test"]);
+    assertEquals(batch.length, 1);
+    assertEquals(batch[0], null, "a damaged article must be null, never truncated content");
   } finally {
     await kv.close();
   }

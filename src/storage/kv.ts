@@ -115,6 +115,39 @@ function expireInMs(expiresAt: string): number {
   return Number.isFinite(ms) ? Math.max(ms, 60_000) : 60_000;
 }
 
+/**
+ * An article whose chunk set does not match its recorded `chunkCount` (audio-feed-cei).
+ *
+ * Thrown rather than silently joined: truncated article text must never reach a TTS queue. Callers that
+ * render a list may degrade one row to null (see getArticles); callers that synthesize must not.
+ * Exported so the two can be distinguished by identity — a blanket catch would also swallow quota,
+ * timeout and genuine bugs in hydration and hide an outage behind a missing row.
+ */
+export class CorruptArticleError extends Error {
+  readonly articleId: string;
+  readonly expectedChunks: number;
+  readonly foundChunks: number;
+
+  constructor(articleId: string, expectedChunks: number, foundChunks: number) {
+    super(
+      `Corrupted article storage for ${articleId}: expected ${expectedChunks} chunks, found ${foundChunks}`,
+    );
+    this.name = "CorruptArticleError";
+    this.articleId = articleId;
+    this.expectedChunks = expectedChunks;
+    this.foundChunks = foundChunks;
+  }
+}
+
+/**
+ * Type guard for the one storage failure a list read may degrade (audio-feed-jnor). Exported so the
+ * discriminator is testable on its own: without it, a blanket `catch { return null }` would satisfy
+ * every behavioural test in the file while also swallowing KV faults as quietly absent content.
+ */
+export function isCorruptArticleError(err: unknown): err is CorruptArticleError {
+  return err instanceof CorruptArticleError;
+}
+
 export class KvMetadataStore implements MetadataStore {
   #kv: Deno.Kv;
   #ownsConnection: boolean;
@@ -494,9 +527,7 @@ export class KvMetadataStore implements MetadataStore {
       }
     }
     if (chunkPieces.length !== article.chunkCount) {
-      throw new Error(
-        `Corrupted article storage for ${article.id}: expected ${article.chunkCount} chunks, found ${chunkPieces.length}`,
-      );
+      throw new CorruptArticleError(article.id, article.chunkCount, chunkPieces.length);
     }
     return {
       ...article,
@@ -615,7 +646,25 @@ export class KvMetadataStore implements MetadataStore {
       for (const row of rows) articles.push(row.value);
     }
     return await Promise.all(
-      articles.map((art) => art ? this.#hydrateArticle(userId, art) : Promise.resolve(null)),
+      articles.map((art) =>
+        art
+          ? this.#hydrateArticle(userId, art).catch((err: unknown) => {
+            // Only a corrupt article degrades to a missing row. Anything else — a KV fault, a bug in
+            // hydration — has to keep travelling, or an outage shows up as quietly absent content and
+            // nobody notices. The single-article read path deliberately has no equivalent handler:
+            // synthesis must fail closed rather than speak truncated text (audio-feed-jnor).
+            if (!isCorruptArticleError(err)) throw err;
+            console.warn(JSON.stringify({
+              event: "article.corrupt",
+              articleId: err.articleId,
+              expectedChunks: err.expectedChunks,
+              foundChunks: err.foundChunks,
+              action: "omitted-from-batch",
+            }));
+            return null;
+          })
+          : Promise.resolve(null)
+      ),
     );
   }
 
