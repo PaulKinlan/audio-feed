@@ -1,0 +1,350 @@
+/* All tokens, spacing, colour and type come from unified tokens (src/routes/tokens.ts). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.admin-page {
+  max-inline-size: var(--page);
+  margin-inline: auto;
+  padding: var(--space-8) var(--space-4) var(--space-12);
+}
+.signin-card .row {
+  margin-block-start: var(--space-3);
+}
+.signin-card a.primary {
+  display: inline-block;
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0.55rem 1.1rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+#setupLinkBox {
+  margin-block-start: var(--space-4);
+}
+
+h1 {
+  font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem);
+  line-height: 1.2;
+  margin: 0 0 var(--space-2);
+}
+h2 {
+  font-size: 1.15rem;
+  margin: 0 0 var(--space-3);
+}
+p {
+  max-inline-size: var(--measure);
+}
+.muted {
+  color: var(--text-muted);
+}
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-6);
+  margin-block: var(--space-6);
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-block-end: var(--space-1);
+}
+.hint {
+  display: block;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+input,
+select {
+  font: inherit;
+  inline-size: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.field {
+  margin-block-end: var(--space-4);
+}
+
+/* audio-feed-u54: two short-value fields grow to their content. Opt-in per field, deliberately not
+   applied to the shared 'input, select { inline-size: 100% }' above — every other field here
+   is better off full width, and a long email or URL in a search box is not something you want to
+   shrink. Chrome 123+ only and not Baseline, so the whole rule sits behind @supports: without the
+   guard, Safari and Firefox get inline-size:auto with no content sizing, which measured 185px —
+   narrower than the 100% they get today. inline-size must be released to auto for field-sizing to do
+   anything at all: with inline-size: 100% the property is inert (measured unchanged at 1224px before
+   and after typing), which is the trap this started from. min-inline-size keeps an empty field
+   clickable; max-inline-size keeps a long value inside its container. */
+/* TODO(baseline/field-sizing): drop the @supports guard and keep the declarations. */
+@supports (field-sizing: content) {
+  input.field-auto {
+    field-sizing: content;
+    inline-size: auto;
+    min-inline-size: 12ch;
+    max-inline-size: 100%;
+  }
+}
+
+/* audio-feed-ndc: a checkbox is the one input that must NOT stretch to 100%,
+   so it is opted out of the shared input rule rather than the rule being
+   narrowed — narrowing it would silently change every other field. */
+.check {
+  display: flex;
+  gap: var(--space-2);
+  align-items: start;
+  margin-block-end: var(--space-4);
+}
+.check input[type="checkbox"] {
+  inline-size: auto;
+  margin-block-start: 0.2rem;
+  flex: none;
+}
+.check label {
+  margin: 0;
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+  justify-content: space-between;
+}
+.card-head h2 {
+  margin: 0;
+}
+
+h3 {
+  font-size: 1rem;
+  margin-block: var(--space-6) var(--space-3);
+}
+
+/* auto-fit rather than a fixed column count: four cards on a desktop, two on a
+   tablet, one on a phone, with no breakpoint to keep in sync. */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-3);
+  margin-block: var(--space-4) 0;
+}
+.stat {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+}
+.stat dt {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.stat dd {
+  margin: var(--space-1) 0 0;
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.stat-note {
+  margin: var(--space-1) 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+td.error-text {
+  color: var(--danger);
+}
+
+button {
+  font: inherit;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+button.secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+button.danger {
+  background: var(--surface);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+button[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* The table scrolls inside its card rather than widening the page on a phone. */
+.table-wrap {
+  max-inline-size: 100%;
+  overflow-x: auto;
+}
+table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 0.9rem;
+}
+caption {
+  text-align: start;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding-block-end: var(--space-2);
+}
+th,
+td {
+  text-align: start;
+  padding: var(--space-2) var(--space-3);
+  border-block-end: 1px solid var(--border);
+  vertical-align: top;
+}
+th {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+td.actions {
+  white-space: nowrap;
+}
+/* Five columns at 390px squeezed Result to one character per line: hold a
+   readable width and let .table-wrap scroll instead. */
+table.runs {
+  min-inline-size: 40rem;
+}
+
+.status {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.status[data-status="approved"] {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.status[data-status="suspended"] {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.status[data-status="rejected"] {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.status[data-status="pending"] {
+  color: var(--text-muted);
+}
+
+.feedback {
+  margin-block-start: var(--space-3);
+  min-block-size: 1.5rem;
+  font-weight: 600;
+}
+.feedback[data-tone="ok"] {
+  color: var(--ok);
+}
+.feedback[data-tone="error"] {
+  color: var(--danger);
+}
+
+.created {
+  margin-block-start: var(--space-4);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border-radius: var(--radius);
+}
+.created dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+.created dt {
+  font-weight: 600;
+}
+.created dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.copy-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-3);
+}
+.copy-row input {
+  flex: 1 1 22rem;
+  min-inline-size: 0;
+}
+.error-detail {
+  font-size: 0.75rem;
+  color: var(--danger);
+  margin-block-start: var(--space-1);
+  word-break: break-all;
+}
+
+.run-errors {
+  margin: 0;
+}
+.run-errors summary {
+  cursor: pointer;
+  color: var(--danger);
+  font-weight: 600;
+}
+.run-errors summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.run-errors-list {
+  margin: var(--space-2) 0 0 0;
+  padding-inline-start: var(--space-4);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  max-inline-size: 32rem;
+  overflow-wrap: anywhere;
+}
+.run-errors-list li {
+  margin-block-end: var(--space-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

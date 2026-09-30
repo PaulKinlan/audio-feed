@@ -15,6 +15,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
+import { shippedCss } from "./admin_css.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
@@ -74,7 +75,15 @@ Deno.test("the background-runs table keeps a readable width on a phone (audio-fe
   // At 390px an unconstrained five-column table squeezed Result to one
   // character per line; the table now holds a minimum width and scrolls.
   assertStringIncludes(html, '<table class="runs">');
-  assertStringIncludes(html, "table.runs { min-inline-size: 40rem; }");
+  // Resolved through the link, not the inline <style>: this rule moved to src/assets/admin.css in
+  // audio-feed-3xq part 3, and reading the HTML alone would now miss it.
+  // Whitespace-normalised: deno fmt rewrites the extracted file across lines, and asserting on exact
+  // formatting ties a behavioural test to the formatter's opinion rather than to the rule existing.
+  const flat = shippedCss(html).replace(/\s+/g, " ");
+  assert(
+    flat.includes("table.runs { min-inline-size: 40rem; }"),
+    "the runs table must keep its phone-width floor, inline or linked",
+  );
 });
 
 Deno.test("GET /admin serves the console and is never cached", async () => {
