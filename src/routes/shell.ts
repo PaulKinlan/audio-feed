@@ -92,12 +92,34 @@ export const SHELL_CSS = `
   }
   .skip:focus { inset-block-start: 0.75rem; }
 
+  /* TODO(baseline/container-scroll-state): additive stuck styling only — a browser
+     without scroll-state queries renders the base header unchanged (no fallback owed).
+     The STICKY element is the scroll-state container (container-scroll-state,
+     chromium 133+): a scroll-state query can only style a container's
+     DESCENDANTS, never the container itself — so the visible surface is
+     .site-header, inside this wrapper. Browsers without scroll-state support
+     drop container-type and the @container rule wholesale: identical rendering. */
+  .site-header-sticky {
+    position: sticky; inset-block-start: 0; z-index: 5;
+    container-type: scroll-state; container-name: site-sticky;
+  }
   .site-header {
     border-block-end: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: saturate(1.4) blur(10px);
-    position: sticky; inset-block-start: 0; z-index: 5;
     view-transition-name: app-header;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .site-header { transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease; }
+  }
+  /* Stuck: subtle elevation and a stronger edge. Paint-only properties, so there is
+     no layout change for scroll anchoring to fight (no overflow-anchor needed). */
+  @container site-sticky scroll-state(stuck: top) {
+    .site-header {
+      border-block-end-color: var(--border-2);
+      background: color-mix(in srgb, var(--bg) 97%, transparent);
+      box-shadow: 0 10px 24px -20px rgb(2 10 22 / .55);
+    }
   }
   .site-header .bar {
     max-inline-size: var(--page); margin-inline: auto;
@@ -645,11 +667,11 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
     : `<div class="who">${
       current === "login" ? "" : `<a class="sign-in" href="/login">Sign in</a>`
     }</div>`;
-  return `<header class="site-header"><div class="bar">
+  return `<div class="site-header-sticky"><header class="site-header"><div class="bar">
     <a class="brand" href="/">${MARK}<span>Audio Feed</span></a>
     <nav class="site-nav" aria-label="Main">${nav}</nav>
     ${who}
-  </div></header>`;
+  </div></header></div>`;
 }
 
 export function renderFooter(): string {
