@@ -86,11 +86,11 @@ const CSS = `
 
 function when(iso: string | undefined): string {
   if (!iso) return "never";
-  // audio-feed-ap45: use Temporal for date string conversion
+  // audio-feed-ap45: use Temporal.PlainDate for calendar date extraction
   // TODO(baseline/temporal): drop fallback when Temporal reaches Baseline
   if (typeof Temporal !== "undefined") {
     try {
-      return Temporal.Instant.from(iso).toZonedDateTimeISO("UTC").toPlainDate().toString();
+      return Temporal.PlainDate.from(iso).toString();
     } catch {
       // fallback
     }

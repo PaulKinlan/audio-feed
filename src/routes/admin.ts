@@ -654,7 +654,7 @@ ${CONFIRM_DIALOG_CLIENT}
         if (m < 60) return m + "m ago";
         const h = Math.round(duration.total({ unit: "hours" }));
         if (h < 48) return h + "h ago";
-        const d = Math.round(duration.total({ unit: "days" }));
+        const d = Math.round(h / 24);
         return d + "d ago";
       } catch {
         // fallback to Date

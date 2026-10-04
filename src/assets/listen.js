@@ -384,11 +384,15 @@ const when = (iso) => {
   }
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "";
-  const days = Math.floor((Date.now() - then) / 86400000);
+  const dThen = new Date(then);
+  const dNow = new Date(Date.now());
+  const startOfToday = new Date(dNow.getFullYear(), dNow.getMonth(), dNow.getDate()).getTime();
+  const startOfItem = new Date(dThen.getFullYear(), dThen.getMonth(), dThen.getDate()).getTime();
+  const days = Math.round((startOfToday - startOfItem) / 86400000);
   if (days <= 0) return "Today";
   if (days === 1) return "Yesterday";
   if (days < 7) return days + " days ago";
-  return new Date(then).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  return dThen.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 };
 
 /** @param {string} message @param {string} [tone] */
