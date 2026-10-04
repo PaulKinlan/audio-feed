@@ -561,6 +561,35 @@ function row(episode) {
     }
 
     if (!shared) {
+      const shareDialog =
+        /** @type {HTMLDialogElement | null} */ (document.getElementById("shareDialog"));
+      const shareMessage = document.getElementById("shareMessage");
+      const shareUrlInput =
+        /** @type {HTMLInputElement | null} */ (document.getElementById("shareUrlInput"));
+      const shareCopyBtn = document.getElementById("shareCopyBtn");
+
+      if (shareDialog && typeof shareDialog.showModal === "function") {
+        if (shareMessage) shareMessage.textContent = episode.title;
+        if (shareUrlInput) shareUrlInput.value = shareUrl;
+        if (shareCopyBtn) {
+          shareCopyBtn.textContent = "Copy";
+          shareCopyBtn.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(shareUrl);
+              shareCopyBtn.textContent = "Copied!";
+              say("Link copied to clipboard.", "ok");
+              setTimeout(() => {
+                if (shareCopyBtn) shareCopyBtn.textContent = "Copy";
+              }, 2000);
+            } catch {
+              say("Could not copy link to clipboard.", "error");
+            }
+          };
+        }
+        shareDialog.showModal();
+        return;
+      }
+
       try {
         await navigator.clipboard.writeText(shareUrl);
         share.dataset.state = "copied";
@@ -1533,4 +1562,24 @@ async function boot() {
     }
   }
 }
+
+// audio-feed-e21x: Native <dialog closedby="any"> light-dismiss fallback shim
+const shareDialogEl =
+  /** @type {HTMLDialogElement | null} */ (document.getElementById("shareDialog"));
+if (
+  shareDialogEl && typeof HTMLDialogElement !== "undefined" &&
+  !("closedBy" in HTMLDialogElement.prototype)
+) {
+  // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
+  shareDialogEl.addEventListener("click", (event) => {
+    if (event.target !== shareDialogEl) return;
+    const rect = shareDialogEl.getBoundingClientRect();
+    const isInside = rect.top <= event.clientY &&
+      event.clientY <= rect.top + rect.height &&
+      rect.left <= event.clientX &&
+      event.clientX <= rect.left + rect.width;
+    if (!isInside) shareDialogEl.close("cancel");
+  });
+}
+
 void boot();
