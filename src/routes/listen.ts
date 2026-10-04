@@ -366,6 +366,21 @@ ${ICON_SPRITE}
   </div>
 </section>
 
+  <!-- audio-feed-e21x: native accessible modal dialog with closedby="any" for declarative light-dismiss -->
+  <dialog id="shareDialog" class="confirm-dialog share-dialog" closedby="any" aria-labelledby="shareTitle" aria-describedby="shareMessage">
+    <form method="dialog" class="confirm-form">
+      <h3 id="shareTitle" class="confirm-title">Share episode</h3>
+      <p id="shareMessage" class="confirm-message"></p>
+      <div class="share-copy-row">
+        <input type="text" id="shareUrlInput" readonly class="share-url-input" aria-label="Episode link" />
+        <button type="button" id="shareCopyBtn" class="btn small">Copy</button>
+      </div>
+      <div class="confirm-actions">
+        <button type="submit" value="close" class="btn secondary" id="shareCloseBtn" autofocus>Close</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
        one JSON document. Data in the page, code in a file. -->
   <script type="application/json" id="player-data">${jsonForScript(playerData)}</script>

@@ -386,6 +386,49 @@ table.runs {
   margin-block-end: var(--space-1);
 }
 
+/* Native Accessible Modal Dialog & Light-Dismiss (audio-feed-e21x, audio-feed-ytl) */
+dialog.confirm-dialog {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 20px 40px -15px rgb(0 0 0 / 0.35);
+  max-inline-size: min(28rem, calc(100vw - 2rem));
+  margin: auto;
+}
+dialog.confirm-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+dialog.confirm-dialog .confirm-form {
+  padding: 1.5rem;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+dialog.confirm-dialog .confirm-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+dialog.confirm-dialog .confirm-message {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+dialog.confirm-dialog .confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-block-start: 0.5rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
