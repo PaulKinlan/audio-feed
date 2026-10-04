@@ -77,14 +77,37 @@ select {
 
 /* ---------------------------------------------------------------- header */
 
-header.app {
+/* TODO(baseline/container-scroll-state): additive stuck styling only — a browser
+   without scroll-state queries renders the base header unchanged (no fallback owed).
+   The sticky element is the scroll-state container (container-scroll-state,
+   chromium 133+): the query can only style its DESCENDANTS, so header.app is the
+   surface inside this wrapper. Unsupported browsers drop container-type and the
+   @container rule wholesale — identical rendering, no marker owed. */
+.app-header-sticky {
   position: sticky;
   inset-block-start: 0;
   z-index: 5;
+  container-type: scroll-state;
+  container-name: app-sticky;
+}
+header.app {
   background: color-mix(in srgb, var(--bg) 82%, transparent);
   backdrop-filter: blur(14px) saturate(140%);
   border-block-end: 1px solid var(--border);
   view-transition-name: app-header;
+}
+@media (prefers-reduced-motion: no-preference) {
+  header.app {
+    transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease;
+  }
+}
+/* Stuck: subtle elevation and a stronger edge — paint-only, no layout shift. */
+@container app-sticky scroll-state(stuck: top) {
+  header.app {
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    border-block-end-color: var(--border-2);
+    box-shadow: 0 10px 24px -20px rgb(2 10 22 / .5);
+  }
 }
 .header-inner {
   max-inline-size: 48rem;

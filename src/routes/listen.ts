@@ -234,6 +234,7 @@ ${SPECULATION_RULES}
 <body>
 ${ICON_SPRITE}
 
+<div class="app-header-sticky">
 <header class="app">
   <div class="header-inner">
     <div class="identity">
@@ -256,6 +257,7 @@ ${ICON_SPRITE}
     </div>
   </div>
 </header>
+</div>
 
 <main>
   <!--
