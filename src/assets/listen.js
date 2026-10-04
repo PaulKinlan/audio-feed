@@ -402,6 +402,145 @@ const say = (message, tone) => {
   else delete playerNotice.dataset.tone;
 };
 
+// audio-feed-pzwe: CSS Anchor Positioning for tooltips with getBoundingClientRect fallback
+// Keep in sync with the shell copy in src/routes/shell.ts (TOOLTIP_CLIENT).
+// WCAG 2.1 1.4.13: dismissible (Escape), hoverable, persistent
+let tooltipEl = document.getElementById("appTooltip");
+if (!tooltipEl && document.body) {
+  tooltipEl = document.createElement("div");
+  tooltipEl.id = "appTooltip";
+  tooltipEl.className = "tooltip";
+  tooltipEl.setAttribute("role", "tooltip");
+  tooltipEl.setAttribute("aria-hidden", "true");
+  document.body.appendChild(tooltipEl);
+}
+
+const supportsAnchorPositioning = typeof CSS !== "undefined" &&
+  typeof CSS.supports === "function" &&
+  CSS.supports("anchor-name", "--a");
+/** @type {HTMLElement | null} */
+let currentTooltipTarget = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let tooltipHideTimer = null;
+
+/**
+ * Position and display tooltip for an anchor element.
+ * Uses CSS Anchor Positioning when supported; falls back to getBoundingClientRect().
+ * @param {HTMLElement} target
+ * @param {string} text
+ */
+function showTooltip(target, text) {
+  if (tooltipHideTimer) {
+    clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = null;
+  }
+  if (currentTooltipTarget && currentTooltipTarget !== target) {
+    currentTooltipTarget.removeAttribute("data-tooltip-active");
+    currentTooltipTarget.removeAttribute("aria-describedby");
+  }
+  currentTooltipTarget = target;
+  target.setAttribute("data-tooltip-active", "");
+  target.setAttribute("aria-describedby", "appTooltip");
+  if (tooltipEl) {
+    tooltipEl.textContent = text;
+    tooltipEl.setAttribute("aria-hidden", "false");
+    tooltipEl.classList.add("visible");
+
+    if (!supportsAnchorPositioning) {
+      // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+      const rect = target.getBoundingClientRect();
+      tooltipEl.style.left = rect.left + "px";
+      const tooltipHeight = tooltipEl.offsetHeight || 28;
+      const margin = 8;
+      const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
+      const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
+      if (overflowBottom && fitsAbove) {
+        // Flip above anchor to match position-try-fallbacks: flip-block
+        tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
+      } else {
+        tooltipEl.style.top = (rect.bottom + margin) + "px";
+      }
+    }
+  }
+}
+
+/**
+ * @param {boolean} [immediate=false]
+ */
+function hideTooltip(immediate = false) {
+  const doHide = () => {
+    if (currentTooltipTarget) {
+      currentTooltipTarget.removeAttribute("data-tooltip-active");
+      currentTooltipTarget.removeAttribute("aria-describedby");
+      currentTooltipTarget = null;
+    }
+    if (tooltipEl) {
+      tooltipEl.classList.remove("visible");
+      tooltipEl.setAttribute("aria-hidden", "true");
+      if (!supportsAnchorPositioning) {
+        tooltipEl.style.left = "";
+        tooltipEl.style.top = "";
+      }
+    }
+  };
+
+  if (immediate) {
+    if (tooltipHideTimer) {
+      clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+    doHide();
+  } else {
+    if (tooltipHideTimer) clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = setTimeout(doHide, 80);
+  }
+}
+
+if (tooltipEl) {
+  tooltipEl.addEventListener("pointerenter", () => {
+    if (tooltipHideTimer) {
+      clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+  });
+  tooltipEl.addEventListener("pointerleave", () => {
+    hideTooltip(false);
+  });
+}
+
+document.addEventListener("pointerover", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target && target instanceof HTMLElement) {
+    const text = target.getAttribute("data-tooltip");
+    if (text) showTooltip(target, text);
+  }
+});
+
+document.addEventListener("pointerout", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target) hideTooltip(false);
+});
+
+document.addEventListener("focusin", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target && target instanceof HTMLElement) {
+    const text = target.getAttribute("data-tooltip");
+    if (text) showTooltip(target, text);
+  }
+});
+
+document.addEventListener("focusout", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target) hideTooltip(true);
+});
+
+// Dismissible: Escape key dismisses active tooltip (WCAG 1.4.13)
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && currentTooltipTarget) {
+    hideTooltip(true);
+  }
+});
+
 async function openOfflineCache() {
   if (!OFFLINE_ENABLED || !("caches" in window)) return null;
   if (!cache) cache = await caches.open(OFFLINE_CACHE);
@@ -518,6 +657,7 @@ function row(episode) {
     "aria-label",
     (saved ? "Saved offline: " : "Download for offline listening: ") + episode.title,
   );
+  download.setAttribute("data-tooltip", saved ? "Saved offline" : "Download episode");
   if (!OFFLINE_ENABLED) {
     download.disabled = true;
     download.title = "This browser cannot store audio offline.";
@@ -534,6 +674,7 @@ function row(episode) {
   share.className = "ep-share";
   share.dataset.action = "share";
   share.setAttribute("aria-label", "Share episode: " + episode.title);
+  share.setAttribute("data-tooltip", "Share episode");
   share.appendChild(icon("share"));
   share.addEventListener("click", async () => {
     const shareUrl = episode.articleUrl || episode.audioUrl || window.location.href;

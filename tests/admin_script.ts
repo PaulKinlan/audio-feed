@@ -100,6 +100,8 @@ const PAGE_IDS = [
   "confirmMessage",
   "confirmOkBtn",
   "confirmCancelBtn",
+  // audio-feed-pzwe: accessible tooltip container
+  "appTooltip",
 ];
 
 export interface StubElement {

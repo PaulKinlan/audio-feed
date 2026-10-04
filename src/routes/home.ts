@@ -475,7 +475,7 @@ export function renderHomePage({
   <div class="note bookmarklet-box" style="margin-block-start: var(--space-4);">
     <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link" href="${
     esc(bookmarkletHref(base))
-  }" draggable="true" title="Drag to your bookmarks bar" style="font-weight: 600; text-decoration: underline;">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
+  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar" style="font-weight: 600; text-decoration: underline;">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
   </div>
 
   <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>
