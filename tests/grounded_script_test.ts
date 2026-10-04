@@ -434,6 +434,20 @@ Deno.test("script deadline: the default is a real budget, not a token bound", ()
   );
 });
 
+Deno.test("script deadline: the default clears three times the observed real-traffic maximum (yr76)", () => {
+  // The measured distribution on real grounded calls (n=4, sotw-ds-flash 2026-10-04):
+  // min 14.7s / p50 19.3s / max 19.7s. The default must clear 3x the observed maximum —
+  // a timeout throws away a PAID grounded call (the episode falls back to the static
+  // builder), so the margin is bought against a tail n=4 has not probed. Lowering the
+  // default below this margin should trip here with the evidence named, not pass quietly.
+  const OBSERVED_MAX_MS = 19_700;
+  assert(
+    DEFAULT_SCRIPT_TIMEOUT_MS >= OBSERVED_MAX_MS * 3,
+    `the default (${DEFAULT_SCRIPT_TIMEOUT_MS}ms) is under 3x the observed max grounded-call time ` +
+      `(${OBSERVED_MAX_MS}ms) — the margin that keeps a paid slow-but-fine call from being thrown away`,
+  );
+});
+
 Deno.test("synthesis: a generator that hangs forever still produces an episode", async () => {
   const warnings: string[] = [];
   const originalWarn = console.warn;
