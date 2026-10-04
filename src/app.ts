@@ -164,12 +164,19 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     handlers.voiceSample ?? (() => notImplemented("Voice samples")),
   );
 
-  router.get("/health", ({ ctx }) =>
-    json({
+  router.get("/health", ({ ctx }) => {
+    const deploy = deployFingerprint();
+    return json({
       status: "ok",
       storage: ctx.stores.describe,
+      // Which revision this process is running: production has no other observable
+      // identity (every other surface is token- or session-gated). See AGENTS.md,
+      // "Verifying a landing against production".
+      deploy: deploy.id,
+      deploySource: deploy.source,
       time: new Date().toISOString(),
-    }));
+    });
+  });
 
   // -- feeds ----------------------------------------------------------------
   // `:token` is the per-user capability: podcast clients cannot authenticate,
@@ -335,6 +342,29 @@ function clampLimit(raw: string | null): number {
   const parsed = Number(raw ?? 50);
   if (!Number.isFinite(parsed)) return 50;
   return Math.min(Math.max(Math.trunc(parsed), 1), 200);
+}
+
+/**
+ * Which revision is this process running? Deno Deploy sets `DENO_DEPLOYMENT_ID` on every
+ * deployment; `GIT_COMMIT_SHA` is for a deploy that injects the commit. `dev` means neither
+ * is present (a local run) — deliberately not a matchable value, so a verification that sees
+ * it records production as UNVERIFIED rather than passing.
+ *
+ * An empty or whitespace-only variable counts as ABSENT: `??` alone would return "" and
+ * quietly make every deployment look identical.
+ */
+export function deployFingerprint(
+  env: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): { id: string; source: "DENO_DEPLOYMENT_ID" | "GIT_COMMIT_SHA" | "dev" } {
+  const pick = (name: string) => {
+    const value = env(name);
+    return value && value.trim() ? value.trim() : undefined;
+  };
+  const deployment = pick("DENO_DEPLOYMENT_ID");
+  if (deployment) return { id: deployment, source: "DENO_DEPLOYMENT_ID" };
+  const commit = pick("GIT_COMMIT_SHA");
+  if (commit) return { id: commit, source: "GIT_COMMIT_SHA" };
+  return { id: "dev", source: "dev" };
 }
 
 export function createApp(
