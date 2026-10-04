@@ -402,6 +402,76 @@ const say = (message, tone) => {
   else delete playerNotice.dataset.tone;
 };
 
+// audio-feed-pzwe: CSS Anchor Positioning for tooltips with getBoundingClientRect fallback
+const tooltipEl = document.createElement("div");
+tooltipEl.className = "tooltip";
+tooltipEl.setAttribute("role", "tooltip");
+tooltipEl.setAttribute("aria-hidden", "true");
+document.body.appendChild(tooltipEl);
+
+const supportsAnchorPositioning = typeof CSS !== "undefined" &&
+  CSS.supports("anchor-name", "--a");
+/** @type {HTMLElement | null} */
+let currentTooltipTarget = null;
+
+/**
+ * Position and display tooltip for an anchor element.
+ * Uses CSS Anchor Positioning when supported; falls back to getBoundingClientRect().
+ * @param {HTMLElement} target
+ * @param {string} text
+ */
+function showTooltip(target, text) {
+  if (currentTooltipTarget && currentTooltipTarget !== target) {
+    currentTooltipTarget.removeAttribute("data-tooltip-active");
+  }
+  currentTooltipTarget = target;
+  target.setAttribute("data-tooltip-active", "");
+  tooltipEl.textContent = text;
+  tooltipEl.classList.add("visible");
+
+  if (!supportsAnchorPositioning) {
+    // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+    // Manual fallback for engines without CSS Anchor Positioning support
+    const rect = target.getBoundingClientRect();
+    tooltipEl.style.left = rect.left + "px";
+    tooltipEl.style.top = (rect.bottom + 8) + "px";
+  }
+}
+
+function hideTooltip() {
+  if (currentTooltipTarget) {
+    currentTooltipTarget.removeAttribute("data-tooltip-active");
+    currentTooltipTarget = null;
+  }
+  tooltipEl.classList.remove("visible");
+}
+
+document.addEventListener("pointerover", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  if (target && target instanceof HTMLElement) {
+    const text = target.getAttribute("data-tooltip");
+    if (text) showTooltip(target, text);
+  }
+});
+
+document.addEventListener("pointerout", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  if (target) hideTooltip();
+});
+
+document.addEventListener("focusin", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  if (target && target instanceof HTMLElement) {
+    const text = target.getAttribute("data-tooltip");
+    if (text) showTooltip(target, text);
+  }
+});
+
+document.addEventListener("focusout", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  if (target) hideTooltip();
+});
+
 async function openOfflineCache() {
   if (!OFFLINE_ENABLED || !("caches" in window)) return null;
   if (!cache) cache = await caches.open(OFFLINE_CACHE);
@@ -518,6 +588,7 @@ function row(episode) {
     "aria-label",
     (saved ? "Saved offline: " : "Download for offline listening: ") + episode.title,
   );
+  download.setAttribute("data-tooltip", saved ? "Saved offline" : "Download episode");
   if (!OFFLINE_ENABLED) {
     download.disabled = true;
     download.title = "This browser cannot store audio offline.";
@@ -534,6 +605,7 @@ function row(episode) {
   share.className = "ep-share";
   share.dataset.action = "share";
   share.setAttribute("aria-label", "Share episode: " + episode.title);
+  share.setAttribute("data-tooltip", "Share episode");
   share.appendChild(icon("share"));
   share.addEventListener("click", async () => {
     const shareUrl = episode.articleUrl || episode.audioUrl || window.location.href;

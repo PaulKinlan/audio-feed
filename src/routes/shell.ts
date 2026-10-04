@@ -186,6 +186,46 @@ export const SHELL_CSS = `
     gap: 0.75rem;
     margin-block-start: 0.5rem;
   }
+
+  /* audio-feed-pzwe: CSS Anchor Positioning for tooltips.
+     Tethers tooltips declaratively to the anchor element with flip-block fallback,
+     degrading to manual getBoundingClientRect() positioning on non-supporting engines. */
+  /* TODO(baseline/anchor-positioning): drop @supports guard when anchor-positioning reaches Baseline */
+  .tooltip {
+    position: fixed;
+    z-index: 1000;
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface-3);
+    color: var(--text);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.2;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s var(--ease);
+    white-space: nowrap;
+  }
+
+  .tooltip.visible {
+    opacity: 1;
+  }
+
+  @supports (anchor-name: --tooltip-anchor) {
+    [data-tooltip-active] {
+      anchor-name: --tooltip-anchor;
+    }
+
+    .tooltip {
+      position: fixed;
+      position-anchor: --tooltip-anchor;
+      top: anchor(bottom);
+      left: anchor(left);
+      margin-block-start: 8px;
+      position-try-fallbacks: flip-block;
+    }
+  }
 `;
 
 /**
@@ -268,6 +308,8 @@ export const SHELL_KIT_CSS = `
       color: var(--accent);
     }
   }
+
+
   .choices { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; }
   .choices label { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; }
   .shell input[type="radio"], .shell input[type="checkbox"] { accent-color: var(--accent); inline-size: 1.05rem; block-size: 1.05rem; }
