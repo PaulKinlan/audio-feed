@@ -43,6 +43,34 @@ export function cdata(value: string): string {
 
 /** RSS pubDate is RFC 2822. Always emit UTC so players cannot misread the offset. */
 export function toRfc2822(iso: string): string {
+  // audio-feed-ap45: use Temporal for timezone-safe date-time component extraction
+  // TODO(baseline/temporal): drop Date fallback when Temporal reaches Baseline
+  if (typeof Temporal !== "undefined") {
+    try {
+      const zdt = Temporal.Instant.from(iso).toZonedDateTimeISO("UTC");
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]; // 1 = Mon .. 7 = Sun
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${days[zdt.dayOfWeek - 1]}, ${pad(zdt.day)} ${months[zdt.month - 1]} ${zdt.year} ${
+        pad(zdt.hour)
+      }:${pad(zdt.minute)}:${pad(zdt.second)} +0000`;
+    } catch {
+      // fallback to Date
+    }
+  }
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) throw new Error(`Invalid pubDate: ${iso}`);
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -122,7 +150,21 @@ function normalise(episodes: Episode[]): Episode[] {
       seen.add(episode.guid);
       return true;
     })
-    .sort((a, b) => Date.parse(b.pubDate) - Date.parse(a.pubDate));
+    .sort((a, b) => {
+      // audio-feed-ap45: use Temporal.Instant.compare for robust timestamp ordering
+      // TODO(baseline/temporal): drop Date.parse fallback when Temporal reaches Baseline
+      if (typeof Temporal !== "undefined") {
+        try {
+          return Temporal.Instant.compare(
+            Temporal.Instant.from(b.pubDate),
+            Temporal.Instant.from(a.pubDate),
+          );
+        } catch {
+          // fallback
+        }
+      }
+      return Date.parse(b.pubDate) - Date.parse(a.pubDate);
+    });
 }
 
 function itemXml(episode: Episode, title: string): string {

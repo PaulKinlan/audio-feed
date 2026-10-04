@@ -365,6 +365,23 @@ const fmt = (seconds) => {
 /** @param {string} [iso] */
 const when = (iso) => {
   if (!iso) return "";
+  // audio-feed-ap45: use Temporal for date arithmetic when available
+  // TODO(baseline/temporal): drop Date fallback when Temporal reaches Baseline
+  if (typeof Temporal !== "undefined") {
+    try {
+      const today = Temporal.Now.plainDateISO();
+      const itemDate = Temporal.Instant.from(iso).toZonedDateTimeISO(Temporal.Now.timeZoneId())
+        .toPlainDate();
+      const diff = today.since(itemDate);
+      const days = diff.total({ unit: "days" });
+      if (days <= 0) return "Today";
+      if (days === 1) return "Yesterday";
+      if (days < 7) return days + " days ago";
+      return itemDate.toLocaleString(undefined, { day: "numeric", month: "short" });
+    } catch {
+      // fallback to Date
+    }
+  }
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "";
   const days = Math.floor((Date.now() - then) / 86400000);
