@@ -273,8 +273,8 @@ export function renderAdminPage(
       (feeds every 15 min; synthesis every 2 min). Trigger an immediate batch run on demand below.
     </p>
     <div class="row">
-      <button type="button" id="pollNowBtn" class="secondary" disabled>Poll Feeds Now</button>
-      <button type="button" id="synthesizeNowBtn" class="secondary" disabled>Synthesize Queue Now</button>
+      <button type="button" id="pollNowBtn" class="secondary" disabled data-tooltip="Poll all configured RSS feeds immediately">Poll Feeds Now</button>
+      <button type="button" id="synthesizeNowBtn" class="secondary" disabled data-tooltip="Process pending audio synthesis jobs">Synthesize Queue Now</button>
     </div>
     <p class="feedback" id="triggersFeedback" role="status" aria-live="polite"></p>
   </section>
@@ -288,8 +288,8 @@ export function renderAdminPage(
       <dl id="manageDetails"></dl>
       <div class="copy-row">
         <input type="text" id="manageFeedUrl" readonly aria-label="Subscriber master feed URL" />
-        <button type="button" id="copyManageFeedUrl">Copy feed URL</button>
-        <button type="button" id="rotateManageToken" class="danger">Rotate token</button>
+        <button type="button" id="copyManageFeedUrl" data-tooltip="Copy master feed URL">Copy feed URL</button>
+        <button type="button" id="rotateManageToken" class="danger" data-tooltip="Revoke old URL and generate new feed token">Rotate token</button>
       </div>
       <p class="muted" id="rotateHelp" style="margin-block-start: var(--space-2); margin-block-end: 0; font-size: 0.8rem;">
         Rotating the feed token revokes the old URL immediately.

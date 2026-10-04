@@ -210,6 +210,7 @@ export const SHELL_CSS = `
 
   .tooltip.visible {
     opacity: 1;
+    pointer-events: auto;
   }
 
   @supports (anchor-name: --tooltip-anchor) {
@@ -491,6 +492,138 @@ export const CONFIRM_DIALOG_CLIENT = `
   }
 `;
 
+/**
+ * Accessible Tooltip Container HTML (audio-feed-pzwe).
+ * WCAG 2.1 1.4.13:
+ * - role="tooltip" for screen readers
+ * - aria-hidden="true" when idle
+ * - aria-describedby binding on active trigger
+ */
+export const TOOLTIP_HTML =
+  `<div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>`;
+
+/**
+ * Accessible Tooltip Controller using CSS Anchor Positioning with flip-block fallback (audio-feed-pzwe).
+ * WCAG 2.1 1.4.13:
+ * - Dismissible: Escape key immediately dismisses tooltip
+ * - Hoverable: Pointer hover over tooltip content keeps it visible (.tooltip.visible { pointer-events: auto })
+ * - Persistent: Stays visible until pointer/focus moves away or Escape pressed
+ * - Screen readers: Dynamically sets aria-describedby="appTooltip" on active target
+ */
+export const TOOLTIP_CLIENT = `
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    const tooltipEl = document.getElementById("appTooltip");
+    if (tooltipEl) {
+      const supportsAnchorPositioning = typeof CSS !== "undefined" &&
+        typeof CSS.supports === "function" &&
+        CSS.supports("anchor-name", "--a");
+      let currentTooltipTarget = null;
+      let hideTimer = null;
+
+      const showTooltip = (target, text) => {
+        if (hideTimer) {
+          clearTimeout(hideTimer);
+          hideTimer = null;
+        }
+        if (currentTooltipTarget && currentTooltipTarget !== target) {
+          currentTooltipTarget.removeAttribute("data-tooltip-active");
+          currentTooltipTarget.removeAttribute("aria-describedby");
+        }
+        currentTooltipTarget = target;
+        target.setAttribute("data-tooltip-active", "");
+        target.setAttribute("aria-describedby", "appTooltip");
+        tooltipEl.textContent = text;
+        tooltipEl.setAttribute("aria-hidden", "false");
+        tooltipEl.classList.add("visible");
+
+        if (!supportsAnchorPositioning) {
+          // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+          const rect = target.getBoundingClientRect();
+          tooltipEl.style.left = rect.left + "px";
+          const tooltipHeight = tooltipEl.offsetHeight || 28;
+          const margin = 8;
+          const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
+          const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
+          if (overflowBottom && fitsAbove) {
+            tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
+          } else {
+            tooltipEl.style.top = (rect.bottom + margin) + "px";
+          }
+        }
+      };
+
+      const hideTooltip = (immediate) => {
+        const doHide = () => {
+          if (currentTooltipTarget) {
+            currentTooltipTarget.removeAttribute("data-tooltip-active");
+            currentTooltipTarget.removeAttribute("aria-describedby");
+            currentTooltipTarget = null;
+          }
+          tooltipEl.classList.remove("visible");
+          tooltipEl.setAttribute("aria-hidden", "true");
+          if (!supportsAnchorPositioning) {
+            tooltipEl.style.left = "";
+            tooltipEl.style.top = "";
+          }
+        };
+
+        if (immediate) {
+          if (hideTimer) {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+          }
+          doHide();
+        } else {
+          if (hideTimer) clearTimeout(hideTimer);
+          hideTimer = setTimeout(doHide, 80);
+        }
+      };
+
+      tooltipEl.addEventListener("pointerenter", () => {
+        if (hideTimer) {
+          clearTimeout(hideTimer);
+          hideTimer = null;
+        }
+      });
+      tooltipEl.addEventListener("pointerleave", () => {
+        hideTooltip(false);
+      });
+
+      document.addEventListener("pointerover", (event) => {
+        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
+        if (target && target instanceof HTMLElement) {
+          const text = target.getAttribute("data-tooltip");
+          if (text) showTooltip(target, text);
+        }
+      });
+
+      document.addEventListener("pointerout", (event) => {
+        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
+        if (target) hideTooltip(false);
+      });
+
+      document.addEventListener("focusin", (event) => {
+        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
+        if (target && target instanceof HTMLElement) {
+          const text = target.getAttribute("data-tooltip");
+          if (text) showTooltip(target, text);
+        }
+      });
+
+      document.addEventListener("focusout", (event) => {
+        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
+        if (target) hideTooltip(true);
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && currentTooltipTarget) {
+          hideTooltip(true);
+        }
+      });
+    }
+  }
+`;
+
 const MARK =
   `<svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--accent)"/><g stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"><path d="M9 13v6"/><path d="M13.5 9v14"/><path d="M18 12v8"/><path d="M22.5 14.5v3"/></g></svg>`;
 
@@ -504,9 +637,9 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
     viewer?.isAdmin ? link("/admin", "Admin", "admin") : "",
   ].join("");
   const who = viewer
-    ? `<div class="who"><span class="name" title="${esc(viewer.email)}">${
-      esc(viewer.displayName)
-    }</span>
+    ? `<div class="who"><span class="name" title="${esc(viewer.email)}" data-tooltip="${
+      esc(viewer.email)
+    }">${esc(viewer.displayName)}</span>
       <form method="post" action="/api/auth/logout"><button class="link-button" type="submit">Sign out</button></form></div>`
     : `<div class="who">${
       current === "login" ? "" : `<a class="sign-in" href="/login">Sign in</a>`
@@ -569,7 +702,12 @@ ${o.main}
 </main>
 ${renderFooter()}
 ${CONFIRM_DIALOG_HTML}
-${o.script ? `<script>\n${o.script}\n</script>` : ""}
+${TOOLTIP_HTML}
+${
+    o.script
+      ? `<script>\n${TOOLTIP_CLIENT}\n${o.script}\n</script>`
+      : `<script>\n${TOOLTIP_CLIENT}\n</script>`
+  }
 </body>
 </html>
 `;

@@ -299,7 +299,7 @@ ${ICON_SPRITE}
   <div class="filter-empty hidden" id="filterEmpty" role="status" aria-live="polite">
     <p><strong>No matching episodes</strong></p>
     <p class="sub" id="filterEmptyMessage">No episodes match your filter.</p>
-    <button type="button" class="btn quiet small" id="clearFilterBtn">Clear filters</button>
+    <button type="button" class="btn quiet small" id="clearFilterBtn" data-tooltip="Clear active filters">Clear filters</button>
   </div>
 </main>
 
@@ -344,13 +344,13 @@ ${ICON_SPRITE}
 
     <div class="transport">
       <span class="t-spacer" aria-hidden="true"></span>
-      <button type="button" class="t-btn" id="back" aria-label="Skip back 15 seconds">
+      <button type="button" class="t-btn" id="back" aria-label="Skip back 15 seconds" data-tooltip="Skip back 15s">
         <svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>
       </button>
-      <button type="button" class="t-btn t-main" id="playPause" aria-label="Play" aria-pressed="false">
+      <button type="button" class="t-btn t-main" id="playPause" aria-label="Play" aria-pressed="false" data-tooltip="Play / Pause">
         <svg class="icon" id="playIcon" aria-hidden="true"><use href="#i-play"/></svg>
       </button>
-      <button type="button" class="t-btn" id="fwd" aria-label="Skip forward 30 seconds">
+      <button type="button" class="t-btn" id="fwd" aria-label="Skip forward 30 seconds" data-tooltip="Skip forward 30s">
         <svg class="icon" aria-hidden="true"><use href="#i-fwd"/></svg>
       </button>
       <select class="rate" id="rate" aria-label="Playback speed">
@@ -373,13 +373,16 @@ ${ICON_SPRITE}
       <p id="shareMessage" class="confirm-message"></p>
       <div class="share-copy-row">
         <input type="text" id="shareUrlInput" readonly class="share-url-input" aria-label="Episode link" />
-        <button type="button" id="shareCopyBtn" class="btn small">Copy</button>
+        <button type="button" id="shareCopyBtn" class="btn small" data-tooltip="Copy link to clipboard">Copy</button>
       </div>
       <div class="confirm-actions">
         <button type="submit" value="close" class="btn secondary" id="shareCloseBtn" autofocus>Close</button>
       </div>
     </form>
   </dialog>
+
+  <!-- audio-feed-pzwe: accessible tooltip container -->
+  <div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>
 
   <!-- audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
        one JSON document. Data in the page, code in a file. -->

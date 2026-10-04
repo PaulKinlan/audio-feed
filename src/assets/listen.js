@@ -403,16 +403,24 @@ const say = (message, tone) => {
 };
 
 // audio-feed-pzwe: CSS Anchor Positioning for tooltips with getBoundingClientRect fallback
-const tooltipEl = document.createElement("div");
-tooltipEl.className = "tooltip";
-tooltipEl.setAttribute("role", "tooltip");
-tooltipEl.setAttribute("aria-hidden", "true");
-document.body.appendChild(tooltipEl);
+// WCAG 2.1 1.4.13: dismissible (Escape), hoverable, persistent
+let tooltipEl = document.getElementById("appTooltip");
+if (!tooltipEl && document.body) {
+  tooltipEl = document.createElement("div");
+  tooltipEl.id = "appTooltip";
+  tooltipEl.className = "tooltip";
+  tooltipEl.setAttribute("role", "tooltip");
+  tooltipEl.setAttribute("aria-hidden", "true");
+  document.body.appendChild(tooltipEl);
+}
 
 const supportsAnchorPositioning = typeof CSS !== "undefined" &&
+  typeof CSS.supports === "function" &&
   CSS.supports("anchor-name", "--a");
 /** @type {HTMLElement | null} */
 let currentTooltipTarget = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let tooltipHideTimer = null;
 
 /**
  * Position and display tooltip for an anchor element.
@@ -421,33 +429,86 @@ let currentTooltipTarget = null;
  * @param {string} text
  */
 function showTooltip(target, text) {
+  if (tooltipHideTimer) {
+    clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = null;
+  }
   if (currentTooltipTarget && currentTooltipTarget !== target) {
     currentTooltipTarget.removeAttribute("data-tooltip-active");
+    currentTooltipTarget.removeAttribute("aria-describedby");
   }
   currentTooltipTarget = target;
   target.setAttribute("data-tooltip-active", "");
-  tooltipEl.textContent = text;
-  tooltipEl.classList.add("visible");
+  target.setAttribute("aria-describedby", "appTooltip");
+  if (tooltipEl) {
+    tooltipEl.textContent = text;
+    tooltipEl.setAttribute("aria-hidden", "false");
+    tooltipEl.classList.add("visible");
 
-  if (!supportsAnchorPositioning) {
-    // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
-    // Manual fallback for engines without CSS Anchor Positioning support
-    const rect = target.getBoundingClientRect();
-    tooltipEl.style.left = rect.left + "px";
-    tooltipEl.style.top = (rect.bottom + 8) + "px";
+    if (!supportsAnchorPositioning) {
+      // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+      const rect = target.getBoundingClientRect();
+      tooltipEl.style.left = rect.left + "px";
+      const tooltipHeight = tooltipEl.offsetHeight || 28;
+      const margin = 8;
+      const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
+      const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
+      if (overflowBottom && fitsAbove) {
+        // Flip above anchor to match position-try-fallbacks: flip-block
+        tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
+      } else {
+        tooltipEl.style.top = (rect.bottom + margin) + "px";
+      }
+    }
   }
 }
 
-function hideTooltip() {
-  if (currentTooltipTarget) {
-    currentTooltipTarget.removeAttribute("data-tooltip-active");
-    currentTooltipTarget = null;
+/**
+ * @param {boolean} [immediate=false]
+ */
+function hideTooltip(immediate = false) {
+  const doHide = () => {
+    if (currentTooltipTarget) {
+      currentTooltipTarget.removeAttribute("data-tooltip-active");
+      currentTooltipTarget.removeAttribute("aria-describedby");
+      currentTooltipTarget = null;
+    }
+    if (tooltipEl) {
+      tooltipEl.classList.remove("visible");
+      tooltipEl.setAttribute("aria-hidden", "true");
+      if (!supportsAnchorPositioning) {
+        tooltipEl.style.left = "";
+        tooltipEl.style.top = "";
+      }
+    }
+  };
+
+  if (immediate) {
+    if (tooltipHideTimer) {
+      clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+    doHide();
+  } else {
+    if (tooltipHideTimer) clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = setTimeout(doHide, 80);
   }
-  tooltipEl.classList.remove("visible");
+}
+
+if (tooltipEl) {
+  tooltipEl.addEventListener("pointerenter", () => {
+    if (tooltipHideTimer) {
+      clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+  });
+  tooltipEl.addEventListener("pointerleave", () => {
+    hideTooltip(false);
+  });
 }
 
 document.addEventListener("pointerover", (event) => {
-  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
   if (target && target instanceof HTMLElement) {
     const text = target.getAttribute("data-tooltip");
     if (text) showTooltip(target, text);
@@ -455,12 +516,12 @@ document.addEventListener("pointerover", (event) => {
 });
 
 document.addEventListener("pointerout", (event) => {
-  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
-  if (target) hideTooltip();
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target) hideTooltip(false);
 });
 
 document.addEventListener("focusin", (event) => {
-  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
   if (target && target instanceof HTMLElement) {
     const text = target.getAttribute("data-tooltip");
     if (text) showTooltip(target, text);
@@ -468,8 +529,15 @@ document.addEventListener("focusin", (event) => {
 });
 
 document.addEventListener("focusout", (event) => {
-  const target = /** @type {HTMLElement | null} */ (event.target)?.closest("[data-tooltip]");
-  if (target) hideTooltip();
+  const target = /** @type {HTMLElement | null} */ (event.target)?.closest?.("[data-tooltip]");
+  if (target) hideTooltip(true);
+});
+
+// Dismissible: Escape key dismisses active tooltip (WCAG 1.4.13)
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && currentTooltipTarget) {
+    hideTooltip(true);
+  }
 });
 
 async function openOfflineCache() {

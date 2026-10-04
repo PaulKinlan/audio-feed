@@ -1057,6 +1057,7 @@ dialog.confirm-dialog .confirm-actions {
 
 .tooltip.visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 @supports (anchor-name: --tooltip-anchor) {

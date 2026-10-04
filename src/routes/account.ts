@@ -122,7 +122,7 @@ export function renderAccountPage(d: AccountPageData): string {
       ? ""
       : `<button class="btn danger small" type="button" data-remove-source="${
         esc(s.id)
-      }" data-title="${esc(s.title)}">Remove</button>`;
+      }" data-title="${esc(s.title)}" data-tooltip="Remove ${esc(s.title)}">Remove</button>`;
     return `<li><div class="row-head"><span class="row-title">${esc(s.title)}</span>${remove}</div>
       <div class="meta">${s.feedUrl ? esc(s.feedUrl) : "Articles you send"} · last polled ${
       when(s.lastPolledAt)
@@ -142,12 +142,14 @@ ${
         ? `
       <div class="actions"><button class="btn quiet small" type="button" data-regenerate-episode="${
           esc(e.id)
-        }" data-title="${esc(e.title)}">Regenerate</button></div>`
+        }" data-title="${esc(e.title)}" data-tooltip="Regenerate ${
+          esc(e.title)
+        }">Regenerate</button></div>`
         : approved && e.status === "failed"
         ? `
       <div class="actions"><button class="btn quiet small" type="button" data-retry-episode="${
           esc(e.id)
-        }" data-title="${esc(e.title)}">Retry</button></div>`
+        }" data-title="${esc(e.title)}" data-tooltip="Retry ${esc(e.title)}">Retry</button></div>`
         : ""
     }
     </li>`
@@ -165,7 +167,7 @@ ${
       </div>
       <button class="btn danger small" type="button" data-remove-passkey="${esc(c.id)}"${
       d.credentials.length <= 1
-        ? ` disabled title="Add another passkey before removing this one"`
+        ? ` disabled title="Add another passkey before removing this one" data-tooltip="Add another passkey before removing this one"`
         : ""
     }>Remove</button></div>
       <div class="meta">Added ${when(c.createdAt)} · last used ${when(c.lastUsedAt)}</div></li>`;
@@ -274,7 +276,7 @@ ${
         </div>
         <a class="btn quiet small bookmarklet-btn" href="${
     esc(bookmarkletCode)
-  }" draggable="true" title="Drag to your bookmarks bar">
+  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar">
           <span aria-hidden="true">🎙️</span> Add to Audio Feed
         </a>
       </div>
