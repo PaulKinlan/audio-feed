@@ -23,6 +23,28 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Modern-web bead closures record a premise verdict
+
+Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title
+(the trailing `(<guide-id>)`). The factory's beads sink skips a candidate whose id is already on a
+bead in ANY state, so the same modernization is never emitted twice.
+
+When closing one of these beads, record the **premise verdict** — what the scanner matched and
+what the code actually has — as `bd close --reason "<line>"` or as a comment:
+
+```
+premise verdict: no producer of <thing> in src/; scanner artefact — canonical id <id>, already carried by <bead-id>
+```
+
+Measured examples: `no tooltip implementation in src/` (1vi, anchor-positioning) and
+`no scroll-driven animation machinery in src/` (t8p, scroll-driven-animations). Without the line the
+next lane re-derives the premise — two lanes did that in one week, and one implemented a contract
+nothing produces (pzwe).
+
+`scripts/check-modern-web-verdicts.ts` enforces it: the modern-web workflow fails when a closed
+`[modern-web]` bead has neither a comment nor a substantive close reason. Run it by hand with
+`deno run -A scripts/check-modern-web-verdicts.ts`.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
