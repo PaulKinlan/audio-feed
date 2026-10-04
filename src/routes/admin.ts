@@ -641,6 +641,25 @@ ${CONFIRM_DIALOG_CLIENT}
   // ── Runs and stats ───────────────────────────────────────────────────────
   function ago(iso) {
     if (!iso) return "never";
+    // audio-feed-ap45: replace manual millisecond math with Temporal.Duration
+    // TODO(baseline/temporal): drop Date fallback when Temporal reaches Baseline
+    if (typeof Temporal !== "undefined") {
+      try {
+        const now = Temporal.Now.instant();
+        const then = Temporal.Instant.from(iso);
+        const duration = now.since(then);
+        const s = Math.round(duration.total({ unit: "seconds" }));
+        if (s < 60) return s + "s ago";
+        const m = Math.round(duration.total({ unit: "minutes" }));
+        if (m < 60) return m + "m ago";
+        const h = Math.round(duration.total({ unit: "hours" }));
+        if (h < 48) return h + "h ago";
+        const d = Math.round(h / 24);
+        return d + "d ago";
+      } catch {
+        // fallback to Date
+      }
+    }
     const ms = Date.now() - Date.parse(iso);
     if (!Number.isFinite(ms)) return "unknown";
     const s = Math.round(ms / 1000);

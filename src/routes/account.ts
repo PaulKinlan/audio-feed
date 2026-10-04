@@ -85,7 +85,17 @@ const CSS = `
 `;
 
 function when(iso: string | undefined): string {
-  return iso ? iso.slice(0, 10) : "never";
+  if (!iso) return "never";
+  // audio-feed-ap45: use Temporal.PlainDate for calendar date extraction
+  // TODO(baseline/temporal): drop fallback when Temporal reaches Baseline
+  if (typeof Temporal !== "undefined") {
+    try {
+      return Temporal.PlainDate.from(iso).toString();
+    } catch {
+      // fallback
+    }
+  }
+  return iso.slice(0, 10);
 }
 
 function copyRow(value: string, label: string): string {
