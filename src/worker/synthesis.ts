@@ -42,9 +42,15 @@ import {
   GeminiTtsClient,
   GeminiTtsTruncatedError,
 } from "../tts/gemini.ts";
-import type { DecodedAudioResult } from "../tts/gemini.ts";
+import type { DecodedAudioResult, DialogueSpeaker } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
+import {
+  createGroundedScriptGenerator,
+  DEFAULT_SCRIPT_TIMEOUT_MS,
+  type GroundedScriptInput,
+  type ScriptGenerator,
+} from "./script.ts";
 import {
   audioBlobKey,
   DEFAULT_CLAIM_LEASE_MS,
@@ -181,6 +187,54 @@ function isPermanent(error: unknown): boolean {
  * is a decision about the product, not an implementation detail — so the pair still
  * falls back to DEFAULT_VOICES.deepdive. Flagged for coord rather than chosen here.
  */
+/**
+ * Run the grounded script stage, or decide not to (audio-feed-yaz5).
+ *
+ * Three cases, in order: an injected generator (a test, or an operator pinning a model), an
+ * explicit `null` (the stage is off), or the real generator when an API key exists. The stage
+ * is best-effort by design: it costs a second API call per episode and can be refused for
+ * reasons that say nothing about this article, so a failure logs the reason and returns
+ * `undefined` — the caller then falls back to the static dialogue builder, which is exactly
+ * how the pipeline behaved before this stage existed. A shallow episode is worse than a
+ * researched one; it is not worse than no episode.
+ */
+async function runScriptStage(
+  generator: ScriptGenerator | null,
+  input: GroundedScriptInput,
+  timeoutMs = DEFAULT_SCRIPT_TIMEOUT_MS,
+): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
+  if (!generator) return undefined;
+  // Two bounds, because one is not enough (audio-feed-yaz5 review). The signal bounds a generator
+  // that passes it to fetch, which the real one does; the race bounds a generator that ignores it,
+  // which an injected one can. Either way synthesis reaches the fallback instead of waiting on a
+  // stalled search call forever.
+  const deadline = AbortSignal.timeout(timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`grounded script stage exceeded ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  const work = generator(input, { signal: deadline });
+  try {
+    return await Promise.race([work, expired]);
+  } catch (error) {
+    console.warn(
+      `[synthesis] grounded script stage failed for "${input.article.title}": ` +
+        `${
+          String((error as Error)?.message ?? error)
+        } — falling back to the static dialogue builder`,
+    );
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    // A generator that ignores its signal is still running; its eventual rejection must not
+    // surface as an unhandled rejection once synthesis has already fallen back.
+    work.catch(() => {});
+  }
+}
+
 export function createGeminiSynthesizer(
   ctx: AppContext,
   /** Injectable so a test can drive the real request path with a capturing fetchFn
@@ -188,9 +242,17 @@ export function createGeminiSynthesizer(
   deps: {
     client?: GeminiTtsClient;
     codeSummarizer?: (code: string) => string | Promise<string>;
+    /** `undefined` = use the real generator when a key is configured; `null` = stage is off. */
+    scriptGenerator?: ScriptGenerator | null;
+    /** How long the grounded stage may hold up this episode; see DEFAULT_SCRIPT_TIMEOUT_MS. */
+    scriptTimeoutMs?: number;
   } = {},
 ): Synthesizer {
   const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
+  const scriptGenerator = deps.scriptGenerator === null ? null : deps.scriptGenerator ??
+    (ctx.config.geminiApiKey
+      ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })
+      : null);
   return async ({ article, source, episode, mode }) => {
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
@@ -202,6 +264,25 @@ export function createGeminiSynthesizer(
       // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
       // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
       const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
+      const speakers: [DialogueSpeaker, DialogueSpeaker] = [
+        { name: "Alex", role: "expert", voice: expert },
+        { name: "Sam", role: "curious_foil", voice: foil },
+      ];
+      // Research and write the script first (audio-feed-yaz5). `turns` is the same field a
+      // hand-written script uses, so the TTS layer renders either identically.
+      const script = await runScriptStage(
+        scriptGenerator,
+        {
+          article: {
+            title: article.title,
+            author: article.author,
+            body: article.content,
+            summary: article.excerpt,
+          },
+          speakers,
+        },
+        deps.scriptTimeoutMs,
+      );
       return await client.synthesizeDialogue({
         title: article.title,
         article: {
@@ -210,10 +291,8 @@ export function createGeminiSynthesizer(
           body: article.content,
           summary: article.excerpt,
         },
-        speakers: [
-          { name: "Alex", role: "expert", voice: expert },
-          { name: "Sam", role: "curious_foil", voice: foil },
-        ],
+        speakers,
+        turns: script?.turns,
         codeHandling,
         codeSummarizer: deps.codeSummarizer,
       });
