@@ -504,6 +504,7 @@ export const TOOLTIP_HTML =
 
 /**
  * Accessible Tooltip Controller using CSS Anchor Positioning with flip-block fallback (audio-feed-pzwe).
+ * Keep in sync with the standalone player copy in src/assets/listen.js.
  * WCAG 2.1 1.4.13:
  * - Dismissible: Escape key immediately dismisses tooltip
  * - Hoverable: Pointer hover over tooltip content keeps it visible (.tooltip.visible { pointer-events: auto })

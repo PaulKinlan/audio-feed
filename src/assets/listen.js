@@ -403,6 +403,7 @@ const say = (message, tone) => {
 };
 
 // audio-feed-pzwe: CSS Anchor Positioning for tooltips with getBoundingClientRect fallback
+// Keep in sync with the shell copy in src/routes/shell.ts (TOOLTIP_CLIENT).
 // WCAG 2.1 1.4.13: dismissible (Escape), hoverable, persistent
 let tooltipEl = document.getElementById("appTooltip");
 if (!tooltipEl && document.body) {
