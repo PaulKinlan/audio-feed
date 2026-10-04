@@ -47,6 +47,7 @@ import type { AppContext } from "../app.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import {
   createGroundedScriptGenerator,
+  DEFAULT_SCRIPT_TIMEOUT_MS,
   type GroundedScriptInput,
   type ScriptGenerator,
 } from "./script.ts";
@@ -200,10 +201,24 @@ function isPermanent(error: unknown): boolean {
 async function runScriptStage(
   generator: ScriptGenerator | null,
   input: GroundedScriptInput,
+  timeoutMs = DEFAULT_SCRIPT_TIMEOUT_MS,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
+  // Two bounds, because one is not enough (audio-feed-yaz5 review). The signal bounds a generator
+  // that passes it to fetch, which the real one does; the race bounds a generator that ignores it,
+  // which an injected one can. Either way synthesis reaches the fallback instead of waiting on a
+  // stalled search call forever.
+  const deadline = AbortSignal.timeout(timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`grounded script stage exceeded ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  const work = generator(input, { signal: deadline });
   try {
-    return await generator(input);
+    return await Promise.race([work, expired]);
   } catch (error) {
     console.warn(
       `[synthesis] grounded script stage failed for "${input.article.title}": ` +
@@ -212,6 +227,11 @@ async function runScriptStage(
         } — falling back to the static dialogue builder`,
     );
     return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    // A generator that ignores its signal is still running; its eventual rejection must not
+    // surface as an unhandled rejection once synthesis has already fallen back.
+    work.catch(() => {});
   }
 }
 
@@ -224,6 +244,8 @@ export function createGeminiSynthesizer(
     codeSummarizer?: (code: string) => string | Promise<string>;
     /** `undefined` = use the real generator when a key is configured; `null` = stage is off. */
     scriptGenerator?: ScriptGenerator | null;
+    /** How long the grounded stage may hold up this episode; see DEFAULT_SCRIPT_TIMEOUT_MS. */
+    scriptTimeoutMs?: number;
   } = {},
 ): Synthesizer {
   const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
@@ -248,15 +270,19 @@ export function createGeminiSynthesizer(
       ];
       // Research and write the script first (audio-feed-yaz5). `turns` is the same field a
       // hand-written script uses, so the TTS layer renders either identically.
-      const script = await runScriptStage(scriptGenerator, {
-        article: {
-          title: article.title,
-          author: article.author,
-          body: article.content,
-          summary: article.excerpt,
+      const script = await runScriptStage(
+        scriptGenerator,
+        {
+          article: {
+            title: article.title,
+            author: article.author,
+            body: article.content,
+            summary: article.excerpt,
+          },
+          speakers,
         },
-        speakers,
-      });
+        deps.scriptTimeoutMs,
+      );
       return await client.synthesizeDialogue({
         title: article.title,
         article: {

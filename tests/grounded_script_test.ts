@@ -15,6 +15,7 @@ import {
   createGroundedScriptGenerator,
   DEFAULT_MAX_BODY_CHARS,
   DEFAULT_SCRIPT_MODEL,
+  DEFAULT_SCRIPT_TIMEOUT_MS,
   GroundedScriptError,
   parseGroundedScript,
   textFromResponse,
@@ -203,7 +204,7 @@ interface SynthesisCall {
   article?: { body: string };
 }
 
-function harness(options: { scriptGenerator: unknown }) {
+function harness(options: { scriptGenerator: unknown; scriptTimeoutMs?: number }) {
   const calls: SynthesisCall[] = [];
   const client = {
     synthesizeDialogue: (input: SynthesisCall) => {
@@ -227,6 +228,7 @@ function harness(options: { scriptGenerator: unknown }) {
     client: client as never,
     // deno-lint-ignore no-explicit-any
     scriptGenerator: options.scriptGenerator as any,
+    scriptTimeoutMs: options.scriptTimeoutMs,
   });
   return { calls, synthesize };
 }
@@ -379,4 +381,89 @@ Deno.test("live: a real grounded call returns dialogue and real search sources",
     `live grounded script: ${script.turns.length} turns, ${script.sources.length} sources, ` +
       `${script.counterarguments.length} counterarguments`,
   );
+});
+
+// ─── the deadline (audio-feed-yaz5 review) ───────────────────────────────────
+// The finding: the fallback handled error responses but not a call that never answers, so a
+// hung search request would hold synthesis forever. These cases pin both bounds — the stage's
+// own deadline, and the call site's race for a generator that ignores the signal it is given.
+
+Deno.test("script request: a hung call is bounded and reports the timeout", async () => {
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 50,
+    // A fetch that never settles on its own, but honours the signal — the real shape of a stall.
+    fetchFn: (_input, init) =>
+      new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "timed out after 50ms");
+});
+
+Deno.test("script request: a caller's cancel is reported as a cancel, not a timeout", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 5_000,
+    // Real fetch rejects immediately for an already-aborted signal; a listener that only fires on a
+    // future abort would hang this case (which is how the first version of this test failed).
+    fetchFn: (_input, init) => {
+      if (init?.signal?.aborted) return Promise.reject(new Error("aborted"));
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    },
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }, { signal: controller.signal }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "cancelled by the caller");
+});
+
+Deno.test("script deadline: the default is a real budget, not a token bound", () => {
+  assert(
+    DEFAULT_SCRIPT_TIMEOUT_MS >= 5_000,
+    `a ${DEFAULT_SCRIPT_TIMEOUT_MS}ms default would fall back on healthy calls`,
+  );
+});
+
+Deno.test("synthesis: a generator that hangs forever still produces an episode", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (message?: unknown) => {
+    warnings.push(String(message));
+  };
+  try {
+    const { calls, synthesize } = harness({
+      scriptTimeoutMs: 50,
+      // Deliberately ignores its signal: this is what the call-site race exists for.
+      scriptGenerator: () => new Promise(() => {}),
+    });
+    const started = Date.now();
+    await synthesize({
+      article: makeArticle({ title: "Hanging", content: "Body." }),
+      source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
+      episode: makeEpisode({}),
+      mode: "deepdive",
+    });
+    const elapsed = Date.now() - started;
+    assertEquals(calls.length, 1, "the TTS call must still happen");
+    assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
+    assert(elapsed < 5_000, `synthesis waited ${elapsed}ms on a hung generator`);
+    assert(
+      warnings.some((line) =>
+        line.includes("grounded script stage failed") && line.includes("exceeded 50ms")
+      ),
+      `expected the timeout to be logged as the fallback reason, saw: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
 });

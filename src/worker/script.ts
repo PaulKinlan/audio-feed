@@ -46,6 +46,14 @@ const GEMINI_GENERATE_ENDPOINT = "https://generativelanguage.googleapis.com/v1be
  */
 export const DEFAULT_MAX_BODY_CHARS = 12_000;
 
+/**
+ * How long the grounded call may take before the stage gives up and synthesis falls back
+ * (audio-feed-yaz5 review). A research call that hangs is indistinguishable from a dead queue
+ * from the outside, so the bound belongs here rather than in the operator's patience. The
+ * default matches the TTS client's own order of magnitude; injected so a test can use 50ms.
+ */
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+
 export interface ScriptSource {
   title: string;
   uri: string;
@@ -73,6 +81,8 @@ export interface GroundedScriptDeps {
   model?: string;
   fetchFn?: typeof fetch;
   maxBodyChars?: number;
+  /** Deadline for one grounded call; see DEFAULT_SCRIPT_TIMEOUT_MS. */
+  timeoutMs?: number;
   /** Injected clock-free logging seam so a test can assert the reason a fallback happened. */
   onWarn?: (message: string) => void;
 }
@@ -241,7 +251,11 @@ function normaliseScript(payload: unknown, maxTurns: number): GroundedScript {
   };
 }
 
-export type ScriptGenerator = (input: GroundedScriptInput) => Promise<GroundedScript>;
+export type ScriptGenerator = (
+  input: GroundedScriptInput,
+  /** The caller's deadline. Generators should pass it to fetch; the call site also bounds them. */
+  options?: { signal?: AbortSignal },
+) => Promise<GroundedScript>;
 
 /**
  * The real generator. `fetchFn` is injectable so the tests drive this exact request path
@@ -250,16 +264,22 @@ export type ScriptGenerator = (input: GroundedScriptInput) => Promise<GroundedSc
 export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptGenerator {
   const model = deps.model ?? DEFAULT_SCRIPT_MODEL;
   const maxBodyChars = deps.maxBodyChars ?? DEFAULT_MAX_BODY_CHARS;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS;
   const warn = deps.onWarn ?? ((message: string) => console.warn(message));
   if (!deps.apiKey) {
     // Constructing a generator without a key would fail on every episode; the caller decides
     // whether to stage the script at all, so this is a programming error, not a runtime one.
     throw new GroundedScriptError("createGroundedScriptGenerator requires an API key");
   }
-  return async (input) => {
+  return async (input, options) => {
     const fetchFn = deps.fetchFn ?? fetch;
     const url = `${GEMINI_GENERATE_ENDPOINT}/${model}:generateContent?key=${deps.apiKey}`;
     const maxTurns = input.maxTurns ?? 14;
+    // Same idiom as the TTS client (src/tts/gemini.ts): this deadline is the floor and a caller's
+    // signal still wins. Without it a stalled search call left synthesis waiting forever and the
+    // fallback unreachable — the review finding this bound answers.
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
     const body = {
       contents: [{
         role: "user",
@@ -276,8 +296,19 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        signal,
       });
     } catch (error) {
+      if (options?.signal?.aborted) {
+        throw new GroundedScriptError("script request was cancelled by the caller", {
+          cause: error,
+        });
+      }
+      if (deadline.aborted) {
+        throw new GroundedScriptError(`script request timed out after ${timeoutMs}ms`, {
+          cause: error,
+        });
+      }
       throw new GroundedScriptError("script request failed before reaching the API", {
         cause: error,
       });
