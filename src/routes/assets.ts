@@ -17,6 +17,8 @@
  */
 import listenCss from "../assets/listen.css" with { type: "text" };
 import listenJs from "../assets/listen.js" with { type: "text" };
+import listenLandingCss from "../assets/listen-landing.css" with { type: "text" };
+import listenLandingJs from "../assets/listen-landing.js" with { type: "text" };
 import adminCss from "../assets/admin.css" with { type: "text" };
 import adminJs from "../assets/admin.js" with { type: "text" };
 // The admin console module is COMPOSED (audio-feed-3xq part 4c): the canonical confirm client
@@ -51,6 +53,17 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
     contentType: "text/css; charset=utf-8",
   },
   "listen.js": { body: listenJs, contentType: "text/javascript; charset=utf-8" },
+  // audio-feed-3xq part 4c: the landing page's own rules and client, extracted from
+  // renderListenLanding's template string. Same composition as listen.css above — DESIGN_TOKENS
+  // in front of the page rules — because the landing never used the shell.
+  "listen-landing.css": {
+    body: `${DESIGN_TOKENS}\n${listenLandingCss}`,
+    contentType: "text/css; charset=utf-8",
+  },
+  "listen-landing.js": {
+    body: listenLandingJs,
+    contentType: "text/javascript; charset=utf-8",
+  },
   // No DESIGN_TOKENS prepend here, unlike listen.css: the admin block already carries the rules that
   // resolve against the shell's tokens, and prepending a second copy would change the cascade. This is
   // a verbatim move — de-duplicating the token block is separate work with its own rendering risk.

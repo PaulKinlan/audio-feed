@@ -111,7 +111,6 @@ import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
-import { DESIGN_TOKENS } from "./tokens.ts";
 import { SPECULATION_RULES } from "./shell.ts";
 import {
   type AudioMode,
@@ -822,47 +821,7 @@ export function renderListenLanding(publicBaseUrl: string): string {
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
 ${SPECULATION_RULES}
-<style>
-  ${DESIGN_TOKENS}
-  * { box-sizing:border-box; }
-  ::selection { background: var(--accent); color: var(--accent-ink); }
-  body {
-    margin:0; background:var(--bg); color:var(--text); font-family:var(--font);
-    line-height:1.5; -webkit-font-smoothing:antialiased;
-    display:grid; place-items:center; min-block-size:100dvb; padding:1.5rem;
-    background-image: radial-gradient(90% 50% at 50% 0%, color-mix(in srgb, var(--accent) 11%, transparent) 0%, transparent 65%);
-  }
-  main {
-    max-inline-size:28rem; inline-size:100%;
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:16px; padding:2rem 1.75rem;
-    box-shadow: 0 24px 60px -30px rgb(0 0 0 / 0.9);
-  }
-  .mark { inline-size:2.75rem; block-size:2.75rem; display:block; margin-block-end:1.25rem; }
-  h1 { font-size:1.4rem; font-weight:660; letter-spacing:-0.025em; margin:0 0 0.5rem; }
-  p.lede { color:var(--text-2); font-size:0.9rem; margin:0 0 1.5rem; text-wrap:pretty; }
-  label { display:block; font-weight:600; font-size:0.85rem; margin-block-end:0.4rem; }
-  input {
-    inline-size:100%; font:inherit; padding:0.65rem 0.75rem; border-radius:10px;
-    border:1px solid var(--border-2); background:var(--bg); color:var(--text);
-  }
-  input::placeholder { color:var(--muted); }
-  input:focus-visible, button:focus-visible { outline:2px solid var(--accent-2); outline-offset:2px; }
-  button {
-    font:inherit; font-weight:600; margin-block-start:0.9rem; inline-size:100%;
-    padding:0.7rem; border-radius:10px; border:1px solid var(--accent);
-    background:var(--accent); color:var(--accent-ink); cursor:pointer;
-    transition: background 0.18s var(--ease), border-color 0.18s var(--ease);
-  }
-  button:hover { background:var(--accent-2); border-color:var(--accent-2); }
-  .status { margin-block-start:0.75rem; font-size:0.83rem; color:var(--muted); min-block-size:1.2rem; }
-  .status[data-tone="error"] { color: var(--danger); }
-  .hint {
-    margin:1.5rem 0 0; padding-block-start:1.25rem; border-block-start:1px solid var(--border);
-    font-size:0.82rem; color:var(--muted); text-wrap:pretty;
-  }
-  \u0040media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
-</style>
+<link rel="stylesheet" href="${assetUrl("listen-landing.css")}">
 </head>
 <body>
 <main>
@@ -893,38 +852,7 @@ ${SPECULATION_RULES}
     episode to keep it on the device for offline listening.
   </p>
 </main>
-<script>
-(() => {
-  "use strict";
-  const status = document.getElementById("status");
-  const input = document.getElementById("feedUrl");
-  const stored = (() => { try { return localStorage.getItem("audio-feed-token"); } catch { return null; } })();
-  if (stored) {
-    // Reopening from the home screen: straight to the player.
-    location.replace("/listen/" + encodeURIComponent(stored));
-    return;
-  }
-  /** Accepts a full feed URL or a bare token, because both are what people have. */
-  const tokenFrom = (value) => {
-    const trimmed = value.trim();
-    const match = trimmed.match(/\\/feed\\/([^/]+)\\//);
-    return match ? decodeURIComponent(match[1]) : trimmed;
-  };
-  document.getElementById("restore").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const token = tokenFrom(input.value);
-    if (!token) {
-      status.dataset.tone = "error";
-      status.textContent = "Paste your feed URL or token first.";
-      input.focus();
-      return;
-    }
-    delete status.dataset.tone;
-    status.textContent = "Opening…";
-    location.assign("/listen/" + encodeURIComponent(token));
-  });
-})();
-</script>
+<script type="module" src="${assetUrl("listen-landing.js")}"></script>
 </body>
 </html>
 `;
