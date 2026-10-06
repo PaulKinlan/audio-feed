@@ -275,25 +275,26 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
         return reply({ error: "Invalid admin token." }, 401, headers);
       }
 
-      let user = await getUserByEmail(store, normalised);
-      if (!user) {
-        user = await createUser(store, {
-          email: normalised,
-          isAdmin: true,
-        });
-        user = await approveUser(store, user.id, "bootstrap");
-      } else {
-        if (!user.isAdmin) {
-          await store.setAdminRole(user.id, true, {
-            adminId: "bootstrap",
-            at: new Date().toISOString(),
-          });
-          user = (await store.getUser(user.id))!;
-        }
-        if (user.status !== "approved") {
-          user = await approveUser(store, user.id, "bootstrap");
-        }
+      const existingUser = await getUserByEmail(store, normalised);
+      if (existingUser) {
+        // Paul's ruling (audio-feed-xw7): an account that already exists must NOT
+        // be re-bootstrapped — do not silently promote, reinstate, or approve it.
+        // Bootstrap is strictly for enrolling the initial admin account. Existing
+        // accounts must sign in or be managed via the admin console / setup links.
+        return reply(
+          {
+            error:
+              "An account already exists for this email. Bootstrap cannot re-enroll or promote existing accounts.",
+          },
+          409,
+        );
       }
+
+      const created = await createUser(store, {
+        email: normalised,
+        isAdmin: true,
+      });
+      const user = await approveUser(store, created.id, "bootstrap");
 
       const { token: setupToken, expiresAt } = await issueSetupLink(store, user.id, "bootstrap");
       return reply({

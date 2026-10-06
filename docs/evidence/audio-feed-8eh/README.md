@@ -10,7 +10,7 @@ Admin passkey bootstrap UI: enroll an admin passkey directly from a browser or m
 3. **Falsification**: Submitting an incorrect admin token returns 401 and displays readable inline error feedback (`Invalid admin token.`).
 4. **Bootstrap & Passkey Enrollment**:
    - Submitting valid `ADMIN_TOKEN` and email calls `POST /api/auth/bootstrap`.
-   - The endpoint validates the token timing-safe, ensures an approved admin record exists in storage, and issues a one-time single-use `setupToken`.
+   - The endpoint validates the token timing-safe, ensures no existing account owns the email (refuses existing accounts with 409 per audio-feed-xw7), creates an approved admin record in storage, and issues a one-time single-use `setupToken`.
    - The browser automatically initiates WebAuthn passkey registration (`navigator.credentials.create`), posts to `/api/auth/register/verify`, establishes the admin session cookie, and navigates directly to `/admin`.
 5. **Admin Access**: `/admin` console immediately renders subscriber management and operations data without manual token re-entry.
 
