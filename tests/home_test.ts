@@ -13,6 +13,8 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { memoryStores } from "../src/config.ts";
 import { renderHomePage } from "../src/routes/home.ts";
+import { assetBody } from "../src/routes/assets.ts";
+import { shippedCss } from "./admin_css.ts";
 import type { AppConfig } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -100,7 +102,8 @@ Deno.test("the token field is masked and excluded from autofill", async () => {
 Deno.test("the token travels as a header, never as a query parameter", async () => {
   const html = await (await app()(get("/"))).text();
 
-  assertStringIncludes(html, '"x-feed-token"');
+  // audio-feed-3xq part 4b: the header usage lives in the client module now, not the page.
+  assertStringIncludes(assetBody("home.js") ?? "", '"x-feed-token"');
   // A token in a query string is logged by every hop it passes through.
   assert(!/[?&](token|feedToken|feed_token)=/.test(html), "no token may appear in a URL");
 });
@@ -170,11 +173,14 @@ Deno.test("validation styling waits for interaction rather than firing on load",
 
   // `:user-invalid` is the difference between "you got this wrong" and
   // "everything is wrong before you have typed anything".
-  assertStringIncludes(html, ":user-invalid");
-  assert(!/input:invalid\s*{/.test(html), "do not style :invalid — it fires on page load");
+  // audio-feed-3xq part 4b: the rule lives in the linked home.css, so resolve the page's
+  // full shipped CSS (inline + every linked asset) rather than reading the page string.
+  const css = shippedCss(html);
+  assertStringIncludes(css, ":user-invalid");
+  assert(!/input:invalid\s*{/.test(css), "do not style :invalid — it fires on page load");
 });
 
-Deno.test("a successful submit resets the form rather than emptying one field", async () => {
+Deno.test("a successful submit resets the form rather than emptying one field", () => {
   // Found by driving the real page in a browser: after a 202 the script cleared
   // `url.value`, which leaves a `required` field empty on an input the user has
   // already interacted with — so `:user-invalid` matched and a red "Enter a
@@ -183,15 +189,17 @@ Deno.test("a successful submit resets the form rather than emptying one field", 
   // `form.reset()` is what clears the browser's interaction state. Asserting on
   // it here because the failure is invisible to any test that only reads the
   // markup: the bug was in what the script does AFTER a successful response.
-  const html = await (await app()(get("/"))).text();
-
-  assertStringIncludes(html, "form.reset()");
+  // audio-feed-3xq part 4b: this behaviour is client code in src/assets/home.js now; the
+  // property under test is unchanged, the bytes moved (tests/home_asset_test.ts pins that
+  // the page links exactly these bytes).
+  const client = assetBody("home.js") ?? "";
+  assertStringIncludes(client, "form.reset()");
   // The token and mode must survive the reset, or sending a second article
   // means retyping a credential.
-  assertStringIncludes(html, "keptToken");
-  assertStringIncludes(html, "keptMode");
+  assertStringIncludes(client, "keptToken");
+  assertStringIncludes(client, "keptMode");
   assert(
-    !/url\.value\s*=\s*""/.test(html),
+    !/url\.value\s*=\s*""/.test(client),
     "clearing a single field re-triggers :user-invalid; reset the form instead",
   );
 });
@@ -275,8 +283,9 @@ Deno.test("the homepage renders the RSS subscribe form with secure method and to
   assertStringIncludes(html, 'id="submit-feed"');
   assertStringIncludes(html, 'id="feed-result"');
 
-  // Must reuse the token header and never expose it in a query string
-  assertStringIncludes(html, '"x-feed-token": token.value.trim()');
+  // Must reuse the token header and never expose it in a query string.
+  // audio-feed-3xq part 4b: the header wiring is client code now.
+  assertStringIncludes(assetBody("home.js") ?? "", '"x-feed-token": token.value.trim()');
   assert(!html.includes("?token="));
   assert(!html.includes("?feedToken="));
 });
@@ -306,9 +315,13 @@ Deno.test("homepage script includes open in web player action on submission succ
     defaultVoice: "Charon",
   });
 
-  assertStringIncludes(html, "Open in Web Player →");
-  assertStringIncludes(html, "/listen/");
-  assertStringIncludes(html, "encodeURIComponent(token.value.trim())");
+  // audio-feed-3xq part 4b: the success-message builder is client code now; the page keeps
+  // the player LINKS in markup (they must work without JavaScript).
+  const client = assetBody("home.js") ?? "";
+  assertStringIncludes(client, "Open in Web Player →");
+  assertStringIncludes(html, 'href="/listen"');
+  assertStringIncludes(client, '"/listen/" +');
+  assertStringIncludes(client, "encodeURIComponent(token.value.trim())");
 });
 
 Deno.test("the homepage renders the request access form with accessible labels, hints, and secure action (audio-feed-r97)", () => {
@@ -332,7 +345,8 @@ Deno.test("the homepage renders the request access form with accessible labels, 
   assertStringIncludes(html, 'name="displayName"');
   assertStringIncludes(html, 'id="request-submit"');
   assertStringIncludes(html, 'id="request-result"');
-  assertStringIncludes(html, 'fetch("/api/request-access"');
+  // audio-feed-3xq part 4b: the fetch wiring is client code now.
+  assertStringIncludes(assetBody("home.js") ?? "", 'fetch("/api/request-access"');
   assertStringIncludes(html, '<a href="#request-access">Request access</a>');
 });
 

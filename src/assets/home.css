@@ -1,0 +1,298 @@
+/* All tokens, spacing, colour and type come from unified tokens (src/routes/tokens.ts). */
+
+/* ---- base ------------------------------------------------------------ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  /* min-inline-size on the body is what actually stops a long unbroken
+     string (a feed URL) from widening the viewport on a narrow phone. */
+  min-inline-size: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+.page {
+  inline-size: 100%;
+  max-inline-size: var(--page);
+  margin-inline: auto;
+  padding-inline: var(--space-4);
+  padding-block: var(--space-8) var(--space-12);
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  text-wrap: balance;
+  margin-block: 0 var(--space-3);
+}
+h1 {
+  font-size: clamp(1.75rem, 1.3rem + 2.2vw, 2.75rem);
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: clamp(1.25rem, 1.1rem + 0.8vw, 1.5rem);
+  margin-block-start: var(--space-8);
+}
+h3 {
+  font-size: 1.05rem;
+}
+p {
+  max-inline-size: var(--measure);
+  margin-block: 0 var(--space-4);
+}
+a {
+  color: inherit;
+  text-underline-offset: 0.2em;
+}
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.lede {
+  font-size: 1.125em;
+  color: var(--text-muted);
+}
+
+/* ---- layout ---------------------------------------------------------- */
+.cards {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  padding: 0;
+  margin-block: var(--space-4) 0;
+  list-style: none;
+}
+
+.card {
+  /* Without min-inline-size:0 a grid item refuses to shrink below its
+     content, which is how a code sample pushes a phone layout sideways. */
+  min-inline-size: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+}
+.card p:last-child {
+  margin-block-end: 0;
+}
+.card .voices {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-block-end: 0;
+}
+
+/* ---- code ------------------------------------------------------------ */
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--mono);
+  font-size: 0.875em;
+}
+code {
+  background: var(--surface-sunken);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  /* A feed URL has no spaces; without this it is a single unbreakable word. */
+  overflow-wrap: anywhere;
+}
+pre {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-block: var(--space-3) var(--space-4);
+  /* Scroll the block, never the page. */
+  overflow-x: auto;
+  max-inline-size: 100%;
+}
+pre code {
+  background: none;
+  padding: 0;
+  overflow-wrap: normal;
+}
+
+.urls {
+  list-style: none;
+  padding: 0;
+  margin-block: var(--space-3) var(--space-4);
+}
+.urls li {
+  margin-block-end: var(--space-2);
+}
+.urls .what {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  display: block;
+}
+
+/* ---- form ------------------------------------------------------------ */
+form {
+  margin-block-start: var(--space-4);
+}
+
+.field {
+  margin-block-end: var(--space-4);
+  max-inline-size: var(--measure);
+}
+.field > label,
+fieldset > legend {
+  display: block;
+  font-weight: 600;
+  margin-block-end: var(--space-1);
+}
+.hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin-block-end: var(--space-2);
+}
+
+input[type="url"],
+input[type="password"] {
+  inline-size: 100%;
+  font: inherit;
+  font-size: max(1rem, 1em); /* >=16px: smaller text makes iOS zoom on focus. */
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin: 0 0 var(--space-4);
+  max-inline-size: var(--measure);
+  min-inline-size: 0; /* fieldsets ignore flex/grid shrinking without this */
+}
+fieldset legend {
+  padding-inline: var(--space-2);
+}
+
+.choice {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding-block: var(--space-2);
+}
+.choice input {
+  margin-block-start: 0.3em;
+  flex: none;
+}
+.choice .what {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+/*
+  Errors appear only after the user has interacted, never on load.
+  Two indicators, not one: colour alone is not a usable signal.
+*/
+.error {
+  display: none;
+  color: var(--danger);
+  font-size: 0.875rem;
+  margin-block-start: var(--space-1);
+}
+input:user-invalid,
+input.is-invalid {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+input:user-invalid ~ .error,
+input.is-invalid ~ .error {
+  display: block;
+}
+
+button[type="submit"] {
+  font: inherit;
+  font-weight: 600;
+  padding: var(--space-3) var(--space-6);
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-block-size: 44px; /* comfortable touch target */
+}
+button[type="submit"]:hover {
+  filter: brightness(1.1);
+}
+button[type="submit"][aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+#result,
+#feed-result,
+#request-result {
+  margin-block-start: var(--space-4);
+  max-inline-size: var(--measure);
+  overflow-wrap: anywhere;
+}
+#result:not(:empty),
+#feed-result:not(:empty),
+#request-result:not(:empty) {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-inline-start: 4px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+#result.ok,
+#feed-result.ok,
+#request-result.ok {
+  border-inline-start-color: var(--ok);
+}
+#result.bad,
+#feed-result.bad,
+#request-result.bad {
+  border-inline-start-color: var(--danger);
+}
+#result p,
+#feed-result p,
+#request-result p {
+  margin: 0;
+}
+#result .detail,
+#feed-result .detail,
+#request-result .detail {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin-block-start: var(--space-1);
+}
+
+.note {
+  background: var(--surface-sunken);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  font-size: 0.9375rem;
+  max-inline-size: var(--measure);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
