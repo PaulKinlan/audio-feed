@@ -291,7 +291,11 @@ export class GroundedScriptOutputLimitError extends GroundedScriptError {
 }
 
 /** A complete batch must contain exactly the assigned id range, with no silent omissions. */
-function parseScriptBatch(text: string, segment: ScriptSegment): ScriptResult {
+function parseScriptBatch(
+  text: string,
+  segment: ScriptSegment,
+  allowedSpeakers: readonly string[],
+): ScriptResult {
   const record = parseScriptObject(text);
   const raw = record.turns;
   if (!Array.isArray(raw) || raw.length !== segment.count) {
@@ -303,7 +307,8 @@ function parseScriptBatch(text: string, segment: ScriptSegment): ScriptResult {
     const turn = item as { id?: unknown; speaker?: unknown; text?: unknown };
     if (
       turn?.id !== segment.from + offset || typeof turn.speaker !== "string" ||
-      !turn.speaker.trim() || typeof turn.text !== "string" || !turn.text.trim()
+      !allowedSpeakers.includes(turn.speaker.trim()) || typeof turn.text !== "string" ||
+      !turn.text.trim()
     ) {
       throw new GroundedScriptError(
         `script batch missing or duplicated turn id ${segment.from + offset}`,
@@ -390,7 +395,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
           `The previous answer hit the output token limit. Restart this batch as a COMPLETE, valid JSON object; do not continue a partial JSON string. ` +
           `Write EXACTLY ${segment.count} turns with numeric ids ${segment.from} through ${
             segment.from + segment.count - 1
-          }, with speaker and text. ` +
+          }, as {"turns":[{"id":number,"speaker":string,"text":string}]} (plus research fields for the first batch). ` +
           `Do not repeat earlier ids or spoken sentences. ${
             segment.from === 0
               ? "Include researchSummary, counterarguments, and sources."
@@ -463,7 +468,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
         if (!text.trim()) throw new GroundedScriptError("script response contained no text");
         return segment.kind === "full"
           ? { segment, script: parseGroundedScript(text, maxTurns), turns: [] }
-          : parseScriptBatch(text, segment);
+          : parseScriptBatch(text, segment, input.speakers.map((speaker) => speaker.name));
       },
       continueOnOutputLimit: (segment, error) => {
         if (!(error instanceof GroundedScriptOutputLimitError) || segment.count < 2) return null;

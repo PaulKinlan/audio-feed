@@ -181,6 +181,45 @@ Deno.test("repeated sentence across continued batches is rejected even with dist
   assertEquals(count, 3);
 });
 
+Deno.test("nested MAX_TOKENS split still stitches complete 0..13 id coverage within call budget", async () => {
+  let calls = 0;
+  const generator = createGroundedScriptGenerator({
+    apiKey: "fixture-key",
+    fetchFn: (() => {
+      calls++;
+      const text = [PARTIAL_JSON, PARTIAL_JSON, batch(0, 4), batch(4, 3), batch(7, 7)][calls - 1]!;
+      return Promise.resolve(
+        response(text, calls <= 2 ? "MAX_TOKENS" : "STOP", `https://search.example/${calls}`),
+      );
+    }) as typeof fetch,
+  });
+  const script = await generator(input);
+  assertEquals(calls, 5);
+  assertEquals(
+    script.turns.map((turn) => turn.text),
+    Array.from({ length: 14 }, (_, i) => `Evidence for turn ${i}: distinct sentence ${i}.`),
+  );
+});
+
+Deno.test("unknown speaker in continued batch fails before TTS", async () => {
+  let calls = 0;
+  const generator = createGroundedScriptGenerator({
+    apiKey: "fixture-key",
+    fetchFn: (() => {
+      calls++;
+      const text = calls === 1 ? PARTIAL_JSON : batch(0, 7, (turns) => {
+        turns[2]!.speaker = "Unknown";
+      });
+      return Promise.resolve(
+        response(text, calls === 1 ? "MAX_TOKENS" : "STOP", `https://search.example/${calls}`),
+      );
+    }) as typeof fetch,
+  });
+  const error = await assertRejects(() => generator(input), GroundedScriptError);
+  assertStringIncludes(error.message, "turn id 2");
+  assertEquals(calls, 2);
+});
+
 Deno.test("continued batch missing an ID fails closed, not a shortened published script", async () => {
   let count = 0;
   const generator = createGroundedScriptGenerator({
