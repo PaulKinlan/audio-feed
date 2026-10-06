@@ -10,8 +10,13 @@
  * - askConfirm helper resolves correctly on confirm, cancel, and fallback
  */
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { CONFIRM_DIALOG_CLIENT, CONFIRM_DIALOG_HTML, renderShell } from "../src/routes/shell.ts";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  CONFIRM_DIALOG_CLIENT,
+  CONFIRM_DIALOG_HTML,
+  confirmClientFromSource,
+  renderShell,
+} from "../src/routes/shell.ts";
 import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import { renderAccountPage } from "../src/routes/account.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
@@ -265,4 +270,46 @@ Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves p
   const cancelled = await cancelPromise;
   assertEquals(cancelled, false);
   assertEquals(dialog.open, false);
+});
+
+Deno.test("confirmClientFromSource rejects malformed sources loudly (audio-feed-0r0s review nit)", () => {
+  const wrap = (body: string) => `// #confirm-shared-begin\n${body}\n// #confirm-shared-end\n`;
+  // happy path: a minimal well-formed region derives cleanly
+  const good = wrap("function askConfirm(message, options) {\n  confirmDialog.showModal();\n}");
+  assertEquals(
+    confirmClientFromSource(good),
+    "\nfunction askConfirm(message, options) {\n  confirmDialog.showModal();\n}",
+  );
+  // marker mentions inside prose must NOT count as markers (whole-line matching)
+  assertThrows(
+    () => confirmClientFromSource("prose mentions // #confirm-shared-begin but has no real marker"),
+    Error,
+    "bracket",
+  );
+  // reversed or missing markers
+  assertThrows(
+    () =>
+      confirmClientFromSource(
+        "// #confirm-shared-end\n// #confirm-shared-begin\nfunction askConfirm(){}",
+      ),
+    Error,
+    "bracket",
+  );
+  // a region without askConfirm is not the confirm client
+  assertThrows(
+    () => confirmClientFromSource(wrap("function somethingElse() {}")),
+    Error,
+    "askConfirm",
+  );
+  // module syntax would kill the classic inline script on the account page
+  assertThrows(
+    () => confirmClientFromSource(wrap(`import { x } from "y";\nfunction askConfirm(){}`)),
+    Error,
+    "import/export",
+  );
+  assertThrows(
+    () => confirmClientFromSource(wrap(`export function askConfirm(){}`)),
+    Error,
+    "import/export",
+  );
 });

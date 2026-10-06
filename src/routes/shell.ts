@@ -480,7 +480,7 @@ export const CONFIRM_DIALOG_HTML = `
 const CONFIRM_SHARED_BEGIN = "// #confirm-shared-begin";
 const CONFIRM_SHARED_END = "// #confirm-shared-end";
 
-function confirmClientFromSource(source: string): string {
+export function confirmClientFromSource(source: string): string {
   // Whole-line matches only: prose that MENTIONS the markers (this file's own doc comments)
   // must never satisfy the search the way the marker line does.
   const beginMatch = source.match(new RegExp(`^${escapeRegExp(CONFIRM_SHARED_BEGIN)}$`, "m"));
