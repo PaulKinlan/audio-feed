@@ -199,18 +199,48 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
   try {
     const probes = await withChrome(async (evaluate) => {
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const until = async <T>(
+        probe: () => Promise<T>,
+        ready: (value: T) => boolean,
+      ): Promise<T> => {
+        const deadline = Date.now() + 5000;
+        let value = await probe();
+        while (!ready(value) && Date.now() < deadline) {
+          await sleep(50);
+          value = await probe();
+        }
+        return value;
+      };
       const measure = async (url: string, surface: string, wrap: string) => {
         await evaluate(
           `location.href = ${JSON.stringify(`http://127.0.0.1:${port}${url}`)}`,
         );
-        await sleep(700);
-        const before = JSON.parse(await evaluate(PROBE(surface, wrap)));
+        // The external listen stylesheet can arrive after navigation; scrolling a short
+        // document clamps to zero and a later layout does not replay scrollTo().
+        const loaded = await until(
+          () =>
+            evaluate(
+              `location.pathname === ${
+                JSON.stringify(url)
+              } && document.readyState === "complete" && document.documentElement.scrollHeight > innerHeight`,
+            ),
+          Boolean,
+        );
+        assert(loaded, `${url}: page did not become scrollable`);
+        const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
+        const before = await until(
+          probe,
+          (state) => state.scrollY === 0 && state.rectTop === 0 && state.shadow === "none",
+        );
         await evaluate("window.scrollTo(0, 2000)");
-        await sleep(450);
-        const after = JSON.parse(await evaluate(PROBE(surface, wrap)));
+        const after = await until(
+          probe,
+          (state) =>
+            state.scrollY > 0 && state.rectTop === 0 && state.shadow !== "none" &&
+            state.bg !== before.bg && state.border !== before.border,
+        );
         await evaluate("window.scrollTo(0, 0)");
-        await sleep(450);
-        const back = JSON.parse(await evaluate(PROBE(surface, wrap)));
+        const back = await until(probe, (state) => state.scrollY === 0 && state.shadow === "none");
         return { before, after, back };
       };
       return {
