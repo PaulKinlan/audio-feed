@@ -7,6 +7,7 @@ import {
   extractArticle,
   fetchArticle,
   IngestError,
+  isBareUrlText,
   isPublicAddress,
   publicLookup,
 } from "../src/ingest/url.ts";
@@ -721,4 +722,52 @@ Deno.test("extractArticle wraps <pre> blocks in code fences (audio-feed-bdo)", (
   equal(result.body.includes("function hello()"), true);
   equal(result.body.includes("Before the code block."), true);
   equal(result.body.includes("After the code block."), true);
+});
+
+Deno.test("isBareUrlText recognises URL-shaped anchor text only (audio-feed-sa4g)", () => {
+  for (
+    const url of [
+      "https://brm.us/show-keystrokes",
+      "http://example.com/a/b",
+      "//cdn.example.com/x.js",
+      "www.example.com/demo",
+      "/show-keystrokes",
+      "brm.us/show-keystrokes",
+    ]
+  ) {
+    equal(isBareUrlText(url), true, url);
+  }
+  for (
+    const prose of [
+      "the demo page",
+      "show-keystrokes",
+      "example.com", // a bare domain is spoken "example dot com" — that IS how it is said
+      "Demo & Playground",
+      "",
+      "https://example.com spaced text",
+    ]
+  ) {
+    equal(isBareUrlText(prose), false, prose);
+  }
+});
+
+Deno.test("hero media, its URL fallback and its leading caption never open the narration (audio-feed-sa4g)", async () => {
+  const result = extractArticle(await fixture("hero-figure"), source);
+  // the article's own first paragraph leads the read, in lead AND body
+  match(result.lead, /^When recording screen casts/);
+  match(result.body, /^When recording screen casts/);
+  // the hero <video>'s fallback URL is never narrated ("slash show dash keystrokes...")
+  equal(result.body.includes("demo.mp4"), false);
+  equal(result.lead.includes("demo.mp4"), false);
+  // a caption BEFORE the opening paragraph is presentation and is dropped
+  equal(result.body.includes("Recording of the demo"), false);
+  // decorative separator paragraphs are not prose
+  equal(result.body.includes("~"), false);
+  // a caption AFTER the opening paragraph is content and stays
+  match(result.body, /Adoption by year/);
+  // code fences stay paired so the TTS layer can strip the listing
+  equal(result.body.includes("```"), true);
+  // a bare-URL anchor contributes no spoken text; a prose anchor survives
+  equal(result.body.includes("https://example.com/demo"), false);
+  match(result.body, /Try the route, or read the documentation/);
 });
