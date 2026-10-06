@@ -17,11 +17,12 @@
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { deleteUserSource } from "../src/compose/account.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
 import { decodedFromWav, GeminiTtsError, parseWavHeader, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
-import { segmentTextHash } from "../src/types.ts";
+import { segmentBlobKey, segmentTextHash } from "../src/types.ts";
 import { collect } from "../src/storage/mod.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -351,6 +352,77 @@ Deno.test("a voice change between death and retry opens a new slot and still res
   });
   assertEquals(third.paid, SEGMENTS.slice(2), "the Kore retry resumes from Kore segments");
   assertEquals(done.ready.length, 1);
+});
+
+Deno.test("deleting a source sweeps the episode's synthesis segments on the plain delete path", async () => {
+  // The wr1u re-review's last P2: the non-cascade delete is the default, and a pending or
+  // synthesizing episode can carry finalized segment records with live blobs. Once the row
+  // is gone nothing can ever list them again, so the delete must sweep them itself.
+  const { ctx, stores } = await queued();
+  const leaseMs = 60_000;
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  assert(
+    await stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "worker-a",
+      now: nowIso,
+      leaseMs,
+      maxClaims: 3,
+    }),
+  );
+  const text = SEGMENTS[0]!;
+  const hash = segmentTextHash(text);
+  assertEquals(
+    await stores.metadata.reserveSynthesisSegment(
+      "user-1",
+      "episode-1",
+      {
+        textHash: hash,
+        text,
+        promptVersion: "v-test",
+        voice: "Charon",
+        audioKey: "",
+        byteLength: 0,
+        owner: "worker-a",
+        claimAt: nowIso,
+        createdAt: nowIso,
+        finalized: false,
+      },
+      nowMs,
+      leaseMs,
+    ),
+    "reserved",
+  );
+  const key = segmentBlobKey({ userId: "user-1", id: "episode-1" }, hash, "rev-1");
+  await stores.blobs.put(key, new Uint8Array(16), { contentType: "audio/wav" });
+  assertEquals(
+    await stores.metadata.finalizeSynthesisSegment(
+      "user-1",
+      "episode-1",
+      { textHash: hash, promptVersion: "v-test", voice: "Charon" },
+      { audioKey: key, byteLength: 16 },
+      "worker-a",
+      nowMs,
+      leaseMs,
+    ),
+    true,
+  );
+  assertEquals((await stores.metadata.listSynthesisSegments("user-1", "episode-1")).length, 1);
+
+  // Plain delete (no ?cascade): the episode row and its segments go together.
+  const res = await deleteUserSource(
+    ctx,
+    new Request("https://audio.example.com/account/sources/inbox", { method: "DELETE" }),
+    "user-1",
+    "inbox",
+  );
+  assert(res.ok, `delete must succeed, got ${res.status}`);
+  assertEquals(
+    await stores.metadata.listSynthesisSegments("user-1", "episode-1"),
+    [],
+    "the plain delete path must clear segment records",
+  );
+  assertEquals(await stores.blobs.get(key), null, "and reclaim their blobs");
 });
 
 Deno.test("decodedFromWav round-trips pcmToWav without losing the audio", () => {

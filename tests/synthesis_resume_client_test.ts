@@ -214,3 +214,51 @@ Deno.test("a truncated segment is never committed as resume material", async () 
   assert(threw, "truncated narration must not publish");
   assertEquals(committed, [], "a truncated segment must never become resume material");
 });
+
+Deno.test("even with allowTruncated the truncated segment is not committed as resumable", async () => {
+  // The guard itself, in its only reachable configuration: a caller that opts into
+  // truncated audio gets its stitched result, but the incomplete segments must not enter
+  // the resume store, where decodedFromWav would relabel them STOP-complete.
+  const calls: string[] = [];
+  const client = new GeminiTtsClient({
+    apiKey: "test-key",
+    fetchFn: (_url, init) => {
+      calls.push(String(init?.body ?? ""));
+      const wav = wavForText(requestText(String(init?.body ?? "")));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [{
+              content: {
+                parts: [{ inlineData: { mimeType: "audio/wav", data: uint8ArrayToBase64(wav) } }],
+              },
+              finishReason: "MAX_TOKENS",
+            }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    },
+  });
+  const committed: string[] = [];
+  const result = await client.synthesizeNarration(
+    { title: "T", author: "A", body: TWO_SEGMENT_BODY, voice: "Charon" },
+    {
+      allowTruncated: true,
+      resume: {
+        prepare: () => Promise.resolve("synthesize"),
+        commit: (text) => {
+          committed.push(text);
+          return Promise.resolve();
+        },
+      },
+    },
+  );
+  assertEquals(calls.length, 2, "the opted-in run still pays for its two segments");
+  assertEquals(result.truncated, true, "the stitched result carries the truncation honestly");
+  assertEquals(
+    committed,
+    [],
+    "truncated segments must never become resume material, even when allowed in the stitch",
+  );
+});

@@ -18,6 +18,35 @@ import { type AudioMode } from "../types.ts";
  * page's (audio-feed-8fc) share this, so the drain guards below exist once.
  * Scoped by `userId`, so another user's source id is simply "Unknown source".
  */
+/**
+ * audio-feed-wr1u: reclaim an episode's persisted synthesis segments before its row goes.
+ *
+ * The episode row is the only path back to these records; EVERY delete path (cascade and
+ * plain) must sweep them, or their blobs leak with no orphan record and no future sweep
+ * that could ever find them. A delete that throws is recorded as an orphan — and
+ * parseAudioBlobKey understands audio-segments/ keys, so the batch sweeper reclaims it.
+ */
+async function sweepEpisodeSegments(
+  ctx: AppContext,
+  userId: string,
+  episodeId: string,
+  deletedBlobKeys: Set<string>,
+  failedBlobKeys: Set<string>,
+): Promise<void> {
+  for (const record of await ctx.stores.metadata.listSynthesisSegments(userId, episodeId)) {
+    if (!record.audioKey || deletedBlobKeys.has(record.audioKey)) continue;
+    try {
+      await ctx.stores.blobs.delete(record.audioKey);
+      deletedBlobKeys.add(record.audioKey);
+      failedBlobKeys.delete(record.audioKey);
+    } catch {
+      failedBlobKeys.add(record.audioKey);
+      await ctx.stores.metadata.recordOrphanBlob(record.audioKey).catch(() => {});
+    }
+  }
+  await ctx.stores.metadata.clearSynthesisSegments(userId, episodeId);
+}
+
 export async function deleteUserSource(
   ctx: AppContext,
   req: Request,
@@ -109,24 +138,7 @@ export async function deleteUserSource(
               failedBlobKeys.add(episode.audioKey);
             }
           }
-          // audio-feed-wr1u: the episode row is the only path that will ever find these
-          // records again, so its deletion sweeps their blobs too. A delete that throws is
-          // recorded as an orphan — and parseAudioBlobKey understands segment keys now, so
-          // the batch sweeper can reclaim it later.
-          for (
-            const record of await ctx.stores.metadata.listSynthesisSegments(userId, episode.id)
-          ) {
-            if (!record.audioKey || deletedBlobKeys.has(record.audioKey)) continue;
-            try {
-              await ctx.stores.blobs.delete(record.audioKey);
-              deletedBlobKeys.add(record.audioKey);
-              failedBlobKeys.delete(record.audioKey);
-            } catch {
-              failedBlobKeys.add(record.audioKey);
-              await ctx.stores.metadata.recordOrphanBlob(record.audioKey).catch(() => {});
-            }
-          }
-          await ctx.stores.metadata.clearSynthesisSegments(userId, episode.id);
+          await sweepEpisodeSegments(ctx, userId, episode.id, deletedBlobKeys, failedBlobKeys);
           const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
           if (removed) {
             deletedEpisodeIds.add(episode.id);
@@ -170,6 +182,11 @@ export async function deleteUserSource(
             ) {
               continue;
             }
+            // audio-feed-wr1u review: the non-cascade delete is the DEFAULT path, and a
+            // pending episode can carry finalized segment records (a failed-then-retried
+            // run). Once the row is gone nothing can ever list them again, so the sweep
+            // belongs here exactly as much as in the cascade.
+            await sweepEpisodeSegments(ctx, userId, episode.id, deletedBlobKeys, failedBlobKeys);
             const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
             if (removed) {
               cancelledPendingIds.add(episode.id);
