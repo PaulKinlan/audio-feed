@@ -41,9 +41,13 @@ export function splitTextUnderByteBudget(text: string, maxBytes: number): string
 }
 
 /** Check the exact non-whitespace text sequence, including repeated words and punctuation.
- * Whitespace may move at a breath boundary; a dropped/duplicated spoken character may not. */
+ * Whitespace may move at a breath boundary; a dropped/duplicated spoken character may not.
+ * A segment carrying no spoken characters is rejected outright. */
 export function assertTextSeams(source: string, turns: readonly string[]): void {
   const compact = (text: string) => text.replace(/\s+/gu, "");
+  if (turns.some((turn) => !turn.trim())) {
+    throw new Error("Synthesis turn boundary has an empty transcript segment");
+  }
   if (compact(turns.join("")) !== compact(source)) {
     throw new Error("Synthesis turn boundary lost or duplicated transcript text");
   }

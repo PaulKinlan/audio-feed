@@ -344,7 +344,8 @@ function parseScriptBatch(
 }
 
 /** Exact id sequence catches a dropped/duplicated section; adjacent duplicate text catches
- * a repeated sentence across the boundary even when the model labels it with a new id. */
+ * a repeated sentence across the boundary even when the model labels it with a new id.
+ * A turn carrying no spoken text is rejected. */
 export function assertScriptTurnSeams(turns: readonly ScriptBatchTurn[], expected: number): void {
   if (turns.length !== expected) {
     throw new GroundedScriptError(`script seam has ${turns.length} of ${expected} turns`);
@@ -352,6 +353,9 @@ export function assertScriptTurnSeams(turns: readonly ScriptBatchTurn[], expecte
   for (let index = 0; index < turns.length; index++) {
     if (turns[index]?.id !== index) {
       throw new GroundedScriptError(`script seam missing or duplicated turn id ${index}`);
+    }
+    if (!turns[index]!.text.trim()) {
+      throw new GroundedScriptError(`script seam empty turn text at turn id ${index}`);
     }
     if (
       index && turns[index]!.text.trim().replace(/\s+/gu, " ").toLowerCase() ===
