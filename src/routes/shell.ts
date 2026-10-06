@@ -17,6 +17,9 @@
 import type { User } from "../types.ts";
 import { esc } from "./html.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
+// The confirm client's single source is the marked region of this file (audio-feed-0r0s);
+// the same `with { type: "text" }` idiom src/routes/assets.ts uses to serve it.
+import adminClientSource from "../assets/admin.js" with { type: "text" };
 
 /** Who the header says is signed in. `null` for a visitor. */
 export interface Viewer {
@@ -466,57 +469,49 @@ export const CONFIRM_DIALOG_HTML = `
  * Combining closedby='any' with an autofocus on the non-destructive Cancel button
  * guarantees keyboard and light-dismiss safety out of the box."
  *
- * SYNC NOTE (audio-feed-3xq part 4a): src/assets/admin.js carries a typed COPY of this snippet —
- * the admin console is a module and cannot read this string. If you change askConfirm here,
- * change it there too, until the account script is extracted and both share one module.
+ * SINGLE SOURCE (audio-feed-0r0s): there is no second copy of this code anymore. The canonical
+ * client — the closedby light-dismiss shim + askConfirm — lives in the marked region at the top
+ * of src/assets/admin.js (the module the admin console serves), and what ships inline on the
+ * classic-script pages (account) is that exact region, sliced at import time below. Editing the
+ * region edits both surfaces; a broken marker fails at module load rather than silently serving
+ * a page without its confirm client. When audio-feed-3xq part 4c extracts the account script to
+ * a module, lift the region into a composed shared asset and delete this slice.
  */
-export const CONFIRM_DIALOG_CLIENT = `
-  const confirmDialog = document.getElementById("confirmDialog");
-  if (confirmDialog && typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
-    // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
-    // Light-dismiss fallback for browsers without native closedby support (Modern Web Guidance)
-    confirmDialog.addEventListener("click", (event) => {
-      if (event.target !== confirmDialog) return;
-      const rect = confirmDialog.getBoundingClientRect();
-      const isInside =
-        rect.top <= event.clientY &&
-        event.clientY <= rect.top + rect.height &&
-        rect.left <= event.clientX &&
-        event.clientX <= rect.left + rect.width;
-      if (!isInside) confirmDialog.close("cancel");
-    });
-  }
+const CONFIRM_SHARED_BEGIN = "// #confirm-shared-begin";
+const CONFIRM_SHARED_END = "// #confirm-shared-end";
 
-  function askConfirm(message, options) {
-    const opts = options || {};
-    if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
-      return Promise.resolve(confirm(message));
-    }
-    const titleEl = document.getElementById("confirmTitle");
-    const msgEl = document.getElementById("confirmMessage");
-    const okEl = document.getElementById("confirmOkBtn");
-    const cancelEl = document.getElementById("confirmCancelBtn");
-    if (titleEl) titleEl.textContent = opts.title || "Confirm Action";
-    if (msgEl) msgEl.textContent = message;
-    if (okEl) {
-      okEl.textContent = opts.confirmText || "Confirm";
-      if (opts.danger === false) {
-        okEl.className = "btn primary";
-      } else {
-        okEl.className = "btn danger";
-      }
-    }
-    if (cancelEl) cancelEl.textContent = opts.cancelText || "Cancel";
-    return new Promise((resolve) => {
-      const onClose = () => {
-        confirmDialog.removeEventListener("close", onClose);
-        resolve(confirmDialog.returnValue === "confirm");
-      };
-      confirmDialog.addEventListener("close", onClose);
-      confirmDialog.showModal();
-    });
+export function confirmClientFromSource(source: string): string {
+  // Whole-line matches only: prose that MENTIONS the markers (this file's own doc comments)
+  // must never satisfy the search the way the marker line does.
+  const beginMatch = source.match(new RegExp(`^${escapeRegExp(CONFIRM_SHARED_BEGIN)}$`, "m"));
+  const endMatch = source.match(new RegExp(`^${escapeRegExp(CONFIRM_SHARED_END)}$`, "m"));
+  if (
+    !beginMatch || !endMatch || endMatch.index === undefined || beginMatch.index === undefined ||
+    endMatch.index < beginMatch.index
+  ) {
+    throw new Error(
+      `src/assets/admin.js must bracket the shared confirm client with whole lines ` +
+        `${CONFIRM_SHARED_BEGIN} and ${CONFIRM_SHARED_END} (audio-feed-0r0s single source)`,
+    );
   }
-`;
+  const begin = beginMatch.index + beginMatch[0].length;
+  const region = source.slice(begin, endMatch.index).replace(/^\n+/, "").replace(/\n+$/, "");
+  if (!region.includes("function askConfirm(")) {
+    throw new Error("the marked confirm-client region in admin.js no longer contains askConfirm");
+  }
+  // The region ships inside a classic <script> on the account page: module syntax there is a
+  // page-killing SyntaxError, so this guards the embed contract, not style.
+  if (/(^|\n)\s*(import|export)\b/.test(region)) {
+    throw new Error("the marked confirm-client region in admin.js must not use import/export");
+  }
+  return `\n${region}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(adminClientSource);
 
 /**
  * Accessible Tooltip Container HTML (audio-feed-pzwe).

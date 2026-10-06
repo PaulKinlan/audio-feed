@@ -9,6 +9,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { renderShell } from "../src/routes/shell.ts";
+import { CONFIRM_DIALOG_CLIENT } from "../src/routes/shell.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { renderAccountPage } from "../src/routes/account.ts";
 import { renderListenPage } from "../src/routes/listen.ts";
@@ -91,11 +92,15 @@ Deno.test("closedby: dialog and backdrop CSS delivered across stylesheets (audio
 });
 
 Deno.test("closedby: Baseline markers are present (audio-feed-e21x)", async () => {
-  const shellTs = await Deno.readTextFile("src/routes/shell.ts");
+  // audio-feed-0r0s: the shim's single source is admin.js's marked region; shell.ts embeds it by
+  // derivation, so the file-level assert follows the source and the runtime assert follows the
+  // export the account page actually ships.
+  const adminJs = await Deno.readTextFile("src/assets/admin.js");
   const listenJs = await Deno.readTextFile("src/assets/listen.js");
 
-  assert(shellTs.includes("TODO(baseline/dialog-closedby)"));
+  assert(adminJs.includes("TODO(baseline/dialog-closedby)"));
   assert(listenJs.includes("TODO(baseline/dialog-closedby)"));
+  assert(CONFIRM_DIALOG_CLIENT.includes("TODO(baseline/dialog-closedby)"));
 });
 
 Deno.test("closedby: headless Chrome reflects closedBy property and attribute (audio-feed-e21x)", async () => {
