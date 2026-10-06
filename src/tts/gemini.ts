@@ -1063,8 +1063,9 @@ export function buildDialogueRequest(
   };
 }
 
-/** Split transcript on a word boundary where possible; never split a Unicode code point.
- * This byte budget conservatively bounds input tokens even for code and non-Latin text. */
+/** Prefer paragraph or sentence boundaries for natural breath points; fall back to a word
+ * boundary, then a Unicode code point for an oversized unbroken word. The byte budget
+ * conservatively bounds input tokens even for code and non-Latin text. */
 export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): string[] {
   if (maxBytes < 4) throw new Error("TTS segment byte budget is too small");
   const result: string[] = [];
@@ -1079,8 +1080,18 @@ export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): stri
       bytes += size;
       end += point.length;
     }
-    const boundary = rest.slice(0, end).search(/\s+\S*$/u);
-    if (boundary > end / 2) end = boundary;
+    const available = rest.slice(0, end);
+    const preferred = /\n\s*\n|[.!?。！？][”"')\]]?\s+/gu;
+    let boundary = 0;
+    for (const match of available.matchAll(preferred)) {
+      const candidate = match.index + match[0].length;
+      if (candidate > end / 2) boundary = candidate;
+    }
+    if (!boundary) {
+      const word = /\s+\S*$/u.exec(available);
+      if (word && word.index > end / 2) boundary = word.index;
+    }
+    if (boundary) end = boundary;
     const segment = rest.slice(0, end).trim();
     if (!segment) throw new Error("TTS segment cannot fit in byte budget");
     result.push(segment);

@@ -123,6 +123,18 @@ Deno.test("original single-request failure is reproducible with real article and
   assertStringIncludes(error.message, "maxOutputTokens=unset");
 });
 
+Deno.test("segmentation prefers paragraph, then sentence, then word boundaries", () => {
+  assertEquals(splitTtsText("First paragraph.\n\nSecond paragraph with words.", 23), [
+    "First paragraph.",
+    "Second paragraph with",
+    "words.",
+  ]);
+  assertEquals(splitTtsText("First sentence. Next sentence follows.", 25), [
+    "First sentence.",
+    "Next sentence follows.",
+  ]);
+});
+
 Deno.test("multispeaker and Unicode paragraphs stay bounded; malformed or mismatched segments fail closed", async () => {
   assert(
     splitTtsText("🚀".repeat(4000)).every((s) =>

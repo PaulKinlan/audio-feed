@@ -45,6 +45,8 @@ const GEMINI_GENERATE_ENDPOINT = "https://generativelanguage.googleapis.com/v1be
  * tail is where a TTS prompt used to slice blindly.
  */
 export const DEFAULT_MAX_BODY_CHARS = 12_000;
+/** Long grounded research and 14 scripted turns must not rely on the model's default output cap. */
+export const SCRIPT_MAX_OUTPUT_TOKENS = 16_384;
 
 /**
  * How long the grounded call may take before the stage gives up and synthesis falls back
@@ -298,7 +300,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
         parts: [{ text: buildScriptPrompt({ ...input, maxTurns, maxBodyChars }) }],
       }],
       tools: [{ googleSearch: {} }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 4_096 },
+      generationConfig: { temperature: 0.7, maxOutputTokens: SCRIPT_MAX_OUTPUT_TOKENS },
     };
     let response: Response;
     try {

@@ -18,6 +18,7 @@ import {
   DEFAULT_SCRIPT_TIMEOUT_MS,
   GroundedScriptError,
   parseGroundedScript,
+  SCRIPT_MAX_OUTPUT_TOKENS,
   textFromResponse,
 } from "../src/worker/script.ts";
 import { createGeminiSynthesizer } from "../src/worker/synthesis.ts";
@@ -108,6 +109,11 @@ Deno.test("script request: grounding is requested and the model is named in the 
   await generator({ article: ARTICLE, speakers: [...SPEAKERS] });
   assertStringIncludes(seenUrl, `${DEFAULT_SCRIPT_MODEL}:generateContent`);
   assertEquals(seenBody.tools, [{ googleSearch: {} }]);
+  assertEquals(
+    (seenBody.generationConfig as { maxOutputTokens: number }).maxOutputTokens,
+    SCRIPT_MAX_OUTPUT_TOKENS,
+  );
+  assertEquals(SCRIPT_MAX_OUTPUT_TOKENS, 16_384);
   const contents = seenBody.contents as { parts: { text: string }[] }[];
   assertStringIncludes(contents[0]?.parts[0]?.text ?? "", "counterarguments");
 });
