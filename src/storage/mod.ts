@@ -26,6 +26,7 @@ import type {
   SetupLink,
   Source,
   SynthesisCounts,
+  SynthesisSegmentRecord,
   User,
 } from "../types.ts";
 export { utcDayKey } from "../types.ts";
@@ -337,6 +338,48 @@ export interface MetadataStore {
    * "you were superseded", and the caller should discard its result.
    */
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
+  /**
+   * Reserve a synthesis segment slot BEFORE paying for its TTS call (audio-feed-wr1u).
+   *
+   * The CAS is the spend guard: only the worker holding the live claim may reserve, and a
+   * slot already finalized for the same text is reported as such so the caller reuses the
+   * stored audio instead of billing again. A reservation left by a claim whose lease has
+   * expired is stealable, exactly like the episode claim itself.
+   *
+   * - "reserved": the slot is this caller's now; go spend, then finalize.
+   * - "finalized": a completed segment for this exact text already exists; reuse its audio.
+   * - "no-claim": the caller does not hold the live claim (superseded, lease expired, or
+   *   never claimed); spend nothing.
+   */
+  reserveSynthesisSegment(
+    userId: string,
+    episodeId: string,
+    record: SynthesisSegmentRecord,
+    nowMs: number,
+    leaseMs: number,
+  ): Promise<"reserved" | "finalized" | "no-claim">;
+
+  /**
+   * Attach the stored blob to a reservation. Claim-conditional and reservation-conditional:
+   * a superseded worker, or anyone finalizing a slot they did not reserve, gets false and
+   * must delete its own orphan blob.
+   */
+  finalizeSynthesisSegment(
+    userId: string,
+    episodeId: string,
+    textHash: string,
+    audio: { audioKey: string; byteLength: number },
+    owner: string,
+    nowMs: number,
+    leaseMs: number,
+  ): Promise<boolean>;
+
+  /** Every persisted segment record for an episode, in reservation order. */
+  listSynthesisSegments(userId: string, episodeId: string): Promise<SynthesisSegmentRecord[]>;
+
+  /** Drop all segment records for an episode (their blobs are the caller's problem). */
+  clearSynthesisSegments(userId: string, episodeId: string): Promise<void>;
+
   /**
    * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
    *

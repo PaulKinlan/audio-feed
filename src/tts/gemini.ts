@@ -234,6 +234,28 @@ export interface SynthesisOptions {
   /** Override the client's maxRetries for this call. */
   maxRetries?: number;
   /**
+   * Durable resumable chunking (audio-feed-wr1u). The worker persists each paid segment so a
+   * run that dies mid-episode resumes instead of re-billing every segment.
+   *
+   * `prepare` runs BEFORE the paid call for one segment (its exact text, or for dialogue the
+   * batch's turn texts joined by U+0000): return stored WAV bytes to skip the call entirely,
+   * "synthesize" to pay for it, or "held" to abort because another live claimant owns that
+   * segment's spend right now. `commit` runs after the segment decodes and before the next
+   * paid call, so a crash loses at most the segment in flight.
+   */
+  resume?: {
+    /**
+     * `wav` carries the stored bytes and the voice that spoke them: the client reuses them
+     * only if it is about to use that same voice, so a voice change re-speaks rather than
+     * serving another voice's audio.
+     */
+    prepare: (
+      segmentText: string,
+      voice: string,
+    ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
+    commit: (segmentText: string, decoded: DecodedAudioResult, voice: string) => Promise<void>;
+  };
+  /**
    * Which failures may be retried. "transient" (default) covers only statuses that mean the API
    * definitively did not process the request (429, 503). "all" also retries other 5xx and network
    * errors — a cost decision, because the server may already have generated (and billed) audio.
@@ -1075,6 +1097,32 @@ export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): stri
 }
 
 /** Each request yields a self-contained audio file; concatenate only compatible PCM payloads. */
+/**
+ * Rebuild a DecodedAudioResult from stored WAV bytes (audio-feed-wr1u resume path).
+ *
+ * Only segments that already passed joinTtsAudio's truncation rejection in their original
+ * run are ever stored, so a stored segment is complete by construction; saying STOP here is
+ * a statement about the record, not a hope about the model.
+ */
+export function decodedFromWav(bytes: Uint8Array): DecodedAudioResult {
+  const info = parseWavHeader(bytes);
+  if (info.audioFormat !== 1 || info.dataLength <= 0) {
+    throw new GeminiTtsError("Stored synthesis segment WAV is not valid PCM audio", 400);
+  }
+  return {
+    rawBytes: bytes,
+    mimeType: "audio/wav",
+    format: "wav",
+    sampleRate: info.sampleRate,
+    channels: info.channels,
+    bitsPerSample: info.bitsPerSample,
+    durationSeconds: info.durationSeconds,
+    finishReason: "STOP",
+    truncated: false,
+    toWav: () => bytes,
+  };
+}
+
 function joinTtsAudio(chunks: DecodedAudioResult[], allowTruncated = false): DecodedAudioResult {
   if (chunks.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
   if (chunks.length === 1) return chunks[0]!;
@@ -1335,11 +1383,24 @@ export class GeminiTtsClient {
       return await runManagedTurns({
         segments,
         maxTurns: MAX_TTS_SEGMENTS,
-        request: (segment) =>
-          this.sendRequest(
+        request: async (segment) => {
+          const prepared = options.resume
+            ? await options.resume.prepare(segment, voice)
+            : "synthesize";
+          if (prepared === "held") {
+            throw new GeminiTtsError(
+              "Synthesis segment is reserved by another live claimant; refusing double spend",
+              409,
+            );
+          }
+          if (prepared !== "synthesize") return decodedFromWav(prepared.wav);
+          const decoded = await this.sendRequest(
             buildSingleVoiceRequest(segment, voice, options.temperature, style),
             segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
-          ),
+          );
+          await options.resume?.commit(segment, decoded, voice);
+          return decoded;
+        },
         splitOnOutputLimit: (segment, error) => {
           if (
             !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
@@ -1421,11 +1482,26 @@ export class GeminiTtsClient {
       return await runManagedTurns({
         segments: batches,
         maxTurns: MAX_TTS_SEGMENTS,
-        request: (part) =>
-          this.sendRequest(
+        request: async (part) => {
+          const segmentText = part.map((turn) => turn.text).join("\u0000");
+          const dialogueVoice = speakers.map((speaker) => speaker.voice).join(",");
+          const prepared = options.resume
+            ? await options.resume.prepare(segmentText, dialogueVoice)
+            : "synthesize";
+          if (prepared === "held") {
+            throw new GeminiTtsError(
+              "Synthesis segment is reserved by another live claimant; refusing double spend",
+              409,
+            );
+          }
+          if (prepared !== "synthesize") return decodedFromWav(prepared.wav);
+          const decoded = await this.sendRequest(
             buildDialogueRequest(part, speakers, options.temperature),
             batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
-          ),
+          );
+          await options.resume?.commit(segmentText, decoded, dialogueVoice);
+          return decoded;
+        },
         stitch: (audio) => {
           assertTextSeams(sourceText, batchText());
           return joinTtsAudio(audio, options.allowTruncated);

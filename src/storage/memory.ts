@@ -17,6 +17,7 @@ import type {
   SetupLink,
   Source,
   SynthesisCounts,
+  SynthesisSegmentRecord,
   User,
 } from "../types.ts";
 import { utcDayKey } from "../types.ts";
@@ -103,6 +104,8 @@ export class MemoryMetadataStore implements MetadataStore {
   /** URL → article id, mirroring KV's `article_by_url` index (audio-feed-d8q). */
   readonly #articleByUrl = new Map<string, string>();
   readonly #episodes = new Map<string, Episode>();
+  /** audio-feed-wr1u: persisted TTS segments per episode, keyed by segment text hash. */
+  readonly #segments = new Map<string, Map<string, SynthesisSegmentRecord>>();
   // Sorted indexes of pending and synthesizing episodes (audio-feed-7li)
   readonly #pendingIndex: { sortKey: string; userId: string; id: string }[] = [];
   readonly #synthesizingIndex: { sortKey: string; userId: string; id: string }[] = [];
@@ -534,6 +537,74 @@ export class MemoryMetadataStore implements MetadataStore {
     });
     this.#episodes.set(key, claimed);
     return Promise.resolve(structuredClone(claimed));
+  }
+
+  reserveSynthesisSegment(
+    userId: string,
+    episodeId: string,
+    record: SynthesisSegmentRecord,
+    nowMs: number,
+    leaseMs: number,
+  ): Promise<"reserved" | "finalized" | "no-claim"> {
+    const episode = this.#episodes.get(MemoryMetadataStore.#scoped(userId, episodeId));
+    // Spend guard: only the live claimant reserves. A superseded worker's reserve is
+    // refused here, not at finalize, so it never reaches the paid call.
+    if (
+      !episode || episode.status !== "synthesizing" || episode.claimedBy !== record.owner ||
+      isClaimExpired(episode, nowMs, leaseMs)
+    ) {
+      return Promise.resolve("no-claim");
+    }
+    const key = MemoryMetadataStore.#scoped(userId, episodeId);
+    let slots = this.#segments.get(key);
+    if (!slots) {
+      slots = new Map();
+      this.#segments.set(key, slots);
+    }
+    const current = slots.get(record.textHash);
+    if (current?.finalized) return Promise.resolve("finalized");
+    // A reservation by anyone other than the live claimant is by definition left by a
+    // claim that has since moved on: stealable, like an expired episode lease.
+    slots.set(record.textHash, structuredClone(record));
+    return Promise.resolve("reserved");
+  }
+
+  finalizeSynthesisSegment(
+    userId: string,
+    episodeId: string,
+    textHash: string,
+    audio: { audioKey: string; byteLength: number },
+    owner: string,
+    nowMs: number,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const episode = this.#episodes.get(MemoryMetadataStore.#scoped(userId, episodeId));
+    if (
+      !episode || episode.status !== "synthesizing" || episode.claimedBy !== owner ||
+      isClaimExpired(episode, nowMs, leaseMs)
+    ) {
+      return Promise.resolve(false);
+    }
+    const slots = this.#segments.get(MemoryMetadataStore.#scoped(userId, episodeId));
+    const current = slots?.get(textHash);
+    if (!current || current.finalized || current.owner !== owner) return Promise.resolve(false);
+    slots!.set(textHash, {
+      ...structuredClone(current),
+      audioKey: audio.audioKey,
+      byteLength: audio.byteLength,
+      finalized: true,
+    });
+    return Promise.resolve(true);
+  }
+
+  listSynthesisSegments(userId: string, episodeId: string): Promise<SynthesisSegmentRecord[]> {
+    const slots = this.#segments.get(MemoryMetadataStore.#scoped(userId, episodeId));
+    return Promise.resolve([...(slots?.values() ?? [])].map((r) => structuredClone(r)));
+  }
+
+  clearSynthesisSegments(userId: string, episodeId: string): Promise<void> {
+    this.#segments.delete(MemoryMetadataStore.#scoped(userId, episodeId));
+    return Promise.resolve();
   }
 
   completeEpisode(episode: Episode, owner: string): Promise<boolean> {
