@@ -586,6 +586,21 @@ export async function discoverFeeds(
 export const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
 /**
+ * Byline chrome a site puts in front of the name — "Published by Bramus!",
+ * "Written by Jo Editor" — reaches the spoken intro prefixed with "By "
+ * (audioPayload / formatNarrationIntro), so bram.us narrated "By Published by
+ * Bramus!." (audio-feed-ldsb). Strip the prefix phrases and a trailing bang so
+ * only the name is narrated. Every prefix must be followed by whitespace, so real
+ * names like "Byrne Smith" or "Bywater" are never touched.
+ */
+export function cleanBylineName(text: string | null | undefined): string {
+  return clean(text)
+    .replace(/^(?:(?:published|written|posted|authored|reviewed|reported)\s+)?by\s+/i, "")
+    .replace(/!+$/, "")
+    .trim();
+}
+
+/**
  * Elements whose subtrees contribute no narration text (audio-feed-sa4g). A media
  * embed's fallback content is a bare link to the media file — left in place, TTS
  * spells the URL character by character before the article says a single word
@@ -754,7 +769,7 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
   return {
     url,
     title,
-    author: clean(result.byline || byline).replace(/^by\s+/i, "") || null,
+    author: cleanBylineName(result.byline || byline) || null,
     publishedAt,
     lead,
     body,
