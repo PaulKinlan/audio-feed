@@ -485,7 +485,7 @@ Deno.test("admin bootstrap: creates approved admin user and issues setupToken (a
   assertEquals(link.issuedBy, "bootstrap");
 });
 
-Deno.test("admin bootstrap: existing non-admin user is promoted to admin and approved (audio-feed-8eh)", async () => {
+Deno.test("admin bootstrap: existing user is refused with 409 and not promoted (audio-feed-xw7)", async () => {
   const { fetch, stores } = app();
   const reader = await seed(stores, {
     email: "pendingreader@example.com",
@@ -499,15 +499,51 @@ Deno.test("admin bootstrap: existing non-admin user is promoted to admin and app
     json: { email: "pendingreader@example.com", adminToken: "admin-secret" },
     origin: BASE,
   }));
-  assertEquals(res.status, 200);
+  assertEquals(res.status, 409);
   const data = await res.json();
-  assertEquals(data.ok, true);
-  assertEquals(data.user.isAdmin, true);
+  assertStringIncludes(data.error, "An account already exists for this email");
 
   const updated = await stores.metadata.getUser(reader.id);
   assert(updated);
-  assertEquals(updated.isAdmin, true);
-  assertEquals(updated.status, "approved");
+  assertEquals(updated.isAdmin, false);
+  assertEquals(updated.status, "pending");
+});
+
+Deno.test("admin bootstrap: existing approved, suspended, or admin users are also refused with 409 (audio-feed-xw7)", async () => {
+  const { fetch, stores } = app();
+  const approvedReader = await seed(stores, {
+    id: "user-reader",
+    email: "reader@example.com",
+    isAdmin: false,
+    status: "approved",
+  });
+  const suspendedUser = await seed(stores, {
+    id: "user-suspended",
+    email: "suspended@example.com",
+    isAdmin: false,
+    status: "suspended",
+  });
+  const existingAdmin = await seed(stores, {
+    id: "user-admin",
+    email: "admin@example.com",
+    isAdmin: true,
+    status: "approved",
+  });
+
+  for (const target of [approvedReader, suspendedUser, existingAdmin]) {
+    const res = await fetch(call("/api/auth/bootstrap", {
+      json: { email: target.email, adminToken: "admin-secret" },
+      origin: BASE,
+    }));
+    assertEquals(res.status, 409);
+    const data = await res.json();
+    assertStringIncludes(data.error, "An account already exists for this email");
+
+    const record = await stores.metadata.getUser(target.id);
+    assert(record);
+    assertEquals(record.isAdmin, target.isAdmin);
+    assertEquals(record.status, target.status);
+  }
 });
 
 Deno.test("admin bootstrap: setupToken passes into register/options and issues WebAuthn challenge (audio-feed-8eh)", async () => {
