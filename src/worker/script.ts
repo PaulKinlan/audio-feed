@@ -344,7 +344,8 @@ function parseScriptBatch(
 }
 
 /** Exact id sequence catches a dropped/duplicated section; adjacent duplicate text catches
- * a repeated sentence across the boundary even when the model labels it with a new id. */
+ * a repeated sentence across the boundary even when the model labels it with a new id.
+ * A turn carrying no spoken text is rejected. */
 export function assertScriptTurnSeams(turns: readonly ScriptBatchTurn[], expected: number): void {
   if (turns.length !== expected) {
     throw new GroundedScriptError(`script seam has ${turns.length} of ${expected} turns`);

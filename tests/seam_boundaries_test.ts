@@ -45,9 +45,9 @@ Deno.test("empty text segment is rejected even if the other chunks cover the sou
   assertThrows(() => assertTextSeams("Hello world", ["Hello ", "  ", "world"]), Error, "empty");
 });
 
-Deno.test("numbered JSON seams catch missing or repeated sections at mid-sentence and mid-word boundaries", () => {
+Deno.test("numbered JSON seams catch missing or repeated turn IDs", () => {
   // JSON continuation regenerates complete numbered turns, never partial JSON fragments.
-  // Text here identifies the seam; the structural checker can verify IDs, not source characters.
+  // Mid-sentence and mid-word examples identify seams, but IDs cannot verify source characters.
   const turns = [
     { id: 0, speaker: "Sam", text: "The quick brown fox" },
     { id: 1, speaker: "Alex", text: "jumps over the fence." },
@@ -55,16 +55,11 @@ Deno.test("numbered JSON seams catch missing or repeated sections at mid-sentenc
     { id: 3, speaker: "Alex", text: "word continues here." },
   ];
   assertScriptTurnSeams(turns, 4);
-  assertEquals(
-    turns.slice(0, 2).map((turn) => turn.text).join(" "),
-    "The quick brown fox jumps over the fence.",
-  );
-  assertEquals(turns.slice(2).map((turn) => turn.text).join(""), "Unbreakableword continues here.");
   for (const omitted of [1, 3]) {
     assertThrows(
       () => assertScriptTurnSeams(turns.filter((turn) => turn.id !== omitted), 4),
       GroundedScriptError,
-      "script seam",
+      "has 3 of 4 turns",
     );
     assertThrows(
       () =>
@@ -74,7 +69,7 @@ Deno.test("numbered JSON seams catch missing or repeated sections at mid-sentenc
           ...turns.slice(omitted + 1),
         ], 5),
       GroundedScriptError,
-      "script seam",
+      `missing or duplicated turn id ${omitted + 1}`,
     );
   }
 });
