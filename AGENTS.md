@@ -2,16 +2,15 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
+> **Architecture in one line:** Issues live in a local Dolt database (`.beads/dolt/`); cross-machine
+> sync uses `bd dolt push/pull` (a git-compatible protocol), stored under `refs/dolt/data` on your
+> git remote — separate from `refs/heads/*` where your code lives. `.beads/issues.jsonl` is a
+> passive export, not the wire protocol.
 >
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md) for
+> the one-screen overview and anti-patterns (don't treat JSONL as the source of truth; don't
+> `bd import` during normal operation; don't reach for third-party Dolt hosting before trying the
+> default).
 
 ## Quick Reference
 
@@ -27,9 +26,11 @@ bd dolt push          # Push beads data to remote
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some
+systems, causing the agent to hang indefinitely waiting for y/n input.
 
 **Use these forms instead:**
+
 ```bash
 # Force overwrite without prompting
 cp -f source dest           # NOT: cp source dest
@@ -42,15 +43,47 @@ cp -rf source dest          # NOT: cp -r source dest
 ```
 
 **Other commands that may prompt:**
+
 - `scp` - use `-o BatchMode=yes` for non-interactive
 - `ssh` - use `-o BatchMode=yes` to fail instead of prompting
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Verifying a landing against production
+
+`GET /health` returns **`deploy`** (the identifier) and **`deploySource`** (the variable that
+supplied it): `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, `GIT_COMMIT_SHA` when the deploy
+injects the commit, or `dev` for a local run. **`dev` is not a match — seeing it means production is
+UNVERIFIED, not verified.**
+
+```bash
+curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
+# { "status": "ok", "storage": "...", "deploy": "<id>", "deploySource": "DENO_DEPLOYMENT_ID", "time": "..." }
+
+# map the id back to a revision:
+deployctl deployments list        # the Deno Deploy dashboard lists the same deployment id
+# when deploySource is GIT_COMMIT_SHA the id IS the commit:
+git log --oneline -1 <id>
+```
+
+The content-addressed assets prove the bytes without any token, and cover the case where the
+fingerprint is unavailable:
+`deno eval 'import {assetUrl} from "./src/routes/assets.ts"; console.log(assetUrl("listen.js"))'`
+prints the URL the landed tree expects, and that URL's `sha256sum` must equal
+`sha256sum src/assets/listen.js` at the landed commit. Caveat (measured): `listen.css` is served
+COMPOSED — design tokens prepended — so compare the tail after the token block, or fetch the file's
+own route.
+
+**Rule: landed \u2260 live.** A change is verified only when the live fingerprint (or an asset hash)
+matches the landed revision. Otherwise record production as UNVERIFIED on the bead and say so in the
+handoff, rather than treating a passing gate on the landed tree as proof of what is serving.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+
 ## Beads Issue Tracker
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and
+commands.
 
 ### Quick Reference
 
@@ -67,19 +100,28 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git
+remote; `.beads/issues.jsonl` is a passive export. See
+https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
 ## Agent Context Profiles
 
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or
+orchestrator instructions.
 
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or
+  Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and
+  suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git
+  policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run
+  quality gates, commit, and push as part of session close. A current "do not commit" or "do not
+  push" instruction still wins.
 
 ## Session Completion
 
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit
+user, repository, and orchestrator instructions.
 
 1. **File issues for remaining work** - Create beads for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
@@ -98,15 +140,20 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
 
 **Critical rules:**
+
 - Explicit user or orchestrator instructions override this Beads block.
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
+
 <!-- END BEADS INTEGRATION -->
 
 <!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
+
 ## Beads Issue Tracker
 
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
+Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at
+`.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global
+install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
 
 ### Quick Reference
 
@@ -121,8 +168,12 @@ bd prime                # Refresh Beads context
 ### Rules
 
 - Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
+- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context
+  automatically through native hooks; use `/hooks` to inspect or toggle them.
 - Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git
+remote; `.beads/issues.jsonl` is a passive export. See
+https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
 <!-- END BEADS CODEX SETUP -->
