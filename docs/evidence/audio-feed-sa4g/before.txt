@@ -1,0 +1,55 @@
+# audio-feed-sa4g evidence capture
+# url: https://www.bram.us/2026/09/23/show-keystrokes/ (fetched 2026-10-06, vendored article.html)
+# command: deno run -A docs/evidence/audio-feed-sa4g/capture.ts <out>
+# extractor: src/ingest/url.ts extractArticle() -> article.lead / article.body
+
+=== TITLE ===
+Show keystrokes on a website with the <show-keystrokes> custom element
+=== AUTHOR ===
+Published by Bramus!
+=== PUBLISHED ===
+2026-09-23T08:32:27.000Z
+=== LEAD (narrated right after the intro by formatNarrationIntro) ===
+https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.mp4
+
+=== BODY — first 40 paragraphs of 50 ===
+[0] https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.mp4
+[1] Recording of the <show-keystrokes> Demo & Playground.
+[2] ~
+[3] When recording screen casts or doing live demos, I typically rely on a native macOS app to visualize my keystrokes on screen. Recently, however, that app got blocked on my work machine by a corporate security policy. Additionally, the keystrokes visualized through that app don’t show up when screen sharing a specific window or tab.
+[4] Because I needed to demo a website that relies heavily on keyboard navigation — and thus really needed those keystrokes to be visible to the audience — I found myself in a bit of a pickle. So with the help of Gemini, I decided to build a web-native solution to fill that gap: <show-keystrokes>
+[5] ~
+[6] # Embed it and you’re good to go
+[7] Using <show-keystrokes> is as simple as loading the module from npm (or a CDN) and dropping the custom element onto your page. Embed it on your site and you’re good to go:
+[8] ```
+[9] <script type="module" src="https://cdn.jsdelivr.net/npm/show-keystrokes/index.js"></script>
+[10] <show-keystrokes></show-keystrokes>
+[11] ```
+[12] Out of the box, <show-keystrokes> listens for keyboard events and displays keyboard shortcuts (such as ⌘ + A or ⇧ + ⌘ + T) and navigational keys (such as ⇥, →, ←, ↵, and ⎋), while ignoring regular typing. If you do want to show every single key press, you can set the keystrokes attribute to all (or narrow it down to shortcuts or navigational).
+[13] ```
+[14] <script type="module" src="https://cdn.jsdelivr.net/npm/show-keystrokes/index.js"></script>
+[15] <show-keystrokes keystrokes="all"></show-keystrokes>
+[16] ```
+[17] The component automatically adapts to your platform (showing ⌘ and ⌥ on macOS versus CTRL and ALT on Windows/Linux), supports both symbol glyphs and text labels (⌘ vs CMD), and ships with two built-in themes that respond to light and dark mode via light-dark(). And oh, it’s fully styleable through by targeting the exposed ::part()s and custom properties.
+[18] ~
+[19] # Powered by the Popover API and CSS Anchor Positioning
+[20] Depending on what you are demoing, you might want the keycaps to appear in different places. Using the position attribute, you can easily position the component in a corner of the viewport (the default is viewport top right), right next to the cursor (position="pointer"), or just inline in normal document flow (position="normal").
+[21] ```
+[22] <!-- Fixed in the bottom-center of the viewport -->
+[23] <show-keystrokes position="viewport bottom center"></show-keystrokes>
+[24] <!-- Follow the cursor -->
+[25] <show-keystrokes position="pointer"></show-keystrokes>
+[26] <!-- Render inline in normal document flow -->
+[27] <show-keystrokes position="normal"></show-keystrokes>
+[28] ```
+[29] Under the hood, <show-keystrokes> leans heavily on modern web platform features to make this work seamlessly without any z-index battles or JavaScript bounding-box math.
+[30] First, the component always stays on top of everything else on the page thanks to the Popover API. Its internal container is promoted to the browser’s Top Layer using popover="manual", ensuring that no matter how complex the host page’s stacking contexts are, your keystrokes will never be clipped or hidden behind another element.
+[31] Second, the component positions and repositions itself thanks to CSS Anchor Positioning. In viewport mode, it anchors itself inside a full-viewport anchor element and aligns itself using position-area, align-self, and justify-self. In pointer mode, an invisible anchor tracks your cursor coordinates (via custom properties), and the popover anchors itself next to it using position-area. The position-try-fallbacks: flip-inline, flip-block, flip-inline flip-block are set by default, so the browser automatically flips the keystroke overlay to the other side of the cursor whenever you move it too close to the edge of the viewport. 🙂
+[32] ~
+[33] # Run it on any site with the Bookmarklet or Browser Extension
+[34] Because you don’t always control the source code of the site you want to demo, the project also comes with both a bookmarklet ⓘ and a Browser Extension (for both Firefox and Chrome) so you can inject <show-keystrokes> onto any webpage on the fly.
+[35] The bookmarklet is a quick drag-and-drop button (available on the demo page) that dynamically imports the package from jsDelivr and calls the programmatic create() helper. For sites with a strict Content Security Policy (CSP) or when you want <show-keystrokes> to persist across page navigations, the Chrome Extension (published) or Firefox Extension (pending review) has you covered. It bundles the component locally, lets you configure global defaults as well as per-origin overrides right from the popup, and includes a handy ⇧ + ⌘ + K (or ⇧ + CTRL + K) shortcut to toggle it on or off.
+[36] Building the extension was a bit of an afterthought once I had version 1.0.0 of the component ready. But thanks to Modern Web Guidance and its Chrome Extensions skill, creating it was easy-peasy and done in no time (also see this guide) 🙂
+[37] ~
+[38] # Links
+[39] <show-keystrokes> Live Demo & Playground →

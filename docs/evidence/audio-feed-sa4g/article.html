@@ -1,0 +1,1734 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<link rel="profile" href="https://gmpg.org/xfn/11" />
+	<title>Show keystrokes on a website with the &lt;show-keystrokes&gt; custom element &#8211; Bram.us</title>
+<meta name='robots' content='max-image-preview:large' />
+<link rel='dns-prefetch' href='//www.googletagmanager.com' />
+<link rel="alternate" type="application/rss+xml" title="Bram.us &raquo; Feed" href="https://www.bram.us/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Bram.us &raquo; Comments Feed" href="https://www.bram.us/comments/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Bram.us &raquo; Show keystrokes on a website with the &lt;show-keystrokes&gt; custom element Comments Feed" href="https://www.bram.us/2026/09/23/show-keystrokes/feed/" />
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://www.bram.us/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.bram.us%2F2026%2F09%2F23%2Fshow-keystrokes%2F" />
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://www.bram.us/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.bram.us%2F2026%2F09%2F23%2Fshow-keystrokes%2F&#038;format=xml" />
+<style id="wp-img-auto-sizes-contain-inline-css">
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<style id="wp-block-library-inline-css">
+:root{--wp-block-synced-color:#7a00df;--wp-block-synced-color--rgb:122,0,223;--wp-bound-block-color:var(--wp-block-synced-color);--wp-editor-canvas-background:#ddd;--wp-admin-theme-color:#007cba;--wp-admin-theme-color--rgb:0,124,186;--wp-admin-theme-color-darker-10:#006ba1;--wp-admin-theme-color-darker-10--rgb:0,107,160.5;--wp-admin-theme-color-darker-20:#005a87;--wp-admin-theme-color-darker-20--rgb:0,90,135;--wp-admin-border-width-focus:2px}@media (min-resolution:192dpi){:root{--wp-admin-border-width-focus:1.5px}}.wp-element-button{cursor:pointer}:root .has-very-light-gray-background-color{background-color:#eee}:root .has-very-dark-gray-background-color{background-color:#313131}:root .has-very-light-gray-color{color:#eee}:root .has-very-dark-gray-color{color:#313131}:root .has-vivid-green-cyan-to-vivid-cyan-blue-gradient-background{background:linear-gradient(135deg,#00d084,#0693e3)}:root .has-purple-crush-gradient-background{background:linear-gradient(135deg,#34e2e4,#4721fb 50%,#ab1dfe)}:root .has-hazy-dawn-gradient-background{background:linear-gradient(135deg,#faaca8,#dad0ec)}:root .has-subdued-olive-gradient-background{background:linear-gradient(135deg,#fafae1,#67a671)}:root .has-atomic-cream-gradient-background{background:linear-gradient(135deg,#fdd79a,#004a59)}:root .has-nightshade-gradient-background{background:linear-gradient(135deg,#330968,#31cdcf)}:root .has-midnight-gradient-background{background:linear-gradient(135deg,#020381,#2874fc)}:root{--wp--preset--font-size--normal:16px;--wp--preset--font-size--huge:42px}.has-regular-font-size{font-size:1em}.has-larger-font-size{font-size:2.625em}.has-normal-font-size{font-size:var(--wp--preset--font-size--normal)}.has-huge-font-size{font-size:var(--wp--preset--font-size--huge)}:root .has-text-align-center{text-align:center}:root .has-text-align-left{text-align:left}:root .has-text-align-right{text-align:right}.has-fit-text{white-space:nowrap!important}#end-resizable-editor-section{display:none}.aligncenter{clear:both}.items-justified-left{justify-content:flex-start}.items-justified-center{justify-content:center}.items-justified-right{justify-content:flex-end}.items-justified-space-between{justify-content:space-between}.screen-reader-text{word-wrap:normal!important;border:0;clip-path:inset(50%);height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;word-break:normal!important}.screen-reader-text:focus{background-color:#ddd;clip-path:none;color:#444;display:block;font-size:1em;height:auto;left:5px;line-height:normal;padding:15px 23px 14px;text-decoration:none;top:5px;width:auto;z-index:100000}html :where(.has-border-color){border-style:solid}html :where([style^=border-color],[style*=";border-color"],[style*="; border-color"]){border-style:solid}html :where([style^=border-top-color],[style*=";border-top-color"],[style*="; border-top-color"]){border-top-style:solid}html :where([style^=border-right-color],[style*=";border-right-color"],[style*="; border-right-color"]){border-right-style:solid}html :where([style^=border-bottom-color],[style*=";border-bottom-color"],[style*="; border-bottom-color"]){border-bottom-style:solid}html :where([style^=border-left-color],[style*=";border-left-color"],[style*="; border-left-color"]){border-left-style:solid}html :where([style^=border-width],[style*=";border-width"],[style*="; border-width"]){border-style:solid}html :where([style^=border-top-width],[style*=";border-top-width"],[style*="; border-top-width"]){border-top-style:solid}html :where([style^=border-right-width],[style*=";border-right-width"],[style*="; border-right-width"]){border-right-style:solid}html :where([style^=border-bottom-width],[style*=";border-bottom-width"],[style*="; border-bottom-width"]){border-bottom-style:solid}html :where([style^=border-left-width],[style*=";border-left-width"],[style*="; border-left-width"]){border-left-style:solid}html :where(img[class*=wp-image-]){height:auto;max-width:100%}:where(figure){margin:0 0 1em}html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:var(--wp-admin--admin-bar--height,0px)}@media screen and (max-width:600px){html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:0px}}
+
+/*# sourceURL=/wp-includes/css/dist/block-library/common.min.css */
+</style>
+<style id="classic-theme-styles-inline-css">
+/*! This file is auto-generated */
+.wp-block-button__link{color:#fff;background-color:#32373c;border-radius:9999px;box-shadow:none;text-decoration:none;padding:calc(.667em + 2px) calc(1.333em + 2px);font-size:1.125em}.wp-block-file__button{background:#32373c;color:#fff;text-decoration:none}
+/*# sourceURL=/wp-includes/css/classic-themes.min.css */
+</style>
+
+<style id="global-styles-inline-css">
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #FFF;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--color--primary: #0073a8;--wp--preset--color--secondary: #005075;--wp--preset--color--dark-gray: #111;--wp--preset--color--light-gray: #767676;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--font-size--small: 19.5px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 36.5px;--wp--preset--font-size--x-large: 42px;--wp--preset--font-size--normal: 22px;--wp--preset--font-size--huge: 49.5px;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}.wp-block-button{--wp--preset--dimension--25: 25%;--wp--preset--dimension--50: 50%;--wp--preset--dimension--75: 75%;--wp--preset--dimension--100: 100%;}:where(body) { margin: 0; }:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}body{padding-top: 0px;padding-right: 0px;padding-bottom: 0px;padding-left: 0px;}:root :where(.wp-element-button, .wp-block-button__link){background-color: #32373c;border-width: 0;color: #fff;font-family: inherit;font-size: inherit;font-style: inherit;font-weight: inherit;letter-spacing: inherit;line-height: inherit;padding-top: calc(0.667em + 2px);padding-right: calc(1.333em + 2px);padding-bottom: calc(0.667em + 2px);padding-left: calc(1.333em + 2px);text-decoration: none;text-transform: inherit;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-primary-color{color: var(--wp--preset--color--primary) !important;}.has-secondary-color{color: var(--wp--preset--color--secondary) !important;}.has-dark-gray-color{color: var(--wp--preset--color--dark-gray) !important;}.has-light-gray-color{color: var(--wp--preset--color--light-gray) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-primary-background-color{background-color: var(--wp--preset--color--primary) !important;}.has-secondary-background-color{background-color: var(--wp--preset--color--secondary) !important;}.has-dark-gray-background-color{background-color: var(--wp--preset--color--dark-gray) !important;}.has-light-gray-background-color{background-color: var(--wp--preset--color--light-gray) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-primary-border-color{border-color: var(--wp--preset--color--primary) !important;}.has-secondary-border-color{border-color: var(--wp--preset--color--secondary) !important;}.has-dark-gray-border-color{border-color: var(--wp--preset--color--dark-gray) !important;}.has-light-gray-border-color{border-color: var(--wp--preset--color--light-gray) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}.has-normal-font-size{font-size: var(--wp--preset--font-size--normal) !important;}.has-huge-font-size{font-size: var(--wp--preset--font-size--huge) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<link rel='stylesheet' id='stcr-font-awesome-css' href='https://www.bram.us/wordpress/wp-content/plugins/subscribe-to-comments-reloaded/includes/css/font-awesome.min.css?ver=7.1.2' media='all' />
+<link rel='stylesheet' id='stcr-style-css' href='https://www.bram.us/wordpress/wp-content/plugins/subscribe-to-comments-reloaded/includes/css/stcr-style.css?ver=7.1.2' media='all' />
+<link rel='stylesheet' id='twentynineteen-style-css' href='https://www.bram.us/wordpress/wp-content/themes/twentynineteen/style.css?ver=3.4' media='all' />
+<link rel='stylesheet' id='twentynineteen-print-style-css' href='https://www.bram.us/wordpress/wp-content/themes/twentynineteen/print.css?ver=3.4' media='print' />
+<link rel='stylesheet' id='slb_core-css' href='https://www.bram.us/wordpress/wp-content/plugins/simple-lightbox/client/css/app.css?ver=2.9.5' media='all' />
+<link rel='stylesheet' id='prism-theme-css' href='https://www.bram.us/wordpress/wp-content/plugins/ank-prism-for-wp/out/prism-css.min.css?ver=1676985021' media='all' />
+<script id="bodhi-dompurify-library-js" src="https://www.bram.us/wordpress/wp-content/plugins/svg-support/vendor/DOMPurify/DOMPurify.min.js?ver=2.5.9"></script>
+<script id="jquery-core-js" src="https://www.bram.us/wordpress/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script>
+<script id="jquery-migrate-js" src="https://www.bram.us/wordpress/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1"></script>
+<script id="bodhi_svg_inline-js-extra">
+var svgSettings = {"skipNested":""};
+//# sourceURL=bodhi_svg_inline-js-extra
+</script>
+<script id="bodhi_svg_inline-js" src="https://www.bram.us/wordpress/wp-content/plugins/svg-support/js/min/svgs-inline-min.js?ver=2.6.1"></script>
+<script id="bodhi_svg_inline-js-after">
+cssTarget={"Bodhi":"img.style-svg","ForceInlineSVG":"style-svg"};ForceInlineSVGActive="false";frontSanitizationEnabled="on";
+//# sourceURL=bodhi_svg_inline-js-after
+</script>
+<script data-wp-strategy="defer" defer id="twentynineteen-priority-menu-js" src="https://www.bram.us/wordpress/wp-content/themes/twentynineteen/js/priority-menu.js?ver=20200129"></script>
+
+<!-- Google tag (gtag.js) snippet added by Site Kit -->
+<!-- Google Analytics snippet added by Site Kit -->
+<script id="google_gtagjs-js" src="https://www.googletagmanager.com/gtag/js?id=GT-NNQ4ZLT" async></script>
+<script id="google_gtagjs-js-after">
+window.dataLayer = window.dataLayer || [];function gtag(){dataLayer.push(arguments);}
+gtag("set","linker",{"domains":["www.bram.us"]});
+gtag("js", new Date());
+gtag("set", "developer_id.dZTNiMT", true);
+gtag("config", "GT-NNQ4ZLT");
+//# sourceURL=google_gtagjs-js-after
+</script>
+<link rel="https://api.w.org/" href="https://www.bram.us/wp-json/" /><link rel="alternate" title="JSON" type="application/json" href="https://www.bram.us/wp-json/wp/v2/posts/36850" /><link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://www.bram.us/wordpress/xmlrpc.php?rsd" />
+<meta name="generator" content="WordPress 7.1.2" />
+<link rel="canonical" href="https://www.bram.us/2026/09/23/show-keystrokes/" />
+<link rel='shortlink' href='https://www.bram.us/?p=36850' />
+<meta property="og:site_name" content="Bram.us"/>
+<meta property="og:url" content="https://www.bram.us/2026/09/23/show-keystrokes/"/>
+<meta property="og:title" content="Show keystrokes on a website with the &lt;show-keystrokes&gt; custom element"/>
+<meta property="og:description" content="When recording screen casts or doing live demos, I typically rely on a native macOS app to visualize my keystrokes on screen. Recently, however, that app got blocked on my work machine by a corporate security policy. Additionally, the keystrokes visualized through that app don’t show up when screen sharing a specific window or tab.Because I needed to demo a website that relies heavily on keyboard navigation — and thus really needed those keystrokes to be visible to the audience — I found myself in a bit of a pickle. So with the help of Gemini, I decided to build a web-native solution to fill that gap: &lt;show-keystrokes&gt;"/>
+<meta property="og:image" content="https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.gif"/>
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:site" content="@bramusblog" />
+<meta name="twitter:creator" content="@bramus" />
+<meta name="twitter:title" content="Show keystrokes on a website with the &lt;show-keystrokes&gt; custom element" />
+<meta name="twitter:description" content="When recording screen casts or doing live demos, I typically rely on a native macOS app to visualize my keystrokes on screen. Recently, however, that app got blocked on my work machine by a corporate security policy. Additionally, the keystrokes visualized through that app don’t show up when screen sharing a specific window or tab.Because I needed to demo a website that relies heavily on keyboard navigation — and thus really needed those keystrokes to be visible to the audience — I found myself in a bit of a pickle. So with the help of Gemini, I decided to build a web-native solution to fill that gap: &lt;show-keystrokes&gt;" />
+<meta name="twitter:image" content="https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.gif" />
+<meta name="generator" content="Site Kit by Google 1.188.0" /><meta name="fediverse:creator" content="@bramus@front-end.social" /><link rel="pingback" href="https://www.bram.us/wordpress/xmlrpc.php"><style id="wp-custom-css">
+@media (horizontal-viewport-segments:2) {
+	#page {
+		width: calc(env(viewport-segment-width 0 0) - 4em);
+		margin: 0 2em;
+	}
+}
+
+.entry-title code, .entry-content code, .entry-title kbd, .entry-content kbd {
+	word-wrap: break-word;
+}
+
+/* Make it all a bit smaller */
+@import url('https://fonts.googleapis.com/css2?family=Barlow:ital,wght@0,100;0,300;0,400;0,500;0,700;1,100;1,300&display=swap');
+
+body {
+	font-size: 0.9em;
+}
+
+body, h1, h2, h3, h4, h5, h6 {
+	font-family: "Barlow", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+}
+
+::target-text {
+    background: #00cdff;
+}
+
+/* In some posts we wrap an extra article inside the content. This rule fixes the margins in that case */
+.entry .entry-content > article > * {
+	margin: 32px 0;
+  max-width: 100%;
+}
+
+.with-list {
+	margin-bottom: 0 !important;
+}
+.with-list + * {
+	margin-top: 0.2em !important;
+}
+
+ol[type="a"] {
+	list-style-type: lower-alpha;
+}
+
+ol[type="i"] {
+	list-style-type: lower-roman;
+}
+
+ol.spaced li,
+ul.spaced li {
+	margin-bottom: 16px;
+}
+
+.sr-only {
+position: absolute;
+width: 1px;
+height: 1px;
+padding: 0;
+margin: -1px;
+overflow: hidden;
+clip: rect(0, 0, 0, 0);
+white-space: nowrap;
+border-width: 0;
+}
+
+.not-sr-only {
+position: static;
+width: auto;
+height: auto;
+padding: 0;
+margin: 0;
+overflow: visible;
+clip: auto;
+white-space: normal;
+}
+
+/* Undo some sizing quirk in the last theme update */
+@media only screen and (min-width: 1168px) {
+	.entry .entry-content > * {
+		max-width: unset;
+	}
+}
+
+/** light it up! **/
+.blink {
+  animation: blinker 1s linear infinite;
+}
+
+@keyframes blinker {
+  50% {
+    opacity: 0;
+  }
+}
+
+/** fix bold(er) **/
+b, strong {
+	font-weight: bold;
+}
+
+q {
+	font-style: italic;
+}
+
+/** fix details/summary **/
+summary {
+	cursor: pointer;
+}
+
+/** faux links **/
+.link {
+	text-decoration: underline;
+	color: hsl( 199, 100%, 33% );
+	color 110ms ease-in-out;
+	cursor: pointer;
+}
+
+.link:hover {
+	text-decoration: none;
+	color: hsl( 199, 100%, 23% );
+}
+
+/** Add some whitespace around targeted links **/
+:target {
+	scroll-margin-top: 3em;
+	scroll-snap-margin-top: 3em;
+}
+
+/** Fix p in li **/
+li > p:first-of-type {
+	margin-top: 0;
+}
+li > p:last-of-type {
+	margin-bottom: 0;
+}
+
+ul.spacebetween li > p:last-of-type {
+	margin-bottom: 1em;
+}
+
+/** tweak header
+#menu-navigation {
+	width: calc(100% - 1em);
+}
+
+#menu-navigation li:last-child {
+	float: right;
+} **/
+
+#menu-navigation #menu-item-24192 {
+	margin-left: 0.1em;
+}
+#menu-navigation #menu-item-24192 a::before {
+	content: '';
+	background: transparent url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAImElEQVR4XuVbe3CU1RX/3W93s+88qQojJWg7WtzoMAjYihWnLe+hyIyPUCiUOFqqrRZNoLXKpgqCtENFqQPyMpaHLbbVKAhamOKzVGIJ4SFiEYshBJJsdpN973c751s3JtnvsfuR3Zjk/LN/3HPvPed3zzn3nPPdZdCgRvcIhxHCDAATosBIAzBMBBwCwLTmZnNcBLgA+DjE0wyGGsbE3WGb4ZXLymvb1eRQVMLzRElBNITFDHwBAGc2lenBvbwMWAOLeUXh4oOtcuvKAtDsdk3jEDcAwiU9KExvLtXAGJtfuOTwru5CdAGAc7AWd8kizvgTvSltBvcuL3LX/a7z+l0AaF5SsrgfKy/pzRgqCpfUrUyA0AFA3OxRnUH0vzJLM8amJNxBAoACXiwUO96PfF4L7AZmMV9NgVEC4IK7ZAUDr9Ca1Z/GGbCs0F33MKN73gChvg9fdXrPxRuCeTBrdrtmc+AFvav05XkMvJQAqOLAnL6siH7Z+WbW6HYdNgAu/Yv03ZkicIg1uV3eAej/0qmJXGxl590uMd3CxjaxHIZLrwIP+8EDrRB9jRBbPkfswinEzp0AD6vWH18Zk6ECiiyApyuR88frYRo+VmEal4CInq5B5JN3Efnve+ChtnS3yBp/BgDoJnssjPDJdxCufRXh43sBMZo15VLZKPMAdJJCbG9C6IM/I3hgG7i/JRX5Ms6TVQAS2vBIEKEDWxF4ewN4kGJw71GvANABRMAD/741klWAi72CQq8CkNA4eqYW7S//Rgqe2SZdAORcdQuEQcPBcmwQbPkQCofBMKgYQu6lVHHr0oFHQ/DvfjJuDVkkXQAoyccsTpiKR8M4fCxM3xgHQ+HX01YlVFsNf3UlCJBsUI8C0F1g4+XXwnzddOSUTAUzO1LWJ3rmEHzbfp6VmyKjACQ0JsuwjP0RLGNng1nzUgIi1nQavqoyiN5zKfHrZcoKAB1AmB2wjv+ZBAaYoCmz6KmHd9NciN4GTV69DFkFICEk1RH2Hz4G4+BvacpNluDdOCdj7qALAOfcDTBefl28EPKeixdBZ48h+lkNomePAUihvDDkwDbxIVhGl2qCQNek7/n5GQmMugDInbcJxmHXywpO6W7k6BsIffg3RM8e1VQuxzUFjhmPAwaTKm/o0Cto//vDmuuly9DjAHQWIPq/DxHYvw6Rk2+rykWVpePOp8By7Kp87a9WInRwR7o6qvJnFIDEzpFT/4J/51LVTM84xAXn3PWqIFAN4V17G2JNn/YYCFkBQJI2FoZ/7zMIvrtZMUaYrrgBzll/VHUHsirvxrmpxZkUYMoeAF8IEznxT7T9dbFik4SSJsfM5VlzhawDIBnDuRPw/ekeiG0XZBW1T3sU5lG3KYJAvQTP01PBg74UzlidRRcAQt4QCPYCMMcgGAZdAUp5yXzTSXfJj32b5oFuje7EjGbk3rVF6jsqUeCtdQjsfbp3AJDd1WBCzjdvgnl0qQRGKhRrOC5letRc7U4UFAkEpYyR5nj+MEHKRS6GdFmA1obGoSNhm7QIxiHXaLEi/NE+tG2/Xzao2ac+AvP1tytbwb5nENi/VnMPNYaMACBtyARYx5XBest9mnk/9QGC7yd/naPCKf/+1xVdS2w7D8+qHwBiTDcImQPgC5FMV34HjttXSc0TJaLa3/vsTMSaP0tisX3vAVjGlSnObdv+C8mK9FLGASDBKEg65zynCgJli74t9B6rKzFbAfIf2ANmssjqGD66B21/eVCv/sgKACQddYics9aouoPv+TJEPj2QpIx9xlKpsSJHlB16Vt4E+tVDFw+AYJCuQjJxKl15wKMoh/XmBVI/QIkoZfZV3ZU0TLUCfY1SIt/WexH5eL8e/S/GApgUoa3jF0CwF8U35yLCx96Ef9dyUIBKIsGAvLtfVL3fWykWNH7czQ8EyQ3iTddkCh7YCv8ufQ/bdFuA7fu/hOXG+bICia318K6fLQuC1mkG36+Cf3fHI66O9e3TfwvzyFtl94s1HEPrWuXrUs00dAFAQS23bIuqyYWPvI62HeWyPLnzq0C5ghxR+0u62rqRao3ARbQsG6OrYaILAK1cPeEOLStulC16ckqmwDFzhSKArc/eiljjyS7jgvMS5C/8h+Ic77o7UmrAdF9AFwDqn8e/3KKVaveG40lCM5MV+RVvgXJ+OWp/7XGEPngxaahg0TtgllzZOVRhhg+/pmqVcoO6AHDcuRr0dUiLPKsnQ2w5I8tGeYFSzRCq2YH26sqkeeR25H5yFNCZFusCwDKmFLbJv1bVX/R8Ds9TkxUbF5QiW797j+wa0dMH4d08L2lMLR8I/Xs72ncu1TqTZGvU80KETDhvwUsQCoYqbtj2UgXCdUmPszv41YJaHLxJSWvbJlbAcoP8gza1oKuGii4LoAXpu59j1hoYioq7ri/G4H/j97LFTWdGteuQntS0LP92ktzW8ffCevNPZfWhTpNv233pW4CeR1KJXSiIUUQ3FY8BKBM8/wnCh16WMkItouzRPu0RWTYei8D3wt1JYzkjJiiWx7H6I/C/uUpr2y7jiUdS1FGQD61pLdf3mKVnchfcI2oZhJK+J36PSPwf1uQu2Qxw6jMPQBI3subKa0o5Z1sHoPak8h2sYeW1dlO7SM/lB1QcIP8P5uUNlh70NLtdyzjwq4FlBfyxIveRR+MALB+Vx4MhStovGxggsHrRGr76a4s+8n35p6nKksmc8539HQDpH6Yck4oq6/aQrl3etDW5XQ8BSO5G9CdUGF9YtORIR8aU9KivudJVzjme7E86ky7SyTP+YGflkywgoXRz3B029p+YwOrB+U8SZt/5cBWfdVJgRDBUwQGqMPrkFUlXncDYatEaXUkBT86qNd+11rtH2SwITufARBFsJLhYDCbkpvsvk0y7FJk4uOgVmHAKEGsAYbc/11k9dOF7AbW9/w/DrpNw6kzIiwAAAABJRU5ErkJggg==) no-repeat 50% 50%;
+	background-size: contain;
+	width: 1em;
+	height: 1em;
+	overflow: hidden;
+	display: inline-block;
+	margin-right: 0.15em;
+	transform: translatey(0.1em);
+}
+
+/* Mimic Salju: Inject icon before post titles. Therefore we have to remove the WP injected line from .entry-title to .entry-header first though … */
+
+.entry-header:before {
+	background: #767676;
+    content: "\020";
+    display: block;
+    height: 2px;
+    margin: 1rem 0;
+    width: 2em;
+}
+
+article.entry .entry-title:before {
+	content: '⚡️';
+	background: transparent;
+	display: inline-block;
+	height: auto;
+	width: auto;
+	margin: 0;
+	padding-right: 0.5ch;
+}
+article.entry.tag-illustration .entry-title:before {
+	content: '✏️ ';
+}
+article.entry.tag-link .entry-title:before {
+	content: '🔗';
+}
+article.entry.tag-video .entry-title:before {
+	content: '📽';
+}
+article.entry.tag-photo .entry-title:before,
+article.entry.tag-cartoon .entry-title:before,
+article.entry.tag-comic .entry-title:before{
+	content: '📸';
+}
+article.entry.tag-audio .entry-title:before {
+	content: '🔊 ';
+}
+article.entry.tag-quote .entry-title:before {
+	content: '📣 ';
+}
+article.entry.tag-slides .entry-title:before {
+	content: '🖥';
+}
+article.entry.category-original-content .entry-title:before,
+article.page .entry-title:before {
+	content: '★ ';
+}
+article.entry.tag-public-speaking .entry-title:before {
+	content: '🖥 ';
+}
+
+/* Make it a round circle if there's room for it */
+@media (min-width: 768px) {
+	article.entry .entry-title:before {
+		font-size: 1.5rem;
+		position: absolute;
+		top: 1.1rem;
+		left: -3.2rem;
+		background: #121212;
+		width: 1.8em;
+		height: 1.8em;
+		overflow: hidden;
+		text-align: center;
+		border-radius: 50%;
+		display: block;
+		padding: 0;
+		color: transparent;
+		text-shadow: 0 0 0 #fff;
+	}
+
+article.entry .entry-title:before {
+  content: "" !important;
+  background-repeat: no-repeat;
+  background-color: black;
+  background-position: center;
+	background-size: 70%;
+	background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9Ii0xIC0yNTYgMTc5MiAxNzkyIj48cGF0aCBkPSJNMTM0OC4xODYgMjMxLjg5OHExOCAyMCA3IDQ0bC01NDAgMTE1N3EtMTMgMjUtNDIgMjUtNCAwLTE0LTItMTctNS0yNS41LTE5dC00LjUtMzBsMTk3LTgwOC00MDYgMTAxcS00IDEtMTIgMS0xOCAwLTMxLTExLTE4LTE1LTEzLTM5bDIwMS04MjVxNC0xNCAxNi0yM3QyOC05aDMyOHExOSAwIDMyIDEyLjV0MTMgMjkuNXEwIDgtNSAxOGwtMTcxIDQ2MyAzOTYtOThxOC0yIDEyLTIgMTkgMCAzNCAxNXoiIGZpbGw9IiNmZmYiLz48L3N2Zz4=");
+}
+	
+article.entry.category-original-content .entry-title:before,
+article.page .entry-title:before {
+	background-size: 75%;
+  background-image: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiA/PjxzdmcgYmFzZVByb2ZpbGU9InRpbnkiIGhlaWdodD0iMjRweCIgaWQ9IkxheWVyXzEiIHZlcnNpb249IjEuMiIgdmlld0JveD0iMCAwIDI0IDI0IiB3aWR0aD0iMjRweCIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+PGc+PGc+PHBhdGggZD0iTTkuMzYyLDkuMTU4YzAsMC0zLjE2LDAuMzUtNS4yNjgsMC41ODRjLTAuMTksMC4wMjMtMC4zNTgsMC4xNS0wLjQyMSwwLjM0M3MwLDAuMzk0LDAuMTQsMC41MjEgICAgYzEuNTY2LDEuNDI5LDMuOTE5LDMuNTY5LDMuOTE5LDMuNTY5Yy0wLjAwMiwwLTAuNjQ2LDMuMTEzLTEuMDc0LDUuMTljLTAuMDM2LDAuMTg4LDAuMDMyLDAuMzg3LDAuMTk2LDAuNTA2ICAgIGMwLjE2MywwLjExOSwwLjM3MywwLjEyMSwwLjUzOCwwLjAyOGMxLjg0NC0xLjA0OCw0LjYwNi0yLjYyNCw0LjYwNi0yLjYyNHMyLjc2MywxLjU3Niw0LjYwNCwyLjYyNSAgICBjMC4xNjgsMC4wOTIsMC4zNzgsMC4wOSwwLjU0MS0wLjAyOWMwLjE2NC0wLjExOSwwLjIzMi0wLjMxOCwwLjE5NS0wLjUwNWMtMC40MjgtMi4wNzgtMS4wNzEtNS4xOTEtMS4wNzEtNS4xOTEgICAgczIuMzUzLTIuMTQsMy45MTktMy41NjZjMC4xNC0wLjEzMSwwLjIwMi0wLjMzMiwwLjE0LTAuNTI0cy0wLjIzLTAuMzE5LTAuNDItMC4zNDFjLTIuMTA4LTAuMjM2LTUuMjY5LTAuNTg2LTUuMjY5LTAuNTg2ICAgIHMtMS4zMS0yLjg5OC0yLjE4My00LjgzYy0wLjA4Mi0wLjE3My0wLjI1NC0wLjI5NC0wLjQ1Ni0wLjI5NHMtMC4zNzUsMC4xMjItMC40NTMsMC4yOTRDMTAuNjcxLDYuMjYsOS4zNjIsOS4xNTgsOS4zNjIsOS4xNTh6IiBmaWxsPSIjRkZGIi8+PC9nPjwvZz48L3N2Zz4=");
+}
+
+article.entry.tag-code .entry-title:before,
+article.entry.tag-demo .entry-title:before{
+	  background-size: 55%;
+    background-image: url("data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgOTYgOTYiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTI0Ljg0NSAyNS4zOTZhNi4wMTMgNi4wMTMgMCAwIDAtOC40NDkuNzYxbC0xNC45OTkgMThhNS45ODQgNS45ODQgMCAwIDAgMCA3LjY4NmwxNSAxOGE1Ljk5OCA1Ljk5OCAwIDEgMCA5LjIxLTcuNjg4TDEzLjgwNiA0OGwxMS44LTE0LjE1NWE2IDYgMCAwIDAtLjc2Mi04LjQ1Wk01NS4xNzEgMTIuMTJhNi4wNTYgNi4wNTYgMCAwIDAtNy4wNTQgNC43MWwtMTIgNTkuOTk2YTUuOTg1IDUuOTg1IDAgMCAwIDQuNzEyIDcuMDU0IDUuNzA2IDUuNzA2IDAgMCAwIDEuMTgzLjExNyA1Ljk5NSA1Ljk5NSAwIDAgMCA1Ljg3LTQuODI3bDEyLTU5Ljk5NmE1Ljk4NSA1Ljk4NSAwIDAgMC00LjcxLTcuMDU1Wm0zOS40MzIgMzIuMDM2LTE1LTE3Ljk5OWE1Ljk5OCA1Ljk5OCAwIDEgMC05LjIxIDcuNjg3TDgyLjE5MyA0OGwtMTEuOCAxNC4xNTVhNS45OTggNS45OTggMCAxIDAgOS4yMSA3LjY4N2wxNS0xNy45OTlhNS45ODQgNS45ODQgMCAwIDAgMC03LjY4N1oiIGZpbGw9IiNmZmYiLz48L3N2Zz4=");
+}
+
+article.entry.tag-link .entry-title:before {
+  background-size: 70%;
+  background-image: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiA/PjxzdmcgaWQ9IkxheWVyXzEiIHN0eWxlPSJlbmFibGUtYmFja2dyb3VuZDpuZXcgMCAwIDY0IDY0OyIgdmVyc2lvbj0iMS4xIiB2aWV3Qm94PSIwIDAgNjQgNjQiIHhtbDpzcGFjZT0icHJlc2VydmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiPjxnPjxnPjxwYXRoIGQ9Ik0zNS41MjEsNDEuMjg4Yy0zLjQyMiwwLTYuNjQtMS4zMzMtOS4wNi0zLjc1M2MtMS4xMDYtMS4xMDYtMS4xMDYtMi45LDAtNC4wMDYgICAgYzEuMTA2LTEuMTA2LDIuOS0xLjEwNiw0LjAwNiwwYzEuMzUsMS4zNSwzLjE0NSwyLjA5Myw1LjA1NCwyLjA5M2MxLjkwOSwwLDMuNzA0LTAuNzQzLDUuMDU0LTIuMDk0bDcuNTM4LTcuNTM4ICAgIGMyLjc4Ny0yLjc4NywyLjc4Ny03LjMyMSwwLTEwLjEwOGMtMi43ODctMi43ODctNy4zMjEtMi43ODctMTAuMTA4LDBsLTMuMjI3LDMuMjI3Yy0xLjEwNiwxLjEwNi0yLjksMS4xMDYtNC4wMDYsMCAgICBjLTEuMTA2LTEuMTA2LTEuMTA2LTIuOSwwLTQuMDA2TDM0LDExLjg3N2M0Ljk5Ni00Ljk5NiwxMy4xMjQtNC45OTUsMTguMTIsMGM0Ljk5Niw0Ljk5Niw0Ljk5NiwxMy4xMjQsMCwxOC4xMmwtNy41MzgsNy41MzggICAgQzQyLjE2MSwzOS45NTUsMzguOTQ0LDQxLjI4OCwzNS41MjEsNDEuMjg4eiIgc3R5bGU9ImZpbGw6I0ZGRkZGRjsiLz48L2c+PGc+PHBhdGggZD0iTTIwLjk0LDU1Ljg2OWMtMy40MjIsMC02LjY0LTEuMzMzLTkuMDYtMy43NTNjLTQuOTk2LTQuOTk2LTQuOTk2LTEzLjEyNCwwLTE4LjEybDcuNTM4LTcuNTM4ICAgIGM0Ljk5Ni00Ljk5NSwxMy4xMjQtNC45OTUsMTguMTIsMGMxLjEwNiwxLjEwNiwxLjEwNiwyLjksMCw0LjAwNmMtMS4xMDYsMS4xMDYtMi45LDEuMTA2LTQuMDA2LDAgICAgYy0yLjc4Ny0yLjc4Ny03LjMyMS0yLjc4Ny0xMC4xMDgsMGwtNy41MzgsNy41MzhjLTIuNzg3LDIuNzg3LTIuNzg3LDcuMzIxLDAsMTAuMTA4YzEuMzUsMS4zNSwzLjE0NSwyLjA5NCw1LjA1NCwyLjA5NCAgICBjMS45MDksMCwzLjcwNC0wLjc0Myw1LjA1NC0yLjA5M2wzLjIyNy0zLjIyN2MxLjEwNi0xLjEwNiwyLjktMS4xMDYsNC4wMDYsMGMxLjEwNiwxLjEwNiwxLjEwNiwyLjksMCw0LjAwNkwzMCw1Mi4xMTcgICAgQzI3LjU4LDU0LjUzNiwyNC4zNjMsNTUuODY5LDIwLjk0LDU1Ljg2OXoiIHN0eWxlPSJmaWxsOiNGRkZGRkY7Ii8+PC9nPjwvZz48L3N2Zz4=");
+}
+	
+article.entry.tag-video .entry-title:before {
+  background-size: 60%;
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgNTEyIDUxMiIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgc3Ryb2tlLW1pdGVybGltaXQ9IjIiPjxwYXRoIGQ9Ik01MDEuMzAzIDEzMi43NjVjLTUuODg3LTIyLjAzLTIzLjIzNS0zOS4zNzctNDUuMjY1LTQ1LjI2NUM0MTYuMTA2IDc2LjggMjU2IDc2LjggMjU2IDc2LjhzLTE2MC4xMDcgMC0yMDAuMDM5IDEwLjdjLTIyLjAyNiA1Ljg4OC0zOS4zNzcgMjMuMjM1LTQ1LjI2NCA0NS4yNjVDMCAxNzIuNjkzIDAgMjU2LjAwMyAwIDI1Ni4wMDNzMCA4My4zMDggMTAuNjk3IDEyMy4yMzJjNS44ODcgMjIuMDMgMjMuMjM4IDM5LjM4MiA0NS4yNjQgNDUuMjY5Qzk1Ljg5MyA0MzUuMiAyNTYgNDM1LjIgMjU2IDQzNS4yczE2MC4xMDYgMCAyMDAuMDM4LTEwLjY5NmMyMi4wMy01Ljg4NyAzOS4zNzgtMjMuMjM5IDQ1LjI2NS00NS4yNjkgMTAuNjk2LTM5LjkyNCAxMC42OTYtMTIzLjIzMiAxMC42OTYtMTIzLjIzMnMwLTgzLjMxLTEwLjY5Ni0xMjMuMjM4Wk0yMDQuNzk3IDMzMi44MDRWMTc5LjIwMWwxMzMuMDE5IDc2LjgwMi0xMzMuMDE5IDc2LjgwMVoiIGZpbGw9IiNmZmYiLz48L3N2Zz4=");
+}
+
+article.entry.tag-illustration .entry-title:before {
+	background-size: 45%;
+	background-image: url("data:image/svg+xml;base64,PHN2ZyBoZWlnaHQ9Ijc4IiB3aWR0aD0iNzcuOTk5IiB4bWw6c3BhY2U9InByZXNlcnZlIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxwYXRoIGQ9Ik03MS44MDcgNi4xOTFDNjQuNTkyLTEuMDI1IDU5LjE3OC4wNTggNTkuMTc4LjA1OGwtMjUuMjYgMjUuMjU5TDUuMDQ5IDU0LjE4NSAwIDc4bDIzLjgxMi01LjA1MUw1Mi42ODEgNDQuMDhsMjUuMjYtMjUuMjU3YzAgLjAwMSAxLjA4NC01LjQxNC02LjEzNC0xMi42MzJ6TTIyLjM5NSA3MC4wODZsLTguMTE3IDEuNzQ4Yy0uNzg1LTEuNDY3LTEuNzI3LTIuOTMyLTMuNDU1LTQuNjU5LTEuNzI3LTEuNzI3LTMuMTkzLTIuNjY5LTQuNjU4LTMuNDU2bDEuNzUtOC4xMTYgMi4zNDYtMi4zNDhzNC40MTguMDg4IDkuNDA0IDUuMDc4YzQuOTg4IDQuOTg3IDUuMDc4IDkuNDA3IDUuMDc4IDkuNDA3bC0yLjM0OCAyLjM0NnoiIGZpbGw9IiNmZmYiLz48L3N2Zz4=");
+}
+article.entry.tag-photo .entry-title:before,
+article.entry.tag-cartoon .entry-title:before,
+article.entry.tag-comic .entry-title:before {
+	  background-size: 75%;
+    background-image: url("data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMzIgMzIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGcgZmlsbD0iI2ZmZiI+PGNpcmNsZSBjeD0iMTYiIGN5PSIxNyIgcj0iMyIvPjxwYXRoIGQ9Ik0yNSA4SDE0YTIgMiAwIDAgMC0yLTJoLTJhMiAyIDAgMCAwLTIgMkg3YTMgMyAwIDAgMC0zIDN2MTJhMyAzIDAgMCAwIDMgM2gxOGEzIDMgMCAwIDAgMy0zVjExYTMgMyAwIDAgMC0zLTNabS05IDE0YTUgNSAwIDEgMSA1LTUgNSA1IDAgMCAxLTUgNVptOC05YTEgMSAwIDEgMSAxLTEgMSAxIDAgMCAxLTEgMVoiLz48L2c+PC9zdmc+");
+}
+article.entry.tag-audio .entry-title:before {
+	  background-size: 85%;
+    background-image: url("data:image/svg+xml;base64,PHN2ZyBpZD0iTGF5ZXJfMSIgdmVyc2lvbj0iMS4xIiB2aWV3Qm94PSIwIDAgMTI4IDEyOCIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48c3R5bGU+LnN0MHtmaWxsOiNmZmZ9PC9zdHlsZT48cGF0aCBjbGFzcz0ic3QwIiBkPSJNNjAuNSAzOCAzOCA1MkgyOGMtMi4yIDAtNCAxLjgtNCA0djE2YzAgMi4yIDEuOCA0IDQgNGgxMGwyMi41IDE0Yy42LjUgMS41IDAgMS41LS44VjM4LjhjMC0uNy0uOC0xLjItMS41LS44em0yNy4yIDU4LjgtMS4zLTEuNWMtLjQtLjQtLjMtMSAuMS0xLjRDOTUuMSA4Ni4zIDEwMCA3NS41IDEwMCA2NGMwLTExLjgtNS4xLTIyLjktMTQuMS0zMC41LS4yLS4xLS41LS40LS45LS43cy0uNS0uOS0uMi0xLjNsMS4xLTEuN2MuMy0uNSAxLS42IDEuNC0uMmwxIC44Qzk4LjMgMzguOCAxMDQgNTEgMTA0IDY0YzAgMTIuNi01LjQgMjQuNi0xNC44IDMzLS41LjMtMS4xLjMtMS41LS4yeiIvPjxwYXRoIGNsYXNzPSJzdDAiIGQ9Im03OS4xIDg4LjMtMS4yLTEuNmMtLjMtLjQtLjMtMSAuMi0xLjRDODQuNCA4MCA4OCA3Mi4zIDg4IDY0cy0zLjYtMTYtMTAtMjEuM2MtLjQtLjMtLjUtMS0uMi0xLjRsMS4yLTEuNmMuMy0uNCAxLS41IDEuNC0uMkM4Ny44IDQ1LjcgOTIgNTQuNSA5MiA2NHMtNC4yIDE4LjMtMTEuNSAyNC40Yy0uNC40LTEgLjMtMS40LS4xeiIvPjxwYXRoIGNsYXNzPSJzdDAiIGQ9Ik02OS42IDc4LjJjLS40LS40LS4zLTEuMS4xLTEuNCA0LTMuMSA2LjMtNy44IDYuMy0xMi43IDAtNS4xLTIuMy05LjgtNi4zLTEyLjctLjQtLjMtLjUtMS0uMi0xLjRsMS4zLTEuNWMuMy0uNC45LS41IDEuNC0uMkM3Ny4xIDUxLjggODAgNTcuNyA4MCA2NGMwIDYuMS0yLjkgMTEuOS03LjcgMTUuOC0uNC4zLTEgLjMtMS40LS4xbC0xLjMtMS41eiIvPjwvc3ZnPg==");
+}
+article.entry.tag-quote .entry-title:before {
+	background-size: 45%;
+    background-image: url("data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgNTEyIDUxMiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNNDY0IDMySDMzNmMtMjYuNSAwLTQ4IDIxLjUtNDggNDh2MTI4YzAgMjYuNSAyMS41IDQ4IDQ4IDQ4aDgwdjY0YzAgMzUuMy0yOC43IDY0LTY0IDY0aC04Yy0xMy4zIDAtMjQgMTAuNy0yNCAyNHY0OGMwIDEzLjMgMTAuNyAyNCAyNCAyNGg4Yzg4LjQgMCAxNjAtNzEuNiAxNjAtMTYwVjgwYzAtMjYuNS0yMS41LTQ4LTQ4LTQ4em0tMjg4IDBINDhDMjEuNSAzMiAwIDUzLjUgMCA4MHYxMjhjMCAyNi41IDIxLjUgNDggNDggNDhoODB2NjRjMCAzNS4zLTI4LjcgNjQtNjQgNjRoLThjLTEzLjMgMC0yNCAxMC43LTI0IDI0djQ4YzAgMTMuMyAxMC43IDI0IDI0IDI0aDhjODguNCAwIDE2MC03MS42IDE2MC0xNjBWODBjMC0yNi41LTIxLjUtNDgtNDgtNDh6IiBmaWxsPSIjZmZmIi8+PC9zdmc+");
+}
+article.entry.tag-slides .entry-title:before,
+article.entry.tag-public-speaking .entry-title:before{
+  background-size: 60%;
+    background-image: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiA/Pjxzdmcgdmlld0JveD0iMCAwIDI1NiAyNTYiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3QgZmlsbD0ibm9uZSIgaGVpZ2h0PSIyNTYiIHdpZHRoPSIyNTYiLz48cmVjdCBmaWxsPSJub25lIiBoZWlnaHQ9IjEzNiIgcng9IjgiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBzdHJva2Utd2lkdGg9IjI0IiB3aWR0aD0iMTkyIiB4PSIzMiIgeT0iNDgiLz48bGluZSBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgc3Ryb2tlLXdpZHRoPSIyNCIgeDE9IjE2MCIgeDI9IjE5MiIgeTE9IjE4NCIgeTI9IjIyNCIvPjxsaW5lIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBzdHJva2Utd2lkdGg9IjI0IiB4MT0iOTYiIHgyPSI2NCIgeTE9IjE4NCIgeTI9IjIyNCIvPjxsaW5lIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBzdHJva2Utd2lkdGg9IjI0IiB4MT0iOTIiIHgyPSI5MiIgeTE9IjEyMCIgeTI9IjE0NCIvPjxsaW5lIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBzdHJva2Utd2lkdGg9IjI0IiB4MT0iMTI4IiB4Mj0iMTI4IiB5MT0iMTA0IiB5Mj0iMTQ0Ii8+PGxpbmUgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIHN0cm9rZS13aWR0aD0iMjQiIHgxPSIxNjQiIHgyPSIxNjQiIHkxPSI4OCIgeTI9IjE0NCIvPjxsaW5lIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBzdHJva2Utd2lkdGg9IjI0IiB4MT0iMTI4IiB4Mj0iMTI4IiB5MT0iNDgiIHkyPSIyNCIvPjwvc3ZnPg==");
+}
+
+}
+
+@media (min-width: 65em) {
+
+	/* Mimic Salju: Center column */
+	body {
+		background: #393939;
+	}
+
+	#page {
+		padding: 4em 0;
+	}
+
+	#masthead, #content, #colophon {
+		max-width: 50em;
+		margin: 0 auto;
+		background: #fff;
+	}
+
+	#masthead {
+		border-radius: 1em 1em 0 0;
+		padding-bottom: 0;
+	}
+	
+	#content {
+		margin-top: -1px;
+	}
+
+	#colophon {
+		border-radius: 0 0 1em 1em;
+	}
+}
+
+/** author bio (customized template) **/
+.author-bio {
+	max-width: 100%;
+	margin-bottom: 0;
+	margin-top: 1rem;
+}
+.author-bio .author-title::before {
+	content: none;
+}
+.author-bio-content {
+	margin-top: 0.5rem;
+	display: flex;
+	gap: 1rem;
+	font-style: italic;
+	font-size: 0.9rem;
+	line-height: 1.6;
+}
+
+.author-bio-content .avatar {
+	margin-top: 0.5rem;
+}
+
+.author-bio-content .author-description {
+	margin: 0;
+}
+
+
+
+
+/* Mimic Salju: Flip order of navigation */
+.site-branding {
+	display: flex;
+	flex-direction: column;
+}
+.site-branding > * {
+	width: 100%;
+}
+.site-branding .main-navigation {
+	order: -1;
+	margin-bottom: 1em;
+}
+
+.site-branding .main-navigation  ul.main-menu > li > a {
+	color: #666;
+}
+
+.site-branding .main-navigation  ul.main-menu > li > a:hover {
+	color: #333;
+}
+
+
+/* Make it all a bit smaller inside #colophon … */
+#colophon h2 {
+	font-size: 1.5rem;
+}
+
+.widget_recent_entries ul li {
+	font-size: 1em;
+}
+
+#colophon p, #colophon li {
+	line-height: 1.42;
+}
+
+/* Do not place site title and description next to eachother */
+.site-title {
+	font-size: 3.5em;
+	font-weight: 700;
+	display: block;
+	line-height: 1;
+}
+.site-description {
+	display: block;
+}
+.site-description:before {
+	display: none;
+}
+
+/* Tweak site navigation */
+#site-navigation {
+	margin-top: 1em;
+}
+
+.main-navigation .main-menu > li > a {
+	font-weight: 300;
+	font-size: 0.75em;
+}
+
+/* Stretch out images */
+.entry-content img[width='560'],
+.entry-content iframe {
+	width: 100%;
+}
+
+iframe[src^="https://codepen.io/editor/"] {
+	border: 1px solid #dedede;
+}
+
+/* Appearance of code blocks and such */
+pre {
+	border: 1px solid #dedede;
+	padding: 1em;
+	background: #f7f7f7;
+}
+
+pre.outdated code:before {
+    content: "!! Warning, this code is outdated! Do not use this !!\A";
+    white-space:pre;
+    color: red;
+    display: block;
+}
+
+pre.notoutdated code:before {
+    content: "This is the correct code you're looking for :-)\A";
+    white-space:pre;
+    color: #33CC33;
+    display: block;
+}
+
+.entry-title code,
+.entry-content code,
+.entry-title kbd,
+.entry-content kbd {
+	background: #f7f7f7;
+	border: 1px solid #dedede;
+	padding: 1px 0.1em;
+}
+
+.entry-content pre code {
+	background: transparent;
+	border: 0;
+	padding: 0;
+}
+
+/* Play nice with Prism.js */
+:not(pre) > code[class*="language-"], pre[class*="language-"] {
+	background: #f7f7f7;
+}
+code[class*="language-"], pre[class*="language-"] {
+	font-family: Menlo, monaco, Consolas, Lucida Console, monospace;
+} 
+pre code .token.comment {
+	padding-left: 0;
+}
+
+blockquote {
+	color: #333;
+	padding: 0.75em 1em;
+}
+
+blockquote.large {
+	font-size: 1.5em;
+	line-height: 1.3;
+	font-style: italic;
+}
+
+figure blockquote :first-child::before {
+	content: open-quote;
+}
+figure blockquote :last-child::after {
+	content: close-quote;
+}
+
+blockquote > *:last-child {
+	margin-bottom: 0;
+}
+
+/* remove injected line-numbers from prism when using line highlights */
+pre[data-line] {
+	padding: 1em;
+}
+.line-highlight:before, .line-highlight[data-end]:after {
+	content: '';
+}
+
+/** Fix for embedded gists */
+.gist .blob-wrapper tr td {
+	border: 0;
+}
+
+
+/* Custom boxes and components */
+.alert {
+	background: rgb(255, 255, 153);
+	padding: 1em;
+	border: 1px solid rgb(255, 153, 0);
+}
+
+dfn {
+	border-bottom: 1px dotted #000;
+}
+
+.entry-content a.button {
+	padding: 0.2em 0.8em;
+	border-radius: 0.625rem;
+	text-decoration: none;
+}
+
+a.button-big {
+	font-size: 1.1em;
+}
+
+.note, .related, .tldr, .via, .update, .sidenote, .source, details:not(.regular) {
+	font-style: italic;
+	letter-spacing: 0.3px;
+	border: 1px solid #aaa;
+	padding: 1em;
+  font-weight: 300;
+	color: #333;
+	margin-bottom: 1em;
+}
+
+.note--small {
+	font-size: 0.9em;
+	opacity: 0.8;
+}
+
+.note--warning, .note--warn {
+	border-color: #dada3d;
+	background: rgb(255 255 205 / 80%);
+}
+
+.note--tip {
+	border-color: orange;
+	background: #ffa50010;
+}
+
+.note--info {
+	background-color: #e4f1f5;
+	color: #003b42;
+	border-color: currentColor;
+}
+
+.note--supergreen {
+	background-color: #e4f5e7;
+	color: #036c2c;
+	border-color: currentColor;
+}
+
+.note--important, .note--error, .note--alarm, .note--danger {
+	border-color: red;
+	background: #ff000010;
+}
+
+.text-error {
+	color: red;
+}
+
+.text-error a {
+	color: red;
+}
+
+.text-error a:hover {
+	color: darkred;
+}
+
+summary:focus {
+	outline: #0073aa thin dotted;
+}
+
+details summary {
+	font-weight: 400;
+}
+
+.tldr, .related, .via, .update, .source, .sidenote {
+	position: relative;
+	padding-top: 1.5em;
+}
+
+.note > *:first-child,
+.tldr > *:first-child,
+.related > *:first-child,
+.via > *:first-child,
+.update > *:first-child,
+.sidenote > *:first-child,
+.source > *:first-child {
+    margin-top: 0 !important;
+}
+
+.note > *:last-child,
+.tldr > *:last-child,
+.related > *:last-child,
+.via > *:last-child,
+.update > *:last-child,
+.sidenote > *:last-child,
+.source > *:last-child {
+    margin-bottom: 0 !important;
+}
+
+.tldr:before,
+.related:before,
+.via:before,
+.update:before,
+.sidenote:before,
+.source:before {
+    content: 'tl;dr';
+    position: absolute;
+    left: 0;
+	top: 0;
+    background: rgb(0 0 0 / 0.30);
+    color: #fff;
+    font-family: Consolas, Courier New, monospace;
+    font-size: 0.8em;
+	height: 1.6em;
+	line-height: 1.3em;
+    padding: 0.2em 0.4em;
+}
+
+.via:before {
+	content: 'via';
+}
+
+.update:before {
+	content: 'update';
+}
+
+.update--multiple:before {
+	content: 'updates';
+}
+
+.source:before {
+	content: 'source';
+}
+
+.sidenote:before {
+	content: 'sidenote';
+}
+
+.related:before {
+	content: 'related';
+}
+
+img.floatLeft {
+  float: left;
+  margin: 0 1em 1em 0;
+}
+
+.twitter-tweet-rendered {
+    margin: 1em auto !important;
+    max-width: 560px !important;
+}
+
+/* faux dark mode
+@media (prefers-color-scheme: dark) {
+	#content, #masthead, #colophon {
+		background: #111;
+		color: #fff;
+	}
+	.site-title a {
+		color: #fff !important;
+	}
+	a, a:visited {
+		color: #ddca7e;
+	}
+	img {
+    filter: brightness(.8) contrast(1.2);
+  }
+	.entry-content code {
+		color: #000;
+	}
+	.note {
+		border-color: #6b6b6b;
+    color: #6b6b6b;
+	}
+} */
+
+/** carbon **/
+header {
+	position: relative;
+}
+
+#carbonads {
+  display: flex;
+	position: absolute;
+	right: 1rem;
+	top: 1rem;
+  max-width: 130px;
+  border-bottom-left-radius: 4px;
+  background-color: hsl(0, 0%, 98%);
+  box-shadow: 0 0 1px hsla(0, 0%, 0%, .15);
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu,
+    Cantarell, "Helvetica Neue", Helvetica, Arial, sans-serif;
+	border-radius: 4px;
+	overflow: hidden;
+	border: 1px solid #ccc;
+}
+
+#carbonads a {
+  color: #111;
+  text-decoration: none;
+}
+
+#carbonads a:hover {
+  color: #111;
+}
+
+.carbon-img {
+  display: block;
+  margin-bottom: 8px;
+  max-width: 130px;
+  line-height: 1;
+}
+
+.carbon-img img {
+  display: block;
+  margin: 0 auto;
+  max-width: 130px;
+  width: 130px;
+  height: auto;
+}
+
+.carbon-text {
+  display: block;
+  padding: 0 10px 8px;
+  text-align: left;
+  line-height: 1.35;
+}
+
+.carbon-poweredby {
+  display: block;
+  padding: 10px;
+  background: repeating-linear-gradient(-45deg, transparent, transparent 5px, hsla(0, 0%, 0%, .025) 5px, hsla(0, 0%, 0%, .025) 10px) hsla(203, 11%, 95%, .4);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  font-weight: 600;
+  font-size: 8px;
+  line-height: 0;
+}
+
+iframe[width="560"][height="315"] {
+	aspect-ratio: 16 / 9;
+  height: auto;
+}
+
+
+@media only screen and (min-width: 320px) and (max-width: 759px) {
+  #carbonads {
+    position: relative;
+    float: none;
+		right: unset;
+		top: unset;
+    margin: 2.5rem auto 0;
+    max-width: 330px;
+    border-radius: 4px;
+	  border: 1px solid #ccc;
+  }
+
+  .carbon-wrap {
+    display: flex;
+    flex-direction: row;
+  }
+
+  .carbon-img {
+    margin: 0;
+  }
+
+  .carbon-text {
+    padding: 10px 10px 0 10px;
+    font-size: 12px;
+  }
+
+  .carbon-poweredby {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    border-radius: 0;
+    border-top-left-radius: 3px;
+    text-align: center;
+  }
+}
+
+/* INTRO (Regular div + visual editor) */
+.intro {
+	font-size: 1.2em;
+	padding: 1em 0;
+	color: #333;
+	position: relative;
+	
+	letter-spacing: 0.3px;
+}
+
+.intro::before {
+	content: '';
+	position: absolute; 
+	left: -1em;
+	top: 0;
+	height: 100%;
+	border-left: 4px solid hsl(199, 100%, 33%);
+}
+
+.wp-block-group.intro,
+.wp-block-group.intro > * {
+	padding: 0 !important;
+}
+
+.wp-block-group.intro > .wp-block-group__inner-container > * {
+	margin-top: 0 !important;
+}
+
+.intro:not(.wp-block-group) > :first-child::before,
+.intro.wp-block-group .wp-block-group__inner-container > :first-child::before {
+	content: 'INTRO ↠ ';
+	font-weight: 700;
+	font-size: 1rem;
+	text-transform: uppercase;
+}
+
+.intro:not(.wp-block-group) > :first-child[data-prefix]::before,
+.intro.wp-block-group .wp-block-group__inner-container > :first-child[data-prefix]::before {
+	content: attr(data-prefix) " ↠ ";
+}
+
+.intro--noborder::before {
+	display: none;
+}
+.intro--noborder:not(.wp-block-group) > :first-child::before,
+.intro--noborder.wp-block-group .wp-block-group__inner-container > :first-child::before {
+	content: '';
+}
+
+
+/* hr to [hr] */
+
+
+.entry .entry-content .wp-block-separator,
+.entry .entry-content hr {
+	max-width: unset;
+	width: 100%;
+	text-align: center;
+  margin: 3rem 0;
+	height: 0;
+	opacity: 1;
+}
+
+.entry .entry-content .wp-block-separator::after,
+.entry .entry-content hr::after {
+	content: '~';
+	width: 100%;
+  font-size: 28px;
+  font-family: 'times new roman', times;
+	display: block;
+	transform: translateY(-50%);
+}
+
+@media only screen and (min-width: 563px) and (max-width: 564px) {
+	#page {
+		transform: rotate(180deg);
+	}
+}
+
+.entry-content > article > .cp_embed_wrapper,
+.entry-content > .cp_embed_wrapper,
+.resizable, p:has(> [data-resize]) {
+	resize: horizontal;
+	overflow: hidden;
+	
+	padding-bottom: 1em;
+	
+	width: 100%;
+	margin-left: 50% !important;
+  transform: translateX(-50%);
+	background: #fff;
+	margin-bottom: 0 !important;
+}
+
+.entry-content > article > .cp_embed_wrapper::after,
+.entry-content > .cp_embed_wrapper::after,
+.resizable::after, p:has(> [data-resize])::after {
+	content: '← Resize Me →';
+	display: block;
+	text-align: center;
+	position: absolute;
+	font-size: 0.5rem;
+	line-height: 1rem;
+	height: 1rem;
+	background: #efefef;
+	color: #333;
+	left: 0;
+	right: 0;
+	z-index: -1;
+	pointer-events: none;
+}
+
+.entry-content > article > .cp_embed_wrapper > *,
+.entry-content > .cp_embed_wrapper > *,
+.resizable > *, p:has(> [data-resize]) > * {
+	width: calc(100%) !important;
+}
+
+.site-content {
+	overflow: visible;
+}
+
+figure:not(figure:has(> blockquote)) figcaption {
+	display: block;
+	text-align: center;
+	font-size: 80%;
+	width: 80%;
+	margin: 0 auto;
+	font-style: italic;
+	color: #666;
+}
+
+figure > a:has(img) {
+	display: block;
+	text-align: center;
+}
+figure > img {
+	display: block;
+	margin: 0 auto;
+}
+
+.license {
+	font-size: 0.7em;
+}
+
+.license .svg-icon {
+	position: relative;
+  display: inline-block;
+  vertical-align: middle;
+	fill: currentColor;
+}
+
+/* Remove the_excerpt’s “read more” link in favor of our own injected read more link */
+.link-more:has(+ .link-more--custom) {
+	display: none;
+}
+
+
+/* DL GRID @src https://codepen.io/bramus/pen/POEaXg*/
+@media(min-width: 30em) {
+dl.grid {
+	display: grid;
+	grid-template: auto / 10em 1fr;
+}
+
+dl.grid dt {
+  grid-column: 1;
+}
+
+dl.grid dd {
+  grid-column: 2;
+}
+
+dl.grid :is(dt, dd) {
+	margin: 0;
+	padding: .3em .5em;
+	border-top: 1px solid rgba(0,0,0,.1);
+	min-width: 0px; /* prevent grid blowout */
+}
+
+dl.grid :is(dt, dd) > :first-child {
+  margin-top: 0;
+}
+dl.grid :is(dt, dd) > :last-child {
+  margin-bottom: 0;
+}
+}
+
+.text-center {
+	text-align: center;
+}
+
+.mt {
+	margin-top: 64px !important;
+}
+
+/* Center post thumbnails in overview */
+img.size-post-thumbnail {
+    margin: 0 auto;
+    display: block;
+}
+
+/* DIV table */
+	div.table {
+		display: flex;
+		flex-direction: column;
+		gap: 1em;
+  }
+@media(min-width: 34em) {
+	div.table {
+		flex-direction: row;
+  }
+	
+	div.table > * {
+		flex: 1;
+	}
+	
+	div.table img {
+		max-width: 100%;
+    height: 100%;
+		object-fit: contain;
+    display: block;
+	}
+}
+
+.lcp_catlist li + li {
+	margin-top: 1em;
+}
+
+mark, mark code {
+	background-color: #fff9c0 !important;
+}
+
+mark code {
+	border-color: #999 !important;
+}
+
+figure .wp-video {
+	margin: 0 auto;
+}
+
+#search-3:target {
+	background: lightyellow;
+}
+
+.wp-video {
+	margin: 0 auto !important;
+}
+
+.bluesky-embed {
+	margin-inline: auto !important;
+}
+</style>
+<link rel='stylesheet' id='mediaelement-css' href='https://www.bram.us/wordpress/wp-includes/js/mediaelement/mediaelementplayer-legacy.min.css?ver=4.2.17' media='all' />
+<link rel='stylesheet' id='wp-mediaelement-css' href='https://www.bram.us/wordpress/wp-includes/js/mediaelement/wp-mediaelement.min.css?ver=7.1.2' media='all' />
+
+</head>
+
+<body class="wp-singular post-template-default single single-post postid-36850 single-format-standard wp-embed-responsive wp-theme-twentynineteen singular image-filters-enabled">
+<div id="page" class="site">
+	<a class="skip-link screen-reader-text" href="#content">
+		Skip to content	</a>
+
+		<header id="masthead" class="site-header">
+
+			<div class="site-branding-container">
+				<div class="site-branding">
+
+									<p class="site-title"><a href="https://www.bram.us/" rel="home" >Bram.us</a></p>
+			
+				<p class="site-description">
+				A rather geeky/technical weblog, est. 2001, by Bramus			</p>
+				<nav id="site-navigation" class="main-navigation" aria-label="Top Menu">
+			<div class="menu-navigation-container"><ul id="menu-navigation" class="main-menu"><li id="menu-item-19066" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-home menu-item-has-children menu-item-19066"><a href="https://www.bram.us" aria-haspopup="true" aria-expanded="false">Blog</a><button class="submenu-expand" tabindex="-1"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"></path><path fill="none" d="M0 0h24v24H0V0z"></path></svg></button>
+<ul class="sub-menu">
+	<li id="menu-item--1" class="mobile-parent-nav-menu-item menu-item--1"><button class="menu-item-link-return" tabindex="-1"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg>Blog</button></li>
+	<li id="menu-item-26201" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-home menu-item-26201"><a href="https://www.bram.us/">All Posts</a></li>
+	<li id="menu-item-26135" class="menu-item menu-item-type-taxonomy menu-item-object-category current-post-ancestor current-menu-parent current-post-parent menu-item-26135"><a href="https://www.bram.us/category/original-content/">Original Content</a></li>
+	<li id="menu-item-26136" class="menu-item menu-item-type-taxonomy menu-item-object-category menu-item-26136"><a href="https://www.bram.us/category/elsewhere/">Elsewhere</a></li>
+</ul>
+</li>
+<li id="menu-item-21297" class="menu-item menu-item-type-post_type menu-item-object-page menu-item-21297"><a href="https://www.bram.us/talks/">Talks</a></li>
+<li id="menu-item-19067" class="menu-item menu-item-type-post_type menu-item-object-page menu-item-19067"><a href="https://www.bram.us/about/">About</a></li>
+<li id="menu-item-24192" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-has-children menu-item-24192"><a href="https://www.bram.us/feed" title="Subscribe to the RSS Feed" aria-haspopup="true" aria-expanded="false">RSS</a><button class="submenu-expand" tabindex="-1"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"></path><path fill="none" d="M0 0h24v24H0V0z"></path></svg></button>
+<ul class="sub-menu">
+	<li id="menu-item--2" class="mobile-parent-nav-menu-item menu-item--2"><button class="menu-item-link-return" tabindex="-1"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg>RSS</button></li>
+	<li id="menu-item-26199" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-26199"><a href="https://www.bram.us/feed/">All Posts</a></li>
+	<li id="menu-item-26197" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-26197"><a href="https://www.bram.us/category/original-content/feed/">Original Content Only</a></li>
+	<li id="menu-item-26198" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-26198"><a href="https://www.bram.us/category/elsewhere/feed/">Elsewhere Only</a></li>
+</ul>
+</li>
+<li id="menu-item-34630" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-34630"><a href="#search-3">Search</a></li>
+</ul></div>
+			<div class="main-menu-more">
+				<ul class="main-menu">
+					<li class="menu-item menu-item-has-children">
+						<button class="submenu-expand main-menu-more-toggle is-empty" tabindex="-1"
+							aria-label="More" aria-haspopup="true" aria-expanded="false"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd"><path d="M0 0h24v24H0z"/><path fill="currentColor" fill-rule="nonzero" d="M12 2c5.52 0 10 4.48 10 10s-4.48 10-10 10S2 17.52 2 12 6.48 2 12 2zM6 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm6 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm6 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/></g></svg>
+						</button>
+						<ul class="sub-menu hidden-links">
+							<li class="mobile-parent-nav-menu-item">
+								<button class="menu-item-link-return"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg>Back
+								</button>
+							</li>
+						</ul>
+					</li>
+				</ul>
+			</div>		</nav><!-- #site-navigation -->
+		</div><!-- .site-branding -->
+			</div><!-- .site-branding-container -->
+			
+			<script async type="text/javascript" src="//cdn.carbonads.com/carbon.js?serve=CE7DE27J&placement=wwwbramus" id="_carbonads_js"></script>
+
+					</header><!-- #masthead -->
+
+	<div id="content" class="site-content">
+
+	<div id="primary" class="content-area">
+		<main id="main" class="site-main">
+
+			
+<article id="post-36850" class="post-36850 post type-post status-publish format-standard has-post-thumbnail hentry category-original-content tag-custom-elements tag-keypress tag-shortcuts wpautop entry">
+		<header class="entry-header">
+		
+<h1 class="entry-title">Show keystrokes on a website with the <code>&lt;show-keystrokes&gt;</code> custom element</h1>
+<div class="entry-meta">
+	<span class="byline"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg><span class="screen-reader-text">Posted by</span><span class="author vcard"><a class="url fn n" href="https://www.bram.us/author/bramus/">Bramus!</a></span></span>	<span class="posted-on"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><defs><path id="a" d="M0 0h24v24H0V0z"></path></defs><clipPath id="b"><use xlink:href="#a" overflow="visible"></use></clipPath><path clip-path="url(#b)" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm4.2 14.2L11 13V7h1.5v5.2l4.5 2.7-.8 1.3z"></path></svg><a href="https://www.bram.us/2026/09/23/show-keystrokes/" rel="bookmark"><time class="entry-date published" datetime="2026-09-23T10:32:27+02:00">September 23, 2026</time><time class="updated" datetime="2026-09-23T20:55:45+02:00">September 23, 2026</time></a></span>	<span class="short-url">
+		<svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><defs><style>.cls-1{fill:none;stroke:#1d1d1b;stroke-linecap:round;stroke-linejoin:round;stroke-width:2px;}</style></defs><g><path class="cls-1" d="M13.38,10.79h0a3.5,3.5,0,0,1,0,5L10.52,18.6a3.5,3.5,0,0,1-5,0h0a3.5,3.5,0,0,1,0-5l.86-.86" /><path class="cls-1" d="M11,13.21h0a3.5,3.5,0,0,1,0-5L13.81,5.4a3.5,3.5,0,0,1,5,0h0a3.5,3.5,0,0,1,0,5l-.86.86" /></g></svg>
+		  <a href="https://brm.us/show-keystrokes">https://brm.us/show-keystrokes</a>
+		</span>	<span class="comment-count">
+				<span class="comments-link"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg><a href="https://www.bram.us/2026/09/23/show-keystrokes/#comments">2 Comments<span class="screen-reader-text"> on Show keystrokes on a website with the <code>&lt;show-keystrokes&gt;</code> custom element</span></a></span>	</span>
+	</div><!-- .entry-meta -->
+		</header>
+	
+	<div class="entry-content">
+		<figure>
+	<div style="width: 640px;" class="wp-video"><video class="wp-video-shortcode" id="video-36850-1" width="640" height="411" loop autoplay muted preload="metadata" controls="controls"><source type="video/mp4" src="https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.mp4?_=1" /><a href="https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.mp4">https://www.bram.us/wordpress/wp-content/uploads/2026/09/show-keystrokes.mp4</a></video></div><figcaption>Recording of the <a href="https://show-keystrokes.netlify.app/"><code>&lt;show-keystrokes&gt;</code> Demo &amp; Playground</a>.</figcaption></figure>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<div class="intro">
+<p>When recording screen casts or doing live demos, I typically rely on a native macOS app to visualize my keystrokes on screen. Recently, however, that app got blocked on my work machine by a corporate security policy. Additionally, the keystrokes visualized through that app don’t show up when screen sharing a specific window or tab.</p>
+<p>Because I needed to demo a website that relies heavily on keyboard navigation — and thus <em>really</em> needed those keystrokes to be visible to the audience — I found myself in a bit of a pickle. So with the help of Gemini, I decided to build a web-native solution to fill that gap: <a href="https://show-keystrokes.netlify.app/"><code>&lt;show-keystrokes&gt;</code></a></p>
+</div>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<h3><a href="#usage" name="usage">#</a> Embed it and you’re good to go</h3>
+<p>Using <code>&lt;show-keystrokes&gt;</code> is as simple as loading the module from npm (or a CDN) and dropping the custom element onto your page. Embed it on your site and you’re good to go:</p>
+<pre><code class="language-html" style="tab-size: 2">&lt;script type="module" src="https://cdn.jsdelivr.net/npm/show-keystrokes/index.js"&gt;&lt;/script&gt;
+&lt;show-keystrokes&gt;&lt;/show-keystrokes&gt;</code></pre>
+<p>Out of the box, <code>&lt;show-keystrokes&gt;</code> listens for keyboard events and displays keyboard shortcuts (such as <code>⌘ + A</code> or <code>⇧ + ⌘ + T</code>) and navigational keys (such as <code>⇥</code>, <code>→</code>, <code>←</code>, <code>↵</code>, and <code>⎋</code>), while ignoring regular typing. If you <em>do</em> want to show every single key press, you can set the <code>keystrokes</code> attribute to <code>all</code> (or narrow it down to <code>shortcuts</code> or <code>navigational</code>).</p>
+<pre><code class="language-html" style="tab-size: 2">&lt;script type="module" src="https://cdn.jsdelivr.net/npm/show-keystrokes/index.js"&gt;&lt;/script&gt;
+&lt;show-keystrokes keystrokes="all"&gt;&lt;/show-keystrokes&gt;</code></pre>
+<p>The component automatically adapts to your platform (showing <code>⌘</code> and <code>⌥</code> on macOS versus <code>CTRL</code> and <code>ALT</code> on Windows/Linux), supports both symbol glyphs and text labels (<code>⌘</code> vs <code>CMD</code>), and ships with two built-in themes that respond to light and dark mode via <code>light-dark()</code>. And oh, it’s fully styleable through by targeting the exposed <code>::part()</code>s and custom properties.</p>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<h3><a href="#positioning-and-modern-css" name="positioning-and-modern-css">#</a> Powered by the Popover API and CSS Anchor Positioning</h3>
+<p>Depending on what you are demoing, you might want the keycaps to appear in different places. Using the <code>position</code> attribute, you can easily position the component in a corner of the viewport (the default is <code>viewport top right</code>), right next to the cursor (<code>position="pointer"</code>), or just inline in normal document flow (<code>position="normal"</code>).</p>
+<pre><code class="language-html" style="tab-size: 2">&lt;!-- Fixed in the bottom-center of the viewport --&gt;
+&lt;show-keystrokes position="viewport bottom center"&gt;&lt;/show-keystrokes&gt;
+
+&lt;!-- Follow the cursor --&gt;
+&lt;show-keystrokes position="pointer"&gt;&lt;/show-keystrokes&gt;
+
+&lt;!-- Render inline in normal document flow --&gt;
+&lt;show-keystrokes position="normal"&gt;&lt;/show-keystrokes&gt;</code></pre>
+<p>Under the hood, <code>&lt;show-keystrokes&gt;</code> leans heavily on modern web platform features to make this work seamlessly without any <code>z-index</code> battles or JavaScript bounding-box math.</p>
+<p>First, the component always stays on top of everything else on the page thanks to the <a href="https://developer.mozilla.org/en-US/docs/Web/API/Popover_API">Popover API</a>. Its internal container is promoted to the browser’s Top Layer using <code>popover="manual"</code>, ensuring that no matter how complex the host page’s stacking contexts are, your keystrokes will never be clipped or hidden behind another element.</p>
+<p>Second, the component positions and repositions itself thanks to <a href="https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Anchor_positioning">CSS Anchor Positioning</a>. In viewport mode, it anchors itself inside a full-viewport anchor element and aligns itself using <code>position-area</code>, <code>align-self</code>, and <code>justify-self</code>. In <code>pointer</code> mode, an invisible anchor tracks your cursor coordinates <em>(via custom properties)</em>, and the popover anchors itself next to it using <code>position-area</code>. The <code>position-try-fallbacks: flip-inline, flip-block, flip-inline flip-block</code> are set by default, so the browser automatically flips the keystroke overlay to the other side of the cursor whenever you move it too close to the edge of the viewport. 🙂</p>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<h3><a href="#bookmarklet-and-extension" name="bookmarklet-and-extension">#</a> Run it on any site with the Bookmarklet or Browser Extension</h3>
+<p>Because you don’t always control the source code of the site you want to demo, the project also comes with both a <a href="https://show-keystrokes.netlify.app/#bookmarklet"><em>bookmarklet</em></a> <a href="https://en.wikipedia.org/wiki/Bookmarklet">ⓘ</a> and a <a href="https://show-keystrokes.netlify.app/#extension">Browser Extension</a> (for both Firefox and Chrome) so you can inject <code>&lt;show-keystrokes&gt;</code> onto any webpage on the fly.</p>
+<p>The bookmarklet is a quick drag-and-drop button (available on <a href="https://show-keystrokes.netlify.app/#bookmarklet">the demo page</a>) that dynamically imports the package from jsDelivr and calls the programmatic <code>create()</code> helper. For sites with a strict Content Security Policy (CSP) or when you want <code>&lt;show-keystrokes&gt;</code> to persist across page navigations, the <a href="https://chromewebstore.google.com/detail/show-keystrokes/djfbngdmoohldepblnidecjhmgommdmh">Chrome Extension</a> <em>(published)</em> or <a href="https://addons.mozilla.org/en-US/firefox/addon/show-keystrokes/">Firefox Extension</a> <em>(pending review)</em> has you covered. It bundles the component locally, lets you configure global defaults as well as per-origin overrides right from the popup, and includes a handy <code>⇧ + ⌘ + K</code> (or <code>⇧ + CTRL + K</code>) shortcut to toggle it on or off.</p>
+<p>Building the extension was a bit of an afterthought once I had version 1.0.0 of the component ready. But thanks to Modern Web Guidance and <a href="https://github.com/GoogleChrome/modern-web-guidance-src/blob/main/skills-src/chrome-extensions/SKILL.md">its Chrome Extensions skill</a>, creating it was easy-peasy and done in no time <em>(also see <a href="https://developer.chrome.com/docs/extensions/ai/build-with-ai">this guide</a>)</em> 🙂</p>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<h3><a href="#links" name="links">#</a> Links</h3>
+<ul>
+<li><a href="https://show-keystrokes.netlify.app/"><code>&lt;show-keystrokes&gt;</code> Live Demo &amp; Playground &rarr;</a></li>
+<li><a href="https://github.com/bramus/show-keystrokes"><code>&lt;show-keystrokes&gt;</code> on GitHub &rarr;</a></li>
+<li><a href="https://www.npmjs.com/package/show-keystrokes"><code>show-keystrokes</code> on npm &rarr;</a></li>
+<li><a href="https://chromewebstore.google.com/detail/show-keystrokes/djfbngdmoohldepblnidecjhmgommdmh"><code>&lt;show-keystrokes&gt;</code> Chrome Extension &rarr;</a></li>
+<li><a href="https://addons.mozilla.org/en-US/firefox/addon/show-keystrokes/"><code>&lt;show-keystrokes&gt;</code> Firefox Extension &rarr;</a></li>
+</ul>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<h3><a href="#spread-the-word" name="spread-the-word">#</a> Spread the word</h3>
+<p>Feel free to reshare one of the following posts on social media to help spread the word:</p>
+<ul>
+<li><a href="https://bsky.app/profile/bram.us/post/3mw3xrnstjk2m">🦋 Bluesky</a></li>
+<li><a href="https://front-end.social/@bramus/117314107823933436">🦣 Mastodon</a></li>
+<p>	<!-- 
+
+<li><a href="https://lnkd.in/p/…">💼 LinkedIn</a></li>
+
+ -->
+</ul>
+<p style="text-align: center; font-size: 28px; font-family: 'times new roman', times; margin: 3em 0;">~</p>
+<div class="note">
+	<p><b>🔥 Like what you see? Want to stay in the loop? Here's how:</b></p>
+	<ul>
+            <li><a href="https://bsky.app/profile/bram.us">🦋 Follow @bram.us on Bluesky</a></li>
+            <li><a href="https://bram.us/feed">🔸 Follow bram.us using RSS</a></li>
+	</ul>
+	<p>I can also be found on <a href="https://x.com/bramus">𝕏 Twitter</a> and <a href="https://front-end.social/@bramus">🐘 Mastodon</a> but only post there sporadically.</p>
+</div>
+	</div><!-- .entry-content -->
+
+	<footer class="entry-footer">
+		<span class="byline"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg><span class="screen-reader-text">Posted by</span><span class="author vcard"><a class="url fn n" href="https://www.bram.us/author/bramus/">Bramus!</a></span></span><span class="posted-on"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><defs><path id="a" d="M0 0h24v24H0V0z"></path></defs><clipPath id="b"><use xlink:href="#a" overflow="visible"></use></clipPath><path clip-path="url(#b)" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm4.2 14.2L11 13V7h1.5v5.2l4.5 2.7-.8 1.3z"></path></svg><a href="https://www.bram.us/2026/09/23/show-keystrokes/" rel="bookmark"><time class="entry-date published" datetime="2026-09-23T10:32:27+02:00">September 23, 2026</time><time class="updated" datetime="2026-09-23T20:55:45+02:00">September 23, 2026</time></a></span><span class="cat-links"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg><span class="screen-reader-text">Posted in</span><a href="https://www.bram.us/category/original-content/" rel="category tag">Original Content</a></span><span class="tags-links"><svg class="svg-icon" width="16" height="16" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg><span class="screen-reader-text">Tags: </span><a href="https://www.bram.us/tag/custom-elements/" rel="tag">custom elements</a>, <a href="https://www.bram.us/tag/keypress/" rel="tag">keypress</a>, <a href="https://www.bram.us/tag/shortcuts/" rel="tag">shortcuts</a></span>	</footer><!-- .entry-footer -->
+
+			<div class="author-bio">
+	<h2 class="author-title">
+		<span class="author-heading">
+			Published by Bramus!		</span>
+	</h2>
+	<div class="author-bio-content">
+		<div style="margin-top: 0.25rem;">
+			<img alt='' src='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=128&#038;d=mm&#038;r=g' srcset='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=256&#038;d=mm&#038;r=g 2x' class='avatar avatar-128 photo' height='128' width='128' decoding='async'/>		</div>
+		<div style="flex: 1;">
+			<p class="author-description">
+				Bramus is a frontend web developer from Belgium, working as a Chrome Developer Relations Engineer at Google. From the moment he discovered view-source at the age of 14 <em>(way back in 1997)</em>, he fell in love with the web and has been tinkering with it ever since <i><a href="/about">(more …)</a></i>				<!-- <a class="author-link" href="https://www.bram.us/author/bramus/" rel="author">
+					View more posts				</a> -->
+			</p><!-- .author-description -->
+		</div>
+	</div>
+</div><!-- .author-bio -->
+						<div class="author-bio license"><div class="note"><p>Unless noted otherwise, the contents of this post are licensed under the <svg role="img" focusable="false" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" class="svg-icon" width="16" height="16"><path d="M 7,13 C 3.691553,13 1,10.30845 1,7 1,3.69155 3.691553,1 7,1 c 3.308447,0 6,2.69155 6,6 0,3.30845 -2.691553,6 -6,6 z M 7,2.2 C 4.353184,2.2 2.2,4.35333 2.2,7 2.2,9.64667 4.353214,11.8 7,11.8 9.646786,11.8 11.8,9.64667 11.8,7 11.8,4.35333 9.646786,2.2 7,2.2 Z M 7.412749,5.8 C 7.794185,5.27185 8.492866,5.06113 9.120507,5.15783 9.649381,5.21123 10.149186,5.52522 10.394691,6.00182 10.128565,6.13961 9.864769,6.28119 9.599109,6.41922 9.516009,6.25562 9.397322,6.10128 9.23069,6.01693 8.91875,5.84666 8.476263,5.95233 8.293904,6.26325 8.144719,6.50488 8.122321,6.79915 8.127855,7.07651 8.138745,7.3607 8.209295,7.66454 8.41871,7.87 8.632205,8.0747 8.964565,8.10461 9.235846,8.01318 9.447041,7.93908 9.587196,7.74496 9.669216,7.54469 9.919991,7.66527 10.164827,7.79791 10.41374,7.92179 10.14007,8.41888 9.625177,8.78357 9.05774,8.84547 8.522079,8.90517 7.935681,8.76897 7.548127,8.37671 7.244865,8.07729 7.092739,7.65496 7.058312,7.23648 7.012172,6.73798 7.106192,6.2064 7.412749,5.8 Z M 3.904613,5.8578 C 4.259341,5.31931 4.940545,5.07241 5.566904,5.14892 6.127991,5.18022 6.669156,5.49838 6.930127,6.00287 6.66237,6.13881 6.39869,6.28199 6.132215,6.42052 6.058035,6.27366 5.958302,6.13412 5.815817,6.0468 5.53903,5.86458 5.131205,5.9132 4.906438,6.15695 4.70436,6.38548 4.662681,6.7054 4.660118,6.99885 c 0.0013,0.2986 0.05913,0.62038 0.268223,0.8469 0.206272,0.22159 0.546903,0.2605 0.82465,0.17345 C 5.973535,7.9486 6.118846,7.74896 6.204622,7.54377 6.453768,7.66694 6.699389,7.79795 6.948302,7.92238 6.673613,8.41892 6.160787,8.78067 5.594195,8.84653 5.105166,8.89733 4.578826,8.79493 4.192409,8.47726 3.862176,8.21029 3.669448,7.80413 3.610351,7.38905 3.534591,6.86737 3.600751,6.30054 3.904613,5.8578 Z"/></svg> <a href="https://creativecommons.org/licenses/by/4.0/">Creative Commons Attribution 4.0 License</a> and code samples are licensed under the <svg role="img" focusable="false" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" class="svg-icon" width="16" height="16"><path d="m 2.17819,10.265823 0,-0.9907999 0.13389,0 0.13389,0 0,0.8836999 0,0.8837 0.48201,0 c 0.4463,0 0.482,0.01 0.482,0.1071 0,0.1009 -0.0357,0.1071 -0.6159,0.1071 l -0.61589,0 0,-0.9908 z m 1.55313,0.241 c 0,-0.7140999 0.005,-0.7497999 0.10711,-0.7497999 0.10201,0 0.10711,0.036 0.10711,0.7497999 0,0.7141 -0.005,0.7498 -0.10711,0.7498 -0.10201,0 -0.10711,-0.036 -0.10711,-0.7498 z m 0.77785,0.6221 c -0.2744,-0.2744 -0.29805,-0.9124 -0.045,-1.2131999 0.1408,-0.1673 0.40799,-0.2466 0.63705,-0.1892 0.16627,0.042 0.39742,0.2606 0.39742,0.3761999 0,0.1319 -0.23394,0.102 -0.29525,-0.038 C 5.14749,9.9373231 4.97978,9.8882231 4.77553,9.9394231 c -0.34021,0.085 -0.30196,1.0449999 0.0451,1.1320999 0.15582,0.039 0.33125,-0.043 0.41085,-0.1913 0.0678,-0.1266 0.26713,-0.1426 0.26713,-0.021 0,0.046 -0.0704,0.1549 -0.15655,0.241 -0.13228,0.1322 -0.19908,0.1565 -0.43089,0.1565 -0.21769,0 -0.30071,-0.026 -0.40207,-0.1277 z m 1.41842,-0.024 c -0.28083,-0.2809 -0.28184,-0.8895 -0.002,-1.2026999 0.13728,-0.1537 0.18423,-0.1717 0.44673,-0.1717 0.21758,0 0.32435,0.028 0.41346,0.1071 0.14306,0.1275 0.26601,0.3989999 0.26601,0.5873999 l 0,0.1356 -0.54226,0 -0.54225,0 0.0336,0.174 c 0.0653,0.338 0.41882,0.4682 0.6906,0.2544 0.1667,-0.1311 0.33238,-0.1441 0.28567,-0.022 -0.0179,0.047 -0.0325,0.094 -0.0325,0.1058 0,0.072 -0.35923,0.1844 -0.59057,0.1844 -0.23017,0 -0.29914,-0.025 -0.42653,-0.1519 z m 0.85644,-0.8156 c 0,-0.081 -0.11188,-0.2835 -0.18208,-0.3303999 -0.0324,-0.022 -0.13123,-0.039 -0.2196,-0.039 -0.19039,0 -0.25739,0.039 -0.34009,0.1956999 -0.11035,0.2097 -0.0787,0.2312 0.34009,0.2312 0.2486,0 0.40168,-0.022 0.40168,-0.057 z m 0.58911,0.2177 c 0,-0.7140999 0.005,-0.7497999 0.10712,-0.7497999 0.0729,0 0.10711,0.036 0.10711,0.1119 0,0.1077 0.006,0.1067 0.16478,-0.027 0.2179,-0.1833 0.4887,-0.1862 0.66778,-0.01 0.12502,0.1251 0.13145,0.1631 0.13145,0.7765999 0,0.6094 -0.006,0.6451 -0.10711,0.6451 -0.0999,0 -0.10711,-0.036 -0.10711,-0.5321 0,-0.6995 -0.0415,-0.8067999 -0.31171,-0.8067999 -0.33435,0 -0.3977,0.1152999 -0.42714,0.7770999 -0.0224,0.5041 -0.0353,0.5618 -0.12507,0.5618 -0.093,0 -0.1001,-0.053 -0.1001,-0.7498 z m 1.67975,0.6872 c -0.0629,-0.031 -0.14073,-0.1132 -0.17291,-0.1838 -0.051,-0.112 -0.045,-0.1285 0.0474,-0.1285 0.0583,0 0.15417,0.048 0.21308,0.1071 0.0696,0.07 0.17852,0.1071 0.3111,0.1071 0.26123,0 0.40088,-0.1003 0.37683,-0.2707 -0.0146,-0.1034 -0.0691,-0.1457 -0.25948,-0.2011 -0.41588,-0.1211 -0.58972,-0.219 -0.64444,-0.3629 -0.16714,-0.4395999 0.56396,-0.7245999 0.99302,-0.3870999 0.15587,0.1226 0.16723,0.1797999 0.045,0.2266999 -0.0539,0.021 -0.12792,-0.01 -0.18953,-0.075 -0.12092,-0.1296999 -0.4788,-0.1487999 -0.57682,-0.031 -0.12901,0.1553999 -0.0392,0.2581999 0.33033,0.3779999 0.45527,0.1476 0.52463,0.2069 0.52362,0.4478 -9.5e-4,0.2244 -0.0347,0.2886 -0.1965,0.3737 -0.14314,0.075 -0.64433,0.075 -0.80075,0 z m 1.54524,-0.021 c -0.27054,-0.1895 -0.36678,-0.7282 -0.20098,-1.1251 0.14985,-0.3585999 0.74687,-0.4538999 1.03549,-0.1652999 0.12384,0.1237999 0.25074,0.5805999 0.18075,0.6505999 -0.0149,0.015 -0.25209,0.027 -0.52701,0.027 -0.49986,0 -0.49986,0 -0.49986,0.1363 0,0.3247 0.46751,0.5208 0.69623,0.2921 0.0589,-0.059 0.14326,-0.1071 0.18745,-0.1071 0.12664,0 0.0939,0.1423 -0.0608,0.2639 -0.17483,0.1375 -0.63203,0.153 -0.81129,0.027 z m 0.77069,-0.9116 c -0.0179,-0.047 -0.0325,-0.1051 -0.0325,-0.13 0,-0.1094 -0.18336,-0.2136999 -0.37569,-0.2136999 -0.21896,0 -0.3741,0.1381999 -0.3741,0.3332999 0,0.083 0.0527,0.095 0.4074,0.095 0.3495,0 0.40278,-0.012 0.3749,-0.085 z M 3.73132,9.3020231 c 0,-0.098 0.0286,-0.1339 0.10711,-0.1339 0.0786,0 0.10711,0.036 0.10711,0.1339 0,0.098 -0.0286,0.1339 -0.10711,0.1339 -0.0786,0 -0.10711,-0.036 -0.10711,-0.1339 z m -2.08869,-1.0711 0,-0.2946 -0.32134,0 -0.32134,0 0,-0.2945 0,-0.2946 0.32134,0 0.32134,0 0,-0.2946 0,-0.2945 -0.32134,0 -0.32134,0 0,-2.0084 0,-2.0083 2.54392,0 2.54392,0 0,2.0057 0,2.0056 -0.30794,0.016 -0.30795,0.016 -0.0162,0.2811 -0.0162,0.2812 0.32414,0 0.32413,0 0,0.2946 0,0.2945 -0.32133,0 -0.32134,0 0,0.2946 0,0.2945 -0.32134,0 -0.32134,0 0,-0.2945 0,-0.2946 0.32134,0 0.32134,0 0,-0.2945 0,-0.2946 -0.32414,0 -0.32413,0 0.0162,-0.2812 0.0162,-0.2811 0.30795,-0.016 0.30795,-0.016 0,-0.2624 0,-0.2624 -0.30795,-0.016 -0.30795,-0.016 -0.0145,-1.0845 -0.0145,-1.0845 -0.37379,0 -0.37378,0 0,2.2494 0,2.2493 -0.48201,0 -0.48201,0 0,-2.2493 0,-2.2494 -0.40167,0 -0.40167,0 0,1.0979 0,1.0979 -0.32134,0 -0.32133,0 0,0.2678 0,0.2678 0.32133,0 0.32134,0 0,0.2945 0,0.2946 -0.32134,0 -0.32133,0 0,0.2946 0,0.2945 0.32133,0 0.32134,0 0,0.2946 0,0.2945 -0.32134,0 -0.32133,0 0,-0.2945 z m 5.19495,-2.5975 0,-2.892 0.64268,0 0.64267,0 0,2.892 0,2.892 -0.64267,0 -0.64268,0 0,-2.892 z m 4.07028,2.5975 0,-0.2946 -0.29456,0 -0.29456,0 0,-0.2945 0,-0.2946 0.29456,0 0.29456,0 0,-0.2946 0,-0.2945 -0.30795,0 -0.30795,1e-4 0.0152,-1.3658 0.0152,-1.3657 -0.72477,0 -0.72477,0 0,-0.6427 0,-0.6426 2.06361,0 2.06362,0 -0.0151,0.6293 -0.0151,0.6292 -0.70962,0.015 -0.70962,0.015 0,1.0964 0,1.0963 -0.32427,0 -0.32427,0 0.0163,0.2544 0.0163,0.2544 0.30794,0.016 0.30795,0.016 0,0.2892 0,0.2893 -0.30795,0.016 -0.30794,0.016 0,0.2678 0,0.2677 0.30794,0.016 0.30795,0.016 0,0.2919 0,0.2918 -0.32134,0 -0.32133,0 0,-0.2945 z"/></svg> <a href="https://opensource.org/licenses/MIT">MIT License</a></p></div></div>
+			
+</article><!-- #post-36850 -->
+
+	<nav class="navigation post-navigation" aria-label="Posts">
+		<h2 class="screen-reader-text">Post navigation</h2>
+		<div class="nav-links"><div class="nav-previous"><a href="https://www.bram.us/2026/09/23/responsive-iframes/" rel="prev"><span class="meta-nav" aria-hidden="true">Previous Post</span> <span class="screen-reader-text">Previous post:</span> <br/><span class="post-title">New in Chrome 154: iframes that automatically resize themselves to their content</span></a></div></div>
+	</nav>
+<div id="comments" class="comments-area">
+	<div class="comments-title-wrap">
+		<h2 class="comments-title">
+		Join the Conversation		</h2><!-- .comments-title -->
+		
+<div class="discussion-meta">
+	<ol class="discussion-avatar-list">
+<li><div class="comment-user-avatar comment-author vcard"><img alt='' src='https://secure.gravatar.com/avatar/75c5d927b0434111db9720dd78af8c83385cf28bb9aeafd031ba8cb0c4ffc558?s=60&#038;d=mm&#038;r=g' srcset='https://secure.gravatar.com/avatar/75c5d927b0434111db9720dd78af8c83385cf28bb9aeafd031ba8cb0c4ffc558?s=120&#038;d=mm&#038;r=g 2x' class='avatar avatar-60 photo' height='60' width='60' decoding='async'/></div></li>
+<li><div class="comment-user-avatar comment-author vcard"><img alt='' src='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=60&#038;d=mm&#038;r=g' srcset='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=120&#038;d=mm&#038;r=g 2x' class='avatar avatar-60 photo' height='60' width='60' decoding='async'/></div></li>
+</ol><!-- .discussion-avatar-list -->
+	<p class="discussion-meta-info">
+		<svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18z"></path><path d="M0 0h24v24H0z" fill="none"></path></svg>		<span>2 Comments</span>
+	</p>
+</div><!-- .discussion-meta -->
+	</div><!-- .comments-title-wrap -->
+			<ol class="comment-list">
+					<li id="comment-937699" class="comment even thread-even depth-1 parent">
+			<article id="div-comment-937699" class="comment-body">
+				<footer class="comment-meta">
+					<div class="comment-author vcard">
+						<img alt='' src='https://secure.gravatar.com/avatar/75c5d927b0434111db9720dd78af8c83385cf28bb9aeafd031ba8cb0c4ffc558?s=60&#038;d=mm&#038;r=g' srcset='https://secure.gravatar.com/avatar/75c5d927b0434111db9720dd78af8c83385cf28bb9aeafd031ba8cb0c4ffc558?s=120&#038;d=mm&#038;r=g 2x' class='avatar avatar-60 photo' height='60' width='60' loading='lazy' decoding='async'/><b class="fn">Christophe</b> <span class="screen-reader-text says">says:</span>					</div><!-- .comment-author -->
+
+					<div class="comment-metadata">
+						<a href="https://www.bram.us/2026/09/23/show-keystrokes/#comment-937699"><time datetime="2026-09-23T12:08:34+02:00">September 23, 2026 at 12:08 pm</time></a>					</div><!-- .comment-metadata -->
+
+					
+					
+				</footer><!-- .comment-meta -->
+
+				<div class="comment-content">
+					<p>Will the browser extension also be available for Firefox ?</p>
+				</div><!-- .comment-content -->
+
+			</article><!-- .comment-body -->
+
+			<div class="comment-reply"><a rel="nofollow" class="comment-reply-link" href="https://www.bram.us/2026/09/23/show-keystrokes/?replytocom=937699#respond" data-commentid="937699" data-postid="36850" data-belowelement="div-comment-937699" data-respondelement="respond" data-replyto="Reply to Christophe" aria-label="Reply to Christophe">Reply</a></div>		<ol class="children">
+		<li id="comment-937731" class="comment byuser comment-author-bramus bypostauthor odd alt depth-2">
+			<article id="div-comment-937731" class="comment-body">
+				<footer class="comment-meta">
+					<div class="comment-author vcard">
+						<a href="https://www.bram.us/" rel="external nofollow" class="url"><img alt='' src='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=60&#038;d=mm&#038;r=g' srcset='https://secure.gravatar.com/avatar/f2f3975d755fc2711e29e9795df804bcd686bbb770d0d947eba58f3478942b6d?s=120&#038;d=mm&#038;r=g 2x' class='avatar avatar-60 photo' height='60' width='60' loading='lazy' decoding='async'/><span class="post-author-badge" aria-hidden="true"><svg class="svg-icon" width="24" height="24" aria-hidden="true" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z" fill="none"></path><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></span><b class="fn">Bramus!</b> <span class="screen-reader-text says">says:</span></a>					</div><!-- .comment-author -->
+
+					<div class="comment-metadata">
+						<a href="https://www.bram.us/2026/09/23/show-keystrokes/#comment-937731"><time datetime="2026-09-23T20:56:13+02:00">September 23, 2026 at 8:56 pm</time></a>					</div><!-- .comment-metadata -->
+
+					
+					
+				</footer><!-- .comment-meta -->
+
+				<div class="comment-content">
+					<p>I’ve submitted it to Firefox Add-Ons just now. Review is pending …</p>
+				</div><!-- .comment-content -->
+
+			</article><!-- .comment-body -->
+
+			<div class="comment-reply"><a rel="nofollow" class="comment-reply-link" href="https://www.bram.us/2026/09/23/show-keystrokes/?replytocom=937731#respond" data-commentid="937731" data-postid="36850" data-belowelement="div-comment-937731" data-respondelement="respond" data-replyto="Reply to Bramus!" aria-label="Reply to Bramus!">Reply</a></div>		</li><!-- #comment-## -->
+</ol><!-- .children -->
+</li><!-- #comment-## -->
+		</ol><!-- .comment-list -->
+					<div class="comment-form-flex comment-form-wrapper">
+				<h2 class="comments-title">Leave a comment</h2>
+					<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title"> <small><a rel="nofollow" id="cancel-comment-reply-link" href="/2026/09/23/show-keystrokes/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://www.bram.us/wordpress/wp-comments-post.php" method="post" id="commentform" class="comment-form"><p class="comment-notes"><span id="email-notes">Your email address will not be published.</span> <span class="required-field-message">Required fields are marked <span class="required">*</span></span></p><p class="comment-form-comment"><label for="comment">Comment <span class="required">*</span></label> <textarea id="comment" name="comment" cols="45" rows="5" maxlength="65525" required></textarea></p><p class="comment-form-author"><label for="author">Name <span class="required">*</span></label> <input id="author" name="author" type="text" value="" size="30" maxlength="245" autocomplete="name" required /></p>
+<p class="comment-form-email"><label for="email">Email <span class="required">*</span></label> <input id="email" name="email" type="email" value="" size="30" maxlength="100" aria-describedby="email-notes" autocomplete="email" required /></p>
+<p class="comment-form-url"><label for="url">Website</label> <input id="url" name="url" type="url" value="" size="30" maxlength="200" autocomplete="url" /></p>
+<p><label for='subscribe-reloaded'><input style='width:30px' type='checkbox' name='subscribe-reloaded' id='subscribe-reloaded' value='replies' /> Notify me of followup comments via e-mail. You can also <a href='https://www.bram.us/comment-subscriptions?srp=36850&amp;srk=f70fb7f13e13a8933b5e177cdd4487d0&amp;sra=s&amp;srsrc=f'>subscribe</a> without commenting.</label></p><p class="form-submit"><input name="submit" type="submit" id="submit" class="submit" value="Post Comment" /> <input type='hidden' name='comment_post_ID' value='36850' id='comment_post_ID' />
+<input type='hidden' name='comment_parent' id='comment_parent' value='0' />
+</p><p style="display: none;"><input type="hidden" id="akismet_comment_nonce" name="akismet_comment_nonce" value="fa34195e13" /></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>&#916;<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label><input type="hidden" id="ak_js_1" name="ak_js" value="148"/><script>
+document.getElementById( "ak_js_1" ).setAttribute( "value", ( new Date() ).getTime() );
+</script>
+</p></form>	</div><!-- #respond -->
+	<p class="akismet_comment_form_privacy_notice">This site uses Akismet to reduce spam. <a href="https://akismet.com/privacy/" target="_blank" rel="nofollow noopener">Learn how your comment data is processed.</a></p>			</div>
+			</div><!-- #comments -->
+
+		</main><!-- #main -->
+	</div><!-- #primary -->
+
+
+	</div><!-- #content -->
+
+	<footer id="colophon" class="site-footer">
+		
+	<aside class="widget-area" aria-label="Footer">
+							<div class="widget-column footer-widget-1">
+					<section id="text-4" class="widget widget_text"><h2 class="widget-title">About Bram.us</h2>			<div class="textwidget"><p><!-- <img loading="lazy" decoding="async" style="float: left; margin: 0 10px 10px 0;" title="" src="https://graph.facebook.com/664662525/picture?type=large" alt="" width="100" height="100" />-->Bram.us is the technical/geeky weblog of Bramus Van Damme, a web developer based in Belgium.</p>
+<p>Bramus is part of the <strong>Chrome Developer Relations team at Google</strong>, focusing on CSS, Web UI, and DevTools. From the moment he discovered view-source at the age of 14 <em>(way back in 1997)</em>, he fell in love with the web and has been tinkering with it ever since.</p>
+<p><a href="https://www.bram.us/about/">More …</a></p>
+</div>
+		</section><section id="text-7" class="widget widget_text"><h2 class="widget-title">Stay up-to-date</h2>			<div class="textwidget"><p>To follow bramus and his blog:</p>
+<ul>
+<li><a href="https://www.bram.us/feed/">🟠 Subscribe to RSS</a></li>
+<li><a href="https://bsky.app/profile/bram.us/">🦋 Follow me on Bluesky</a></li>
+<li><a href="https://front-end.social/@bramus" rel="me">🦣 Follow me on Mastodon</a></li>
+</ul>
+</div>
+		</section><section id="archives-3" class="widget widget_archive"><h2 class="widget-title">Archives</h2>		<label class="screen-reader-text" for="archives-dropdown-3">Archives</label>
+		<select id="archives-dropdown-3" name="archive-dropdown">
+			
+			<option value="">Select Month</option>
+				<option value='https://www.bram.us/2026/09/'> September 2026 </option>
+	<option value='https://www.bram.us/2026/08/'> August 2026 </option>
+	<option value='https://www.bram.us/2026/07/'> July 2026 </option>
+	<option value='https://www.bram.us/2026/06/'> June 2026 </option>
+	<option value='https://www.bram.us/2026/04/'> April 2026 </option>
+	<option value='https://www.bram.us/2026/03/'> March 2026 </option>
+	<option value='https://www.bram.us/2026/02/'> February 2026 </option>
+	<option value='https://www.bram.us/2026/01/'> January 2026 </option>
+	<option value='https://www.bram.us/2025/12/'> December 2025 </option>
+	<option value='https://www.bram.us/2025/11/'> November 2025 </option>
+	<option value='https://www.bram.us/2025/10/'> October 2025 </option>
+	<option value='https://www.bram.us/2025/09/'> September 2025 </option>
+	<option value='https://www.bram.us/2025/06/'> June 2025 </option>
+	<option value='https://www.bram.us/2025/05/'> May 2025 </option>
+	<option value='https://www.bram.us/2025/04/'> April 2025 </option>
+	<option value='https://www.bram.us/2025/03/'> March 2025 </option>
+	<option value='https://www.bram.us/2025/02/'> February 2025 </option>
+	<option value='https://www.bram.us/2025/01/'> January 2025 </option>
+	<option value='https://www.bram.us/2024/12/'> December 2024 </option>
+	<option value='https://www.bram.us/2024/11/'> November 2024 </option>
+	<option value='https://www.bram.us/2024/10/'> October 2024 </option>
+	<option value='https://www.bram.us/2024/09/'> September 2024 </option>
+	<option value='https://www.bram.us/2024/08/'> August 2024 </option>
+	<option value='https://www.bram.us/2024/07/'> July 2024 </option>
+	<option value='https://www.bram.us/2024/06/'> June 2024 </option>
+	<option value='https://www.bram.us/2024/05/'> May 2024 </option>
+	<option value='https://www.bram.us/2024/04/'> April 2024 </option>
+	<option value='https://www.bram.us/2024/02/'> February 2024 </option>
+	<option value='https://www.bram.us/2024/01/'> January 2024 </option>
+	<option value='https://www.bram.us/2023/12/'> December 2023 </option>
+	<option value='https://www.bram.us/2023/11/'> November 2023 </option>
+	<option value='https://www.bram.us/2023/10/'> October 2023 </option>
+	<option value='https://www.bram.us/2023/09/'> September 2023 </option>
+	<option value='https://www.bram.us/2023/08/'> August 2023 </option>
+	<option value='https://www.bram.us/2023/07/'> July 2023 </option>
+	<option value='https://www.bram.us/2023/06/'> June 2023 </option>
+	<option value='https://www.bram.us/2023/05/'> May 2023 </option>
+	<option value='https://www.bram.us/2023/04/'> April 2023 </option>
+	<option value='https://www.bram.us/2023/03/'> March 2023 </option>
+	<option value='https://www.bram.us/2023/02/'> February 2023 </option>
+	<option value='https://www.bram.us/2023/01/'> January 2023 </option>
+	<option value='https://www.bram.us/2022/12/'> December 2022 </option>
+	<option value='https://www.bram.us/2022/11/'> November 2022 </option>
+	<option value='https://www.bram.us/2022/10/'> October 2022 </option>
+	<option value='https://www.bram.us/2022/09/'> September 2022 </option>
+	<option value='https://www.bram.us/2022/08/'> August 2022 </option>
+	<option value='https://www.bram.us/2022/07/'> July 2022 </option>
+	<option value='https://www.bram.us/2022/06/'> June 2022 </option>
+	<option value='https://www.bram.us/2022/05/'> May 2022 </option>
+	<option value='https://www.bram.us/2022/04/'> April 2022 </option>
+	<option value='https://www.bram.us/2022/03/'> March 2022 </option>
+	<option value='https://www.bram.us/2022/02/'> February 2022 </option>
+	<option value='https://www.bram.us/2022/01/'> January 2022 </option>
+	<option value='https://www.bram.us/2021/12/'> December 2021 </option>
+	<option value='https://www.bram.us/2021/11/'> November 2021 </option>
+	<option value='https://www.bram.us/2021/10/'> October 2021 </option>
+	<option value='https://www.bram.us/2021/09/'> September 2021 </option>
+	<option value='https://www.bram.us/2021/08/'> August 2021 </option>
+	<option value='https://www.bram.us/2021/07/'> July 2021 </option>
+	<option value='https://www.bram.us/2021/06/'> June 2021 </option>
+	<option value='https://www.bram.us/2021/05/'> May 2021 </option>
+	<option value='https://www.bram.us/2021/04/'> April 2021 </option>
+	<option value='https://www.bram.us/2021/03/'> March 2021 </option>
+	<option value='https://www.bram.us/2021/02/'> February 2021 </option>
+	<option value='https://www.bram.us/2021/01/'> January 2021 </option>
+	<option value='https://www.bram.us/2020/12/'> December 2020 </option>
+	<option value='https://www.bram.us/2020/11/'> November 2020 </option>
+	<option value='https://www.bram.us/2020/09/'> September 2020 </option>
+	<option value='https://www.bram.us/2020/08/'> August 2020 </option>
+	<option value='https://www.bram.us/2020/07/'> July 2020 </option>
+	<option value='https://www.bram.us/2020/06/'> June 2020 </option>
+	<option value='https://www.bram.us/2020/05/'> May 2020 </option>
+	<option value='https://www.bram.us/2020/04/'> April 2020 </option>
+	<option value='https://www.bram.us/2020/03/'> March 2020 </option>
+	<option value='https://www.bram.us/2020/02/'> February 2020 </option>
+	<option value='https://www.bram.us/2020/01/'> January 2020 </option>
+	<option value='https://www.bram.us/2019/12/'> December 2019 </option>
+	<option value='https://www.bram.us/2019/11/'> November 2019 </option>
+	<option value='https://www.bram.us/2019/10/'> October 2019 </option>
+	<option value='https://www.bram.us/2019/09/'> September 2019 </option>
+	<option value='https://www.bram.us/2019/08/'> August 2019 </option>
+	<option value='https://www.bram.us/2019/07/'> July 2019 </option>
+	<option value='https://www.bram.us/2019/06/'> June 2019 </option>
+	<option value='https://www.bram.us/2019/05/'> May 2019 </option>
+	<option value='https://www.bram.us/2019/04/'> April 2019 </option>
+	<option value='https://www.bram.us/2019/03/'> March 2019 </option>
+	<option value='https://www.bram.us/2019/02/'> February 2019 </option>
+	<option value='https://www.bram.us/2019/01/'> January 2019 </option>
+	<option value='https://www.bram.us/2018/12/'> December 2018 </option>
+	<option value='https://www.bram.us/2018/11/'> November 2018 </option>
+	<option value='https://www.bram.us/2018/10/'> October 2018 </option>
+	<option value='https://www.bram.us/2018/08/'> August 2018 </option>
+	<option value='https://www.bram.us/2018/07/'> July 2018 </option>
+	<option value='https://www.bram.us/2018/06/'> June 2018 </option>
+	<option value='https://www.bram.us/2018/05/'> May 2018 </option>
+	<option value='https://www.bram.us/2018/04/'> April 2018 </option>
+	<option value='https://www.bram.us/2018/03/'> March 2018 </option>
+	<option value='https://www.bram.us/2018/02/'> February 2018 </option>
+	<option value='https://www.bram.us/2018/01/'> January 2018 </option>
+	<option value='https://www.bram.us/2017/12/'> December 2017 </option>
+	<option value='https://www.bram.us/2017/11/'> November 2017 </option>
+	<option value='https://www.bram.us/2017/10/'> October 2017 </option>
+	<option value='https://www.bram.us/2017/09/'> September 2017 </option>
+	<option value='https://www.bram.us/2017/08/'> August 2017 </option>
+	<option value='https://www.bram.us/2017/07/'> July 2017 </option>
+	<option value='https://www.bram.us/2017/06/'> June 2017 </option>
+	<option value='https://www.bram.us/2017/05/'> May 2017 </option>
+	<option value='https://www.bram.us/2017/04/'> April 2017 </option>
+	<option value='https://www.bram.us/2017/03/'> March 2017 </option>
+	<option value='https://www.bram.us/2017/02/'> February 2017 </option>
+	<option value='https://www.bram.us/2017/01/'> January 2017 </option>
+	<option value='https://www.bram.us/2016/12/'> December 2016 </option>
+	<option value='https://www.bram.us/2016/11/'> November 2016 </option>
+	<option value='https://www.bram.us/2016/10/'> October 2016 </option>
+	<option value='https://www.bram.us/2016/09/'> September 2016 </option>
+	<option value='https://www.bram.us/2016/08/'> August 2016 </option>
+	<option value='https://www.bram.us/2016/07/'> July 2016 </option>
+	<option value='https://www.bram.us/2016/06/'> June 2016 </option>
+	<option value='https://www.bram.us/2016/05/'> May 2016 </option>
+	<option value='https://www.bram.us/2016/04/'> April 2016 </option>
+	<option value='https://www.bram.us/2016/03/'> March 2016 </option>
+	<option value='https://www.bram.us/2016/02/'> February 2016 </option>
+	<option value='https://www.bram.us/2016/01/'> January 2016 </option>
+	<option value='https://www.bram.us/2015/12/'> December 2015 </option>
+	<option value='https://www.bram.us/2015/11/'> November 2015 </option>
+	<option value='https://www.bram.us/2015/10/'> October 2015 </option>
+	<option value='https://www.bram.us/2015/09/'> September 2015 </option>
+	<option value='https://www.bram.us/2015/08/'> August 2015 </option>
+	<option value='https://www.bram.us/2015/07/'> July 2015 </option>
+	<option value='https://www.bram.us/2015/06/'> June 2015 </option>
+	<option value='https://www.bram.us/2015/05/'> May 2015 </option>
+	<option value='https://www.bram.us/2015/04/'> April 2015 </option>
+	<option value='https://www.bram.us/2015/03/'> March 2015 </option>
+	<option value='https://www.bram.us/2015/02/'> February 2015 </option>
+	<option value='https://www.bram.us/2015/01/'> January 2015 </option>
+	<option value='https://www.bram.us/2014/12/'> December 2014 </option>
+	<option value='https://www.bram.us/2014/11/'> November 2014 </option>
+	<option value='https://www.bram.us/2014/10/'> October 2014 </option>
+	<option value='https://www.bram.us/2014/09/'> September 2014 </option>
+	<option value='https://www.bram.us/2014/08/'> August 2014 </option>
+	<option value='https://www.bram.us/2014/07/'> July 2014 </option>
+	<option value='https://www.bram.us/2014/06/'> June 2014 </option>
+	<option value='https://www.bram.us/2014/05/'> May 2014 </option>
+	<option value='https://www.bram.us/2014/04/'> April 2014 </option>
+	<option value='https://www.bram.us/2014/03/'> March 2014 </option>
+	<option value='https://www.bram.us/2014/02/'> February 2014 </option>
+	<option value='https://www.bram.us/2014/01/'> January 2014 </option>
+	<option value='https://www.bram.us/2013/12/'> December 2013 </option>
+	<option value='https://www.bram.us/2013/11/'> November 2013 </option>
+	<option value='https://www.bram.us/2013/10/'> October 2013 </option>
+	<option value='https://www.bram.us/2013/09/'> September 2013 </option>
+	<option value='https://www.bram.us/2013/08/'> August 2013 </option>
+	<option value='https://www.bram.us/2013/07/'> July 2013 </option>
+	<option value='https://www.bram.us/2013/06/'> June 2013 </option>
+	<option value='https://www.bram.us/2013/05/'> May 2013 </option>
+	<option value='https://www.bram.us/2013/04/'> April 2013 </option>
+	<option value='https://www.bram.us/2013/03/'> March 2013 </option>
+	<option value='https://www.bram.us/2013/02/'> February 2013 </option>
+	<option value='https://www.bram.us/2013/01/'> January 2013 </option>
+	<option value='https://www.bram.us/2012/12/'> December 2012 </option>
+	<option value='https://www.bram.us/2012/11/'> November 2012 </option>
+	<option value='https://www.bram.us/2012/10/'> October 2012 </option>
+	<option value='https://www.bram.us/2012/09/'> September 2012 </option>
+	<option value='https://www.bram.us/2012/08/'> August 2012 </option>
+	<option value='https://www.bram.us/2012/07/'> July 2012 </option>
+	<option value='https://www.bram.us/2012/06/'> June 2012 </option>
+	<option value='https://www.bram.us/2012/05/'> May 2012 </option>
+	<option value='https://www.bram.us/2012/04/'> April 2012 </option>
+	<option value='https://www.bram.us/2012/03/'> March 2012 </option>
+	<option value='https://www.bram.us/2012/02/'> February 2012 </option>
+	<option value='https://www.bram.us/2012/01/'> January 2012 </option>
+	<option value='https://www.bram.us/2011/12/'> December 2011 </option>
+	<option value='https://www.bram.us/2011/11/'> November 2011 </option>
+	<option value='https://www.bram.us/2011/10/'> October 2011 </option>
+	<option value='https://www.bram.us/2011/09/'> September 2011 </option>
+	<option value='https://www.bram.us/2011/08/'> August 2011 </option>
+	<option value='https://www.bram.us/2011/07/'> July 2011 </option>
+	<option value='https://www.bram.us/2011/06/'> June 2011 </option>
+	<option value='https://www.bram.us/2011/05/'> May 2011 </option>
+	<option value='https://www.bram.us/2011/04/'> April 2011 </option>
+	<option value='https://www.bram.us/2011/03/'> March 2011 </option>
+	<option value='https://www.bram.us/2011/01/'> January 2011 </option>
+	<option value='https://www.bram.us/2010/12/'> December 2010 </option>
+	<option value='https://www.bram.us/2010/11/'> November 2010 </option>
+	<option value='https://www.bram.us/2010/10/'> October 2010 </option>
+	<option value='https://www.bram.us/2010/09/'> September 2010 </option>
+	<option value='https://www.bram.us/2010/08/'> August 2010 </option>
+	<option value='https://www.bram.us/2010/07/'> July 2010 </option>
+	<option value='https://www.bram.us/2010/06/'> June 2010 </option>
+	<option value='https://www.bram.us/2010/05/'> May 2010 </option>
+	<option value='https://www.bram.us/2010/04/'> April 2010 </option>
+	<option value='https://www.bram.us/2010/03/'> March 2010 </option>
+	<option value='https://www.bram.us/2010/02/'> February 2010 </option>
+	<option value='https://www.bram.us/2010/01/'> January 2010 </option>
+	<option value='https://www.bram.us/2009/12/'> December 2009 </option>
+	<option value='https://www.bram.us/2009/11/'> November 2009 </option>
+	<option value='https://www.bram.us/2009/10/'> October 2009 </option>
+	<option value='https://www.bram.us/2009/09/'> September 2009 </option>
+	<option value='https://www.bram.us/2009/08/'> August 2009 </option>
+	<option value='https://www.bram.us/2009/07/'> July 2009 </option>
+	<option value='https://www.bram.us/2009/06/'> June 2009 </option>
+	<option value='https://www.bram.us/2009/05/'> May 2009 </option>
+	<option value='https://www.bram.us/2009/04/'> April 2009 </option>
+	<option value='https://www.bram.us/2009/03/'> March 2009 </option>
+	<option value='https://www.bram.us/2009/02/'> February 2009 </option>
+	<option value='https://www.bram.us/2009/01/'> January 2009 </option>
+	<option value='https://www.bram.us/2008/12/'> December 2008 </option>
+	<option value='https://www.bram.us/2008/11/'> November 2008 </option>
+	<option value='https://www.bram.us/2008/10/'> October 2008 </option>
+	<option value='https://www.bram.us/2008/09/'> September 2008 </option>
+	<option value='https://www.bram.us/2008/08/'> August 2008 </option>
+	<option value='https://www.bram.us/2008/07/'> July 2008 </option>
+	<option value='https://www.bram.us/2008/06/'> June 2008 </option>
+	<option value='https://www.bram.us/2008/05/'> May 2008 </option>
+	<option value='https://www.bram.us/2008/04/'> April 2008 </option>
+	<option value='https://www.bram.us/2008/03/'> March 2008 </option>
+	<option value='https://www.bram.us/2008/02/'> February 2008 </option>
+	<option value='https://www.bram.us/2008/01/'> January 2008 </option>
+	<option value='https://www.bram.us/2007/12/'> December 2007 </option>
+	<option value='https://www.bram.us/2007/11/'> November 2007 </option>
+	<option value='https://www.bram.us/2007/10/'> October 2007 </option>
+	<option value='https://www.bram.us/2007/09/'> September 2007 </option>
+	<option value='https://www.bram.us/2007/08/'> August 2007 </option>
+	<option value='https://www.bram.us/2007/07/'> July 2007 </option>
+	<option value='https://www.bram.us/2007/06/'> June 2007 </option>
+	<option value='https://www.bram.us/2007/05/'> May 2007 </option>
+	<option value='https://www.bram.us/2007/04/'> April 2007 </option>
+	<option value='https://www.bram.us/2007/03/'> March 2007 </option>
+	<option value='https://www.bram.us/2007/02/'> February 2007 </option>
+	<option value='https://www.bram.us/2007/01/'> January 2007 </option>
+	<option value='https://www.bram.us/2006/12/'> December 2006 </option>
+	<option value='https://www.bram.us/2006/11/'> November 2006 </option>
+	<option value='https://www.bram.us/2006/10/'> October 2006 </option>
+	<option value='https://www.bram.us/2006/09/'> September 2006 </option>
+	<option value='https://www.bram.us/2006/08/'> August 2006 </option>
+	<option value='https://www.bram.us/2006/07/'> July 2006 </option>
+	<option value='https://www.bram.us/2006/06/'> June 2006 </option>
+	<option value='https://www.bram.us/2006/05/'> May 2006 </option>
+	<option value='https://www.bram.us/2006/04/'> April 2006 </option>
+	<option value='https://www.bram.us/2006/03/'> March 2006 </option>
+	<option value='https://www.bram.us/2005/12/'> December 2005 </option>
+	<option value='https://www.bram.us/2005/11/'> November 2005 </option>
+	<option value='https://www.bram.us/2005/08/'> August 2005 </option>
+	<option value='https://www.bram.us/2005/07/'> July 2005 </option>
+	<option value='https://www.bram.us/2005/06/'> June 2005 </option>
+	<option value='https://www.bram.us/2005/05/'> May 2005 </option>
+	<option value='https://www.bram.us/2005/04/'> April 2005 </option>
+	<option value='https://www.bram.us/2005/03/'> March 2005 </option>
+	<option value='https://www.bram.us/2005/02/'> February 2005 </option>
+	<option value='https://www.bram.us/2004/11/'> November 2004 </option>
+	<option value='https://www.bram.us/2004/10/'> October 2004 </option>
+	<option value='https://www.bram.us/2004/08/'> August 2004 </option>
+	<option value='https://www.bram.us/2004/07/'> July 2004 </option>
+	<option value='https://www.bram.us/2004/06/'> June 2004 </option>
+	<option value='https://www.bram.us/2004/05/'> May 2004 </option>
+	<option value='https://www.bram.us/2004/04/'> April 2004 </option>
+	<option value='https://www.bram.us/2004/03/'> March 2004 </option>
+	<option value='https://www.bram.us/2004/02/'> February 2004 </option>
+	<option value='https://www.bram.us/2003/10/'> October 2003 </option>
+
+		</select>
+
+			<script>
+( ( dropdownId ) => {
+	const dropdown = document.getElementById( dropdownId );
+	function onSelectChange() {
+		setTimeout( () => {
+			if ( 'escape' === dropdown.dataset.lastkey ) {
+				return;
+			}
+			if ( dropdown.value ) {
+				document.location.href = dropdown.value;
+			}
+		}, 250 );
+	}
+	function onKeyUp( event ) {
+		if ( 'Escape' === event.key ) {
+			dropdown.dataset.lastkey = 'escape';
+		} else {
+			delete dropdown.dataset.lastkey;
+		}
+	}
+	function onClick() {
+		delete dropdown.dataset.lastkey;
+	}
+	dropdown.addEventListener( 'keyup', onKeyUp );
+	dropdown.addEventListener( 'click', onClick );
+	dropdown.addEventListener( 'change', onSelectChange );
+})( "archives-dropdown-3" );
+
+//# sourceURL=WP_Widget_Archives%3A%3Awidget
+</script>
+</section><section id="search-3" class="widget widget_search"><h2 class="widget-title">Search</h2><form role="search" method="get" class="search-form" action="https://www.bram.us/">
+				<label>
+					<span class="screen-reader-text">Search for:</span>
+					<input type="search" class="search-field" placeholder="Search &hellip;" value="" name="s" />
+				</label>
+				<input type="submit" class="search-submit" value="Search" />
+			</form></section>					</div>
+					</aside><!-- .widget-area -->
+
+			<div class="site-info">
+										<a class="site-name" href="https://www.bram.us/" rel="home">Bram.us</a>,
+						<a href="https://wordpress.org/" class="imprint">
+				Proudly powered by WordPress.			</a>
+								</div><!-- .site-info -->
+	</footer><!-- #colophon -->
+
+</div><!-- #page -->
+
+<script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":["/wordpress/wp-*.php","/wordpress/wp-admin/*","/wordpress/wp-content/uploads/*","/wordpress/wp-content/*","/wordpress/wp-content/plugins/*","/wordpress/wp-content/themes/twentynineteen/*","/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<script data-wp-strategy="defer" defer id="twentynineteen-touch-navigation-js" src="https://www.bram.us/wordpress/wp-content/themes/twentynineteen/js/touch-keyboard-navigation.js?ver=20250802"></script>
+<script async data-wp-strategy="async" fetchpriority="low" id="comment-reply-js" src="https://www.bram.us/wordpress/wp-includes/js/comment-reply.min.js?ver=7.1.2"></script>
+<script id="prism-script-js" src="https://www.bram.us/wordpress/wp-content/plugins/ank-prism-for-wp/out/prism-js.min.js?ver=1676985021"></script>
+<script id="mediaelement-core-js-before">
+var mejsL10n = {"language":"en","strings":{"mejs.download-file":"Download File","mejs.install-flash":"You are using a browser that does not have Flash player enabled or installed. Please turn on your Flash player plugin or download the latest version from https://get.adobe.com/flashplayer/","mejs.fullscreen":"Fullscreen","mejs.play":"Play","mejs.pause":"Pause","mejs.time-slider":"Time Slider","mejs.time-help-text":"Use Left/Right Arrow keys to advance one second, Up/Down arrows to advance ten seconds.","mejs.live-broadcast":"Live Broadcast","mejs.volume-help-text":"Use Up/Down Arrow keys to increase or decrease volume.","mejs.unmute":"Unmute","mejs.mute":"Mute","mejs.volume-slider":"Volume Slider","mejs.video-player":"Video Player","mejs.audio-player":"Audio Player","mejs.captions-subtitles":"Captions/Subtitles","mejs.captions-chapters":"Chapters","mejs.none":"None","mejs.afrikaans":"Afrikaans","mejs.albanian":"Albanian","mejs.arabic":"Arabic","mejs.belarusian":"Belarusian","mejs.bulgarian":"Bulgarian","mejs.catalan":"Catalan","mejs.chinese":"Chinese","mejs.chinese-simplified":"Chinese (Simplified)","mejs.chinese-traditional":"Chinese (Traditional)","mejs.croatian":"Croatian","mejs.czech":"Czech","mejs.danish":"Danish","mejs.dutch":"Dutch","mejs.english":"English","mejs.estonian":"Estonian","mejs.filipino":"Filipino","mejs.finnish":"Finnish","mejs.french":"French","mejs.galician":"Galician","mejs.german":"German","mejs.greek":"Greek","mejs.haitian-creole":"Haitian Creole","mejs.hebrew":"Hebrew","mejs.hindi":"Hindi","mejs.hungarian":"Hungarian","mejs.icelandic":"Icelandic","mejs.indonesian":"Indonesian","mejs.irish":"Irish","mejs.italian":"Italian","mejs.japanese":"Japanese","mejs.korean":"Korean","mejs.latvian":"Latvian","mejs.lithuanian":"Lithuanian","mejs.macedonian":"Macedonian","mejs.malay":"Malay","mejs.maltese":"Maltese","mejs.norwegian":"Norwegian","mejs.persian":"Persian","mejs.polish":"Polish","mejs.portuguese":"Portuguese","mejs.romanian":"Romanian","mejs.russian":"Russian","mejs.serbian":"Serbian","mejs.slovak":"Slovak","mejs.slovenian":"Slovenian","mejs.spanish":"Spanish","mejs.swahili":"Swahili","mejs.swedish":"Swedish","mejs.tagalog":"Tagalog","mejs.thai":"Thai","mejs.turkish":"Turkish","mejs.ukrainian":"Ukrainian","mejs.vietnamese":"Vietnamese","mejs.welsh":"Welsh","mejs.yiddish":"Yiddish"}};
+//# sourceURL=mediaelement-core-js-before
+</script>
+<script id="mediaelement-core-js" src="https://www.bram.us/wordpress/wp-includes/js/mediaelement/mediaelement-and-player.min.js?ver=4.2.17"></script>
+<script id="mediaelement-migrate-js" src="https://www.bram.us/wordpress/wp-includes/js/mediaelement/mediaelement-migrate.min.js?ver=7.1.2"></script>
+<script id="mediaelement-js-extra">
+var _wpmejsSettings = {"pluginPath":"/wordpress/wp-includes/js/mediaelement/","classPrefix":"mejs-","stretching":"responsive","audioShortcodeLibrary":"mediaelement","videoShortcodeLibrary":"mediaelement"};
+//# sourceURL=mediaelement-js-extra
+</script>
+<script id="wp-mediaelement-js" src="https://www.bram.us/wordpress/wp-includes/js/mediaelement/wp-mediaelement.min.js?ver=7.1.2"></script>
+<script id="mediaelement-vimeo-js" src="https://www.bram.us/wordpress/wp-includes/js/mediaelement/renderers/vimeo.min.js?ver=4.2.17"></script>
+<script defer id="akismet-frontend-js" src="https://www.bram.us/wordpress/wp-content/plugins/akismet/_inc/akismet-frontend.js?ver=1787681550"></script>
+<script type="text/javascript" id="slb_context">/* <![CDATA[ */if ( !!window.jQuery ) {(function($){$(document).ready(function(){if ( !!window.SLB ) { {$.extend(SLB, {"context":["public","user_guest"]});} }})})(jQuery);}/* ]]> */</script>
+
+</body>
+</html>

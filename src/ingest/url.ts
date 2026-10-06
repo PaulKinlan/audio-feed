@@ -585,12 +585,99 @@ export async function discoverFeeds(
  */
 export const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
+/**
+ * Elements whose subtrees contribute no narration text (audio-feed-sa4g). A media
+ * embed's fallback content is a bare link to the media file — left in place, TTS
+ * spells the URL character by character before the article says a single word
+ * (measured on bram.us: the narration opened with "https://... show-keystrokes.mp4").
+ */
+const NON_NARRATED_ELEMENTS = new Set([
+  "VIDEO",
+  "AUDIO",
+  "SOURCE",
+  "EMBED",
+  "OBJECT",
+  "IFRAME",
+  "CANVAS",
+  "TRACK",
+  "SVG",
+]);
+
+/**
+ * A paragraph substantial enough to count as the article's own prose (the point after
+ * which figure captions are content, not decoration). 40 characters is two spoken
+ * clauses — separators ("~"), credits and media fallback wrappers never reach it.
+ */
+const SUBSTANTIAL_PARAGRAPH_CHARS = 40;
+
+/**
+ * A link whose entire visible text is a URL or bare path is navigation chrome, not
+ * prose (audio-feed-sa4g): spelled aloud it becomes "slash show dash keystrokes".
+ * Domain-only text ("example.com") is kept — "example dot com" is how it is said.
+ */
+export function isBareUrlText(text: string | null | undefined): boolean {
+  const value = clean(text);
+  if (!value || /\s/.test(value)) return false;
+  return /^(?:https?:)?\/\//i.test(value) ||
+    /^www\./i.test(value) ||
+    value.startsWith("/") ||
+    /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\/\S+/i.test(value);
+}
+
+/** True when the node sits inside a <figcaption> (captions are not opening prose). */
+function withinFigcaption(node: Element): boolean {
+  for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+    if (parent.nodeName === "FIGCAPTION") return true;
+  }
+  return false;
+}
+
+/** The first paragraph substantial enough to be the article's opening line, if any. */
+function firstSubstantialParagraph(root: ParentNode): Element | null {
+  for (const p of root.querySelectorAll("p")) {
+    if (withinFigcaption(p)) continue;
+    if (clean(p.textContent).length >= SUBSTANTIAL_PARAGRAPH_CHARS) return p;
+  }
+  return null;
+}
+
+/**
+ * Strip what can never be narration, in the order the later decisions depend on
+ * (audio-feed-sa4g): media embeds first — their fallback wrappers must be empty
+ * before "leading" is measured — then decorative paragraphs, then the captions of
+ * figures that appear before the article's own first substantial paragraph. A hero
+ * figure's caption is presentation (a demo pointer, a photo credit); the same
+ * markup after the opening paragraph is content (a chart's caption) and stays.
+ */
+function stripNonNarration(content: Element): void {
+  for (
+    const node of content.querySelectorAll(
+      "video, audio, source, embed, object, iframe, canvas, track",
+    )
+  ) node.remove();
+  for (const p of content.querySelectorAll("p")) {
+    if (!/[\p{L}\p{N}]/u.test(clean(p.textContent))) p.remove();
+  }
+  const firstProse = firstSubstantialParagraph(content);
+  if (!firstProse) return;
+  // querySelectorAll yields document order, so every figcaption seen before the
+  // article's opening paragraph belongs to a leading/hero figure — drop it. The
+  // same markup after that paragraph is content (a chart's caption) and stays.
+  let seenProse = false;
+  for (const node of content.querySelectorAll("figcaption, p")) {
+    if (node === firstProse) seenProse = true;
+    else if (node.nodeName === "FIGCAPTION" && !seenProse) node.remove();
+  }
+}
+
 export function plainText(node: Node): string {
   if (node.nodeType === 3) return (node.textContent ?? "").replace(/\s+/g, " ");
+  if (NON_NARRATED_ELEMENTS.has(node.nodeName)) return "";
   if (node.nodeName === "PRE") {
     const raw = (node.textContent ?? "").trim();
     return raw ? `\n\`\`\`\n${raw}\n\`\`\`\n` : "";
   }
+  if (node.nodeName === "A" && isBareUrlText(node.textContent)) return "";
   const text = Array.from(node.childNodes).map(plainText).join("");
   return /^(P|DIV|SECTION|H[1-6]|LI|UL|OL|BLOCKQUOTE|BR|TR)$/.test(node.nodeName)
     ? `\n${text}\n`
@@ -637,7 +724,14 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
       heading.remove();
     }
   }
+  stripNonNarration(content);
   const body = plainText(content).split("\n").map(clean).filter(Boolean).join("\n\n");
+  // The lead is spoken in the intro (formatNarrationIntro); it must go through
+  // plainText so a bare-URL anchor in the opening paragraph is not spelled out
+  // there while the body strips it (review finding on audio-feed-sa4g).
+  const firstProse = firstSubstantialParagraph(content);
+  const lead = (firstProse ? clean(plainText(firstProse)) : "") ||
+    body.split("\n\n")[0] || body;
   if (!title || body.length < 80) {
     throw new IngestError(
       422,
@@ -662,7 +756,7 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     title,
     author: clean(result.byline || byline).replace(/^by\s+/i, "") || null,
     publishedAt,
-    lead: clean(content.querySelector("p")?.textContent) || body.split("\n\n")[0] || body,
+    lead,
     body,
   };
 }
