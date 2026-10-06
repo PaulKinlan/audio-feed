@@ -92,13 +92,14 @@ Deno.test("closedby: dialog and backdrop CSS delivered across stylesheets (audio
 });
 
 Deno.test("closedby: Baseline markers are present (audio-feed-e21x)", async () => {
-  // audio-feed-0r0s: the shim's single source is admin.js's marked region; shell.ts embeds it by
-  // derivation, so the file-level assert follows the source and the runtime assert follows the
-  // export the account page actually ships.
-  const adminJs = await Deno.readTextFile("src/assets/admin.js");
+  // audio-feed-0r0s: the shim's single source is the marked region, embedded by derivation, so
+  // the file-level assert follows the source and the runtime assert follows the export the
+  // account page actually ships. audio-feed-3xq part 4c: the source file is
+  // src/assets/confirm-shared.js (composed into the served admin.js by assets.ts).
+  const confirmShared = await Deno.readTextFile("src/assets/confirm-shared.js");
   const listenJs = await Deno.readTextFile("src/assets/listen.js");
 
-  assert(adminJs.includes("TODO(baseline/dialog-closedby)"));
+  assert(confirmShared.includes("TODO(baseline/dialog-closedby)"));
   assert(listenJs.includes("TODO(baseline/dialog-closedby)"));
   assert(CONFIRM_DIALOG_CLIENT.includes("TODO(baseline/dialog-closedby)"));
 });

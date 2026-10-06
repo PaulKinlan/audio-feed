@@ -17,9 +17,11 @@
 import type { User } from "../types.ts";
 import { esc } from "./html.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
-// The confirm client's single source is the marked region of this file (audio-feed-0r0s);
-// the same `with { type: "text" }` idiom src/routes/assets.ts uses to serve it.
-import adminClientSource from "../assets/admin.js" with { type: "text" };
+// The confirm client's single source is src/assets/confirm-shared.js (audio-feed-0r0s, lifted
+// out of admin.js by audio-feed-3xq part 4c); the same `with { type: "text" }` idiom
+// src/routes/assets.ts uses to serve it.
+import confirmSharedSource from "../assets/confirm-shared.js" with { type: "text" };
+import tooltipClientSource from "../assets/tooltip-client.js" with { type: "text" };
 
 /** Who the header says is signed in. `null` for a visitor. */
 export interface Viewer {
@@ -469,13 +471,14 @@ export const CONFIRM_DIALOG_HTML = `
  * Combining closedby='any' with an autofocus on the non-destructive Cancel button
  * guarantees keyboard and light-dismiss safety out of the box."
  *
- * SINGLE SOURCE (audio-feed-0r0s): there is no second copy of this code anymore. The canonical
- * client — the closedby light-dismiss shim + askConfirm — lives in the marked region at the top
- * of src/assets/admin.js (the module the admin console serves), and what ships inline on the
- * classic-script pages (account) is that exact region, sliced at import time below. Editing the
- * region edits both surfaces; a broken marker fails at module load rather than silently serving
- * a page without its confirm client. When audio-feed-3xq part 4c extracts the account script to
- * a module, lift the region into a composed shared asset and delete this slice.
+ * SINGLE SOURCE (audio-feed-0r0s, composed asset since audio-feed-3xq part 4c): there is no
+ * second copy of this code. The canonical client — the closedby light-dismiss shim + askConfirm —
+ * is src/assets/confirm-shared.js in full, and what ships inline on the classic-script pages
+ * (account) is that file's marked region, sliced at import time below. The admin console gets the
+ * same bytes composed in front of src/assets/admin.js by src/routes/assets.ts. Editing the
+ * region edits every surface; a broken marker fails at module load rather than silently serving
+ * a page without its confirm client. When the account script itself is extracted to a module,
+ * this slice goes away and the module imports the shared asset through an import map.
  */
 const CONFIRM_SHARED_BEGIN = "// #confirm-shared-begin";
 const CONFIRM_SHARED_END = "// #confirm-shared-end";
@@ -511,7 +514,7 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(adminClientSource);
+export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(confirmSharedSource);
 
 /**
  * Accessible Tooltip Container HTML (audio-feed-pzwe).
@@ -524,127 +527,12 @@ export const TOOLTIP_HTML =
   `<div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>`;
 
 /**
- * Accessible Tooltip Controller using CSS Anchor Positioning with flip-block fallback (audio-feed-pzwe).
- * Keep in sync with the standalone player copy in src/assets/listen.js.
- * WCAG 2.1 1.4.13:
- * - Dismissible: Escape key immediately dismisses tooltip
- * - Hoverable: Pointer hover over tooltip content keeps it visible (.tooltip.visible { pointer-events: auto })
- * - Persistent: Stays visible until pointer/focus moves away or Escape pressed
- * - Screen readers: Dynamically sets aria-describedby="appTooltip" on active target
+ * The tooltip client, shipped inline on every shell page. Its source is
+ * src/assets/tooltip-client.js (audio-feed-3xq part 4c) — a @ts-check file imported as text,
+ * the same idiom as the confirm client above. Exported for the tests that embed the exact
+ * bytes the pages run.
  */
-export const TOOLTIP_CLIENT = `
-  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
-    const tooltipEl = document.getElementById("appTooltip");
-    if (tooltipEl) {
-      const supportsAnchorPositioning = typeof CSS !== "undefined" &&
-        typeof CSS.supports === "function" &&
-        CSS.supports("anchor-name", "--a");
-      let currentTooltipTarget = null;
-      let hideTimer = null;
-
-      const showTooltip = (target, text) => {
-        if (hideTimer) {
-          clearTimeout(hideTimer);
-          hideTimer = null;
-        }
-        if (currentTooltipTarget && currentTooltipTarget !== target) {
-          currentTooltipTarget.removeAttribute("data-tooltip-active");
-          currentTooltipTarget.removeAttribute("aria-describedby");
-        }
-        currentTooltipTarget = target;
-        target.setAttribute("data-tooltip-active", "");
-        target.setAttribute("aria-describedby", "appTooltip");
-        tooltipEl.textContent = text;
-        tooltipEl.setAttribute("aria-hidden", "false");
-        tooltipEl.classList.add("visible");
-
-        if (!supportsAnchorPositioning) {
-          // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
-          const rect = target.getBoundingClientRect();
-          tooltipEl.style.left = rect.left + "px";
-          const tooltipHeight = tooltipEl.offsetHeight || 28;
-          const margin = 8;
-          const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
-          const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
-          if (overflowBottom && fitsAbove) {
-            tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
-          } else {
-            tooltipEl.style.top = (rect.bottom + margin) + "px";
-          }
-        }
-      };
-
-      const hideTooltip = (immediate) => {
-        const doHide = () => {
-          if (currentTooltipTarget) {
-            currentTooltipTarget.removeAttribute("data-tooltip-active");
-            currentTooltipTarget.removeAttribute("aria-describedby");
-            currentTooltipTarget = null;
-          }
-          tooltipEl.classList.remove("visible");
-          tooltipEl.setAttribute("aria-hidden", "true");
-          if (!supportsAnchorPositioning) {
-            tooltipEl.style.left = "";
-            tooltipEl.style.top = "";
-          }
-        };
-
-        if (immediate) {
-          if (hideTimer) {
-            clearTimeout(hideTimer);
-            hideTimer = null;
-          }
-          doHide();
-        } else {
-          if (hideTimer) clearTimeout(hideTimer);
-          hideTimer = setTimeout(doHide, 80);
-        }
-      };
-
-      tooltipEl.addEventListener("pointerenter", () => {
-        if (hideTimer) {
-          clearTimeout(hideTimer);
-          hideTimer = null;
-        }
-      });
-      tooltipEl.addEventListener("pointerleave", () => {
-        hideTooltip(false);
-      });
-
-      document.addEventListener("pointerover", (event) => {
-        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
-        if (target && target instanceof HTMLElement) {
-          const text = target.getAttribute("data-tooltip");
-          if (text) showTooltip(target, text);
-        }
-      });
-
-      document.addEventListener("pointerout", (event) => {
-        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
-        if (target) hideTooltip(false);
-      });
-
-      document.addEventListener("focusin", (event) => {
-        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
-        if (target && target instanceof HTMLElement) {
-          const text = target.getAttribute("data-tooltip");
-          if (text) showTooltip(target, text);
-        }
-      });
-
-      document.addEventListener("focusout", (event) => {
-        const target = event.target && event.target.closest ? event.target.closest("[data-tooltip]") : null;
-        if (target) hideTooltip(true);
-      });
-
-      document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && currentTooltipTarget) {
-          hideTooltip(true);
-        }
-      });
-    }
-  }
-`;
+export const TOOLTIP_CLIENT = tooltipClientSource;
 
 const MARK =
   `<svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--accent)"/><g stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"><path d="M9 13v6"/><path d="M13.5 9v14"/><path d="M18 12v8"/><path d="M22.5 14.5v3"/></g></svg>`;

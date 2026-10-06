@@ -90,13 +90,18 @@ Deno.test("renderAccountPage: includes native accessible <dialog> and client scr
   );
 });
 
-Deno.test("confirm client has ONE source: shell's export is admin.js's marked region (audio-feed-0r0s)", () => {
-  // There is no second copy to keep in sync anymore: the canonical client is the region between
-  // the #confirm-shared markers in src/assets/admin.js, and CONFIRM_DIALOG_CLIENT is that exact
-  // region sliced at import time. This test pins the derivation: exactly one marker pair, the
-  // slice equals the export byte for byte, the region stays embeddable in a classic <script>,
-  // and the account page actually ships it. Any drift between the surfaces is now impossible by
-  // construction — what CAN break is the slicing, and that fails here instead of at deploy.
+Deno.test("confirm client has ONE source: confirm-shared.js, composed into admin.js and sliced into the shell (audio-feed-0r0s, part 4c)", () => {
+  // There is no second copy to keep in sync: the canonical client is src/assets/confirm-shared.js
+  // in full. Two surfaces, one source: the admin console SERVES it composed in front of
+  // src/assets/admin.js (assets.ts), and the classic-script pages (account) EMBED the file's
+  // marked region sliced at import time (shell.ts CONFIRM_DIALOG_CLIENT). This test pins both
+  // derivations: exactly one marker pair in the shared file and in the composed admin bytes, the
+  // composition is exactly shared + "\n" + console file, the slice equals the shell export byte
+  // for byte, the on-disk console file no longer carries any copy or marker, and the console
+  // binds to the composed-provided client through globalThis. What CAN still break is the
+  // slicing or the composition order — and that fails here instead of at deploy.
+  const sharedFile = Deno.readTextFileSync("src/assets/confirm-shared.js");
+  const consoleFile = Deno.readTextFileSync("src/assets/admin.js");
   const source = assetBody("admin.js") ?? "";
   const beginMarker = "// #confirm-shared-begin";
   const endMarker = "// #confirm-shared-end";
@@ -104,14 +109,44 @@ Deno.test("confirm client has ONE source: shell's export is admin.js's marked re
   const countLines = (text: string, line: string) =>
     text.split("\n").filter((l) => l === line).length;
   assertEquals(
+    countLines(sharedFile, beginMarker),
+    1,
+    "confirm-shared.js must carry exactly one confirm-shared-begin marker line",
+  );
+  assertEquals(
+    countLines(sharedFile, endMarker),
+    1,
+    "confirm-shared.js must carry exactly one confirm-shared-end marker line",
+  );
+  assertEquals(
+    countLines(consoleFile, beginMarker),
+    0,
+    "the on-disk console file must not carry a copy of the shared client",
+  );
+  assertEquals(
+    countLines(consoleFile, endMarker),
+    0,
+    "the on-disk console file must not carry a copy of the shared client",
+  );
+  assertEquals(
+    source,
+    `${sharedFile}\n${consoleFile}`,
+    "served admin.js must be exactly confirm-shared.js + console file (composition contract)",
+  );
+  assertStringIncludes(
+    consoleFile,
+    "(globalThis).askConfirm",
+    "the console file must bind to the composed-provided client through globalThis",
+  );
+  assertEquals(
     countLines(source, beginMarker),
     1,
-    "admin.js must carry exactly one confirm-shared-begin marker line",
+    "composed admin.js must carry exactly one confirm-shared-begin marker line",
   );
   assertEquals(
     countLines(source, endMarker),
     1,
-    "admin.js must carry exactly one confirm-shared-end marker line",
+    "composed admin.js must carry exactly one confirm-shared-end marker line",
   );
   const beginLine = source.split("\n").indexOf(beginMarker);
   const endLine = source.split("\n").indexOf(endMarker);

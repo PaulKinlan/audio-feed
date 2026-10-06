@@ -114,10 +114,14 @@ Deno.test("unification: home, admin, listen landing, and player stylesheet share
   assert(adminHtml.includes("--space-12: 3rem"));
   assert(adminHtml.includes("--radius: 12px"));
 
-  // Listen landing includes DESIGN_TOKENS
+  // Listen landing links its stylesheet; DESIGN_TOKENS are composed into it
+  // (audio-feed-3xq part 4c — the tokens no longer ride in the page's HTML).
   const listenLandingHtml = renderListenLanding("https://audio.example.com");
-  assert(listenLandingHtml.includes("--space-12: 3rem"));
-  assert(listenLandingHtml.includes("--radius: 12px"));
+  const landingCss = (await import("../src/routes/assets.ts")).assetBody("listen-landing.css") ??
+    "";
+  assert(listenLandingHtml.includes("listen-landing.css"), "landing must link its stylesheet");
+  assert(landingCss.includes("--space-12: 3rem"));
+  assert(landingCss.includes("--radius: 12px"));
 
   // Content-addressed player stylesheet includes DESIGN_TOKENS
   const assetModule = await import("../src/routes/assets.ts");

@@ -19,6 +19,7 @@ import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerClient, playerData } from "./listen_client.ts";
+import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -146,10 +147,19 @@ Deno.test("the player remembers the token so a home-screen launch needs no typin
   const client = await playerClient(fetch, BASE, html);
   assertStringIncludes(client, 'localStorage.setItem("audio-feed-token"');
   // …and /listen restores it client-side, since a server cannot read localStorage.
+  // audio-feed-3xq part 4c: the restore client is src/assets/listen-landing.js now; the page
+  // keeps the markup and links the module. The property under test is unchanged: the landing
+  // ships the same-storage-key restore and the redirect, and its form is the one it drives.
   const landing = await (await fetch(get("/listen"))).text();
-  assertStringIncludes(landing, 'localStorage.getItem("audio-feed-token")');
-  assertStringIncludes(landing, 'location.replace("/listen/"');
+  const landingClient = assetBody("listen-landing.js") ?? "";
+  assertStringIncludes(landingClient, 'localStorage.getItem("audio-feed-token")');
+  assertStringIncludes(landingClient, 'location.replace("/listen/"');
   assertStringIncludes(landing, "Open my player");
+  assertStringIncludes(
+    landing,
+    assetUrl("listen-landing.js"),
+    "landing must link the client it relies on",
+  );
 });
 
 Deno.test("the token is the only credential, and it is checked", async () => {
