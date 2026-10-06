@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import {
   articleUrl,
   audioPayload,
+  cleanBylineName,
   createUrlIngestHandler,
   extractArticle,
   fetchArticle,
@@ -787,4 +788,22 @@ Deno.test("the lead strips bare-URL anchors exactly like the body does (audio-fe
   match(result.body, /^Welcome to this guide/);
   // a media-less hero caption still never leads the read
   equal(result.body.includes("decorative hero caption"), false);
+});
+
+Deno.test("byline chrome is stripped so narration says only the name (audio-feed-ldsb)", () => {
+  const page = (byline: string) =>
+    `<!doctype html><html><head><title>Bylines</title></head><body><article>
+    <h1>Bylines</h1>
+    <p class="byline">${byline}</p>
+    <p>Opening paragraph with more than forty characters of real article prose to anchor extraction.</p>
+    <p>Second paragraph so the body comfortably clears the readability threshold for parsing.</p>
+  </article></body></html>`;
+  equal(extractArticle(page("Published by Bramus!"), source).author, "Bramus");
+  equal(extractArticle(page("Written by Jo Editor"), source).author, "Jo Editor");
+  equal(extractArticle(page("by Alex Reader"), source).author, "Alex Reader");
+  // a name that merely starts with the letters "by" is never touched
+  equal(extractArticle(page("Byrne Smith"), source).author, "Byrne Smith");
+  equal(cleanBylineName("Posted by Sam"), "Sam");
+  equal(cleanBylineName("Authored by Pat!"), "Pat");
+  equal(cleanBylineName(""), "");
 });

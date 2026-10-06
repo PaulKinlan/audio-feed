@@ -1,0 +1,11 @@
+# audio-feed-ldsb evidence capture
+# url: https://www.bram.us/2026/09/23/show-keystrokes/ (vendored ../audio-feed-sa4g/article.html)
+# command: deno run -A docs/evidence/audio-feed-ldsb/capture.ts <out>
+
+=== EXTRACTED AUTHOR ===
+Published by Bramus!
+
+=== DIRECT-MODE NARRATION, first 3 lines (what TTS reads first) ===
+Show keystrokes on a website with the <show-keystrokes> custom element
+By Published by Bramus!.
+Published 2026-09-23T08:32:27.000Z.
