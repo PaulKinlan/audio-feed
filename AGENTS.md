@@ -74,7 +74,7 @@ prints the URL the landed tree expects, and that URL's `sha256sum` must equal
 COMPOSED — design tokens prepended — so compare the tail after the token block, or fetch the file's
 own route.
 
-**Rule: landed \u2260 live.** A change is verified only when the live fingerprint (or an asset hash)
+**Rule: landed ≠ live.** A change is verified only when the live fingerprint (or an asset hash)
 matches the landed revision. Otherwise record production as UNVERIFIED on the bead and say so in the
 handoff, rather than treating a passing gate on the landed tree as proof of what is serving.
 
