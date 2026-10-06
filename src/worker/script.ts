@@ -396,13 +396,15 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
               ? "Include researchSummary, counterarguments, and sources."
               : "Keep previous research and sources; output only this turn range."
           }`;
-        const contents = segment.kind === "full" ? [{ role: "user", parts: [{ text: prompt }] }] : [
-          { role: "user", parts: [{ text: prompt }] },
-          ...(previous.length
-            ? [{ role: "model", parts: [{ text: JSON.stringify({ turns: previous }) }] }]
-            : []),
-          { role: "user", parts: [{ text: batchInstruction }] },
-        ];
+        const contents = segment.kind === "full"
+          ? [{ role: "user", parts: [{ text: prompt }] }]
+          : previous.length
+          ? [
+            { role: "user", parts: [{ text: prompt }] },
+            { role: "model", parts: [{ text: JSON.stringify({ turns: previous }) }] },
+            { role: "user", parts: [{ text: batchInstruction }] },
+          ]
+          : [{ role: "user", parts: [{ text: `${prompt}\n\n${batchInstruction}` }] }];
         const body = {
           contents,
           tools: [{ googleSearch: {} }],

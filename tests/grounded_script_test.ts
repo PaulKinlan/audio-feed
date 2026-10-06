@@ -315,6 +315,40 @@ Deno.test("synthesis: in-flight TTS is cancelled before claim expiry and termina
   assertEquals(calls, 1);
 });
 
+Deno.test("grounded continuation stage is clamped to remaining claim lease", async () => {
+  let ttsAccepted = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: ((_url, init) => {
+      if (init?.signal?.aborted) {
+        return Promise.reject(new Error("claim cancelled before TTS spend"));
+      }
+      ttsAccepted++;
+      return Promise.reject(new Error("unexpected TTS call"));
+    }) as typeof fetch,
+  });
+  const ctx = {
+    config: { geminiApiKey: "fixture-key" },
+    stores: memoryStores(),
+  } as unknown as AppContext;
+  const synthesize = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: () => new Promise(() => {}), // ignores signal; outer race must still win
+  });
+  const error = await assertRejects(() =>
+    synthesize({
+      article: makeArticle({ title: "Lease", content: "Body." }),
+      source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
+      episode: makeEpisode({ claimedAt: new Date().toISOString() }),
+      mode: "deepdive",
+      leaseMs: 60_060,
+    })
+  );
+  assert(error instanceof Error);
+  assertEquals((error as { status?: number }).status, 400);
+  assertEquals(ttsAccepted, 0);
+});
+
 Deno.test("synthesis: direct mode never pays for the research call", async () => {
   let researchCalls = 0;
   const { calls, synthesize } = harness({

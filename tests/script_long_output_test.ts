@@ -87,6 +87,10 @@ Deno.test("after: long article output continues as complete numbered JSON batche
   assertStringIncludes(requests[0]!.url, `${DEFAULT_SCRIPT_MODEL}:generateContent`);
   const params = firstBody.generationConfig as { temperature: number; maxOutputTokens: number };
   assertEquals(params, { temperature: 0.7, maxOutputTokens: SCRIPT_MAX_OUTPUT_TOKENS });
+  assert(requests.every((r) => JSON.stringify(r.body.generationConfig) === JSON.stringify(params)));
+  assertEquals((requests[1]!.body.contents as Array<{ role: string }>).map((c) => c.role), [
+    "user",
+  ]);
   assertEquals((requests[2]!.body.contents as Array<{ role: string }>).map((c) => c.role), [
     "user",
     "model",

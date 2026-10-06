@@ -301,7 +301,7 @@ export function createGeminiSynthesizer(
           },
           speakers,
         },
-        deps.scriptTimeoutMs,
+        Math.min(deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS, remainingMs ?? Infinity),
       );
       try {
         return await client.synthesizeDialogue({
