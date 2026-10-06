@@ -126,8 +126,17 @@ await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 let nextId = 0;
 const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
 // CDP events, collected rather than dropped: the network and console checks below
-// read what the browser actually saw.
-const events: { method: string; params: Record<string, any> }[] = [];
+// read what the browser actually saw. Typed to the few fields this proof reads.
+interface CdpEvent {
+  method: string;
+  params: {
+    response?: { url?: string; status?: number; headers?: Record<string, string> };
+    request?: { method?: string; url?: string };
+    type?: string;
+    entry?: { level?: string };
+  };
+}
+const events: CdpEvent[] = [];
 ws.addEventListener("message", (e) => {
   const msg = JSON.parse(e.data);
   if (msg.id && pending.has(msg.id)) {
