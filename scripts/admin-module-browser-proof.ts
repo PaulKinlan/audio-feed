@@ -308,7 +308,7 @@ try {
 
   // 6. Zero console errors or exceptions across everything above.
   const consoleErrors = events.filter((e) =>
-    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type)) ||
+    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type ?? "")) ||
     e.method === "Runtime.exceptionThrown" ||
     (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
   );
@@ -337,7 +337,7 @@ try {
   await until(`document.readyState === "complete"`, "admin page reloaded at 390x844");
   await until(`document.getElementById("usersBody")?.children?.length > 0`, "users loaded at 390x844");
   const phoneErrors = events.filter((e) =>
-    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type)) ||
+    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type ?? "")) ||
     e.method === "Runtime.exceptionThrown" ||
     (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
   );
