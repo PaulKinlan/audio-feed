@@ -12,6 +12,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { CONFIRM_DIALOG_CLIENT, CONFIRM_DIALOG_HTML, renderShell } from "../src/routes/shell.ts";
+import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import { renderAccountPage } from "../src/routes/account.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { makeUser } from "./fixtures.ts";
@@ -93,11 +94,19 @@ Deno.test("renderAdminPage: includes native accessible <dialog> and client scrip
 
   assertStringIncludes(html, '<dialog id="confirmDialog"');
   assertStringIncludes(html, 'closedby="any"');
-  assertStringIncludes(html, "askConfirm(");
+  // audio-feed-3xq part 4a: askConfirm moved from the inline page string into the
+  // content-addressed client module, so the assertion follows the bytes that ship.
+  // The property is unchanged: the console asks with the native dialog, never with a
+  // blocking window.confirm whose result is discarded.
+  const client = assetBody("admin.js");
+  assert(client !== null, "admin.js must be a registered asset");
+  assertStringIncludes(client, "askConfirm(");
   assert(
-    !html.includes("!confirm("),
-    "admin console script must use askConfirm instead of blocking window.confirm",
+    !client.includes("!confirm("),
+    "admin console client must use askConfirm instead of blocking window.confirm",
   );
+  // And the page must actually load that module.
+  assertStringIncludes(html, `<script type="module" src="${assetUrl("admin.js")}"></script>`);
 });
 
 Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves promise on close (audio-feed-ytl)", async () => {

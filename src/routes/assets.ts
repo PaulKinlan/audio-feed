@@ -18,6 +18,7 @@
 import listenCss from "../assets/listen.css" with { type: "text" };
 import listenJs from "../assets/listen.js" with { type: "text" };
 import adminCss from "../assets/admin.css" with { type: "text" };
+import adminJs from "../assets/admin.js" with { type: "text" };
 import { DESIGN_TOKENS } from "./tokens.ts";
 import type { RouteContext } from "../router.ts";
 
@@ -47,6 +48,10 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
   // resolve against the shell's tokens, and prepending a second copy would change the cascade. This is
   // a verbatim move — de-duplicating the token block is separate work with its own rendering risk.
   "admin.css": { body: adminCss, contentType: "text/css; charset=utf-8" },
+  // audio-feed-3xq part 4a: the console's client, extracted from admin.ts's template string.
+  // Like listen.js it is a self-contained module — no imports — because a verbatim-served file
+  // cannot address another hashed asset by name.
+  "admin.js": { body: adminJs, contentType: "text/javascript; charset=utf-8" },
 };
 
 /** The URL a page should reference for an asset, content-addressed. */

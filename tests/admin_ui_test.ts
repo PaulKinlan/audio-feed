@@ -15,6 +15,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
+import { assetBody } from "../src/routes/assets.ts";
 import { shippedCss } from "./admin_css.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -66,7 +67,9 @@ Deno.test("the admin page renders the console with accessible controls (audio-fe
   assertStringIncludes(html, '<th scope="col">');
   assertStringIncludes(html, 'aria-live="polite"');
   // No data is baked in: the shell is public, the data is token-gated.
-  assertEquals(html.includes("feedToken"), true, "the client must know about the field");
+  // audio-feed-3xq part 4a: the client is a linked module now, so "the client must know
+  // about the field" is asserted against the shipped module bytes, not the page string.
+  assertStringIncludes(assetBody("admin.js") ?? "", "feedToken");
   assertEquals(html.includes(ADMIN), false, "the server token must never be in the page");
 });
 
@@ -104,15 +107,20 @@ Deno.test("the page says so when the server has no admin token", () => {
 
 Deno.test("subscriber-supplied text is never interpolated into the shell", () => {
   // The console holds the admin token in sessionStorage, so a stored-XSS payload
-  // in a display name would be able to read it. The page must contain no
-  // server-side interpolation of user data at all.
+  // in a display name would be able to read it. Neither the page nor its client
+  // module may contain server-side interpolation of user data or HTML-sink calls.
+  // audio-feed-3xq part 4a: the client moved to src/assets/admin.js, so the
+  // assertions follow the shipped bytes there AND stay on the page markup.
   const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
-  assertStringIncludes(html, "textContent");
-  // Assert on USAGE, not on the word: the client script documents the rule in a
+  const client = assetBody("admin.js") ?? "";
+  assertStringIncludes(client, "textContent");
+  // Assert on USAGE, not on the word: the client documents the rule in a
   // comment, so a bare substring check fails on its own documentation.
-  assertEquals(/\.innerHTML\s*=/.test(html), false, "no innerHTML assignment");
-  assertEquals(/insertAdjacentHTML/.test(html), false, "no insertAdjacentHTML");
-  assertEquals(/document\.write/.test(html), false, "no document.write");
+  for (const [where, text] of [["page", html], ["client module", client]] as const) {
+    assertEquals(/\.innerHTML\s*=/.test(text), false, `no innerHTML assignment in the ${where}`);
+    assertEquals(/insertAdjacentHTML/.test(text), false, `no insertAdjacentHTML in the ${where}`);
+    assertEquals(/document\.write/.test(text), false, `no document.write in the ${where}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -372,9 +380,10 @@ Deno.test("a hostile origin cannot break out of the script block", () => {
   const html = renderAdminPage({ publicBaseUrl: hostile, adminConfigured: true });
   assertEquals(/<\/script><img/.test(html), false, "the payload must not appear as markup");
   assertStringIncludes(html, "\\u003c/script\\u003e");
-  // And the document still has exactly the script blocks it should.
-  const opens = html.match(/<script>/g)?.length ?? 0;
+  // And the document still has exactly the script blocks it should: the shell's inline
+  // script, the #admin-data island, and the client module (audio-feed-3xq part 4a).
+  const opens = html.match(/<script\b/g)?.length ?? 0;
   const closes = html.match(/<\/script>/g)?.length ?? 0;
   assertEquals(opens, closes);
-  assertEquals(opens, 1);
+  assertEquals(opens, 3);
 });

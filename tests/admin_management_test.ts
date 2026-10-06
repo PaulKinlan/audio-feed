@@ -9,6 +9,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, openStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
+import { assetBody } from "../src/routes/assets.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -913,11 +914,14 @@ Deno.test("admin console page renders subscriber management section and auto-loa
   // clicking Cancel deleted the feed anyway (audio-feed-05b). They are driven
   // for real in tests/admin_confirm_test.ts, which watches for the request.
 
-  // Auto-load on sign-in: script calls loadUsers() when SIGNED_IN is true (audio-feed-0jp).
+  // Auto-load on sign-in: the client calls loadUsers() when SIGNED_IN is true (audio-feed-0jp).
   // Token-paste controls and storage are removed in favor of passkey session auth.
-  assertStringIncludes(html, "if (SIGNED_IN)");
-  assertStringIncludes(html, "loadUsers();");
-  assertStringIncludes(html, "loadStats();");
+  // audio-feed-3xq part 4a: that logic lives in src/assets/admin.js now, so the assertion
+  // follows the shipped module bytes; the page itself must stay free of the old token controls.
+  const client = assetBody("admin.js") ?? "";
+  assertStringIncludes(client, "if (SIGNED_IN)");
+  assertStringIncludes(client, "loadUsers();");
+  assertStringIncludes(client, "loadStats();");
   assertEquals(html.includes("adminToken"), false);
   assertEquals(html.includes("saveToken"), false);
   assertEquals(html.includes("TOKEN_KEY"), false);
