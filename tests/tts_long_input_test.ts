@@ -6,6 +6,7 @@ import {
   GeminiTtsClient,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_OUTPUT_TOKENS,
+  MAX_TTS_SEGMENTS,
   pcmToWav,
   splitTtsText,
   uint8ArrayToBase64,
@@ -170,6 +171,10 @@ Deno.test("multispeaker and Unicode paragraphs stay bounded; malformed or mismat
       new TextEncoder().encode(c.parts.map((p) => p.text).join("")).length <= MAX_TTS_INPUT_BYTES
     ),
   );
+  assertEquals(
+    calls.flatMap((c) => c.parts).map((p) => p.text).join(" ").split(/\s+/u),
+    `${article} Indeed.`.split(/\s+/u),
+  );
   let n = 0;
   const incompatible = new GeminiTtsClient({
     apiKey: "fixture-key",
@@ -198,4 +203,90 @@ Deno.test("multispeaker and Unicode paragraphs stay bounded; malformed or mismat
   const err = await assertRejects(() => incompatible.synthesizeNarration(input));
   assert(err instanceof Error);
   assertStringIncludes(err.message, "incompatible");
+});
+
+Deno.test("oversized article is refused before any paid call; empty narration is a typed error", async () => {
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: (() => {
+      calls++;
+      return Promise.resolve(success());
+    }) as typeof fetch,
+  });
+  const huge = await assertRejects(() =>
+    client.synthesizeNarration({ title: "Huge", body: "word ".repeat(30000) })
+  );
+  assert(huge instanceof Error);
+  assertStringIncludes(huge.message, `limit ${MAX_TTS_SEGMENTS}`);
+  assertEquals(calls, 0);
+  const empty = await assertRejects(() =>
+    client.synthesizeNarration({ title: "", body: " ", includeIntro: false })
+  );
+  assert(empty instanceof Error);
+  assertStringIncludes(empty.message, "no spoken text");
+  assertEquals(calls, 0);
+});
+
+Deno.test("allowTruncated is explicit and remains visible for segmented audio", async () => {
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: (() => {
+      calls++;
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [{
+              finishReason: calls === 2 ? "MAX_TOKENS" : "STOP",
+              content: {
+                parts: [{
+                  inlineData: { mimeType: "audio/pcm;rate=24000", data: uint8ArrayToBase64(pcm) },
+                }],
+              },
+            }],
+          }),
+          { status: 200 },
+        ),
+      );
+    }) as typeof fetch,
+  });
+  const output = await client.synthesizeNarration(input, { allowTruncated: true });
+  assertEquals(calls, 8);
+  assert(output.truncated);
+  assertEquals(output.finishReason, "MAX_TOKENS");
+});
+
+Deno.test("MAX_TOKENS audio causes local adaptive split, not silent publication or whole-episode failure", async () => {
+  let calls = 0;
+  const transcripts: string[] = [];
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: ((_url: string | URL | Request, init?: RequestInit) => {
+      calls++;
+      transcripts.push(JSON.parse(String(init?.body)).contents[0].parts[0].text);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [{
+              finishReason: calls === 3 ? "MAX_TOKENS" : "STOP",
+              content: {
+                parts: [{
+                  inlineData: { mimeType: "audio/pcm;rate=24000", data: uint8ArrayToBase64(pcm) },
+                }],
+              },
+            }],
+          }),
+          { status: 200 },
+        ),
+      );
+    }) as typeof fetch,
+  });
+  const output = await client.synthesizeNarration(input);
+  assert(calls >= 10 && calls <= MAX_TTS_SEGMENTS); // refused segment replaced by smaller chunks
+  assertEquals(output.rawBytes.length, (calls - 1) * pcm.length);
+  assertEquals(
+    transcripts.filter((_text, index) => index !== 2).join(" ").split(/\s+/u),
+    formatNarrationPrompt(input).split(/\s+/u),
+  );
 });

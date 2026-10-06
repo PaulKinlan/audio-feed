@@ -73,6 +73,9 @@ export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 export const MAX_TTS_INPUT_BYTES = 6_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
+/** Bound paid calls per episode below the 15-minute claim lease (each attempt has a 60s deadline).
+ * Further adaptive splits count too; long articles fail before sending any requests. */
+export const MAX_TTS_SEGMENTS = 12;
 /** Per-attempt deadline. A hung request must not hold a synthesis worker forever. */
 export const DEFAULT_TIMEOUT_MS = 60_000;
 /** Retries AFTER the first attempt. */
@@ -1104,16 +1107,20 @@ export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): stri
 }
 
 /** Each request yields a self-contained audio file; concatenate only compatible PCM payloads. */
-function joinTtsAudio(chunks: DecodedAudioResult[]): DecodedAudioResult {
+function joinTtsAudio(chunks: DecodedAudioResult[], allowTruncated = false): DecodedAudioResult {
+  if (chunks.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
   if (chunks.length === 1) return chunks[0]!;
   const first = chunks[0]!;
   const pcm = chunks.map((chunk) => {
     if (
       chunk.sampleRate !== first.sampleRate || chunk.channels !== first.channels ||
-      chunk.bitsPerSample !== first.bitsPerSample || chunk.truncated ||
+      chunk.bitsPerSample !== first.bitsPerSample ||
       (chunk.format !== "wav" && chunk.format !== "pcm")
     ) {
       throw new GeminiTtsError("TTS segments returned incompatible or incomplete audio");
+    }
+    if (chunk.truncated && !allowTruncated) {
+      throw new GeminiTtsError("TTS segment returned incomplete audio");
     }
     if (chunk.format === "pcm") return chunk.rawBytes;
     const info = parseWavHeader(chunk.rawBytes);
@@ -1137,8 +1144,8 @@ function joinTtsAudio(chunks: DecodedAudioResult[]): DecodedAudioResult {
     bitsPerSample: first.bitsPerSample,
     durationSeconds: combined.length /
       (first.sampleRate * first.channels * first.bitsPerSample / 8),
-    finishReason: "STOP",
-    truncated: false,
+    finishReason: chunks.some((chunk) => chunk.truncated) ? "MAX_TOKENS" : "STOP",
+    truncated: chunks.some((chunk) => chunk.truncated),
     toWav: () =>
       pcmToWav(combined, {
         sampleRate: first.sampleRate,
@@ -1348,16 +1355,43 @@ export class GeminiTtsClient {
     const prompt = formatNarrationPrompt({ ...input, body: processedBody });
     const style = input.style ?? DEFAULT_NARRATION_STYLE;
     const segments = splitTtsText(prompt);
-    const audio: DecodedAudioResult[] = [];
-    for (const segment of segments) {
-      audio.push(
-        await this.sendRequest(
-          buildSingleVoiceRequest(segment, voice, options.temperature, style),
-          options,
-        ),
+    if (segments.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
+    if (segments.length > MAX_TTS_SEGMENTS) {
+      throw new GeminiTtsError(
+        `Narration needs ${segments.length} TTS segments (limit ${MAX_TTS_SEGMENTS})`,
+        400,
       );
     }
-    return joinTtsAudio(audio);
+    const audio: DecodedAudioResult[] = [];
+    let calls = 0;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index]!;
+      try {
+        calls++;
+        audio.push(
+          await this.sendRequest(
+            buildSingleVoiceRequest(segment, voice, options.temperature, style),
+            segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
+          ),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
+          calls >= MAX_TTS_SEGMENTS || segments.length >= MAX_TTS_SEGMENTS ||
+          new TextEncoder().encode(segment).length < 8
+        ) throw error;
+        const halves = splitTtsText(
+          segment,
+          Math.floor(new TextEncoder().encode(segment).length / 2),
+        );
+        if (halves.length < 2 || segments.length + halves.length - 1 > MAX_TTS_SEGMENTS) {
+          throw error;
+        }
+        segments.splice(index, 1, ...halves);
+        index--;
+      }
+    }
+    return joinTtsAudio(audio, options.allowTruncated);
   }
 
   /**
@@ -1398,16 +1432,25 @@ export class GeminiTtsClient {
       }
     }
     if (batch.length) batches.push(batch);
+    if (batches.length > MAX_TTS_SEGMENTS) {
+      throw new GeminiTtsError(
+        `Dialogue needs ${batches.length} TTS segments (limit ${MAX_TTS_SEGMENTS})`,
+        400,
+      );
+    }
     const audio: DecodedAudioResult[] = [];
     for (const turns of batches) {
       audio.push(
-        await this.sendRequest(buildDialogueRequest(turns, speakers, options.temperature), options),
+        await this.sendRequest(
+          buildDialogueRequest(turns, speakers, options.temperature),
+          batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
+        ),
       );
     }
     if (audio.length === 0) {
       throw new GeminiTtsError("Dialogue contained no spoken text");
     }
-    return joinTtsAudio(audio);
+    return joinTtsAudio(audio, options.allowTruncated);
   }
 
   /**

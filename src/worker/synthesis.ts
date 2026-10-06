@@ -41,6 +41,8 @@ import {
   DEFAULT_NARRATION_VOICE,
   GeminiTtsClient,
   GeminiTtsTruncatedError,
+  MAX_TTS_INPUT_BYTES,
+  MAX_TTS_SEGMENTS,
 } from "../tts/gemini.ts";
 import type { DecodedAudioResult, DialogueSpeaker } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
@@ -105,7 +107,8 @@ const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
   intervalMs: 15_000,
   maxAttempts: 3,
   retryBaseDelayMs: 500,
-  maxInputCharacters: 2_000_000,
+  // At most 12 sequential TTS calls; preserve the 15-minute claim lease and per-episode spend.
+  maxInputCharacters: MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS,
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   owner: WORKER_ID,
