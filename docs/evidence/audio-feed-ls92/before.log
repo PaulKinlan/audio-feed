@@ -1,0 +1,9 @@
+Check tests/script_long_output_test.ts
+running 1 test from ./tests/script_long_output_test.ts
+before: long grounded script MAX_TOKENS leaves incomplete JSON and falls back ...
+------- output -------
+{"stage":"before","model":"gemini-3.8-flash","formerMaxOutputTokens":4096,"currentMaxOutputTokens":16384,"temperature":0.7,"sourceArticleChars":47000,"promptBytes":13462,"finishReason":"MAX_TOKENS","requestCount":1,"result":"incomplete JSON, fallback to static dialogue"}
+----- output end -----
+before: long grounded script MAX_TOKENS leaves incomplete JSON and falls back ... ok (9ms)
+
+ok | 1 passed | 0 failed (14ms)
