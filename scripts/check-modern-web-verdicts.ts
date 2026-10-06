@@ -2,8 +2,8 @@
 /**
  * audio-feed-9ara — a closed [modern-web] bead must record a premise verdict.
  *
- * The factory's beads sink skips a candidate whose canonical feature id is already on a bead in
- * any state, so a duplicate is never *emitted* twice. What it cannot do is stop a bead being
+ * The factory dedupes only by its own per-run findings fingerprint (rebuilt each CI run), so the
+ * same modernization CAN be emitted more than once. What nothing stops is a bead being
  * closed with nothing recorded: d5c / 1vi / t8p were closed with their reasoning only in the
  * close-reason field (not in comments, where lanes look), and one lane later implemented a
  * contract nothing produced (pzwe) after re-deriving a premise a comment would have settled.

@@ -25,8 +25,11 @@ bd dolt push          # Push beads data to remote
 ## Modern-web bead closures record a premise verdict
 
 Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title
-(the trailing `(<guide-id>)`). The factory's beads sink skips a candidate whose id is already on a
-bead in ANY state, so the same modernization is never emitted twice.
+(the trailing `(<guide-id>)`). The factory dedupes only by its own per-run findings fingerprint,
+which is rebuilt on every CI run — so the same modernization CAN be emitted more than once (three
+anchor-positioning beads, two scroll-driven-animations and two dialog-closedby exist today). Before
+working a [modern-web] bead, search closed bead titles for its canonical id: a bead with the same id
+may already be implemented, superseded or closed.
 
 When closing one of these beads, record the **premise verdict** — what the scanner matched and
 what the code actually has — as `bd close --reason "<line>"` or as a comment:
