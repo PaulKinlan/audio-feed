@@ -405,18 +405,24 @@ export function buildSegmentResume(
 
   const prepare = async (segmentText: string, voice: string) => {
     const textHash = segmentTextHash(segmentText);
-    const existing = (await records()).find((record) => record.textHash === textHash);
-    if (existing?.finalized) {
-      // Reuse is gated on prompt version AND voice: either changing means different words
-      // or a different speaker, and neither may serve the old bytes.
-      if (existing.promptVersion === PROMPT_VERSION && existing.voice === voice) {
-        const blob = await blobs.get(existing.audioKey).catch(() => null);
-        if (blob && (blob.size ?? existing.byteLength) === existing.byteLength) {
-          return { wav: await collect(blob.body) };
-        }
+    // Reuse is gated on prompt version AND voice: either changing means different words or
+    // a different speaker, and neither may serve the old bytes. Slots are keyed by
+    // (hash, version, voice), so drift does not fight the old record — it opens a new slot
+    // beside it, and the episode's sweep reclaims the old blob once audio is committed.
+    const existing = (await records()).find((record) =>
+      record.textHash === textHash && record.finalized &&
+      record.promptVersion === PROMPT_VERSION && record.voice === voice
+    );
+    if (existing) {
+      const blob = await blobs.get(existing.audioKey).catch(() => null);
+      if (
+        blob && (blob.size ?? existing.byteLength) === existing.byteLength &&
+        existing.text === segmentText
+      ) {
+        return { wav: await collect(blob.body) };
       }
-      // Finalized but unusable (old prompt/voice, or the blob is gone): the slot stays as
-      // history; this run speaks the segment again and commit() keeps the newer record.
+      // Blob gone or record inconsistent with its own hash: speak again into a fresh
+      // revision; the stranded record is sweep fodder, never reuse fodder.
     }
     const outcome = await metadata.reserveSynthesisSegment(
       episode.userId,
@@ -440,13 +446,18 @@ export function buildSegmentResume(
       // Lost a reserve race to a record that finished between our list and our reserve:
       // reuse it if it matches, else speak again.
       const record = (await metadata.listSynthesisSegments(episode.userId, episode.id)).find(
-        (r) => r.textHash === textHash,
+        (r) =>
+          r.textHash === textHash && r.finalized && r.promptVersion === PROMPT_VERSION &&
+          r.voice === voice,
       );
-      if (
-        record?.finalized && record.promptVersion === PROMPT_VERSION && record.voice === voice
-      ) {
+      if (record) {
         const blob = await blobs.get(record.audioKey).catch(() => null);
-        if (blob) return { wav: await collect(blob.body) };
+        if (
+          blob && (blob.size ?? record.byteLength) === record.byteLength &&
+          record.text === segmentText
+        ) {
+          return { wav: await collect(blob.body) };
+        }
       }
       return "synthesize";
     }
@@ -458,12 +469,7 @@ export function buildSegmentResume(
     return "synthesize";
   };
 
-  const commit = async (
-    segmentText: string,
-    decoded: DecodedAudioResult,
-    // The record's voice was fixed at reserve time; commit only attaches the blob.
-    _voice: string,
-  ) => {
+  const commit = async (segmentText: string, decoded: DecodedAudioResult, voice: string) => {
     const textHash = segmentTextHash(segmentText);
     const wav = decoded.format === "wav" ? decoded.rawBytes : decoded.toWav();
     const audioKey = segmentBlobKey(episode, textHash, options.revision());
@@ -483,7 +489,7 @@ export function buildSegmentResume(
     const finalized = await metadata.finalizeSynthesisSegment(
       episode.userId,
       episode.id,
-      textHash,
+      { textHash, promptVersion: PROMPT_VERSION, voice },
       { audioKey, byteLength },
       options.owner,
       now(),
@@ -871,6 +877,13 @@ export async function runSynthesisBatch(
       if (!parsed) continue; // unparseable: left recorded for a human
       try {
         let referenced = false;
+        if (parsed.segmentEpisodeId) {
+          // A segment blob is live while any record of its episode still names it.
+          referenced = (await metadata.listSynthesisSegments(
+            parsed.userId,
+            parsed.segmentEpisodeId,
+          )).some((record) => record.audioKey === key);
+        }
         for (const id of parsed.candidateIds) {
           const episode = await metadata.getEpisode(parsed.userId, id);
           if (episode?.audioKey === key) {
@@ -897,7 +910,13 @@ export async function runSynthesisBatch(
  */
 export function parseAudioBlobKey(
   key: string,
-): { userId: string; candidateIds: string[] } | null {
+): { userId: string; candidateIds: string[]; segmentEpisodeId?: string } | null {
+  // audio-feed-wr1u: segment blobs live under their own prefix and are referenced by
+  // segment RECORDS, not by episode.audioKey — the orphan sweeper checks them differently.
+  const segment = /^audio-segments\/([^/]+)\/([^/]+)\/[^/]+$/.exec(key);
+  if (segment?.[1] && segment[2]) {
+    return { userId: segment[1], candidateIds: [], segmentEpisodeId: segment[2] };
+  }
   const match = /^audio\/([^/]+)\/[^/]+\/([^/]+)\.[^./]+$/.exec(key);
   if (!match?.[1] || !match[2]) return null;
   const userId = match[1];

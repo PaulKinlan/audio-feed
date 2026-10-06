@@ -109,6 +109,24 @@ export async function deleteUserSource(
               failedBlobKeys.add(episode.audioKey);
             }
           }
+          // audio-feed-wr1u: the episode row is the only path that will ever find these
+          // records again, so its deletion sweeps their blobs too. A delete that throws is
+          // recorded as an orphan — and parseAudioBlobKey understands segment keys now, so
+          // the batch sweeper can reclaim it later.
+          for (
+            const record of await ctx.stores.metadata.listSynthesisSegments(userId, episode.id)
+          ) {
+            if (!record.audioKey || deletedBlobKeys.has(record.audioKey)) continue;
+            try {
+              await ctx.stores.blobs.delete(record.audioKey);
+              deletedBlobKeys.add(record.audioKey);
+              failedBlobKeys.delete(record.audioKey);
+            } catch {
+              failedBlobKeys.add(record.audioKey);
+              await ctx.stores.metadata.recordOrphanBlob(record.audioKey).catch(() => {});
+            }
+          }
+          await ctx.stores.metadata.clearSynthesisSegments(userId, episode.id);
           const removed = await ctx.stores.metadata.deleteEpisode(userId, episode.id);
           if (removed) {
             deletedEpisodeIds.add(episode.id);

@@ -104,8 +104,13 @@ export class MemoryMetadataStore implements MetadataStore {
   /** URL → article id, mirroring KV's `article_by_url` index (audio-feed-d8q). */
   readonly #articleByUrl = new Map<string, string>();
   readonly #episodes = new Map<string, Episode>();
-  /** audio-feed-wr1u: persisted TTS segments per episode, keyed by segment text hash. */
+  /** audio-feed-wr1u: persisted TTS segments per episode, keyed by slot (hash@version@voice). */
   readonly #segments = new Map<string, Map<string, SynthesisSegmentRecord>>();
+
+  /** One slot per (text, prompt version, voice): drift opens a new slot, never a fight. */
+  static #slotKey(slot: { textHash: string; promptVersion: string; voice: string }): string {
+    return `${slot.textHash}\u0000${slot.promptVersion}\u0000${slot.voice}`;
+  }
   // Sorted indexes of pending and synthesizing episodes (audio-feed-7li)
   readonly #pendingIndex: { sortKey: string; userId: string; id: string }[] = [];
   readonly #synthesizingIndex: { sortKey: string; userId: string; id: string }[] = [];
@@ -561,18 +566,19 @@ export class MemoryMetadataStore implements MetadataStore {
       slots = new Map();
       this.#segments.set(key, slots);
     }
-    const current = slots.get(record.textHash);
+    const slotKey = MemoryMetadataStore.#slotKey(record);
+    const current = slots.get(slotKey);
     if (current?.finalized) return Promise.resolve("finalized");
     // A reservation by anyone other than the live claimant is by definition left by a
     // claim that has since moved on: stealable, like an expired episode lease.
-    slots.set(record.textHash, structuredClone(record));
+    slots.set(slotKey, structuredClone(record));
     return Promise.resolve("reserved");
   }
 
   finalizeSynthesisSegment(
     userId: string,
     episodeId: string,
-    textHash: string,
+    slot: { textHash: string; promptVersion: string; voice: string },
     audio: { audioKey: string; byteLength: number },
     owner: string,
     nowMs: number,
@@ -586,9 +592,9 @@ export class MemoryMetadataStore implements MetadataStore {
       return Promise.resolve(false);
     }
     const slots = this.#segments.get(MemoryMetadataStore.#scoped(userId, episodeId));
-    const current = slots?.get(textHash);
+    const current = slots?.get(MemoryMetadataStore.#slotKey(slot));
     if (!current || current.finalized || current.owner !== owner) return Promise.resolve(false);
-    slots!.set(textHash, {
+    slots!.set(MemoryMetadataStore.#slotKey(slot), {
       ...structuredClone(current),
       audioKey: audio.audioKey,
       byteLength: audio.byteLength,

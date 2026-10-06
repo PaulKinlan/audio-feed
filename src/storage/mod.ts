@@ -346,6 +346,11 @@ export interface MetadataStore {
    * stored audio instead of billing again. A reservation left by a claim whose lease has
    * expired is stealable, exactly like the episode claim itself.
    *
+   * Slots are keyed by (text hash, prompt version, voice): a prompt bump or a voice change
+   * opens a NEW slot beside the old record instead of fighting it, so a run that resumes
+   * after such a drift persists its re-spoken segments rather than deleting them as
+   * superseded. The old record stays until the episode's sweep reclaims its blob.
+   *
    * - "reserved": the slot is this caller's now; go spend, then finalize.
    * - "finalized": a completed segment for this exact text already exists; reuse its audio.
    * - "no-claim": the caller does not hold the live claim (superseded, lease expired, or
@@ -367,7 +372,7 @@ export interface MetadataStore {
   finalizeSynthesisSegment(
     userId: string,
     episodeId: string,
-    textHash: string,
+    slot: { textHash: string; promptVersion: string; voice: string },
     audio: { audioKey: string; byteLength: number },
     owner: string,
     nowMs: number,

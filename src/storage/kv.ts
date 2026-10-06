@@ -929,7 +929,14 @@ export class KvMetadataStore implements MetadataStore {
     leaseMs: number,
   ): Promise<"reserved" | "finalized" | "no-claim"> {
     const episodeKey: Deno.KvKey = ["episode", userId, episodeId];
-    const segmentKey: Deno.KvKey = ["synthesis-segment", userId, episodeId, record.textHash];
+    const segmentKey: Deno.KvKey = [
+      "synthesis-segment",
+      userId,
+      episodeId,
+      record.textHash,
+      record.promptVersion,
+      record.voice,
+    ];
     const [episodeEntry, segmentEntry] = await Promise.all([
       this.#kv.get<Episode>(episodeKey),
       this.#kv.get<SynthesisSegmentRecord>(segmentKey),
@@ -957,14 +964,21 @@ export class KvMetadataStore implements MetadataStore {
   async finalizeSynthesisSegment(
     userId: string,
     episodeId: string,
-    textHash: string,
+    slot: { textHash: string; promptVersion: string; voice: string },
     audio: { audioKey: string; byteLength: number },
     owner: string,
     nowMs: number,
     leaseMs: number,
   ): Promise<boolean> {
     const episodeKey: Deno.KvKey = ["episode", userId, episodeId];
-    const segmentKey: Deno.KvKey = ["synthesis-segment", userId, episodeId, textHash];
+    const segmentKey: Deno.KvKey = [
+      "synthesis-segment",
+      userId,
+      episodeId,
+      slot.textHash,
+      slot.promptVersion,
+      slot.voice,
+    ];
     const [episodeEntry, segmentEntry] = await Promise.all([
       this.#kv.get<Episode>(episodeKey),
       this.#kv.get<SynthesisSegmentRecord>(segmentKey),

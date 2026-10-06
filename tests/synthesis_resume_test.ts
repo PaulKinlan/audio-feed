@@ -239,7 +239,7 @@ Deno.test("the segment CAS refuses a second claimant while the first claim is li
     await stores.metadata.finalizeSynthesisSegment(
       "user-1",
       "episode-1",
-      record.textHash,
+      { textHash: record.textHash, promptVersion: "v", voice: "Charon" },
       { audioKey: "audio-segments/x", byteLength: 10 },
       "worker-b",
       t0,
@@ -251,7 +251,7 @@ Deno.test("the segment CAS refuses a second claimant while the first claim is li
     await stores.metadata.finalizeSynthesisSegment(
       "user-1",
       "episode-1",
-      record.textHash,
+      { textHash: record.textHash, promptVersion: "v", voice: "Charon" },
       { audioKey: "audio-segments/x", byteLength: 10 },
       "worker-a",
       t0,
@@ -305,6 +305,52 @@ Deno.test("a voice change re-speaks rather than reusing another voice's segments
     SEGMENTS,
     "segments spoken by Charon must not serve a Kore run",
   );
+});
+
+Deno.test("a voice change between death and retry opens a new slot and still resumes", async () => {
+  // The reviewer's P2-1 loop: run dies, a voice (or prompt-version) change lands, the retry
+  // must re-speak into a NEW slot and PERSIST there — not delete its fresh blobs as
+  // superseded and re-bill forever.
+  const { ctx, stores } = await queued();
+  const first = { paid: [] as string[] };
+  await runSynthesisBatch(ctx, segmentSynthesizer(first, { failAt: 2, voice: "Charon" }), {
+    owner: "worker-a",
+    maxAttempts: 1,
+  });
+  assertEquals(first.paid.length, 2);
+  await stores.metadata.retryEpisode("user-1", "episode-1");
+
+  // Retry under a different voice, dying again at segment three.
+  const second = { paid: [] as string[] };
+  await runSynthesisBatch(ctx, segmentSynthesizer(second, { failAt: 2, voice: "Kore" }), {
+    owner: "worker-b",
+    maxAttempts: 1,
+  });
+  assertEquals(
+    second.paid,
+    SEGMENTS.slice(0, 2),
+    "Kore re-speaks exactly the segments Charon had completed, then dies at the same place",
+  );
+  const afterSecond = await stores.metadata.listSynthesisSegments("user-1", "episode-1");
+  const koreFinalized = afterSecond.filter((r) => r.voice === "Kore" && r.finalized);
+  assertEquals(
+    koreFinalized.length,
+    2,
+    "the Kore run's completed segments must PERSIST in their own slot, not be deleted",
+  );
+  for (const record of koreFinalized) {
+    assert(await stores.blobs.get(record.audioKey), "the fresh Kore blobs must survive");
+  }
+
+  // Third run, same voice as the second: resumes from the Kore slots.
+  await stores.metadata.retryEpisode("user-1", "episode-1");
+  const third = { paid: [] as string[] };
+  const done = await runSynthesisBatch(ctx, segmentSynthesizer(third, { voice: "Kore" }), {
+    owner: "worker-c",
+    maxAttempts: 1,
+  });
+  assertEquals(third.paid, SEGMENTS.slice(2), "the Kore retry resumes from Kore segments");
+  assertEquals(done.ready.length, 1);
 });
 
 Deno.test("decodedFromWav round-trips pcmToWav without losing the audio", () => {

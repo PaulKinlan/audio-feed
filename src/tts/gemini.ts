@@ -1398,7 +1398,9 @@ export class GeminiTtsClient {
             buildSingleVoiceRequest(segment, voice, options.temperature, style),
             segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
           );
-          await options.resume?.commit(segment, decoded, voice);
+          // A truncated segment must never be persisted as resumable: decodedFromWav would
+          // serve it later as STOP-complete. Only complete audio becomes resume material.
+          if (!decoded.truncated) await options.resume?.commit(segment, decoded, voice);
           return decoded;
         },
         splitOnOutputLimit: (segment, error) => {
@@ -1483,7 +1485,11 @@ export class GeminiTtsClient {
         segments: batches,
         maxTurns: MAX_TTS_SEGMENTS,
         request: async (part) => {
-          const segmentText = part.map((turn) => turn.text).join("\u0000");
+          // Attribution is part of the identity: the same sentences spoken by swapped
+          // speakers are different audio, and must not reuse each other's segments.
+          const segmentText = part.map((turn) => `${turn.speaker}\u0001${turn.text}`).join(
+            "\u0000",
+          );
           const dialogueVoice = speakers.map((speaker) => speaker.voice).join(",");
           const prepared = options.resume
             ? await options.resume.prepare(segmentText, dialogueVoice)
@@ -1499,7 +1505,7 @@ export class GeminiTtsClient {
             buildDialogueRequest(part, speakers, options.temperature),
             batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
           );
-          await options.resume?.commit(segmentText, decoded, dialogueVoice);
+          if (!decoded.truncated) await options.resume?.commit(segmentText, decoded, dialogueVoice);
           return decoded;
         },
         stitch: (audio) => {

@@ -1875,7 +1875,7 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       await store.finalizeSynthesisSegment(
         "user-1",
         "e-seg",
-        "h1",
+        { textHash: "h1", promptVersion: "v-test", voice: "Charon" },
         { audioKey: "k", byteLength: 1 },
         "worker-b",
         t0,
@@ -1888,7 +1888,7 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       await store.finalizeSynthesisSegment(
         "user-1",
         "e-seg",
-        "h1",
+        { textHash: "h1", promptVersion: "v-test", voice: "Charon" },
         { audioKey: "k", byteLength: 1 },
         "worker-a",
         t0,
