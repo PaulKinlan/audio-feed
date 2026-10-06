@@ -18,7 +18,7 @@ import { renderListenLanding } from "../src/routes/listen.ts";
 
 const BASE = "https://audio.example.com";
 
-async function landingApp() {
+function landingApp() {
   const stores: Stores = memoryStores();
   const config: AppConfig = { port: 0 };
   const ctx = { config, stores };
@@ -76,7 +76,7 @@ Deno.test("listen-landing.css is composed with the design tokens in front of the
 });
 
 Deno.test("the landing assets are served with the immutable contract and stale hashes 404", async () => {
-  const fetch = await landingApp();
+  const fetch = landingApp();
 
   for (const name of ["listen-landing.css", "listen-landing.js"] as const) {
     const res = await fetch(new Request(`https://audio.example.com${assetUrl(name)}`));
