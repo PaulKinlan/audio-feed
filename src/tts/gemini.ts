@@ -67,7 +67,9 @@ export const DEFAULT_FOIL_VOICE: GeminiTtsVoice = "Puck";
 
 export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 /** 3.8 Flash TTS accepts at most 8192 input tokens; UTF-8 bytes are a conservative
- * upper bound for token counting, leaving space for request metadata and style. */
+ * upper bound for transcript tokens: each text token consumes at least one input byte, even
+ * in CJK/multibyte text. 6000 leaves >2000 tokens for metadata/overhead vs the 8192 cap.
+ * Exact counts still require the provider countTokens endpoint. */
 export const MAX_TTS_INPUT_BYTES = 6_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
@@ -1065,7 +1067,7 @@ export function buildDialogueRequest(
 
 /** Prefer paragraph or sentence boundaries for natural breath points; fall back to a word
  * boundary, then a Unicode code point for an oversized unbroken word. The byte budget
- * conservatively bounds input tokens even for code and non-Latin text. */
+ * bounds transcript tokens even for code and non-Latin text, with metadata headroom. */
 export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): string[] {
   if (maxBytes < 4) throw new Error("TTS segment byte budget is too small");
   const result: string[] = [];
