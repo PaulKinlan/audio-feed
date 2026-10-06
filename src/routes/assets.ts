@@ -19,6 +19,11 @@ import listenCss from "../assets/listen.css" with { type: "text" };
 import listenJs from "../assets/listen.js" with { type: "text" };
 import adminCss from "../assets/admin.css" with { type: "text" };
 import adminJs from "../assets/admin.js" with { type: "text" };
+// The admin console module is COMPOSED (audio-feed-3xq part 4c): the canonical confirm client
+// ships in front of the console code as one served module, the same way listen.css below
+// composes the design tokens in front of the page stylesheet. One source, many surfaces:
+// shell.ts embeds this file's marked region inline on the classic-script pages.
+import confirmSharedJs from "../assets/confirm-shared.js" with { type: "text" };
 import homeCss from "../assets/home.css" with { type: "text" };
 import homeJs from "../assets/home.js" with { type: "text" };
 import { DESIGN_TOKENS } from "./tokens.ts";
@@ -53,7 +58,10 @@ const ASSETS: Record<string, { body: string; contentType: string }> = {
   // audio-feed-3xq part 4a: the console's client, extracted from admin.ts's template string.
   // Like listen.js it is a self-contained module — no imports — because a verbatim-served file
   // cannot address another hashed asset by name.
-  "admin.js": { body: adminJs, contentType: "text/javascript; charset=utf-8" },
+  "admin.js": {
+    body: `${confirmSharedJs}\n${adminJs}`,
+    contentType: "text/javascript; charset=utf-8",
+  },
   // audio-feed-3xq part 4b: the homepage's stylesheet and client, extracted from home.ts's
   // template string. No DESIGN_TOKENS prepend, same reason as admin.css: the page's shell
   // already inlines the tokens these rules resolve against.

@@ -17,9 +17,10 @@
 import type { User } from "../types.ts";
 import { esc } from "./html.ts";
 import { DESIGN_TOKENS } from "./tokens.ts";
-// The confirm client's single source is the marked region of this file (audio-feed-0r0s);
-// the same `with { type: "text" }` idiom src/routes/assets.ts uses to serve it.
-import adminClientSource from "../assets/admin.js" with { type: "text" };
+// The confirm client's single source is src/assets/confirm-shared.js (audio-feed-0r0s, lifted
+// out of admin.js by audio-feed-3xq part 4c); the same `with { type: "text" }` idiom
+// src/routes/assets.ts uses to serve it.
+import confirmSharedSource from "../assets/confirm-shared.js" with { type: "text" };
 
 /** Who the header says is signed in. `null` for a visitor. */
 export interface Viewer {
@@ -469,13 +470,14 @@ export const CONFIRM_DIALOG_HTML = `
  * Combining closedby='any' with an autofocus on the non-destructive Cancel button
  * guarantees keyboard and light-dismiss safety out of the box."
  *
- * SINGLE SOURCE (audio-feed-0r0s): there is no second copy of this code anymore. The canonical
- * client — the closedby light-dismiss shim + askConfirm — lives in the marked region at the top
- * of src/assets/admin.js (the module the admin console serves), and what ships inline on the
- * classic-script pages (account) is that exact region, sliced at import time below. Editing the
- * region edits both surfaces; a broken marker fails at module load rather than silently serving
- * a page without its confirm client. When audio-feed-3xq part 4c extracts the account script to
- * a module, lift the region into a composed shared asset and delete this slice.
+ * SINGLE SOURCE (audio-feed-0r0s, composed asset since audio-feed-3xq part 4c): there is no
+ * second copy of this code. The canonical client — the closedby light-dismiss shim + askConfirm —
+ * is src/assets/confirm-shared.js in full, and what ships inline on the classic-script pages
+ * (account) is that file's marked region, sliced at import time below. The admin console gets the
+ * same bytes composed in front of src/assets/admin.js by src/routes/assets.ts. Editing the
+ * region edits every surface; a broken marker fails at module load rather than silently serving
+ * a page without its confirm client. When the account script itself is extracted to a module,
+ * this slice goes away and the module imports the shared asset through an import map.
  */
 const CONFIRM_SHARED_BEGIN = "// #confirm-shared-begin";
 const CONFIRM_SHARED_END = "// #confirm-shared-end";
@@ -511,7 +513,7 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(adminClientSource);
+export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(confirmSharedSource);
 
 /**
  * Accessible Tooltip Container HTML (audio-feed-pzwe).

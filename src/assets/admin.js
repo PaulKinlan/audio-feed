@@ -8,86 +8,29 @@
  * document.* calls, 22 addEventListener calls — were checked by nothing, which is the exact
  * failure mode audio-feed-3xq exists to end.
  *
- * Served verbatim at /assets/<hash>.admin.js, so: plain ESM, no TypeScript syntax, no build step.
- * Types come from JSDoc and inference.
- *
- * SINGLE SOURCE (audio-feed-0r0s): the confirm-dialog client at the top of this file — the
- * region between the #confirm-shared markers — is the ONLY copy. src/routes/shell.ts imports
- * this file as text and embeds that exact region inline on the classic-script pages (account),
- * so editing the region edits every surface and there is no second copy to drift. Constraints the
- * region must keep: plain script (no import/export), self-contained (only DOM globals). When
- * audio-feed-3xq part 4c extracts the account script to a module, lift this region into a
- * composed shared asset and delete the shell-side slice.
+ * COMPOSED AT SERVE TIME (audio-feed-3xq part 4c): the bytes the server hands out as
+ * /assets/<hash>.admin.js are src/assets/confirm-shared.js (the canonical confirm-dialog
+ * client, audio-feed-0r0s) followed by THIS file. The confirm client lives in its own file so
+ * the classic-script pages and any future module can share one copy; this file is the console
+ * itself. Served as one module, so: plain ESM, no TypeScript syntax, no build step; types come
+ * from JSDoc and inference. (The second @ts-check pragma below is a comment by the time it sits
+ * mid-file in the composed module; it is what makes THIS file checked standalone.)
  */
 // @ts-check
 /// <reference lib="dom" />
 
-// #confirm-shared-begin
-const confirmDialog = /** @type {HTMLDialogElement | null} */ (
-  document.getElementById("confirmDialog")
-);
-if (
-  confirmDialog && typeof HTMLDialogElement !== "undefined" &&
-  !("closedBy" in HTMLDialogElement.prototype)
-) {
-  // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
-  // Light-dismiss fallback for browsers without native closedby support (Modern Web Guidance)
-  confirmDialog.addEventListener("click", (event) => {
-    if (event.target !== confirmDialog) return;
-    const rect = confirmDialog.getBoundingClientRect();
-    const isInside = rect.top <= event.clientY &&
-      event.clientY <= rect.top + rect.height &&
-      rect.left <= event.clientX &&
-      event.clientX <= rect.left + rect.width;
-    if (!isInside) confirmDialog.close("cancel");
-  });
-}
-
 /**
- * The options askConfirm accepts.
- * @typedef {object} ConfirmOptions
- * @property {string} [title]
- * @property {string} [confirmText]
- * @property {string} [cancelText]
- * @property {boolean} [danger]
+ * The confirm-dialog client, composed in front of this file at serve time from
+ * src/assets/confirm-shared.js (audio-feed-0r0s single source, lifted by part 4c). In the
+ * composed module the region also publishes itself on globalThis, which is what this
+ * standalone-checked file binds to; on the classic-script pages the same function is a plain
+ * global. The type import is JSDoc-only, so the served bytes stay comment.
+ * @type {(message: string, options?: import("./confirm-shared.js").ConfirmOptions) => Promise<boolean>}
  */
-
-/**
- * @param {string} message
- * @param {ConfirmOptions} [options]
- * @returns {Promise<boolean>}
- */
-function askConfirm(message, options) {
-  /** @type {ConfirmOptions} */
-  const opts = options || {};
-  if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
-    return Promise.resolve(confirm(message));
-  }
-  const titleEl = document.getElementById("confirmTitle");
-  const msgEl = document.getElementById("confirmMessage");
-  const okEl = document.getElementById("confirmOkBtn");
-  const cancelEl = document.getElementById("confirmCancelBtn");
-  if (titleEl) titleEl.textContent = opts.title || "Confirm Action";
-  if (msgEl) msgEl.textContent = message;
-  if (okEl) {
-    okEl.textContent = opts.confirmText || "Confirm";
-    if (opts.danger === false) {
-      okEl.className = "btn primary";
-    } else {
-      okEl.className = "btn danger";
-    }
-  }
-  if (cancelEl) cancelEl.textContent = opts.cancelText || "Cancel";
-  return new Promise((resolve) => {
-    const onClose = () => {
-      confirmDialog.removeEventListener("close", onClose);
-      resolve(confirmDialog.returnValue === "confirm");
-    };
-    confirmDialog.addEventListener("close", onClose);
-    confirmDialog.showModal();
-  });
-}
-// #confirm-shared-end
+const confirmWith =
+  /** @type {(message: string, options?: import("./confirm-shared.js").ConfirmOptions) => Promise<boolean>} */ (
+    /** @type {any} */ (globalThis).askConfirm
+  );
 
 // ── Session identity, the admin token, and the API wrapper ───────────────
 /**
@@ -390,7 +333,7 @@ $("copySetupLink").addEventListener("click", async () => {
  */
 async function setRole(user, isAdmin, button) {
   if (!isAdmin) {
-    const ok = await askConfirm("Remove admin access from " + user.email + "?", {
+    const ok = await confirmWith("Remove admin access from " + user.email + "?", {
       title: "Revoke Admin Access",
       confirmText: "Revoke",
     });
@@ -821,7 +764,7 @@ copyManageFeedUrl.addEventListener("click", async () => {
 
 rotateManageToken.addEventListener("click", async () => {
   if (!currentManagingUser) return;
-  const ok = await askConfirm(
+  const ok = await confirmWith(
     "Are you sure you want to rotate this subscriber's feed token? All existing podcast app subscriptions will stop working.",
     {
       title: "Rotate Feed Token",
@@ -932,7 +875,7 @@ async function loadManageSources(userId) {
       delBtn.textContent = "Remove";
       delBtn.setAttribute("aria-label", "Remove feed " + source.title);
       delBtn.addEventListener("click", async () => {
-        const ok = await askConfirm('Remove feed subscription "' + source.title + '"?', {
+        const ok = await confirmWith('Remove feed subscription "' + source.title + '"?', {
           title: "Remove Feed Subscription",
           confirmText: "Remove",
         });
@@ -1062,7 +1005,7 @@ async function loadManageEpisodes(userId) {
  * @param {HTMLButtonElement} button
  */
 async function regenerateEpisode(userId, episode, button) {
-  const ok = await askConfirm(
+  const ok = await confirmWith(
     'Regenerate 1 episode ("' + (episode.title || episode.id) + '")? ' +
       "This is a billed TTS call. The old audio keeps playing until the new audio is ready.",
     {
@@ -1098,7 +1041,7 @@ async function regenerateEpisode(userId, episode, button) {
  * @param {HTMLButtonElement} button
  */
 async function retrySingleEpisode(userId, episode, button) {
-  const ok = await askConfirm(
+  const ok = await confirmWith(
     'Retry failed episode ("' + (episode.title || episode.id) + '")? ' +
       "This will re-queue it for synthesis.",
     {
@@ -1152,7 +1095,7 @@ async function regenerateFeed(scope, button) {
       "? Each ready episode is re-narrated with current prompts and failed episodes are retried."
     : "Regenerate " + plural(count) +
       " made with older prompts? Each is a billed TTS call. The old audio keeps playing until the new audio is ready.";
-  const ok = await askConfirm(promptMessage, {
+  const ok = await confirmWith(promptMessage, {
     title: scope === "failed" ? "Retry Failed Episodes" : "Regenerate Episodes",
     confirmText: scope === "failed" ? "Retry All" : "Regenerate",
   });
