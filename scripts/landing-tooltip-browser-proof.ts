@@ -244,6 +244,9 @@ try {
   const shown = await js(`
     (() => {
       const t = document.querySelector("[data-tooltip]");
+      // Bring the target (and the tooltip that anchors to it) into the viewport so the
+      // screenshot is evidence of the visible state, not just the DOM state (4c review P2).
+      t.scrollIntoView({ block: "center" });
       t.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       const tip = document.getElementById("appTooltip");
       return {
@@ -254,6 +257,7 @@ try {
       };
     })()
   `) as { visible: boolean; text: string; expected: string; describedby: string | null };
+  await sleep(150);
   check(
     "pointerover shows #appTooltip with the target's text and aria-describedby",
     shown?.visible === true && shown.text === shown.expected && shown.describedby === "appTooltip",
