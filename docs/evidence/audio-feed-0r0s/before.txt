@@ -1,0 +1,54 @@
+# audio-feed-0r0s evidence capture
+# command: deno run -A docs/evidence/audio-feed-0r0s/capture.ts <out>
+
+=== admin.js asset URL (content-addressed) ===
+/assets/b65e9fd1.admin.js
+
+=== shell.ts CONFIRM_DIALOG_CLIENT export: length + sha256 ===
+length=1951 sha256=b6025a3d5d26ab11e12e63505383680216e21bfd37bd1b05352e4f25c6853714
+
+=== confirm fragment as served inline on the account page ===
+present=true sha256=5025fbdbf89675189fb25d9ee99ba661c9c9d49f06f0f8a84576bd1d858ecfae
+const confirmDialog = document.getElementById("confirmDialog");
+  if (confirmDialog && typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
+    // TODO(baseline/dialog-closedby): remove this click shim; keep closedby="any" on the dialog.
+    // Light-dismiss fallback for browsers without native closedby support (Modern Web Guidance)
+    confirmDialog.addEventListener("click", (event) => {
+      if (event.target !== confirmDialog) return;
+      const rect = confirmDialog.getBoundingClientRect();
+      const isInside =
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width;
+      if (!isInside) confirmDialog.close("cancel");
+    });
+  }
+
+  function askConfirm(message, options) {
+    const opts = options || {};
+    if (!confirmDialog || typeof confirmDialog.showModal !== "function") {
+      return Promise.resolve(confirm(message));
+    }
+    const titleEl = document.getElementById("confirmTitle");
+    const msgEl = document.getElementById("confirmMessage");
+    const okEl = document.getElementById("confirmOkBtn");
+    const cancelEl = document.getElementById("confirmCancelBtn");
+    if (titleEl) titleEl.textContent = opts.title || "Confirm Action";
+    if (msgEl) msgEl.textContent = message;
+    if (okEl) {
+      okEl.textContent = opts.confirmText || "Confirm";
+      if (opts.danger === false) {
+        okEl.className = "btn primary";
+      } else {
+        okEl.className = "btn danger";
+      }
+    }
+    if (cancelEl) cancelEl.textContent = opts.cancelText || "Cancel";
+    return new Promise((resolve) => {
+      const onClose = () => {
+        confirmDialog.removeEventListener("close", onClose);
+        resolve(confirmDialog.returnValue === "confirm");
+      };
+      confirmDialog.addEventListener("close", onClose);
+      confirmDialog.showModal();

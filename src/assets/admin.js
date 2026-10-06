@@ -11,15 +11,18 @@
  * Served verbatim at /assets/<hash>.admin.js, so: plain ESM, no TypeScript syntax, no build step.
  * Types come from JSDoc and inference.
  *
- * SYNC NOTE (precedent: commit 192221a, listen.js <-> shell.ts tooltips): the confirm-dialog
- * client at the top of this file is a COPY of CONFIRM_DIALOG_CLIENT in src/routes/shell.ts, which
- * still ships inline on the account and login pages. If you change askConfirm here, change it
- * there too, until the account script is extracted and the two are unified into one shared
- * module (tracked as follow-up work on audio-feed-3xq).
+ * SINGLE SOURCE (audio-feed-0r0s): the confirm-dialog client at the top of this file — the
+ * region between the #confirm-shared markers — is the ONLY copy. src/routes/shell.ts imports
+ * this file as text and embeds that exact region inline on the classic-script pages (account),
+ * so editing the region edits every surface and there is no second copy to drift. Constraints the
+ * region must keep: plain script (no import/export), self-contained (only DOM globals). When
+ * audio-feed-3xq part 4c extracts the account script to a module, lift this region into a
+ * composed shared asset and delete the shell-side slice.
  */
 // @ts-check
 /// <reference lib="dom" />
 
+// #confirm-shared-begin
 const confirmDialog = /** @type {HTMLDialogElement | null} */ (
   document.getElementById("confirmDialog")
 );
@@ -41,8 +44,7 @@ if (
 }
 
 /**
- * The options askConfirm accepts. Matches CONFIRM_DIALOG_CLIENT in src/routes/shell.ts, which
- * still ships inline on the account and login pages (see the SYNC NOTE at the top of this file).
+ * The options askConfirm accepts.
  * @typedef {object} ConfirmOptions
  * @property {string} [title]
  * @property {string} [confirmText]
@@ -85,6 +87,7 @@ function askConfirm(message, options) {
     confirmDialog.showModal();
   });
 }
+// #confirm-shared-end
 
 // ── Session identity, the admin token, and the API wrapper ───────────────
 /**

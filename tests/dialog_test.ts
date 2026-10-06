@@ -85,30 +85,66 @@ Deno.test("renderAccountPage: includes native accessible <dialog> and client scr
   );
 });
 
-Deno.test("admin.js askConfirm stays in sync with shell.ts CONFIRM_DIALOG_CLIENT (audio-feed-3xq part 4a)", () => {
-  // The console's module carries a typed COPY of the confirm client: a verbatim-served module
-  // cannot import the shell's string, and unification is tracked as follow-up work for when the
-  // account script is extracted. Until then these markers are the behavioural skeleton both
-  // copies must keep — the closedby shim condition, the light-dismiss close, the blocking-confirm
-  // fallback, the danger styling branch and the returnValue contract. If either side's logic
-  // drifts, one of these fails here instead of shipping silently.
-  const shellClient = CONFIRM_DIALOG_CLIENT;
-  const adminClient = assetBody("admin.js") ?? "";
-  const markers = [
-    `!("closedBy" in HTMLDialogElement.prototype)`,
-    `confirmDialog.close("cancel")`,
-    `typeof confirmDialog.showModal !== "function"`,
-    `Promise.resolve(confirm(message))`,
-    `opts.danger === false`,
-    `okEl.className = "btn primary"`,
-    `okEl.className = "btn danger"`,
-    `resolve(confirmDialog.returnValue === "confirm")`,
-    `confirmDialog.showModal();`,
-  ];
-  for (const marker of markers) {
-    assertStringIncludes(shellClient, marker, `shell copy lost: ${marker}`);
-    assertStringIncludes(adminClient, marker, `admin copy lost: ${marker}`);
+Deno.test("confirm client has ONE source: shell's export is admin.js's marked region (audio-feed-0r0s)", () => {
+  // There is no second copy to keep in sync anymore: the canonical client is the region between
+  // the #confirm-shared markers in src/assets/admin.js, and CONFIRM_DIALOG_CLIENT is that exact
+  // region sliced at import time. This test pins the derivation: exactly one marker pair, the
+  // slice equals the export byte for byte, the region stays embeddable in a classic <script>,
+  // and the account page actually ships it. Any drift between the surfaces is now impossible by
+  // construction — what CAN break is the slicing, and that fails here instead of at deploy.
+  const source = assetBody("admin.js") ?? "";
+  const beginMarker = "// #confirm-shared-begin";
+  const endMarker = "// #confirm-shared-end";
+  // whole-line occurrences only — prose that mentions a marker must not count as one
+  const countLines = (text: string, line: string) =>
+    text.split("\n").filter((l) => l === line).length;
+  assertEquals(
+    countLines(source, beginMarker),
+    1,
+    "admin.js must carry exactly one confirm-shared-begin marker line",
+  );
+  assertEquals(
+    countLines(source, endMarker),
+    1,
+    "admin.js must carry exactly one confirm-shared-end marker line",
+  );
+  const beginLine = source.split("\n").indexOf(beginMarker);
+  const endLine = source.split("\n").indexOf(endMarker);
+  const region = source.split("\n").slice(beginLine + 1, endLine).join("\n");
+  assertEquals(CONFIRM_DIALOG_CLIENT, `\n${region}`, "shell export must BE the marked region");
+  // behavioural skeleton of the single source (was the two-copy sync list)
+  for (
+    const marker of [
+      `!("closedBy" in HTMLDialogElement.prototype)`,
+      `confirmDialog.close("cancel")`,
+      `typeof confirmDialog.showModal !== "function"`,
+      `Promise.resolve(confirm(message))`,
+      `opts.danger === false`,
+      `okEl.className = "btn primary"`,
+      `okEl.className = "btn danger"`,
+      `resolve(confirmDialog.returnValue === "confirm")`,
+      `confirmDialog.showModal();`,
+    ]
+  ) {
+    assertStringIncludes(CONFIRM_DIALOG_CLIENT, marker, `confirm client lost: ${marker}`);
   }
+  // the account page ships the single source inline
+  const html = renderAccountPage({
+    user: makeUser({ id: "user-1", email: "test@example.com" }),
+    baseUrl: "https://audio.example.com",
+    rpId: "audio.example.com",
+    sources: [],
+    credentials: [],
+    episodes: [],
+    outdatedCount: 0,
+    failedCount: 0,
+    prefill: null,
+  });
+  assertStringIncludes(html, "function askConfirm(");
+  assert(
+    !html.includes("!confirm("),
+    "account page script must use askConfirm instead of blocking window.confirm",
+  );
 });
 
 Deno.test("renderAdminPage: includes native accessible <dialog> and client script (audio-feed-ytl)", () => {
