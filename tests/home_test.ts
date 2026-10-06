@@ -189,10 +189,9 @@ Deno.test("a successful submit resets the form rather than emptying one field", 
   // `form.reset()` is what clears the browser's interaction state. Asserting on
   // it here because the failure is invisible to any test that only reads the
   // markup: the bug was in what the script does AFTER a successful response.
-  const html = await (await app()(get("/"))).text();
-
   // audio-feed-3xq part 4b: this behaviour is client code in src/assets/home.js now; the
-  // property under test is unchanged, the bytes moved.
+  // property under test is unchanged, the bytes moved (tests/home_asset_test.ts pins that
+  // the page links exactly these bytes).
   const client = assetBody("home.js") ?? "";
   assertStringIncludes(client, "form.reset()");
   // The token and mode must survive the reset, or sending a second article
