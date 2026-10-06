@@ -50,7 +50,6 @@ import type { AppContext } from "../app.ts";
 import { PROMPT_VERSION } from "../tts/prompt_version.ts";
 import {
   createGroundedScriptGenerator,
-  DEFAULT_SCRIPT_TIMEOUT_MS,
   type GroundedScriptInput,
   type ScriptGenerator,
 } from "./script.ts";
@@ -204,10 +203,14 @@ function isPermanent(error: unknown): boolean {
  * how the pipeline behaved before this stage existed. A shallow episode is worse than a
  * researched one; it is not worse than no episode.
  */
+/** Six bounded 60s grounded turns may be needed after MAX_TOKENS; each request still
+ * has its own 60s deadline in script.ts. The worker claim lease remains the outer bound. */
+export const DEFAULT_SCRIPT_STAGE_TIMEOUT_MS = 360_000;
+
 async function runScriptStage(
   generator: ScriptGenerator | null,
   input: GroundedScriptInput,
-  timeoutMs = DEFAULT_SCRIPT_TIMEOUT_MS,
+  timeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
   // Two bounds, because one is not enough (audio-feed-yaz5 review). The signal bounds a generator
@@ -250,7 +253,7 @@ export function createGeminiSynthesizer(
     codeSummarizer?: (code: string) => string | Promise<string>;
     /** `undefined` = use the real generator when a key is configured; `null` = stage is off. */
     scriptGenerator?: ScriptGenerator | null;
-    /** How long the grounded stage may hold up this episode; see DEFAULT_SCRIPT_TIMEOUT_MS. */
+    /** Whole-stage deadline across continued turns; see DEFAULT_SCRIPT_STAGE_TIMEOUT_MS. */
     scriptTimeoutMs?: number;
   } = {},
 ): Synthesizer {

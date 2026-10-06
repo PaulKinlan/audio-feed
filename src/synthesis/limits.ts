@@ -51,7 +51,7 @@ export function assertTextSeams(source: string, turns: readonly string[]): void 
 
 /** Limit total paid turns, including a refused output and its smaller replacements.
  * Failed turns are never silently added to the stitched result. */
-export async function runManagedTurns<T, R>(options: {
+export async function runManagedTurns<T, R, S = R>(options: {
   segments: T[];
   maxTurns: number;
   /** Completed turns let a text model request a continuation with overlap context. */
@@ -65,8 +65,8 @@ export async function runManagedTurns<T, R>(options: {
     error: unknown,
     completed: readonly R[],
   ) => { partial?: R; next: T[] } | null;
-  stitch: (results: R[]) => R;
-}): Promise<R> {
+  stitch: (results: R[]) => S;
+}): Promise<S> {
   const { segments, maxTurns, request, splitOnOutputLimit, continueOnOutputLimit, stitch } =
     options;
   if (segments.length === 0 || segments.length > maxTurns) {
