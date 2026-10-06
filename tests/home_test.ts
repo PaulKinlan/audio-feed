@@ -180,7 +180,7 @@ Deno.test("validation styling waits for interaction rather than firing on load",
   assert(!/input:invalid\s*{/.test(css), "do not style :invalid — it fires on page load");
 });
 
-Deno.test("a successful submit resets the form rather than emptying one field", async () => {
+Deno.test("a successful submit resets the form rather than emptying one field", () => {
   // Found by driving the real page in a browser: after a 202 the script cleared
   // `url.value`, which leaves a `required` field empty on an input the user has
   // already interacted with — so `:user-invalid` matched and a red "Enter a
