@@ -32,7 +32,7 @@ email and feed token are all in the scan.)
 
 **putUser "orphan"** (`src/storage/kv.ts` `putUser` writes the email index
 unconditionally): unreachable — every `putUser` caller spreads `...user` and
-never changes `email` (`updateUser`: displayName/voice/feeds;
+never changes `email` (`updatePreferences`: displayName/voice/feeds;
 `rotateFeedToken`: feedToken; `decide`/approve/reject: status fields), so the
 unconditional write always targets the user's own existing index key. Feed
 token rotation generates a fresh token; collision with another user's token
