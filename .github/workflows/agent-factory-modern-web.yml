@@ -97,6 +97,18 @@ jobs:
           fi
           echo "Report verified: $DELTA_REPORT ($(wc -l < "$DELTA_REPORT") lines)"
 
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Verify premise verdicts on closed modern-web beads (audio-feed-9ara)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          deno run -A scripts/check-modern-web-verdicts.ts
+
       - name: Sync Beads Database
         if: always()
         shell: bash
