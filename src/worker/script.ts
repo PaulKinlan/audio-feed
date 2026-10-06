@@ -49,10 +49,20 @@ export const DEFAULT_MAX_BODY_CHARS = 12_000;
 /**
  * How long the grounded call may take before the stage gives up and synthesis falls back
  * (audio-feed-yaz5 review). A research call that hangs is indistinguishable from a dead queue
- * from the outside, so the bound belongs here rather than in the operator's patience. The
- * default matches the TTS client's own order of magnitude; injected so a test can use 50ms.
+ * from the outside, so the bound belongs here rather than in the operator's patience.
+ *
+ * THE NUMBER (audio-feed-yr76): the measured distribution on real grounded calls is
+ * min 14.7s / p50 19.3s / max 19.7s (n=4, sotw-ds-flash, 2026-10-04), so 30s was only ~1.5x
+ * the observed maximum over a tail four samples have not probed — and grounded search fans out
+ * to retrieval before generating, so a long tail is plausible. The cost asymmetry decides it:
+ * a timeout throws away a call that was ALREADY PAID FOR (the episode falls back to the static
+ * builder — spend wasted, quality lost), while a too-late timeout costs only queue wall time.
+ * 60s is ~3x the observed max. The open follow-up the bead records: pull the timeout-classified
+ * fallback rate from Workers Logs over a meaningful sample when log access is wired into the
+ * fleet's tooling — ~0% closes the question for good, low single digits+ says raise it again.
+ * Injected so a test can use 50ms.
  */
-export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 60_000;
 
 export interface ScriptSource {
   title: string;
