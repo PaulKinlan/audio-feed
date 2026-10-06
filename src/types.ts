@@ -406,6 +406,69 @@ export function audioBlobKey(
   return `audio/${episode.userId}/${episode.mode}/${name}.${ext}`;
 }
 
+/**
+ * One persisted TTS segment of an episode's synthesis (audio-feed-wr1u).
+ *
+ * A long episode is several paid TTS calls. gueb made a run that would outlive its
+ * claim lease stop cleanly instead of re-billing the whole episode; this record is what
+ * lets the NEXT claim pick up where the dead one stopped: each completed segment's audio
+ * is stored under its own blob key and described here, keyed by the hash of the exact
+ * text it speaks, so a re-split (a breath boundary moving, an article edit landing
+ * between attempts) never reuses audio for different words.
+ *
+ * Lifecycle: `reserve` (claim-conditional CAS, before the paid call) -> `finalize`
+ * (claim-conditional, after the blob write) -> reused by any later claim whose split
+ * produces the same text at the same prompt version and voice -> deleted with its blobs
+ * once the episode's stitched audio is committed. A reservation whose claim lease
+ * expired is stealable, exactly like the episode claim itself.
+ */
+export interface SynthesisSegmentRecord {
+  /** Stable id of the segment text: FNV-1a hex of the UTF-8 bytes. */
+  textHash: string;
+  /** The exact segment text, kept so a reuse can be eyeballed and seam-checked. */
+  text: string;
+  /** Segments are only reusable for the same prompt generation (see PROMPT_VERSION). */
+  promptVersion: string;
+  /** The voice that spoke it; a voice change must not reuse another voice's audio. */
+  voice: string;
+  /** Blob key holding this segment's WAV bytes. Empty until finalized. */
+  audioKey: string;
+  byteLength: number;
+  /** Worker identity that reserved/finalized it; the CAS compares this. */
+  owner: string;
+  /** ISO instant of the claim under which it was reserved. */
+  claimAt: string;
+  createdAt: string;
+  /** Reserved = paid call in flight or done but not yet blob-written. */
+  finalized: boolean;
+}
+
+/** Blob key for one persisted synthesis segment. Per-attempt, like episode audio. */
+export function segmentBlobKey(
+  episode: Pick<Episode, "userId" | "id">,
+  textHash: string,
+  revision: string,
+) {
+  return `audio-segments/${episode.userId}/${episode.id}/${textHash}-${revision}.wav`;
+}
+
+/**
+ * Stable, collision-cheap id for a segment text. Not a security boundary — an identity
+ * for reuse — so a fast non-cryptographic hash over the exact UTF-8 bytes is enough, and
+ * the record keeps the text itself for seam checks.
+ */
+export function segmentTextHash(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  // FNV-1a 64-bit over the exact UTF-8 bytes, xor-folded to 64 bits of hex.
+  let h = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    h ^= BigInt(byte);
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  const folded = (h ^ (h >> 32n)) & 0xffffffffffffffffn;
+  return folded.toString(16).padStart(16, "0");
+}
+
 // ---------------------------------------------------------------------------
 // Accounts: sessions, passkeys, setup links (audio-feed-8fc)
 // ---------------------------------------------------------------------------

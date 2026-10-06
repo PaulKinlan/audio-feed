@@ -60,10 +60,13 @@ import {
   DEFAULT_MAX_CLAIMS,
   DEFAULT_VOICES,
   INBOX_SOURCE_ID,
+  segmentBlobKey,
+  segmentTextHash,
   unsynthesized,
   utcDayKey,
 } from "../types.ts";
-import type { Article, AudioMode, Episode, Source } from "../types.ts";
+import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
+import { collect } from "../storage/mod.ts";
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
 export type Synthesizer = (job: {
@@ -73,7 +76,23 @@ export type Synthesizer = (job: {
   mode: AudioMode;
   /** Claim lifetime for lease-aware network cancellation; injected synthesizers may ignore it. */
   leaseMs?: number;
+  /**
+   * Durable resumable chunking (audio-feed-wr1u). The worker builds these hooks around the
+   * claim; a synthesizer that forwards them to the TTS client resumes persisted segments and
+   * persists each new one before the next paid call. Injected synthesizers may ignore them,
+   * exactly like leaseMs — the episode then simply re-bills on resume, as before wr1u.
+   */
+  resume?: SegmentResume;
 }) => Promise<DecodedAudioResult>;
+
+/** The prepare/commit pair the TTS client drives; see SynthesisOptions.resume. */
+export interface SegmentResume {
+  prepare: (
+    segmentText: string,
+    voice: string,
+  ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
+  commit: (segmentText: string, decoded: DecodedAudioResult, voice: string) => Promise<void>;
+}
 
 export interface SynthesisWorkerOptions {
   /** Episodes per tick. Sequential: each result can be a megabyte of audio. */
@@ -262,7 +281,7 @@ export function createGeminiSynthesizer(
     (ctx.config.geminiApiKey
       ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })
       : null);
-  return async ({ article, source, episode, mode, leaseMs }) => {
+  return async ({ article, source, episode, mode, leaseMs, resume }) => {
     // Stop paid work before the claim expires; reserve one minute for persisting its outcome.
     // A terminal TTS error prevents the worker retrying already-paid segments from turn one.
     const claimedAt = Date.parse(episode.claimedAt ?? "");
@@ -273,7 +292,10 @@ export function createGeminiSynthesizer(
       throw new GeminiTtsError("synthesis claim has insufficient lease time", 400);
     }
     const leaseSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);
-    const ttsOptions = leaseSignal ? { signal: leaseSignal } : {};
+    const ttsOptions = {
+      ...(leaseSignal ? { signal: leaseSignal } : {}),
+      ...(resume ? { resume } : {}),
+    };
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
       // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
@@ -355,6 +377,152 @@ export function createGeminiSynthesizer(
       throw error;
     }
   };
+}
+
+/**
+ * The resume hooks for one claimed episode (audio-feed-wr1u).
+ *
+ * prepare: a finalized record for this exact text at this prompt version and voice is reused
+ * from its blob — no paid call. Anything else is RESERVED first (claim-conditional CAS), so a
+ * worker that is no longer the live claimant hears "held"/refusal before spending, never
+ * after. A reservation whose claim lease expired is stealable by the next claimant, like the
+ * episode claim itself.
+ *
+ * commit: stores the segment's WAV under its own per-attempt key and finalizes the record,
+ * claim-conditionally. A superseded worker's finalize fails and its blob is recorded as an
+ * orphan rather than left silent.
+ *
+ * sweep: once the stitched audio is committed, the segment blobs and records have done their
+ * job; deleting them here is what keeps the blob store from growing one WAV per segment per
+ * episode forever.
+ */
+export function buildSegmentResume(
+  ctx: AppContext,
+  episode: Episode,
+  options: { owner: string; leaseMs: number; revision: () => string; nowMs?: number },
+): { resume: SegmentResume; sweep: () => Promise<void> } {
+  const { metadata, blobs } = ctx.stores;
+  const now = () => options.nowMs ?? Date.now();
+  let listed: Promise<SynthesisSegmentRecord[]> | null = null;
+  const records = () => listed ??= metadata.listSynthesisSegments(episode.userId, episode.id);
+
+  const prepare = async (segmentText: string, voice: string) => {
+    const textHash = segmentTextHash(segmentText);
+    // Reuse is gated on prompt version AND voice: either changing means different words or
+    // a different speaker, and neither may serve the old bytes. Slots are keyed by
+    // (hash, version, voice), so drift does not fight the old record — it opens a new slot
+    // beside it, and the episode's sweep reclaims the old blob once audio is committed.
+    const existing = (await records()).find((record) =>
+      record.textHash === textHash && record.finalized &&
+      record.promptVersion === PROMPT_VERSION && record.voice === voice
+    );
+    if (existing) {
+      const blob = await blobs.get(existing.audioKey).catch(() => null);
+      if (
+        blob && (blob.size ?? existing.byteLength) === existing.byteLength &&
+        existing.text === segmentText
+      ) {
+        return { wav: await collect(blob.body) };
+      }
+      // Blob gone or record inconsistent with its own hash: speak again into a fresh
+      // revision; the stranded record is sweep fodder, never reuse fodder.
+    }
+    const outcome = await metadata.reserveSynthesisSegment(
+      episode.userId,
+      episode.id,
+      {
+        textHash,
+        text: segmentText,
+        promptVersion: PROMPT_VERSION,
+        voice,
+        audioKey: "",
+        byteLength: 0,
+        owner: options.owner,
+        claimAt: new Date(now()).toISOString(),
+        createdAt: new Date(now()).toISOString(),
+        finalized: false,
+      },
+      now(),
+      options.leaseMs,
+    );
+    if (outcome === "finalized") {
+      // Lost a reserve race to a record that finished between our list and our reserve:
+      // reuse it if it matches, else speak again.
+      const record = (await metadata.listSynthesisSegments(episode.userId, episode.id)).find(
+        (r) =>
+          r.textHash === textHash && r.finalized && r.promptVersion === PROMPT_VERSION &&
+          r.voice === voice,
+      );
+      if (record) {
+        const blob = await blobs.get(record.audioKey).catch(() => null);
+        if (
+          blob && (blob.size ?? record.byteLength) === record.byteLength &&
+          record.text === segmentText
+        ) {
+          return { wav: await collect(blob.body) };
+        }
+      }
+      return "synthesize";
+    }
+    if (outcome === "no-claim") {
+      // This worker's claim is gone (superseded or lease-expired). "held" aborts the spend
+      // before the paid call; the batch then reports the episode superseded.
+      return "held";
+    }
+    return "synthesize";
+  };
+
+  const commit = async (segmentText: string, decoded: DecodedAudioResult, voice: string) => {
+    const textHash = segmentTextHash(segmentText);
+    const wav = decoded.format === "wav" ? decoded.rawBytes : decoded.toWav();
+    const audioKey = segmentBlobKey(episode, textHash, options.revision());
+    let byteLength = wav.length;
+    try {
+      const stored = await blobs.put(audioKey, wav, { contentType: "audio/wav" });
+      byteLength = stored.size ?? wav.length;
+    } catch (error) {
+      // The segment audio exists only in this run's memory; stitching still succeeds, but
+      // the next claimant cannot reuse it. Say so loudly rather than pretending.
+      console.error(
+        `[audio-feed] segment blob write failed for episode ${episode.id} segment ${textHash}:`,
+        error,
+      );
+      return;
+    }
+    const finalized = await metadata.finalizeSynthesisSegment(
+      episode.userId,
+      episode.id,
+      { textHash, promptVersion: PROMPT_VERSION, voice },
+      { audioKey, byteLength },
+      options.owner,
+      now(),
+      options.leaseMs,
+    );
+    if (!finalized) {
+      // Superseded between reserve and finalize: the blob is this attempt's own key, so
+      // deleting it can never take another worker's audio with it.
+      try {
+        await blobs.delete(audioKey);
+      } catch {
+        await metadata.recordOrphanBlob(audioKey).catch(() => {});
+      }
+    }
+  };
+
+  const sweep = async () => {
+    const all = await metadata.listSynthesisSegments(episode.userId, episode.id);
+    for (const record of all) {
+      if (!record.audioKey) continue;
+      try {
+        await blobs.delete(record.audioKey);
+      } catch {
+        await metadata.recordOrphanBlob(record.audioKey).catch(() => {});
+      }
+    }
+    await metadata.clearSynthesisSegments(episode.userId, episode.id);
+  };
+
+  return { resume: { prepare, commit }, sweep };
 }
 
 /**
@@ -581,6 +749,15 @@ export async function runSynthesisBatch(
 
     const source = await metadata.getSource(claimed.userId, claimed.sourceId);
 
+    // Durable resumable chunking (audio-feed-wr1u): hooks are bound to THIS claim, so every
+    // reserve/finalize inside them is claim-conditional.
+    const segmentResume = buildSegmentResume(ctx, claimed, {
+      owner: opts.owner,
+      leaseMs: opts.leaseMs,
+      revision: opts.revision,
+      nowMs: options.nowMs,
+    });
+
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
@@ -591,6 +768,7 @@ export async function runSynthesisBatch(
           episode: claimed,
           mode: claimed.mode,
           leaseMs: opts.leaseMs,
+          resume: segmentResume.resume,
         });
         break;
       } catch (error) {
@@ -648,6 +826,15 @@ export async function runSynthesisBatch(
 
     if (wrote) {
       result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+      // The stitched audio is committed; the per-segment blobs have done their job.
+      try {
+        await segmentResume.sweep();
+      } catch (err) {
+        console.error(
+          `[audio-feed] segment sweep failed for episode ${claimed.id}; orphans recorded where possible:`,
+          err,
+        );
+      }
       await notifyOnDemand(claimed, "ready");
       // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp, audio-feed-akm).
       // A failure here is logged as an operational alert so counter anomalies are visible.
@@ -693,6 +880,13 @@ export async function runSynthesisBatch(
       if (!parsed) continue; // unparseable: left recorded for a human
       try {
         let referenced = false;
+        if (parsed.segmentEpisodeId) {
+          // A segment blob is live while any record of its episode still names it.
+          referenced = (await metadata.listSynthesisSegments(
+            parsed.userId,
+            parsed.segmentEpisodeId,
+          )).some((record) => record.audioKey === key);
+        }
         for (const id of parsed.candidateIds) {
           const episode = await metadata.getEpisode(parsed.userId, id);
           if (episode?.audioKey === key) {
@@ -719,7 +913,13 @@ export async function runSynthesisBatch(
  */
 export function parseAudioBlobKey(
   key: string,
-): { userId: string; candidateIds: string[] } | null {
+): { userId: string; candidateIds: string[]; segmentEpisodeId?: string } | null {
+  // audio-feed-wr1u: segment blobs live under their own prefix and are referenced by
+  // segment RECORDS, not by episode.audioKey — the orphan sweeper checks them differently.
+  const segment = /^audio-segments\/([^/]+)\/([^/]+)\/[^/]+$/.exec(key);
+  if (segment?.[1] && segment[2]) {
+    return { userId: segment[1], candidateIds: [], segmentEpisodeId: segment[2] };
+  }
   const match = /^audio\/([^/]+)\/[^/]+\/([^/]+)\.[^./]+$/.exec(key);
   if (!match?.[1] || !match[2]) return null;
   const userId = match[1];

@@ -7,11 +7,12 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import type { EpisodeQuery, MetadataStore, RunRecord } from "../../src/storage/mod.ts";
 import { RUN_HISTORY_LIMIT } from "../../src/storage/mod.ts";
 import type { Episode, OutboxNotification } from "../../src/types.ts";
 import { unsynthesized } from "../../src/types.ts";
+import type { SynthesisSegmentRecord } from "../../src/types.ts";
 import { makeApproval, makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 
 export interface MetadataSuiteOptions {
@@ -1819,6 +1820,126 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       createdAt: isoAt(0),
     });
     assertEquals((await store.listUsers()).map((u) => u.id), ["user-1"]);
+  });
+  // -- synthesis segments (audio-feed-wr1u) -----------------------------------
+  test("segment reservation is claim-conditional, single-owner, and stealable after lease expiry", async (store) => {
+    await store.putUser(makeUser({ id: "user-1" }));
+    await store.putEpisode(queued({ id: "e-seg" }));
+    const t0 = Date.parse(CLAIM.now);
+    const record = (hash: string, owner: string): SynthesisSegmentRecord => ({
+      textHash: hash,
+      text: `text ${hash}`,
+      promptVersion: "v-test",
+      voice: "Charon",
+      audioKey: "",
+      byteLength: 0,
+      owner,
+      claimAt: CLAIM.now,
+      createdAt: CLAIM.now,
+      finalized: false,
+    });
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h1", "worker-a"),
+        t0,
+        CLAIM.leaseMs,
+      ),
+      "no-claim",
+      "without a claim nothing may be reserved",
+    );
+    assertNotEquals(await store.claimEpisode("user-1", "e-seg", CLAIM), null);
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h1", "worker-b"),
+        t0,
+        CLAIM.leaseMs,
+      ),
+      "no-claim",
+      "a second worker must not reserve under someone else's live claim",
+    );
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h1", "worker-a"),
+        t0,
+        CLAIM.leaseMs,
+      ),
+      "reserved",
+    );
+    assertEquals(
+      await store.finalizeSynthesisSegment(
+        "user-1",
+        "e-seg",
+        { textHash: "h1", promptVersion: "v-test", voice: "Charon" },
+        { audioKey: "k", byteLength: 1 },
+        "worker-b",
+        t0,
+        CLAIM.leaseMs,
+      ),
+      false,
+      "a slot may only be finalized by its reserver",
+    );
+    assertEquals(
+      await store.finalizeSynthesisSegment(
+        "user-1",
+        "e-seg",
+        { textHash: "h1", promptVersion: "v-test", voice: "Charon" },
+        { audioKey: "k", byteLength: 1 },
+        "worker-a",
+        t0,
+        CLAIM.leaseMs,
+      ),
+      true,
+    );
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h1", "worker-a"),
+        t0,
+        CLAIM.leaseMs,
+      ),
+      "finalized",
+      "a finalized slot reports reuse, not a fresh reservation",
+    );
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h2", "worker-a"),
+        t0,
+        CLAIM.leaseMs,
+      ),
+      "reserved",
+    );
+    const later = t0 + CLAIM.leaseMs + 1;
+    assertNotEquals(
+      await store.claimEpisode("user-1", "e-seg", {
+        ...CLAIM,
+        owner: "worker-b",
+        now: new Date(later).toISOString(),
+      }),
+      null,
+    );
+    assertEquals(
+      await store.reserveSynthesisSegment(
+        "user-1",
+        "e-seg",
+        record("h2", "worker-b"),
+        later,
+        CLAIM.leaseMs,
+      ),
+      "reserved",
+      "a reservation whose claim lease expired is stealable",
+    );
+    assertEquals((await store.listSynthesisSegments("user-1", "e-seg")).length, 2);
+    await store.clearSynthesisSegments("user-1", "e-seg");
+    assertEquals(await store.listSynthesisSegments("user-1", "e-seg"), []);
   });
 }
 
