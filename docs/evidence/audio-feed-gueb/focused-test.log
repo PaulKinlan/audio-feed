@@ -1,0 +1,88 @@
+Check tests/limits_test.ts
+Check tests/tts_long_input_test.ts
+Check tests/tts_test.ts
+Check tests/grounded_script_test.ts
+running 5 tests from ./tests/limits_test.ts
+shared byte chunker keeps Unicode and paragraph boundaries under a caller-supplied cap ... ok (1ms)
+synthesis text seams preserve repeated words, punctuation and Unicode exactly ... ok (852µs)
+managed turns reject over-budget before spend and check completed-turn context ... ok (531µs)
+generic output continuation carries validated partial text to next turn and checks seam ... ok (319µs)
+managed turns replace one output-limited turn without stitching its incomplete output ... ok (292µs)
+running 9 tests from ./tests/tts_long_input_test.ts
+long real article: former single TTS request exceeds 8192-token budget ...
+------- post-test output -------
+{"stage":"before","model":"gemini-3.8-flash-tts","article":"History of the Internet (Wikipedia)","inputBytes":47044,"inputTokenCount":"unavailable without Gemini countTokens API","maxOutputTokens":"unset in original request","temperature":0.7,"expectedApiError":"The input token count exceeds the maximum number of tokens allowed (8192)"}
+----- post-test output end -----
+long real article: former single TTS request exceeds 8192-token budget ... ok (1ms)
+long real article: narrated in bounded ordered segments, audio joined without losing bytes ...
+------- post-test output -------
+{"stage":"after","model":"gemini-3.8-flash-tts","requests":8,"inputBytesPerRequest":[5867,5989,5974,5834,5975,5830,5858,5706],"inputTokenCount":"unavailable without Gemini countTokens API","maxOutputTokens":16384,"temperature":0.7,"audioBytes":64}
+----- post-test output end -----
+long real article: narrated in bounded ordered segments, audio joined without losing bytes ... ok (67ms)
+original single-request failure is reproducible with real article and mocked API refusal ... ok (2ms)
+segmentation prefers paragraph, then sentence, then word boundaries ... ok (352µs)
+multispeaker and Unicode paragraphs stay bounded; malformed or mismatched segments fail closed ... ok (74ms)
+oversized article is refused before any paid call; empty narration is a typed error ... ok (106ms)
+a failed later turn is terminal, not a retry of earlier paid turns ... ok (36ms)
+allowTruncated is explicit and remains visible for segmented audio ... ok (35ms)
+MAX_TOKENS audio causes local adaptive split, not silent publication or whole-episode failure ... ok (46ms)
+running 31 tests from ./tests/tts_test.ts
+Voice configuration - supports all 5 required voices ... ok (1ms)
+Single-voice narration - spoken date formatting ... ok (18ms)
+Single-voice narration - builds Ben Thompson style spoken intro ... ok (293µs)
+Single-voice narration - custom intro and partial metadata ... ok (194µs)
+Single-voice narration - builds prompt with spoken intro and article text without meta-preamble or bracketed headers (audio-feed-xad, audio-feed-9dc) ... ok (461µs)
+Single-voice narration - request builder creates valid Gemini payload (audio-feed-bjt) ... ok (194µs)
+Two-voice dialogue - returns the supplied turns and speaker roles in order ... ok (218µs)
+Two-voice dialogue - derives an opening exchange from article context ... ok (157µs)
+no meta-instruction reaches the dialogue API (audio-feed-9jh) ... ok (238µs)
+Two-voice dialogue - request builder creates multiSpeakerVoiceConfig ... ok (219µs)
+Two-voice dialogue - attaches speech_metadata.speaker to each turn part ... ok (80µs)
+Base64 encoding and decoding roundtrip ... ok (459µs)
+PCM to WAV packaging - produces valid 44-byte RIFF header ... ok (332µs)
+Audio format detection - identifies WAV, MP3 and PCM ... ok (82µs)
+decodeAudioResponse - decodes standard Gemini audio response ... ok (5ms)
+decodeAudioResponse - handles snake_case inline_data format ... ok (1ms)
+decodeAudioResponse - error handling ... ok (992µs)
+GeminiTtsClient - synthesizeNarration executes flow with mock fetch ... ok (9ms)
+GeminiTtsClient - synthesizeDialogue executes multi-speaker request ... ok (1ms)
+GeminiTtsClient - rejects when API key is missing ... ok (726µs)
+GeminiTtsClient - handles HTTP 500 error from API ... ok (625µs)
+outgoing single-voice request captures title-first intro and keeps parts strictly verbatim without meta-instructions (audio-feed-tov, audio-feed-bdo, audio-feed-bjt) ... ok (565µs)
+formatCodeForTts - skips code blocks by default (audio-feed-bdo) ... ok (75µs)
+formatCodeForTts - explains code blocks when summarizer is available (audio-feed-bdo, audio-feed-sju) ... ok (114µs)
+formatCodeForTts - falls back to skip when summarizer throws or is omitted (audio-feed-bdo) ... ok (273µs)
+buildNarrationSystemPrompt directs code handling without forbidden meta-phrases (audio-feed-bdo) ... ok (95µs)
+GeminiTtsClient - synthesizeDialogue passes code-handled article body without un-attributed instructions (audio-feed-bdo, audio-feed-9pc) ... ok (491µs)
+formatCodeForTts - handles code block variants including tildes, multiline CRLF, and HTML pre tags (audio-feed-2ob) ... ok (185µs)
+decodeHtmlEntities - decodes specific entities before ampersand to avoid double-decoding (audio-feed-91r) ... ok (116µs)
+GeminiTtsClient - synthesizeDialogue guarantees 100% of parts specify speech_metadata.speaker with zero bare parts (audio-feed-9pc) ... ok (515µs)
+Gemini TTS requests guarantee parts.text contains ONLY verbatim transcript without meta-instructions in single and dialogue (audio-feed-bjt) ... ok (477µs)
+running 21 tests from ./tests/grounded_script_test.ts
+script prompt: demands research, sources and counterarguments before writing turns ... ok (524µs)
+script prompt: a long article is bounded, and the contract still survives the bound ... ok (125µs)
+script request: grounding is requested and the model is named in the URL ... ok (10ms)
+script request: a refused call is a typed error carrying the status ... ok (1ms)
+script generator: constructing without an API key is refused up front ... ok (447µs)
+script parsing: fenced JSON surrounded by prose still parses ... ok (159µs)
+script parsing: unusable answers are errors, never half a dialogue ... ok (487µs)
+script parsing: grounding metadata outranks the model's own source list, deduped ... ok (342µs)
+script parsing: a response with no text is an error ... ok (239µs)
+synthesis: a deep dive reaches the TTS request with the researched turns ... ok (1ms)
+synthesis: exhausted claim lease fails closed before a paid call ... ok (609µs)
+synthesis: in-flight TTS is cancelled before claim expiry and terminal ... ok (64ms)
+synthesis: direct mode never pays for the research call ... ok (228µs)
+synthesis: a refused research call still produces an episode, with the static dialogue ... ok (518µs)
+synthesis: the stage can be switched off explicitly ... ok (173µs)
+live: a real grounded call returns dialogue and real search sources ...
+------- post-test output -------
+skipped: set GEMINI_API_KEY to run the live grounded-script check
+----- post-test output end -----
+live: a real grounded call returns dialogue and real search sources ... ok (355µs)
+script request: a hung call is bounded and reports the timeout ... ok (50ms)
+script request: a caller's cancel is reported as a cancel, not a timeout ... ok (495µs)
+script deadline: the default is a real budget, not a token bound ... ok (53µs)
+script deadline: the default clears three times the observed real-traffic maximum (yr76) ... ok (45µs)
+synthesis: a generator that hangs forever still produces an episode ... ok (52ms)
+
+ok | 66 passed | 0 failed (1s)
