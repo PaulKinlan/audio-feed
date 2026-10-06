@@ -465,6 +465,10 @@ export const CONFIRM_DIALOG_HTML = `
  * to the clicked submit button's value, which drastically simplifies state tracking.
  * Combining closedby='any' with an autofocus on the non-destructive Cancel button
  * guarantees keyboard and light-dismiss safety out of the box."
+ *
+ * SYNC NOTE (audio-feed-3xq part 4a): src/assets/admin.js carries a typed COPY of this snippet —
+ * the admin console is a module and cannot read this string. If you change askConfirm here,
+ * change it there too, until the account script is extracted and both share one module.
  */
 export const CONFIRM_DIALOG_CLIENT = `
   const confirmDialog = document.getElementById("confirmDialog");
@@ -696,6 +700,13 @@ export interface ShellOptions {
   /** The page's own script, if it has one. The shell never adds another. */
   script?: string;
   /**
+   * URL of the page's client module, content-addressed (audio-feed-3xq). Emitted as a
+   * `<script type="module">` after the inline shell script. Modules are deferred, so any data
+   * island the page carries in `main` is parsed before this runs. A page passes EITHER this or
+   * `script`, never both: one console, one client.
+   */
+  scriptModule?: string;
+  /**
    * External stylesheet URLs, emitted AFTER the inline <style> on purpose. Page CSS used to be
    * appended inside that same style element, so it came last and won equal-specificity ties; a link
    * placed before it would silently reverse that cascade (audio-feed-3xq part 3).
@@ -731,6 +742,7 @@ ${
       ? `<script>\n${TOOLTIP_CLIENT}\n${o.script}\n</script>`
       : `<script>\n${TOOLTIP_CLIENT}\n</script>`
   }
+${o.scriptModule ? `<script type="module" src="${o.scriptModule}"></script>` : ""}
 </body>
 </html>
 `;

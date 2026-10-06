@@ -154,16 +154,18 @@ Deno.test("temporal: listen.js when() Temporal path and Date fallback agree acro
   }
 });
 
-Deno.test("temporal: admin.ts ago() Temporal path and Date fallback agree on duration brackets (audio-feed-ap45)", async () => {
-  const adminTs = await Deno.readTextFile("src/routes/admin.ts");
-  const start = adminTs.indexOf("function ago(");
+Deno.test("temporal: admin.js ago() Temporal path and Date fallback agree on duration brackets (audio-feed-ap45)", async () => {
+  // audio-feed-3xq part 4a: ago() moved with the rest of the console client into
+  // src/assets/admin.js; the test follows the shipped bytes.
+  const adminJs = await Deno.readTextFile("src/assets/admin.js");
+  const start = adminJs.indexOf("function ago(");
   assert(start >= 0);
-  const brace = adminTs.indexOf("{", start);
+  const brace = adminJs.indexOf("{", start);
   let depth = 0;
   let end = -1;
-  for (let i = brace; i < adminTs.length; i++) {
-    if (adminTs[i] === "{") depth++;
-    else if (adminTs[i] === "}") {
+  for (let i = brace; i < adminJs.length; i++) {
+    if (adminJs[i] === "{") depth++;
+    else if (adminJs[i] === "}") {
       depth--;
       if (depth === 0) {
         end = i + 1;
@@ -172,7 +174,7 @@ Deno.test("temporal: admin.ts ago() Temporal path and Date fallback agree on dur
     }
   }
   assert(end > 0);
-  const agoBody = `return function (iso) ${adminTs.slice(brace, end)};`;
+  const agoBody = `return function (iso) ${adminJs.slice(brace, end)};`;
 
   const NOW = Date.parse("2026-10-04T21:00:00Z");
   const H = 3_600_000;
@@ -231,12 +233,14 @@ Deno.test("temporal: admin.ts ago() Temporal path and Date fallback agree on dur
 
 Deno.test("temporal: Baseline markers are present across modified surfaces (audio-feed-ap45)", async () => {
   const listenJs = await Deno.readTextFile("src/assets/listen.js");
-  const adminTs = await Deno.readTextFile("src/routes/admin.ts");
+  // audio-feed-3xq part 4a: the admin console's ago() — and its Baseline marker — live in
+  // the extracted client module now.
+  const adminJs = await Deno.readTextFile("src/assets/admin.js");
   const rssTs = await Deno.readTextFile("src/feed/rss.ts");
   const accountTs = await Deno.readTextFile("src/routes/account.ts");
 
   assert(listenJs.includes("TODO(baseline/temporal)"));
-  assert(adminTs.includes("TODO(baseline/temporal)"));
+  assert(adminJs.includes("TODO(baseline/temporal)"));
   assert(rssTs.includes("TODO(baseline/temporal)"));
   assert(accountTs.includes("TODO(baseline/temporal)"));
 });

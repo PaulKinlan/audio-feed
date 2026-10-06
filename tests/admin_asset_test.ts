@@ -62,3 +62,53 @@ Deno.test("a stale admin hash is a 404, not fresh bytes under an immutable heade
   const res = handleAsset({ params: { name: "00000000.admin.css" } } as never);
   assertEquals(res.status, 404);
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-3xq part 4a: the console's client JS made the same move the CSS did.
+// ~980 lines of browser code left admin.ts's template string for src/assets/admin.js,
+// served content-addressed; the page carries one JSON island (#admin-data) instead of
+// interpolated constants.
+// ---------------------------------------------------------------------------
+
+Deno.test("admin page links its client module instead of inlining ~980 lines of JS", () => {
+  const url = assetUrl("admin.js");
+  assertStringIncludes(html, `<script type="module" src="${url}"></script>`);
+  // Markers exclusive to the console's client code — the markup has ids like
+  // "rotateManageToken", but only the module ever CALLS these functions.
+  for (const marker of ["loadManageSources", "messageOf(error)", "function askConfirm"]) {
+    assertEquals(
+      html.includes(marker),
+      false,
+      `${marker} must come from admin.js, not a template string`,
+    );
+  }
+});
+
+Deno.test("the page hands the client its data as one JSON island, not interpolated constants", () => {
+  const match = /<script type="application\/json" id="admin-data">([\s\S]*?)<\/script>/.exec(html);
+  assert(match, "the page must carry an #admin-data document");
+  const data = JSON.parse(match![1]!);
+  assertEquals(data.origin, "https://example.com");
+  assertEquals(data.signedIn, true);
+  // The old shape interpolated the origin into a JS string constant; the island is the
+  // only place server state enters the client now.
+  assertEquals(html.includes(`const ORIGIN = "https://example.com"`), false);
+});
+
+Deno.test("the admin.js asset is served with the hash the page actually references", async () => {
+  const url = assetUrl("admin.js");
+  const segments = url.slice("/assets/".length);
+  const res = handleAsset({ params: { name: segments } } as never);
+  assertEquals(res.status, 200);
+  assertEquals(res.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assertEquals(res.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  const body = await res.text();
+  assert(body.includes("// @ts-check"), "the served client is the checked module");
+  assert(body.includes("rotateManageToken"), "the served bytes are the console client");
+  assert(body.length > 30000, `expected the full client, got ${body.length} bytes`);
+});
+
+Deno.test("a stale admin.js hash is a 404, not fresh bytes under an immutable header", () => {
+  const res = handleAsset({ params: { name: "00000000.admin.js" } } as never);
+  assertEquals(res.status, 404);
+});

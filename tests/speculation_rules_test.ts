@@ -127,8 +127,22 @@ Deno.test("admin console strictly excludes speculation rules to protect isolatio
   assertEquals(html.includes('type="speculationrules"'), false);
   assertEquals(extractSpeculationRules(html), null);
 
-  // Admin script block remains unambiguous (exactly 1 script block)
+  // The script inventory remains unambiguous (audio-feed-3xq part 4a): the shell's inline
+  // classic script, the #admin-data JSON island, and the console's client module — and no
+  // speculation rules among them.
   const { document } = parseHTML(html);
-  const scripts = document.querySelectorAll("script");
-  assertEquals(scripts.length, 1, "admin page must retain exactly one script element");
+  const scripts = [...document.querySelectorAll("script")];
+  assertEquals(scripts.length, 3, "shell inline + #admin-data island + client module");
+  assertEquals(
+    scripts.filter((s) => s.getAttribute("type") === "speculationrules").length,
+    0,
+    "admin must never carry speculation rules",
+  );
+  assertEquals(scripts.filter((s) => s.getAttribute("type") === "application/json").length, 1);
+  assertEquals(scripts.filter((s) => s.getAttribute("type") === "module").length, 1);
+  assertEquals(
+    scripts.filter((s) => !s.getAttribute("type")).length,
+    1,
+    "the shell's classic inline script",
+  );
 });

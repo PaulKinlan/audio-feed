@@ -12,16 +12,23 @@
  * anyway -- left every test green. The mutant was exactly the bug the feature
  * exists to prevent (audio-feed-05b).
  *
- * So each test drives the real shipped script through `tests/admin_script.ts`,
+ * So each test drives the real shipped client through `tests/admin_script.ts`,
  * answers the dialog, and then asserts on the REQUEST: dismissing must send
  * nothing, accepting must send exactly one. A request going out is what actually
  * destroys a subscriber's feed, so a request is what the test watches.
  *
- * Owned by: audio-feed-05b.
+ * audio-feed-3xq part 4a: the client moved from an inline page string to the
+ * content-addressed module src/assets/admin.js. The property under test is
+ * unchanged -- the harness still runs the exact shipped bytes -- but the guard
+ * that proves WHICH artifact runs now checks the island and the module link
+ * instead of counting inline blocks.
+ *
+ * Owned by: audio-feed-05b, audio-feed-3xq.
  */
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { adminScriptSource, extractInlineScript, runAdminScript } from "./admin_script.ts";
+import { adminClient, adminClientFromHtml, runAdminScript } from "./admin_script.ts";
 import type { AdminHarness } from "./admin_script.ts";
+import { assetUrl } from "../src/routes/assets.ts";
 
 const USER = {
   id: "u1",
@@ -68,43 +75,56 @@ const deletes = (h: AdminHarness) => h.requests.filter((r) => r.method === "DELE
 const rotations = (h: AdminHarness) =>
   h.requests.filter((r) => r.method === "POST" && r.path.endsWith("/rotate-token"));
 
-Deno.test("the harness refuses to guess which script block is the console's (audio-feed-euq)", () => {
-  // These tests are worth something only if they run the script that ships. The
-  // extraction used to take the FIRST <script> block, which was correct while
-  // the page had one -- but a block inserted before it would have been run
-  // instead, silently, while the suite stayed green. That is the same failure
-  // this file exists to prevent, one level out, so the guard gets its own tests.
+Deno.test("the harness refuses to guess which artifact is the console's (audio-feed-euq, re-pointed by audio-feed-3xq part 4a)", () => {
+  // These tests are worth something only if they run what ships. When the client was an
+  // inline block, the danger was a second <script> being run instead; the extractor refused
+  // ambiguous pages. Now the client is a content-addressed module fed by a JSON island, so
+  // the ambiguities that matter are: no island, two islands, no module link, or a link whose
+  // hash does not match what the server serves -- a stale link 404s in production, and a
+  // harness that ran some other bytes would stay green while doing it.
   //
-  // The real page has exactly one block, so neither guard can fire against it.
-  // Hence feeding the pure extractor pages the real one is not, yet.
+  // The real page passes every guard, so each one gets a decoy page it must refuse.
+  const island = `<script type="application/json" id="admin-data">{}</script>`;
+  const module_ = `<script type="module" src="${assetUrl("admin.js")}"></script>`;
+
+  assertThrows(
+    () => adminClientFromHtml(`<html><body>${module_}</body></html>`),
+    Error,
+    "no #admin-data",
+    "a page without the data island must be refused, not run with empty data",
+  );
+
+  assertThrows(
+    () => adminClientFromHtml(`<html><body>${island}${island}${module_}</body></html>`),
+    Error,
+    "2 #admin-data documents",
+    "a decoy island must be refused, not one-of-two picked silently",
+  );
+
+  assertThrows(
+    () => adminClientFromHtml(`<html><body>${island}</body></html>`),
+    Error,
+    "exactly one client module",
+    "a page that links no module would never run a client; refuse it",
+  );
+
   assertThrows(
     () =>
-      extractInlineScript(
-        `<html><script type="application/ld+json">{"a":1}</script>` +
-          `<script>(() => { "use strict"; })()</script></html>`,
+      adminClientFromHtml(
+        `<html><body>${island}<script type="module" src="/assets/deadbeef.admin.js"></script>` +
+          `</body></html>`,
       ),
     Error,
-    "2 script blocks",
-    "a decoy block before the console script must be refused, not run",
+    "stale or wrong asset link",
+    "a module link whose hash does not match the served bytes must be refused",
   );
 
-  assertThrows(
-    () => extractInlineScript(`<html><body>no script</body></html>`),
-    Error,
-    "no inline script",
-  );
-
-  assertThrows(
-    () => extractInlineScript(`<html><script>console.log("analytics")</script></html>`),
-    Error,
-    "does not look like the console script",
-    "a single block that is not the console's must be refused",
-  );
-
-  // And the page as it actually renders still resolves to the console's IIFE.
-  const source = adminScriptSource();
-  assert(source.includes(`"use strict"`));
-  assert(source.includes("rotateManageToken"), "must be the console script, not some other block");
+  // And the page as it actually renders still resolves to the console's client and data.
+  const client = adminClient();
+  assert(client.source.includes("rotateManageToken"), "must be the console client");
+  const data = JSON.parse(client.data);
+  assertEquals(data.origin, "https://audio.example.com");
+  assertEquals(data.signedIn, true);
 });
 
 Deno.test("dismissing the Remove dialog sends no DELETE (audio-feed-05b)", async () => {

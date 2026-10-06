@@ -165,7 +165,9 @@ Deno.test("GET /admin: a signed-out visitor is offered sign-in, token controls r
   assertStringIncludes(html, "Bootstrap passkey");
   assertEquals(html.includes("Use admin token instead"), false);
   assertEquals(html.includes('id="adminToken"'), false);
-  assertStringIncludes(html, "const SIGNED_IN = false");
+  // audio-feed-3xq part 4a: the session flag reaches the client through the #admin-data
+  // island, not an interpolated JS constant.
+  assertStringIncludes(html, '"signedIn":false');
 });
 
 Deno.test("GET /login: renders Admin bootstrap accordion panel (audio-feed-8eh)", async () => {
@@ -186,7 +188,8 @@ Deno.test("GET /admin: an admin session gets the console, signed in (audio-feed-
   const res = await get(fetch, "/admin", stores, admin.id);
   assertEquals(res.status, 200);
   const html = await res.text();
-  assertStringIncludes(html, "const SIGNED_IN = true");
+  // audio-feed-3xq part 4a: the session flag rides in the #admin-data island.
+  assertStringIncludes(html, '"signedIn":true');
   assertStringIncludes(html, 'id="usersBody"');
   assertStringIncludes(html, "Sign out");
 });

@@ -12,6 +12,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { CONFIRM_DIALOG_CLIENT, CONFIRM_DIALOG_HTML, renderShell } from "../src/routes/shell.ts";
+import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import { renderAccountPage } from "../src/routes/account.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { makeUser } from "./fixtures.ts";
@@ -84,6 +85,32 @@ Deno.test("renderAccountPage: includes native accessible <dialog> and client scr
   );
 });
 
+Deno.test("admin.js askConfirm stays in sync with shell.ts CONFIRM_DIALOG_CLIENT (audio-feed-3xq part 4a)", () => {
+  // The console's module carries a typed COPY of the confirm client: a verbatim-served module
+  // cannot import the shell's string, and unification is tracked as follow-up work for when the
+  // account script is extracted. Until then these markers are the behavioural skeleton both
+  // copies must keep — the closedby shim condition, the light-dismiss close, the blocking-confirm
+  // fallback, the danger styling branch and the returnValue contract. If either side's logic
+  // drifts, one of these fails here instead of shipping silently.
+  const shellClient = CONFIRM_DIALOG_CLIENT;
+  const adminClient = assetBody("admin.js") ?? "";
+  const markers = [
+    `!("closedBy" in HTMLDialogElement.prototype)`,
+    `confirmDialog.close("cancel")`,
+    `typeof confirmDialog.showModal !== "function"`,
+    `Promise.resolve(confirm(message))`,
+    `opts.danger === false`,
+    `okEl.className = "btn primary"`,
+    `okEl.className = "btn danger"`,
+    `resolve(confirmDialog.returnValue === "confirm")`,
+    `confirmDialog.showModal();`,
+  ];
+  for (const marker of markers) {
+    assertStringIncludes(shellClient, marker, `shell copy lost: ${marker}`);
+    assertStringIncludes(adminClient, marker, `admin copy lost: ${marker}`);
+  }
+});
+
 Deno.test("renderAdminPage: includes native accessible <dialog> and client script (audio-feed-ytl)", () => {
   const html = renderAdminPage({
     publicBaseUrl: "https://audio.example.com",
@@ -93,11 +120,19 @@ Deno.test("renderAdminPage: includes native accessible <dialog> and client scrip
 
   assertStringIncludes(html, '<dialog id="confirmDialog"');
   assertStringIncludes(html, 'closedby="any"');
-  assertStringIncludes(html, "askConfirm(");
+  // audio-feed-3xq part 4a: askConfirm moved from the inline page string into the
+  // content-addressed client module, so the assertion follows the bytes that ship.
+  // The property is unchanged: the console asks with the native dialog, never with a
+  // blocking window.confirm whose result is discarded.
+  const client = assetBody("admin.js");
+  assert(client !== null, "admin.js must be a registered asset");
+  assertStringIncludes(client, "askConfirm(");
   assert(
-    !html.includes("!confirm("),
-    "admin console script must use askConfirm instead of blocking window.confirm",
+    !client.includes("!confirm("),
+    "admin console client must use askConfirm instead of blocking window.confirm",
   );
+  // And the page must actually load that module.
+  assertStringIncludes(html, `<script type="module" src="${assetUrl("admin.js")}"></script>`);
 });
 
 Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves promise on close (audio-feed-ytl)", async () => {
