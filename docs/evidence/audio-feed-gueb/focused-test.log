@@ -1,0 +1,49 @@
+Check tests/tts_long_input_test.ts
+Check tests/tts_test.ts
+running 4 tests from ./tests/tts_long_input_test.ts
+long real article: former single TTS request exceeds 8192-token budget ...
+------- output -------
+{"stage":"before","model":"gemini-3.8-flash-tts","article":"History of the Internet (Wikipedia)","inputBytes":47044,"inputTokenCount":"unavailable without Gemini countTokens API","maxOutputTokens":"unset in original request","temperature":0.7,"expectedApiError":"The input token count exceeds the maximum number of tokens allowed (8192)"}
+----- output end -----
+long real article: former single TTS request exceeds 8192-token budget ... ok (1ms)
+long real article: narrated in bounded ordered segments, audio joined without losing bytes ...
+------- output -------
+{"stage":"after","model":"gemini-3.8-flash-tts","requests":8,"inputBytesPerRequest":[5999,5998,5991,5994,5994,5999,5994,5067],"inputTokenCount":"unavailable without Gemini countTokens API","maxOutputTokens":16384,"temperature":0.7,"audioBytes":64}
+----- output end -----
+long real article: narrated in bounded ordered segments, audio joined without losing bytes ... ok (58ms)
+original single-request failure is reproducible with real article and mocked API refusal ... ok (1ms)
+multispeaker and Unicode paragraphs stay bounded; malformed or mismatched segments fail closed ... ok (84ms)
+running 31 tests from ./tests/tts_test.ts
+Voice configuration - supports all 5 required voices ... ok (856µs)
+Single-voice narration - spoken date formatting ... ok (18ms)
+Single-voice narration - builds Ben Thompson style spoken intro ... ok (365µs)
+Single-voice narration - custom intro and partial metadata ... ok (216µs)
+Single-voice narration - builds prompt with spoken intro and article text without meta-preamble or bracketed headers (audio-feed-xad, audio-feed-9dc) ... ok (284µs)
+Single-voice narration - request builder creates valid Gemini payload (audio-feed-bjt) ... ok (220µs)
+Two-voice dialogue - returns the supplied turns and speaker roles in order ... ok (227µs)
+Two-voice dialogue - derives an opening exchange from article context ... ok (172µs)
+no meta-instruction reaches the dialogue API (audio-feed-9jh) ... ok (263µs)
+Two-voice dialogue - request builder creates multiSpeakerVoiceConfig ... ok (292µs)
+Two-voice dialogue - attaches speech_metadata.speaker to each turn part ... ok (92µs)
+Base64 encoding and decoding roundtrip ... ok (463µs)
+PCM to WAV packaging - produces valid 44-byte RIFF header ... ok (373µs)
+Audio format detection - identifies WAV, MP3 and PCM ... ok (90µs)
+decodeAudioResponse - decodes standard Gemini audio response ... ok (2ms)
+decodeAudioResponse - handles snake_case inline_data format ... ok (888µs)
+decodeAudioResponse - error handling ... ok (1ms)
+GeminiTtsClient - synthesizeNarration executes flow with mock fetch ... ok (9ms)
+GeminiTtsClient - synthesizeDialogue executes multi-speaker request ... ok (1ms)
+GeminiTtsClient - rejects when API key is missing ... ok (557µs)
+GeminiTtsClient - handles HTTP 500 error from API ... ok (622µs)
+outgoing single-voice request captures title-first intro and keeps parts strictly verbatim without meta-instructions (audio-feed-tov, audio-feed-bdo, audio-feed-bjt) ... ok (605µs)
+formatCodeForTts - skips code blocks by default (audio-feed-bdo) ... ok (80µs)
+formatCodeForTts - explains code blocks when summarizer is available (audio-feed-bdo, audio-feed-sju) ... ok (109µs)
+formatCodeForTts - falls back to skip when summarizer throws or is omitted (audio-feed-bdo) ... ok (281µs)
+buildNarrationSystemPrompt directs code handling without forbidden meta-phrases (audio-feed-bdo) ... ok (102µs)
+GeminiTtsClient - synthesizeDialogue passes code-handled article body without un-attributed instructions (audio-feed-bdo, audio-feed-9pc) ... ok (474µs)
+formatCodeForTts - handles code block variants including tildes, multiline CRLF, and HTML pre tags (audio-feed-2ob) ... ok (180µs)
+decodeHtmlEntities - decodes specific entities before ampersand to avoid double-decoding (audio-feed-91r) ... ok (179µs)
+GeminiTtsClient - synthesizeDialogue guarantees 100% of parts specify speech_metadata.speaker with zero bare parts (audio-feed-9pc) ... ok (514µs)
+Gemini TTS requests guarantee parts.text contains ONLY verbatim transcript without meta-instructions in single and dialogue (audio-feed-bjt) ... ok (453µs)
+
+ok | 35 passed | 0 failed (300ms)

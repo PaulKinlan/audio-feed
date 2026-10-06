@@ -66,6 +66,11 @@ export const DEFAULT_EXPERT_VOICE: GeminiTtsVoice = "Fenrir";
 export const DEFAULT_FOIL_VOICE: GeminiTtsVoice = "Puck";
 
 export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
+/** 3.8 Flash TTS accepts at most 8192 input tokens; UTF-8 bytes are a conservative
+ * upper bound for token counting, leaving space for request metadata and style. */
+export const MAX_TTS_INPUT_BYTES = 6_000;
+/** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
+export const MAX_TTS_OUTPUT_TOKENS = 16_384;
 /** Per-attempt deadline. A hung request must not hold a synthesis worker forever. */
 export const DEFAULT_TIMEOUT_MS = 60_000;
 /** Retries AFTER the first attempt. */
@@ -181,6 +186,7 @@ export interface GeminiGenerateContentRequest {
       };
     };
     temperature?: number;
+    maxOutputTokens?: number;
   };
 }
 
@@ -988,6 +994,7 @@ export function buildSingleVoiceRequest(
         },
       },
       temperature,
+      maxOutputTokens: MAX_TTS_OUTPUT_TOKENS,
     },
   };
 }
@@ -1051,7 +1058,80 @@ export function buildDialogueRequest(
         },
       },
       temperature,
+      maxOutputTokens: MAX_TTS_OUTPUT_TOKENS,
     },
+  };
+}
+
+/** Split transcript on a word boundary where possible; never split a Unicode code point.
+ * This byte budget conservatively bounds input tokens even for code and non-Latin text. */
+export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): string[] {
+  if (maxBytes < 4) throw new Error("TTS segment byte budget is too small");
+  const result: string[] = [];
+  const encoder = new TextEncoder();
+  let rest = text.trim();
+  while (encoder.encode(rest).length > maxBytes) {
+    let end = 0;
+    let bytes = 0;
+    for (const point of rest) {
+      const size = encoder.encode(point).length;
+      if (bytes + size > maxBytes) break;
+      bytes += size;
+      end += point.length;
+    }
+    const boundary = rest.slice(0, end).search(/\s+\S*$/u);
+    if (boundary > end / 2) end = boundary;
+    const segment = rest.slice(0, end).trim();
+    if (!segment) throw new Error("TTS segment cannot fit in byte budget");
+    result.push(segment);
+    rest = rest.slice(end).trimStart();
+  }
+  if (rest) result.push(rest);
+  return result;
+}
+
+/** Each request yields a self-contained audio file; concatenate only compatible PCM payloads. */
+function joinTtsAudio(chunks: DecodedAudioResult[]): DecodedAudioResult {
+  if (chunks.length === 1) return chunks[0]!;
+  const first = chunks[0]!;
+  const pcm = chunks.map((chunk) => {
+    if (
+      chunk.sampleRate !== first.sampleRate || chunk.channels !== first.channels ||
+      chunk.bitsPerSample !== first.bitsPerSample || chunk.truncated ||
+      (chunk.format !== "wav" && chunk.format !== "pcm")
+    ) {
+      throw new GeminiTtsError("TTS segments returned incompatible or incomplete audio");
+    }
+    if (chunk.format === "pcm") return chunk.rawBytes;
+    const info = parseWavHeader(chunk.rawBytes);
+    if (info.audioFormat !== 1 || info.dataLength <= 0) {
+      throw new GeminiTtsError("TTS segment WAV is not valid PCM audio");
+    }
+    return chunk.rawBytes.subarray(info.dataOffset, info.dataOffset + info.dataLength);
+  });
+  const combined = new Uint8Array(pcm.reduce((total, bytes) => total + bytes.length, 0));
+  let offset = 0;
+  for (const bytes of pcm) {
+    combined.set(bytes, offset);
+    offset += bytes.length;
+  }
+  return {
+    rawBytes: combined,
+    mimeType: `audio/pcm;rate=${first.sampleRate}`,
+    format: "pcm",
+    sampleRate: first.sampleRate,
+    channels: first.channels,
+    bitsPerSample: first.bitsPerSample,
+    durationSeconds: combined.length /
+      (first.sampleRate * first.channels * first.bitsPerSample / 8),
+    finishReason: "STOP",
+    truncated: false,
+    toWav: () =>
+      pcmToWav(combined, {
+        sampleRate: first.sampleRate,
+        numChannels: first.channels,
+        bitsPerSample: first.bitsPerSample,
+      }),
   };
 }
 
@@ -1254,8 +1334,17 @@ export class GeminiTtsClient {
     const processedBody = await formatCodeForTts(input.body, codeHandling, input.codeSummarizer);
     const prompt = formatNarrationPrompt({ ...input, body: processedBody });
     const style = input.style ?? DEFAULT_NARRATION_STYLE;
-    const request = buildSingleVoiceRequest(prompt, voice, options.temperature, style);
-    return await this.sendRequest(request, options);
+    const segments = splitTtsText(prompt);
+    const audio: DecodedAudioResult[] = [];
+    for (const segment of segments) {
+      audio.push(
+        await this.sendRequest(
+          buildSingleVoiceRequest(segment, voice, options.temperature, style),
+          options,
+        ),
+      );
+    }
+    return joinTtsAudio(audio);
   }
 
   /**
@@ -1279,8 +1368,33 @@ export class GeminiTtsClient {
       };
     }
     const { turns, speakers } = formatDialoguePrompt(formattedInput);
-    const request = buildDialogueRequest(turns, speakers, options.temperature);
-    return await this.sendRequest(request, options);
+    const batches: DialogueTurn[][] = [];
+    let batch: DialogueTurn[] = [];
+    let bytes = 0;
+    const encoder = new TextEncoder();
+    for (const turn of turns) {
+      for (const text of splitTtsText(turn.text)) {
+        const size = encoder.encode(text).length;
+        if (batch.length && bytes + size > MAX_TTS_INPUT_BYTES) {
+          batches.push(batch);
+          batch = [];
+          bytes = 0;
+        }
+        batch.push({ ...turn, text });
+        bytes += size;
+      }
+    }
+    if (batch.length) batches.push(batch);
+    const audio: DecodedAudioResult[] = [];
+    for (const turns of batches) {
+      audio.push(
+        await this.sendRequest(buildDialogueRequest(turns, speakers, options.temperature), options),
+      );
+    }
+    if (audio.length === 0) {
+      throw new GeminiTtsError("Dialogue contained no spoken text");
+    }
+    return joinTtsAudio(audio);
   }
 
   /**
@@ -1366,7 +1480,18 @@ export class GeminiTtsClient {
         // use default statusText
       }
 
-      lastError = new GeminiTtsError(errMsg, res.status, errDetails);
+      const inputBytes = request.contents.reduce(
+        (total, content) =>
+          total +
+          content.parts.reduce((sum, part) => sum + new TextEncoder().encode(part.text).length, 0),
+        0,
+      );
+      lastError = new GeminiTtsError(
+        `${errMsg} [model=${model}, inputBytes=${inputBytes}, estimatedInputTokens<=${inputBytes} (UTF-8-byte bound), ` +
+          `maxOutputTokens=${request.generationConfig.maxOutputTokens ?? "unset"}]`,
+        res.status,
+        errDetails,
+      );
       const retryable = retryOn !== "none" && attempt < attempts &&
         (TRANSIENT_STATUSES.has(res.status) ||
           (retryOn === "all" && res.status >= 500));
