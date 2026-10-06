@@ -228,6 +228,26 @@ Deno.test("oversized article is refused before any paid call; empty narration is
   assertEquals(calls, 0);
 });
 
+Deno.test("a failed later turn is terminal, not a retry of earlier paid turns", async () => {
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: (() => {
+      calls++;
+      return calls === 2
+        ? Promise.resolve(
+          new Response(JSON.stringify({ error: { message: "quota" } }), { status: 429 }),
+        )
+        : Promise.resolve(success());
+    }) as typeof fetch,
+  });
+  const error = await assertRejects(() => client.synthesizeNarration(input));
+  assert(error instanceof Error);
+  assertEquals((error as { status?: number }).status, 400);
+  assertStringIncludes(error.message, "refusing whole-episode retry");
+  assertEquals(calls, 2);
+});
+
 Deno.test("allowTruncated is explicit and remains visible for segmented audio", async () => {
   let calls = 0;
   const client = new GeminiTtsClient({

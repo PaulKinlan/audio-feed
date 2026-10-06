@@ -22,7 +22,7 @@ import {
   textFromResponse,
 } from "../src/worker/script.ts";
 import { createGeminiSynthesizer } from "../src/worker/synthesis.ts";
-import type { DecodedAudioResult } from "../src/tts/gemini.ts";
+import { type DecodedAudioResult, GeminiTtsClient } from "../src/tts/gemini.ts";
 import type { AppContext } from "../src/app.ts";
 import { makeArticle, makeEpisode, makeSource } from "./fixtures.ts";
 
@@ -264,6 +264,55 @@ Deno.test("synthesis: a deep dive reaches the TTS request with the researched tu
   assertEquals(researchCalls, 1);
   assertEquals(calls[0]?.turns?.length, 2);
   assertEquals(calls[0]?.turns?.[0]?.text, "Where does the evidence actually come from?");
+});
+
+Deno.test("synthesis: exhausted claim lease fails closed before a paid call", async () => {
+  const { calls, synthesize } = harness({ scriptGenerator: null });
+  const error = await assertRejects(() =>
+    synthesize({
+      article: makeArticle({ title: "Lease", content: "Body." }),
+      source: makeSource({ voices: {} }),
+      episode: makeEpisode({ claimedAt: new Date(Date.now() - 850_000).toISOString() }),
+      mode: "direct",
+      leaseMs: 900_000,
+    })
+  );
+  assert(error instanceof Error);
+  assertEquals((error as { status?: number }).status, 400);
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("synthesis: in-flight TTS is cancelled before claim expiry and terminal", async () => {
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "fixture-key",
+    fetchFn: ((_url, init) => {
+      calls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("lease aborted")), {
+          once: true,
+        });
+      });
+    }) as typeof fetch,
+  });
+  const ctx = {
+    config: { geminiApiKey: "fixture-key" },
+    stores: memoryStores(),
+  } as unknown as AppContext;
+  const synthesize = createGeminiSynthesizer(ctx, { client, scriptGenerator: null });
+  const error = await assertRejects(() =>
+    synthesize({
+      article: makeArticle({ title: "Lease", content: "Body." }),
+      source: makeSource({ voices: {} }),
+      episode: makeEpisode({ claimedAt: new Date().toISOString() }),
+      mode: "direct",
+      leaseMs: 60_060,
+    })
+  );
+  assert(error instanceof Error);
+  assertEquals((error as { status?: number }).status, 400);
+  assertStringIncludes(error.message, "claim lease");
+  assertEquals(calls, 1);
 });
 
 Deno.test("synthesis: direct mode never pays for the research call", async () => {

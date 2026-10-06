@@ -1364,31 +1364,42 @@ export class GeminiTtsClient {
       );
     }
     assertTextSeams(prompt, segments);
-    return await runManagedTurns({
-      segments,
-      maxTurns: MAX_TTS_SEGMENTS,
-      request: (segment) =>
-        this.sendRequest(
-          buildSingleVoiceRequest(segment, voice, options.temperature, style),
-          segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
-        ),
-      splitOnOutputLimit: (segment, error) => {
-        if (
-          !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
-          new TextEncoder().encode(segment).length < 8
-        ) return null;
-        const halves = splitTtsText(
-          segment,
-          Math.floor(new TextEncoder().encode(segment).length / 2),
-        );
-        assertTextSeams(segment, halves);
-        return halves;
-      },
-      stitch: (audio) => {
-        assertTextSeams(prompt, segments);
-        return joinTtsAudio(audio, options.allowTruncated);
-      },
-    });
+    try {
+      return await runManagedTurns({
+        segments,
+        maxTurns: MAX_TTS_SEGMENTS,
+        request: (segment) =>
+          this.sendRequest(
+            buildSingleVoiceRequest(segment, voice, options.temperature, style),
+            segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
+          ),
+        splitOnOutputLimit: (segment, error) => {
+          if (
+            !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
+            new TextEncoder().encode(segment).length < 8
+          ) return null;
+          const halves = splitTtsText(
+            segment,
+            Math.floor(new TextEncoder().encode(segment).length / 2),
+          );
+          assertTextSeams(segment, halves);
+          return halves;
+        },
+        stitch: (audio) => {
+          assertTextSeams(prompt, segments);
+          return joinTtsAudio(audio, options.allowTruncated);
+        },
+      });
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      throw new GeminiTtsError(
+        `TTS turn failed; refusing whole-episode retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        400,
+        error,
+      );
+    }
   }
 
   /**
@@ -1439,19 +1450,30 @@ export class GeminiTtsClient {
     const sourceText = turns.map((turn) => turn.text).join("");
     const batchText = () => batches.flatMap((part) => part.map((turn) => turn.text));
     assertTextSeams(sourceText, batchText());
-    return await runManagedTurns({
-      segments: batches,
-      maxTurns: MAX_TTS_SEGMENTS,
-      request: (part) =>
-        this.sendRequest(
-          buildDialogueRequest(part, speakers, options.temperature),
-          batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
-        ),
-      stitch: (audio) => {
-        assertTextSeams(sourceText, batchText());
-        return joinTtsAudio(audio, options.allowTruncated);
-      },
-    });
+    try {
+      return await runManagedTurns({
+        segments: batches,
+        maxTurns: MAX_TTS_SEGMENTS,
+        request: (part) =>
+          this.sendRequest(
+            buildDialogueRequest(part, speakers, options.temperature),
+            batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
+          ),
+        stitch: (audio) => {
+          assertTextSeams(sourceText, batchText());
+          return joinTtsAudio(audio, options.allowTruncated);
+        },
+      });
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      throw new GeminiTtsError(
+        `TTS turn failed; refusing whole-episode retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        400,
+        error,
+      );
+    }
   }
 
   /**

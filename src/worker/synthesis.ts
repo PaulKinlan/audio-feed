@@ -40,6 +40,7 @@ import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import {
   DEFAULT_NARRATION_VOICE,
   GeminiTtsClient,
+  GeminiTtsError,
   GeminiTtsTruncatedError,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
@@ -71,6 +72,8 @@ export type Synthesizer = (job: {
   source: Source | null;
   episode: Episode;
   mode: AudioMode;
+  /** Claim lifetime for lease-aware network cancellation; injected synthesizers may ignore it. */
+  leaseMs?: number;
 }) => Promise<DecodedAudioResult>;
 
 export interface SynthesisWorkerOptions {
@@ -256,7 +259,18 @@ export function createGeminiSynthesizer(
     (ctx.config.geminiApiKey
       ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })
       : null);
-  return async ({ article, source, episode, mode }) => {
+  return async ({ article, source, episode, mode, leaseMs }) => {
+    // Stop paid work before the claim expires; reserve one minute for persisting its outcome.
+    // A terminal TTS error prevents the worker retrying already-paid segments from turn one.
+    const claimedAt = Date.parse(episode.claimedAt ?? "");
+    const remainingMs = leaseMs && Number.isFinite(claimedAt)
+      ? claimedAt + leaseMs - Date.now() - 60_000
+      : undefined;
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      throw new GeminiTtsError("synthesis claim has insufficient lease time", 400);
+    }
+    const leaseSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);
+    const ttsOptions = leaseSignal ? { signal: leaseSignal } : {};
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
       // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
@@ -286,19 +300,26 @@ export function createGeminiSynthesizer(
         },
         deps.scriptTimeoutMs,
       );
-      return await client.synthesizeDialogue({
-        title: article.title,
-        article: {
+      try {
+        return await client.synthesizeDialogue({
           title: article.title,
-          author: article.author,
-          body: article.content,
-          summary: article.excerpt,
-        },
-        speakers,
-        turns: script?.turns,
-        codeHandling,
-        codeSummarizer: deps.codeSummarizer,
-      });
+          article: {
+            title: article.title,
+            author: article.author,
+            body: article.content,
+            summary: article.excerpt,
+          },
+          speakers,
+          turns: script?.turns,
+          codeHandling,
+          codeSummarizer: deps.codeSummarizer,
+        }, ttsOptions);
+      } catch (error) {
+        if (leaseSignal?.aborted) {
+          throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
+        }
+        throw error;
+      }
     }
 
     // Only read the user record when nothing above it decided, so the common case
@@ -313,16 +334,23 @@ export function createGeminiSynthesizer(
       .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
       DEFAULT_NARRATION_VOICE;
 
-    return await client.synthesizeNarration({
-      title: article.title,
-      author: article.author,
-      publishedAt: article.publishedAt,
-      sourceName: source?.title ?? episode.sourceTitle,
-      body: article.content,
-      voice,
-      codeHandling,
-      codeSummarizer: deps.codeSummarizer,
-    });
+    try {
+      return await client.synthesizeNarration({
+        title: article.title,
+        author: article.author,
+        publishedAt: article.publishedAt,
+        sourceName: source?.title ?? episode.sourceTitle,
+        body: article.content,
+        voice,
+        codeHandling,
+        codeSummarizer: deps.codeSummarizer,
+      }, ttsOptions);
+    } catch (error) {
+      if (leaseSignal?.aborted) {
+        throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
+      }
+      throw error;
+    }
   };
 }
 
@@ -554,7 +582,13 @@ export async function runSynthesisBatch(
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
-        audio = await synthesize({ article, source, episode: claimed, mode: claimed.mode });
+        audio = await synthesize({
+          article,
+          source,
+          episode: claimed,
+          mode: claimed.mode,
+          leaseMs: opts.leaseMs,
+        });
         break;
       } catch (error) {
         lastError = error;
