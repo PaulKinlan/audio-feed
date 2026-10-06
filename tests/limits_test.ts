@@ -1,5 +1,17 @@
 import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@^1.0.10";
-import { assertTextSeams, runManagedTurns } from "../src/tts/limits.ts";
+import {
+  assertTextSeams,
+  runManagedTurns,
+  splitTextUnderByteBudget,
+} from "../src/synthesis/limits.ts";
+
+Deno.test("shared byte chunker keeps Unicode and paragraph boundaries under a caller-supplied cap", () => {
+  const source = "First paragraph.\n\nSecond paragraph has 🚀 text.";
+  const parts = splitTextUnderByteBudget(source, 24);
+  assertTextSeams(source, parts);
+  assertEquals(parts[0], "First paragraph.");
+  assertEquals(parts.every((part) => new TextEncoder().encode(part).length <= 24), true);
+});
 
 Deno.test("synthesis text seams preserve repeated words, punctuation and Unicode exactly", () => {
   assertTextSeams("One. One. 二！", ["One.", "One. 二！"]);
@@ -47,6 +59,24 @@ Deno.test("managed turns reject over-budget before spend and check completed-tur
     stitch: (parts) => parts.join("|"),
   });
   assertEquals(result, "0:a|1:b");
+});
+
+Deno.test("generic output continuation carries validated partial text to next turn and checks seam", async () => {
+  const result = await runManagedTurns({
+    segments: ["first"],
+    maxTurns: 2,
+    request: async (segment, completed) => {
+      if (segment === "first") throw new Error("MAX_TOKENS");
+      assertEquals(completed, ["Once upon"]);
+      return " a time.";
+    },
+    continueOnOutputLimit: () => ({ partial: "Once upon", next: ["continue"] }),
+    stitch: (parts) => {
+      assertTextSeams("Once upon a time.", parts);
+      return parts.join("");
+    },
+  });
+  assertEquals(result, "Once upon a time.");
 });
 
 Deno.test("managed turns replace one output-limited turn without stitching its incomplete output", async () => {

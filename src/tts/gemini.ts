@@ -1,5 +1,5 @@
 import type { CodeHandling } from "../types.ts";
-import { assertTextSeams, runManagedTurns } from "./limits.ts";
+import { assertTextSeams, runManagedTurns, splitTextUnderByteBudget } from "../synthesis/limits.ts";
 
 /**
  * Gemini 3.8 / 2.5 Flash TTS Client
@@ -1069,42 +1069,9 @@ export function buildDialogueRequest(
   };
 }
 
-/** Prefer paragraph or sentence boundaries for natural breath points; fall back to a word
- * boundary, then a Unicode code point for an oversized unbroken word. The byte budget
- * bounds transcript tokens even for code and non-Latin text, with metadata headroom. */
+/** Backward-compatible TTS budget wrapper around the shared synthesis chunker. */
 export function splitTtsText(text: string, maxBytes = MAX_TTS_INPUT_BYTES): string[] {
-  if (maxBytes < 4) throw new Error("TTS segment byte budget is too small");
-  const result: string[] = [];
-  const encoder = new TextEncoder();
-  let rest = text.trim();
-  while (encoder.encode(rest).length > maxBytes) {
-    let end = 0;
-    let bytes = 0;
-    for (const point of rest) {
-      const size = encoder.encode(point).length;
-      if (bytes + size > maxBytes) break;
-      bytes += size;
-      end += point.length;
-    }
-    const available = rest.slice(0, end);
-    const preferred = /\n\s*\n|[.!?。！？][”"')\]]?\s+/gu;
-    let boundary = 0;
-    for (const match of available.matchAll(preferred)) {
-      const candidate = match.index + match[0].length;
-      if (candidate > end / 2) boundary = candidate;
-    }
-    if (!boundary) {
-      const word = /\s+\S*$/u.exec(available);
-      if (word && word.index > end / 2) boundary = word.index;
-    }
-    if (boundary) end = boundary;
-    const segment = rest.slice(0, end).trim();
-    if (!segment) throw new Error("TTS segment cannot fit in byte budget");
-    result.push(segment);
-    rest = rest.slice(end).trimStart();
-  }
-  if (rest) result.push(rest);
-  return result;
+  return splitTextUnderByteBudget(text, maxBytes);
 }
 
 /** Each request yields a self-contained audio file; concatenate only compatible PCM payloads. */
@@ -1355,7 +1322,7 @@ export class GeminiTtsClient {
     const processedBody = await formatCodeForTts(input.body, codeHandling, input.codeSummarizer);
     const prompt = formatNarrationPrompt({ ...input, body: processedBody });
     const style = input.style ?? DEFAULT_NARRATION_STYLE;
-    const segments = splitTtsText(prompt);
+    const segments = splitTextUnderByteBudget(prompt, MAX_TTS_INPUT_BYTES);
     if (segments.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
     if (segments.length > MAX_TTS_SEGMENTS) {
       throw new GeminiTtsError(
@@ -1378,7 +1345,7 @@ export class GeminiTtsClient {
             !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
             new TextEncoder().encode(segment).length < 8
           ) return null;
-          const halves = splitTtsText(
+          const halves = splitTextUnderByteBudget(
             segment,
             Math.floor(new TextEncoder().encode(segment).length / 2),
           );
@@ -1428,7 +1395,7 @@ export class GeminiTtsClient {
     let bytes = 0;
     const encoder = new TextEncoder();
     for (const turn of turns) {
-      for (const text of splitTtsText(turn.text)) {
+      for (const text of splitTextUnderByteBudget(turn.text, MAX_TTS_INPUT_BYTES)) {
         const size = encoder.encode(text).length;
         if (batch.length && bytes + size > MAX_TTS_INPUT_BYTES) {
           batches.push(batch);
