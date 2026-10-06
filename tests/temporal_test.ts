@@ -120,25 +120,37 @@ Deno.test("temporal: listen.js when() Temporal path and Date fallback agree acro
     ) => string;
   }
 
-  const withT = makeWhen(true);
-  const withoutT = makeWhen(false);
+  // audio-feed-x6u4: the Date fallback derives day boundaries from local-time
+  // getters (getFullYear/getMonth/getDate), which follow the process timezone.
+  // Pin TZ to the zone the frozen clock targets (Deno re-reads TZ on
+  // Deno.env.set, so this takes effect in-process) so the test is deterministic
+  // regardless of ambient TZ, and restore it so sibling tests are unaffected.
+  const savedTz = Deno.env.get("TZ");
+  Deno.env.set("TZ", tz);
+  try {
+    const withT = makeWhen(true);
+    const withoutT = makeWhen(false);
 
-  const testDeltas: [string, number, string][] = [
-    ["1h ago (same calendar day)", NOW - 1 * H, "Today"],
-    ["2h ago (straddles midnight into yesterday)", NOW - 2 * H, "Yesterday"],
-    ["23h ago (yesterday morning)", NOW - 23 * H, "Yesterday"],
-    ["26h ago (2 days ago)", NOW - 26 * H, "2 days ago"],
-    ["3d ago", NOW - 3 * 24 * H, "3 days ago"],
-    ["6d ago", NOW - 6 * 24 * H, "6 days ago"],
-  ];
+    const testDeltas: [string, number, string][] = [
+      ["1h ago (same calendar day)", NOW - 1 * H, "Today"],
+      ["2h ago (straddles midnight into yesterday)", NOW - 2 * H, "Yesterday"],
+      ["23h ago (yesterday morning)", NOW - 23 * H, "Yesterday"],
+      ["26h ago (2 days ago)", NOW - 26 * H, "2 days ago"],
+      ["3d ago", NOW - 3 * 24 * H, "3 days ago"],
+      ["6d ago", NOW - 6 * 24 * H, "6 days ago"],
+    ];
 
-  for (const [desc, timeMs, expected] of testDeltas) {
-    const isoStr = new Date(timeMs).toISOString();
-    const tVal = withT(isoStr);
-    const fVal = withoutT(isoStr);
-    assertEquals(tVal, expected, `Temporal path failed for ${desc}`);
-    assertEquals(fVal, expected, `Date fallback failed for ${desc}`);
-    assertEquals(tVal, fVal, `Temporal and fallback diverged for ${desc}`);
+    for (const [desc, timeMs, expected] of testDeltas) {
+      const isoStr = new Date(timeMs).toISOString();
+      const tVal = withT(isoStr);
+      const fVal = withoutT(isoStr);
+      assertEquals(tVal, expected, `Temporal path failed for ${desc}`);
+      assertEquals(fVal, expected, `Date fallback failed for ${desc}`);
+      assertEquals(tVal, fVal, `Temporal and fallback diverged for ${desc}`);
+    }
+  } finally {
+    if (savedTz === undefined) Deno.env.delete("TZ");
+    else Deno.env.set("TZ", savedTz);
   }
 });
 
