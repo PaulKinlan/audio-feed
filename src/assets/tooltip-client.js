@@ -1,7 +1,7 @@
 /**
  * audio-feed-3xq part 4c — the shell's tooltip client as a real file instead of a template
  * string in src/routes/shell.ts. shell.ts imports this file as text and ships it inline in the
- * classic <script> every shell page carries (login and account are classic-script pages; the
+ * classic script block every shell page carries (login and account are classic-script pages;
  * module pages get the shell script the same way), so: plain script, no import/export, no
  * TypeScript syntax, no build step. `// @ts-check` plus the DOM reference is what makes these
  * ~110 lines of event and geometry code visible to the gate.

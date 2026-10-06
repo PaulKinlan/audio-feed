@@ -85,7 +85,7 @@ function askConfirm(message, options) {
 }
 
 // Publish for code composed AFTER this region (audio-feed-3xq part 4c): inside a classic
-// <script> the function declaration above is already a global; inside the composed console
+// script block the function declaration above is already a global; inside the composed console
 // module it is module-scoped, and src/assets/admin.js binds to it through globalThis.
 /** @type {any} */ (globalThis).askConfirm = askConfirm;
 // #confirm-shared-end
