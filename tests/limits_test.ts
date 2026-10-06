@@ -39,9 +39,9 @@ Deno.test("managed turns reject over-budget before spend and check completed-tur
       runManagedTurns({
         segments: ["a", "b", "c"],
         maxTurns: 2,
-        request: async () => {
+        request: () => {
           calls++;
-          return "x";
+          return Promise.resolve("x");
         },
         stitch: (parts) => parts.join(""),
       }),
@@ -52,9 +52,9 @@ Deno.test("managed turns reject over-budget before spend and check completed-tur
   const result = await runManagedTurns({
     segments: ["a", "b"],
     maxTurns: 2,
-    request: async (part, previous) => {
+    request: (part, previous) => {
       calls++;
-      return `${previous.length}:${part}`;
+      return Promise.resolve(`${previous.length}:${part}`);
     },
     stitch: (parts) => parts.join("|"),
   });
@@ -65,10 +65,10 @@ Deno.test("generic output continuation carries validated partial text to next tu
   const result = await runManagedTurns({
     segments: ["first"],
     maxTurns: 2,
-    request: async (segment, completed) => {
-      if (segment === "first") throw new Error("MAX_TOKENS");
+    request: (segment, completed) => {
+      if (segment === "first") return Promise.reject(new Error("MAX_TOKENS"));
       assertEquals(completed, ["Once upon"]);
-      return " a time.";
+      return Promise.resolve(" a time.");
     },
     continueOnOutputLimit: () => ({ partial: "Once upon", next: ["continue"] }),
     stitch: (parts) => {
@@ -84,10 +84,10 @@ Deno.test("managed turns replace one output-limited turn without stitching its i
   const result = await runManagedTurns({
     segments: ["alpha", "bravo"],
     maxTurns: 4,
-    request: async (segment) => {
+    request: (segment) => {
       sent.push(segment);
-      if (segment === "bravo") throw new Error("MAX_TOKENS");
-      return segment;
+      if (segment === "bravo") return Promise.reject(new Error("MAX_TOKENS"));
+      return Promise.resolve(segment);
     },
     splitOnOutputLimit: (segment, error) =>
       segment === "bravo" && String(error).includes("MAX_TOKENS") ? ["bra", "vo"] : null,
