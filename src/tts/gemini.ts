@@ -1,4 +1,5 @@
 import type { CodeHandling } from "../types.ts";
+import { assertTextSeams, runManagedTurns } from "./limits.ts";
 
 /**
  * Gemini 3.8 / 2.5 Flash TTS Client
@@ -1362,36 +1363,32 @@ export class GeminiTtsClient {
         400,
       );
     }
-    const audio: DecodedAudioResult[] = [];
-    let calls = 0;
-    for (let index = 0; index < segments.length; index++) {
-      const segment = segments[index]!;
-      try {
-        calls++;
-        audio.push(
-          await this.sendRequest(
-            buildSingleVoiceRequest(segment, voice, options.temperature, style),
-            segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
-          ),
-        );
-      } catch (error) {
+    assertTextSeams(prompt, segments);
+    return await runManagedTurns({
+      segments,
+      maxTurns: MAX_TTS_SEGMENTS,
+      request: (segment) =>
+        this.sendRequest(
+          buildSingleVoiceRequest(segment, voice, options.temperature, style),
+          segments.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
+        ),
+      splitOnOutputLimit: (segment, error) => {
         if (
           !(error instanceof GeminiTtsTruncatedError) || error.finishReason !== "MAX_TOKENS" ||
-          calls >= MAX_TTS_SEGMENTS || segments.length >= MAX_TTS_SEGMENTS ||
           new TextEncoder().encode(segment).length < 8
-        ) throw error;
+        ) return null;
         const halves = splitTtsText(
           segment,
           Math.floor(new TextEncoder().encode(segment).length / 2),
         );
-        if (halves.length < 2 || segments.length + halves.length - 1 > MAX_TTS_SEGMENTS) {
-          throw error;
-        }
-        segments.splice(index, 1, ...halves);
-        index--;
-      }
-    }
-    return joinTtsAudio(audio, options.allowTruncated);
+        assertTextSeams(segment, halves);
+        return halves;
+      },
+      stitch: (audio) => {
+        assertTextSeams(prompt, segments);
+        return joinTtsAudio(audio, options.allowTruncated);
+      },
+    });
   }
 
   /**
@@ -1438,19 +1435,23 @@ export class GeminiTtsClient {
         400,
       );
     }
-    const audio: DecodedAudioResult[] = [];
-    for (const turns of batches) {
-      audio.push(
-        await this.sendRequest(
-          buildDialogueRequest(turns, speakers, options.temperature),
+    if (batches.length === 0) throw new GeminiTtsError("Dialogue contained no spoken text", 400);
+    const sourceText = turns.map((turn) => turn.text).join("");
+    const batchText = () => batches.flatMap((part) => part.map((turn) => turn.text));
+    assertTextSeams(sourceText, batchText());
+    return await runManagedTurns({
+      segments: batches,
+      maxTurns: MAX_TTS_SEGMENTS,
+      request: (part) =>
+        this.sendRequest(
+          buildDialogueRequest(part, speakers, options.temperature),
           batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
         ),
-      );
-    }
-    if (audio.length === 0) {
-      throw new GeminiTtsError("Dialogue contained no spoken text");
-    }
-    return joinTtsAudio(audio, options.allowTruncated);
+      stitch: (audio) => {
+        assertTextSeams(sourceText, batchText());
+        return joinTtsAudio(audio, options.allowTruncated);
+      },
+    });
   }
 
   /**
