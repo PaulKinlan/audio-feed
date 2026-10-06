@@ -29,6 +29,7 @@
  * `formatDialoguePrompt` is exported.
  */
 import type { DialogueSpeaker, DialogueTurn } from "../tts/gemini.ts";
+import { runManagedTurns } from "../synthesis/limits.ts";
 
 /**
  * The text model that does the research and writes the script. Separate from
@@ -160,7 +161,7 @@ export function buildScriptPrompt(input: GroundedScriptInput & { maxBodyChars?: 
  * prose. Everything else is a typed error — guessing at a half-written dialogue would put
  * invented words in a listener's ears.
  */
-export function parseGroundedScript(text: string, maxTurns = 14): GroundedScript {
+function parseScriptObject(text: string): Record<string, unknown> {
   const trimmed = text.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
   const body = fenced?.[1]?.trim() ?? trimmed;
@@ -169,13 +170,19 @@ export function parseGroundedScript(text: string, maxTurns = 14): GroundedScript
   if (start === -1 || end === -1 || end <= start) {
     throw new GroundedScriptError("script response contained no JSON object");
   }
-  let payload: unknown;
   try {
-    payload = JSON.parse(body.slice(start, end + 1));
+    const result: unknown = JSON.parse(body.slice(start, end + 1));
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      throw new Error("not an object");
+    }
+    return result as Record<string, unknown>;
   } catch (error) {
     throw new GroundedScriptError("script response was not valid JSON", { cause: error });
   }
-  return normaliseScript(payload, maxTurns);
+}
+
+export function parseGroundedScript(text: string, maxTurns = 14): GroundedScript {
+  return normaliseScript(parseScriptObject(text), maxTurns);
 }
 
 /**
@@ -269,6 +276,92 @@ export type ScriptGenerator = (
   options?: { signal?: AbortSignal },
 ) => Promise<GroundedScript>;
 
+interface ScriptBatchTurn extends DialogueTurn {
+  id: number;
+}
+type ScriptSegment = { kind: "full" | "batch"; from: number; count: number };
+type ScriptResult = { segment: ScriptSegment; script: GroundedScript; turns: ScriptBatchTurn[] };
+
+/** Only MAX_TOKENS can trigger continuation. Never accept an incomplete JSON fragment. */
+export class GroundedScriptOutputLimitError extends GroundedScriptError {
+  constructor() {
+    super("script output reached maxOutputTokens; retrying bounded complete JSON batches");
+    this.name = "GroundedScriptOutputLimitError";
+  }
+}
+
+/** A complete batch must contain exactly the assigned id range, with no silent omissions. */
+function parseScriptBatch(
+  text: string,
+  segment: ScriptSegment,
+  allowedSpeakers: readonly string[],
+): ScriptResult {
+  const record = parseScriptObject(text);
+  const raw = record.turns;
+  if (!Array.isArray(raw) || raw.length !== segment.count) {
+    throw new GroundedScriptError(
+      `script batch expected ${segment.count} turns from id ${segment.from}`,
+    );
+  }
+  const turns: ScriptBatchTurn[] = raw.map((item, offset) => {
+    const turn = item as { id?: unknown; speaker?: unknown; text?: unknown };
+    if (
+      turn?.id !== segment.from + offset || typeof turn.speaker !== "string" ||
+      !allowedSpeakers.includes(turn.speaker.trim()) || typeof turn.text !== "string" ||
+      !turn.text.trim()
+    ) {
+      throw new GroundedScriptError(
+        `script batch missing or duplicated turn id ${segment.from + offset}`,
+      );
+    }
+    return { id: segment.from + offset, speaker: turn.speaker.trim(), text: turn.text.trim() };
+  });
+  const sources = Array.isArray(record.sources)
+    ? record.sources.flatMap((item): ScriptSource[] => {
+      const source = item as { title?: unknown; uri?: unknown };
+      return typeof source?.uri === "string" && source.uri
+        ? [{ uri: source.uri, title: typeof source.title === "string" ? source.title : source.uri }]
+        : [];
+    })
+    : [];
+  const counterarguments = Array.isArray(record.counterarguments)
+    ? record.counterarguments.filter((item): item is string =>
+      typeof item === "string" && !!item.trim()
+    )
+    : [];
+  return {
+    segment,
+    turns,
+    script: {
+      turns,
+      sources,
+      counterarguments,
+      researchSummary: typeof record.researchSummary === "string"
+        ? record.researchSummary.trim()
+        : "",
+    },
+  };
+}
+
+/** Exact id sequence catches a dropped/duplicated section; adjacent duplicate text catches
+ * a repeated sentence across the boundary even when the model labels it with a new id. */
+export function assertScriptTurnSeams(turns: readonly ScriptBatchTurn[], expected: number): void {
+  if (turns.length !== expected) {
+    throw new GroundedScriptError(`script seam has ${turns.length} of ${expected} turns`);
+  }
+  for (let index = 0; index < turns.length; index++) {
+    if (turns[index]?.id !== index) {
+      throw new GroundedScriptError(`script seam missing or duplicated turn id ${index}`);
+    }
+    if (
+      index && turns[index]!.text.trim().replace(/\s+/gu, " ").toLowerCase() ===
+        turns[index - 1]!.text.trim().replace(/\s+/gu, " ").toLowerCase()
+    ) {
+      throw new GroundedScriptError(`script seam duplicated sentence at turn id ${index}`);
+    }
+  }
+}
+
 /**
  * The real generator. `fetchFn` is injectable so the tests drive this exact request path
  * with a capturing fetch rather than asserting on a helper the call site might not use.
@@ -287,67 +380,127 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
     const fetchFn = deps.fetchFn ?? fetch;
     const url = `${GEMINI_GENERATE_ENDPOINT}/${model}:generateContent?key=${deps.apiKey}`;
     const maxTurns = input.maxTurns ?? 14;
-    // Same idiom as the TTS client (src/tts/gemini.ts): this deadline is the floor and a caller's
-    // signal still wins. Without it a stalled search call left synthesis waiting forever and the
-    // fallback unreachable — the review finding this bound answers.
-    const deadline = AbortSignal.timeout(timeoutMs);
-    const signal = options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
-    const body = {
-      contents: [{
-        role: "user",
-        // The body is bounded inside the prompt builder; the prompt itself is never truncated,
-        // because its tail is the output contract this stage parses.
-        parts: [{ text: buildScriptPrompt({ ...input, maxTurns, maxBodyChars }) }],
-      }],
-      tools: [{ googleSearch: {} }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: SCRIPT_MAX_OUTPUT_TOKENS },
-    };
-    let response: Response;
-    try {
-      response = await fetchFn(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal,
-      });
-    } catch (error) {
-      if (options?.signal?.aborted) {
-        throw new GroundedScriptError("script request was cancelled by the caller", {
-          cause: error,
-        });
-      }
-      if (deadline.aborted) {
-        throw new GroundedScriptError(`script request timed out after ${timeoutMs}ms`, {
-          cause: error,
-        });
-      }
-      throw new GroundedScriptError("script request failed before reaching the API", {
-        cause: error,
-      });
+    if (!Number.isInteger(maxTurns) || maxTurns < 2 || maxTurns > 32) {
+      throw new GroundedScriptError("script maxTurns must be an integer from 2 to 32");
     }
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new GroundedScriptError(
-        `script request was refused with ${response.status}${
-          detail ? `: ${detail.slice(0, 200)}` : ""
-        }`,
-        { status: response.status },
-      );
-    }
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch (error) {
-      throw new GroundedScriptError("script response was not JSON", { cause: error });
-    }
-    const text = textFromResponse(payload);
-    if (!text.trim()) {
-      throw new GroundedScriptError("script response contained no text");
-    }
-    const script = parseGroundedScript(text, maxTurns);
-    const grounded = sourcesFromGrounding(payload);
-    // The grounding metadata is the record of what search returned; the model's declared list
-    // is a claim about what it used. Metadata wins on conflict, and both are deduped by URI.
+    const prompt = buildScriptPrompt({ ...input, maxTurns, maxBodyChars });
+    const grounded: ScriptSource[] = [];
+    const segments: ScriptSegment[] = [{ kind: "full", from: 0, count: maxTurns }];
+    const script = await runManagedTurns<ScriptSegment, ScriptResult, GroundedScript>({
+      segments,
+      maxTurns: Math.min(6, maxTurns * 2 + 1),
+      request: async (segment, completed) => {
+        const previous = completed.flatMap((result) => result.turns);
+        const batchInstruction =
+          `The previous answer hit the output token limit. Restart this batch as a COMPLETE, valid JSON object; do not continue a partial JSON string. ` +
+          `Write EXACTLY ${segment.count} turns with numeric ids ${segment.from} through ${
+            segment.from + segment.count - 1
+          }, as {"turns":[{"id":number,"speaker":string,"text":string}]} (plus research fields for the first batch). ` +
+          `Do not repeat earlier ids or spoken sentences. ${
+            segment.from === 0
+              ? "Include researchSummary, counterarguments, and sources."
+              : "Keep previous research and sources; output only this turn range."
+          }`;
+        const contents = segment.kind === "full"
+          ? [{ role: "user", parts: [{ text: prompt }] }]
+          : previous.length
+          ? [
+            { role: "user", parts: [{ text: prompt }] },
+            { role: "model", parts: [{ text: JSON.stringify({ turns: previous }) }] },
+            { role: "user", parts: [{ text: batchInstruction }] },
+          ]
+          : [{ role: "user", parts: [{ text: `${prompt}\n\n${batchInstruction}` }] }];
+        const body = {
+          contents,
+          tools: [{ googleSearch: {} }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: SCRIPT_MAX_OUTPUT_TOKENS },
+        };
+        // Each turn has its own deadline; the synthesis caller also bounds the whole stage.
+        const deadline = AbortSignal.timeout(timeoutMs);
+        const signal = options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+        let response: Response;
+        try {
+          response = await fetchFn(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+            signal,
+          });
+        } catch (error) {
+          if (options?.signal?.aborted) {
+            throw new GroundedScriptError("script request was cancelled by the caller", {
+              cause: error,
+            });
+          }
+          if (deadline.aborted) {
+            throw new GroundedScriptError(`script request timed out after ${timeoutMs}ms`, {
+              cause: error,
+            });
+          }
+          throw new GroundedScriptError("script request failed before reaching the API", {
+            cause: error,
+          });
+        }
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new GroundedScriptError(
+            `script request was refused with ${response.status}${
+              detail ? `: ${detail.slice(0, 200)}` : ""
+            }`,
+            { status: response.status },
+          );
+        }
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch (error) {
+          throw new GroundedScriptError("script response was not JSON", { cause: error });
+        }
+        grounded.push(...sourcesFromGrounding(payload));
+        const reason = firstCandidate(payload)?.finishReason;
+        if (reason === "MAX_TOKENS") throw new GroundedScriptOutputLimitError();
+        if (
+          typeof reason === "string" && reason !== "STOP" && reason !== "FINISH_REASON_UNSPECIFIED"
+        ) {
+          throw new GroundedScriptError(`script generation stopped with ${reason}`);
+        }
+        const text = textFromResponse(payload);
+        if (!text.trim()) throw new GroundedScriptError("script response contained no text");
+        return segment.kind === "full"
+          ? { segment, script: parseGroundedScript(text, maxTurns), turns: [] }
+          : parseScriptBatch(text, segment, input.speakers.map((speaker) => speaker.name));
+      },
+      continueOnOutputLimit: (segment, error) => {
+        if (!(error instanceof GroundedScriptOutputLimitError) || segment.count < 2) return null;
+        // Never stitch an incomplete JSON fragment. Regenerate two complete, smaller id ranges.
+        const first = Math.ceil(segment.count / 2);
+        return {
+          next: [
+            { kind: "batch", from: segment.from, count: first },
+            { kind: "batch", from: segment.from + first, count: segment.count - first },
+          ],
+        };
+      },
+      stitch: (results) => {
+        if (results.length === 1 && results[0]?.segment.kind === "full") return results[0].script;
+        const turns = results.flatMap((result) => result.turns);
+        assertScriptTurnSeams(turns, maxTurns);
+        const first = results.find((result) => result.segment.from === 0);
+        if (!first?.script.researchSummary || first.script.counterarguments.length === 0) {
+          throw new GroundedScriptError("continued script omitted research or counterarguments");
+        }
+        return {
+          turns: turns.map(({ speaker, text }) => ({ speaker, text })),
+          sources: results.flatMap((result) => result.script.sources),
+          counterarguments: [
+            ...new Set(results.flatMap((result) => result.script.counterarguments)),
+          ],
+          researchSummary: first.script.researchSummary,
+        };
+      },
+    });
+    // Grounding metadata records the sources actually retrieved across ALL calls, even a
+    // MAX_TOKENS response; model-declared sources come after it and are URI-deduplicated.
     const sources: ScriptSource[] = [];
     const seen = new Set<string>();
     for (const source of [...grounded, ...script.sources]) {
@@ -357,8 +510,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
     }
     if (sources.length === 0) {
       warn(
-        `[script] grounded script for "${input.article.title}" came back without sources; ` +
-          `the dialogue may be uncited`,
+        `[script] grounded script for "${input.article.title}" came back without sources; the dialogue may be uncited`,
       );
     }
     return { ...script, sources };

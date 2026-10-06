@@ -1,0 +1,55 @@
+Check tests/script_long_output_test.ts
+Check tests/grounded_script_test.ts
+Check tests/limits_test.ts
+running 8 tests from ./tests/script_long_output_test.ts
+after: long article output continues as complete numbered JSON batches, preserving grounding and seams ...
+------- output -------
+{"stage":"after","model":"gemini-3.8-flash","sourceArticleChars":47000,"promptBytes":13462,"maxOutputTokensPerCall":16384,"temperature":0.7,"calls":3,"finishReasons":["MAX_TOKENS","STOP","STOP"],"completeTurnIds":"0..13","sourceCount":5,"provider":"mock-only"}
+----- output end -----
+after: long article output continues as complete numbered JSON batches, preserving grounding and seams ... ok (13ms)
+seam verification rejects missing, repeated or altered turn IDs and duplicate sentences ... ok (582µs)
+MAX_TOKENS always continues even when a partial response happens to parse as JSON ... ok (942µs)
+repeated sentence across continued batches is rejected even with distinct ids ... ok (977µs)
+nested MAX_TOKENS split still stitches complete 0..13 id coverage within call budget ... ok (1ms)
+unknown speaker in continued batch fails before TTS ... ok (638µs)
+continued batch missing an ID fails closed, not a shortened published script ... ok (508µs)
+safety refusal never retries or stitches incomplete content ... ok (250µs)
+running 22 tests from ./tests/grounded_script_test.ts
+script prompt: demands research, sources and counterarguments before writing turns ... ok (529µs)
+script prompt: a long article is bounded, and the contract still survives the bound ... ok (146µs)
+script request: grounding is requested and the model is named in the URL ... ok (9ms)
+script request: a refused call is a typed error carrying the status ... ok (991µs)
+script generator: constructing without an API key is refused up front ... ok (505µs)
+script parsing: fenced JSON surrounded by prose still parses ... ok (170µs)
+script parsing: unusable answers are errors, never half a dialogue ... ok (533µs)
+script parsing: grounding metadata outranks the model's own source list, deduped ... ok (354µs)
+script parsing: a response with no text is an error ... ok (297µs)
+synthesis: a deep dive reaches the TTS request with the researched turns ... ok (1ms)
+synthesis: exhausted claim lease fails closed before a paid call ... ok (626µs)
+synthesis: in-flight TTS is cancelled before claim expiry and terminal ... ok (62ms)
+grounded continuation stage is clamped to remaining claim lease ...
+------- post-test output -------
+[synthesis] grounded script stage failed for "Lease": grounded script stage exceeded 60ms — falling back to the static dialogue builder
+----- post-test output end -----
+grounded continuation stage is clamped to remaining claim lease ... ok (63ms)
+synthesis: direct mode never pays for the research call ... ok (256µs)
+synthesis: a refused research call still produces an episode, with the static dialogue ... ok (529µs)
+synthesis: the stage can be switched off explicitly ... ok (206µs)
+live: a real grounded call returns dialogue and real search sources ...
+------- post-test output -------
+skipped: set GEMINI_API_KEY to run the live grounded-script check
+----- post-test output end -----
+live: a real grounded call returns dialogue and real search sources ... ok (280µs)
+script request: a hung call is bounded and reports the timeout ... ok (51ms)
+script request: a caller's cancel is reported as a cancel, not a timeout ... ok (998µs)
+script deadline: the default is a real budget, not a token bound ... ok (77µs)
+script deadline: the default clears three times the observed real-traffic maximum (yr76) ... ok (74µs)
+synthesis: a generator that hangs forever still produces an episode ... ok (52ms)
+running 5 tests from ./tests/limits_test.ts
+shared byte chunker keeps Unicode and paragraph boundaries under a caller-supplied cap ... ok (1ms)
+synthesis text seams preserve repeated words, punctuation and Unicode exactly ... ok (779µs)
+managed turns reject over-budget before spend and check completed-turn context ... ok (485µs)
+generic output continuation carries validated partial text to next turn and checks seam ... ok (289µs)
+managed turns replace one output-limited turn without stitching its incomplete output ... ok (269µs)
+
+ok | 35 passed | 0 failed (513ms)
