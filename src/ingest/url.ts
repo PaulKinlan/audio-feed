@@ -726,6 +726,12 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
   }
   stripNonNarration(content);
   const body = plainText(content).split("\n").map(clean).filter(Boolean).join("\n\n");
+  // The lead is spoken in the intro (formatNarrationIntro); it must go through
+  // plainText so a bare-URL anchor in the opening paragraph is not spelled out
+  // there while the body strips it (review finding on audio-feed-sa4g).
+  const firstProse = firstSubstantialParagraph(content);
+  const lead = (firstProse ? clean(plainText(firstProse)) : "") ||
+    body.split("\n\n")[0] || body;
   if (!title || body.length < 80) {
     throw new IngestError(
       422,
@@ -750,8 +756,7 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
     title,
     author: clean(result.byline || byline).replace(/^by\s+/i, "") || null,
     publishedAt,
-    lead: clean(firstSubstantialParagraph(content)?.textContent) ||
-      body.split("\n\n")[0] || body,
+    lead,
     body,
   };
 }

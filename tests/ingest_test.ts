@@ -771,3 +771,20 @@ Deno.test("hero media, its URL fallback and its leading caption never open the n
   equal(result.body.includes("https://example.com/demo"), false);
   match(result.body, /Try the route, or read the documentation/);
 });
+
+Deno.test("the lead strips bare-URL anchors exactly like the body does (audio-feed-sa4g review nit)", () => {
+  const html = `<!doctype html><html><head><title>Lead URL</title></head><body><article>
+    <h1>Lead URL</h1>
+    <figure><figcaption>A decorative hero caption.</figcaption></figure>
+    <p>Welcome to this guide. Try the <a href="https://example.com/demo">https://example.com/demo</a> route or read the docs for details.</p>
+    <p>Second paragraph with enough substance for the extractor to keep the article body long and readable.</p>
+  </article></body></html>`;
+  const result = extractArticle(html, "https://example.com/lead-url");
+  // the spoken intro must not spell out an inline bare-URL anchor either
+  equal(result.lead.includes("https://example.com/demo"), false);
+  match(result.lead, /Try the route or read the docs/);
+  // lead and body agree on the same opening sentence
+  match(result.body, /^Welcome to this guide/);
+  // a media-less hero caption still never leads the read
+  equal(result.body.includes("decorative hero caption"), false);
+});
