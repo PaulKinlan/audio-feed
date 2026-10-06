@@ -14,11 +14,6 @@ import type { AppContext } from "../app.ts";
 import { type AudioMode } from "../types.ts";
 
 /**
- * Remove one of `userId`'s sources: the admin console's delete and the account
- * page's (audio-feed-8fc) share this, so the drain guards below exist once.
- * Scoped by `userId`, so another user's source id is simply "Unknown source".
- */
-/**
  * audio-feed-wr1u: reclaim an episode's persisted synthesis segments before its row goes.
  *
  * The episode row is the only path back to these records; EVERY delete path (cascade and
@@ -46,6 +41,12 @@ async function sweepEpisodeSegments(
   }
   await ctx.stores.metadata.clearSynthesisSegments(userId, episodeId);
 }
+
+/**
+ * Remove one of `userId`'s sources: the admin console's delete and the account
+ * page's (audio-feed-8fc) share this, so the drain guards below exist once.
+ * Scoped by `userId`, so another user's source id is simply "Unknown source".
+ */
 
 export async function deleteUserSource(
   ctx: AppContext,
