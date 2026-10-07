@@ -28,6 +28,17 @@
   margin-block-start: var(--space-4);
 }
 
+/* audio-feed-x55k: headings wrap balanced, matching home.css and listen.css, so a wrapped
+   heading does not end on a lone orphaned word. Body paragraphs get pretty rather than
+   balance: they are multi-line prose, where balance's equal-line work buys nothing and
+   pretty's job (no single-word last line) is the actual goal. text-wrap is Baseline Widely
+   Available (canonical feature id: text-wrap) and degrades to today's normal wrapping on
+   engines without it — no fallback code, so no TODO(baseline/text-wrap). */
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
 h1 {
   font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2.1rem);
   line-height: 1.2;
@@ -39,6 +50,7 @@ h2 {
 }
 p {
   max-inline-size: var(--measure);
+  text-wrap: pretty;
 }
 .muted {
   color: var(--text-muted);
