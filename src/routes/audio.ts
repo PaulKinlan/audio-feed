@@ -13,7 +13,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { notFound, problem } from "../http.ts";
+import { forbidden, notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import type { RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
@@ -85,12 +85,50 @@ export function isSafeBlobKey(key: string): boolean {
   return !key.split("/").some((segment) => segment === "." || segment === "..");
 }
 
+/**
+ * Restrict keys to canonical audio/ keys or legacy flat keys (*.wav, *.mp3).
+ * Explicitly rejects intermediate synthesis segments under audio-segments/...
+ *
+ * Owned by: audio-feed-5iue.
+ */
+export function isAllowedAudioKey(rawKey: string): boolean {
+  if (!isSafeBlobKey(rawKey)) return false;
+
+  // Explicitly reject intermediate synthesis segments under audio-segments/
+  if (
+    rawKey === "audio-segments" ||
+    rawKey.startsWith("audio-segments/") ||
+    rawKey.includes("/audio-segments/")
+  ) {
+    return false;
+  }
+
+  // Canonical keys starting with audio/
+  if (rawKey.startsWith("audio/")) {
+    const sub = rawKey.slice("audio/".length);
+    if (sub.startsWith("audio-segments/") || sub.includes("/audio-segments/")) {
+      return false;
+    }
+    return true;
+  }
+
+  // Legacy flat keys (e.g. "legacy.wav", "legacy.mp3")
+  if (!rawKey.includes("/")) {
+    return true;
+  }
+
+  // Multi-segment keys without leading "audio/": must form a canonical audio/ key
+  // i.e., audio/${rawKey} where rawKey is <userId>/<mode>/<filename>
+  const parts = rawKey.split("/");
+  return parts.length >= 3;
+}
+
 export async function handleAudio(
   { req, params, ctx }: RouteContext<AppContext>,
 ): Promise<Response> {
   const rawKey = params.key;
-  if (!rawKey || !isSafeBlobKey(rawKey)) {
-    console.warn(`[audio-feed] audio 404: unsafe or empty key "${rawKey}"`);
+  if (!rawKey || !isAllowedAudioKey(rawKey)) {
+    console.warn(`[audio-feed] audio 404: disallowed or unsafe key "${rawKey}"`);
     return notFound("Unknown audio object");
   }
 
@@ -103,6 +141,16 @@ export async function handleAudio(
     : isSafeBlobKey(`audio/${rawKey}`)
     ? [`audio/${rawKey}`, rawKey]
     : [rawKey];
+
+  // For canonical keys with an embedded user ID, verify the owning user is approved (audio-feed-5iue).
+  const candidateUserId = candidateKeys.map(userIdFromBlobKey).find(Boolean);
+  if (candidateUserId) {
+    const user = await ctx.stores.metadata.getUser(candidateUserId);
+    if (user && user.status !== "approved") {
+      console.warn(`[audio-feed] audio 403: user "${candidateUserId}" is ${user.status}`);
+      return forbidden(`User account is ${user.status}`);
+    }
+  }
 
   if (isHead) {
     let resolvedKey: string | null = null;
