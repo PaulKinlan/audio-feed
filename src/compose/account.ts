@@ -8,10 +8,15 @@
 import { isSynthesisAuthorized, type User } from "../types.ts";
 import { isOutdated } from "../tts/prompt_version.ts";
 import type { MetadataStore } from "../storage/mod.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
 import { forbidden, notFound } from "./shared.ts";
 import { countEpisodeScan, episodeScan } from "./ingest.ts";
 import type { AppContext } from "../app.ts";
 import { type AudioMode } from "../types.ts";
+
+/** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so a sweep
+ * cannot stampede the blob store. */
+const SEGMENT_DELETE_CONCURRENCY = 8;
 
 /**
  * audio-feed-wr1u: reclaim an episode's persisted synthesis segments before its row goes.
@@ -28,17 +33,30 @@ async function sweepEpisodeSegments(
   deletedBlobKeys: Set<string>,
   failedBlobKeys: Set<string>,
 ): Promise<void> {
+  // Collect the keys first, so the dedupe reads (`deletedBlobKeys`, and the same key
+  // listed twice) all happen before any delete is in flight — a check that races a
+  // concurrent delete would delete the same object twice.
+  const keys: string[] = [];
+  const seen = new Set<string>();
   for (const record of await ctx.stores.metadata.listSynthesisSegments(userId, episodeId)) {
-    if (!record.audioKey || deletedBlobKeys.has(record.audioKey)) continue;
-    try {
-      await ctx.stores.blobs.delete(record.audioKey);
-      deletedBlobKeys.add(record.audioKey);
-      failedBlobKeys.delete(record.audioKey);
-    } catch {
-      failedBlobKeys.add(record.audioKey);
-      await ctx.stores.metadata.recordOrphanBlob(record.audioKey).catch(() => {});
-    }
+    const key = record.audioKey;
+    if (!key || deletedBlobKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
   }
+  // audio-feed-ikst: bounded concurrency. Each delete still carries its own failure
+  // handling — a blob that refuses to go is recorded as an orphan, never swallowed,
+  // and never aborts the rest of the sweep.
+  await mapWithConcurrency(keys, SEGMENT_DELETE_CONCURRENCY, async (key) => {
+    try {
+      await ctx.stores.blobs.delete(key);
+      deletedBlobKeys.add(key);
+      failedBlobKeys.delete(key);
+    } catch {
+      failedBlobKeys.add(key);
+      await ctx.stores.metadata.recordOrphanBlob(key).catch(() => {});
+    }
+  });
   await ctx.stores.metadata.clearSynthesisSegments(userId, episodeId);
 }
 

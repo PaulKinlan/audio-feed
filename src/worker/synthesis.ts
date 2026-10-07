@@ -67,6 +67,11 @@ import {
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
 import { collect } from "../storage/mod.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
+
+/** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
+ * that follows a finished run cannot stampede the blob store. */
+const SEGMENT_DELETE_CONCURRENCY = 8;
 
 /** Transcription of one job into the client call; injectable so tests need no network. */
 export type Synthesizer = (job: {
@@ -511,14 +516,18 @@ export function buildSegmentResume(
 
   const sweep = async () => {
     const all = await metadata.listSynthesisSegments(episode.userId, episode.id);
-    for (const record of all) {
-      if (!record.audioKey) continue;
+    const keys = all.map((record) => record.audioKey).filter((key): key is string => Boolean(key));
+    // audio-feed-ikst: bounded concurrency over the deletions. When an episode has ten
+    // segments, serial deletes made the sweep the slowest part of finishing a run.
+    // Each delete keeps its own failure handling, so one blob that refuses to go is
+    // recorded as an orphan and the rest are still reclaimed.
+    await mapWithConcurrency(keys, SEGMENT_DELETE_CONCURRENCY, async (key) => {
       try {
-        await blobs.delete(record.audioKey);
+        await blobs.delete(key);
       } catch {
-        await metadata.recordOrphanBlob(record.audioKey).catch(() => {});
+        await metadata.recordOrphanBlob(key).catch(() => {});
       }
-    }
+    });
     await metadata.clearSynthesisSegments(episode.userId, episode.id);
   };
 

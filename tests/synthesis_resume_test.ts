@@ -121,6 +121,85 @@ async function queued() {
   return { ctx: { config, stores }, stores };
 }
 
+/**
+ * Reserve, store and finalize one synthesis segment, exactly as a run that died
+ * mid-episode leaves it: a record with a live blob and no episode audio yet.
+ */
+async function finalizeSegment(
+  stores: Stores,
+  text: string,
+  owner: string,
+  nowMs: number,
+  leaseMs: number,
+): Promise<string> {
+  const hash = segmentTextHash(text);
+  const iso = new Date(nowMs).toISOString();
+  assertEquals(
+    await stores.metadata.reserveSynthesisSegment(
+      "user-1",
+      "episode-1",
+      {
+        textHash: hash,
+        text,
+        promptVersion: "v-test",
+        voice: "Charon",
+        audioKey: "",
+        byteLength: 0,
+        owner,
+        claimAt: iso,
+        createdAt: iso,
+        finalized: false,
+      },
+      nowMs,
+      leaseMs,
+    ),
+    "reserved",
+  );
+  const key = segmentBlobKey({ userId: "user-1", id: "episode-1" }, hash, "rev-1");
+  await stores.blobs.put(key, new Uint8Array(16), { contentType: "audio/wav" });
+  assertEquals(
+    await stores.metadata.finalizeSynthesisSegment(
+      "user-1",
+      "episode-1",
+      { textHash: hash, promptVersion: "v-test", voice: "Charon" },
+      { audioKey: key, byteLength: 16 },
+      owner,
+      nowMs,
+      leaseMs,
+    ),
+    true,
+  );
+  return key;
+}
+
+/**
+ * Wrap the blob store's delete so a test can see how many deletions overlap. The delay
+ * is what makes the count meaningful: a serial sweep finishes each delete before it
+ * starts the next, so it can never report a peak above one.
+ */
+function countConcurrentDeletes(
+  stores: Stores,
+  failKey?: string,
+): { peak: () => number; calls: () => number } {
+  const realDelete = stores.blobs.delete.bind(stores.blobs);
+  let inFlight = 0;
+  let peak = 0;
+  let calls = 0;
+  stores.blobs.delete = async (key: string) => {
+    calls++;
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    try {
+      if (key === failKey) throw new Error("blob store unavailable");
+      await realDelete(key);
+    } finally {
+      inFlight--;
+    }
+  };
+  return { peak: () => peak, calls: () => calls };
+}
+
 Deno.test("a run that dies mid-episode leaves its segments behind, and the retry pays only for the rest", async () => {
   const { ctx, stores } = await queued();
 
@@ -423,6 +502,106 @@ Deno.test("deleting a source sweeps the episode's synthesis segments on the plai
     "the plain delete path must clear segment records",
   );
   assertEquals(await stores.blobs.get(key), null, "and reclaim their blobs");
+});
+
+Deno.test("the plain delete sweeps an episode's segment blobs concurrently (audio-feed-ikst)", async () => {
+  const { ctx, stores } = await queued();
+  const leaseMs = 60_000;
+  const nowMs = Date.now();
+  assert(
+    await stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "worker-a",
+      now: new Date(nowMs).toISOString(),
+      leaseMs,
+      maxClaims: 3,
+    }),
+  );
+  const keys: string[] = [];
+  for (const text of SEGMENTS) {
+    keys.push(await finalizeSegment(stores, text, "worker-a", nowMs, leaseMs));
+  }
+  const deletes = countConcurrentDeletes(stores);
+
+  const res = await deleteUserSource(
+    ctx,
+    new Request("https://audio.example.com/account/sources/inbox", { method: "DELETE" }),
+    "user-1",
+    "inbox",
+  );
+  assert(res.ok, `delete must succeed, got ${res.status}`);
+  // Four segments used to be four sequential round-trips before the row could go.
+  assert(
+    deletes.peak() > 1,
+    "segment blob deletions must overlap; a serial sweep pays for each one in turn",
+  );
+  for (const key of keys) {
+    assertEquals(await stores.blobs.get(key), null, "every segment blob must be reclaimed");
+  }
+  assertEquals(await stores.metadata.listSynthesisSegments("user-1", "episode-1"), []);
+});
+
+Deno.test("one blob that refuses to delete is recorded as an orphan, and the rest of the sweep still runs (audio-feed-ikst)", async () => {
+  const { ctx, stores } = await queued();
+  const leaseMs = 60_000;
+  const nowMs = Date.now();
+  assert(
+    await stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "worker-a",
+      now: new Date(nowMs).toISOString(),
+      leaseMs,
+      maxClaims: 3,
+    }),
+  );
+  const keys: string[] = [];
+  for (const text of SEGMENTS) {
+    keys.push(await finalizeSegment(stores, text, "worker-a", nowMs, leaseMs));
+  }
+  const failing = keys[1]!;
+  const deletes = countConcurrentDeletes(stores, failing);
+
+  const res = await deleteUserSource(
+    ctx,
+    new Request("https://audio.example.com/account/sources/inbox", { method: "DELETE" }),
+    "user-1",
+    "inbox",
+  );
+  assert(res.ok, `a failed blob delete must not fail the delete, got ${res.status}`);
+  // Concurrency must not swallow the failure: the key blob is recorded so the orphan
+  // sweeper can reclaim it later, and it is not counted as deleted.
+  assertEquals(await stores.metadata.listOrphanBlobs(10), [failing]);
+  for (const key of keys) {
+    if (key === failing) continue;
+    assertEquals(await stores.blobs.get(key), null, "the other segment blobs are still reclaimed");
+  }
+  assertEquals(
+    await stores.metadata.listSynthesisSegments("user-1", "episode-1"),
+    [],
+    "the records are cleared even when one blob could not be deleted",
+  );
+  assert(deletes.peak() > 1, "a failing blob must not serialise the sweep");
+});
+
+Deno.test("a finished run sweeps its segment blobs concurrently (audio-feed-ikst)", async () => {
+  const { ctx, stores } = await queued();
+  const deletes = countConcurrentDeletes(stores);
+  const state = { paid: [] as string[] };
+
+  const done = await runSynthesisBatch(ctx, segmentSynthesizer(state), {
+    owner: "worker-a",
+    maxAttempts: 1,
+  });
+
+  assertEquals(done.ready.length, 1);
+  assertEquals(
+    deletes.calls(),
+    SEGMENTS.length,
+    "the post-run sweep deletes one blob per finalized segment",
+  );
+  assert(
+    deletes.peak() > 1,
+    "the post-run sweep must overlap its deletes; it used to be the slowest part of finishing",
+  );
+  assertEquals(await stores.metadata.listSynthesisSegments("user-1", "episode-1"), []);
 });
 
 Deno.test("decodedFromWav round-trips pcmToWav without losing the audio", () => {
