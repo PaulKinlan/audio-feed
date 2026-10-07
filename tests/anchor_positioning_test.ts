@@ -449,3 +449,124 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "anchor-positioning: the JS fallback reads layout before writing styles and still positions the tooltip (audio-feed-kuu0)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const listenCss = await getListenCss();
+
+    const testHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee; --text: #111; --border: #999; --radius-sm: 6px; --ease: ease; }
+    body { margin: 0; height: 900px; font: 14px system-ui; }
+    #mid  { position: absolute; top: 200px;  left: 220px; width: 120px; height: 36px; }
+    #edge { position: absolute; top: 860px; left: 220px; width: 120px; height: 36px; }
+    ${listenCss}
+  </style>
+</head>
+<body>
+  <button id="mid" data-tooltip="Download episode">mid</button>
+  <button id="edge" data-tooltip="Near bottom edge">edge</button>
+  <div id="results"></div>
+  ${TOOLTIP_HTML}
+
+  <script>
+    // Force the JS fallback: the client reads CSS.supports once, at load.
+    CSS.supports = () => false;
+  </script>
+  <script>
+    ${TOOLTIP_CLIENT}
+
+    const tip = document.getElementById("appTooltip");
+    const midBtn = document.getElementById("mid");
+    const edgeBtn = document.getElementById("edge");
+    const out = document.getElementById("results");
+
+    // audio-feed-kuu0: watch the tooltip's own height read. If the fallback writes
+    // style.left before reading offsetHeight, the read observes a non-empty inline left.
+    const heightGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight").get;
+    let leftAtFirstHeightRead = null;
+    Object.defineProperty(tip, "offsetHeight", {
+      configurable: true,
+      get() {
+        if (leftAtFirstHeightRead === null) leftAtFirstHeightRead = tip.style.left;
+        return heightGetter.call(this);
+      },
+    });
+
+    midBtn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    const midRect = midBtn.getBoundingClientRect();
+    const midStyleLeft = tip.style.left;
+    const midStyleTop = tip.style.top;
+    const tipHeight = tip.offsetHeight || 28;
+
+    edgeBtn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    const edgeRect = edgeBtn.getBoundingClientRect();
+    const edgeStyleTop = tip.style.top;
+    const edgeRenderedBottom = tip.getBoundingClientRect().bottom;
+    const edgeFlips = (edgeRect.bottom + 8 + tipHeight) > window.innerHeight &&
+      (edgeRect.top - 8 - tipHeight) >= 0;
+
+    out.textContent = JSON.stringify({
+      leftAtFirstHeightRead,
+      midStyleLeft,
+      midStyleTop,
+      midRectLeft: midRect.left,
+      midRectBottom: midRect.bottom,
+      tipHeight,
+      edgeStyleTop,
+      edgeRectTop: edgeRect.top,
+      edgeRenderedBottom,
+      edgeFlips
+    });
+  </script>
+</body>
+</html>`;
+
+    const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    await Deno.writeTextFile(tempHtmlFile, testHtml);
+
+    try {
+      const command = new Deno.Command("google-chrome-stable", {
+        args: [
+          "--headless=new",
+          "--disable-gpu",
+          "--allow-file-access-from-files",
+          "--window-size=1000,900",
+          "--dump-dom",
+          `file://${tempHtmlFile}`,
+        ],
+      });
+
+      const output = await command.output();
+      assertEquals(output.code, 0);
+      const dom = new TextDecoder().decode(output.stdout);
+      const match = dom.match(/<div id="results">(.*?)<\/div>/);
+      assert(match && match[1], "results container must be present");
+      const res = JSON.parse(match[1].replace(/&quot;/g, '"'));
+
+      // The fix: no style write may precede the layout read that followed it.
+      assertEquals(
+        res.leftAtFirstHeightRead,
+        "",
+        "the tooltip height must be read before style.left is written",
+      );
+      // ... and the fallback arithmetic is unchanged: same place, same flip.
+      assertEquals(parseFloat(res.midStyleLeft), res.midRectLeft);
+      assertEquals(parseFloat(res.midStyleTop), res.midRectBottom + 8);
+      assertEquals(res.edgeFlips, true, "the near-bottom anchor must take the flip branch");
+      assertEquals(parseFloat(res.edgeStyleTop), res.edgeRectTop - 8 - res.tipHeight);
+      assert(
+        res.edgeRenderedBottom <= res.edgeRectTop,
+        "the flipped tooltip must render above its target",
+      );
+    } finally {
+      await Deno.remove(tempHtmlFile).catch(() => {});
+    }
+  },
+});

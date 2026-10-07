@@ -448,12 +448,15 @@ function showTooltip(target, text) {
 
     if (!supportsAnchorPositioning) {
       // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+      // audio-feed-kuu0: both layout READs happen before either style WRITE, so showing a
+      // tooltip on a non-anchor engine does not force a synchronous reflow. Kept in sync
+      // with the shell copy in src/assets/tooltip-client.js.
       const rect = target.getBoundingClientRect();
-      tooltipEl.style.left = rect.left + "px";
       const tooltipHeight = tooltipEl.offsetHeight || 28;
       const margin = 8;
       const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
       const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
+      tooltipEl.style.left = rect.left + "px";
       if (overflowBottom && fitsAbove) {
         // Flip above anchor to match position-try-fallbacks: flip-block
         tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";

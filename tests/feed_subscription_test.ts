@@ -275,6 +275,48 @@ Deno.test("one unfetchable article does not fail the poll", async () => {
   assertEquals((await stores.metadata.listEpisodes({ userId: "user-1" })).length, 1);
 });
 
+Deno.test("new feed items are fetched with bounded concurrency, not one at a time (audio-feed-8ce2)", async () => {
+  const { ctx, source } = await subscriberSource();
+  const items = Array.from(
+    { length: 6 },
+    (_, i) =>
+      `<item><title>Post ${i}</title><link>https://stratechery.com/2026/post-${i}</link></item>`,
+  ).join("\n      ");
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Many</title>
+      ${items}
+    </channel></rss>`;
+
+  let inFlight = 0;
+  let peak = 0;
+  const result = await pollFeedSource(ctx, source, {
+    transport: feedTransport(xml),
+    fetchArticle: async (url) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Long enough that a serial loop can never overlap two fetches: with a
+      // sequential await the counter is back to 0 before the next item starts.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return {
+        url,
+        title: "Post",
+        author: null,
+        publishedAt: null,
+        lead: "A lead.",
+        body: "The body.",
+      };
+    },
+  });
+
+  assertEquals(result.queued, 6);
+  assertEquals(result.failed, 0);
+  // The promise of audio-feed-8ce2: N items cost ~ceil(N / cap) round-trips, not N.
+  assert(peak > 1, "article fetches must overlap; a serial loop pays the sum of every fetch");
+  // The promise of the cap: a feed cannot open one connection per item at once.
+  assert(peak < 6, "six items must not put six article fetches in flight at once");
+});
+
 Deno.test("the batch poller only picks up sources that are due", async () => {
   const { stores, ctx, source } = await subscriberSource();
   const deps = { transport: feedTransport(RSS), fetchArticle: article("A", "Body.") };

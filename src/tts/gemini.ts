@@ -1,5 +1,10 @@
 import type { CodeHandling } from "../types.ts";
 import { assertTextSeams, runManagedTurns, splitTextUnderByteBudget } from "../synthesis/limits.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
+
+/** Code-block explanations in flight at once (audio-feed-8acp): each one is a model
+ * request, so the pool stays small. */
+const CODE_EXPLANATION_CONCURRENCY = 4;
 
 /**
  * Gemini 3.8 / 2.5 Flash TTS Client
@@ -801,17 +806,33 @@ export async function formatCodeForTts(
       matches.push({ full: match[0], code, index: match.index });
     }
 
+    // audio-feed-8acp: resolve every explanation concurrently. Awaiting the summarizer
+    // inside the assembly loop made N code blocks cost N sequential model round-trips.
+    // The pool is bounded because each call is a model request: a long article with a
+    // dozen listings must not fire a dozen at once. Each call keeps its own try/catch,
+    // so one block that fails to summarise is omitted rather than failing the script.
+    const explanations = await mapWithConcurrency(
+      matches,
+      CODE_EXPLANATION_CONCURRENCY,
+      async (m) => {
+        try {
+          const explanation = await summarizer(m.code);
+          return explanation && explanation.trim() ? explanation.trim() : null;
+        } catch {
+          // Fallback: omit raw code
+          return null;
+        }
+      },
+    );
+
     let result = "";
     let lastIndex = 0;
-    for (const m of matches) {
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i]!;
       result += text.slice(lastIndex, m.index);
-      try {
-        const explanation = await summarizer(m.code);
-        if (explanation && explanation.trim()) {
-          result += `\nHere is what that code does: ${explanation.trim()}\n`;
-        }
-      } catch {
-        // Fallback: omit raw code
+      const explanation = explanations[i];
+      if (explanation) {
+        result += `\nHere is what that code does: ${explanation}\n`;
       }
       lastIndex = m.index + m.full.length;
     }
