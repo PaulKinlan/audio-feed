@@ -277,6 +277,50 @@ Deno.test("a completed background fetch caches every finished episode offline (a
   assertEquals(harness.updates.at(-1)?.title, "2 episodes ready offline");
 });
 
+Deno.test("background fetch records are resolved and cached concurrently, not one at a time (audio-feed-i6eg)", async () => {
+  const harness = await swHarness();
+  let inFlight = 0;
+  let peak = 0;
+  // The getter is the observable: it is read once per record, and the delay means a
+  // serial loop finishes one record before it reads the next one's promise.
+  const trackedRecord = (name: string): BackgroundFetchRecordStub => ({
+    request: new Request(`${BASE}/audio/${name}`),
+    get responseReady() {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => {
+          inFlight--;
+          resolve(new Response(name, { status: 200 }));
+        }, 5);
+      });
+    },
+  });
+
+  await harness.dispatch("backgroundfetchsuccess", {
+    registration: {
+      // More records than the batch, so the test sees both overlap and the bound.
+      matchAll: () =>
+        Promise.resolve([
+          trackedRecord("ep-1.wav"),
+          trackedRecord("ep-2.wav"),
+          trackedRecord("ep-3.wav"),
+          trackedRecord("ep-4.wav"),
+          trackedRecord("ep-5.wav"),
+          trackedRecord("ep-6.wav"),
+        ]),
+    },
+  });
+
+  assertEquals(harness.cachedUrls(OFFLINE_CACHE).length, 6);
+  assertEquals(harness.updates.at(-1)?.title, "6 episodes ready offline");
+  assert(
+    peak > 1,
+    "records must be awaited and cached concurrently; the notification used to wait on the sum of them",
+  );
+  assert(peak < 6, "six records must not all be resolved at once");
+});
+
 Deno.test("a partly-failed background fetch caches only the records that finished (audio-feed-qn5)", async () => {
   const harness = await swHarness();
   await harness.dispatch("backgroundfetchsuccess", {

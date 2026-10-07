@@ -223,13 +223,26 @@ self.addEventListener("backgroundfetchsuccess", (event) => {
     (async () => {
       const offline = await caches.open(OFFLINE_CACHE);
       const records = await event.registration.matchAll();
+      // audio-feed-i6eg: the browser downloaded these records in parallel, so resolve and
+      // store them the same way instead of one at a time. The batch is bounded (and each
+      // write is a local cache write): one serial responseReady await and cache write per
+      // record made the notification — the only surface left once the tab is closed — wait
+      // on the sum of every write. Each record still stores independently: one that did
+      // not finish, or failed, contributes 0 and caches nothing.
+      const STORE_BATCH = 4;
       let stored = 0;
-      for (const record of records) {
-        const response = await record.responseReady;
-        if (response && response.ok) {
-          await offline.put(record.request, response);
-          stored++;
-        }
+      for (let at = 0; at < records.length; at += STORE_BATCH) {
+        const results = await Promise.all(
+          records.slice(at, at + STORE_BATCH).map(async (record) => {
+            const response = await record.responseReady;
+            if (response && response.ok) {
+              await offline.put(record.request, response);
+              return 1;
+            }
+            return 0;
+          }),
+        );
+        stored += results.reduce((total, value) => total + value, 0);
       }
       // The OS notification is the only surface a subscriber sees once the tab is
       // closed, so it states the outcome rather than staying on "downloading".
