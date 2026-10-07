@@ -17,6 +17,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { userIdFromBlobKey } from "../src/routes/audio.ts";
+import { makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { BlobObject } from "../src/storage/mod.ts";
 
@@ -32,6 +33,8 @@ async function app(
   blobs?: (inner: Stores["blobs"]) => Stores["blobs"],
 ): Promise<{ fetch: (req: Request) => Promise<Response>; stores: Stores }> {
   const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putUser(makeUser({ id: "user-2", status: "approved" }));
   await stores.blobs.put(KEY, BYTES, { contentType: "audio/wav" });
   await stores.blobs.put(LEGACY_KEY, BYTES, { contentType: "audio/wav" });
   if (blobs) stores.blobs = blobs(stores.blobs);
@@ -182,6 +185,8 @@ Deno.test("a 404 does NOT count (audio-feed-ndc)", async () => {
 
 Deno.test("two subscribers are counted separately (audio-feed-ndc)", async () => {
   const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putUser(makeUser({ id: "user-2", status: "approved" }));
   await stores.blobs.put("audio/user-1/direct/a.wav", BYTES, { contentType: "audio/wav" });
   await stores.blobs.put("audio/user-2/direct/b.wav", BYTES, { contentType: "audio/wav" });
   const ctx = { config, stores };

@@ -21,6 +21,8 @@ const config: AppConfig = {
 
 function app(handlers = {}) {
   const stores = memoryStores();
+  stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   const { fetch } = createApp({ config, stores }, handlers);
   return { fetch, stores };
 }

@@ -58,16 +58,25 @@ export function sanitizeRequestUrl(rawUrl: string): string {
   }
 }
 
-/** Check if the request arrived over HTTPS directly or through a TLS-terminating reverse proxy. */
-export function isHttpsRequest(req: Request): boolean {
+/** Check if the request arrived over HTTPS directly or through a trusted TLS-terminating reverse proxy. */
+export function isHttpsRequest(
+  req: Request,
+  optsOrTrustProxy?: boolean | { trustProxyHeaders?: boolean },
+): boolean {
   try {
     const url = new URL(req.url);
     if (url.protocol === "https:") return true;
   } catch {
     // ignore
   }
-  const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-  return proto === "https";
+  const trustProxy = typeof optsOrTrustProxy === "boolean"
+    ? optsOrTrustProxy
+    : Boolean(optsOrTrustProxy?.trustProxyHeaders);
+  if (trustProxy) {
+    const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+    return proto === "https";
+  }
+  return false;
 }
 
 /**
@@ -79,7 +88,11 @@ export function isHttpsRequest(req: Request): boolean {
  *
  * Owned by: audio-feed-8k19.
  */
-export function applySecurityHeaders(res: Response, req?: Request): Response {
+export function applySecurityHeaders(
+  res: Response,
+  req?: Request,
+  opts?: { trustProxyHeaders?: boolean },
+): Response {
   let headers: Headers;
   let recreated = false;
 
@@ -105,7 +118,7 @@ export function applySecurityHeaders(res: Response, req?: Request): Response {
     if (!headers.has("content-security-policy")) {
       headers.set(
         "content-security-policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
       );
     }
     if (!headers.has("x-frame-options")) {
@@ -120,7 +133,7 @@ export function applySecurityHeaders(res: Response, req?: Request): Response {
     }
   }
 
-  if (req && isHttpsRequest(req)) {
+  if (req && isHttpsRequest(req, opts)) {
     if (!headers.has("strict-transport-security")) {
       headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
     }
@@ -181,6 +194,10 @@ export class Router<Ctx> {
 
     const pathMatches: Route<Ctx>[] = [];
     const remoteAddr = info?.remoteAddr?.hostname;
+    const trustProxyHeaders = Boolean(
+      (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
+    );
+    const secOpts = { trustProxyHeaders };
 
     for (const route of this.#routes) {
       const match = route.pattern.exec({ pathname: url.pathname });
@@ -196,9 +213,9 @@ export class Router<Ctx> {
           ctx,
           remoteAddr,
         });
-        return applySecurityHeaders(res, req);
+        return applySecurityHeaders(res, req, secOpts);
       } catch (error) {
-        if (error instanceof HttpError) return applySecurityHeaders(error.response, req);
+        if (error instanceof HttpError) return applySecurityHeaders(error.response, req, secOpts);
         throw error;
       }
     }
@@ -206,10 +223,14 @@ export class Router<Ctx> {
     if (pathMatches.length > 0) {
       const allow = [...new Set(pathMatches.map((r) => r.method))];
       if (allow.includes("GET")) allow.push("HEAD");
-      return applySecurityHeaders(methodNotAllowed(allow), req);
+      return applySecurityHeaders(methodNotAllowed(allow), req, secOpts);
     }
 
-    return applySecurityHeaders(notFound(`No route for ${req.method} ${url.pathname}`), req);
+    return applySecurityHeaders(
+      notFound(`No route for ${req.method} ${sanitizeRequestUrl(url.pathname)}`),
+      req,
+      secOpts,
+    );
   }
 
   /**
@@ -222,6 +243,11 @@ export class Router<Ctx> {
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },
   ) => Promise<Response> {
+    const trustProxyHeaders = Boolean(
+      (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
+    );
+    const secOpts = { trustProxyHeaders };
+
     return async (req, info) => {
       try {
         return await this.handle(req, ctx, info);
@@ -230,7 +256,11 @@ export class Router<Ctx> {
           `[audio-feed] unhandled error for ${req.method} ${sanitizeRequestUrl(req.url)}:`,
           error,
         );
-        return applySecurityHeaders(problem({ status: 500, title: "internal_error" }), req);
+        return applySecurityHeaders(
+          problem({ status: 500, title: "internal_error" }),
+          req,
+          secOpts,
+        );
       }
     };
   }

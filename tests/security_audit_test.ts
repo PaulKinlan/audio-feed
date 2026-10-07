@@ -23,9 +23,14 @@ const config: AppConfig = {
   adminToken: "admin-secret-token",
 };
 
-function setupTestApp(customStores?: Stores, handlers = {}) {
+function setupTestApp(
+  customStores?: Stores,
+  handlers = {},
+  customConfig?: Partial<AppConfig>,
+) {
   const stores = customStores ?? memoryStores();
-  const ctx = { config, stores };
+  const cfg = { ...config, ...customConfig };
+  const ctx = { config: cfg, stores };
   const { fetch } = createApp(ctx, handlers);
   return { fetch, stores, ctx };
 }
@@ -67,7 +72,8 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
       `${path} CSP missing script-src`,
     );
     assertStringIncludes(csp!, "style-src 'self' 'unsafe-inline'", `${path} CSP missing style-src`);
-    assertStringIncludes(csp!, "media-src 'self' blob: https:", `${path} CSP missing media-src`);
+    assertStringIncludes(csp!, "media-src 'self' blob:", `${path} CSP missing media-src`);
+    assertStringIncludes(csp!, "connect-src 'self'", `${path} CSP missing connect-src`);
     await res.body?.cancel();
   }
 
@@ -113,7 +119,7 @@ Deno.test("security headers: JSON and problem responses carry restrictive CSP, n
   await notFoundRes.body?.cancel();
 });
 
-Deno.test("security headers: HSTS is sent on HTTPS and proxied-HTTPS, omitted on plain HTTP", async () => {
+Deno.test("security headers: HSTS is sent on HTTPS and trusted proxied-HTTPS, omitted on plain HTTP or untrusted proxy", async () => {
   const { fetch } = setupTestApp();
 
   // Direct HTTPS URL
@@ -124,17 +130,27 @@ Deno.test("security headers: HSTS is sent on HTTPS and proxied-HTTPS, omitted on
   );
   await httpsRes.body?.cancel();
 
-  // Reverse proxy with x-forwarded-proto: https
-  const proxiedRes = await fetch(
+  // Untrusted proxy header (trustProxyHeaders not set): x-forwarded-proto ignored
+  const untrustedProxiedRes = await fetch(
+    new Request(`${HTTP_BASE}/health`, {
+      headers: { "x-forwarded-proto": "https" },
+    }),
+  );
+  assertEquals(untrustedProxiedRes.headers.get("strict-transport-security"), null);
+  await untrustedProxiedRes.body?.cancel();
+
+  // Trusted proxy with trustProxyHeaders: true
+  const { fetch: trustedFetch } = setupTestApp(undefined, {}, { trustProxyHeaders: true });
+  const trustedProxiedRes = await trustedFetch(
     new Request(`${HTTP_BASE}/health`, {
       headers: { "x-forwarded-proto": "https" },
     }),
   );
   assertEquals(
-    proxiedRes.headers.get("strict-transport-security"),
+    trustedProxiedRes.headers.get("strict-transport-security"),
     "max-age=31536000; includeSubDomains",
   );
-  await proxiedRes.body?.cancel();
+  await trustedProxiedRes.body?.cancel();
 
   // Plain HTTP request without TLS header: no HSTS
   const httpRes = await fetch(new Request(`${HTTP_BASE}/health`));
@@ -142,18 +158,35 @@ Deno.test("security headers: HSTS is sent on HTTPS and proxied-HTTPS, omitted on
   await httpRes.body?.cancel();
 });
 
-Deno.test("security headers: isHttpsRequest helper checks direct protocol and proxy header", () => {
+Deno.test("security headers: isHttpsRequest helper checks direct protocol and proxy header only when trusted", () => {
   assertEquals(isHttpsRequest(new Request("https://example.com/test")), true);
   assertEquals(isHttpsRequest(new Request("http://localhost:8000/test")), false);
+  // Untrusted proxy header: false
   assertEquals(
     isHttpsRequest(
       new Request("http://localhost:8000/test", { headers: { "x-forwarded-proto": "https" } }),
+    ),
+    false,
+  );
+  // Trusted proxy header via boolean or config object
+  assertEquals(
+    isHttpsRequest(
+      new Request("http://localhost:8000/test", { headers: { "x-forwarded-proto": "https" } }),
+      true,
+    ),
+    true,
+  );
+  assertEquals(
+    isHttpsRequest(
+      new Request("http://localhost:8000/test", { headers: { "x-forwarded-proto": "https" } }),
+      { trustProxyHeaders: true },
     ),
     true,
   );
   assertEquals(
     isHttpsRequest(
       new Request("http://localhost:8000/test", { headers: { "x-forwarded-proto": "http" } }),
+      true,
     ),
     false,
   );
@@ -261,28 +294,59 @@ Deno.test("token redaction: Router 500 error logging redacts capability token an
   }
 });
 
+Deno.test("token redaction: 404 response body redacts capability tokens from URL path", async () => {
+  const SECRET_FEED_TOKEN = "private-feed-token-987654321";
+  const { fetch } = setupTestApp();
+
+  const res = await fetch(new Request(`${BASE}/feed/${SECRET_FEED_TOKEN}/unknown-route`));
+  assertEquals(res.status, 404);
+  const body = await res.json();
+  const serialized = JSON.stringify(body);
+  assert(
+    !serialized.includes(SECRET_FEED_TOKEN),
+    `404 body must not contain feed token: ${serialized}`,
+  );
+  assertStringIncludes(
+    serialized,
+    "/feed/[redacted]/unknown-route",
+    "404 body detail must contain redacted pathname",
+  );
+});
+
 // ===========================================================================
 // 3. audio-feed-5iue: Enforce prefix allowlist and user approval check on /audio/
 // ===========================================================================
 
-Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat legacy keys, rejecting audio-segments/", () => {
+Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat legacy keys, rejecting audio-segments/, voice-samples/, and arbitrary prefixes", () => {
   // Disallowed: intermediate synthesis segments
   assertEquals(isAllowedAudioKey("audio-segments/user-1/ep-1/hash.wav"), false);
   assertEquals(isAllowedAudioKey("audio-segments"), false);
   assertEquals(isAllowedAudioKey("audio/audio-segments/user-1/ep-1/hash.wav"), false);
 
-  // Disallowed: path traversal / unsafe keys
+  // Disallowed: voice samples
+  assertEquals(isAllowedAudioKey("voice-samples/v1/Kore.wav"), false);
+  assertEquals(isAllowedAudioKey("voice-samples/v1/Puck.wav"), false);
+  assertEquals(isAllowedAudioKey("audio/voice-samples/v1/Kore.wav"), false);
+
+  // Disallowed: arbitrary 3-segment or multi-segment prefixes
+  assertEquals(isAllowedAudioKey("arbitrary-prefix/v1/sample.wav"), false);
+  assertEquals(isAllowedAudioKey("arbitrary/prefix/foo.wav"), false);
+  assertEquals(isAllowedAudioKey("internal-cache/temp/file.wav"), false);
+  assertEquals(isAllowedAudioKey("tts-secrets/v1/secret.wav"), false);
+
+  // Disallowed: path traversal / unsafe keys / non-audio extensions
   assertEquals(isAllowedAudioKey("../secret.wav"), false);
   assertEquals(isAllowedAudioKey("/audio/foo.wav"), false);
   assertEquals(isAllowedAudioKey(""), false);
-
-  // Disallowed: arbitrary non-canonical directory structure without 3+ segments
+  assertEquals(isAllowedAudioKey("secret.json"), false);
   assertEquals(isAllowedAudioKey("internal-cache/file.wav"), false);
 
   // Allowed: canonical keys
   assertEquals(isAllowedAudioKey("audio/user-1/direct/ep-1.wav"), true);
+  assertEquals(isAllowedAudioKey("audio/user-1/deepdive/ep-1.mp3"), true);
   assertEquals(isAllowedAudioKey("audio/u1/direct/e1.mp3"), true);
   assertEquals(isAllowedAudioKey("user-1/direct/ep-1.wav"), true); // route-trimmed canonical
+  assertEquals(isAllowedAudioKey("u1/deepdive/e1.mp3"), true); // route-trimmed canonical
   assertEquals(isAllowedAudioKey("audio/ready.wav"), true);
 
   // Allowed: legacy flat keys
@@ -397,14 +461,76 @@ Deno.test("audio route: direct-URL redirect branch checks user approval before i
   await suspRes.body?.cancel();
 });
 
-Deno.test("audio route: legacy flat keys continue to serve without a user ID in the key", async () => {
+Deno.test("audio route: account-status oracle closed (nonexistent object returns 404 even for suspended user)", async () => {
   const stores = memoryStores();
-  await stores.blobs.put("legacy-episode.wav", bytes(300), { contentType: "audio/wav" });
+  const suspendedUser = makeUser({ id: "user-suspended", status: "suspended" });
+  await stores.metadata.putUser(suspendedUser);
 
   const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
 
-  const res = await fetch(new Request(`${BASE}/audio/legacy-episode.wav`));
-  assertEquals(res.status, 200, "Legacy flat key should be served");
-  assertEquals(res.headers.get("content-type"), "audio/wav");
+  // Nonexistent object for suspended user must answer 404, NOT 403
+  const res = await fetch(new Request(`${BASE}/audio/user-suspended/direct/nonexistent.wav`));
+  assertEquals(res.status, 404, "Nonexistent object for suspended user must answer 404, not 403");
   await res.body?.cancel();
+
+  const headRes = await fetch(
+    new Request(`${BASE}/audio/user-suspended/direct/nonexistent.wav`, { method: "HEAD" }),
+  );
+  assertEquals(
+    headRes.status,
+    404,
+    "HEAD on nonexistent object for suspended user must answer 404",
+  );
+  await headRes.body?.cancel();
+});
+
+Deno.test("audio route: voice-samples bypass is closed (404), while approved user 200s and legacy flat key serves", async () => {
+  const stores = memoryStores();
+
+  const approvedUser = makeUser({ id: "user-approved", status: "approved" });
+  await stores.metadata.putUser(approvedUser);
+
+  const voiceSampleKey = "voice-samples/v1/Kore.wav";
+  const approvedKey = "audio/user-approved/direct/ep-1.wav";
+  const legacyWavKey = "legacy-episode.wav";
+  const legacyMp3Key = "legacy-track.mp3";
+
+  // Put objects in blob storage
+  await stores.blobs.put(voiceSampleKey, bytes(500), { contentType: "audio/wav" });
+  await stores.blobs.put(approvedKey, bytes(200), { contentType: "audio/wav" });
+  await stores.blobs.put(legacyWavKey, bytes(300), { contentType: "audio/wav" });
+  await stores.blobs.put(legacyMp3Key, bytes(400), { contentType: "audio/mpeg" });
+
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  // 1. voice-samples bypass repro: MUST return 404 (not 200)
+  const vsRes = await fetch(new Request(`${BASE}/audio/${voiceSampleKey}`));
+  assertEquals(vsRes.status, 404, "voice-samples/ key must return 404");
+  await vsRes.body?.cancel();
+
+  // 1b. HEAD on voice-samples: MUST return 404
+  const vsHead = await fetch(new Request(`${BASE}/audio/${voiceSampleKey}`, { method: "HEAD" }));
+  assertEquals(vsHead.status, 404, "HEAD on voice-samples/ key must return 404");
+  await vsHead.body?.cancel();
+
+  // 2. Canonical approved-user key: returns 200
+  const appRes = await fetch(new Request(`${BASE}/audio/user-approved/direct/ep-1.wav`));
+  assertEquals(appRes.status, 200, "Canonical approved-user key must return 200");
+  await appRes.body?.cancel();
+
+  // 3. Legacy flat .wav: returns 200
+  const legWavRes = await fetch(new Request(`${BASE}/audio/${legacyWavKey}`));
+  assertEquals(legWavRes.status, 200, "Legacy flat .wav must return 200");
+  await legWavRes.body?.cancel();
+
+  // 4. Legacy flat .mp3: returns 200
+  const legMp3Res = await fetch(new Request(`${BASE}/audio/${legacyMp3Key}`));
+  assertEquals(legMp3Res.status, 200, "Legacy flat .mp3 must return 200");
+  await legMp3Res.body?.cancel();
+
+  // 5. On direct-URL store as well: voice-samples MUST return 404, not 302
+  stores.blobs.url = (key: string) => Promise.resolve(`https://cdn.example.com/${key}`);
+  const vsResDirect = await fetch(new Request(`${BASE}/audio/${voiceSampleKey}`));
+  assertEquals(vsResDirect.status, 404, "voice-samples/ on direct-URL store must return 404");
+  await vsResDirect.body?.cancel();
 });

@@ -17,6 +17,7 @@ import { forbidden, notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import type { RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
+import { isAudioMode } from "../types.ts";
 
 /**
  * Whether this request is one the browser will apply CORS rules to.
@@ -87,40 +88,84 @@ export function isSafeBlobKey(key: string): boolean {
 
 /**
  * Restrict keys to canonical audio/ keys or legacy flat keys (*.wav, *.mp3).
- * Explicitly rejects intermediate synthesis segments under audio-segments/...
+ * Explicitly rejects intermediate synthesis segments (audio-segments/), voice samples
+ * (voice-samples/), arbitrary multi-segment prefixes, and non-audio files.
+ *
+ * Canonical audio keys are either:
+ *   - `audio/<userId>/<mode>/<file>` (4 segments, starts with "audio/")
+ *   - `<userId>/<mode>/<file>` (3 segments, route-trimmed by /audio/:key+)
+ * where <mode> is an AudioMode ("direct" | "deepdive") and <file> is *.wav | *.mp3.
+ *
+ * Legacy flat keys are single-segment filenames:
+ *   - `<file>` or `audio/<file>` where <file> is *.wav | *.mp3.
  *
  * Owned by: audio-feed-5iue.
  */
 export function isAllowedAudioKey(rawKey: string): boolean {
   if (!isSafeBlobKey(rawKey)) return false;
 
-  // Explicitly reject intermediate synthesis segments under audio-segments/
+  // Must end in .wav or .mp3
+  if (!/\.(wav|mp3)$/i.test(rawKey)) {
+    return false;
+  }
+
+  // Explicitly reject forbidden prefixes anywhere in the key
   if (
-    rawKey === "audio-segments" ||
     rawKey.startsWith("audio-segments/") ||
-    rawKey.includes("/audio-segments/")
+    rawKey.includes("/audio-segments/") ||
+    rawKey.startsWith("voice-samples/") ||
+    rawKey.includes("/voice-samples/") ||
+    rawKey.startsWith("internal-cache/") ||
+    rawKey.includes("/internal-cache/") ||
+    rawKey.startsWith("tts-secrets/") ||
+    rawKey.includes("/tts-secrets/")
   ) {
     return false;
   }
 
-  // Canonical keys starting with audio/
-  if (rawKey.startsWith("audio/")) {
-    const sub = rawKey.slice("audio/".length);
-    if (sub.startsWith("audio-segments/") || sub.includes("/audio-segments/")) {
-      return false;
-    }
-    return true;
-  }
-
-  // Legacy flat keys (e.g. "legacy.wav", "legacy.mp3")
-  if (!rawKey.includes("/")) {
-    return true;
-  }
-
-  // Multi-segment keys without leading "audio/": must form a canonical audio/ key
-  // i.e., audio/${rawKey} where rawKey is <userId>/<mode>/<filename>
   const parts = rawKey.split("/");
-  return parts.length >= 3;
+
+  // 1. Legacy flat key: e.g. "legacy.wav", "episode-1.mp3"
+  if (parts.length === 1) {
+    return true;
+  }
+
+  // 2. Legacy key prefixed with audio/: e.g. "audio/ready.wav"
+  if (parts.length === 2) {
+    return parts[0] === "audio";
+  }
+
+  // 3. Route-trimmed canonical key: <userId>/<mode>/<file>
+  // Mode must be a valid AudioMode ("direct" | "deepdive")
+  if (parts.length === 3) {
+    const [userId, mode] = parts;
+    return Boolean(userId) && isAudioMode(mode);
+  }
+
+  // 4. Canonical key: audio/<userId>/<mode>/<file>
+  // Must start with "audio" and mode must be a valid AudioMode
+  if (parts.length === 4) {
+    const [prefix, userId, mode] = parts;
+    return prefix === "audio" && Boolean(userId) && isAudioMode(mode);
+  }
+
+  return false;
+}
+
+/** Check user approval on the key that actually resolved; fails closed if user missing or not approved. */
+async function checkUserApproval(
+  ctx: RouteContext<AppContext>["ctx"],
+  resolvedKey: string,
+): Promise<Response | null> {
+  const userId = userIdFromBlobKey(resolvedKey);
+  if (!userId) return null;
+  const user = await ctx.stores.metadata.getUser(userId);
+  if (!user || user.status !== "approved") {
+    const status = user?.status ?? "unknown";
+    console.warn(`[audio-feed] audio 403: user "${userId}" is ${status}`);
+    return forbidden(`User account is ${status}`);
+  }
+  return null;
 }
 
 export async function handleAudio(
@@ -134,23 +179,17 @@ export async function handleAudio(
 
   const isHead = req.method === "HEAD";
 
-  // For keys not starting with "audio/", the canonical shape emitted by new feeds
-  // is audio/${rawKey}. Try the canonical candidate first, then rawKey (audio-feed-1rx).
+  // For keys not starting with "audio/", the canonical shape in storage is
+  // audio/${rawKey}. For multi-segment keys, only audio/${rawKey} is checked
+  // (blob storage never stores multi-segment audio outside the audio/ prefix).
+  // For legacy flat keys, check audio/${rawKey} first, then rawKey (audio-feed-1rx, audio-feed-vlw).
   const candidateKeys = rawKey.startsWith("audio/")
     ? [rawKey]
+    : rawKey.includes("/")
+    ? [`audio/${rawKey}`]
     : isSafeBlobKey(`audio/${rawKey}`)
     ? [`audio/${rawKey}`, rawKey]
     : [rawKey];
-
-  // For canonical keys with an embedded user ID, verify the owning user is approved (audio-feed-5iue).
-  const candidateUserId = candidateKeys.map(userIdFromBlobKey).find(Boolean);
-  if (candidateUserId) {
-    const user = await ctx.stores.metadata.getUser(candidateUserId);
-    if (user && user.status !== "approved") {
-      console.warn(`[audio-feed] audio 403: user "${candidateUserId}" is ${user.status}`);
-      return forbidden(`User account is ${user.status}`);
-    }
-  }
 
   if (isHead) {
     let resolvedKey: string | null = null;
@@ -171,6 +210,9 @@ export async function handleAudio(
       return notFound("Unknown audio object");
     }
 
+    const refusal = await checkUserApproval(ctx, resolvedKey);
+    if (refusal) return refusal;
+
     return headResponse(info.size, {
       "content-type": info.contentType,
       "accept-ranges": "bytes",
@@ -181,50 +223,25 @@ export async function handleAudio(
   }
 
   // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
-  //
-  // Nothing here may assume url() answers the same way for EVERY key. That was the
-  // audio-feed-gxn bug: a store that offers direct URLs for one prefix only (a CDN
-  // mapped over "audio/", say) made the first candidate look like a redirecting
-  // store, and when its head() missed the handler returned 404 for an object that
-  // existed and that HEAD could see. The interface never promised per-key
-  // consistency, so the handler must not depend on it.
-  // …but a redirect the browser cannot follow is worse than no redirect. A
-  // CORS-constrained request is served from the isolate instead, because the
-  // object store the redirect points at does not answer CORS.
   if (!isHead && !isCorsConstrained(req)) {
-    // Whether the store offered a direct URL for EVERY candidate, which is what
-    // distinguishes a uniformly-redirecting store from a per-key one.
     let everyKeyHasDirectUrl = true;
     for (const key of candidateKeys) {
       const direct = await ctx.stores.blobs.url(key);
       if (!direct) {
-        // `continue`, not `break`: a key with no direct URL says nothing about the
-        // next candidate on a store that answers per key (audio-feed-gxn).
         everyKeyHasDirectUrl = false;
         continue;
       }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
-        // Counted when the redirect is ISSUED, not when the client finishes —
-        // on a redirecting store the bytes never reach us, so this is the last
-        // point at which anything is observable. The dashboard says
-        // "downloads / redirects" rather than implying a completed download
-        // (audio-feed-ndc).
+        const refusal = await checkUserApproval(ctx, key);
+        if (refusal) return refusal;
+
         if (!req.headers.get("range")) {
           await ctx.stores.metadata.recordDownload(userIdFromBlobKey(key));
         }
         return new Response(null, { status: 302, headers: { location: direct } });
       }
     }
-    // Short-circuit a miss ONLY when the store offered a direct URL for every
-    // candidate: that is the uniform case (S3 answers for any key), where get()
-    // would be a wasted round trip for a definitive 404, and audio-feed-vlw pins
-    // that behaviour with `getCalls === 0`.
-    //
-    // If any candidate had NO direct URL the store answers per key, so nothing here
-    // can conclude that a missing object is missing — a CDN mapped over one prefix
-    // would 404 objects that exist (audio-feed-gxn). Existence is then decided by
-    // the get() loop below, which costs one get() on a genuine miss.
     if (everyKeyHasDirectUrl) {
       console.warn(
         `[audio-feed] audio direct-url 404: key "${rawKey}" not found (candidates: ${
@@ -269,6 +286,12 @@ export async function handleAudio(
       })`,
     );
     return notFound("Unknown audio object");
+  }
+
+  const refusal = await checkUserApproval(ctx, resolvedKey);
+  if (refusal) {
+    await object.body.cancel?.();
+    return refusal;
   }
 
   const headers = new Headers({
