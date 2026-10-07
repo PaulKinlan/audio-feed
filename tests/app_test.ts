@@ -282,6 +282,30 @@ Deno.test("audio: an unsatisfiable Range is 416 with content-range", async () =>
   await res.body?.cancel();
 });
 
+Deno.test("audio: suffix Range bytes=-0 is 416 unsatisfiable per RFC 9110", async () => {
+  const { fetch, stores } = await app();
+  await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
+
+  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=-0" } }));
+
+  assertEquals(res.status, 416);
+  assertEquals(res.headers.get("content-range"), "bytes */100");
+  await res.body?.cancel();
+});
+
+Deno.test("audio: suffix Range bytes=-1 returns the last byte", async () => {
+  const { fetch, stores } = await app();
+  const payload = bytes(1000);
+  await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
+
+  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=-1" } }));
+
+  assertEquals(res.status, 206);
+  assertEquals(res.headers.get("content-range"), "bytes 999-999/1000");
+  assertEquals(res.headers.get("content-length"), "1");
+  assertEquals(await collect(res.body!), payload.subarray(999));
+});
+
 Deno.test("audio: a malformed Range is ignored, not fatal", async () => {
   const { fetch, stores } = await app();
   await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
