@@ -855,6 +855,61 @@ Deno.test("formatCodeForTts - falls back to skip when summarizer throws or is om
   assertEquals(fallbackOnThrow, "Snippet:\n\nEnd.");
 });
 
+Deno.test("formatCodeForTts - resolves every code block concurrently, bounded, and keeps them in order (audio-feed-8acp)", async () => {
+  // More blocks than the pool, so the test can see both that calls overlap and that
+  // they do not all fire at once.
+  const input = Array.from(
+    { length: 6 },
+    (_, i) => `Paragraph ${i}.\n\n\`\`\`js\nconst block${i} = ${i};\n\`\`\``,
+  ).join("\n\n");
+
+  let inFlight = 0;
+  let peak = 0;
+  const summarizer = async (code: string) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    // Long enough that a sequential await can never overlap two calls.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    const index = code.match(/block(\d+)/)?.[1] ?? "?";
+    return `it declares block ${index}`;
+  };
+
+  const processed = await formatCodeForTts(input, "explain", summarizer);
+
+  // Six code blocks used to cost six sequential model round-trips.
+  assert(peak > 1, "summarizer calls must overlap; a sequential loop pays for each block in turn");
+  assert(peak < 6, "the explanations must go through a bounded pool, not all at once");
+  // The explanations are still assembled in the text's own order.
+  for (let i = 0; i < 6; i++) {
+    assert(
+      processed.includes(`it declares block ${i}`),
+      `the explanation for block ${i} must be spoken`,
+    );
+    assertEquals(processed.includes(`const block${i} =`), false, "raw code is never read aloud");
+  }
+  assert(
+    processed.indexOf("it declares block 0") < processed.indexOf("it declares block 5"),
+    "explanations must appear in the original code block order",
+  );
+});
+
+Deno.test("formatCodeForTts - one failing explanation does not drop the others (audio-feed-8acp)", async () => {
+  const input = [
+    "```js\nconst bad = 1;\n```",
+    "Between.",
+    "```js\nconst good = 2;\n```",
+  ].join("\n\n");
+  const processed = await formatCodeForTts(input, "explain", (code) => {
+    if (code.includes("bad")) throw new Error("summarizer backend offline");
+    return "the second block is fine";
+  });
+  assertEquals(processed.includes("Here is what that code does: the second block is fine"), true);
+  // The failed block is omitted, never narrated as raw code.
+  assertEquals(processed.includes("const bad"), false);
+  assertEquals(processed.includes("Between."), true);
+});
+
 Deno.test("buildNarrationSystemPrompt directs code handling without forbidden meta-phrases (audio-feed-bdo)", () => {
   const skipPrompt = buildNarrationSystemPrompt("skip");
   assertStringIncludes(skipPrompt, "Skip code blocks");
