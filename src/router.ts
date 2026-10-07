@@ -34,9 +34,10 @@ interface Route<Ctx> {
  *
  * Owned by: audio-feed-n2ha.
  */
-export function sanitizeRequestUrl(rawUrl: string): string {
+export function sanitizeRequestUrl(rawUrl: unknown): string {
+  const raw = String(rawUrl ?? "");
   try {
-    const url = new URL(rawUrl, "http://localhost");
+    const url = new URL(raw, "http://localhost");
     url.search = "";
     url.hash = "";
     const segments = url.pathname.split("/");
@@ -48,12 +49,12 @@ export function sanitizeRequestUrl(rawUrl: string): string {
       }
     }
     url.pathname = segments.join("/");
-    if (rawUrl.startsWith("/")) {
+    if (raw.startsWith("/")) {
       return url.pathname;
     }
     return url.href;
   } catch {
-    const withoutQuery = rawUrl.split("?")[0]?.split("#")[0] ?? "";
+    const withoutQuery = raw.split("?")[0]?.split("#")[0] ?? "";
     return withoutQuery.replace(/(\/(?:feed|listen)\/)[^/]+/g, "$1[redacted]");
   }
 }

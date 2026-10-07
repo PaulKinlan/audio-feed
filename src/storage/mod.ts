@@ -616,9 +616,9 @@ export function resolveRange(range: ByteRange | undefined, size: number) {
   const requested = Math.trunc(range.start);
 
   // Negative start encodes the suffix form (`bytes=-500` → last 500 bytes).
-  if (requested < 0) {
+  if (requested < 0 || Object.is(requested, -0)) {
     const suffix = -requested;
-    if (suffix === 0) throw new RangeNotSatisfiableError(size);
+    if (suffix === 0 || Object.is(requested, -0)) throw new RangeNotSatisfiableError(size);
     return { start: Math.max(0, size - suffix), end: size - 1, total: size };
   }
 

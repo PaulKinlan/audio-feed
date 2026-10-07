@@ -242,6 +242,23 @@ Deno.test("token redaction: sanitizeRequestUrl redacts feed and listen capabilit
   );
 });
 
+Deno.test("token redaction: sanitizeRequestUrl handles non-string inputs safely without throwing", () => {
+  const nonStrings: unknown[] = [
+    null,
+    undefined,
+    123,
+    true,
+    false,
+    {},
+    [],
+    Symbol("test"),
+  ];
+  for (const input of nonStrings) {
+    const res = sanitizeRequestUrl(input);
+    assertEquals(typeof res, "string");
+  }
+});
+
 Deno.test("token redaction: Router 500 error logging redacts capability token and preserves error stack", async () => {
   const SECRET_FEED_TOKEN = "private-feed-token-987654321";
   const { fetch } = setupTestApp(undefined, {

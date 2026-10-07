@@ -47,6 +47,19 @@ Deno.test("resolveRange: a suffix longer than the object returns the whole objec
   assertEquals(resolveRange({ start: -500 }, 100), { start: 0, end: 99, total: 100 });
 });
 
+Deno.test("resolveRange: rejects a zero suffix (bytes=-0 is unsatisfiable per RFC 9110)", () => {
+  assertThrows(() => resolveRange(parseRangeHeader("bytes=-0"), 100), RangeNotSatisfiableError);
+  assertThrows(() => resolveRange({ start: -0 }, 100), RangeNotSatisfiableError);
+});
+
+Deno.test("resolveRange: suffix of 1 returns the last byte", () => {
+  assertEquals(resolveRange(parseRangeHeader("bytes=-1"), 100), {
+    start: 99,
+    end: 99,
+    total: 100,
+  });
+});
+
 Deno.test("resolveRange: rejects a start at or past the end", () => {
   assertThrows(() => resolveRange({ start: 100 }, 100), RangeNotSatisfiableError);
   assertThrows(() => resolveRange({ start: 101 }, 100), RangeNotSatisfiableError);
