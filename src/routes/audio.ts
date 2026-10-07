@@ -13,10 +13,11 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { notFound, problem } from "../http.ts";
+import { forbidden, notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import type { RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
+import { isAudioMode } from "../types.ts";
 
 /**
  * Whether this request is one the browser will apply CORS rules to.
@@ -85,21 +86,109 @@ export function isSafeBlobKey(key: string): boolean {
   return !key.split("/").some((segment) => segment === "." || segment === "..");
 }
 
+/**
+ * Restrict keys to canonical audio/ keys or legacy flat keys (*.wav, *.mp3).
+ * Explicitly rejects intermediate synthesis segments (audio-segments/), voice samples
+ * (voice-samples/), arbitrary multi-segment prefixes, and non-audio files.
+ *
+ * Canonical audio keys are either:
+ *   - `audio/<userId>/<mode>/<file>` (4 segments, starts with "audio/")
+ *   - `<userId>/<mode>/<file>` (3 segments, route-trimmed by /audio/:key+)
+ * where <mode> is an AudioMode ("direct" | "deepdive") and <file> is *.wav | *.mp3.
+ *
+ * Legacy flat keys are single-segment filenames:
+ *   - `<file>` or `audio/<file>` where <file> is *.wav | *.mp3.
+ *
+ * Owned by: audio-feed-5iue.
+ */
+export function isAllowedAudioKey(rawKey: string): boolean {
+  if (!isSafeBlobKey(rawKey)) return false;
+
+  // Must end in .wav or .mp3
+  if (!/\.(wav|mp3)$/i.test(rawKey)) {
+    return false;
+  }
+
+  const lower = rawKey.toLowerCase();
+
+  // Explicitly reject forbidden prefixes anywhere in the key
+  if (
+    lower.startsWith("audio-segments/") ||
+    lower.includes("/audio-segments/") ||
+    lower.startsWith("voice-samples/") ||
+    lower.includes("/voice-samples/") ||
+    lower.startsWith("internal-cache/") ||
+    lower.includes("/internal-cache/") ||
+    lower.startsWith("tts-secrets/") ||
+    lower.includes("/tts-secrets/")
+  ) {
+    return false;
+  }
+
+  const parts = rawKey.split("/");
+
+  // 1. Legacy flat key: e.g. "legacy.wav", "episode-1.mp3"
+  if (parts.length === 1) {
+    return true;
+  }
+
+  // 2. Legacy key prefixed with audio/: e.g. "audio/ready.wav"
+  if (parts.length === 2) {
+    return parts[0] === "audio";
+  }
+
+  // 3. Route-trimmed canonical key: <userId>/<mode>/<file>
+  // Mode must be a valid AudioMode ("direct" | "deepdive")
+  if (parts.length === 3) {
+    const [userId, mode] = parts;
+    return Boolean(userId) && isAudioMode(mode);
+  }
+
+  // 4. Canonical key: audio/<userId>/<mode>/<file>
+  // Must start with "audio" and mode must be a valid AudioMode
+  if (parts.length === 4) {
+    const [prefix, userId, mode] = parts;
+    return prefix === "audio" && Boolean(userId) && isAudioMode(mode);
+  }
+
+  return false;
+}
+
+/** Check user approval on the key that actually resolved; fails closed if user missing or not approved. */
+async function checkUserApproval(
+  ctx: RouteContext<AppContext>["ctx"],
+  resolvedKey: string,
+): Promise<Response | null> {
+  const userId = userIdFromBlobKey(resolvedKey);
+  if (!userId) return null;
+  const user = await ctx.stores.metadata.getUser(userId);
+  if (!user || user.status !== "approved") {
+    const status = user?.status ?? "unknown";
+    console.warn(`[audio-feed] audio 403: user "${userId}" is ${status}`);
+    return forbidden("Not available");
+  }
+  return null;
+}
+
 export async function handleAudio(
   { req, params, ctx }: RouteContext<AppContext>,
 ): Promise<Response> {
   const rawKey = params.key;
-  if (!rawKey || !isSafeBlobKey(rawKey)) {
-    console.warn(`[audio-feed] audio 404: unsafe or empty key "${rawKey}"`);
+  if (!rawKey || !isAllowedAudioKey(rawKey)) {
+    console.warn(`[audio-feed] audio 404: disallowed or unsafe key "${rawKey}"`);
     return notFound("Unknown audio object");
   }
 
   const isHead = req.method === "HEAD";
 
-  // For keys not starting with "audio/", the canonical shape emitted by new feeds
-  // is audio/${rawKey}. Try the canonical candidate first, then rawKey (audio-feed-1rx).
+  // For keys not starting with "audio/", the canonical shape in storage is
+  // audio/${rawKey}. For multi-segment keys, only audio/${rawKey} is checked
+  // (blob storage never stores multi-segment audio outside the audio/ prefix).
+  // For legacy flat keys, check audio/${rawKey} first, then rawKey (audio-feed-1rx, audio-feed-vlw).
   const candidateKeys = rawKey.startsWith("audio/")
     ? [rawKey]
+    : rawKey.includes("/")
+    ? [`audio/${rawKey}`]
     : isSafeBlobKey(`audio/${rawKey}`)
     ? [`audio/${rawKey}`, rawKey]
     : [rawKey];
@@ -122,6 +211,9 @@ export async function handleAudio(
       );
       return notFound("Unknown audio object");
     }
+
+    const refusal = await checkUserApproval(ctx, resolvedKey);
+    if (refusal) return refusal;
 
     return headResponse(info.size, {
       "content-type": info.contentType,
@@ -157,6 +249,9 @@ export async function handleAudio(
       }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
+        const refusal = await checkUserApproval(ctx, key);
+        if (refusal) return refusal;
+
         // Counted when the redirect is ISSUED, not when the client finishes —
         // on a redirecting store the bytes never reach us, so this is the last
         // point at which anything is observable. The dashboard says
@@ -198,6 +293,8 @@ export async function handleAudio(
       object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
     } catch (error) {
       if (error instanceof RangeNotSatisfiableError) {
+        const refusal = await checkUserApproval(ctx, key);
+        if (refusal) return refusal;
         return new Response(null, {
           status: 416,
           headers: {
@@ -221,6 +318,12 @@ export async function handleAudio(
       })`,
     );
     return notFound("Unknown audio object");
+  }
+
+  const refusal = await checkUserApproval(ctx, resolvedKey);
+  if (refusal) {
+    await object.body.cancel?.();
+    return refusal;
   }
 
   const headers = new Headers({

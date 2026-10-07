@@ -24,6 +24,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { isCorsConstrained } from "../src/routes/audio.ts";
+import { makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { BlobObject } from "../src/storage/mod.ts";
 
@@ -45,6 +46,7 @@ function redirectingStore(inner: Stores["blobs"]): Stores["blobs"] {
 
 async function app(blobs?: (inner: Stores["blobs"]) => Stores["blobs"]) {
   const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   await stores.blobs.put(KEY, BYTES, { contentType: "audio/wav" });
   if (blobs) stores.blobs = blobs(stores.blobs);
   const ctx = { config, stores };

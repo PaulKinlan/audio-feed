@@ -19,8 +19,10 @@ const config: AppConfig = {
   publicBaseUrl: "https://audio.example.com",
 };
 
-function app(handlers = {}) {
+async function app(handlers = {}) {
   const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   const { fetch } = createApp({ config, stores }, handlers);
   return { fetch, stores };
 }
@@ -33,7 +35,7 @@ const get = (path: string, init?: RequestInit) =>
 // ---------------------------------------------------------------------------
 
 Deno.test("health reports the selected storage backends", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   const res = await fetch(get("/health"));
 
   assertEquals(res.status, 200);
@@ -43,7 +45,7 @@ Deno.test("health reports the selected storage backends", async () => {
 });
 
 Deno.test("unknown paths are 404 with a stable error shape", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   const res = await fetch(get("/nope"));
 
   assertEquals(res.status, 404);
@@ -51,7 +53,7 @@ Deno.test("unknown paths are 404 with a stable error shape", async () => {
 });
 
 Deno.test("a known path with the wrong method is 405, not 404", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   const res = await fetch(get("/health", { method: "DELETE" }));
 
   assertEquals(res.status, 405);
@@ -60,7 +62,7 @@ Deno.test("a known path with the wrong method is 405, not 404", async () => {
 });
 
 Deno.test("HEAD is served by the GET handler", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   const res = await fetch(get("/health", { method: "HEAD" }));
 
   assertEquals(res.status, 200);
@@ -68,7 +70,7 @@ Deno.test("HEAD is served by the GET handler", async () => {
 });
 
 Deno.test("a handler that throws becomes a 500, not a dropped connection", async () => {
-  const { fetch } = app({
+  const { fetch } = await app({
     ingest: () => {
       throw new Error("boom");
     },
@@ -84,7 +86,7 @@ Deno.test("a handler that throws becomes a 500, not a dropped connection", async
 // ---------------------------------------------------------------------------
 
 Deno.test("unwired lane features return 501 rather than 404", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
 
   for (
     const req of [
@@ -102,7 +104,7 @@ Deno.test("unwired lane features return 501 rather than 404", async () => {
 
 Deno.test("a lane handler receives its path params", async () => {
   const seen: Record<string, string | undefined> = {};
-  const { fetch } = app({
+  const { fetch } = await app({
     sourceFeed: ({ params }: { params: Record<string, string | undefined> }) => {
       Object.assign(seen, params);
       return json({ ok: true });
@@ -133,7 +135,7 @@ Deno.test("feed routes do not shadow each other", () => {
 // ---------------------------------------------------------------------------
 
 Deno.test("audio: serves a whole object and advertises range support", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("audio/u1/direct/e1.mp3", bytes(1000), { contentType: "audio/mpeg" });
 
   const res = await fetch(get("/audio/audio/u1/direct/e1.mp3"));
@@ -146,7 +148,7 @@ Deno.test("audio: serves a whole object and advertises range support", async () 
 });
 
 Deno.test("audio: GET skips head() and resolves canonical audio/ key in one get() call (audio-feed-1rx)", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("audio/u1/direct/e1.mp3", bytes(1000), { contentType: "audio/mpeg" });
 
   let headCalls = 0;
@@ -185,7 +187,7 @@ Deno.test("audio: GET skips head() and resolves canonical audio/ key in one get(
 });
 
 Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (audio-feed-vnb)", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("audio/u1/direct/e1.mp3", bytes(1000), { contentType: "audio/mpeg" });
 
   let getCalls = 0;
@@ -202,7 +204,7 @@ Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (a
 });
 
 Deno.test("audio: direct-URL store resolves legacy flat key to existing key without dead redirect (audio-feed-vlw)", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   // Store has ONLY legacy.mp3 (flat key), NOT audio/legacy.mp3
   await stores.blobs.put("legacy.mp3", bytes(500), { contentType: "audio/mpeg" });
 
@@ -233,7 +235,7 @@ Deno.test("audio: direct-URL store resolves legacy flat key to existing key with
 });
 
 Deno.test("audio: HEAD returns metadata with no body", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("k.mp3", bytes(512), { contentType: "audio/mpeg" });
 
   const res = await fetch(get("/audio/k.mp3", { method: "HEAD" }));
@@ -245,7 +247,7 @@ Deno.test("audio: HEAD returns metadata with no body", async () => {
 });
 
 Deno.test("audio: a Range request gets 206 with the right slice and headers", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   const payload = bytes(1000);
   await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
 
@@ -258,7 +260,7 @@ Deno.test("audio: a Range request gets 206 with the right slice and headers", as
 });
 
 Deno.test("audio: a suffix Range works (clients resume with these)", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   const payload = bytes(1000);
   await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
 
@@ -270,7 +272,7 @@ Deno.test("audio: a suffix Range works (clients resume with these)", async () =>
 });
 
 Deno.test("audio: an unsatisfiable Range is 416 with content-range", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
 
   const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=500-600" } }));
@@ -281,7 +283,7 @@ Deno.test("audio: an unsatisfiable Range is 416 with content-range", async () =>
 });
 
 Deno.test("audio: a malformed Range is ignored, not fatal", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
 
   const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=abc" } }));
@@ -291,13 +293,13 @@ Deno.test("audio: a malformed Range is ignored, not fatal", async () => {
 });
 
 Deno.test("audio: a missing object is 404", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   const res = await fetch(get("/audio/missing.mp3"));
   assertEquals(res.status, 404);
 });
 
 Deno.test("audio: multi-segment keys survive the router", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   const episode = makeEpisode();
   await stores.blobs.put(episode.audioKey!, bytes(10), { contentType: "audio/mpeg" });
 
@@ -320,13 +322,13 @@ Deno.test("audio: path traversal in a key is refused", () => {
 // ---------------------------------------------------------------------------
 
 Deno.test("episodes: requires a known user", async () => {
-  const { fetch } = app();
+  const { fetch } = await app();
   assertEquals((await fetch(get("/api/episodes"))).status, 404);
   assertEquals((await fetch(get("/api/episodes?userId=ghost"))).status, 404);
 });
 
 Deno.test("episodes: returns the user's episodes newest first", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.metadata.putUser(makeUser());
   await stores.metadata.putEpisode(
     makeEpisode({ id: "old", createdAt: "2026-09-01T00:00:00.000Z" }),
@@ -343,7 +345,7 @@ Deno.test("episodes: returns the user's episodes newest first", async () => {
 });
 
 Deno.test("episodes: rejects an unknown mode instead of silently ignoring it", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.metadata.putUser(makeUser());
 
   const res = await fetch(get("/api/episodes?userId=user-1&mode=whistling"));
@@ -351,7 +353,7 @@ Deno.test("episodes: rejects an unknown mode instead of silently ignoring it", a
 });
 
 Deno.test("episodes: never returns another user's episodes", async () => {
-  const { fetch, stores } = app();
+  const { fetch, stores } = await app();
   await stores.metadata.putUser(makeUser());
   await stores.metadata.putEpisode(makeEpisode({ id: "mine", userId: "user-1" }));
   await stores.metadata.putEpisode(makeEpisode({ id: "theirs", userId: "user-2" }));
