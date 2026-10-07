@@ -72,7 +72,7 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
       `${path} CSP missing script-src`,
     );
     assertStringIncludes(csp!, "style-src 'self' 'unsafe-inline'", `${path} CSP missing style-src`);
-    assertStringIncludes(csp!, "media-src 'self' blob:", `${path} CSP missing media-src`);
+    assertStringIncludes(csp!, "media-src 'self' blob: https:", `${path} CSP missing media-src`);
     assertStringIncludes(csp!, "connect-src 'self'", `${path} CSP missing connect-src`);
     await res.body?.cancel();
   }
@@ -333,6 +333,8 @@ Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat
   assertEquals(isAllowedAudioKey("arbitrary/prefix/foo.wav"), false);
   assertEquals(isAllowedAudioKey("internal-cache/temp/file.wav"), false);
   assertEquals(isAllowedAudioKey("tts-secrets/v1/secret.wav"), false);
+  assertEquals(isAllowedAudioKey("Voice-Samples/direct/Kore.wav"), false);
+  assertEquals(isAllowedAudioKey("Audio-Segments/user-1/direct/e1.wav"), false);
 
   // Disallowed: path traversal / unsafe keys / non-audio extensions
   assertEquals(isAllowedAudioKey("../secret.wav"), false);
@@ -413,6 +415,7 @@ Deno.test("audio route: canonical audio is served for approved users, 403 Forbid
   assertEquals(suspRes.status, 403, "Suspended user audio must return 403");
   const suspBody = await suspRes.json();
   assertEquals(suspBody.error, "forbidden");
+  assertEquals(suspBody.detail, "Not available");
 
   // Suspended user: HEAD returns 403
   const suspHead = await fetch(new Request(`${BASE}/${suspendedKey}`, { method: "HEAD" }));
@@ -533,4 +536,42 @@ Deno.test("audio route: voice-samples bypass is closed (404), while approved use
   const vsResDirect = await fetch(new Request(`${BASE}/audio/${voiceSampleKey}`));
   assertEquals(vsResDirect.status, 404, "voice-samples/ on direct-URL store must return 404");
   await vsResDirect.body?.cancel();
+});
+
+Deno.test("audio route: out-of-range Range checks user approval before returning 416 (no existence/size leak)", async () => {
+  const stores = memoryStores();
+
+  const approvedUser = makeUser({ id: "user-approved", status: "approved" });
+  const suspendedUser = makeUser({ id: "user-suspended", status: "suspended" });
+  await stores.metadata.putUser(approvedUser);
+  await stores.metadata.putUser(suspendedUser);
+
+  const approvedKey = "audio/user-approved/direct/ep-1.wav";
+  const suspendedKey = "audio/user-suspended/direct/ep-2.wav";
+
+  await stores.blobs.put(approvedKey, bytes(200), { contentType: "audio/wav" });
+  await stores.blobs.put(suspendedKey, bytes(200), { contentType: "audio/wav" });
+
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  // Out-of-range Range on suspended user must return 403 Forbidden (not 416), leaking neither existence nor size
+  const suspRes = await fetch(
+    new Request(`${BASE}/${suspendedKey}`, {
+      headers: { range: "bytes=5000-6000" },
+    }),
+  );
+  assertEquals(suspRes.status, 403, "Out-of-range Range for suspended user must return 403");
+  assertEquals(suspRes.headers.get("content-range"), null, "Must not leak content-range header");
+  const suspBody = await suspRes.json();
+  assertEquals(suspBody.detail, "Not available", "Must return generic forbidden message");
+
+  // Out-of-range Range on approved user returns 416 with content-range
+  const appRes = await fetch(
+    new Request(`${BASE}/${approvedKey}`, {
+      headers: { range: "bytes=5000-6000" },
+    }),
+  );
+  assertEquals(appRes.status, 416, "Out-of-range Range for approved user must return 416");
+  assertEquals(appRes.headers.get("content-range"), "bytes */200");
+  await appRes.body?.cancel();
 });

@@ -109,16 +109,18 @@ export function isAllowedAudioKey(rawKey: string): boolean {
     return false;
   }
 
+  const lower = rawKey.toLowerCase();
+
   // Explicitly reject forbidden prefixes anywhere in the key
   if (
-    rawKey.startsWith("audio-segments/") ||
-    rawKey.includes("/audio-segments/") ||
-    rawKey.startsWith("voice-samples/") ||
-    rawKey.includes("/voice-samples/") ||
-    rawKey.startsWith("internal-cache/") ||
-    rawKey.includes("/internal-cache/") ||
-    rawKey.startsWith("tts-secrets/") ||
-    rawKey.includes("/tts-secrets/")
+    lower.startsWith("audio-segments/") ||
+    lower.includes("/audio-segments/") ||
+    lower.startsWith("voice-samples/") ||
+    lower.includes("/voice-samples/") ||
+    lower.startsWith("internal-cache/") ||
+    lower.includes("/internal-cache/") ||
+    lower.startsWith("tts-secrets/") ||
+    lower.includes("/tts-secrets/")
   ) {
     return false;
   }
@@ -163,7 +165,7 @@ async function checkUserApproval(
   if (!user || user.status !== "approved") {
     const status = user?.status ?? "unknown";
     console.warn(`[audio-feed] audio 403: user "${userId}" is ${status}`);
-    return forbidden(`User account is ${status}`);
+    return forbidden("Not available");
   }
   return null;
 }
@@ -223,11 +225,25 @@ export async function handleAudio(
   }
 
   // A store-provided URL means the client can fetch bytes directly without transiting the isolate (audio-feed-vnb).
+  //
+  // Nothing here may assume url() answers the same way for EVERY key. That was the
+  // audio-feed-gxn bug: a store that offers direct URLs for one prefix only (a CDN
+  // mapped over "audio/", say) made the first candidate look like a redirecting
+  // store, and when its head() missed the handler returned 404 for an object that
+  // existed and that HEAD could see. The interface never promised per-key
+  // consistency, so the handler must not depend on it.
+  // …but a redirect the browser cannot follow is worse than no redirect. A
+  // CORS-constrained request is served from the isolate instead, because the
+  // object store the redirect points at does not answer CORS.
   if (!isHead && !isCorsConstrained(req)) {
+    // Whether the store offered a direct URL for EVERY candidate, which is what
+    // distinguishes a uniformly-redirecting store from a per-key one.
     let everyKeyHasDirectUrl = true;
     for (const key of candidateKeys) {
       const direct = await ctx.stores.blobs.url(key);
       if (!direct) {
+        // `continue`, not `break`: a key with no direct URL says nothing about the
+        // next candidate on a store that answers per key (audio-feed-gxn).
         everyKeyHasDirectUrl = false;
         continue;
       }
@@ -236,12 +252,26 @@ export async function handleAudio(
         const refusal = await checkUserApproval(ctx, key);
         if (refusal) return refusal;
 
+        // Counted when the redirect is ISSUED, not when the client finishes —
+        // on a redirecting store the bytes never reach us, so this is the last
+        // point at which anything is observable. The dashboard says
+        // "downloads / redirects" rather than implying a completed download
+        // (audio-feed-ndc).
         if (!req.headers.get("range")) {
           await ctx.stores.metadata.recordDownload(userIdFromBlobKey(key));
         }
         return new Response(null, { status: 302, headers: { location: direct } });
       }
     }
+    // Short-circuit a miss ONLY when the store offered a direct URL for every
+    // candidate: that is the uniform case (S3 answers for any key), where get()
+    // would be a wasted round trip for a definitive 404, and audio-feed-vlw pins
+    // that behaviour with `getCalls === 0`.
+    //
+    // If any candidate had NO direct URL the store answers per key, so nothing here
+    // can conclude that a missing object is missing — a CDN mapped over one prefix
+    // would 404 objects that exist (audio-feed-gxn). Existence is then decided by
+    // the get() loop below, which costs one get() on a genuine miss.
     if (everyKeyHasDirectUrl) {
       console.warn(
         `[audio-feed] audio direct-url 404: key "${rawKey}" not found (candidates: ${
@@ -263,6 +293,8 @@ export async function handleAudio(
       object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
     } catch (error) {
       if (error instanceof RangeNotSatisfiableError) {
+        const refusal = await checkUserApproval(ctx, key);
+        if (refusal) return refusal;
         return new Response(null, {
           status: 416,
           headers: {
