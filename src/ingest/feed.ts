@@ -27,6 +27,7 @@
  */
 import { DOMParser, parseHTML } from "npm:linkedom@0.18.12";
 import { clean, type ExtractedArticle, fetchArticle, fetchFeedDocument, plainText } from "./url.ts";
+import { mapWithConcurrency } from "../concurrency.ts";
 import type { AppContext } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import {
@@ -271,6 +272,14 @@ function extractTextFromHtml(rawHtml: string): string {
   }
 }
 
+/**
+ * Article fetches in flight at once (audio-feed-8ce2).
+ *
+ * Bounded, not unbounded: a feed with fifty new items must not open fifty sockets to
+ * one publisher at the same moment, and must not stampede the metadata store either.
+ */
+const ARTICLE_FETCH_CONCURRENCY = 4;
+
 /** Queue an episode per item that the store has not already seen. */
 async function queueItems(
   ctx: AppContext,
@@ -282,11 +291,11 @@ async function queueItems(
   result.items = items.length;
   const mode: AudioMode = source.modes[0] ?? "direct";
 
-  for (const item of items) {
+  const queueOne = async (item: FeedItem): Promise<void> => {
     const existing = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
     if (existing) {
       result.skipped++;
-      continue;
+      return;
     }
     let extracted: ExtractedArticle;
     try {
@@ -325,7 +334,7 @@ async function queueItems(
         if (result.errors.length < 5) {
           result.errors.push(`${item.link}: ${errMsg}`);
         }
-        continue;
+        return;
       }
     }
 
@@ -334,7 +343,7 @@ async function queueItems(
     const raced = await ctx.stores.metadata.findArticleByUrl(source.userId, item.link);
     if (raced) {
       result.skipped++;
-      continue;
+      return;
     }
 
     const now = new Date().toISOString();
@@ -377,10 +386,17 @@ async function queueItems(
     );
     if (!inserted) {
       result.skipped++;
-      continue;
+      return;
     }
     result.queued++;
-  }
+  };
+
+  // Bounded concurrency (audio-feed-8ce2): this used to be a serial `for` loop, so a
+  // feed with N new items paid the SUM of N article fetches, each of which can sit on
+  // its own network timeout. The per-item guards are unchanged — first lookup, the
+  // post-fetch re-check and the CAS insert still gate every item — and a failing fetch
+  // is still counted in `result` instead of aborting the poll.
+  await mapWithConcurrency(items, ARTICLE_FETCH_CONCURRENCY, queueOne);
 }
 
 /** Stable, readable source id derived from the feed host, unique per user. */
