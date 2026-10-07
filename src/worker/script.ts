@@ -120,9 +120,27 @@ export class GroundedScriptError extends Error {
 const ARTICLE_BODY_FENCE_OPEN = "<article_body>";
 const ARTICLE_BODY_FENCE_CLOSE = "</article_body>";
 
+/**
+ * Any fence-tag-shaped run, matched case-insensitively and with optional whitespace or a
+ * self-closing slash: a model reads `</ARTICLE_BODY>` or `< / article_body >` as the same
+ * delimiter as the canonical spelling, so the variants have to be stripped too. `[^>]*`
+ * tolerates attributes on the tag.
+ */
+const ARTICLE_BODY_FENCE_TAG = /<\s*\/?\s*article_body[^>]*>/gi;
+
 /** Fence markers may not appear inside the fence; anything else in the body passes through. */
 function fenceArticleBody(body: string): string {
-  return body.replaceAll(ARTICLE_BODY_FENCE_OPEN, "").replaceAll(ARTICLE_BODY_FENCE_CLOSE, "");
+  // A single pass is not enough: removing a tag can weld a live one together from the
+  // fragments around it, so `</article_bod</article_body>y>` would first lose the inner tag
+  // and then read as an intact `</article_body>`. Strip to a fixed point instead — each pass
+  // only deletes characters, so this terminates.
+  let out = body;
+  let stripped = out.replace(ARTICLE_BODY_FENCE_TAG, "");
+  while (stripped !== out) {
+    out = stripped;
+    stripped = out.replace(ARTICLE_BODY_FENCE_TAG, "");
+  }
+  return out;
 }
 
 /**
