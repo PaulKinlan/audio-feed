@@ -28,6 +28,114 @@ interface Route<Ctx> {
   handler: Handler<Ctx>;
 }
 
+/**
+ * Sanitize a request URL for error logging by redacting capability tokens
+ * (e.g. following /feed/ and /listen/) and stripping query parameters.
+ *
+ * Owned by: audio-feed-n2ha.
+ */
+export function sanitizeRequestUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl, "http://localhost");
+    url.search = "";
+    url.hash = "";
+    const segments = url.pathname.split("/");
+    for (let i = 0; i < segments.length; i++) {
+      if ((segments[i] === "feed" || segments[i] === "listen") && i + 1 < segments.length) {
+        if (segments[i + 1] !== "") {
+          segments[i + 1] = "[redacted]";
+        }
+      }
+    }
+    url.pathname = segments.join("/");
+    if (rawUrl.startsWith("/")) {
+      return url.pathname;
+    }
+    return url.href;
+  } catch {
+    const withoutQuery = rawUrl.split("?")[0]?.split("#")[0] ?? "";
+    return withoutQuery.replace(/(\/(?:feed|listen)\/)[^/]+/g, "$1[redacted]");
+  }
+}
+
+/** Check if the request arrived over HTTPS directly or through a TLS-terminating reverse proxy. */
+export function isHttpsRequest(req: Request): boolean {
+  try {
+    const url = new URL(req.url);
+    if (url.protocol === "https:") return true;
+  } catch {
+    // ignore
+  }
+  const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  return proto === "https";
+}
+
+/**
+ * Baseline security headers applied centrally to HTTP responses.
+ *
+ * Sets Content-Security-Policy (with sensible rules compatible with existing pages),
+ * X-Content-Type-Options: nosniff, frame-ancestors 'none' / X-Frame-Options: DENY,
+ * and Strict-Transport-Security on HTTPS requests.
+ *
+ * Owned by: audio-feed-8k19.
+ */
+export function applySecurityHeaders(res: Response, req?: Request): Response {
+  let headers: Headers;
+  let recreated = false;
+
+  try {
+    res.headers.set("_test", "1");
+    res.headers.delete("_test");
+    headers = res.headers;
+  } catch {
+    headers = new Headers(res.headers);
+    recreated = true;
+  }
+
+  const contentType = (headers.get("content-type") ?? "").toLowerCase();
+  const isHtml = contentType.includes("text/html");
+  const isJson = contentType.includes("application/json") ||
+    contentType.includes("application/problem+json");
+
+  if (!headers.has("x-content-type-options")) {
+    headers.set("x-content-type-options", "nosniff");
+  }
+
+  if (isHtml) {
+    if (!headers.has("content-security-policy")) {
+      headers.set(
+        "content-security-policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+      );
+    }
+    if (!headers.has("x-frame-options")) {
+      headers.set("x-frame-options", "DENY");
+    }
+  } else if (isJson) {
+    if (!headers.has("content-security-policy")) {
+      headers.set("content-security-policy", "default-src 'none'; frame-ancestors 'none'");
+    }
+    if (!headers.has("x-frame-options")) {
+      headers.set("x-frame-options", "DENY");
+    }
+  }
+
+  if (req && isHttpsRequest(req)) {
+    if (!headers.has("strict-transport-security")) {
+      headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+    }
+  }
+
+  if (recreated) {
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    });
+  }
+  return res;
+}
+
 export class Router<Ctx> {
   readonly #routes: Route<Ctx>[] = [];
 
@@ -81,15 +189,16 @@ export class Router<Ctx> {
       if (route.method !== method) continue;
 
       try {
-        return await route.handler({
+        const res = await route.handler({
           req,
           params: match.pathname.groups,
           url,
           ctx,
           remoteAddr,
         });
+        return applySecurityHeaders(res, req);
       } catch (error) {
-        if (error instanceof HttpError) return error.response;
+        if (error instanceof HttpError) return applySecurityHeaders(error.response, req);
         throw error;
       }
     }
@@ -97,10 +206,10 @@ export class Router<Ctx> {
     if (pathMatches.length > 0) {
       const allow = [...new Set(pathMatches.map((r) => r.method))];
       if (allow.includes("GET")) allow.push("HEAD");
-      return methodNotAllowed(allow);
+      return applySecurityHeaders(methodNotAllowed(allow), req);
     }
 
-    return notFound(`No route for ${req.method} ${url.pathname}`);
+    return applySecurityHeaders(notFound(`No route for ${req.method} ${url.pathname}`), req);
   }
 
   /**
@@ -117,8 +226,11 @@ export class Router<Ctx> {
       try {
         return await this.handle(req, ctx, info);
       } catch (error) {
-        console.error(`[audio-feed] unhandled error for ${req.method} ${req.url}:`, error);
-        return problem({ status: 500, title: "internal_error" });
+        console.error(
+          `[audio-feed] unhandled error for ${req.method} ${sanitizeRequestUrl(req.url)}:`,
+          error,
+        );
+        return applySecurityHeaders(problem({ status: 500, title: "internal_error" }), req);
       }
     };
   }
