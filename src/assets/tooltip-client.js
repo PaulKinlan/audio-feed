@@ -50,12 +50,15 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
 
       if (!supportsAnchorPositioning) {
         // TODO(baseline/anchor-positioning): remove getBoundingClientRect fallback when anchor-positioning reaches Baseline
+        // audio-feed-kuu0: both layout READs happen before either style WRITE. Reading
+        // offsetHeight after `style.left` invalidated the layout the read needed and
+        // forced a synchronous reflow on every tooltip shown on a non-anchor engine.
         const rect = target.getBoundingClientRect();
-        tooltipEl.style.left = rect.left + "px";
         const tooltipHeight = tooltipEl.offsetHeight || 28;
         const margin = 8;
         const overflowBottom = (rect.bottom + margin + tooltipHeight) > window.innerHeight;
         const fitsAbove = (rect.top - margin - tooltipHeight) >= 0;
+        tooltipEl.style.left = rect.left + "px";
         if (overflowBottom && fitsAbove) {
           tooltipEl.style.top = (rect.top - margin - tooltipHeight) + "px";
         } else {
