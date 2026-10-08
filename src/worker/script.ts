@@ -419,7 +419,13 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
   }
   return async (input, options) => {
     const fetchFn = deps.fetchFn ?? fetch;
-    const url = `${GEMINI_GENERATE_ENDPOINT}/${model}:generateContent?key=${deps.apiKey}`;
+    // The API key must never travel in the query string: request URLs are retained by proxies,
+    // platform logs and error traces. Send it in the x-goog-api-key header, like src/tts/gemini.ts.
+    const url = `${GEMINI_GENERATE_ENDPOINT}/${model}:generateContent`;
+    const requestHeaders = {
+      "content-type": "application/json",
+      "x-goog-api-key": deps.apiKey,
+    };
     const maxTurns = input.maxTurns ?? 14;
     if (!Number.isInteger(maxTurns) || maxTurns < 2 || maxTurns > 32) {
       throw new GroundedScriptError("script maxTurns must be an integer from 2 to 32");
@@ -463,7 +469,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
         try {
           response = await fetchFn(url, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: requestHeaders,
             body: JSON.stringify(body),
             signal,
           });
