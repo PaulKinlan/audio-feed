@@ -208,7 +208,11 @@ export async function registrationOptions(
       id: c.id,
       transports: c.transports as AuthenticatorTransport[] | undefined,
     })),
-    authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+    // audio-feed-9ho7: passkeys are the normal admin sign-in path, so the
+    // authenticator must actually verify the human (biometric / PIN / screen
+    // lock). `preferred` let a UV-less authenticator register, and the matching
+    // `requireUserVerification: true` below is what refuses one.
+    authenticatorSelection: { residentKey: "required", userVerification: "required" },
   });
   await store.putChallenge({
     challenge: options.challenge,
@@ -243,7 +247,7 @@ export async function finishRegistration(
       expectedChallenge: challenge.challenge,
       expectedOrigin: rp.origin,
       expectedRPID: rp.rpID,
-      requireUserVerification: false,
+      requireUserVerification: true,
     });
   } catch {
     throw new PasskeyError("The passkey could not be verified.");
@@ -287,7 +291,8 @@ export async function authenticationOptions(
 ): Promise<PublicKeyCredentialRequestOptionsJSON> {
   const options = await generateAuthenticationOptions({
     rpID: rp.rpID,
-    userVerification: "preferred",
+    // audio-feed-9ho7: see registrationOptions — UV is required, not preferred.
+    userVerification: "required",
   });
   await store.putChallenge({
     challenge: options.challenge,
@@ -326,7 +331,7 @@ export async function finishAuthentication(
         counter: credential.counter,
         transports: credential.transports as AuthenticatorTransport[] | undefined,
       },
-      requireUserVerification: false,
+      requireUserVerification: true,
     });
   } catch {
     throw new PasskeyError("The passkey could not be verified.");

@@ -4,6 +4,7 @@
     "jsr:@std/assert@^1.0.10": "1.0.19",
     "jsr:@std/cli@1": "1.0.32",
     "jsr:@std/internal@^1.0.12": "1.0.14",
+    "npm:@levischuck/tiny-cbor@0.2.11": "0.2.11",
     "npm:@mozilla/readability@0.6.0": "0.6.0",
     "npm:@simplewebauthn/server@14.0.3": "14.0.3",
     "npm:aws4fetch@^1.0.20": "1.0.20",
