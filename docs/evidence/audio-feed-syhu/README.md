@@ -38,7 +38,7 @@ media-src 'self' blob: https:; connect-src 'self'; frame-ancestors 'none'; base-
 `deno run --allow-all --unstable-kv scripts/csp-nonce-browser-proof.ts` →
 
 ```
-20/20 checks passed
+21/21 checks passed
 ```
 
 For each of `/`, `/login`, `/admin`, `/listen`, `/listen/:token`, `/account`:
@@ -48,6 +48,15 @@ For each of `/`, `/login`, `/admin`, `/listen`, `/listen/:token`, `/account`:
 3. the nonced inline `<style>` was **applied** (a class from it computes a non-zero margin);
 4. the inline classic script **executed** — dispatching `pointerover` on a probe `[data-tooltip]`
    element makes the shell's tooltip client show `#appTooltip` (only the inline script can do that).
+
+On `/admin` with a short `ADMIN_TOKEN` it also pins the review finding that the `u-*` classes must
+still beat same-specificity rules from the linked sheet: the advisory card's
+`margin-block-end/start` is `16px/24px` (`.u-mb-4` wins over `admin.css`'s `.card`), which only
+holds because the utility `<style>` is emitted after the `<link rel="stylesheet">`.
+
+The service worker's offline fallback (`src/routes/pwa.ts`) no longer carries an inline
+`style="..."` attribute either; it is a `<style>` block, checked by
+`tests/security_audit_test.ts`.
 
 Screenshots: `home-1280x900.png`, `login-1280x900.png`, `admin-1280x900.png`,
 `listen-landing-1280x900.png`, `listen-player-1280x900.png`, `account-1280x900.png`.

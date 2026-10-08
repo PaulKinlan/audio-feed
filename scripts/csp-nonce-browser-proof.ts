@@ -37,7 +37,7 @@ function newestChrome(): string {
 }
 
 const stores: Stores = memoryStores();
-const config: AppConfig = { port: 0 };
+const config: AppConfig = { port: 0, adminToken: "short-token" };
 const ctx = { config, stores };
 
 const user = makeUser({
@@ -268,6 +268,25 @@ try {
         `${name}: inline classic script executed (tooltip client ran)`,
         tooltipShown === "shown",
         tooltipShown,
+      );
+    }
+
+    // audio-feed-syhu review finding: the u-* classes replaced inline style attributes, which
+    // beat same-specificity rules from linked sheets. admin.css sets `.card { margin-block: 1.5rem }`;
+    // the short-ADMIN_TOKEN advisory card carries `.u-mb-4` (1rem) and must win that tie.
+    if (name === "admin") {
+      const cardMargin = await js(`
+        (() => {
+          const card = document.querySelector(".u-accent-start.u-mb-4");
+          if (!card) return "card-absent";
+          const s = getComputedStyle(card);
+          return s.marginBlockEnd + "/" + s.marginBlockStart;
+        })()
+      `) as string;
+      check(
+        "admin: utility CSS wins the tie against the linked .card rule",
+        cardMargin === "16px/24px",
+        `advisory card margin-block-end/start = ${cardMargin} (want 16px/24px)`,
       );
     }
 

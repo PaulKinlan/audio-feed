@@ -181,6 +181,22 @@ Deno.test("security headers: every HTML page's nonce matches its CSP and has no 
   );
 });
 
+Deno.test("service worker offline fallback carries no inline style attribute (audio-feed-syhu)", async () => {
+  // The offline page is synthesised client-side by the service worker, so no server CSP applies
+  // to it; it must still carry no inline style attribute, the same rule the server templates hold.
+  const stores = memoryStores();
+  const ctx = { config: { ...config }, stores };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const res = await fetch(new Request(`${BASE}/sw.js`));
+  assertEquals(res.status, 200);
+  const body = await res.text();
+  assertEquals(
+    body.includes('style="'),
+    false,
+    "the service worker's offline page must not carry an inline style attribute",
+  );
+});
+
 Deno.test("security headers: JSON and problem responses carry restrictive CSP, nosniff, and frame deny", async () => {
   const { fetch } = setupTestApp();
 

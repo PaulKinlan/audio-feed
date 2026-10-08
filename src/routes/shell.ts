@@ -580,8 +580,10 @@ export function renderFooter(): string {
 /**
  * Style-attribute replacements (audio-feed-syhu). A CSP nonce/hash cannot cover an inline
  * `style="..."` ATTRIBUTE, so the pages carry none: each former attribute is one of these
- * classes instead. Appended AFTER the page CSS in renderShell's inline <style> so the
- * declarations keep the precedence the attributes had over the shared and page stylesheets.
+ * classes instead. renderShell emits them in their own nonced <style> AFTER the linked
+ * stylesheets, so the declarations keep the precedence the attributes had: an inline style beat
+ * a same-specificity rule from any author sheet, and a utility emitted before the link would
+ * lose that tie (review finding: `.card` in admin.css would override `.u-mb-4`).
  */
 export const UTILITY_CSS = `
   .u-mt-0 { margin-top: 0; }
@@ -664,8 +666,9 @@ ${o.description ? `<meta name="description" content="${esc(o.description)}">` : 
 ${o.current !== "admin" ? speculationRules(o.nonce) : ""}${o.head ?? ""}
 <style nonce="${nonce}">${SHELL_TOKENS}${SHELL_CSS}${o.kit ? SHELL_KIT_CSS : ""}${
     o.css ?? ""
-  }${UTILITY_CSS}</style>
+  }</style>
 ${(o.stylesheets ?? []).map((href) => `<link rel="stylesheet" href="${href}">`).join("\n")}
+<style nonce="${nonce}">${UTILITY_CSS}</style>
 </head>
 <body class="shell">
 <a class="skip" href="#main">Skip to content</a>

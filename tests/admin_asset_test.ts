@@ -45,6 +45,22 @@ Deno.test("the stylesheet link comes after the inline style so the cascade is un
   );
 });
 
+Deno.test("utility CSS is emitted after the linked stylesheets so it keeps the inline-style precedence", () => {
+  // audio-feed-syhu review finding: the u-* classes replaced inline style="..." attributes, which
+  // beat same-specificity rules from any author sheet. admin.css sets margin-block on .card, so a
+  // utility emitted before the link would silently lose that tie.
+  const linkStart = html.indexOf(`<link rel="stylesheet" href="${assetUrl("admin.css")}">`);
+  const utilityStart = html.indexOf(".u-mb-4 {");
+  assert(
+    linkStart !== -1 && utilityStart !== -1,
+    "the stylesheet link and the utility block must both be present",
+  );
+  assert(
+    utilityStart > linkStart,
+    "utilities must come after the linked sheets; before them, external rules win ties the inline styles won",
+  );
+});
+
 Deno.test("the admin asset is served with the hash the page actually references", async () => {
   const url = assetUrl("admin.css");
   const segments = url.slice("/assets/".length);
