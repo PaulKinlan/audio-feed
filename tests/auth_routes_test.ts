@@ -398,7 +398,19 @@ Deno.test("admin role: the last two admins demoting each other at once leaves on
       origin: BASE,
     }));
   const statuses = (await Promise.all([demote(a, b), demote(b, a)])).map((r) => r.status);
-  assertEquals(statuses.toSorted(), [200, 409], `statuses ${statuses}`);
+  // Exactly one demotion succeeds. The loser is refused either because the caller was just
+  // demoted itself (403, "not an admin") or because the change would leave no admins (409, the
+  // atomic last-admin guard in the store). Which one it is depends on request interleaving; both
+  // are safe refusals, so asserting the exact code flaked under CPU contention. The invariant
+  // that matters is the remaining-admin count below.
+  assertEquals(
+    statuses.filter((status) => status === 200).length,
+    1,
+    `exactly one demotion may succeed; statuses ${statuses}`,
+  );
+  for (const status of statuses) {
+    assert(status === 200 || status === 403 || status === 409, `unexpected status ${status}`);
+  }
   assertEquals((await stores.metadata.listUsers()).filter((u) => u.isAdmin).length, 1);
 });
 
