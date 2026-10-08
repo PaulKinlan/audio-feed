@@ -15,7 +15,7 @@
  *   GET  /feed/:token/:sourceId/:mode.xml     per-source feed             [7w6]
  *   GET  /audio/:key+                         enclosure bytes (Range)     [0h8]
  *   POST /api/ingest                          Send-to-Audio URL ingest    [by7]
- *   GET  /api/episodes                        episode listing             [0h8]
+ *   GET  /api/episodes                        own episode listing (auth)   [0h8]
  *   POST /api/admin/users/:id/approve         approval gate               [7wn]
  *   GET  /api/admin/stats                     operational metrics         [ndc]
  *   GET  /login, /account                     passkey sign-in, account    [8fc]
@@ -29,7 +29,7 @@
  */
 
 import { type Handler, Router } from "./router.ts";
-import { json, notFound } from "./http.ts";
+import { json } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
@@ -46,7 +46,6 @@ import { handleShare } from "./routes/share.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import type { AppConfig, Stores } from "./config.ts";
-import { isAudioMode } from "./types.ts";
 import { resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
 
@@ -77,6 +76,8 @@ export interface AppHandlers {
   /** audio-feed-2e5 — RSS/Atom subscriptions for a subscriber. */
   listSources?: Handler<AppContext>;
   createSource?: Handler<AppContext>;
+  /** audio-feed-0h8 — the subscriber's own episode listing (ownership-gated, nx3o). */
+  listEpisodes?: Handler<AppContext>;
   /** audio-feed-e3n — admin subscriber management: sources and token rotation. */
   adminListSources?: Handler<AppContext>;
   adminCreateSource?: Handler<AppContext>;
@@ -202,7 +203,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     "/api/sources",
     handlers.createSource ?? (() => notImplemented("Source subscription")),
   );
-  router.get("/api/episodes", handleEpisodes);
+  router.get("/api/episodes", handlers.listEpisodes ?? (() => notImplemented("Episode listing")));
   router.post(
     "/api/admin/users/:id/approve",
     handlers.approveUser ?? (() => notImplemented("Admin approval")),
@@ -309,39 +310,6 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   handlers.extra?.(router);
 
   return router;
-}
-
-/**
- * Episode listing. Read-only and user-scoped; the caller identity comes from
- * `7wn`'s auth once it lands, so for now it requires an explicit `userId` and
- * exposes nothing without one.
- */
-const handleEpisodes: Handler<AppContext> = async ({ url, ctx }) => {
-  const userId = url.searchParams.get("userId");
-  if (!userId) return notFound("Unknown user");
-
-  const user = await ctx.stores.metadata.getUser(userId);
-  if (!user) return notFound("Unknown user");
-
-  const modeParam = url.searchParams.get("mode");
-  if (modeParam !== null && !isAudioMode(modeParam)) {
-    return notFound(`Unknown mode: ${modeParam}`);
-  }
-
-  const episodes = await ctx.stores.metadata.listEpisodes({
-    userId,
-    sourceId: url.searchParams.get("sourceId") ?? undefined,
-    mode: modeParam ?? undefined,
-    limit: clampLimit(url.searchParams.get("limit")),
-  });
-
-  return json({ episodes });
-};
-
-function clampLimit(raw: string | null): number {
-  const parsed = Number(raw ?? 50);
-  if (!Number.isFinite(parsed)) return 50;
-  return Math.min(Math.max(Math.trunc(parsed), 1), 200);
 }
 
 /**

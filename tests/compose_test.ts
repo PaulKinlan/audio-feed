@@ -16,6 +16,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { pollFeedSource } from "../src/ingest/feed.ts";
+import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { bytes, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig } from "../src/config.ts";
@@ -477,7 +478,9 @@ Deno.test("no route echoes a feed capability", async () => {
       method: "POST",
       headers: { "x-admin-token": "admin-secret" },
     })),
-    await fetch(req("/api/episodes?userId=user-1")),
+    await fetch(req("/api/episodes?userId=user-1", {
+      headers: { "x-feed-token": "token-user-1" },
+    })),
     await fetch(req("/api/ingest", {
       method: "POST",
       headers: { "content-type": "application/json", "x-feed-token": "token-user-1" },
@@ -724,4 +727,112 @@ Deno.test("the feed stops at the real episode count and does not pad (audio-feed
     7,
     "with fewer than 200 playable episodes the feed carries what exists",
   );
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/episodes — the caller's OWN listing (audio-feed-nx3o)
+//
+// The route used to read `userId` from the query string and return that
+// subscriber's Episode records — title, description, status, audioKey — to
+// anyone. User ids are not secret, so a known id was a full catalogue read, and
+// each returned audioKey then opened /audio/<key> (which answers
+// access-control-allow-origin: *). These assertions drive the real dispatch
+// function Deno.serve receives, with real credentials.
+// ---------------------------------------------------------------------------
+
+Deno.test("episodes: an unauthenticated caller gets nothing, even for a known id", async () => {
+  const { fetch } = await seededApp();
+  assertEquals((await fetch(req("/api/episodes"))).status, 403);
+  assertEquals((await fetch(req("/api/episodes?userId=user-1"))).status, 403);
+  assertEquals((await fetch(req("/api/episodes?userId=ghost"))).status, 403);
+});
+
+Deno.test("episodes: another subscriber's userId is refused (audio-feed-nx3o)", async () => {
+  const { fetch, stores } = await seededApp();
+  await stores.metadata.putUser(makeUser({ id: "user-2", email: "two@example.com" }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "episode-2",
+    userId: "user-2",
+    sourceId: "stratechery",
+    title: "Their Private Article",
+    audioKey: "audio/user-2/direct/episode-2.mp3",
+  }));
+
+  const res = await fetch(req("/api/episodes?userId=user-2", {
+    headers: { "x-feed-token": "token-user-1" },
+  }));
+  assertEquals(res.status, 403);
+  const text = await res.text();
+  assert(!text.includes("Their Private Article"), "no other subscriber's data may leak");
+  assert(!text.includes("audio/user-2/"), "no other subscriber's audioKey may leak");
+});
+
+Deno.test("episodes: the token names the caller, so the listing is theirs", async () => {
+  const { fetch, stores } = await seededApp();
+  await stores.metadata.putUser(makeUser({ id: "user-2", email: "two@example.com" }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "episode-2",
+    userId: "user-2",
+    sourceId: "stratechery",
+  }));
+
+  // `userId` is optional, and when present it can only name the caller.
+  for (const path of ["/api/episodes", "/api/episodes?userId=user-1"]) {
+    const res = await fetch(req(path, { headers: { "x-feed-token": "token-user-1" } }));
+    assertEquals(res.status, 200, path);
+    const { episodes } = await res.json();
+    assertEquals((episodes as Episode[]).map((e) => e.id), ["episode-1"], path);
+  }
+});
+
+Deno.test("episodes: newest first, and an unknown mode is still refused", async () => {
+  const { fetch, stores } = await seededApp();
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "older",
+    userId: "user-1",
+    sourceId: "stratechery",
+    createdAt: "2026-09-01T00:00:00.000Z",
+  }));
+
+  const ok = await fetch(req("/api/episodes?userId=user-1", {
+    headers: { "x-feed-token": "token-user-1" },
+  }));
+  assertEquals(ok.status, 200);
+  const { episodes } = await ok.json();
+  assertEquals((episodes as Episode[]).map((e) => e.id), ["episode-1", "older"]);
+
+  const bad = await fetch(req("/api/episodes?userId=user-1&mode=whistling", {
+    headers: { "x-feed-token": "token-user-1" },
+  }));
+  assertEquals(bad.status, 404);
+});
+
+Deno.test("episodes: a not-yet-approved subscriber's token is refused", async () => {
+  const { fetch } = await seededApp();
+  const res = await fetch(req("/api/episodes?userId=pending-1", {
+    headers: { "x-feed-token": "token-pending-1" },
+  }));
+  assertEquals(res.status, 403);
+});
+
+Deno.test("episodes: a same-site session may read; another site may not", async () => {
+  const { fetch, stores } = await seededApp();
+  const secret = await createSession(stores.metadata, "user-1");
+  const cookie = { cookie: `${SESSION_COOKIE}=${secret}` };
+
+  const sameSite = await fetch(req("/api/episodes", {
+    headers: { ...cookie, "sec-fetch-site": "same-origin" },
+  }));
+  assertEquals(sameSite.status, 200);
+
+  const crossSite = await fetch(req("/api/episodes", {
+    headers: { ...cookie, "sec-fetch-site": "cross-site", origin: "https://evil.example" },
+  }));
+  assertEquals(crossSite.status, 403);
+
+  // A present Origin that is not this origin is refused too (no Sec-Fetch-Site).
+  const crossOrigin = await fetch(req("/api/episodes", {
+    headers: { ...cookie, origin: "https://evil.example" },
+  }));
+  assertEquals(crossOrigin.status, 403);
 });

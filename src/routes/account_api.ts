@@ -17,6 +17,7 @@ import {
   issueSetupLink,
   peekSetupLink,
   sameOrigin,
+  sameSiteRead,
   sessionCookie,
   sessionUser,
 } from "../auth/sessions.ts";
@@ -112,24 +113,15 @@ async function signedIn(ctx: AppContext, req: Request): Promise<User | Response>
 }
 
 /**
- * The signed-in user for a READ (audio-feed-6hw): 401 without a session, 403
- * from elsewhere. It cannot reuse `signedIn`'s Origin test, because browsers send
- * no Origin on a same-origin GET, so that test would refuse every real
- * discovery. The cross-site evidence that IS present is `Sec-Fetch-Site`, which a
- * page cannot set: `cross-site`/`same-site` is refused, `same-origin` is the
- * browser's own word for it. A request with NEITHER header is a non-browser
- * client (curl, tests) that no page can steer, so the session cookie is the whole
- * wall; an attacker page cannot strip the two headers the browser adds.
+ * The signed-in user for a READ (audio-feed-6hw): 401 without a session, 403 from
+ * elsewhere. The wall itself is `sameSiteRead` (browsers send no Origin on a
+ * same-origin GET, so the state-change `sameOrigin` test would refuse every real
+ * read; `Sec-Fetch-Site` is the cross-site evidence that IS present).
  */
 async function readSignedIn(ctx: AppContext, req: Request): Promise<User | Response> {
   const user = await sessionUser(ctx.stores.metadata, req);
   if (!user) return reply({ error: "Sign in first." }, 401);
-  const site = req.headers.get("sec-fetch-site");
-  if (site === "cross-site" || site === "same-site") {
-    return reply({ error: "Cross-origin request refused." }, 403);
-  }
-  const origin = req.headers.get("origin");
-  if (origin !== null && origin !== baseUrl(ctx, req)) {
+  if (!sameSiteRead(req, baseUrl(ctx, req))) {
     return reply({ error: "Cross-origin request refused." }, 403);
   }
   return user;

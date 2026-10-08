@@ -7,13 +7,12 @@
  * by audio-feed-bd0 with no behaviour change.
  */
 import { createUrlIngestHandler } from "../ingest/url.ts";
-import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import { INBOX_SOURCE_ID } from "../types.ts";
 import { sameOrigin, sessionUser } from "../auth/sessions.ts";
 import type { EpisodeQuery, MetadataStore } from "../storage/mod.ts";
 import type { Episode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
-import { type ComposeDeps, forbidden, loadUserByFeedToken, presentedToken } from "./shared.ts";
+import { approvedUserFor, type ComposeDeps, forbidden, presentedToken } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import { type Article } from "../types.ts";
@@ -65,10 +64,11 @@ export function createIngestHandler(
     fetchArticle: deps.fetchArticle,
     // Identity is the feed token, the same capability the feed routes use.
     authorize: async (request) => {
-      const token = presentedToken(request);
-      if (!token) {
+      if (!presentedToken(request)) {
         // audio-feed-8fc: a signed-in browser may send without pasting its token,
-        // but a cookie is ambient, so it only counts from this origin.
+        // but a cookie is ambient, so it only counts from this origin. This is a
+        // state change (POST), so the strict `sameOrigin` wall applies rather than
+        // the same-site-read wall a GET route uses.
         const signedIn = await sessionUser(ctx.stores.metadata, request);
         if (!signedIn) return forbidden("A feed token is required (x-feed-token).");
         if (!sameOrigin(request, resolveOrigin(ctx.config, request).baseUrl)) {
@@ -78,17 +78,11 @@ export function createIngestHandler(
           ? signedIn
           : forbidden("An approved user is required.");
       }
-      const user = await loadUserByFeedToken(ctx, token);
-      if (!user) return forbidden("Unknown feed token.");
-      try {
-        // Throwing gate first, so a forgotten boolean check cannot fail open.
-        return await assertAuthorizedForAudio(ctx.stores.metadata, user.id);
-      } catch (error) {
-        if (error instanceof NotAuthorizedError) {
-          return forbidden("An approved user is required.");
-        }
-        throw error;
-      }
+      // The explicit-token path is the gate every user-scoped API route owns
+      // (`approvedUserFor`); sharing it stops the spend check drifting between
+      // routes with its own copy of the try/catch.
+      const resolved = await approvedUserFor(ctx, request);
+      return "denied" in resolved ? resolved.denied : resolved.user;
     },
     enqueue: async ({ article, mode, user }) => {
       // 202 means QUEUED, not synthesized: no worker exists yet, so this records

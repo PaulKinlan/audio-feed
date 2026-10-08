@@ -112,6 +112,23 @@ export function sameOrigin(req: Request, expectedOrigin: string): boolean {
   return origin === "null" && req.headers.get("sec-fetch-site") === "same-origin";
 }
 
+/**
+ * The same-origin wall for a cookie-authenticated READ (audio-feed-6hw).
+ *
+ * `sameOrigin` cannot be reused here: browsers send no `Origin` on a same-origin
+ * GET, so requiring one refuses every real read. The cross-site evidence that IS
+ * present is `Sec-Fetch-Site`, which a page cannot write: `cross-site` and
+ * `same-site` are refused, `same-origin` is the browser's own word for it, and a
+ * request carrying NEITHER header is a non-browser client (curl, a test) that no
+ * page can steer. An `Origin` that is present must still be this origin.
+ */
+export function sameSiteRead(req: Request, expectedOrigin: string): boolean {
+  const site = req.headers.get("sec-fetch-site");
+  if (site === "cross-site" || site === "same-site") return false;
+  const origin = req.headers.get("origin");
+  return origin === null || origin === expectedOrigin;
+}
+
 /** Admin rights need the flag AND an approved account: suspending an admin demotes them. */
 export function isActiveAdmin(user: User | null): boolean {
   return Boolean(user?.isAdmin && user.status === "approved");
