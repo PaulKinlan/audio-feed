@@ -189,6 +189,25 @@ Deno.test("script request: grounding is requested and the model is named in the 
   assertStringIncludes(contents[0]?.parts[0]?.text ?? "", "counterarguments");
 });
 
+Deno.test("script request: the API key rides the x-goog-api-key header, never the URL", async () => {
+  let seenUrl = "";
+  let seenHeaders: Record<string, string> = {};
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    fetchFn: (input, init) => {
+      seenUrl = String(input);
+      seenHeaders = init?.headers as Record<string, string>;
+      return Promise.resolve(geminiResponse(VALID_SCRIPT));
+    },
+  });
+  await generator({ article: ARTICLE, speakers: [...SPEAKERS] });
+  // A query-string key is retained by proxies, platform logs and error traces.
+  assertEquals(seenUrl.includes("test-key"), false, `key leaked into URL: ${seenUrl}`);
+  assertEquals(seenUrl.includes("key="), false, `query key parameter present: ${seenUrl}`);
+  assertStringIncludes(seenUrl, `${DEFAULT_SCRIPT_MODEL}:generateContent`);
+  assertEquals(seenHeaders["x-goog-api-key"], "test-key");
+});
+
 Deno.test("script request: a refused call is a typed error carrying the status", async () => {
   const generator = createGroundedScriptGenerator({
     apiKey: "test-key",
