@@ -536,7 +536,14 @@ export interface MetadataStore {
    * value, or `null` to leave the row untouched. The read and the write are one
    * step: two isolates that both read the same value must not both commit, so
    * the loser retries against what the winner wrote. Resolves the value in the
-   * store after the call.
+   * store after the call and whether the mutation was actually applied.
+   *
+   * **`committed: false` is load-bearing.** A writer that cannot win a commit
+   * (every attempt lost its race) gets back the value it read, with nothing
+   * written. A caller whose correctness depends on the write — a rate limiter
+   * that must not admit an uncounted request — has to fail closed on it rather
+   * than treat the returned value as its own. That is why this returns a
+   * result object instead of a bare `T | null` (audio-feed-2zvc review).
    *
    * `ttlMs` bounds a row that may never be read again — the rate limiter's
    * per-client list of attempt timestamps. Without it a per-client key would
@@ -552,9 +559,17 @@ export interface MetadataStore {
     key: string,
     mutate: (current: T | null) => T | null,
     ttlMs?: number,
-  ): Promise<T | null>;
+  ): Promise<AtomicWrite<T>>;
 
   close(): Promise<void>;
+}
+
+/** The outcome of `MetadataStore.atomicUpdate`: what is stored, and whether we wrote it. */
+export interface AtomicWrite<T> {
+  /** The value in the store after the call (the unchanged value when not committed). */
+  value: T | null;
+  /** `true` when `mutate` was applied, `false` when it aborted or lost every race. */
+  committed: boolean;
 }
 
 /** How many runs each job's history keeps. Older records are dropped on write. */

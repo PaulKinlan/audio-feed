@@ -687,8 +687,8 @@ Deno.test("atomicUpdate: concurrent read-modify-writes do not lose one (KV)", as
       () => store.atomicUpdate<number>("counter", (current) => (current ?? 0) + 1),
     );
     const results = await Promise.all(writers);
-    assertEquals(results.filter((value) => value !== null).length, 20);
-    assertEquals(await store.atomicUpdate<number>("counter", () => null), 20);
+    assertEquals(results.filter((result) => result.committed).length, 20);
+    assertEquals((await store.atomicUpdate<number>("counter", () => null)).value, 20);
   } finally {
     await store.close();
   }
@@ -703,7 +703,7 @@ Deno.test("atomicUpdate: two stores over one KV share the row (audio-feed-2zvc)"
     await b.atomicUpdate<number[]>("window", (current) => [...(current ?? []), 2]);
     // Two adapter objects, separate in-process state, one row: the substrate the
     // limiters share when Deno Deploy runs more than one isolate.
-    assertEquals(await a.atomicUpdate<number[]>("window", () => null), [1, 2]);
+    assertEquals((await a.atomicUpdate<number[]>("window", () => null)).value, [1, 2]);
   } finally {
     kv.close();
   }
@@ -711,15 +711,19 @@ Deno.test("atomicUpdate: two stores over one KV share the row (audio-feed-2zvc)"
 
 Deno.test("atomicUpdate: a null mutation leaves the row untouched", async () => {
   const store = new MemoryMetadataStore();
-  assertEquals(await store.atomicUpdate<number>("k", () => 7), 7);
-  assertEquals(await store.atomicUpdate<number>("k", () => null), 7, "a peek must not write");
+  assertEquals(await store.atomicUpdate<number>("k", () => 7), { value: 7, committed: true });
+  assertEquals(
+    await store.atomicUpdate<number>("k", () => null),
+    { value: 7, committed: false },
+    "a peek must not write, and must say it did not",
+  );
 });
 
 Deno.test("atomicUpdate: the memory adapter shows the same contract", async () => {
   const store = new MemoryMetadataStore();
   // Single-threaded, so this pins the observable contract rather than racing:
   // both adapters must behave the same for the policy above them.
-  assertEquals(await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1), 1);
-  assertEquals(await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1), 2);
-  assertEquals(await store.atomicUpdate<number>("n", () => null), 2);
+  assertEquals((await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1)).value, 1);
+  assertEquals((await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1)).value, 2);
+  assertEquals((await store.atomicUpdate<number>("n", () => null)).value, 2);
 });

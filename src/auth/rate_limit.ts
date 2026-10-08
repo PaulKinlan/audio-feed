@@ -12,13 +12,15 @@
  * tests) makes one bound hold for the deployment.
  */
 
+import type { AtomicWrite } from "../storage/mod.ts";
+
 /** The one store capability the limiter needs — see `MetadataStore.atomicUpdate`. */
 export interface RateLimitStore {
   atomicUpdate<T>(
     key: string,
     mutate: (current: T | null) => T | null,
     ttlMs?: number,
-  ): Promise<T | null>;
+  ): Promise<AtomicWrite<T>>;
 }
 
 export interface RateLimitConfig {
@@ -37,9 +39,10 @@ export interface RateLimitResult {
 /**
  * Sliding-window counter per client key (typically IP), shared across isolates.
  *
- * Keys are namespaced per consumer by the caller (the admin limiter and the
- * request-access limiter must not collide on the same client), so the window is
- * stored at `rate_limit/<key the caller passes>`.
+ * Keys are namespaced per consumer by the caller: the admin limiter and the
+ * request-access limiter must not collide on the same client, or five
+ * front-door posts would count toward ten admin guesses. The window is stored
+ * at the store row `<namespace>:<key>` (an `["atomic", …]` row in KV).
  */
 export class SlidingWindowRateLimiter {
   readonly #config: RateLimitConfig;
@@ -77,7 +80,7 @@ export class SlidingWindowRateLimiter {
     // one the store applied.
     let admitted = false;
 
-    const stored = await this.#store.atomicUpdate<number[]>(
+    const write = await this.#store.atomicUpdate<number[]>(
       this.#row(key),
       (current) => {
         const active = (current ?? []).filter((t) => t > windowStart);
@@ -96,15 +99,19 @@ export class SlidingWindowRateLimiter {
       this.#config.windowMs * 2,
     );
 
-    return this.#result(stored, admitted, now);
+    // `committed` is load-bearing (audio-feed-2zvc review): a mutation that lost
+    // every CAS race was never recorded, and reporting it as allowed would let
+    // uncounted attempts through — the exact bound this exists to hold. A
+    // window we could not write fails CLOSED.
+    return this.#result(write.value, write.committed && admitted, now);
   }
 
   /** Check whether a key is currently rate-limited without recording a new hit. */
   async peek(key: string, now = Date.now()): Promise<RateLimitResult> {
     // `null` from the mutation means "leave the row as it is"; the store still
     // returns the current value.
-    const stored = await this.#store.atomicUpdate<number[]>(this.#row(key), () => null);
-    const active = (stored ?? []).filter((t) => t > now - this.#config.windowMs);
+    const write = await this.#store.atomicUpdate<number[]>(this.#row(key), () => null);
+    const active = (write.value ?? []).filter((t) => t > now - this.#config.windowMs);
     // A read has no hit to admit, so unlike `check` the refusal rule is simply
     // whether the recorded window is already full.
     const allowed = active.length < this.#config.maxRequests;
@@ -141,7 +148,14 @@ export class SlidingWindowRateLimiter {
 
   /** Reset the window for `key` (a successful auth, or a test). */
   async reset(key: string): Promise<void> {
-    await this.#store.atomicUpdate<number[]>(this.#row(key), () => []);
+    // Keep the TTL: `reset` runs on every successful admin auth, and a row
+    // written without an expiry would leave a permanent entry per client IP
+    // (audio-feed-2zvc review).
+    await this.#store.atomicUpdate<number[]>(
+      this.#row(key),
+      () => [],
+      this.#config.windowMs * 2,
+    );
   }
 }
 

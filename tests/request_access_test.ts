@@ -2,8 +2,9 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import { type RateLimitStore, SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
 import { KvMetadataStore } from "../src/storage/kv.ts";
+import type { AtomicWrite } from "../src/storage/mod.ts";
 import { approveUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -363,6 +364,72 @@ Deno.test("SlidingWindowRateLimiter: namespaces keep unrelated limits apart (aud
   // two shared one row, five posts would silently count toward ten guesses.
   assertEquals((await admin.peek("5.5.5.5", now)).allowed, true);
   assertEquals((await admin.check("5.5.5.5", now)).allowed, true);
+});
+
+Deno.test("SlidingWindowRateLimiter: a window that could not be recorded refuses the attempt (audio-feed-2zvc)", async () => {
+  // A store whose commit always loses every race. The limiter must fail CLOSED:
+  // reporting allowed for an unrecorded attempt is how a burst exceeds the
+  // bound (found in review of the first cut of audio-feed-2zvc).
+  const unwritable: RateLimitStore = {
+    atomicUpdate: <T>(_key: string, _mutate: (current: T | null) => T | null) =>
+      Promise.resolve({ value: null, committed: false } as AtomicWrite<T>),
+  };
+  const limiter = new SlidingWindowRateLimiter(
+    { maxRequests: 5, windowMs: 60_000 },
+    unwritable,
+    "test",
+  );
+  assertEquals(
+    (await limiter.check("client", 1)).allowed,
+    false,
+    "an attempt that was not recorded must not be admitted",
+  );
+  assertEquals((await limiter.peek("client", 1)).allowed, true, "nothing recorded yet, so room");
+});
+
+Deno.test("SlidingWindowRateLimiter: concurrent attempts are never admitted uncounted (audio-feed-2zvc)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const limiter = new SlidingWindowRateLimiter(
+    { maxRequests: 10, windowMs: 60_000 },
+    new KvMetadataStore(kv, { ownsConnection: false }),
+    "test",
+  );
+  try {
+    const now = 300_000;
+    const results = await Promise.all(
+      Array.from({ length: 50 }, () => limiter.check("flooder", now)),
+    );
+    const admitted = results.filter((result) => result.allowed).length;
+    const recorded = (await kv.get<number[]>(["atomic", "test:flooder"])).value?.length ?? 0;
+    // The safety property: every attempt reported as allowed is IN the store.
+    // Before the `committed` flag, a CAS retry exhaustion reported allowed while
+    // writing nothing, so a concurrent burst exceeded the bound.
+    assert(admitted <= recorded, `admitted ${admitted} but only ${recorded} were recorded`);
+    assert(admitted <= 10, `the bound admitted ${admitted}, over 10`);
+    assert(recorded > 0, "the burst must not fail closed entirely");
+  } finally {
+    kv.close();
+  }
+});
+
+Deno.test("SlidingWindowRateLimiter: reset keeps a TTL on the row (audio-feed-2zvc review)", async () => {
+  // reset runs on every successful admin auth. A write with no TTL would leave a
+  // permanent row per client IP (the P2 review finding), so the limiter must
+  // pass the same bounded lifetime the window writes use.
+  let seenTtl: number | undefined;
+  const store: RateLimitStore = {
+    atomicUpdate: <T>(_key: string, mutate: (current: T | null) => T | null, ttlMs?: number) => {
+      seenTtl = ttlMs;
+      return Promise.resolve({ value: mutate(null), committed: true } as AtomicWrite<T>);
+    },
+  };
+  const limiter = new SlidingWindowRateLimiter(
+    { maxRequests: 5, windowMs: 60_000 },
+    store,
+    "test",
+  );
+  await limiter.reset("client");
+  assertEquals(seenTtl, 120_000, "a reset must not leave a permanent row");
 });
 
 Deno.test("POST /api/request-access: HTML error and confirmation paths escape markup against XSS (audio-feed-hn4)", async () => {

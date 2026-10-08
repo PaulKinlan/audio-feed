@@ -22,7 +22,7 @@ import type {
 } from "../types.ts";
 import { utcDayKey } from "../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "./mod.ts";
-import type { EpisodePage, EpisodePageResult } from "./mod.ts";
+import type { AtomicWrite, EpisodePage, EpisodePageResult } from "./mod.ts";
 import { DEFAULT_CLAIM_LEASE_MS, isClaimExpired, isPublishable, unsynthesized } from "../types.ts";
 import {
   type BlobInfo,
@@ -898,7 +898,7 @@ export class MemoryMetadataStore implements MetadataStore {
     key: string,
     mutate: (current: T | null) => T | null,
     ttlMs?: number,
-  ): Promise<T | null> {
+  ): Promise<AtomicWrite<T>> {
     const now = Date.now();
     const row = this.#atomics.get(key);
     const live = row && (row.expiresAt === undefined || row.expiresAt > now);
@@ -906,12 +906,12 @@ export class MemoryMetadataStore implements MetadataStore {
     const current = live ? row.value as T : null;
     const next = mutate(current);
     // A null return means "do not write"; the caller still gets what is there.
-    if (next === null) return Promise.resolve(current);
+    if (next === null) return Promise.resolve({ value: current, committed: false });
     this.#atomics.set(key, {
       value: structuredClone(next),
       expiresAt: ttlMs === undefined ? undefined : now + ttlMs,
     });
-    return Promise.resolve(next);
+    return Promise.resolve({ value: next, committed: true });
   }
 
   close(): Promise<void> {

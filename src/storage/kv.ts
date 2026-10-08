@@ -57,6 +57,7 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type {
+  AtomicWrite,
   DownloadCounts,
   EpisodeClaim,
   EpisodePage,
@@ -1566,26 +1567,33 @@ export class KvMetadataStore implements MetadataStore {
    * both admit an attempt, which is exactly the per-isolate hole this closes.
    * The loser of a race retries against what the winner wrote.
    *
-   * If an improbable run of races all lose, the row is returned unmodified
-   * rather than spinning: the caller sees a consistent value and its mutation
-   * is simply not applied. Never write than what was read.
+   * If every attempt loses — a burst of writers all re-colliding — the row is
+   * returned unmodified with `committed: false`, so a caller that must not act
+   * on an unwritten value can fail closed. Never claim a write that did not
+   * land.
    */
   async atomicUpdate<T>(
     key: string,
     mutate: (current: T | null) => T | null,
     ttlMs?: number,
-  ): Promise<T | null> {
+  ): Promise<AtomicWrite<T>> {
     const kvKey: Deno.KvKey = ["atomic", key];
     for (let attempt = 0; attempt < 32; attempt++) {
       const entry = await this.#kv.get<T>(kvKey);
       const next = mutate(entry.value);
-      if (next === null) return entry.value;
+      if (next === null) return { value: entry.value, committed: false };
       const commit = ttlMs === undefined
         ? await this.#kv.atomic().check(entry).set(kvKey, next).commit()
         : await this.#kv.atomic().check(entry).set(kvKey, next, { expireIn: ttlMs }).commit();
-      if (commit.ok) return next;
+      if (commit.ok) return { value: next, committed: true };
+      // Jittered backoff, capped low: without it a burst of writers that all
+      // read the same versionstamp re-collides in lockstep until the retries
+      // run out, which is how this path got exercised in the first place.
+      if (attempt >= 2) {
+        await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 5)));
+      }
     }
-    return (await this.#kv.get<T>(kvKey)).value;
+    return { value: (await this.#kv.get<T>(kvKey)).value, committed: false };
   }
 
   /**
