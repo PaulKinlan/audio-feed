@@ -21,6 +21,7 @@ import { INBOX_SOURCE_ID } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { CONFIRM_DIALOG_CLIENT, PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
+import { htmlResponse, newCspNonce } from "./csp.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
 import { resolvePasskeyProvider } from "../auth/aaguid.ts";
 
@@ -43,6 +44,8 @@ export interface AccountPageData {
   failedCount: number;
   /** Optional prefill from query params or bookmarklet (audio-feed-ep1). */
   prefill?: PrefillData | null;
+  /** CSP nonce for this response (audio-feed-syhu); stamped on the shell's inline tags. */
+  nonce: string;
 }
 
 const CSS = `
@@ -223,11 +226,9 @@ ${
     <div class="quick-grid">
       <div class="quick-card">
         <div>
-          <h3 style="margin-top: 0; font-size: 1rem;">Queue this single page</h3>
-          <p class="meta" style="font-size: 0.85rem; word-break: break-all;"><code>${
-      esc(prefill.url)
-    }</code></p>
-          <div class="choices" role="radiogroup" aria-label="Format" style="margin-block: 0.5rem;">
+          <h3 class="u-mt-0 u-fs-body">Queue this single page</h3>
+          <p class="meta u-fs-sm u-break-all"><code>${esc(prefill.url)}</code></p>
+          <div class="choices u-my-half" role="radiogroup" aria-label="Format">
             <label><input type="radio" name="quickMode" value="direct" checked> Read aloud</label>
             <label><input type="radio" name="quickMode" value="deepdive"> Deep dive</label>
           </div>
@@ -238,11 +239,11 @@ ${
       </div>
       <div class="quick-card" id="detectedFeed"${prefill.feedUrl ? "" : " hidden"}>
         <div>
-          <h3 style="margin-top: 0; font-size: 1rem;">Subscribe to the feed</h3>
-          <p class="meta" style="font-size: 0.85rem; word-break: break-all;">${
+          <h3 class="u-mt-0 u-fs-body">Subscribe to the feed</h3>
+          <p class="meta u-fs-sm u-break-all">${
       prefill.feedUrl ? "Detected feed: " : "This page advertises: "
     }<code id="detectedFeedUrl">${esc(prefill.feedUrl ?? "")}</code></p>
-          <p class="sub" style="font-size: 0.85rem; margin-block-start: 0.25rem;">Follow the publication for future articles.</p>
+          <p class="sub u-fs-sm u-mt-quarter">Follow the publication for future articles.</p>
         </div>
         <button type="button" class="btn quiet small" id="quickSubscribeBtn"${
       approved ? "" : " disabled"
@@ -269,10 +270,10 @@ ${
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
     <div class="bookmarklet-box">
-      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem;">
+      <div class="u-flex-between-wrap">
         <div>
-          <strong style="display: block; font-size: 0.92rem;">Browser Bookmarklet</strong>
-          <span class="sub" style="font-size: 0.85rem; color: var(--muted);">Drag this button to your bookmarks bar to add articles or feeds from any tab:</span>
+          <strong class="u-block u-fs-092">Browser Bookmarklet</strong>
+          <span class="sub u-fs-sm u-muted-color">Drag this button to your bookmarks bar to add articles or feeds from any tab:</span>
         </div>
         <a class="btn quiet small bookmarklet-btn" href="${
     esc(bookmarkletCode)
@@ -307,7 +308,7 @@ ${sendSection}
     <div class="field"><span class="legend">Everything, newest first</span>${
     copyRow(`${feedBase}/master.xml`, "master feed URL")
   }</div>
-    <h3 class="legend" style="margin: 1.25rem 0 0.4rem">Sources</h3>
+    <h3 class="legend u-legend">Sources</h3>
     ${
     sourceItems
       ? `<ul class="rows">${sourceItems}</ul>`
@@ -360,7 +361,7 @@ ${sendSection}
       ${
     passkeyItems ? `<ul class="rows">${passkeyItems}</ul>` : `<p class="empty">No passkeys yet.</p>`
   }
-      <div class="actions" style="margin-block-start: 0.75rem"><button class="btn quiet" type="button" id="addPasskey">Add a passkey</button></div>
+      <div class="actions u-mt-sm"><button class="btn quiet" type="button" id="addPasskey">Add a passkey</button></div>
       <p class="feedback" id="passkeyFeedback" role="status" aria-live="polite"></p>
     </section>
   </div>
@@ -368,7 +369,7 @@ ${sendSection}
   <section class="panel" aria-labelledby="episodes-h">
     <div class="section-title"><h2 id="episodes-h">Recent episodes</h2>${
     approved
-      ? `<div class="row" style="gap: var(--space-2);"><button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
+      ? `<div class="row u-gap-2"><button class="btn quiet small" type="button" id="regenOutdated" data-count="${d.outdatedCount}"${
         d.outdatedCount ? "" : " disabled"
       }>Regenerate outdated (${d.outdatedCount})</button>
       <button class="btn quiet small" type="button" id="retryFailed" data-count="${d.failedCount}"${
@@ -758,6 +759,7 @@ ${CONFIRM_DIALOG_CLIENT}
     head: `<meta name="robots" content="noindex">`,
     main,
     script,
+    nonce: d.nonce,
   });
 }
 
@@ -783,6 +785,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     });
   }
   const baseUrl = resolveOrigin(ctx.config, req).baseUrl;
+  const nonce = newCspNonce();
   const [sources, credentials, episodes, outdatedCount, failedEpisodes] = await Promise.all([
     store.listSources(user.id),
     store.listCredentials(user.id),
@@ -815,10 +818,10 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     outdatedCount,
     failedCount: failedEpisodes.length,
     prefill,
+    nonce,
   });
-  return new Response(html, {
+  return htmlResponse(html, nonce, {
     headers: {
-      "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
     },

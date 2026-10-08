@@ -27,7 +27,7 @@ function landingApp() {
 }
 
 Deno.test("listen landing links its assets and carries no inline style or script of its own", () => {
-  const html = renderListenLanding(BASE);
+  const html = renderListenLanding(BASE, "test-nonce");
 
   // The page is markup plus links now: no <style> block, no inline client.
   assert(!/<style>/.test(html), "the landing must not carry an inline <style> block anymore");

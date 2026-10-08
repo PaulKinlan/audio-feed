@@ -52,6 +52,7 @@ Deno.test("CONFIRM_DIALOG_HTML: adheres to Modern Web Guidance conventions (audi
 
 Deno.test("SHELL_CSS: styles dialog and backdrop with unified tokens (audio-feed-ytl)", () => {
   const html = renderShell({
+    nonce: "test-nonce",
     title: "Test Shell",
     viewer: null,
     main: "<p>Content</p>",
@@ -70,6 +71,7 @@ Deno.test("SHELL_CSS: styles dialog and backdrop with unified tokens (audio-feed
 Deno.test("renderAccountPage: includes native accessible <dialog> and client script (audio-feed-ytl)", () => {
   const user = makeUser({ id: "user-1", email: "test@example.com" });
   const html = renderAccountPage({
+    nonce: "test-nonce",
     user,
     baseUrl: "https://audio.example.com",
     rpId: "audio.example.com",
@@ -170,6 +172,7 @@ Deno.test("confirm client has ONE source: confirm-shared.js, composed into admin
   }
   // the account page ships the single source inline
   const html = renderAccountPage({
+    nonce: "test-nonce",
     user: makeUser({ id: "user-1", email: "test@example.com" }),
     baseUrl: "https://audio.example.com",
     rpId: "audio.example.com",
@@ -189,6 +192,7 @@ Deno.test("confirm client has ONE source: confirm-shared.js, composed into admin
 
 Deno.test("renderAdminPage: includes native accessible <dialog> and client script (audio-feed-ytl)", () => {
   const html = renderAdminPage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     adminConfigured: true,
     viewer: { displayName: "Admin", email: "admin@example.com", isAdmin: true },

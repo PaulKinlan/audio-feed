@@ -111,7 +111,8 @@ import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
-import { SPECULATION_RULES } from "./shell.ts";
+import { speculationRules } from "./shell.ts";
+import { htmlContentSecurityPolicy, newCspNonce } from "./csp.ts";
 import {
   type AudioMode,
   type Episode,
@@ -173,6 +174,8 @@ export interface ListenPageOptions {
   offlineEnabled: boolean;
   /** Work in progress and work that failed (audio-feed-7s2). */
   activity?: PlayerActivity;
+  /** CSP nonce for this response (audio-feed-syhu); stamped on the inline tags. */
+  nonce: string;
 }
 
 const OFFLINE_CACHE = "audio-feed-offline-v1";
@@ -202,7 +205,7 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
 </svg>`;
 
 export function renderListenPage(
-  { token, subscriber, feedUrl, episodes, offlineEnabled, activity }: ListenPageOptions,
+  { token, subscriber, feedUrl, episodes, offlineEnabled, activity, nonce }: ListenPageOptions,
 ): string {
   const title = `${subscriber} — Audio Feed`;
   // Everything the client used to receive as six injected constants, in one JSON document. The
@@ -228,7 +231,7 @@ export function renderListenPage(
 <link rel="icon" href="/icon.svg">
 <link rel="alternate" type="application/rss+xml" title="${esc(title)}" href="${esc(feedUrl)}">
 <link rel="stylesheet" href="${assetUrl("listen.css")}">
-${SPECULATION_RULES}
+${speculationRules(nonce)}
 </head>
 <body>
 ${ICON_SPRITE}
@@ -387,7 +390,9 @@ ${ICON_SPRITE}
 
   <!-- audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
        one JSON document. Data in the page, code in a file. -->
-  <script type="application/json" id="player-data">${jsonForScript(playerData)}</script>
+  <script type="application/json" id="player-data" nonce="${esc(nonce)}">${
+    jsonForScript(playerData)
+  }</script>
   <script type="module" src="${assetUrl("listen.js")}"></script>
 </body>
 </html>
@@ -690,6 +695,7 @@ export async function handleListen(
   const dbMs = performance.now() - dbStart;
 
   const renderStart = performance.now();
+  const nonce = newCspNonce();
   const html = renderListenPage({
     token,
     subscriber: user.displayName || user.email,
@@ -698,6 +704,7 @@ export async function handleListen(
     activity,
     // Offline storage needs Cache Storage; without it the page still plays online.
     offlineEnabled: true,
+    nonce,
   });
   const renderMs = performance.now() - renderStart;
   logListenTiming("page", {
@@ -713,6 +720,7 @@ export async function handleListen(
     status: 200,
     headers: {
       "content-type": "text/html; charset=utf-8",
+      "content-security-policy": htmlContentSecurityPolicy(nonce),
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
@@ -810,7 +818,7 @@ const forbidden = (message: string) =>
   Response.json({ error: message }, { status: 403, headers: { "cache-control": "no-store" } });
 
 /** `/listen` without a token: restore from localStorage, or paste a feed URL. */
-export function renderListenLanding(publicBaseUrl: string): string {
+export function renderListenLanding(publicBaseUrl: string, nonce: string): string {
   return `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -820,7 +828,7 @@ export function renderListenLanding(publicBaseUrl: string): string {
 <meta name="theme-color" content="#0a0a0c">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg">
-${SPECULATION_RULES}
+${speculationRules(nonce)}
 <link rel="stylesheet" href="${assetUrl("listen-landing.css")}">
 </head>
 <body>

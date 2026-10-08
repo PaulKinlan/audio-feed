@@ -313,7 +313,9 @@ export function adminClient(
   const viewer = signedIn
     ? { displayName: "Admin", email: "admin@example.com", isAdmin: true }
     : null;
-  return adminClientFromHtml(renderAdminPage({ publicBaseUrl, adminConfigured: true, viewer }));
+  return adminClientFromHtml(
+    renderAdminPage({ nonce: "test-nonce", publicBaseUrl, adminConfigured: true, viewer }),
+  );
 }
 
 /**
@@ -329,7 +331,9 @@ export function adminClient(
  */
 export function adminClientFromHtml(html: string): AdminClient {
   const islands = [
-    ...html.matchAll(/<script type="application\/json" id="admin-data">([\s\S]*?)<\/script>/g),
+    ...html.matchAll(
+      /<script\b[^>]*type="application\/json"[^>]*id="admin-data"[^>]*>([\s\S]*?)<\/script>/g,
+    ),
   ];
   if (islands.length === 0) {
     throw new Error(

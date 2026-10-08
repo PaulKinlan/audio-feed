@@ -207,7 +207,7 @@ export async function createListenHarness(port = 8131) {
     throw new Error(`listen harness startup failure: GET /listen/${TOKEN} returned ${testRes.status}`);
   }
   const html = await testRes.text();
-  const match = /<script type="application\/json" id="player-data">([\s\S]*?)<\/script>/.exec(html);
+  const match = /<script\b[^>]*type="application\/json"[^>]*id="player-data"[^>]*>([\s\S]*?)<\/script>/.exec(html);
   if (!match) {
     throw new Error("listen harness startup failure: #player-data script tag not found in served page");
   }

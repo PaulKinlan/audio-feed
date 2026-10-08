@@ -117,9 +117,13 @@ export function applySecurityHeaders(
 
   if (isHtml) {
     if (!headers.has("content-security-policy")) {
+      // Fallback only: every HTML route attaches the nonce-bearing policy itself via
+      // `htmlResponse` (audio-feed-syhu). This default is deliberately strict — no
+      // 'unsafe-inline' — so a new HTML route that forgets its nonce fails visibly instead of
+      // quietly re-opening inline script. See src/routes/csp.ts.
       headers.set(
         "content-security-policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
       );
     }
     if (!headers.has("x-frame-options")) {

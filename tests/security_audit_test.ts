@@ -66,12 +66,23 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
       "frame-ancestors 'none'",
       `${path} CSP missing frame-ancestors 'none'`,
     );
+    // audio-feed-syhu: the policy carries a per-response nonce; 'unsafe-inline' would defeat
+    // CSP as a last line of defence on these credentialed documents.
+    assertEquals(
+      csp!.includes("'unsafe-inline'"),
+      false,
+      `${path} CSP still allows 'unsafe-inline': ${csp}`,
+    );
     assertStringIncludes(
       csp!,
-      "script-src 'self' 'unsafe-inline'",
-      `${path} CSP missing script-src`,
+      "script-src 'self' 'nonce-",
+      `${path} CSP missing script-src nonce`,
     );
-    assertStringIncludes(csp!, "style-src 'self' 'unsafe-inline'", `${path} CSP missing style-src`);
+    assertStringIncludes(
+      csp!,
+      "style-src 'self' 'nonce-",
+      `${path} CSP missing style-src nonce`,
+    );
     assertStringIncludes(csp!, "media-src 'self' blob: https:", `${path} CSP missing media-src`);
     assertStringIncludes(csp!, "connect-src 'self'", `${path} CSP missing connect-src`);
     await res.body?.cancel();
@@ -93,6 +104,97 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
   assertEquals(accountRes.headers.get("x-frame-options"), "DENY");
   assertEquals(accountRes.headers.get("x-content-type-options"), "nosniff");
   await accountRes.body?.cancel();
+});
+
+/**
+ * audio-feed-syhu: the nonce in the CSP header must be the nonce on the page's inline
+ * `<script>`/`<style>` tags, and there must be no inline style attributes (which no CSP nonce
+ * can cover). A mismatch means the browser blocks the page's boot script — the exact failure
+ * this guard exists to make loud instead of silent.
+ */
+function assertNonceConsistency(path: string, csp: string | null, body: string): void {
+  assert(csp, `${path} missing Content-Security-Policy`);
+  assert(
+    !csp.includes("'unsafe-inline'"),
+    `${path} CSP still allows 'unsafe-inline': ${csp}`,
+  );
+  const nonce = csp.match(/'nonce-([^']+)'/)?.[1];
+  assert(nonce, `${path} CSP carries no nonce: ${csp}`);
+  assert(
+    !body.includes('style="'),
+    `${path} carries an inline style attribute; a CSP nonce cannot cover attributes`,
+  );
+  for (const tag of body.match(/<script\b[^>]*>/gi) ?? []) {
+    // External scripts are covered by `'self'`; every inline tag must carry this response's nonce.
+    if (/\bsrc\s*=/i.test(tag)) continue;
+    assert(
+      tag.includes(`nonce="${nonce}"`),
+      `${path} inline script without the response nonce: ${tag}`,
+    );
+  }
+  for (const tag of body.match(/<style\b[^>]*>/gi) ?? []) {
+    assert(
+      tag.includes(`nonce="${nonce}"`),
+      `${path} inline style without the response nonce: ${tag}`,
+    );
+  }
+}
+
+Deno.test("security headers: every HTML page's nonce matches its CSP and has no inline style attributes (audio-feed-syhu)", async () => {
+  const stores = memoryStores();
+  const ctx = { config: { ...config }, stores };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+
+  const user = makeUser({ id: "syhu-user", status: "approved", feedToken: "syhu-token" });
+  await stores.metadata.putUser(user);
+  const token = await createSession(stores.metadata, user.id);
+
+  const pages: Array<[string, RequestInit]> = [
+    ["/", {}],
+    ["/admin", {}],
+    ["/login", {}],
+    ["/listen", {}],
+    ["/listen/syhu-token", {}],
+    ["/account", { headers: { cookie: `${SESSION_COOKIE}=${token}` } }],
+  ];
+  for (const [path, init] of pages) {
+    const res = await fetch(new Request(`${BASE}${path}`, init));
+    assertEquals(res.status, 200, `${path} expected 200`);
+    const body = await res.text();
+    assertNonceConsistency(path, res.headers.get("content-security-policy"), body);
+  }
+
+  // The request-access HTML page is composed outside the router's HTML routes (audio-feed-r97);
+  // it still has to carry a matching nonce.
+  const accessRes = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/html" },
+      body: JSON.stringify({ email: "syhu@example.com" }),
+    }),
+  );
+  assert(accessRes.ok, `request-access HTML page expected 2xx, saw ${accessRes.status}`);
+  assertNonceConsistency(
+    "/api/request-access",
+    accessRes.headers.get("content-security-policy"),
+    await accessRes.text(),
+  );
+});
+
+Deno.test("service worker offline fallback carries no inline style attribute (audio-feed-syhu)", async () => {
+  // The offline page is synthesised client-side by the service worker, so no server CSP applies
+  // to it; it must still carry no inline style attribute, the same rule the server templates hold.
+  const stores = memoryStores();
+  const ctx = { config: { ...config }, stores };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const res = await fetch(new Request(`${BASE}/sw.js`));
+  assertEquals(res.status, 200);
+  const body = await res.text();
+  assertEquals(
+    body.includes('style="'),
+    false,
+    "the service worker's offline page must not carry an inline style attribute",
+  );
 });
 
 Deno.test("security headers: JSON and problem responses carry restrictive CSP, nosniff, and frame deny", async () => {

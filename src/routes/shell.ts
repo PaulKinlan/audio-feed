@@ -68,6 +68,15 @@ export const SPECULATION_RULES = `<script type="speculationrules">
 }
 </script>`;
 
+/**
+ * The speculation-rules block with the response's CSP nonce stamped on it. The nonce is added
+ * at embed time so the constant above stays the single nonce-less source the rules test parses
+ * (audio-feed-syhu).
+ */
+export function speculationRules(nonce: string): string {
+  return SPECULATION_RULES.replace("<script ", `<script nonce="${esc(nonce)}" `);
+}
+
 /** Colour, type, spacing and shape unified in src/routes/tokens.ts (audio-feed-vpw). */
 export const SHELL_TOKENS = DESIGN_TOKENS;
 
@@ -568,6 +577,45 @@ export function renderFooter(): string {
   </div></footer>`;
 }
 
+/**
+ * Style-attribute replacements (audio-feed-syhu). A CSP nonce/hash cannot cover an inline
+ * `style="..."` ATTRIBUTE, so the pages carry none: each former attribute is one of these
+ * classes instead. renderShell emits them in their own nonced <style> AFTER the linked
+ * stylesheets, so the declarations keep the precedence the attributes had: an inline style beat
+ * a same-specificity rule from any author sheet, and a utility emitted before the link would
+ * lose that tie (review finding: `.card` in admin.css would override `.u-mb-4`).
+ */
+export const UTILITY_CSS = `
+  .u-mt-0 { margin-top: 0; }
+  .u-mb-0 { margin-block-end: 0; }
+  .u-m-0 { margin: 0; }
+  .u-fs-body { font-size: 1rem; }
+  .u-fs-sm { font-size: 0.85rem; }
+  .u-fs-xs { font-size: 0.8rem; }
+  .u-fs-092 { font-size: 0.92rem; }
+  .u-fs-088 { font-size: 0.88rem; }
+  .u-break-all { word-break: break-all; }
+  .u-my-half { margin-block: 0.5rem; }
+  .u-mt-quarter { margin-block-start: 0.25rem; }
+  .u-legend { margin: 1.25rem 0 0.4rem; }
+  .u-mt-sm { margin-block-start: 0.75rem; }
+  .u-mb-sm { margin-block-end: 0.75rem; }
+  .u-mt-2 { margin-block-start: var(--space-2); }
+  .u-mt-3 { margin-block-start: var(--space-3); }
+  .u-mt-4 { margin-block-start: var(--space-4); }
+  .u-mt-6 { margin-block-start: var(--space-6); }
+  .u-mb-2 { margin-block-end: var(--space-2); }
+  .u-mb-4 { margin-block-end: var(--space-4); }
+  .u-my-4 { margin-block: var(--space-4); }
+  .u-gap-2 { gap: var(--space-2); }
+  .u-accent-start { border-inline-start: 4px solid var(--accent); }
+  .u-strong-link { font-weight: 600; text-decoration: underline; }
+  .u-center-between { justify-content: space-between; align-items: center; }
+  .u-flex-between-wrap { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; }
+  .u-block { display: block; }
+  .u-muted-color { color: var(--muted); }
+`;
+
 export interface ShellOptions {
   title: string;
   description?: string;
@@ -580,6 +628,13 @@ export interface ShellOptions {
   /** Extra `<head>` markup, e.g. a robots meta. */
   head?: string;
   main: string;
+  /**
+   * The CSP nonce for this response (audio-feed-syhu). Stamped on the inline `<style>`, the
+   * inline boot script and the speculation-rules block; the route must put the same nonce in
+   * the response's `content-security-policy` via `htmlResponse`. Required: a shell without a
+   * nonce would drop `'unsafe-inline'` and silently break its own inline script.
+   */
+  nonce: string;
   /** The page's own script, if it has one. The shell never adds another. */
   script?: string;
   /**
@@ -598,6 +653,7 @@ export interface ShellOptions {
 }
 
 export function renderShell(o: ShellOptions): string {
+  const nonce = esc(o.nonce);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -607,9 +663,12 @@ export function renderShell(o: ShellOptions): string {
 ${o.description ? `<meta name="description" content="${esc(o.description)}">` : ""}
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="/icon.svg">
-${o.current !== "admin" ? SPECULATION_RULES : ""}${o.head ?? ""}
-<style>${SHELL_TOKENS}${SHELL_CSS}${o.kit ? SHELL_KIT_CSS : ""}${o.css ?? ""}</style>
+${o.current !== "admin" ? speculationRules(o.nonce) : ""}${o.head ?? ""}
+<style nonce="${nonce}">${SHELL_TOKENS}${SHELL_CSS}${o.kit ? SHELL_KIT_CSS : ""}${
+    o.css ?? ""
+  }</style>
 ${(o.stylesheets ?? []).map((href) => `<link rel="stylesheet" href="${href}">`).join("\n")}
+<style nonce="${nonce}">${UTILITY_CSS}</style>
 </head>
 <body class="shell">
 <a class="skip" href="#main">Skip to content</a>
@@ -622,8 +681,8 @@ ${CONFIRM_DIALOG_HTML}
 ${TOOLTIP_HTML}
 ${
     o.script
-      ? `<script>\n${TOOLTIP_CLIENT}\n${o.script}\n</script>`
-      : `<script>\n${TOOLTIP_CLIENT}\n</script>`
+      ? `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n${o.script}\n</script>`
+      : `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n</script>`
   }
 ${o.scriptModule ? `<script type="module" src="${o.scriptModule}"></script>` : ""}
 </body>

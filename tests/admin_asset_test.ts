@@ -13,6 +13,7 @@ import { renderAdminPage } from "../src/routes/admin.ts";
 import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 
 const html = renderAdminPage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   adminConfigured: true,
   viewer: { displayName: "Paul", email: "paul@example.com", isAdmin: true },
@@ -41,6 +42,22 @@ Deno.test("the stylesheet link comes after the inline style so the cascade is un
   assert(
     linkStart > styleEnd,
     "link must follow the inline <style>; before it, admin rules lose ties they used to win",
+  );
+});
+
+Deno.test("utility CSS is emitted after the linked stylesheets so it keeps the inline-style precedence", () => {
+  // audio-feed-syhu review finding: the u-* classes replaced inline style="..." attributes, which
+  // beat same-specificity rules from any author sheet. admin.css sets margin-block on .card, so a
+  // utility emitted before the link would silently lose that tie.
+  const linkStart = html.indexOf(`<link rel="stylesheet" href="${assetUrl("admin.css")}">`);
+  const utilityStart = html.indexOf(".u-mb-4 {");
+  assert(
+    linkStart !== -1 && utilityStart !== -1,
+    "the stylesheet link and the utility block must both be present",
+  );
+  assert(
+    utilityStart > linkStart,
+    "utilities must come after the linked sheets; before them, external rules win ties the inline styles won",
   );
 });
 
@@ -85,7 +102,10 @@ Deno.test("admin page links its client module instead of inlining ~980 lines of 
 });
 
 Deno.test("the page hands the client its data as one JSON island, not interpolated constants", () => {
-  const match = /<script type="application\/json" id="admin-data">([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="admin-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   assert(match, "the page must carry an #admin-data document");
   const data = JSON.parse(match![1]!);
   assertEquals(data.origin, "https://example.com");

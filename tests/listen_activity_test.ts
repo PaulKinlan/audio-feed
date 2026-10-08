@@ -399,6 +399,7 @@ Deno.test({
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
     const html = renderListenPage({
+      nonce: "test-nonce",
       token: "test-token",
       subscriber: "Paul",
       feedUrl: "https://example.com/feed.xml",

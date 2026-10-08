@@ -14,6 +14,7 @@ import { renderHomePage } from "../src/routes/home.ts";
 import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 
 const html = renderHomePage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   synthesisConfigured: true,
   defaultVoice: "Charon",
@@ -44,7 +45,10 @@ Deno.test("the home stylesheet link comes after the inline style so the cascade 
 
 Deno.test("home page links its client module and carries the data island", () => {
   assertStringIncludes(html, `<script type="module" src="${assetUrl("home.js")}"></script>`);
-  const match = /<script type="application\/json" id="home-data">([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="home-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   assert(match, "the page must carry a #home-data document");
   const data = JSON.parse(match![1]!);
   assertEquals(data.base, "https://example.com");

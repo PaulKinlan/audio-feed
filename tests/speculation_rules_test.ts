@@ -21,7 +21,7 @@ import { parseHTML } from "npm:linkedom@0.18.12";
 const BASE = "https://audio.example.com";
 
 function extractSpeculationRules(html: string): unknown | null {
-  const match = html.match(/<script\s+type="speculationrules">([\s\S]*?)<\/script>/);
+  const match = html.match(/<script\b[^>]*\stype="speculationrules"[^>]*>([\s\S]*?)<\/script>/);
   if (!match || !match[1]) return null;
   return JSON.parse(match[1]);
 }
@@ -72,14 +72,14 @@ Deno.test("pages render speculation rules on public and user surfaces (audio-fee
   const homeRes = await fetch(new Request(BASE));
   assertEquals(homeRes.status, 200);
   const homeHtml = await homeRes.text();
-  assertStringIncludes(homeHtml, '<script type="speculationrules">');
+  assertStringIncludes(homeHtml, 'type="speculationrules"');
   assert(extractSpeculationRules(homeHtml) !== null);
 
   // 2. Login (/login)
   const loginRes = await fetch(new Request(`${BASE}/login`));
   assertEquals(loginRes.status, 200);
   const loginHtml = await loginRes.text();
-  assertStringIncludes(loginHtml, '<script type="speculationrules">');
+  assertStringIncludes(loginHtml, 'type="speculationrules"');
 
   // 3. Account (/account)
   const accountRes = await fetch(
@@ -87,19 +87,19 @@ Deno.test("pages render speculation rules on public and user surfaces (audio-fee
   );
   assertEquals(accountRes.status, 200);
   const accountHtml = await accountRes.text();
-  assertStringIncludes(accountHtml, '<script type="speculationrules">');
+  assertStringIncludes(accountHtml, 'type="speculationrules"');
 
   // 4. Web player landing (/listen)
   const listenLandingRes = await fetch(new Request(`${BASE}/listen`));
   assertEquals(listenLandingRes.status, 200);
   const listenLandingHtml = await listenLandingRes.text();
-  assertStringIncludes(listenLandingHtml, '<script type="speculationrules">');
+  assertStringIncludes(listenLandingHtml, 'type="speculationrules"');
 
   // 5. User web player app (/listen/:token)
   const playerRes = await fetch(new Request(`${BASE}/listen/${user.feedToken}`));
   assertEquals(playerRes.status, 200);
   const playerHtml = await playerRes.text();
-  assertStringIncludes(playerHtml, '<script type="speculationrules">');
+  assertStringIncludes(playerHtml, 'type="speculationrules"');
   assert(extractSpeculationRules(playerHtml) !== null);
 });
 

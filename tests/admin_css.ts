@@ -12,7 +12,7 @@ import { assetBody } from "../src/routes/assets.ts";
 
 export function shippedCss(html: string): string {
   let css = "";
-  for (const m of html.matchAll(/<style>([\s\S]*?)<\/style>/g)) css += m[1] ?? "";
+  for (const m of html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)) css += m[1] ?? "";
   for (const m of html.matchAll(/<link rel="stylesheet" href="(\/assets\/[^"]+)">/g)) {
     const segments = (m[1] ?? "").slice("/assets/".length);
     const dot = segments.indexOf(".");

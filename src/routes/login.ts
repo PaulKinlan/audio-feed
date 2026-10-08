@@ -14,6 +14,7 @@ import { sessionUser } from "../auth/sessions.ts";
 import { jsonForScript } from "./html.ts";
 import { esc } from "./html.ts";
 import { PASSKEY_CLIENT, renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { htmlResponse, newCspNonce } from "./csp.ts";
 
 /** Only a same-site path: `/x`, never `//host` or `/\host`. */
 export function safeNext(raw: string | null, fallback = "/account"): string {
@@ -35,7 +36,7 @@ const CSS = `
 const KEY_ICON =
   `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3"/><path d="m16 7 3 3"/><path d="m14 9 2 2"/></svg>`;
 
-export function renderLoginPage(o: { viewer: Viewer | null; next: string }): string {
+export function renderLoginPage(o: { viewer: Viewer | null; next: string; nonce: string }): string {
   const signedIn = o.viewer
     ? `<p class="callout">You're signed in as <strong>${esc(o.viewer.displayName)}</strong>.
        <a href="${esc(o.next)}">Continue</a>, or sign in below as someone else.</p>`
@@ -58,17 +59,17 @@ export function renderLoginPage(o: { viewer: Viewer | null; next: string }): str
     </details>
     <details class="more" id="bootstrapDetails">
       <summary>Admin bootstrap</summary>
-      <form id="bootstrapForm" novalidate style="margin-block-start: 0.75rem;">
+      <form id="bootstrapForm" novalidate class="u-mt-sm">
         <p class="sub">Set up your admin passkey directly on this device using your server ADMIN_TOKEN.</p>
-        <div class="field" style="margin-block-end: 0.75rem;">
+        <div class="field u-mb-sm">
           <label for="bootstrapEmail">Admin email</label>
           <input id="bootstrapEmail" type="email" required placeholder="admin@example.com" autocomplete="email" />
         </div>
-        <div class="field" style="margin-block-end: 0.75rem;">
+        <div class="field u-mb-sm">
           <label for="bootstrapToken">Admin token</label>
           <input id="bootstrapToken" type="password" required placeholder="Value of ADMIN_TOKEN" autocomplete="current-password" />
         </div>
-        <div class="actions" style="margin-block-start: 0.75rem;">
+        <div class="actions u-mt-sm">
           <button class="btn" type="submit" id="bootstrapSubmit">${KEY_ICON}<span>Register admin passkey</span></button>
         </div>
         <p class="feedback" id="bootstrapFeedback" role="status" aria-live="polite"></p>
@@ -221,15 +222,20 @@ ${PASSKEY_CLIENT}
     head: `<meta name="robots" content="noindex">`,
     main,
     script,
+    nonce: o.nonce,
   });
 }
 
 export async function handleLogin({ ctx, req, url }: RouteContext<AppContext>): Promise<Response> {
   const viewer = viewerOf(await sessionUser(ctx.stores.metadata, req));
-  const html = renderLoginPage({ viewer, next: safeNext(url.searchParams.get("next")) });
-  return new Response(html, {
+  const nonce = newCspNonce();
+  const html = renderLoginPage({
+    viewer,
+    next: safeNext(url.searchParams.get("next")),
+    nonce,
+  });
+  return htmlResponse(html, nonce, {
     headers: {
-      "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       // The fragment is never sent in a Referer, but say so anyway.
       "referrer-policy": "no-referrer",

@@ -16,6 +16,7 @@ import { renderAdminPage } from "../src/routes/admin.ts";
 import { shippedCss } from "./admin_css.ts";
 
 const adminHtml = renderAdminPage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   adminConfigured: true,
   viewer: { displayName: "Paul Kinlan", email: "paul@example.com", isAdmin: true },

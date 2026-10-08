@@ -179,9 +179,9 @@ self.addEventListener("fetch", (event) => {
             cached ||
             new Response(
               "<!doctype html><meta charset=utf-8><title>Offline</title>" +
-                "<body style=\\"font-family:system-ui;background:#09090b;color:#fafafa;padding:2rem\\">" +
+                "<style>body{font-family:system-ui;background:#09090b;color:#fafafa;padding:2rem}</style><body>" +
                 "<h1>Offline</h1><p>Open this app once while online, then use the Download button " +
-                "on an episode to listen offline.</p>",
+                "on an episode to listen offline.</p></body></html>",
               { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
             )
           );
