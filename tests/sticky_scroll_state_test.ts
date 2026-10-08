@@ -30,6 +30,7 @@ function tallListenHtml(): string {
     audioUrl: `https://example.com/audio/ep-${i}.wav`,
   }));
   return renderListenPage({
+    nonce: "test-nonce",
     token: "test-token",
     subscriber: "Listener",
     feedUrl: "https://example.com/feed/test-token",
@@ -43,7 +44,7 @@ function listenCss(): string {
 }
 
 Deno.test("txcz: both sticky elements are scroll-state containers and both surfaces are their descendants", () => {
-  const shell = renderShell({ title: "probe", viewer: null, main: "" });
+  const shell = renderShell({ nonce: "test-nonce", title: "probe", viewer: null, main: "" });
   assertStringIncludes(shell, '<div class="site-header-sticky"><header class="site-header">');
   assertStringIncludes(shell, "</header></div>");
   assertStringIncludes(SHELL_CSS, "container-type: scroll-state;");
@@ -188,6 +189,7 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
     }
     return new Response(
       renderShell({
+        nonce: "test-nonce",
         title: "sticky probe",
         viewer: null,
         main: `<div style="block-size:4000px" aria-hidden="true"></div>`,

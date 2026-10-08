@@ -13,6 +13,7 @@ import { renderAdminPage } from "../src/routes/admin.ts";
 import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 
 const html = renderAdminPage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   adminConfigured: true,
   viewer: { displayName: "Paul", email: "paul@example.com", isAdmin: true },
@@ -85,7 +86,10 @@ Deno.test("admin page links its client module instead of inlining ~980 lines of 
 });
 
 Deno.test("the page hands the client its data as one JSON island, not interpolated constants", () => {
-  const match = /<script type="application\/json" id="admin-data">([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="admin-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   assert(match, "the page must carry an #admin-data document");
   const data = JSON.parse(match![1]!);
   assertEquals(data.origin, "https://example.com");

@@ -19,12 +19,14 @@ import { shippedCss } from "./admin_css.ts";
 import { makeEpisode, makeUser } from "./fixtures.ts";
 
 const adminHtml = renderAdminPage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   adminConfigured: true,
   viewer: { displayName: "Paul Kinlan", email: "paul@example.com", isAdmin: true },
 });
 
 const accountHtml = renderAccountPage({
+  nonce: "test-nonce",
   user: makeUser(),
   baseUrl: "https://example.com",
   rpId: "example.com",
@@ -36,6 +38,7 @@ const accountHtml = renderAccountPage({
 });
 
 const listenHtml = renderListenPage({
+  nonce: "test-nonce",
   token: "test-token",
   subscriber: "Listener",
   feedUrl: "https://example.com/feed/test-token",
@@ -57,7 +60,7 @@ async function getListenCss(): Promise<string> {
 
 Deno.test("closedby: all dialogs declare closedby='any' (audio-feed-e21x)", () => {
   // 1. Shell confirmDialog
-  const shellHtml = renderShell({ title: "Shell", viewer: null, main: "" });
+  const shellHtml = renderShell({ nonce: "test-nonce", title: "Shell", viewer: null, main: "" });
   assert(shellHtml.includes('<dialog id="confirmDialog" class="confirm-dialog" closedby="any"'));
 
   // 2. Admin confirmDialog
@@ -76,7 +79,7 @@ Deno.test("closedby: all dialogs declare closedby='any' (audio-feed-e21x)", () =
 
 Deno.test("closedby: dialog and backdrop CSS delivered across stylesheets (audio-feed-e21x)", async () => {
   // 1. Shell CSS
-  const shellHtml = renderShell({ title: "Shell", viewer: null, main: "" });
+  const shellHtml = renderShell({ nonce: "test-nonce", title: "Shell", viewer: null, main: "" });
   assert(shellHtml.includes("dialog.confirm-dialog"));
   assert(shellHtml.includes("dialog.confirm-dialog::backdrop"));
 

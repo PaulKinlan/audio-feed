@@ -37,6 +37,7 @@ Deno.test("renderAccountPage: renders .rows list items compatible with subgrid c
   });
 
   const html = renderAccountPage({
+    nonce: "test-nonce",
     user,
     baseUrl: "https://audio.example.com",
     rpId: "audio.example.com",

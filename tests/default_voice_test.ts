@@ -171,6 +171,7 @@ Deno.test("the home page states the deployment's real default voice, not Charon 
   // page used to hard-code "Default voice: Charon"; passing defaultVoice through
   // proves nothing unless a non-Charon value actually appears.
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Fenrir",

@@ -25,6 +25,7 @@ import type { RouteContext } from "../router.ts";
 import { originCacheControl, resolveOrigin } from "../origin.ts";
 import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
 import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { htmlResponse, newCspNonce } from "./csp.ts";
 import { assetUrl } from "./assets.ts";
 import { jsonForScript } from "./html.ts";
 import { sessionUser } from "../auth/sessions.ts";
@@ -54,6 +55,8 @@ export interface HomePageOptions {
   defaultVoice: string;
   /** Who is signed in (audio-feed-8fc), for the shared header. */
   viewer?: Viewer | null;
+  /** CSP nonce for this response (audio-feed-syhu); stamped on the shell's inline tags. */
+  nonce: string;
 }
 
 /**
@@ -65,6 +68,7 @@ export function renderHomePage({
   synthesisConfigured,
   defaultVoice,
   viewer = null,
+  nonce,
 }: HomePageOptions): string {
   const base = esc(publicBaseUrl.replace(/\/+$/, ""));
 
@@ -138,9 +142,9 @@ export function renderHomePage({
     accepts an RSS URL. Episodes appear once synthesis finishes.
   </p>
 
-  <div id="returningSubscriber" class="note" hidden style="margin-block: var(--space-4);">
+  <div id="returningSubscriber" class="note u-my-4" hidden>
     <p><strong>Welcome back!</strong> A saved player was found on this device:
-    <a href="/listen" id="openPlayerLink" style="font-weight: 600; text-decoration: underline;">Open your Web Player &rarr;</a></p>
+    <a href="/listen" id="openPlayerLink" class="u-strong-link">Open your Web Player &rarr;</a></p>
   </div>
 
   <h2 id="request-access">Request access</h2>
@@ -270,10 +274,10 @@ export function renderHomePage({
 
   <div id="result" role="status" aria-live="polite"></div>
 
-  <div class="note bookmarklet-box" style="margin-block-start: var(--space-4);">
+  <div class="note bookmarklet-box u-mt-4">
     <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link" href="${
     esc(bookmarkletHref(base))
-  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar" style="font-weight: 600; text-decoration: underline;">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
+  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar" class="u-strong-link">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
   </div>
 
   <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>
@@ -368,7 +372,9 @@ curl -X POST ${base}/api/sources \\
 <!-- audio-feed-3xq part 4b: the homepage's client is a content-addressed module
      (src/assets/home.js), and the one server value it needs rides in this island. Data in the
      page, code in a file — the same contract the listen and admin pages use. -->
-<script type="application/json" id="home-data">${jsonForScript({ base })}</script>
+<script type="application/json" id="home-data" nonce="${esc(nonce)}">${
+    jsonForScript({ base })
+  }</script>
 </body>
 </html>
 `;
@@ -386,6 +392,7 @@ curl -X POST ${base}/api/sources \\
     stylesheets: [assetUrl("home.css")],
     main,
     scriptModule: assetUrl("home.js"),
+    nonce,
   });
 }
 
@@ -396,6 +403,7 @@ export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promis
   const origin = resolveOrigin(ctx.config, req);
 
   const viewer = viewerOf(await sessionUser(ctx.stores.metadata, req));
+  const nonce = newCspNonce();
   const html = renderHomePage({
     publicBaseUrl: origin.baseUrl,
     synthesisConfigured: Boolean(ctx.config.geminiApiKey),
@@ -403,9 +411,10 @@ export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promis
     // shown a page that still claims the default is Charon (audio-feed-4xt).
     defaultVoice: ctx.config.defaultVoice ?? DEFAULT_NARRATION_VOICE,
     viewer,
+    nonce,
   });
 
-  return new Response(html, {
+  return htmlResponse(html, nonce, {
     status: 200,
     headers: {
       "content-type": "text/html; charset=utf-8",

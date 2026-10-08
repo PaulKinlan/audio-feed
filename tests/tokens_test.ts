@@ -99,6 +99,7 @@ Deno.test("unification: home, admin, listen landing, and player stylesheet share
 
   // Home page includes DESIGN_TOKENS
   const homeHtml = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -108,6 +109,7 @@ Deno.test("unification: home, admin, listen landing, and player stylesheet share
 
   // Admin page includes DESIGN_TOKENS
   const adminHtml = renderAdminPage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     adminConfigured: true,
   });
@@ -116,7 +118,7 @@ Deno.test("unification: home, admin, listen landing, and player stylesheet share
 
   // Listen landing links its stylesheet; DESIGN_TOKENS are composed into it
   // (audio-feed-3xq part 4c — the tokens no longer ride in the page's HTML).
-  const listenLandingHtml = renderListenLanding("https://audio.example.com");
+  const listenLandingHtml = renderListenLanding("https://audio.example.com", "test-nonce");
   const landingCss = (await import("../src/routes/assets.ts")).assetBody("listen-landing.css") ??
     "";
   assert(listenLandingHtml.includes("listen-landing.css"), "landing must link its stylesheet");

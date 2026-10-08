@@ -501,7 +501,10 @@ Deno.test("listen harness: seeds 5 publishable episodes and page renders all 5 (
   const html = await res.text();
 
   assertStringIncludes(html, '<span id="episodeCount">5 episodes</span>');
-  const match = /<script type="application\/json" id="player-data">([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="player-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   assert(match, "player-data script tag must exist");
   const data = JSON.parse(match[1]!);
   assertEquals(data.episodes.length, 5);

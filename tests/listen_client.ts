@@ -42,7 +42,10 @@ export function playerData(html: string): {
     playable?: number;
   };
 } {
-  const match = /<script type="application\/json" id="player-data">([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="player-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   const body = match?.[1];
   if (body === undefined) throw new Error("the page carries no #player-data document");
   return JSON.parse(body);

@@ -46,7 +46,7 @@ const auth = { "x-admin-token": ADMIN };
 // ---------------------------------------------------------------------------
 
 Deno.test("the admin page renders the console with accessible controls (audio-feed-0jp)", () => {
-  const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
+  const html = renderAdminPage({ nonce: "test-nonce", publicBaseUrl: BASE, adminConfigured: true });
   // The core controls an admin actually needs, present in the document.
   assertStringIncludes(html, 'id="createForm"');
   assertStringIncludes(html, 'id="usersBody"');
@@ -74,7 +74,7 @@ Deno.test("the admin page renders the console with accessible controls (audio-fe
 });
 
 Deno.test("the background-runs table keeps a readable width on a phone (audio-feed-8fc)", () => {
-  const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
+  const html = renderAdminPage({ nonce: "test-nonce", publicBaseUrl: BASE, adminConfigured: true });
   // At 390px an unconstrained five-column table squeezed Result to one
   // character per line; the table now holds a minimum width and scrolls.
   assertStringIncludes(html, '<table class="runs">');
@@ -101,7 +101,11 @@ Deno.test("GET /admin serves the console and is never cached", async () => {
 });
 
 Deno.test("the page says so when the server has no admin token", () => {
-  const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: false });
+  const html = renderAdminPage({
+    nonce: "test-nonce",
+    publicBaseUrl: BASE,
+    adminConfigured: false,
+  });
   assertStringIncludes(html, "Admin token not configured");
 });
 
@@ -111,7 +115,7 @@ Deno.test("subscriber-supplied text is never interpolated into the shell", () =>
   // module may contain server-side interpolation of user data or HTML-sink calls.
   // audio-feed-3xq part 4a: the client moved to src/assets/admin.js, so the
   // assertions follow the shipped bytes there AND stay on the page markup.
-  const html = renderAdminPage({ publicBaseUrl: BASE, adminConfigured: true });
+  const html = renderAdminPage({ nonce: "test-nonce", publicBaseUrl: BASE, adminConfigured: true });
   const client = assetBody("admin.js") ?? "";
   assertStringIncludes(client, "textContent");
   // Assert on USAGE, not on the word: the client documents the rule in a
@@ -377,7 +381,11 @@ Deno.test("a hostile origin cannot break out of the script block", () => {
   // The origin can be request-derived (Host header), so a value containing
   // </script> must not be able to close the element and inject markup.
   const hostile = "https://example.com/</script><img src=x onerror=alert(1)>";
-  const html = renderAdminPage({ publicBaseUrl: hostile, adminConfigured: true });
+  const html = renderAdminPage({
+    nonce: "test-nonce",
+    publicBaseUrl: hostile,
+    adminConfigured: true,
+  });
   assertEquals(/<\/script><img/.test(html), false, "the payload must not appear as markup");
   assertStringIncludes(html, "\\u003c/script\\u003e");
   // And the document still has exactly the script blocks it should: the shell's inline

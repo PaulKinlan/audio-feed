@@ -113,6 +113,7 @@ Deno.test("interpolated config is escaped", () => {
   // defence in depth — but an unescaped interpolation into a template is the
   // kind of thing that stops being harmless the moment the source changes.
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: `https://x.test/"><script>alert(1)</script>`,
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -271,6 +272,7 @@ Deno.test("POST / is 405, not 404", async () => {
 
 Deno.test("the homepage renders the RSS subscribe form with secure method and token handling", () => {
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -292,6 +294,7 @@ Deno.test("the homepage renders the RSS subscribe form with secure method and to
 
 Deno.test("the front door links to the web player in header and body without leaking capabilities (audio-feed-ytg)", () => {
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -310,6 +313,7 @@ Deno.test("the front door links to the web player in header and body without lea
 
 Deno.test("homepage script includes open in web player action on submission success (audio-feed-ytg)", () => {
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -326,6 +330,7 @@ Deno.test("homepage script includes open in web player action on submission succ
 
 Deno.test("the homepage renders the request access form with accessible labels, hints, and secure action (audio-feed-r97)", () => {
   const html = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",

@@ -40,6 +40,7 @@ Deno.test("anchor-positioning: player stylesheet delivers anchor-positioning rul
 
 Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
   const adminHtml = renderAdminPage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://example.com",
     adminConfigured: true,
   });
@@ -54,7 +55,7 @@ Deno.test("anchor-positioning: admin stylesheet delivers anchor-positioning rule
 });
 
 Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rules (audio-feed-pzwe)", () => {
-  const shellHtml = renderShell({ title: "Shell", viewer: null, main: "" });
+  const shellHtml = renderShell({ nonce: "test-nonce", title: "Shell", viewer: null, main: "" });
   assert(shellHtml.includes(".tooltip"));
   assert(shellHtml.includes(".tooltip.visible"));
   assert(shellHtml.includes("pointer-events: auto"));
@@ -79,6 +80,7 @@ Deno.test("anchor-positioning: Baseline markers are present at all @supports gua
 Deno.test("anchor-positioning: rendered markup across account, admin, home, and shell wires data-tooltip (audio-feed-pzwe)", () => {
   // 1. Account page
   const accountHtml = renderAccountPage({
+    nonce: "test-nonce",
     user: {
       id: "u1",
       email: "test@example.com",
@@ -151,6 +153,7 @@ Deno.test("anchor-positioning: rendered markup across account, admin, home, and 
 
   // 2. Admin page
   const adminHtml = renderAdminPage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://example.com",
     adminConfigured: true,
   });
@@ -171,6 +174,7 @@ Deno.test("anchor-positioning: rendered markup across account, admin, home, and 
 
   // 3. Home page
   const homeHtml = renderHomePage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://example.com",
     synthesisConfigured: true,
     defaultVoice: "Charon",
@@ -180,6 +184,7 @@ Deno.test("anchor-positioning: rendered markup across account, admin, home, and 
 
   // 4. Shell header
   const shellHtml = renderShell({
+    nonce: "test-nonce",
     title: "Test",
     viewer: {
       email: "user@example.com",

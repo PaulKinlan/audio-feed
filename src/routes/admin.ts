@@ -37,6 +37,7 @@ import { resolveOrigin } from "../origin.ts";
 import { assetUrl } from "./assets.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { htmlContentSecurityPolicy, newCspNonce } from "./csp.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
@@ -52,10 +53,18 @@ export interface AdminPageOptions {
    * session cookie and the token box is a fallback behind a toggle.
    */
   viewer?: Viewer | null;
+  /** CSP nonce for this response (audio-feed-syhu); stamped on the shell's inline tags. */
+  nonce: string;
 }
 
 export function renderAdminPage(
-  { publicBaseUrl, adminConfigured, adminTokenShort = false, viewer = null }: AdminPageOptions,
+  {
+    publicBaseUrl,
+    adminConfigured,
+    adminTokenShort = false,
+    viewer = null,
+    nonce,
+  }: AdminPageOptions,
 ): string {
   const signedIn = Boolean(viewer?.isAdmin);
   const html = `<!doctype html>
@@ -90,7 +99,7 @@ export function renderAdminPage(
 
   ${
     signedIn && adminTokenShort
-      ? `<div class="card" role="status" style="border-inline-start: 4px solid var(--accent); margin-block-end: var(--space-4);">
+      ? `<div class="card u-accent-start u-mb-4" role="status">
     <h2>Security Advisory: Short ADMIN_TOKEN</h2>
     <p>
       The configured <code class="mono">ADMIN_TOKEN</code> is shorter than 16 characters.
@@ -109,7 +118,7 @@ export function renderAdminPage(
       : `<h2 id="auth-h">Sign in to administer</h2>
     <p class="muted">Admins sign in with a passkey, like everyone else.</p>
     <div class="row"><a class="primary" href="/login?next=%2Fadmin">Sign in with a passkey</a></div>
-    <p class="muted" style="margin-block-start: var(--space-3); font-size: 0.88rem;">
+    <p class="muted u-mt-3 u-fs-088">
       Need to enroll with your admin token? <a href="/login?next=%2Fadmin#bootstrap">Bootstrap passkey</a>
     </p>`
   }
@@ -280,23 +289,23 @@ export function renderAdminPage(
   </section>
 
   <section class="card" id="manageSection" aria-labelledby="manage-h" hidden>
-    <div class="row" style="justify-content: space-between; align-items: center;">
-      <h2 id="manage-h" style="margin: 0;">4. Manage subscriber: <span id="manageName"></span></h2>
+    <div class="row u-center-between">
+      <h2 id="manage-h" class="u-m-0">4. Manage subscriber: <span id="manageName"></span></h2>
       <button type="button" id="closeManage" class="secondary">Close</button>
     </div>
-    <div class="created" style="margin-block-start: var(--space-4);">
+    <div class="created u-mt-4">
       <dl id="manageDetails"></dl>
       <div class="copy-row">
         <input type="text" id="manageFeedUrl" readonly aria-label="Subscriber master feed URL" />
         <button type="button" id="copyManageFeedUrl" data-tooltip="Copy master feed URL">Copy feed URL</button>
         <button type="button" id="rotateManageToken" class="danger" data-tooltip="Revoke old URL and generate new feed token">Rotate token</button>
       </div>
-      <p class="muted" id="rotateHelp" style="margin-block-start: var(--space-2); margin-block-end: 0; font-size: 0.8rem;">
+      <p class="muted u-mt-2 u-mb-0 u-fs-xs" id="rotateHelp">
         Rotating the feed token revokes the old URL immediately.
       </p>
     </div>
 
-    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Subscribed RSS feeds</h3>
+    <h3 class="u-mt-6 u-mb-2">Subscribed RSS feeds</h3>
     <div class="table-wrap">
       <table aria-describedby="manageSourcesHelp">
         <caption id="manageSourcesCaption">Loading feeds…</caption>
@@ -315,7 +324,7 @@ export function renderAdminPage(
     </div>
     <p class="feedback" id="manageSourcesFeedback" role="status" aria-live="polite"></p>
 
-    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Episodes</h3>
+    <h3 class="u-mt-6 u-mb-2">Episodes</h3>
     <p class="muted" id="manageEpisodesHelp">
       Regenerate re-synthesises audio with the current TTS prompts. Each episode is a billed
       TTS call. The old audio keeps playing until the new audio is ready.
@@ -342,7 +351,7 @@ export function renderAdminPage(
     </div>
     <p class="feedback" id="manageEpisodesFeedback" role="status" aria-live="polite"></p>
 
-    <h3 style="margin-block-start: var(--space-6); margin-block-end: var(--space-2);">Add feed to subscriber</h3>
+    <h3 class="u-mt-6 u-mb-2">Add feed to subscriber</h3>
     <form id="addSourceForm" novalidate>
       <div class="field">
         <label for="subFeedUrl">RSS or Atom feed URL</label>
@@ -377,7 +386,7 @@ export function renderAdminPage(
 <!-- audio-feed-3xq part 4a: the console's client is a content-addressed module
      (src/assets/admin.js), and everything the server knows is one JSON document. Data in the
      page, code in a file — the same contract the listen page uses for #player-data. -->
-<script type="application/json" id="admin-data">${
+<script type="application/json" id="admin-data" nonce="${esc(nonce)}">${
     jsonForScript({
       origin: publicBaseUrl,
       signedIn,
@@ -398,6 +407,7 @@ export function renderAdminPage(
     head: `<meta name="robots" content="noindex, nofollow">`,
     main,
     scriptModule: assetUrl("admin.js"),
+    nonce,
   });
 }
 
@@ -412,8 +422,12 @@ export function renderAdminPage(
 export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promise<Response> {
   const origin = resolveOrigin(ctx.config, req);
   const user = await sessionUser(ctx.stores.metadata, req);
+  const nonce = newCspNonce();
   const headers = {
     "content-type": "text/html; charset=utf-8",
+    // The nonce-bearing policy is attached here because this handler builds its own headers
+    // for both the 403 and the 200 branch (audio-feed-syhu).
+    "content-security-policy": htmlContentSecurityPolicy(nonce),
     // `no-store`: this document is the one place a feed token is displayed, and
     // it prompts for the admin token. It must never sit in a cache.
     "cache-control": "no-store",
@@ -440,6 +454,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
         kit: true,
         head: `<meta name="robots" content="noindex, nofollow">`,
         main,
+        nonce,
       }),
       { status: 403, headers },
     );
@@ -451,6 +466,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     adminConfigured: Boolean(ctx.config.adminToken),
     adminTokenShort,
     viewer: viewerOf(user),
+    nonce,
   });
   return new Response(html, { status: 200, headers });
 }

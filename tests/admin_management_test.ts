@@ -894,6 +894,7 @@ Deno.test("POST /api/admin/users/:id/rotate-token rotates feed token and revokes
 
 Deno.test("admin console page renders subscriber management section and auto-loads on refresh", () => {
   const html = renderAdminPage({
+    nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
     adminConfigured: true,
   });

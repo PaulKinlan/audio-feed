@@ -13,6 +13,7 @@ import { shippedCss } from "./admin_css.ts";
 import { makeUser } from "./fixtures.ts";
 
 const adminHtml = renderAdminPage({
+  nonce: "test-nonce",
   publicBaseUrl: "https://example.com",
   adminConfigured: true,
   viewer: { displayName: "Paul Kinlan", email: "paul@example.com", isAdmin: true },
@@ -21,6 +22,7 @@ const adminHtml = renderAdminPage({
 const adminCss = shippedCss(adminHtml);
 
 const accountHtml = renderAccountPage({
+  nonce: "test-nonce",
   user: makeUser(),
   baseUrl: "https://example.com",
   rpId: "example.com",
