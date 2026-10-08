@@ -44,10 +44,24 @@ export interface RateLimitResult {
 export class SlidingWindowRateLimiter {
   readonly #config: RateLimitConfig;
   readonly #store: RateLimitStore;
+  readonly #namespace: string;
 
-  constructor(config: RateLimitConfig, store: RateLimitStore) {
+  /**
+   * `namespace` keeps unrelated limiters off each other's row. Without it the
+   * admin-failure window and the request-access window collide on the same
+   * client key, so five front-door posts would count toward the ten admin
+   * guesses — and each limiter would filter the other's timestamps by its own
+   * window. The caller must state what its window means; defaults here would
+   * invite exactly that collision (audio-feed-2zvc).
+   */
+  constructor(config: RateLimitConfig, store: RateLimitStore, namespace: string) {
     this.#config = config;
     this.#store = store;
+    this.#namespace = namespace;
+  }
+
+  #row(key: string): string {
+    return `${this.#namespace}:${key}`;
   }
 
   /**
@@ -64,7 +78,7 @@ export class SlidingWindowRateLimiter {
     let admitted = false;
 
     const stored = await this.#store.atomicUpdate<number[]>(
-      key,
+      this.#row(key),
       (current) => {
         const active = (current ?? []).filter((t) => t > windowStart);
         if (active.length >= this.#config.maxRequests) {
@@ -89,7 +103,7 @@ export class SlidingWindowRateLimiter {
   async peek(key: string, now = Date.now()): Promise<RateLimitResult> {
     // `null` from the mutation means "leave the row as it is"; the store still
     // returns the current value.
-    const stored = await this.#store.atomicUpdate<number[]>(key, () => null);
+    const stored = await this.#store.atomicUpdate<number[]>(this.#row(key), () => null);
     const active = (stored ?? []).filter((t) => t > now - this.#config.windowMs);
     // A read has no hit to admit, so unlike `check` the refusal rule is simply
     // whether the recorded window is already full.
@@ -127,7 +141,7 @@ export class SlidingWindowRateLimiter {
 
   /** Reset the window for `key` (a successful auth, or a test). */
   async reset(key: string): Promise<void> {
-    await this.#store.atomicUpdate<number[]>(key, () => []);
+    await this.#store.atomicUpdate<number[]>(this.#row(key), () => []);
   }
 }
 
@@ -170,14 +184,21 @@ export interface FailedAuthLimiterOptions {
   windowMs?: number;
 }
 
+/** Namespaces the admin-token window so it cannot swap rows with another limiter. */
+const ADMIN_AUTH_NAMESPACE = "admin_auth";
+
 export class FailedAuthLimiter {
   readonly #limiter: SlidingWindowRateLimiter;
 
   constructor(store: RateLimitStore, options: FailedAuthLimiterOptions = {}) {
-    this.#limiter = new SlidingWindowRateLimiter({
-      maxRequests: options.maxFailures ?? 10,
-      windowMs: options.windowMs ?? 5 * 60 * 1000,
-    }, store);
+    this.#limiter = new SlidingWindowRateLimiter(
+      {
+        maxRequests: options.maxFailures ?? 10,
+        windowMs: options.windowMs ?? 5 * 60 * 1000,
+      },
+      store,
+      ADMIN_AUTH_NAMESPACE,
+    );
   }
 
   /** Check if client key has reached failure threshold without incrementing. */

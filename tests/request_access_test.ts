@@ -18,10 +18,14 @@ function setup(rateLimitMax = 5) {
     trustProxyHeaders: true,
   };
   const stores: Stores = memoryStores();
-  const limiter = new SlidingWindowRateLimiter({
-    maxRequests: rateLimitMax,
-    windowMs: 60 * 1000,
-  }, stores.metadata);
+  const limiter = new SlidingWindowRateLimiter(
+    {
+      maxRequests: rateLimitMax,
+      windowMs: 60 * 1000,
+    },
+    stores.metadata,
+    "request_access",
+  );
 
   const ctx = { config, stores };
   const handlers = createHandlers(ctx, {
@@ -268,7 +272,7 @@ Deno.test("POST /api/request-access: returns HTML confirmation for browser form 
 
 Deno.test("SlidingWindowRateLimiter: a window that has passed frees the key again (audio-feed-r97)", async () => {
   const store = memoryStores().metadata;
-  const limiter = new SlidingWindowRateLimiter({ maxRequests: 2, windowMs: 1000 }, store);
+  const limiter = new SlidingWindowRateLimiter({ maxRequests: 2, windowMs: 1000 }, store, "test");
 
   const t0 = 10_000;
   assertEquals((await limiter.check("client", t0)).allowed, true);
@@ -285,8 +289,16 @@ Deno.test("SlidingWindowRateLimiter: the bound is shared across limiter instance
   // Two instances stand in for two Deno Deploy isolates: separate module memory,
   // one store. Before the store-backed window each held its own count, so an
   // attacker could multiply the bound by the number of live isolates.
-  const isolateA = new SlidingWindowRateLimiter({ maxRequests: 3, windowMs: 60_000 }, store);
-  const isolateB = new SlidingWindowRateLimiter({ maxRequests: 3, windowMs: 60_000 }, store);
+  const isolateA = new SlidingWindowRateLimiter(
+    { maxRequests: 3, windowMs: 60_000 },
+    store,
+    "test",
+  );
+  const isolateB = new SlidingWindowRateLimiter(
+    { maxRequests: 3, windowMs: 60_000 },
+    store,
+    "test",
+  );
   const now = 50_000;
 
   assertEquals((await isolateA.check("1.2.3.4", now)).allowed, true);
@@ -307,10 +319,12 @@ Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing
   const isolateA = new SlidingWindowRateLimiter(
     { maxRequests: 3, windowMs: 60_000 },
     new KvMetadataStore(kv, { ownsConnection: false }),
+    "test",
   );
   const isolateB = new SlidingWindowRateLimiter(
     { maxRequests: 3, windowMs: 60_000 },
     new KvMetadataStore(kv, { ownsConnection: false }),
+    "test",
   );
   try {
     const now = 100_000;
@@ -325,6 +339,30 @@ Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing
   } finally {
     kv.close();
   }
+});
+
+Deno.test("SlidingWindowRateLimiter: namespaces keep unrelated limits apart (audio-feed-2zvc)", async () => {
+  const store = memoryStores().metadata;
+  const frontDoor = new SlidingWindowRateLimiter(
+    { maxRequests: 2, windowMs: 60_000 },
+    store,
+    "request_access",
+  );
+  const admin = new SlidingWindowRateLimiter(
+    { maxRequests: 2, windowMs: 60_000 },
+    store,
+    "admin_auth",
+  );
+  const now = 200_000;
+
+  assertEquals((await frontDoor.check("5.5.5.5", now)).allowed, true);
+  assertEquals((await frontDoor.check("5.5.5.5", now)).allowed, true);
+  assertEquals((await frontDoor.check("5.5.5.5", now)).allowed, false);
+
+  // The same client's admin window is untouched by the front-door posts. If the
+  // two shared one row, five posts would silently count toward ten guesses.
+  assertEquals((await admin.peek("5.5.5.5", now)).allowed, true);
+  assertEquals((await admin.check("5.5.5.5", now)).allowed, true);
 });
 
 Deno.test("POST /api/request-access: HTML error and confirmation paths escape markup against XSS (audio-feed-hn4)", async () => {
