@@ -1,0 +1,150 @@
+{
+  "model": {
+    "name": "models/gemini-3.8-flash-tts",
+    "version": "3.8-flash-tts",
+    "inputTokenLimit": 8192,
+    "outputTokenLimit": 16384,
+    "supportedGenerationMethods": [
+      "generateContent",
+      "countTokens",
+      "batchGenerateContent"
+    ]
+  },
+  "article": {
+    "source": "docs/evidence/audio-feed-gueb/article.txt",
+    "characters": 47000,
+    "bytes": 47018,
+    "promptBytes": 47044,
+    "promptTokens": 10512
+  },
+  "negativeControls": [
+    {
+      "description": "Synthetic repeated sentence",
+      "tokens": 15001,
+      "status": 400,
+      "error": {
+        "code": 400,
+        "message": "The input token count exceeds the maximum number of tokens allowed (8192).",
+        "status": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "description": "Article with expanded preamble",
+      "tokens": 11208,
+      "status": 400,
+      "error": {
+        "code": 400,
+        "message": "The input token count exceeds the maximum number of tokens allowed (8192).",
+        "status": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "description": "Raw unsegmented article",
+      "tokens": 10506,
+      "status": 200,
+      "finishReason": "OTHER",
+      "finishMessage": "The generated content was filtered because it may contain material that resembles existing copyrighted works. Try rephrasing the prompt. If you think this was an error, [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting).",
+      "audioReturned": false,
+      "decoderFailedClosed": true,
+      "usageMetadata": {
+        "promptTokenCount": 10506,
+        "candidatesTokenCount": 70482,
+        "totalTokenCount": 80988,
+        "promptTokensDetails": [
+          {
+            "modality": "TEXT",
+            "tokenCount": 10506
+          }
+        ],
+        "candidatesTokensDetails": [
+          {
+            "modality": "AUDIO",
+            "tokenCount": 70482
+          }
+        ],
+        "serviceTier": "standard"
+      }
+    }
+  ],
+  "productionSegmentation": {
+    "budgetBytes": 6000,
+    "segments": [
+      {
+        "index": 1,
+        "bytes": 5867,
+        "tokens": 1238
+      },
+      {
+        "index": 2,
+        "bytes": 5989,
+        "tokens": 1365
+      },
+      {
+        "index": 3,
+        "bytes": 5974,
+        "tokens": 1369
+      },
+      {
+        "index": 4,
+        "bytes": 5834,
+        "tokens": 1353
+      },
+      {
+        "index": 5,
+        "bytes": 5975,
+        "tokens": 1310
+      },
+      {
+        "index": 6,
+        "bytes": 5830,
+        "tokens": 1284
+      },
+      {
+        "index": 7,
+        "bytes": 5858,
+        "tokens": 1372
+      },
+      {
+        "index": 8,
+        "bytes": 5706,
+        "tokens": 1218
+      }
+    ]
+  },
+  "positiveAudioSynthesis": {
+    "source": "First two paragraphs of article.txt, joined by two newlines",
+    "sampleCharacters": 1097,
+    "sampleBytes": 1097,
+    "requestMaxOutputTokens": 16384,
+    "httpStatus": 200,
+    "modelVersion": "gemini-3.8-flash-tts",
+    "usageMetadata": {
+      "promptTokenCount": 215,
+      "candidatesTokenCount": 1568,
+      "totalTokenCount": 1783,
+      "promptTokensDetails": [
+        {
+          "modality": "TEXT",
+          "tokenCount": 215
+        }
+      ],
+      "candidatesTokensDetails": [
+        {
+          "modality": "AUDIO",
+          "tokenCount": 1568
+        }
+      ],
+      "serviceTier": "standard"
+    },
+    "finishReason": "STOP",
+    "mimeType": "audio/wav",
+    "base64Length": 4022232,
+    "rawAudioBytes": 3016674,
+    "audioHeaderHex": "52 49 46 46 da 07 2e 00 57 41 56 45 66 6d 74 20",
+    "sampleRate": 24000,
+    "channels": 1,
+    "bitsPerSample": 16,
+    "pcmDataBytes": 3010560,
+    "durationSeconds": 62.72
+  }
+}
