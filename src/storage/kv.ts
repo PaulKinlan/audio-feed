@@ -29,6 +29,7 @@
  *   ["passkey_by_user", userId, createdAt, id]   -> credentialId
  *   ["setup_link", tokenHash]                    one-time enrolment link
  *   ["auth_challenge", challenge]                pending WebAuthn challenge
+ *   ["atomic", key]                              shared counter/CAS row, expireIn honoured
  *
  * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
@@ -56,6 +57,7 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type {
+  AtomicWrite,
   DownloadCounts,
   EpisodeClaim,
   EpisodePage,
@@ -1557,6 +1559,41 @@ export class KvMetadataStore implements MetadataStore {
 
   consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
     return this.#consume<AuthChallenge>(["auth_challenge", challenge]);
+  }
+
+  /**
+   * Shared counters (audio-feed-2zvc). The versionstamp check is the whole
+   * point: a read-then-set lets two isolates both observe the same count and
+   * both admit an attempt, which is exactly the per-isolate hole this closes.
+   * The loser of a race retries against what the winner wrote.
+   *
+   * If every attempt loses — a burst of writers all re-colliding — the row is
+   * returned unmodified with `committed: false`, so a caller that must not act
+   * on an unwritten value can fail closed. Never claim a write that did not
+   * land.
+   */
+  async atomicUpdate<T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ): Promise<AtomicWrite<T>> {
+    const kvKey: Deno.KvKey = ["atomic", key];
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const entry = await this.#kv.get<T>(kvKey);
+      const next = mutate(entry.value);
+      if (next === null) return { value: entry.value, committed: false };
+      const commit = ttlMs === undefined
+        ? await this.#kv.atomic().check(entry).set(kvKey, next).commit()
+        : await this.#kv.atomic().check(entry).set(kvKey, next, { expireIn: ttlMs }).commit();
+      if (commit.ok) return { value: next, committed: true };
+      // Jittered backoff, capped low: without it a burst of writers that all
+      // read the same versionstamp re-collides in lockstep until the retries
+      // run out, which is how this path got exercised in the first place.
+      if (attempt >= 2) {
+        await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 5)));
+      }
+    }
+    return { value: (await this.#kv.get<T>(kvKey)).value, committed: false };
   }
 
   /**

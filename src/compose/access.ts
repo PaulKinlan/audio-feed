@@ -30,6 +30,10 @@ export interface RequestAccessDeps {
   rateLimitConfig?: RateLimitConfig;
 }
 
+/** Namespaces this limiter's window, so a front-door post and a failed admin
+ *  guess for the same client can never share a row (audio-feed-2zvc). */
+const REQUEST_ACCESS_NAMESPACE = "request_access";
+
 const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   maxRequests: 5,
   windowMs: 60 * 60 * 1000, // 1 hour
@@ -40,7 +44,11 @@ export function createRequestAccessHandler(
   deps: RequestAccessDeps = {},
 ): AppHandlers["requestAccess"] {
   const limiter = deps.rateLimiter ??
-    new SlidingWindowRateLimiter(deps.rateLimitConfig ?? DEFAULT_RATE_LIMIT);
+    new SlidingWindowRateLimiter(
+      deps.rateLimitConfig ?? DEFAULT_RATE_LIMIT,
+      ctx.stores.metadata,
+      REQUEST_ACCESS_NAMESPACE,
+    );
 
   return async ({ req, remoteAddr }) => {
     const isHtml = req.headers.get("accept")?.includes("text/html") ?? false;
@@ -73,7 +81,7 @@ export function createRequestAccessHandler(
 
     // 1. Rate limiting by client IP
     const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
-    const limitResult = limiter.check(clientIp);
+    const limitResult = await limiter.check(clientIp);
 
     if (!limitResult.allowed) {
       const retryAfterSec = Math.max(1, Math.ceil(limitResult.resetMs / 1000));
