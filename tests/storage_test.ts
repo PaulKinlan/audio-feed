@@ -669,3 +669,57 @@ Deno.test("KvMetadataStore: multi-batch atomic write rollback, retry, and base-a
     await kv.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// atomicUpdate: the shared counter behind the rate limiters (audio-feed-2zvc)
+// ---------------------------------------------------------------------------
+
+Deno.test("atomicUpdate: concurrent read-modify-writes do not lose one (KV)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const store = new KvMetadataStore(kv, { ownsConnection: true });
+  try {
+    // Every writer reads the same value and tries to write it back +1. Without
+    // the versionstamp check most of them would overwrite each other and the
+    // final count would be far below the number of attempts — which is exactly
+    // how a per-isolate counter under-counts a distributed guesser.
+    const writers = Array.from(
+      { length: 20 },
+      () => store.atomicUpdate<number>("counter", (current) => (current ?? 0) + 1),
+    );
+    const results = await Promise.all(writers);
+    assertEquals(results.filter((value) => value !== null).length, 20);
+    assertEquals(await store.atomicUpdate<number>("counter", () => null), 20);
+  } finally {
+    await store.close();
+  }
+});
+
+Deno.test("atomicUpdate: two stores over one KV share the row (audio-feed-2zvc)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const a = new KvMetadataStore(kv, { ownsConnection: false });
+  const b = new KvMetadataStore(kv, { ownsConnection: false });
+  try {
+    await a.atomicUpdate<number[]>("window", (current) => [...(current ?? []), 1]);
+    await b.atomicUpdate<number[]>("window", (current) => [...(current ?? []), 2]);
+    // Two adapter objects, separate in-process state, one row: the substrate the
+    // limiters share when Deno Deploy runs more than one isolate.
+    assertEquals(await a.atomicUpdate<number[]>("window", () => null), [1, 2]);
+  } finally {
+    kv.close();
+  }
+});
+
+Deno.test("atomicUpdate: a null mutation leaves the row untouched", async () => {
+  const store = new MemoryMetadataStore();
+  assertEquals(await store.atomicUpdate<number>("k", () => 7), 7);
+  assertEquals(await store.atomicUpdate<number>("k", () => null), 7, "a peek must not write");
+});
+
+Deno.test("atomicUpdate: the memory adapter shows the same contract", async () => {
+  const store = new MemoryMetadataStore();
+  // Single-threaded, so this pins the observable contract rather than racing:
+  // both adapters must behave the same for the policy above them.
+  assertEquals(await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1), 1);
+  assertEquals(await store.atomicUpdate<number>("n", (current) => (current ?? 0) + 1), 2);
+  assertEquals(await store.atomicUpdate<number>("n", () => null), 2);
+});

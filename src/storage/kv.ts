@@ -29,6 +29,7 @@
  *   ["passkey_by_user", userId, createdAt, id]   -> credentialId
  *   ["setup_link", tokenHash]                    one-time enrolment link
  *   ["auth_challenge", challenge]                pending WebAuthn challenge
+ *   ["atomic", key]                              shared counter/CAS row, expireIn honoured
  *
  * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
  */
@@ -1557,6 +1558,34 @@ export class KvMetadataStore implements MetadataStore {
 
   consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
     return this.#consume<AuthChallenge>(["auth_challenge", challenge]);
+  }
+
+  /**
+   * Shared counters (audio-feed-2zvc). The versionstamp check is the whole
+   * point: a read-then-set lets two isolates both observe the same count and
+   * both admit an attempt, which is exactly the per-isolate hole this closes.
+   * The loser of a race retries against what the winner wrote.
+   *
+   * If an improbable run of races all lose, the row is returned unmodified
+   * rather than spinning: the caller sees a consistent value and its mutation
+   * is simply not applied. Never write than what was read.
+   */
+  async atomicUpdate<T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ): Promise<T | null> {
+    const kvKey: Deno.KvKey = ["atomic", key];
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const entry = await this.#kv.get<T>(kvKey);
+      const next = mutate(entry.value);
+      if (next === null) return entry.value;
+      const commit = ttlMs === undefined
+        ? await this.#kv.atomic().check(entry).set(kvKey, next).commit()
+        : await this.#kv.atomic().check(entry).set(kvKey, next, { expireIn: ttlMs }).commit();
+      if (commit.ok) return next;
+    }
+    return (await this.#kv.get<T>(kvKey)).value;
   }
 
   /**

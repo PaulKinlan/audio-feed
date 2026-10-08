@@ -4,8 +4,22 @@
  * Prevents denial-of-service, row exhaustion, and spam on public endpoints
  * like `POST /api/request-access`.
  *
- * Implements a memory-backed sliding-window counter per client key (typically IP).
+ * The sliding window lives in the shared store, not in module memory. That is
+ * the whole point (audio-feed-2zvc): Deno Deploy gives each isolate its own
+ * memory and runs several of them, so a module-level Map held the bound
+ * per-isolate — guesses spread across isolates were effectively unbounded in
+ * aggregate. Keying the window in `MetadataStore` (KV in production, memory in
+ * tests) makes one bound hold for the deployment.
  */
+
+/** The one store capability the limiter needs — see `MetadataStore.atomicUpdate`. */
+export interface RateLimitStore {
+  atomicUpdate<T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ): Promise<T | null>;
+}
 
 export interface RateLimitConfig {
   /** Maximum allowed requests within the time window. */
@@ -20,81 +34,100 @@ export interface RateLimitResult {
   resetMs: number;
 }
 
+/**
+ * Sliding-window counter per client key (typically IP), shared across isolates.
+ *
+ * Keys are namespaced per consumer by the caller (the admin limiter and the
+ * request-access limiter must not collide on the same client), so the window is
+ * stored at `rate_limit/<key the caller passes>`.
+ */
 export class SlidingWindowRateLimiter {
   readonly #config: RateLimitConfig;
-  readonly #hits = new Map<string, number[]>();
+  readonly #store: RateLimitStore;
 
-  constructor(config: RateLimitConfig) {
+  constructor(config: RateLimitConfig, store: RateLimitStore) {
     this.#config = config;
+    this.#store = store;
   }
 
   /**
    * Check whether a key is within the rate limit, recording the attempt.
+   *
+   * The read, the decision, and the write are one `atomicUpdate`, so two
+   * isolates cannot both admit the attempt that crosses the bound.
    */
-  check(key: string, now = Date.now()): RateLimitResult {
+  async check(key: string, now = Date.now()): Promise<RateLimitResult> {
     const windowStart = now - this.#config.windowMs;
-    const timestamps = this.#hits.get(key) ?? [];
+    // Set by the mutation that is actually committed. The callback can run more
+    // than once when a concurrent writer wins a commit, and the last run is the
+    // one the store applied.
+    let admitted = false;
 
-    // Filter out timestamps outside the active window
-    const active = timestamps.filter((t) => t > windowStart);
+    const stored = await this.#store.atomicUpdate<number[]>(
+      key,
+      (current) => {
+        const active = (current ?? []).filter((t) => t > windowStart);
+        if (active.length >= this.#config.maxRequests) {
+          // Refused attempts do NOT extend the window: the oldest active hit
+          // still decides when the client may try again.
+          admitted = false;
+          return active;
+        }
+        active.push(now);
+        admitted = true;
+        return active;
+      },
+      // The row is housekeeping once every timestamp has fallen out of the
+      // window; twice the window keeps it readable for the whole of one.
+      this.#config.windowMs * 2,
+    );
 
-    // Evict expired entries if map grows past 200 keys
-    if (this.#hits.size > 200) {
-      for (const [k, ts] of this.#hits.entries()) {
-        const remaining = ts.filter((t) => t > windowStart);
-        if (remaining.length === 0) this.#hits.delete(k);
-        else this.#hits.set(k, remaining);
-      }
-    }
-
-    if (active.length >= this.#config.maxRequests) {
-      const oldestActive = active[0] ?? now;
-      const resetMs = Math.max(0, oldestActive + this.#config.windowMs - now);
-      this.#hits.set(key, active);
-      return {
-        allowed: false,
-        remaining: 0,
-        resetMs,
-      };
-    }
-
-    active.push(now);
-    this.#hits.set(key, active);
-
-    return {
-      allowed: true,
-      remaining: this.#config.maxRequests - active.length,
-      resetMs: this.#config.windowMs,
-    };
+    return this.#result(stored, admitted, now);
   }
 
   /** Check whether a key is currently rate-limited without recording a new hit. */
-  peek(key: string, now = Date.now()): RateLimitResult {
-    const windowStart = now - this.#config.windowMs;
-    const timestamps = this.#hits.get(key) ?? [];
-    const active = timestamps.filter((t) => t > windowStart);
+  async peek(key: string, now = Date.now()): Promise<RateLimitResult> {
+    // `null` from the mutation means "leave the row as it is"; the store still
+    // returns the current value.
+    const stored = await this.#store.atomicUpdate<number[]>(key, () => null);
+    const active = (stored ?? []).filter((t) => t > now - this.#config.windowMs);
+    // A read has no hit to admit, so unlike `check` the refusal rule is simply
+    // whether the recorded window is already full.
+    const allowed = active.length < this.#config.maxRequests;
+    return {
+      allowed,
+      remaining: allowed ? this.#config.maxRequests - active.length : 0,
+      resetMs: allowed ? this.#config.windowMs : this.#untilOldestExpires(active, now),
+    };
+  }
 
-    if (active.length >= this.#config.maxRequests) {
-      const oldestActive = active[0] ?? now;
-      const resetMs = Math.max(0, oldestActive + this.#config.windowMs - now);
+  #untilOldestExpires(active: number[], now: number): number {
+    const oldestActive = active[0] ?? now;
+    return Math.max(0, oldestActive + this.#config.windowMs - now);
+  }
+
+  /** Shape a `check` result: `admitted` is the mutation's own decision. */
+  #result(stored: number[] | null, admitted: boolean, now: number): RateLimitResult {
+    const active = (stored ?? []).filter((t) => t > now - this.#config.windowMs);
+
+    if (!admitted) {
       return {
         allowed: false,
         remaining: 0,
-        resetMs,
+        resetMs: this.#untilOldestExpires(active, now),
       };
     }
 
     return {
       allowed: true,
-      remaining: this.#config.maxRequests - active.length,
+      remaining: Math.max(0, this.#config.maxRequests - active.length),
       resetMs: this.#config.windowMs,
     };
   }
 
-  /** Reset tracked hits for a key (primarily for tests). */
-  reset(key?: string): void {
-    if (key) this.#hits.delete(key);
-    else this.#hits.clear();
+  /** Reset the window for `key` (a successful auth, or a test). */
+  async reset(key: string): Promise<void> {
+    await this.#store.atomicUpdate<number[]>(key, () => []);
   }
 }
 
@@ -140,31 +173,36 @@ export interface FailedAuthLimiterOptions {
 export class FailedAuthLimiter {
   readonly #limiter: SlidingWindowRateLimiter;
 
-  constructor(options: FailedAuthLimiterOptions = {}) {
+  constructor(store: RateLimitStore, options: FailedAuthLimiterOptions = {}) {
     this.#limiter = new SlidingWindowRateLimiter({
       maxRequests: options.maxFailures ?? 10,
       windowMs: options.windowMs ?? 5 * 60 * 1000,
-    });
+    }, store);
   }
 
   /** Check if client key has reached failure threshold without incrementing. */
-  isLockedOut(key: string, now = Date.now()): RateLimitResult {
+  isLockedOut(key: string, now = Date.now()): Promise<RateLimitResult> {
     return this.#limiter.peek(key, now);
   }
 
   /** Record a failed authentication attempt. */
-  recordFailure(key: string, now = Date.now()): RateLimitResult {
+  recordFailure(key: string, now = Date.now()): Promise<RateLimitResult> {
     return this.#limiter.check(key, now);
   }
 
   /** Reset failure count for a key upon successful authentication. */
-  reset(key?: string): void {
-    this.#limiter.reset(key);
+  reset(key: string): Promise<void> {
+    return this.#limiter.reset(key);
   }
 }
 
-const SHARED_ADMIN_AUTH_LIMITER = new FailedAuthLimiter();
-
-export function getSharedAdminAuthLimiter(): FailedAuthLimiter {
-  return SHARED_ADMIN_AUTH_LIMITER;
+/**
+ * The admin-token failure limiter for a store.
+ *
+ * Every caller that passes the same store shares one counter — that is what
+ * makes the header path and the bootstrap path one bound instead of two, and
+ * what makes it survive an isolate being recycled.
+ */
+export function createAdminAuthLimiter(store: RateLimitStore): FailedAuthLimiter {
+  return new FailedAuthLimiter(store);
 }

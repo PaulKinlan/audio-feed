@@ -527,6 +527,33 @@ export interface MetadataStore {
   /** Single use, with the same exactly-one guarantee as `consumeSetupLink`. */
   consumeChallenge(challenge: string): Promise<AuthChallenge | null>;
 
+  // -- shared counters (audio-feed-2zvc) ------------------------------------
+
+  /**
+   * Atomic read-modify-write of a small JSON value, shared across isolates.
+   *
+   * `mutate` sees the current value (`null` when absent) and returns the next
+   * value, or `null` to leave the row untouched. The read and the write are one
+   * step: two isolates that both read the same value must not both commit, so
+   * the loser retries against what the winner wrote. Resolves the value in the
+   * store after the call.
+   *
+   * `ttlMs` bounds a row that may never be read again — the rate limiter's
+   * per-client list of attempt timestamps. Without it a per-client key would
+   * outlive the limiter that owns it.
+   *
+   * This is what lets the abuse limiters be global instead of per-isolate.
+   * Before it they lived in module-level Maps, so the documented bound held
+   * inside one Deno Deploy isolate only; guesses spread across isolates were
+   * effectively unbounded in aggregate (audio-feed-bns noted the ceiling,
+   * audio-feed-2zvc closes it).
+   */
+  atomicUpdate<T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ): Promise<T | null>;
+
   close(): Promise<void>;
 }
 

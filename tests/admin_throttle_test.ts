@@ -16,7 +16,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
-import { FailedAuthLimiter } from "../src/auth/rate_limit.ts";
+import { FailedAuthLimiter, type FailedAuthLimiterOptions } from "../src/auth/rate_limit.ts";
 import { handleAdmin } from "../src/routes/admin.ts";
 import { bootstrap } from "../src/server.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
@@ -25,7 +25,10 @@ import { createSession, sessionCookie } from "../src/auth/sessions.ts";
 const BASE = "https://audio.example.com";
 const ADMIN_SECRET = "super-secret-admin-passphrase-123";
 
-function testApp(overrides: Partial<AppConfig> = {}, limiter?: FailedAuthLimiter) {
+function testApp(
+  overrides: Partial<AppConfig> = {},
+  limiterOptions?: FailedAuthLimiterOptions,
+) {
   const config: AppConfig = {
     port: 8080,
     publicBaseUrl: BASE,
@@ -34,14 +37,19 @@ function testApp(overrides: Partial<AppConfig> = {}, limiter?: FailedAuthLimiter
   };
   const stores: Stores = memoryStores();
   const ctx: AppContext = { config, stores };
-  const handlers = createHandlers(ctx, { adminAuthLimiter: limiter });
+  // The limiter has to share the app's store: that is where its counter lives
+  // now (audio-feed-2zvc), so a limiter built against any other store would be
+  // testing a second, unrelated bound.
+  const adminAuthLimiter = limiterOptions
+    ? new FailedAuthLimiter(stores.metadata, limiterOptions)
+    : undefined;
+  const handlers = createHandlers(ctx, { adminAuthLimiter });
   const app = createApp(ctx, handlers);
   return { app, ctx, stores, fetch: app.fetch };
 }
 
 Deno.test("admin throttle: POST /api/auth/bootstrap throttles after 10 failed attempts", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 5, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 5, windowMs: 60_000 });
 
   // Send 5 wrong tokens
   for (let i = 0; i < 5; i++) {
@@ -77,8 +85,7 @@ Deno.test("admin throttle: POST /api/auth/bootstrap throttles after 10 failed at
 });
 
 Deno.test("admin throttle: GET /api/admin/users header path throttles after failed attempts", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 3, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 3, windowMs: 60_000 });
 
   for (let i = 0; i < 3; i++) {
     const res = await fetch(
@@ -101,8 +108,7 @@ Deno.test("admin throttle: GET /api/admin/users header path throttles after fail
 });
 
 Deno.test("admin throttle: failure counts are SHARED between bootstrap and header path", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 4, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 4, windowMs: 60_000 });
 
   // 2 failed attempts on bootstrap
   for (let i = 0; i < 2; i++) {
@@ -146,8 +152,7 @@ Deno.test("admin throttle: failure counts are SHARED between bootstrap and heade
 });
 
 Deno.test("admin throttle: successful authentication resets failure count", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 3, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 3, windowMs: 60_000 });
 
   // 2 failures (threshold is 3)
   for (let i = 0; i < 2; i++) {
@@ -179,8 +184,7 @@ Deno.test("admin throttle: successful authentication resets failure count", asyn
 });
 
 Deno.test("admin throttle: unauthenticated requests (no token) do not count as failures", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 2, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 2, windowMs: 60_000 });
 
   // 5 unauthenticated requests (no headers)
   for (let i = 0; i < 5; i++) {
@@ -198,8 +202,7 @@ Deno.test("admin throttle: unauthenticated requests (no token) do not count as f
 });
 
 Deno.test("admin throttle: valid credentials are NEVER locked out by prior failures", async () => {
-  const limiter = new FailedAuthLimiter({ maxFailures: 3, windowMs: 60_000 });
-  const { fetch } = testApp({}, limiter);
+  const { fetch } = testApp({}, { maxFailures: 3, windowMs: 60_000 });
 
   // 3 wrong token attempts on this client IP -> triggers lockout for bad tokens
   for (let i = 0; i < 3; i++) {

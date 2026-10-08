@@ -130,6 +130,8 @@ export class MemoryMetadataStore implements MetadataStore {
   readonly #synthesisByUser = new Map<string, { count: number; bytes: number }>();
   readonly #synthesisByUserAndDay = new Map<string, number>();
   readonly #outbox: OutboxNotification[] = [];
+  /** Shared counters (audio-feed-2zvc): the same CAS shape the KV adapter implements. */
+  readonly #atomics = new Map<string, { value: unknown; expiresAt?: number }>();
 
   static #scoped(userId: string, id: string) {
     return `${userId}\u0000${id}`;
@@ -883,6 +885,33 @@ export class MemoryMetadataStore implements MetadataStore {
     const found = this.#challenges.get(challenge);
     this.#challenges.delete(challenge);
     return Promise.resolve(found ?? null);
+  }
+
+  /**
+   * Shared counters (audio-feed-2zvc). Single-threaded: the callback and the
+   * write below cannot interleave with another request, so this is already the
+   * atomic step the KV adapter has to make explicit with a versionstamp check.
+   * The two adapters are deliberately the same shape so policy above them has
+   * one behaviour to reason about.
+   */
+  atomicUpdate<T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ): Promise<T | null> {
+    const now = Date.now();
+    const row = this.#atomics.get(key);
+    const live = row && (row.expiresAt === undefined || row.expiresAt > now);
+    if (row && !live) this.#atomics.delete(key);
+    const current = live ? row.value as T : null;
+    const next = mutate(current);
+    // A null return means "do not write"; the caller still gets what is there.
+    if (next === null) return Promise.resolve(current);
+    this.#atomics.set(key, {
+      value: structuredClone(next),
+      expiresAt: ttlMs === undefined ? undefined : now + ttlMs,
+    });
+    return Promise.resolve(next);
   }
 
   close(): Promise<void> {

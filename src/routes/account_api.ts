@@ -40,9 +40,9 @@ import {
   updatePreferences,
 } from "../auth/users.ts";
 import {
+  createAdminAuthLimiter,
   extractClientIp,
   type FailedAuthLimiter,
-  getSharedAdminAuthLimiter,
 } from "../auth/rate_limit.ts";
 import { subscribeToFeed } from "../ingest/feed.ts";
 import {
@@ -242,14 +242,16 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
 
       // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
       const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
-      const limiter = deps.adminAuthLimiter ?? getSharedAdminAuthLimiter();
+      // Shared through the store, so this path and adminGate count against ONE
+      // bound even on different isolates (audio-feed-2zvc).
+      const limiter = deps.adminAuthLimiter ?? createAdminAuthLimiter(ctx.stores.metadata);
 
       try {
         await requireAdminToken(adminToken.trim(), expected);
-        limiter.reset(clientIp);
+        await limiter.reset(clientIp);
       } catch {
         // Token is invalid. Check if client IP is currently locked out.
-        const lock = limiter.isLockedOut(clientIp);
+        const lock = await limiter.isLockedOut(clientIp);
         if (!lock.allowed) {
           const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
           return reply(
@@ -259,7 +261,7 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
           );
         }
 
-        const fail = limiter.recordFailure(clientIp);
+        const fail = await limiter.recordFailure(clientIp);
         const headers: Record<string, string> = {};
         if (!fail.allowed) {
           headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();

@@ -20,9 +20,9 @@ import {
   UnknownUserError,
 } from "../auth/users.ts";
 import {
+  createAdminAuthLimiter,
   extractClientIp,
   type FailedAuthLimiter,
-  getSharedAdminAuthLimiter,
 } from "../auth/rate_limit.ts";
 import { isAudioMode } from "../types.ts";
 import { isActiveAdmin, issueSetupLink, sameOrigin, sessionUser } from "../auth/sessions.ts";
@@ -54,7 +54,7 @@ async function adminGate(
   ctx: AppContext,
   req: Request,
   remoteAddr?: string,
-  limiter: FailedAuthLimiter = getSharedAdminAuthLimiter(),
+  limiter?: FailedAuthLimiter,
 ): Promise<Response | null> {
   const bearer = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")
     ? req.headers.get("authorization")!.slice(7).trim()
@@ -91,14 +91,17 @@ async function adminGate(
 
   // audio-feed-bns: throttle failed admin auth attempts without locking out valid credentials
   const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
+  // Shared through the store, so the header path and the bootstrap path count
+  // against ONE bound even on different isolates (audio-feed-2zvc).
+  const failedAuth = limiter ?? createAdminAuthLimiter(ctx.stores.metadata);
 
   try {
     await requireAdminToken(presented, expected);
-    limiter.reset(clientIp);
+    await failedAuth.reset(clientIp);
     return null;
   } catch {
     // Token is invalid. Check if client IP is currently locked out.
-    const lock = limiter.isLockedOut(clientIp);
+    const lock = await failedAuth.isLockedOut(clientIp);
     if (!lock.allowed) {
       const retryAfterSec = Math.max(1, Math.ceil(lock.resetMs / 1000));
       return Response.json(
@@ -113,7 +116,7 @@ async function adminGate(
       );
     }
 
-    const fail = limiter.recordFailure(clientIp);
+    const fail = await failedAuth.recordFailure(clientIp);
     const headers: Record<string, string> = { "cache-control": "no-store" };
     if (!fail.allowed) {
       headers["retry-after"] = Math.max(1, Math.ceil(fail.resetMs / 1000)).toString();

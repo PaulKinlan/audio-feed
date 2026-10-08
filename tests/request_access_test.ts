@@ -3,6 +3,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import { KvMetadataStore } from "../src/storage/kv.ts";
 import { approveUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -20,7 +21,7 @@ function setup(rateLimitMax = 5) {
   const limiter = new SlidingWindowRateLimiter({
     maxRequests: rateLimitMax,
     windowMs: 60 * 1000,
-  });
+  }, stores.metadata);
 
   const ctx = { config, stores };
   const handlers = createHandlers(ctx, {
@@ -265,23 +266,65 @@ Deno.test("POST /api/request-access: returns HTML confirmation for browser form 
   assertStringIncludes(html, "Return to Audio Feed");
 });
 
-Deno.test("SlidingWindowRateLimiter: evicts expired keys when map grows (audio-feed-r97)", () => {
-  const limiter = new SlidingWindowRateLimiter({
-    maxRequests: 2,
-    windowMs: 1000,
-  });
+Deno.test("SlidingWindowRateLimiter: a window that has passed frees the key again (audio-feed-r97)", async () => {
+  const store = memoryStores().metadata;
+  const limiter = new SlidingWindowRateLimiter({ maxRequests: 2, windowMs: 1000 }, store);
 
-  const t0 = 10000;
-  // Fill 250 keys at t0
-  for (let i = 0; i < 250; i++) {
-    limiter.check(`key-${i}`, t0);
+  const t0 = 10_000;
+  assertEquals((await limiter.check("client", t0)).allowed, true);
+  assertEquals((await limiter.check("client", t0)).allowed, true);
+  // The third attempt inside the window is refused and does not extend it.
+  assertEquals((await limiter.check("client", t0)).allowed, false);
+
+  // Once every recorded hit is older than the window, the key is admitted again.
+  assertEquals((await limiter.check("client", t0 + 2000)).allowed, true);
+});
+
+Deno.test("SlidingWindowRateLimiter: the bound is shared across limiter instances (audio-feed-2zvc)", async () => {
+  const store = memoryStores().metadata;
+  // Two instances stand in for two Deno Deploy isolates: separate module memory,
+  // one store. Before the store-backed window each held its own count, so an
+  // attacker could multiply the bound by the number of live isolates.
+  const isolateA = new SlidingWindowRateLimiter({ maxRequests: 3, windowMs: 60_000 }, store);
+  const isolateB = new SlidingWindowRateLimiter({ maxRequests: 3, windowMs: 60_000 }, store);
+  const now = 50_000;
+
+  assertEquals((await isolateA.check("1.2.3.4", now)).allowed, true);
+  assertEquals((await isolateB.check("1.2.3.4", now)).allowed, true);
+  assertEquals((await isolateA.check("1.2.3.4", now)).allowed, true);
+
+  const blocked = await isolateB.check("1.2.3.4", now);
+  assertEquals(blocked.allowed, false, "the fourth attempt is refused from either isolate");
+  assertEquals((await isolateA.peek("1.2.3.4", now)).allowed, false);
+  assertEquals((await isolateB.peek("1.2.3.4", now)).allowed, false);
+});
+
+Deno.test("SlidingWindowRateLimiter: the bound is global across isolates sharing KV (audio-feed-2zvc)", async () => {
+  const kv = await Deno.openKv(":memory:");
+  // Two limiters over two adapter objects, as a Deno Deploy deployment has two
+  // isolates over one KV. Before this, each isolate held its own Map, so the
+  // bound multiplied by the number of live isolates.
+  const isolateA = new SlidingWindowRateLimiter(
+    { maxRequests: 3, windowMs: 60_000 },
+    new KvMetadataStore(kv, { ownsConnection: false }),
+  );
+  const isolateB = new SlidingWindowRateLimiter(
+    { maxRequests: 3, windowMs: 60_000 },
+    new KvMetadataStore(kv, { ownsConnection: false }),
+  );
+  try {
+    const now = 100_000;
+    for (let i = 0; i < 3; i++) {
+      assertEquals((await isolateA.check("9.9.9.9", now)).allowed, true, `attempt ${i + 1}`);
+    }
+    // The fourth attempt arrives at the OTHER isolate and is still refused:
+    // the window is in the store, not in either isolate's memory.
+    assertEquals((await isolateB.check("9.9.9.9", now)).allowed, false);
+    // A different client is unaffected by the first client's lockout.
+    assertEquals((await isolateB.check("8.8.8.8", now)).allowed, true);
+  } finally {
+    kv.close();
   }
-
-  // At t0 + 2000 ms, all previous timestamps have expired
-  limiter.check("fresh-key", t0 + 2000);
-
-  // Expired keys are pruned, map size doesn't leak unbounded
-  assert(limiter.check("fresh-key-2", t0 + 2000).allowed);
 });
 
 Deno.test("POST /api/request-access: HTML error and confirmation paths escape markup against XSS (audio-feed-hn4)", async () => {
