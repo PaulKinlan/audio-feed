@@ -33,6 +33,7 @@ import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { discoverFeeds } from "./ingest/url.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
 import { createIngestHandler } from "./compose/ingest.ts";
+import { createListEpisodesHandler } from "./compose/episodes.ts";
 import { createRequestAccessHandler } from "./compose/access.ts";
 import {
   createCreateSourceHandler,
@@ -80,6 +81,7 @@ export {
   createSourceFeedHandler,
 } from "./compose/feeds.ts";
 export { createIngestHandler } from "./compose/ingest.ts";
+export { createListEpisodesHandler } from "./compose/episodes.ts";
 export { createRequestAccessHandler, type RequestAccessDeps } from "./compose/access.ts";
 export {
   createAckOutboxHandler,
@@ -111,6 +113,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     approveUser: createApproveUserHandler(ctx, deps),
     listSources: createListSourcesHandler(ctx),
     createSource: createCreateSourceHandler(ctx, deps),
+    listEpisodes: createListEpisodesHandler(ctx),
     listUsers: createListUsersHandler(ctx, deps),
     createUser: createCreateUserHandler(ctx, deps),
     suspendUser: createSuspendUserHandler(ctx, deps),

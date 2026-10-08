@@ -93,6 +93,7 @@ Deno.test("unwired lane features return 501 rather than 404", async () => {
       get("/feed/tok/master.xml"),
       get("/feed/tok/stratechery/direct.xml"),
       get("/api/ingest", { method: "POST" }),
+      get("/api/episodes"),
       get("/api/admin/users/u1/approve", { method: "POST" }),
     ]
   ) {
@@ -343,45 +344,9 @@ Deno.test("audio: path traversal in a key is refused", () => {
 
 // ---------------------------------------------------------------------------
 // Episode listing
+//
+// Listing behaviour and its ownership gate (audio-feed-nx3o) are asserted in
+// tests/compose_test.ts, through the composition root that actually wires the
+// handler. Here the route is deliberately unwired, so it answers 501 like every
+// other lane seam — see the "unwired lane features" test above.
 // ---------------------------------------------------------------------------
-
-Deno.test("episodes: requires a known user", async () => {
-  const { fetch } = await app();
-  assertEquals((await fetch(get("/api/episodes"))).status, 404);
-  assertEquals((await fetch(get("/api/episodes?userId=ghost"))).status, 404);
-});
-
-Deno.test("episodes: returns the user's episodes newest first", async () => {
-  const { fetch, stores } = await app();
-  await stores.metadata.putUser(makeUser());
-  await stores.metadata.putEpisode(
-    makeEpisode({ id: "old", createdAt: "2026-09-01T00:00:00.000Z" }),
-  );
-  await stores.metadata.putEpisode(
-    makeEpisode({ id: "new", createdAt: "2026-09-20T00:00:00.000Z" }),
-  );
-
-  const res = await fetch(get("/api/episodes?userId=user-1"));
-  assertEquals(res.status, 200);
-
-  const { episodes } = await res.json();
-  assertEquals(episodes.map((e: { id: string }) => e.id), ["new", "old"]);
-});
-
-Deno.test("episodes: rejects an unknown mode instead of silently ignoring it", async () => {
-  const { fetch, stores } = await app();
-  await stores.metadata.putUser(makeUser());
-
-  const res = await fetch(get("/api/episodes?userId=user-1&mode=whistling"));
-  assertEquals(res.status, 404);
-});
-
-Deno.test("episodes: never returns another user's episodes", async () => {
-  const { fetch, stores } = await app();
-  await stores.metadata.putUser(makeUser());
-  await stores.metadata.putEpisode(makeEpisode({ id: "mine", userId: "user-1" }));
-  await stores.metadata.putEpisode(makeEpisode({ id: "theirs", userId: "user-2" }));
-
-  const { episodes } = await (await fetch(get("/api/episodes?userId=user-1"))).json();
-  assertEquals(episodes.map((e: { id: string }) => e.id), ["mine"]);
-});

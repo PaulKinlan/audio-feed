@@ -6,6 +6,8 @@
  * compose.ts and admin.ts import each other. These five depend on no handler.
  */
 import { assertAuthorizedForAudio, getUserByFeedToken, NotAuthorizedError } from "../auth/users.ts";
+import { sameSiteRead, sessionUser } from "../auth/sessions.ts";
+import { resolveOrigin } from "../origin.ts";
 import type { AppContext } from "../app.ts";
 import type { User } from "../types.ts";
 import type { FeedPollOptions, PollDependencies } from "../ingest/feed.ts";
@@ -79,6 +81,42 @@ export async function approvedUserFor(
     throw error;
   }
   return { user };
+}
+
+/**
+ * The caller on a user-scoped API route, resolved from EITHER credential.
+ *
+ * The two credentials differ in how they are presented, so the wall differs:
+ *
+ * - a feed token (`x-feed-token`, `x-user-token`, `Authorization: Bearer`) is
+ *   EXPLICIT — a client has to attach it — so it counts from any origin;
+ * - a session cookie is AMBIENT — the browser attaches it to whatever asks — so
+ *   it counts only on a same-site read (`sameSiteRead`, audio-feed-6hw).
+ *
+ * Both must resolve to an approved user. The response to send is returned when
+ * neither does, so a route can `return resolved.denied`.
+ *
+ * audio-feed-nx3o: /api/episodes returned another subscriber's catalogue to any
+ * caller because it trusted the `userId` query parameter as identity. Identity
+ * comes from here; the parameter is only checked against it.
+ */
+export async function callerUserFor(
+  ctx: AppContext,
+  req: Request,
+): Promise<{ user: User } | { denied: Response }> {
+  // A presented token is explicit, so it is resolved (and refused) on its own
+  // terms rather than falling through to the cookie.
+  if (presentedToken(req)) return approvedUserFor(ctx, req);
+
+  const signedIn = await sessionUser(ctx.stores.metadata, req);
+  if (!signedIn) return { denied: forbidden("A feed token is required (x-feed-token).") };
+  if (!sameSiteRead(req, resolveOrigin(ctx.config, req).baseUrl)) {
+    return { denied: forbidden("Cross-origin request refused.") };
+  }
+  if (signedIn.status !== "approved") {
+    return { denied: forbidden("An approved user is required.") };
+  }
+  return { user: signedIn };
 }
 
 export interface ComposeDeps {
