@@ -9,8 +9,18 @@
  * - GET /.well-known/webauthn serves valid ROR JSON with origins list and public cache headers
  */
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { isPublicSuffix, PasskeyError, relyingParty } from "../src/auth/passkeys.ts";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  authenticationOptions,
+  finishAuthentication,
+  isPublicSuffix,
+  PasskeyError,
+  registrationOptions,
+  relyingParty,
+} from "../src/auth/passkeys.ts";
+import { base64url } from "../src/auth/sessions.ts";
+import { makeUser } from "./fixtures.ts";
+import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
@@ -190,4 +200,159 @@ Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poison
   assertEquals(res2.headers.get("cache-control"), "no-store");
   assertEquals(JSON.parse(body1), { origins: [] });
   assertEquals(JSON.parse(body2), { origins: [] });
+});
+
+// ---------------------------------------------------------------------------
+// User verification is required (audio-feed-9ho7)
+//
+// A passkey is the normal admin sign-in path, so possession of a credential whose
+// authenticator never verified the human must not mint a session. `preferred`
+// allowed registering one; `requireUserVerification: false` accepted its
+// assertions. Both ends are asserted here: the options the browser is handed,
+// and the verifier's actual answer to a UV-clear assertion.
+// ---------------------------------------------------------------------------
+
+/** base64url -> bytes, for building a COSE key the test can also sign with. */
+function b64urlToBytes(value: string): Uint8Array {
+  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * A P-256 COSE_Key (RFC 9052): map(5){1:2, 3:-7, -1:1, -2:x, -3:y}, which is the
+ * shape `PasskeyCredential.publicKey` stores. Hand-encoded because the test needs
+ * a key it can actually sign with and the library only ever consumes it.
+ */
+function coseP256(x: Uint8Array, y: Uint8Array): Uint8Array {
+  return Uint8Array.from([
+    0xa5,
+    0x01,
+    0x02,
+    0x03,
+    0x26,
+    0x20,
+    0x01,
+    0x21,
+    0x58,
+    0x20,
+    ...x,
+    0x22,
+    0x58,
+    0x20,
+    ...y,
+  ]);
+}
+
+/** WebCrypto ECDSA returns raw r||s; a WebAuthn signature is DER-encoded. */
+function toDer(raw: Uint8Array): Uint8Array {
+  const int = (bytes: Uint8Array): number[] => {
+    let i = 0;
+    while (i < bytes.length - 1 && bytes[i] === 0) i++;
+    const body = [...bytes.slice(i)];
+    if ((body[0] ?? 0) & 0x80) body.unshift(0);
+    return [0x02, body.length, ...body];
+  };
+  const r = int(raw.slice(0, 32));
+  const s = int(raw.slice(32));
+  return Uint8Array.from([0x30, r.length + s.length, ...r, ...s]);
+}
+
+Deno.test("passkey options require user verification (audio-feed-9ho7)", async () => {
+  const store = memoryStores().metadata;
+  const rp = relyingParty(BASE);
+  const user = makeUser({ id: "user-uv", status: "approved" });
+  await store.putUser(user);
+
+  const registration = await registrationOptions(store, rp, user);
+  assertEquals(
+    registration.authenticatorSelection?.userVerification,
+    "required",
+    "registration must ask the authenticator to verify the human",
+  );
+  // Discoverable is what makes the account-less sign-in flow work; UV must not
+  // have been traded away for it.
+  assertEquals(registration.authenticatorSelection?.residentKey, "required");
+
+  const authentication = await authenticationOptions(store, rp);
+  assertEquals(
+    authentication.userVerification,
+    "required",
+    "authentication must ask the authenticator to verify the human",
+  );
+});
+
+Deno.test("a UV-clear assertion is refused; the same assertion with UV signs in (audio-feed-9ho7)", async () => {
+  const store = memoryStores().metadata;
+  const rp = relyingParty(BASE);
+  const user = makeUser({ id: "user-uv", status: "approved" });
+  await store.putUser(user);
+
+  const keyPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const jwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+  await store.putCredential({
+    id: "cred-uv",
+    userId: user.id,
+    publicKey: base64url(coseP256(b64urlToBytes(jwk.x!), b64urlToBytes(jwk.y!))),
+    counter: 0,
+    name: "UV test",
+    createdAt: "2026-10-08T00:00:00.000Z",
+  });
+
+  /**
+   * A genuinely signed assertion (real P-256 signature over
+   * authenticatorData||SHA-256(clientDataJSON)) whose ONLY variable is the UV
+   * flag. If the verifier refused it for any other reason, the UV-set twin below
+   * could not succeed — so the pair isolates `requireUserVerification`.
+   */
+  const assertion = async (userVerified: boolean): Promise<AuthenticationResponseJSON> => {
+    const options = await authenticationOptions(store, rp);
+    const clientDataJSON = new TextEncoder().encode(JSON.stringify({
+      type: "webauthn.get",
+      challenge: options.challenge,
+      origin: rp.origin,
+      crossOrigin: false,
+    }));
+    const authenticatorData = new Uint8Array(37);
+    authenticatorData.set(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rp.rpID))),
+      0,
+    );
+    // UP (0x01) is always present; UV (0x04) is the bit under test.
+    authenticatorData[32] = userVerified ? 0x05 : 0x01;
+    const clientDataHash = new Uint8Array(await crypto.subtle.digest("SHA-256", clientDataJSON));
+    const signature = new Uint8Array(
+      await crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-256" },
+        keyPair.privateKey,
+        Uint8Array.from([...authenticatorData, ...clientDataHash]),
+      ),
+    );
+    return {
+      id: "cred-uv",
+      rawId: "cred-uv",
+      type: "public-key",
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: base64url(clientDataJSON),
+        authenticatorData: base64url(authenticatorData),
+        signature: base64url(toDer(signature)),
+      },
+    };
+  };
+
+  await assertRejects(
+    async () => finishAuthentication(store, rp, await assertion(false)),
+    PasskeyError,
+    "could not be verified",
+  );
+
+  const signedIn = await finishAuthentication(store, rp, await assertion(true));
+  assertEquals(signedIn.id, user.id, "with UV the identical assertion is accepted");
 });
