@@ -72,6 +72,21 @@ Deno.test("Gemini API base URL - respects GEMINI_API_BASE_URL env override with 
   }
 });
 
+Deno.test("Gemini API base URL - appends version only for a complete trailing version segment", () => {
+  for (const path of ["/v1-proxy", "/v1foo", "/v1beta/proxy"]) {
+    assertEquals(
+      getGeminiApiBaseUrl(`https://example.com${path}`),
+      `https://example.com${path}/v1beta`,
+    );
+  }
+  for (const version of ["v1", "v1beta", "v1alpha"]) {
+    assertEquals(
+      getGeminiApiBaseUrl(`https://example.com/${version}/`),
+      `https://example.com/${version}`,
+    );
+  }
+});
+
 Deno.test("Gemini API base URL - explicit config.baseUrl takes precedence over env override", () => {
   const previous = Deno.env.get("GEMINI_API_BASE_URL");
   try {

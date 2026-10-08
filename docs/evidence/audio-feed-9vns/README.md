@@ -40,49 +40,50 @@ As required when raw text hits the copyright recitation filter, the production i
 Production segmentation under `MAX_TTS_INPUT_BYTES = 6000` yielded EXACTLY 8 segments:
 - `assertTextSeams(prompt, segments)` passed with zero dropped or duplicate characters.
 
-| Segment | Characters | Text bytes | Duration (s) | Raw WAV bytes | PCM Data bytes | Finish Reason |
-|---:|---:|---:|---:|---:|---:|:---:|
-| 1 | 5,890 | 5,900 | 352.08 | 16,905,954 | 16,899,840 | `STOP` |
-| 2 | 5,950 | 5,962 | 351.32 | 16,869,474 | 16,863,360 | `STOP` |
-| 3 | 5,885 | 5,891 | 343.44 | 16,491,234 | 16,485,120 | `STOP` |
-| 4 | 5,941 | 5,955 | 354.40 | 17,017,314 | 17,011,200 | `STOP` |
-| 5 | 5,876 | 5,880 | 345.20 | 16,575,714 | 16,569,600 | `STOP` |
-| 6 | 5,964 | 5,968 | 354.60 | 17,026,914 | 17,020,800 | `STOP` |
-| 7 | 5,879 | 5,885 | 356.32 | 17,109,474 | 17,103,360 | `STOP` |
-| 8 | 3,260 | 3,262 | 193.68 | 9,302,754 | 9,296,640 | `STOP` |
-| **Total** | **44,645** | **44,703** | **2,651.04** | **127,298,832** | **127,249,920** | — |
+| Segment | Characters | Text bytes | Duration (s) | Raw WAV bytes | PCM Data bytes | Source | Finish Reason |
+|---:|---:|---:|---:|---:|---:|:---:|:---:|
+| 1 | 5,890 | 5,900 | 348.72 | 16,744,674 | 16,738,560 | `fresh` | `STOP` |
+| 2 | 5,950 | 5,962 | 360.20 | 17,295,714 | 17,289,600 | `fresh` | `STOP` |
+| 3 | 5,885 | 5,891 | 346.60 | 16,642,914 | 16,636,800 | `fresh` | `STOP` |
+| 4 | 5,941 | 5,955 | 364.72 | 17,512,674 | 17,506,560 | `fresh` | `STOP` |
+| 5 | 5,876 | 5,880 | 351.28 | 16,867,554 | 16,861,440 | `fresh` | `STOP` |
+| 6 | 5,964 | 5,968 | 348.40 | 16,729,314 | 16,723,200 | `fresh` | `STOP` |
+| 7 | 5,879 | 5,885 | 368.56 | 17,696,994 | 17,690,880 | `fresh` | `STOP` |
+| 8 | 3,260 | 3,262 | 200.72 | 9,640,674 | 9,634,560 | `fresh` | `STOP` |
+| **Total** | **44,645** | **44,703** | **2,689.20** | **129,130,512** | **129,081,600** | — | — |
 
-Live first-run elapsed time across all 8 serial provider synthesis calls: **332.6 seconds** (5.5 minutes), averaging ~41.5s per segment.
+Fresh-run elapsed time across all 8 serial provider synthesis calls: **342,315 ms** (342.315 seconds). The cache was cleared before this run; `dataSource: fresh`, `freshRun: true`, and each segment's `source: fresh` in the JSON distinguish this measurement from a replay. On cache replay the harness omits unobserved finish reasons and truncation flags.
 
 ## 4. Stitched Output Audio Verification
 
 `client.synthesizeNarration` stitched all 8 segments via `joinTtsAudio`:
 
-- **PCM data bytes**: `127,249,920` (exactly equal to sum of segment PCM data bytes).
-- **Total WAV bytes**: `127,249,964` (44-byte RIFF/WAVE header + 127,249,920 PCM bytes).
-- **Stitched duration**: `2,651.04` seconds (44 minutes, 11 seconds), matching `sum(segmentDurations) = 2,651.04s` with **0.000s delta**.
-- **WAV Header Magic**: First 16 bytes: `52 49 46 46 24 ae 95 07 57 41 56 45 66 6d 74 20` (`RIFF....WAVEfmt `).
+- **PCM data bytes**: `129,081,600` (exactly equal to sum of segment PCM data bytes).
+- **Total WAV bytes**: `129,081,644` (44-byte RIFF/WAVE header + 129,081,600 PCM bytes).
+- **Stitched duration**: `2,689.20` seconds (44 minutes, 49.20 seconds), matching `sum(segmentDurations) = 2,689.20s` with **0.000s delta**.
+- **WAV Header Magic**: First 16 bytes: `52 49 46 46 24 a1 b1 07 57 41 56 45 66 6d 74 20` (`RIFF....WAVEfmt `).
 - **PCM Format Details**:
   - `audioFormat`: `1` (uncompressed PCM)
   - `sampleRate`: `24,000 Hz`
   - `channels`: `1` (mono)
   - `bitsPerSample`: `16`
-  - `duration = dataLength / (sampleRate * channels * (bitsPerSample / 8))` = `127,249,920 / 48,000 = 2,651.04s`.
-- Decodable, non-empty, and valid.
+  - `duration = dataLength / (sampleRate * channels * (bitsPerSample / 8))` = `129,081,600 / 48,000 = 2,689.20s`.
+- Decodable by the production `decodeAudioResponse` on the stitched WAV bytes (`format: "wav"`, `truncated: false`), non-empty, and valid.
 
 ## Exact Commands
 
 ```bash
 # 1. Run unit tests for base-URL override
-timeout -k 30 30 deno test --allow-env tests/gemini_base_url_test.ts
+timeout -k 30 60 deno test --allow-env tests/gemini_base_url_test.ts
 
 # 2. Run existing TTS test suite
 timeout -k 30 30 deno test --allow-env --allow-read tests/tts_test.ts
 
-# 3. Run live end-to-end verification through fleet proxy
-timeout -k 30 600 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
+# 3. Force a fresh run (otherwise the harness reports cache/mixed provenance)
+rm -rf var/segments
+timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
 ```
 
 ## Verdict
 
-**VERIFIED.** The production `GeminiTtsClient` resolves the proxy base URL via `GEMINI_API_BASE_URL`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,651.04 seconds duration.
+**VERIFIED.** The production `GeminiTtsClient` resolves the proxy base URL via `GEMINI_API_BASE_URL`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.

@@ -113,7 +113,7 @@ export function getGeminiApiBaseUrl(override?: string): string {
 
   if (raw && raw.length > 0) {
     const trimmed = raw.replace(/\/+$/, "");
-    return trimmed.includes("/v1") ? trimmed : `${trimmed}/v1beta`;
+    return /\/v1(?:beta|alpha)?$/.test(trimmed) ? trimmed : `${trimmed}/v1beta`;
   }
   return DEFAULT_GEMINI_API_BASE_URL;
 }

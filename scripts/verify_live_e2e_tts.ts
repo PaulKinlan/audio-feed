@@ -8,11 +8,15 @@
  * 3. End-to-end multi-segment synthesis of the 8-segment narration script via client.synthesizeNarration
  * 4. Stitched WAV output: valid RIFF/WAVE header, PCM parameters, decodability, duration ≈ sum of segments
  *
- * Run with: timeout -k 30 600 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
+ * For fresh evidence, first rm -rf var/segments; then run with:
+ * timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
  */
+import { encodeBase64 } from "jsr:@std/encoding@^1.0.10/base64";
 import {
   buildSingleVoiceRequest,
+  decodeAudioResponse,
   type DecodedAudioResult,
+  decodedFromWav,
   formatNarrationPrompt,
   GeminiTtsClient,
   MAX_TTS_INPUT_BYTES,
@@ -115,23 +119,38 @@ interface SegmentRecord {
   channels: number;
   bitsPerSample: number;
   format: string;
+  source: "fresh" | "cache";
   finishReason?: string;
-  truncated: boolean;
+  truncated?: boolean;
 }
 
 await Deno.mkdir("var/segments", { recursive: true });
 
 const capturedSegments: SegmentRecord[] = [];
 let prepareIndex = 1;
-let commitIndex = 0;
+let pendingIndex: number | undefined;
 
-function recordSegment(index: number, segText: string, decoded: DecodedAudioResult, voice: string) {
+function recordSegment(
+  index: number,
+  segText: string,
+  decoded: DecodedAudioResult,
+  voice: string,
+  source: "fresh" | "cache",
+) {
+  if (source === "fresh") {
+    requireCondition(
+      decoded.finishReason === "STOP" && !decoded.truncated,
+      `Fresh segment ${index} did not finish normally: ${decoded.finishReason}`,
+    );
+  }
   const segWav = decoded.format === "wav" ? parseWavHeader(decoded.rawBytes) : null;
   const pcmBytes = segWav ? segWav.dataLength : decoded.rawBytes.length;
   console.log(
     `  [segment ${index}/8] voice=${voice}, duration=${
       decoded.durationSeconds.toFixed(2)
-    }s, rawBytes=${decoded.rawBytes.length}, pcmBytes=${pcmBytes}, finishReason=${decoded.finishReason}`,
+    }s, rawBytes=${decoded.rawBytes.length}, pcmBytes=${pcmBytes}, source=${source}, finishReason=${
+      source === "fresh" ? decoded.finishReason : "not observed (cache)"
+    }`,
   );
   capturedSegments.push({
     segmentIndex: index,
@@ -144,8 +163,10 @@ function recordSegment(index: number, segText: string, decoded: DecodedAudioResu
     channels: decoded.channels,
     bitsPerSample: decoded.bitsPerSample,
     format: decoded.format,
-    finishReason: decoded.finishReason,
-    truncated: decoded.truncated,
+    source,
+    ...(source === "fresh"
+      ? { finishReason: decoded.finishReason, truncated: decoded.truncated }
+      : {}),
   });
 }
 
@@ -161,34 +182,32 @@ const stitchedResult = await client.synthesizeNarration(
     resume: {
       prepare: async (segmentText, voice) => {
         const index = prepareIndex++;
+        requireCondition(
+          narrationSegments[index - 1] === segmentText,
+          `Unexpected segment text at index ${index}; cannot attribute evidence or cache safely`,
+        );
         const cacheFile = `var/segments/segment-${index}.wav`;
         try {
           const wav = await Deno.readFile(cacheFile);
           if (wav.length > 44) {
             console.log(`  [segment ${index}/8] Reusing cached segment from ${cacheFile}`);
-            const decoded = parseWavHeader(wav);
-            recordSegment(index, segmentText, {
-              rawBytes: wav,
-              mimeType: `audio/pcm;rate=${decoded.sampleRate}`,
-              format: "wav",
-              sampleRate: decoded.sampleRate,
-              channels: decoded.channels,
-              bitsPerSample: decoded.bitsPerSample,
-              durationSeconds: decoded.durationSeconds,
-              finishReason: "STOP",
-              truncated: false,
-              toWav: () => wav,
-            }, voice);
+            recordSegment(index, segmentText, decodedFromWav(wav), voice, "cache");
             return { wav };
           }
         } catch {
           // not cached, proceed to synthesize
         }
+        pendingIndex = index;
         return "synthesize";
       },
       commit: async (segmentText, decoded, voice) => {
-        commitIndex++;
-        const index = commitIndex;
+        const index = pendingIndex;
+        requireCondition(index !== undefined, "Commit without a prepared fresh segment");
+        requireCondition(
+          narrationSegments[index - 1] === segmentText,
+          `Commit text differs from prepared segment ${index}`,
+        );
+        pendingIndex = undefined;
         // Cache segment WAV to disk
         try {
           await Deno.writeFile(`var/segments/segment-${index}.wav`, decoded.toWav());
@@ -196,7 +215,7 @@ const stitchedResult = await client.synthesizeNarration(
           // ignore cache write failures
         }
 
-        recordSegment(index, segmentText, decoded, voice);
+        recordSegment(index, segmentText, decoded, voice, "fresh");
       },
     },
   },
@@ -211,6 +230,11 @@ requireCondition(
   capturedSegments.length === 8,
   `Expected 8 captured segments, got ${capturedSegments.length}`,
 );
+requireCondition(
+  capturedSegments.every((segment, index) => segment.segmentIndex === index + 1),
+  "Captured segments are not in narration order",
+);
+const freshRun = capturedSegments.every((segment) => segment.source === "fresh");
 
 // 4. Stitched WAV verification
 console.log("[step 3/3] Verifying stitched output audio...");
@@ -234,6 +258,18 @@ const magicWave = String.fromCharCode(...stitchedWav.subarray(8, 12));
 requireCondition(magicRiff === "RIFF", `Expected RIFF header, got ${magicRiff}`);
 requireCondition(magicWave === "WAVE", `Expected WAVE format, got ${magicWave}`);
 
+const decodedStitched = decodeAudioResponse({
+  candidates: [{
+    content: {
+      parts: [{ inlineData: { mimeType: "audio/wav", data: encodeBase64(stitchedWav) } }],
+    },
+    finishReason: "STOP", // Local wrapper for decoding bytes; not a provider observation.
+  }],
+});
+requireCondition(
+  decodedStitched.format === "wav" && !decodedStitched.truncated,
+  "Production decoder rejected stitched WAV",
+);
 const headerInfo = parseWavHeader(stitchedWav);
 console.log(
   `[step 3/3] WAV header: audioFormat=${headerInfo.audioFormat}, sampleRate=${headerInfo.sampleRate}, channels=${headerInfo.channels}, bitsPerSample=${headerInfo.bitsPerSample}, dataLength=${headerInfo.dataLength}`,
@@ -286,6 +322,8 @@ const validationReport = {
   resolvedBaseUrl: client.baseUrl,
   model: "gemini-3.8-flash-tts",
   voice: "Charon",
+  dataSource: freshRun ? "fresh" : "mixed-or-cache",
+  freshRun,
   negativeControl: {
     description: "Raw 47k Wikipedia article segment 1 through real client",
     source: "docs/evidence/audio-feed-gueb/article.txt",
@@ -317,7 +355,7 @@ const validationReport = {
     bitsPerSample: headerInfo.bitsPerSample,
     audioFormat: headerInfo.audioFormat,
     validRiffWave: true,
-    decodable: true,
+    decodable: decodedStitched.format === "wav" && !decodedStitched.truncated,
     nonEmpty: true,
   },
 };
