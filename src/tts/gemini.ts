@@ -92,7 +92,33 @@ export const DEFAULT_MAX_RETRIES = 1;
  * cost decision, so it is opt-in via retryOn: "all".
  */
 const TRANSIENT_STATUSES = new Set([429, 503]);
-export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+export const DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+/**
+ * Resolve the Gemini API base URL, preferring an explicit override or the
+ * GEMINI_API_BASE_URL environment variable, falling back to DEFAULT_GEMINI_API_BASE_URL.
+ * Normalizes host-only URLs by appending /v1beta so /models/... appends correctly.
+ */
+export function getGeminiApiBaseUrl(override?: string): string {
+  const raw = override?.trim() || (() => {
+    try {
+      if (typeof Deno !== "undefined" && typeof Deno.env?.get === "function") {
+        return Deno.env.get("GEMINI_API_BASE_URL")?.trim();
+      }
+    } catch {
+      // Permission denied or environment access restricted
+    }
+    return undefined;
+  })();
+
+  if (raw && raw.length > 0) {
+    const trimmed = raw.replace(/\/+$/, "");
+    return trimmed.includes("/v1") ? trimmed : `${trimmed}/v1beta`;
+  }
+  return DEFAULT_GEMINI_API_BASE_URL;
+}
+
+export const GEMINI_API_BASE_URL = DEFAULT_GEMINI_API_BASE_URL;
 
 /**
  * Narration input for single-voice reading (Stratechery / Ben Thompson style)
@@ -1348,7 +1374,7 @@ export function decodeAudioResponse(
 export class GeminiTtsClient {
   private apiKey: string;
   private model: string;
-  private baseUrl: string;
+  public readonly baseUrl: string;
   private fetchFn: typeof fetch;
   private timeoutMs: number;
   private maxRetries: number;
@@ -1371,12 +1397,16 @@ export class GeminiTtsClient {
 
     this.apiKey = config.apiKey || envKey || "";
     this.model = config.model || DEFAULT_TTS_MODEL;
-    this.baseUrl = config.baseUrl || GEMINI_API_BASE_URL;
+    this.baseUrl = config.baseUrl ? getGeminiApiBaseUrl(config.baseUrl) : getGeminiApiBaseUrl();
     this.fetchFn = config.fetchFn || fetch;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryOn = config.retryOn ?? "transient";
     this.retryBaseDelayMs = config.retryBaseDelayMs ?? 250;
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /**
