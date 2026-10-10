@@ -13,7 +13,14 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
 import { describeSynthesisFailure } from "../src/worker/synthesis.ts";
-import { GeminiTtsClient, GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
+import {
+  formatCodeForTts,
+  GeminiTtsClient,
+  GeminiTtsError,
+  GeminiTtsTruncatedError,
+  MAX_TTS_INPUT_BYTES,
+  MAX_TTS_SEGMENTS,
+} from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
@@ -236,6 +243,44 @@ Deno.test("a provider verdict under the wrapper is never retried at the episode 
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "failed");
   assertStringIncludes(episode?.error ?? "", "provider status 500");
+});
+
+Deno.test("code blocks are stripped before the byte budget is measured (audio-feed-n19w)", async () => {
+  // The guard must measure the text the client SEGMENTS. With the default codeHandling "skip" the
+  // client strips fenced and <pre> blocks before segmenting, so the raw article can be over budget
+  // while the narration input is a few bytes — counting raw bytes failed such articles permanently,
+  // which the first byte-based fix made 3x stricter for non-Latin listings.
+  const budget = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS;
+  const listings = [
+    `Start.\n\n\`\`\`\n${"あ".repeat(25_000)}\n\`\`\`\n\nEnd.`,
+    `Start.\n\n<pre>${"あ".repeat(25_000)}</pre>\n\nEnd.`,
+  ];
+  for (const content of listings) {
+    const { ctx, stores } = await queued();
+    await stores.metadata.putArticle(
+      makeArticle({ id: "article-1", userId: "user-1", content }),
+    );
+    // Fixture check: the raw article is over the default budget, the narration input is not.
+    assert(
+      new TextEncoder().encode(content).length > budget,
+      "fixture must be over budget before code handling",
+    );
+    const stripped = await formatCodeForTts(content, "skip");
+    assert(
+      new TextEncoder().encode(stripped).length < budget,
+      "code handling must bring the fixture under budget",
+    );
+
+    let synthesized = false;
+    const synth: Synthesizer = () => {
+      synthesized = true;
+      return Promise.resolve(fakeAudio());
+    };
+
+    const result = await runSynthesisBatch(ctx, synth); // real defaults
+    assertEquals(synthesized, true, "a strippable listing must not fail the article");
+    assertEquals(result.ready.length, 1);
+  }
 });
 
 Deno.test("truncated audio is a permanent failure, never published", async () => {
@@ -948,9 +993,9 @@ Deno.test("a failed episode records the unwrapped cause with mode, claim and pro
   assertStringIncludes(described, "claim 1/3");
 });
 
-Deno.test("article content exceeding maxInputCharacters fails closed without spending (audio-feed-3hb)", async () => {
+Deno.test("article content exceeding maxInputBytes fails closed without spending (audio-feed-3hb)", async () => {
   const { ctx, stores } = await queued();
-  // Article with 1,000 chars, limit set to 500
+  // Article with 1,000 ASCII bytes, limit set to 500
   await stores.metadata.putArticle(
     makeArticle({
       id: "article-1",
@@ -965,7 +1010,7 @@ Deno.test("article content exceeding maxInputCharacters fails closed without spe
     return Promise.resolve(fakeAudio());
   };
 
-  const result = await runSynthesisBatch(ctx, synth, { maxInputCharacters: 500 });
+  const result = await runSynthesisBatch(ctx, synth, { maxInputBytes: 500 });
   assertEquals(synthesized, false, "must fail closed before calling synthesis");
   assertEquals(result.failed.length, 1);
   assertStringIncludes(result.failed[0]!.error, "article content exceeds input limit");
@@ -973,7 +1018,97 @@ Deno.test("article content exceeding maxInputCharacters fails closed without spe
 
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "failed");
-  assertStringIncludes(episode?.error ?? "", "1000 > 500 chars");
+  assertStringIncludes(episode?.error ?? "", "1000 > 500 bytes");
+});
+
+Deno.test("the input pre-check counts UTF-8 bytes, so a multibyte article is refused up-front (audio-feed-y98q)", async () => {
+  // The guard approximates the TTS byte budget (MAX_TTS_INPUT_BYTES per paid call x
+  // MAX_TTS_SEGMENTS), so it must count the unit the segmenter packs. Counting UTF-16 code
+  // units admitted 30,000 CJK characters = 90,000 bytes, which the client then rejected at the
+  // 12-segment cap — after the episode had been claimed.
+  const { ctx, stores } = await queued();
+  const cjk = "あ".repeat(1_500); // 4,500 UTF-8 bytes; .length is only 1,500
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", content: cjk }),
+  );
+
+  let synthesized = false;
+  const synth: Synthesizer = () => {
+    synthesized = true;
+    return Promise.resolve(fakeAudio());
+  };
+
+  // A 3,000-byte budget: the article is under it in code units and over it in bytes.
+  const result = await runSynthesisBatch(ctx, synth, { maxInputBytes: 3_000 });
+  assertEquals(synthesized, false, "must fail closed before calling synthesis");
+  assertEquals(result.failed.length, 1);
+  assertStringIncludes(result.failed[0]!.error, "article content exceeds input limit");
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "4500 > 3000 bytes");
+});
+
+Deno.test("an in-budget multibyte article still reaches synthesis (audio-feed-y98q)", async () => {
+  // The fix must not become fail-always: 1,000 CJK characters and 3,000 ASCII characters are the
+  // SAME number of bytes, so the same budget admits both and refuses neither.
+  for (const content of ["あ".repeat(1_000), "a".repeat(3_000)]) {
+    const { ctx, stores } = await queued();
+    await stores.metadata.putArticle(
+      makeArticle({ id: "article-1", userId: "user-1", content }),
+    );
+    let synthesized = false;
+    const synth: Synthesizer = () => {
+      synthesized = true;
+      return Promise.resolve(fakeAudio());
+    };
+
+    const result = await runSynthesisBatch(ctx, synth, { maxInputBytes: 3_000 });
+    assertEquals(
+      synthesized,
+      true,
+      `a 3,000-byte article must be admitted (${content.slice(0, 1)})`,
+    );
+    assertEquals(result.ready.length, 1);
+  }
+});
+
+Deno.test("emoji are measured in bytes, not UTF-16 units (audio-feed-y98q)", async () => {
+  // An emoji is 2 UTF-16 code units but 4 UTF-8 bytes, so a .length check under-counts by half.
+  const { ctx, stores } = await queued();
+  const emoji = "😀".repeat(800); // 3,200 bytes; .length is only 1,600
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", content: emoji }),
+  );
+
+  let synthesized = false;
+  const synth: Synthesizer = () => {
+    synthesized = true;
+    return Promise.resolve(fakeAudio());
+  };
+
+  await runSynthesisBatch(ctx, synth, { maxInputBytes: 2_000 });
+  assertEquals(synthesized, false, "3,200 bytes must be refused even though .length is 1,600");
+});
+
+Deno.test("the default byte budget refuses the reviewer's CJK repro before any spend (audio-feed-y98q)", async () => {
+  // The bead's own repro string, against the real defaults: 30,000 CJK characters is 90,000 bytes
+  // and 15 segments — over the 72,000-byte / 12-segment budget, but under it in code units, which
+  // is how it used to reach the client and fail there.
+  const { ctx, stores } = await queued();
+  await stores.metadata.putArticle(
+    makeArticle({ id: "article-1", userId: "user-1", content: "あ".repeat(30_000) }),
+  );
+
+  let synthesized = false;
+  const synth: Synthesizer = () => {
+    synthesized = true;
+    return Promise.resolve(fakeAudio());
+  };
+
+  const result = await runSynthesisBatch(ctx, synth);
+  assertEquals(synthesized, false, "the guard must fire before the client is reached");
+  assertEquals(result.failed.length, 1);
+  assertStringIncludes(result.failed[0]!.error, "90000 > 72000 bytes");
 });
 
 Deno.test("synthesised audio blob key is the canonical scoping plus a per-attempt revision (audio-feed-3hb, -xsu)", async () => {

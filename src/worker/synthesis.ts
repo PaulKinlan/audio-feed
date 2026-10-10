@@ -39,6 +39,7 @@
 import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import {
   DEFAULT_NARRATION_VOICE,
+  formatCodeForTts,
   GeminiTtsClient,
   GeminiTtsError,
   GeminiTtsTruncatedError,
@@ -109,8 +110,15 @@ export interface SynthesisWorkerOptions {
   maxAttempts?: number;
   /** Base backoff between attempts. */
   retryBaseDelayMs?: number;
-  /** Maximum article content length in characters allowed for synthesis before spend (audio-feed-3hb, audio-feed-cei). Default 2,000,000. */
-  maxInputCharacters?: number;
+  /**
+   * Maximum narration input allowed for synthesis before spend, in UTF-8 BYTES
+   * (audio-feed-3hb, audio-feed-y98q). The unit matters: the segmenter packs
+   * MAX_TTS_INPUT_BYTES bytes per paid call, so a character count admitted multibyte
+   * articles that the 12-segment cap then rejected inside the client — after the episode
+   * had been claimed. Measured after code handling, matching what the client segments.
+   * Defaults to MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS.
+   */
+  maxInputBytes?: number;
   /** How long a claim is honoured before another worker may take the episode. */
   leaseMs?: number;
   /** Claims per episode before it is abandoned as unprocessable. */
@@ -135,7 +143,8 @@ const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
   maxAttempts: 3,
   retryBaseDelayMs: 500,
   // At most 12 sequential TTS calls; preserve the 15-minute claim lease and per-episode spend.
-  maxInputCharacters: MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS,
+  // In UTF-8 bytes, the same unit as the TTS budget it approximates: see maxInputBytes.
+  maxInputBytes: MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS,
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
   owner: WORKER_ID,
@@ -778,9 +787,26 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    if (opts.maxInputCharacters && article.content.length > opts.maxInputCharacters) {
+    const source = await metadata.getSource(claimed.userId, claimed.sourceId);
+
+    // The budget is in bytes, so the guard must count bytes (audio-feed-y98q): .length counts
+    // UTF-16 code units, which for CJK/emoji under-counts by 2-3x and lets the client reject the
+    // article at the 12-segment cap after this claim has already been spent. It must also measure
+    // the text the client will SEGMENT rather than the raw article: code handling strips fenced
+    // and <pre> blocks before segmentation, so counting raw bytes failed articles whose entire
+    // overage was strippable code (audio-feed-n19w).
+    // No summarizer is passed, deliberately: none of the production call sites gives the
+    // synthesizer one, so `formatCodeForTts` strips code here exactly as the client will, and the
+    // guard can never admit more than the client is willing to speak. It stays an approximation
+    // in ONE respect — the client segments the prompt (this body plus a title/author preamble) and
+    // may cut at a sentence boundary before a segment is full — so the client is still the exact
+    // gate.
+    const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
+    const narrationInput = await formatCodeForTts(article.content, codeHandling);
+    const inputBytes = new TextEncoder().encode(narrationInput).length;
+    if (opts.maxInputBytes && inputBytes > opts.maxInputBytes) {
       const error =
-        `article content exceeds input limit (${article.content.length} > ${opts.maxInputCharacters} chars)`;
+        `article content exceeds input limit (${inputBytes} > ${opts.maxInputBytes} bytes)`;
       console.error(
         `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
       );
@@ -793,8 +819,6 @@ export async function runSynthesisBatch(
       }
       continue;
     }
-
-    const source = await metadata.getSource(claimed.userId, claimed.sourceId);
 
     // Durable resumable chunking (audio-feed-wr1u): hooks are bound to THIS claim, so every
     // reserve/finalize inside them is claim-conditional.
