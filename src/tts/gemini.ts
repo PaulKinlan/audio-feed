@@ -1766,8 +1766,18 @@ export class GeminiTtsClient {
             errMsg = `Gemini API error: ${apiErr.message}`;
           }
         }
-      } catch {
-        // use default statusText
+      } catch (error) {
+        // Mirror the ok branch (audio-feed-icl4): the deadline can fire while the error body is
+        // still streaming, and a bare swallow made our own bound look like an ordinary provider
+        // rejection with an empty body — the exact class of incompleteness Paul reported. The
+        // classification is deliberately untouched: this response still came from the provider, so
+        // res.status decides (and `details` stays the non-Error { statusText } stand-in below).
+        if (options.signal?.aborted) throw error; // a lease expiry is not a provider error
+        if (deadline.aborted) {
+          errMsg +=
+            ` (Gemini TTS request timed out after ${timeoutMs}ms while reading the error response body)`;
+        }
+        // Otherwise use the default statusText.
       }
 
       const inputBytes = request.contents.reduce(
