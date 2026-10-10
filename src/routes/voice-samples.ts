@@ -19,7 +19,7 @@ import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import { notFound, problem, unauthorized } from "../http.ts";
 import { sessionUser } from "../auth/sessions.ts";
-import { GeminiTtsClient } from "../tts/gemini.ts";
+import { GeminiTtsClient, ttsClientConfig } from "../tts/gemini.ts";
 import {
   isVoiceSampleName,
   synthesizeVoiceSample,
@@ -92,7 +92,7 @@ export function createVoiceSampleHandler(
 
     let pending = inFlight.get(key);
     if (!pending) {
-      const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
+      const client = deps.client ?? new GeminiTtsClient(ttsClientConfig(ctx.config));
       pending = synthesizeVoiceSample(client, name)
         .then(async (bytes) => {
           // Cache under the versioned key: a later text/model change writes a new

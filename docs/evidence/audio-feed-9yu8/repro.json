@@ -1,0 +1,118 @@
+{
+  "bead": "audio-feed-9yu8",
+  "capturedAt": "2026-10-10T21:29:23.725Z",
+  "capturedAgainst": "post-fix (the pre-fix capture is docs/evidence/audio-feed-bp6r/repro.json)",
+  "provider": {
+    "endpoint": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+    "note": "gemini.int.exe.xyz injects Paul's real API key; the client sends a dummy key",
+    "model": "gemini-3.8-flash-tts"
+  },
+  "defaults": {
+    "DEFAULT_TIMEOUT_MS": 120000,
+    "DEFAULT_TIMEOUT_RETRIES": 1
+  },
+  "partA_realNarration": {
+    "description": "One real narration through the production client with the new 120s default deadline and default retry policy (no timeout retry is exercised: the call succeeds).",
+    "outcome": {
+      "result": "success",
+      "totalMs": 4716,
+      "durationSeconds": 10.92,
+      "bytes": 530276,
+      "finishReason": "STOP",
+      "truncated": false
+    },
+    "httpCallsMade": 1,
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "durationMs": 4429,
+        "status": 200,
+        "statusText": "OK"
+      }
+    ]
+  },
+  "partB_deadlineRetry": {
+    "description": "Multi-segment input (>1 segment forces maxRetries 0 per segment) with a forced 1.5s deadline. Expect 2 HTTP calls for the first segment: the deadline retry fires on its own budget, then the failure surfaces status-less and transient instead of as our own 400.",
+    "segmentCount": 3,
+    "outcome": {
+      "result": "failure",
+      "totalMs": 3232,
+      "name": "GeminiTtsError",
+      "message": "TTS turn failed (transient; the episode may be retried): Gemini TTS request timed out after 1500ms",
+      "permanent": false,
+      "innerError": {
+        "name": "GeminiTtsError",
+        "message": "Gemini TTS request timed out after 1500ms"
+      }
+    },
+    "httpCallsMade": 2,
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "durationMs": 1502,
+        "errorName": "TimeoutError",
+        "errorMessage": "The operation was aborted due to timeout"
+      },
+      {
+        "seq": 2,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "durationMs": 1502,
+        "errorName": "TimeoutError",
+        "errorMessage": "The operation was aborted due to timeout"
+      }
+    ]
+  },
+  "partC_retryOptOut": {
+    "description": "The same forced deadline with retryOn: 'none'. Expect exactly 1 HTTP call: the operator opt-out is preserved for the deadline retry too.",
+    "outcome": {
+      "name": "GeminiTtsError",
+      "message": "TTS turn failed (transient; the episode may be retried): Gemini TTS request timed out after 1500ms",
+      "permanent": false,
+      "innerError": {
+        "name": "GeminiTtsError",
+        "message": "Gemini TTS request timed out after 1500ms"
+      }
+    },
+    "httpCallsMade": 1,
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "durationMs": 1501,
+        "errorName": "TimeoutError",
+        "errorMessage": "The operation was aborted due to timeout"
+      }
+    ]
+  },
+  "partD_providerVerdict": {
+    "description": "A bogus model name makes the proxy return the provider's real HTTP error. Expect the provider's status to survive the wrapper and permanent === true: the re-billing guard still refuses an episode retry for a provider verdict.",
+    "outcome": {
+      "name": "GeminiTtsError",
+      "message": "TTS turn failed; refusing whole-episode retry: Gemini API error: models/gemini-3.8-flash-tts-does-not-exist is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods. [model=gemini-3.8-flash-tts-does-not-exist, inputBytes=67, estimatedInputTokens<=67 (UTF-8-byte bound), maxOutputTokens=16384]",
+      "status": 404,
+      "permanent": true,
+      "innerError": {
+        "name": "GeminiTtsError",
+        "message": "Gemini API error: models/gemini-3.8-flash-tts-does-not-exist is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods. [model=gemini-3.8-flash-tts-does-not-exist, inputBytes=67, estimatedInputTokens<=67 (UTF-8-byte bound), maxOutputTokens=16384]",
+        "status": 404
+      }
+    },
+    "httpCallsMade": 1,
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts-does-not-exist:generateContent",
+        "durationMs": 181,
+        "status": 404,
+        "statusText": "Not Found"
+      }
+    ]
+  },
+  "partE_envKnob": {
+    "description": "loadConfig resolves TTS_TIMEOUT_MS; unset means the 120s default.",
+    "unset": 120000,
+    "ttsTimeoutMs45000": 45000
+  }
+}
