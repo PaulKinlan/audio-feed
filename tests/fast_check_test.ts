@@ -24,6 +24,12 @@ const GRAPH = new Map<string, string[]>([
   // widgets.ts is reachable ONLY through the hub: the walk must refuse to
   // cross into app.ts and must report the file uncovered.
   ["src/routes/widgets.ts", ["src/app.ts"]],
+  // A TESTED script: its change must select the test (audio-feed-bqd4).
+  ["scripts/tool.ts", ["tests/tool_test.ts"]],
+  // A script imported only by another script: importers exist, no test
+  // reaches it — cannot be scoped safely.
+  ["scripts/helper.ts", ["scripts/other.ts"]],
+  // scripts/standalone.ts has no entry: nothing imports it at all.
 ]);
 
 Deno.test("a route change selects direct tests, not every app-booting test", () => {
@@ -40,11 +46,25 @@ Deno.test("the hub cut does not strand a change that only the hub sees", () => {
   assertEquals(uncovered, ["src/routes/widgets.ts"]);
 });
 
-Deno.test("scripts/ changes select no tests and are never 'uncovered'", () => {
-  const { tests, uncovered } = reachableTests(GRAPH, ["scripts/smoke.ts"]);
+Deno.test("a TESTED script change selects its importing test (bqd4)", () => {
+  const { tests, uncovered } = reachableTests(GRAPH, ["scripts/tool.ts"]);
+
+  assertEquals([...tests], ["tests/tool_test.ts"]);
+  assertEquals(uncovered, []);
+});
+
+Deno.test("a script with importers but no reachable test falls back to full", () => {
+  const { tests, uncovered } = reachableTests(GRAPH, ["scripts/helper.ts"]);
 
   assertEquals([...tests], []);
-  assertEquals(uncovered, [], "dev tooling is type-checked, not suite-tested");
+  assertEquals(uncovered, ["scripts/helper.ts"], "a guess is not a proof");
+});
+
+Deno.test("a script NOTHING imports is exempt — zero tests is correct", () => {
+  const { tests, uncovered } = reachableTests(GRAPH, ["scripts/standalone.ts"]);
+
+  assertEquals([...tests], []);
+  assertEquals(uncovered, [], "the always-run type-check is a standalone tool's gate");
 });
 
 Deno.test("a changed test file runs itself", () => {
@@ -129,4 +149,14 @@ Deno.test("planTests: docs-only and empty change sets run no tests", () => {
 Deno.test("planTests: a changed test file runs itself without the graph", () => {
   const plan = planTests(["tests/http_test.ts"], new Map(), NO_NAMED);
   assertEquals(plan.testFiles, ["tests/http_test.ts"]);
+});
+
+Deno.test("planTests: the bqd4 repro — changing the selection algorithm runs its own tests", () => {
+  const plan = planTests(
+    ["scripts/fast-check.ts"],
+    new Map([["scripts/fast-check.ts", ["tests/fast_check_test.ts"]]]),
+    new Map(),
+  );
+
+  assertEquals(plan.testFiles, ["tests/fast_check_test.ts"], "must NOT select zero");
 });

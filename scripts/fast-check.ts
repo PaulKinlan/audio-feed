@@ -162,15 +162,15 @@ function isHub(file: string): boolean {
  * Coverage is judged per CHANGED file, not per node reached mid-walk: the
  * reverse graph from src/routes/listen.ts legitimately passes through app.ts
  * and server.ts into scripts/* (dev tools no test imports), and those interior
- * nodes say nothing about whether the CHANGE is covered. scripts/ changes
- * themselves select no tests — they are dev/proof tooling, type-checked by the
- * always-run `deno task check` and exercised by hand.
+ * nodes say nothing about whether the CHANGE is covered.
  *
  * The walk does not cross a hub: app.ts/compose.ts import every route, so
  * crossing them selects every app-booting test for any route change. A test
  * that only reaches the changed file THROUGH the hub boots the whole app but
  * does not exercise that route's behaviour; the changed file's direct tests
- * are the ones that do.
+ * are the ones that do. scripts/ modules are walked like anything else — a
+ * tested script (fast-check.ts itself) must select its test; only a script
+ * NOTHING imports is exempt (audio-feed-bqd4).
  */
 export function reachableTests(reverse: Map<string, string[]>, changed: string[]): {
   tests: Set<string>;
@@ -184,8 +184,7 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
       tests.add(start);
       continue;
     }
-    if (/^scripts\//.test(start)) continue; // dev tooling: type-check only
-    if (!/^(src\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
+    if (!/^(src\/|scripts\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
 
     let covered = false;
     const queue = [start];
@@ -204,7 +203,15 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
         queue.push(importer);
       }
     }
-    if (!covered) uncovered.push(start);
+    // Uncovered means "changed code no test can observe":
+    // - src/ and main.ts always need coverage;
+    // - a scripts/ module with importers but no reachable test cannot be
+    //   scoped safely -> full suite;
+    // - a scripts/ module NOTHING imports is a standalone dev tool: the
+    //   always-run type-check is its gate, zero tests is correct.
+    if (!covered && (!start.startsWith("scripts/") || reverse.has(start))) {
+      uncovered.push(start);
+    }
   }
   return { tests, uncovered };
 }
