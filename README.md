@@ -63,6 +63,12 @@ deno task dev
 
 # Run all tests
 deno test -A
+
+# Fast tier while iterating: fmt + lint + type-check + only the tests your
+# change affects (import graph + name convention; falls back to the full
+# suite for deno.json/deno.lock, cross-cutting files, or uncovered code).
+# Measured: ~11s for a typical route change vs ~65-108s for the full gate.
+deno task test:fast
 ```
 
 ## Configuration

@@ -22,17 +22,39 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Fast test tier (`deno task test:fast`)
+
+The full gate (`deno task gate`) costs ~108s on a fleet VM; a one-file change should not pay all of
+it while iterating. `deno task test:fast` (scripts/fast-check.ts, audio-feed-pubd) runs fmt + lint +
+the whole-repo type-check, then only the tests a change can affect: tests that reach a changed file
+in the static import graph without crossing the app/compose hubs, plus the name-convention tests
+(`<stem>_test.ts`, `<stem>_*_test.ts`, mirrored test subdirectories). Changed scripts/ modules
+select the tests that import them; only a script NOTHING imports selects none (the always-run
+type-check is its gate). It falls back to the FULL suite when deno.json/deno.lock changes, when a
+cross-cutting file (app/compose/router/http/config/server/origin) changes, when a changed src file
+has no covering test, when a changed script has importers but no reachable test, when a shared test
+helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file under src/ or tests/
+changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff itself
+fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
+
+The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
+anything lands, so a selection miss is caught there, not shipped.
+
+Fleet wiring: the VM-local `~/.fleet/check.conf` carries `CHECK_FAST_CMD="deno task test:fast"`
+(with `CHECK_FAST_TIMEOUT=600`). That file is reprovisioned, so if `fleet-check --fast` reports no
+fast command, re-add the line — the durable deliverable is the repo task, not the VM file.
+
 ## Modern-web bead closures record a premise verdict
 
-Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title
-(the trailing `(<guide-id>)`). The factory dedupes only by its own per-run findings fingerprint,
-which is rebuilt on every CI run — so the same modernization CAN be emitted more than once (three
+Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title (the
+trailing `(<guide-id>)`). The factory dedupes only by its own per-run findings fingerprint, which is
+rebuilt on every CI run — so the same modernization CAN be emitted more than once (three
 anchor-positioning beads, two scroll-driven-animations and two dialog-closedby exist today). Before
 working a [modern-web] bead, search closed bead titles for its canonical id: a bead with the same id
 may already be implemented, superseded or closed.
 
-When closing one of these beads, record the **premise verdict** — what the scanner matched and
-what the code actually has — as `bd close --reason "<line>"` or as a comment:
+When closing one of these beads, record the **premise verdict** — what the scanner matched and what
+the code actually has — as `bd close --reason "<line>"` or as a comment:
 
 ```
 premise verdict: no producer of <thing> in src/; scanner artefact — canonical id <id>, already carried by <bead-id>
