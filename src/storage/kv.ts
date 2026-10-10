@@ -65,10 +65,16 @@ import type {
   EpisodeQuery,
   ListPendingOptions,
   ListPendingResult,
+  MetadataRepositories,
   MetadataStore,
   RunRecord,
 } from "./mod.ts";
-import { compareRunsNewestFirst, RUN_HISTORY_LIMIT, RUN_KINDS } from "./mod.ts";
+import {
+  compareRunsNewestFirst,
+  metadataRepositories,
+  RUN_HISTORY_LIMIT,
+  RUN_KINDS,
+} from "./mod.ts";
 
 const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
 
@@ -154,6 +160,13 @@ export function isCorruptArticleError(err: unknown): err is CorruptArticleError 
 export class KvMetadataStore implements MetadataStore {
   #kv: Deno.Kv;
   #ownsConnection: boolean;
+
+  /**
+   * The per-domain views of this store (audio-feed-d9sl Phase 1). Every member is this store, so
+   * `repositories.episodes.getEpisode(a, b)` and `getEpisode(a, b)` are the same call; the value is
+   * the type boundary that lets a lane depend on one domain instead of all 62 methods.
+   */
+  readonly repositories: MetadataRepositories = metadataRepositories(this);
 
   constructor(kv: Deno.Kv, opts?: { ownsConnection?: boolean }) {
     this.#kv = kv;

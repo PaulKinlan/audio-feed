@@ -152,7 +152,28 @@ export interface DownloadCounts {
   perUser: { userId: string; count: number }[];
 }
 
-export interface MetadataStore {
+// ---------------------------------------------------------------------------
+// Metadata: domain repositories (audio-feed-d9sl Phase 1)
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS GROUPED, AND NOT YET SPLIT
+// `MetadataStore` was one ~60-method interface implemented by two 1,000-1,600 line classes and
+// exercised by an 81KB conformance suite. Those three files are the repo's top collision hotspots
+// (kv.ts: 30 changes in 30 days), so two feature lanes working on different entities — auth and
+// episodes, say — conflicted in the same files for no shared reason. Phase 1 is deliberately
+// TYPE-LEVEL ONLY: every method keeps its exact signature, its order within its own concern and
+// its implementation, so no call can behave differently. What changes is that each entity owns an
+// interface, `MetadataStore` composes them, and `MetadataRepositories` hands call sites a domain
+// view (`stores.metadata.repositories.episodes.listPendingEpisodes(…)`) to migrate to one domain at
+// a time without touching the other 60 methods. `tests/storage_repositories_test.ts` proves the
+// grouping is exhaustive and non-overlapping at compile time. Extracting each implementation and
+// the conformance suite along these boundaries is Phase 2/3 — see docs/adr/0001-domain-repositories.md,
+// audio-feed-d9sl and audio-feed-f96o.
+
+/**
+ * Users: accounts, approval state, feed tokens and the admin role.
+ */
+export interface UserRepository {
   // -- users ------------------------------------------------------------
   /**
    * Atomic first write. Resolves `false` — never throws — when the email or the
@@ -191,14 +212,23 @@ export interface MetadataStore {
     isAdmin: boolean,
     by: { adminId: string; at: string },
   ): Promise<"changed" | "unchanged" | "last-admin" | "missing">;
+}
 
-  // -- sources ----------------------------------------------------------
+/**
+ * Sources: the subscriptions a user's feed is built from.
+ */
+export interface SourceRepository {
   putSource(source: Source): Promise<void>;
   getSource(userId: string, id: string): Promise<Source | null>;
   listSources(userId: string): Promise<Source[]>;
   deleteSource(userId: string, id: string): Promise<void>;
+}
 
-  // -- articles ---------------------------------------------------------
+/**
+ * Articles: ingested content, the URL dedupe index, and the article+episode pairs ingest writes
+ * atomically so a subscriber never sees one without the other.
+ */
+export interface ArticleRepository {
   putArticle(article: Article): Promise<void>;
   /**
    * Atomic first write for an article (audio-feed-33m).
@@ -252,8 +282,14 @@ export interface MetadataStore {
   /** Dedupe hook for repeat ingests of the same URL. */
   findArticleByUrl(userId: string, url: string): Promise<Article | null>;
   deleteArticle(userId: string, id: string): Promise<void>;
+}
 
-  // -- episodes ---------------------------------------------------------
+/**
+ * Episodes: the unit a subscriber downloads, from `pending` through the claim that bounds paid
+ * work, completion, failure, and the two recovery transitions (retry a failure, regenerate a
+ * published episode).
+ */
+export interface EpisodeRepository {
   putEpisode(episode: Episode): Promise<void>;
   getEpisode(userId: string, id: string): Promise<Episode | null>;
   deleteEpisode(userId: string, id: string): Promise<boolean>;
@@ -338,6 +374,50 @@ export interface MetadataStore {
    * "you were superseded", and the caller should discard its result.
    */
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
+
+  /**
+   * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
+   *
+   * This is the subscriber's "try again", and it is deliberately a different method from
+   * `requeueEpisode` rather than a flag on it, because the two transitions mean different
+   * things: a requeue starts from `ready` and KEEPS the old audio playable while the new
+   * render is made, whereas a retry starts from `failed`, where there is no trustworthy
+   * audio to keep playing. One method accepting both would either strand a failed episode
+   * or, worse, mark a broken render as publishable.
+   *
+   * So the episode returns to `pending` with its error cleared and a fresh claim budget,
+   * and WITHOUT `regenerating` — which is what keeps it out of the feed until it actually
+   * has audio again. The audio fields stay on the record so a partially-written blob is
+   * still reachable by the failed-blob path rather than orphaned here.
+   *
+   * Resolves the queued episode, or `null` when there is nothing to do: not failed (a
+   * ready episode is requeueEpisode's job; a pending or synthesizing one is already
+   * queued), no such episode, or a concurrent write won the race.
+   */
+  retryEpisode(userId: string, id: string): Promise<Episode | null>;
+  /**
+   * Queue a published (`ready`) episode for re-synthesis with the current prompts
+   * (audio-feed-8oz), atomically. The episode goes back to `pending` with
+   * `regenerating` set and a fresh claim budget, KEEPING its audio fields, so it
+   * stays publishable on the old audio until the worker swaps the new key in.
+   *
+   * Resolves the queued episode, or `null` when there is nothing to do: already
+   * queued or synthesizing (so a repeat is idempotent), no audio, or no episode.
+   */
+  requeueEpisode(userId: string, id: string): Promise<Episode | null>;
+  /**
+   * Abandon a queued or in-flight regeneration, restoring the episode to `ready` on
+   * its old audio. A worker still holding the claim is then refused by
+   * `completeEpisode`. Resolves `false` for anything that is not regenerating.
+   */
+  cancelRegeneration(userId: string, id: string): Promise<boolean>;
+}
+
+/**
+ * Synthesis segments: the per-segment reservation that stops a retried episode paying twice for
+ * audio it already has (audio-feed-wr1u).
+ */
+export interface SynthesisSegmentRepository {
   /**
    * Reserve a synthesis segment slot BEFORE paying for its TTS call (audio-feed-wr1u).
    *
@@ -384,44 +464,13 @@ export interface MetadataStore {
 
   /** Drop all segment records for an episode (their blobs are the caller's problem). */
   clearSynthesisSegments(userId: string, episodeId: string): Promise<void>;
+}
 
-  /**
-   * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
-   *
-   * This is the subscriber's "try again", and it is deliberately a different method from
-   * `requeueEpisode` rather than a flag on it, because the two transitions mean different
-   * things: a requeue starts from `ready` and KEEPS the old audio playable while the new
-   * render is made, whereas a retry starts from `failed`, where there is no trustworthy
-   * audio to keep playing. One method accepting both would either strand a failed episode
-   * or, worse, mark a broken render as publishable.
-   *
-   * So the episode returns to `pending` with its error cleared and a fresh claim budget,
-   * and WITHOUT `regenerating` — which is what keeps it out of the feed until it actually
-   * has audio again. The audio fields stay on the record so a partially-written blob is
-   * still reachable by the failed-blob path rather than orphaned here.
-   *
-   * Resolves the queued episode, or `null` when there is nothing to do: not failed (a
-   * ready episode is requeueEpisode's job; a pending or synthesizing one is already
-   * queued), no such episode, or a concurrent write won the race.
-   */
-  retryEpisode(userId: string, id: string): Promise<Episode | null>;
-  /**
-   * Queue a published (`ready`) episode for re-synthesis with the current prompts
-   * (audio-feed-8oz), atomically. The episode goes back to `pending` with
-   * `regenerating` set and a fresh claim budget, KEEPING its audio fields, so it
-   * stays publishable on the old audio until the worker swaps the new key in.
-   *
-   * Resolves the queued episode, or `null` when there is nothing to do: already
-   * queued or synthesizing (so a repeat is idempotent), no audio, or no episode.
-   */
-  requeueEpisode(userId: string, id: string): Promise<Episode | null>;
-  /**
-   * Abandon a queued or in-flight regeneration, restoring the episode to `ready` on
-   * its old audio. A worker still holding the claim is then refused by
-   * `completeEpisode`. Resolves `false` for anything that is not regenerating.
-   */
-  cancelRegeneration(userId: string, id: string): Promise<boolean>;
-
+/**
+ * Orphaned audio blobs: keys a delete failed on after they became unreferenced, kept so a later
+ * sweep can retry them (audio-feed-8oz).
+ */
+export interface OrphanBlobRepository {
   /**
    * Blobs a delete failed on after they became unreferenced, kept so a later
    * synthesis batch can retry them (audio-feed-8oz). Recording a key twice keeps
@@ -430,9 +479,13 @@ export interface MetadataStore {
   recordOrphanBlob(key: string): Promise<void>;
   listOrphanBlobs(limit: number): Promise<string[]>;
   forgetOrphanBlob(key: string): Promise<void>;
+}
 
-  // -- operational stats (audio-feed-ndc) --------------------------------
-
+/**
+ * Operational counters: enclosure requests and synthesis spend (audio-feed-ndc). Both are
+ * read-modify-writes that must be atomic across isolates.
+ */
+export interface UsageRepository {
   /**
    * Count one enclosure request, against the total and against `userId` when
    * the blob key identifies one.
@@ -459,8 +512,13 @@ export interface MetadataStore {
   recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void>;
   getSynthesisCounts(today?: string): Promise<SynthesisCounts>;
   getUserDailySynthesisCount(userId: string, day: string): Promise<number>;
+}
 
-  // -- outbox notifications (audio-feed-np5) --------------------------------
+/**
+ * The outbox for on-demand ingest notifications (audio-feed-np5): delivery failures must not
+ * affect synthesis or audio publishing.
+ */
+export interface NotificationRepository {
   /**
    * Outbox notification queue for on-demand ingest completion.
    * Delivery failures must not affect synthesis or audio publishing.
@@ -468,9 +526,14 @@ export interface MetadataStore {
   queueNotification(notification: OutboxNotification): Promise<void>;
   listOutbox(limit?: number): Promise<OutboxNotification[]>;
   ackNotification(id: string): Promise<boolean>;
+}
 
+/**
+ * Background-job history for the admin dashboard: one row per completed run, appended and pruned
+ * per job (audio-feed-att, audio-feed-ct1, audio-feed-0ob).
+ */
+export interface RunRepository {
   /**
-   * Append a run to its job's history, pruning that job to its newest
    * `RUN_HISTORY_LIMIT`.
    *
    * Bounded on write, deliberately: an unbounded history is the audio-feed-att
@@ -492,7 +555,15 @@ export interface MetadataStore {
    * default limit returns everything retained.
    */
   listRuns(limit?: number): Promise<RunRecord[]>;
+}
 
+/**
+ * Accounts storage (audio-feed-8fc): sessions, passkey credentials, setup links and challenges.
+ *
+ * Storage only. Expiry, hashing and ownership rules live in src/auth/, which checks `expiresAt` on
+ * every read; an adapter may also drop expired rows.
+ */
+export interface AuthRepository {
   // -- accounts (audio-feed-8fc) -------------------------------------------
   //
   // Storage only. Expiry, hashing and ownership rules live in src/auth/, which
@@ -526,6 +597,34 @@ export interface MetadataStore {
   putChallenge(challenge: AuthChallenge): Promise<void>;
   /** Single use, with the same exactly-one guarantee as `consumeSetupLink`. */
   consumeChallenge(challenge: string): Promise<AuthChallenge | null>;
+}
+
+/**
+ * Every domain of the metadata store, as one object.
+ *
+ * This composition is what keeps Phase 1 behaviour-preserving: a `MetadataStore` IS each of its
+ * repositories, so every existing caller (`stores.metadata.getEpisode(…)`, `MetadataStore["putEpisode"]`)
+ * is untouched, while new code can depend on the one domain it actually needs.
+ */
+export interface MetadataStore
+  extends
+    UserRepository,
+    SourceRepository,
+    ArticleRepository,
+    EpisodeRepository,
+    SynthesisSegmentRepository,
+    OrphanBlobRepository,
+    UsageRepository,
+    NotificationRepository,
+    RunRepository,
+    AuthRepository {
+  /**
+   * The domain views of this store; see `MetadataRepositories`.
+   *
+   * Provided by both implementations so feature code can migrate one domain at a time instead of
+   * being rewritten in the same commit as the split that motivates it (audio-feed-d9sl).
+   */
+  readonly repositories: MetadataRepositories;
 
   // -- shared counters (audio-feed-2zvc) ------------------------------------
 
@@ -562,6 +661,48 @@ export interface MetadataStore {
   ): Promise<AtomicWrite<T>>;
 
   close(): Promise<void>;
+}
+
+/**
+ * The per-domain views of one metadata store (audio-feed-d9sl Phase 1).
+ *
+ * Phase 1 is a facade, and saying so matters: every member IS the store, narrowed to one domain's
+ * methods. The value is that a lane can now take `EpisodeRepository` instead of the 60-method God
+ * interface, migrate its call sites one domain at a time, and stop conflicting with a lane that
+ * owns `AuthRepository`. Isolation of the *implementations* per domain is Phase 2
+ * (docs/adr/0001-domain-repositories.md) — until then a defect in one domain still lives in the
+ * same file as the others, and this facade must not be mistaken for that fix.
+ */
+export interface MetadataRepositories {
+  readonly users: UserRepository;
+  readonly sources: SourceRepository;
+  readonly articles: ArticleRepository;
+  readonly episodes: EpisodeRepository;
+  readonly segments: SynthesisSegmentRepository;
+  readonly orphanBlobs: OrphanBlobRepository;
+  readonly usage: UsageRepository;
+  readonly notifications: NotificationRepository;
+  readonly runs: RunRepository;
+  readonly auth: AuthRepository;
+}
+
+/**
+ * The domain views of `store`, for callers holding the composed interface rather than a concrete
+ * store. Every member is `store` itself, narrowed by type.
+ */
+export function metadataRepositories(store: MetadataStore): MetadataRepositories {
+  return {
+    users: store,
+    sources: store,
+    articles: store,
+    episodes: store,
+    segments: store,
+    orphanBlobs: store,
+    usage: store,
+    notifications: store,
+    runs: store,
+    auth: store,
+  };
 }
 
 /** The outcome of `MetadataStore.atomicUpdate`: what is stored, and whether we wrote it. */
