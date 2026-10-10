@@ -723,7 +723,7 @@ Deno.test("no route hand-rolls a content-security-policy header outside csp.ts",
         await scan(path);
       } else if (entry.name.endsWith(".ts")) {
         const text = await Deno.readTextFile(path);
-        if (!allowed.has(path) && text.includes('"content-security-policy"')) {
+        if (!allowed.has(path) && /["']content-security-policy["']/i.test(text)) {
           offenders.push(path);
         }
       }
