@@ -47,6 +47,20 @@ export interface OriginConfig {
    * client choose the origin.
    */
   trustProxyHeaders?: boolean;
+  /**
+   * The hosts this deployment is willing to advertise (audio-feed-fp4r).
+   *
+   * Without it, the advertised origin — and with it feed `selfUrl`, enclosure
+   * `audioUrl`, redirects and the WebAuthn RP ID — is derived from the request
+   * host, which on any platform that does not validate Host is whatever the
+   * client sent. With it, a request arriving on an unlisted host never becomes
+   * the advertised origin: the pinned origin is used instead, and the app
+   * boundary answers the request `421 Misdirected Request`.
+   *
+   * The `publicBaseUrl` host is always implicitly allowed. Loopback hosts are
+   * always allowed so local development keeps working when the list is set.
+   */
+  allowedHosts?: string[];
 }
 
 export interface ResolvedOrigin {
@@ -61,6 +75,102 @@ export interface ResolvedOrigin {
    * "this page is wrong for everyone who asks after the attacker".
    */
   explicit: boolean;
+}
+
+/**
+ * Normalise one configured host entry for comparison: lowercase, no port, no
+ * trailing dot. IPv6 literals keep their brackets off, matching `URL.hostname`.
+ */
+function normaliseHost(entry: string): string {
+  let host = entry.trim().toLowerCase();
+  if (!host) return host;
+  // Tolerate entries given as origins ("https://audio.example.com") by parsing
+  // them down to the hostname — an operator pasting the PUBLIC_BASE_URL value
+  // into ALLOWED_HOSTS has the right idea and the wrong shape.
+  if (host.includes("://")) {
+    try {
+      host = new URL(host).hostname;
+    } catch {
+      return "";
+    }
+  }
+  host = host.replace(/\.$/, "");
+  if (host.startsWith("[")) return host.replace(/^\[|\]$/g, "");
+  // Strip an explicit port ("example.com:8443"). A colon at this point can
+  // only be a port separator — IPv6 was handled above.
+  const colon = host.indexOf(":");
+  if (colon !== -1) host = host.slice(0, colon);
+  return host;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" ||
+    host === "0.0.0.0" || host.endsWith(".localhost");
+}
+
+/**
+ * The hosts a request may arrive on and still be advertised, or `null` when no
+ * allow-list is configured (the request host is then the only source of truth
+ * and is used as-is).
+ *
+ * The list only activates when the operator sets ALLOWED_HOSTS. The
+ * `publicBaseUrl` host is folded in so the canonical host never rejects
+ * itself, but setting PUBLIC_BASE_URL alone does not turn the gate on — the
+ * advertised origin is already pinned in that deployment, and gating would
+ * only break its preview URLs.
+ */
+function allowedHostSet(config: OriginConfig): Set<string> | null {
+  if (!config.allowedHosts?.length) return null;
+  const hosts = new Set<string>();
+  for (const entry of config.allowedHosts) {
+    const host = normaliseHost(entry);
+    if (host) hosts.add(host);
+  }
+  if (!isUnusableOrigin(config.publicBaseUrl)) {
+    hosts.add(new URL(config.publicBaseUrl!).hostname.toLowerCase());
+  }
+  return hosts.size ? hosts : null;
+}
+
+/**
+ * The host the request is effectively arriving on — the same host
+ * `requestOrigin` would derive the origin from, including an honoured
+ * `x-forwarded-host` under the explicit proxy opt-in.
+ */
+function effectiveRequestHost(request: Request, trustProxyHeaders?: boolean): string | null {
+  if (trustProxyHeaders) {
+    const forwarded = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    if (forwarded) {
+      try {
+        // The header is a host[:port], not a URL; parse with a dummy scheme.
+        return new URL(`https://${forwarded}`).hostname.toLowerCase();
+      } catch {
+        return null;
+      }
+    }
+  }
+  try {
+    // A trailing dot is the same host (DNS-wise) but a different string.
+    return new URL(request.url).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this request arriving on a host the deployment is willing to advertise?
+ *
+ * `true` when no allow-list is configured (preserving the request-derived
+ * behaviour that fixed audio-feed-0k3), when the host is on the list, or when
+ * it is loopback — a local dev machine has nothing to poison but itself, and
+ * refusing it would break `deno task dev` the moment anyone sets the list.
+ */
+export function requestHostAllowed(config: OriginConfig, request: Request): boolean {
+  const allowed = allowedHostSet(config);
+  if (!allowed) return true;
+  const host = effectiveRequestHost(request, config.trustProxyHeaders);
+  if (!host) return false;
+  return allowed.has(host) || isLoopbackHost(host);
 }
 
 /** Strip trailing slashes so concatenation never produces `//feed`. */
@@ -140,6 +250,15 @@ export function requestOrigin(
 export function resolveOrigin(config: OriginConfig, request: Request): ResolvedOrigin {
   if (!isUnusableOrigin(config.publicBaseUrl)) {
     return { baseUrl: normalise(config.publicBaseUrl!), explicit: true };
+  }
+
+  // A request arriving on a host the operator has not listed must never become
+  // the advertised origin: that host is whatever the client chose to send.
+  // Pin to the first listed host instead of the attacker's. `explicit: true`
+  // because the value no longer varies with the request.
+  if (!requestHostAllowed(config, request)) {
+    const pinned = [...allowedHostSet(config)!][0];
+    return { baseUrl: `https://${pinned}`, explicit: true };
   }
 
   const derived = requestOrigin(request, { trustProxyHeaders: config.trustProxyHeaders });

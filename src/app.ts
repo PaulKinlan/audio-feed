@@ -29,7 +29,7 @@
  */
 
 import { type Handler, Router } from "./router.ts";
-import { json } from "./http.ts";
+import { json, problem } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
@@ -47,7 +47,7 @@ import { handleShare } from "./routes/share.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import type { AppConfig, Stores } from "./config.ts";
-import { resolveOrigin } from "./origin.ts";
+import { requestHostAllowed, resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
 
 export interface AppContext {
@@ -347,5 +347,21 @@ export function createApp(
   fetch: (req: Request, info?: { remoteAddr?: { hostname?: string } }) => Promise<Response>;
 } {
   const router = createRouter(handlers);
-  return { router, fetch: router.fetchHandler(ctx) };
+  const handle = router.fetchHandler(ctx);
+  return {
+    router,
+    fetch: async (req, info) => {
+      // audio-feed-fp4r: with an allow-list configured, a request arriving on an
+      // unlisted host is answered before any route runs — the advertised origin,
+      // feed URLs, redirects and the WebAuthn RP ID never see a spoofed Host.
+      if (!requestHostAllowed(ctx.config, req)) {
+        return problem({
+          status: 421,
+          title: "misdirected_request",
+          detail: "This deployment does not serve the requested host.",
+        });
+      }
+      return await handle(req, info);
+    },
+  };
 }
