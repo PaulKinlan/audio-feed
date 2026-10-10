@@ -37,7 +37,7 @@ import { resolveOrigin } from "../origin.ts";
 import { assetUrl } from "./assets.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { renderShell, type Viewer, viewerOf } from "./shell.ts";
-import { htmlContentSecurityPolicy, newCspNonce } from "./csp.ts";
+import { htmlResponse, newCspNonce } from "./csp.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
 
@@ -423,11 +423,10 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
   const origin = resolveOrigin(ctx.config, req);
   const user = await sessionUser(ctx.stores.metadata, req);
   const nonce = newCspNonce();
-  const headers = {
-    "content-type": "text/html; charset=utf-8",
-    // The nonce-bearing policy is attached here because this handler builds its own headers
-    // for both the 403 and the 200 branch (audio-feed-syhu).
-    "content-security-policy": htmlContentSecurityPolicy(nonce),
+  // Everything but content-type and the CSP: those two are attached by
+  // `htmlResponse` at each return so the header can never drift from the nonce
+  // stamped into the document (audio-feed-syhu, audio-feed-ivbt).
+  const baseHeaders = {
     // `no-store`: this document is the one place a feed token is displayed, and
     // it prompts for the admin token. It must never sit in a cache.
     "cache-control": "no-store",
@@ -446,7 +445,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
   and sign in with the right passkey.</p>
   <div class="actions"><a class="btn" href="/account">Go to your account</a></div>
 </div>`;
-    return new Response(
+    return htmlResponse(
       renderShell({
         title: "Admin — Audio Feed",
         viewer: viewerOf(user),
@@ -456,7 +455,8 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
         main,
         nonce,
       }),
-      { status: 403, headers },
+      nonce,
+      { status: 403, headers: baseHeaders },
     );
   }
 
@@ -468,5 +468,5 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     viewer: viewerOf(user),
     nonce,
   });
-  return new Response(html, { status: 200, headers });
+  return htmlResponse(html, nonce, { status: 200, headers: baseHeaders });
 }

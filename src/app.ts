@@ -42,7 +42,7 @@ import {
   renderListenLanding,
 } from "./routes/listen.ts";
 import { handleAsset } from "./routes/assets.ts";
-import { htmlContentSecurityPolicy, newCspNonce } from "./routes/csp.ts";
+import { htmlResponse, newCspNonce } from "./routes/csp.ts";
 import { handleShare } from "./routes/share.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
@@ -137,15 +137,16 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     "/listen",
     ({ ctx, req }) => {
       const nonce = newCspNonce();
-      return new Response(renderListenLanding(resolveOrigin(ctx.config, req).baseUrl, nonce), {
-        status: 200,
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "content-security-policy": htmlContentSecurityPolicy(nonce),
-          "cache-control": "no-store",
-          "referrer-policy": "no-referrer",
+      return htmlResponse(
+        renderListenLanding(resolveOrigin(ctx.config, req).baseUrl, nonce),
+        nonce,
+        {
+          headers: {
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+          },
         },
-      });
+      );
     },
   );
   // audio-feed-3xq: content-addressed static assets (see src/routes/assets.ts).
