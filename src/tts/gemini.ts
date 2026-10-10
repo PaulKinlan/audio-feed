@@ -1689,7 +1689,12 @@ export class GeminiTtsClient {
         `${errMsg} [model=${model}, inputBytes=${inputBytes}, estimatedInputTokens<=${inputBytes} (UTF-8-byte bound), ` +
           `maxOutputTokens=${request.generationConfig.maxOutputTokens ?? "unset"}]`,
         res.status,
-        errDetails,
+        // audio-feed-bp6r: details must ALWAYS be a non-Error object here —
+        // describeSynthesisFailure reads that shape as "this status came from a real
+        // API response". An unparseable body (proxy/gateway 5xx, HTML error page)
+        // still came from the provider, so stand in with the status text rather
+        // than leaving details undefined and losing the provider-status label.
+        errDetails ?? { statusText: res.statusText },
       );
       const retryable = retryOn !== "none" && attempt < attempts &&
         (TRANSIENT_STATUSES.has(res.status) ||

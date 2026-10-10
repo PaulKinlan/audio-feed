@@ -189,6 +189,39 @@ Deno.test("a timeout during the response body read is named with its deadline (a
   }
 });
 
+Deno.test("caller cancellation during the body read surfaces as-is (audio-feed-bp6r)", async () => {
+  // The body-read catch must keep the same caller-first precedence as the fetch stage:
+  // a caller abort mid-stream is the lease expiring, not the per-attempt deadline.
+  const caller = new AbortController();
+  caller.abort(new Error("caller gave up"));
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          controller.error(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => controller.error(signal.reason));
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  }) as typeof fetch;
+
+  let message = "";
+  try {
+    await client(streaming, { timeoutMs: 30_000, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/caller gave up/.test(message)) {
+    throw new Error(`caller abort must surface raw, got: ${message}`);
+  }
+});
+
 Deno.test("caller cancellation is never retried and surfaces as-is", async () => {
   const controller = new AbortController();
   let attempts = 0;
