@@ -1,4 +1,5 @@
 import type { CodeHandling } from "../types.ts";
+import { attemptDeadline } from "./deadline.ts";
 import { assertTextSeams, runManagedTurns, splitTextUnderByteBudget } from "../synthesis/limits.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 
@@ -1680,9 +1681,13 @@ export class GeminiTtsClient {
     while (true) {
       // Attempt number is only there to scale backoff, so a refused retry must leave it alone.
       const attempt = 1 + statusRetries + timeoutRetries;
-      const deadline = AbortSignal.timeout(timeoutMs);
+      // audio-feed-0cmu: a CLEARABLE deadline, disposed when this attempt ends. `AbortSignal.any`
+      // is deliberately not used here: once that composite aborts it re-refs the caller's lease
+      // timer and holds the event loop long after the work is done. `using` disposes on every exit
+      // from this block, including both retry paths.
+      using deadline = attemptDeadline(timeoutMs, options.signal);
       // The caller's signal (if any) still wins; the timeout is the floor, never a replacement for it.
-      const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+      const signal = deadline.signal;
 
       let res: Response;
       try {
@@ -1698,7 +1703,7 @@ export class GeminiTtsClient {
         // CALLER's signal did not fire. The old `!options.signal` guard mislabelled every
         // production timeout — the worker always passes a lease signal, so Paul's UI showed
         // the raw "The operation was aborted due to timeout" with no timeout value attached.
-        const timedOut = deadline.aborted && !options.signal?.aborted;
+        const timedOut = deadline.timedOut() && !options.signal?.aborted;
         lastError = timedOut
           ? new GeminiTtsError(
             `Gemini TTS request timed out after ${timeoutMs}ms`,
@@ -1730,7 +1735,7 @@ export class GeminiTtsClient {
           // 59.8s, then the abort killed the body read. Name it with the deadline that
           // fired, unless the caller's own signal did.
           if (options.signal?.aborted) throw error;
-          if (deadline.aborted) {
+          if (deadline.timedOut()) {
             lastError = new GeminiTtsError(
               `Gemini TTS request timed out after ${timeoutMs}ms while reading the response body`,
               undefined,
@@ -1773,7 +1778,7 @@ export class GeminiTtsClient {
         // classification is deliberately untouched: this response still came from the provider, so
         // res.status decides (and `details` stays the non-Error { statusText } stand-in below).
         if (options.signal?.aborted) throw error; // a lease expiry is not a provider error
-        if (deadline.aborted) {
+        if (deadline.timedOut()) {
           errMsg +=
             ` (Gemini TTS request timed out after ${timeoutMs}ms while reading the error response body)`;
         }

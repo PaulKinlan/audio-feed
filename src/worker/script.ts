@@ -29,6 +29,7 @@
  * `formatDialoguePrompt` is exported.
  */
 import type { DialogueSpeaker, DialogueTurn } from "../tts/gemini.ts";
+import { attemptDeadline } from "../tts/deadline.ts";
 import { runManagedTurns } from "../synthesis/limits.ts";
 
 /**
@@ -463,8 +464,11 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
           generationConfig: { temperature: 0.7, maxOutputTokens: SCRIPT_MAX_OUTPUT_TOKENS },
         };
         // Each turn has its own deadline; the synthesis caller also bounds the whole stage.
-        const deadline = AbortSignal.timeout(timeoutMs);
-        const signal = options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+        // audio-feed-0cmu: clearable, and disposed when this turn's request function returns — an
+        // `AbortSignal.any` composite would re-ref the caller's stage/lease timer once it aborted
+        // and keep a finished process alive for the rest of that bound.
+        using deadline = attemptDeadline(timeoutMs, options?.signal);
+        const signal = deadline.signal;
         let response: Response;
         try {
           response = await fetchFn(url, {
@@ -479,7 +483,7 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
               cause: error,
             });
           }
-          if (deadline.aborted) {
+          if (deadline.timedOut()) {
             throw new GroundedScriptError(`script request timed out after ${timeoutMs}ms`, {
               cause: error,
             });
