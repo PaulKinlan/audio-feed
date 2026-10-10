@@ -36,12 +36,18 @@ export async function createTempChromeProfile(
   };
 }
 
-export function newestChrome(): string {
+export function newestChrome(chromeCacheRoot?: string): string {
   const home = Deno.env.get("HOME") ?? "";
-  const root = `${home}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
+  const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`;
+  let dirs: string[] = [];
+  try {
+    dirs = [...Deno.readDirSync(root)]
+      .filter((d) => d.isDirectory)
+      .map((d) => d.name)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  } catch {
+    dirs = [];
+  }
   if (dirs.length === 0) {
     throw new Error(`No Chrome binaries found under ${root}`);
   }
