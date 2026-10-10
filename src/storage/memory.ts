@@ -34,6 +34,8 @@ import {
   type DownloadCounts,
   type EpisodeClaim,
   type EpisodeQuery,
+  type MetadataRepositories,
+  metadataRepositories,
   type MetadataStore,
   resolveRange,
   RUN_HISTORY_LIMIT,
@@ -97,6 +99,13 @@ export class MemoryBlobStore implements BlobStore {
 }
 
 export class MemoryMetadataStore implements MetadataStore {
+  /**
+   * The per-domain views of this store (audio-feed-d9sl Phase 1). Every member is this store, so
+   * `repositories.episodes.getEpisode(a, b)` and `getEpisode(a, b)` are the same call; the value is
+   * the type boundary that lets a lane depend on one domain instead of all 62 methods.
+   */
+  readonly repositories: MetadataRepositories = metadataRepositories(this);
+
   readonly #users = new Map<string, User>();
   readonly #approvals: ApprovalRecord[] = [];
   readonly #sources = new Map<string, Source>();

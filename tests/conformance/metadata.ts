@@ -22,7 +22,7 @@ export interface MetadataSuiteOptions {
 }
 
 export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
-  const test = (label: string, fn: (store: MetadataStore) => Promise<void>) => {
+  const test = (label: string, fn: (store: MetadataStore) => void | Promise<void>) => {
     Deno.test(`${name}: ${label}`, async () => {
       const store = await create();
       try {
@@ -2001,6 +2001,83 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals((await store.listSynthesisSegments("user-1", "e-seg")).length, 2);
     await store.clearSynthesisSegments("user-1", "e-seg");
     assertEquals(await store.listSynthesisSegments("user-1", "e-seg"), []);
+  });
+
+  // -- domain repositories (audio-feed-d9sl Phase 1) ---------------------------
+  //
+  // The facade is a type boundary, not a second implementation: in Phase 1 every view IS the
+  // store, which is exactly what makes the grouping behaviour-preserving. These cases pin that
+  // for every adapter. A Phase 2 that gives a domain its own implementation has to come here and
+  // change the identity case deliberately, which is the point — it is a decision, not a drift.
+
+  test("exposes every domain of the store, and each view is the store itself", (store) => {
+    const repositories = store.repositories;
+    assertEquals(
+      Object.keys(repositories).sort(),
+      [
+        "articles",
+        "auth",
+        "episodes",
+        "notifications",
+        "orphanBlobs",
+        "runs",
+        "segments",
+        "sources",
+        "usage",
+        "users",
+      ],
+      "the domain list is the contract: adding an entity means adding a domain",
+    );
+    for (const [domain, view] of Object.entries(repositories)) {
+      assert(
+        view === store,
+        `${domain} must be the store itself in Phase 1, not a wrapper over it`,
+      );
+    }
+  });
+
+  test("a call through a domain view is the same call, and the same result", async (store) => {
+    // One write per domain that owns one, so a view that pointed at a different store (a copy, a
+    // second connection, a stale snapshot) could not pass this.
+    const user = makeUser({ id: "repo-user", email: "repo@example.com" });
+    assert(await store.repositories.users.insertUser(user));
+    assertEquals(await store.getUser(user.id), await store.repositories.users.getUser(user.id));
+
+    const source = makeSource({ id: "repo-source", userId: user.id });
+    await store.repositories.sources.putSource(source);
+    assertEquals(await store.repositories.sources.getSource(user.id, source.id), source);
+
+    const episode = makeEpisode({ id: "repo-episode", userId: user.id, sourceId: source.id });
+    await store.repositories.episodes.putEpisode(episode);
+    assertEquals(await store.repositories.episodes.getEpisode(user.id, episode.id), episode);
+    // The episode domain includes the recovery transitions, not just the queue.
+    assertEquals(typeof store.repositories.episodes.retryEpisode, "function");
+    assertEquals(typeof store.repositories.episodes.cancelRegeneration, "function");
+
+    const article = makeArticle({ id: "repo-article", userId: user.id, sourceId: source.id });
+    await store.repositories.articles.putArticle(article);
+    // Field-wise, not deep-equal: the KV adapter records its own `chunkCount` on hydration
+    // (audio-feed-cei), which is not part of the article the caller wrote.
+    const readBack = await store.repositories.articles.getArticle(user.id, article.id);
+    assertEquals(readBack?.id, article.id);
+    assertEquals(readBack?.content, article.content);
+
+    for (
+      const [domain, method] of [
+        ["segments", "reserveSynthesisSegment"],
+        ["orphanBlobs", "recordOrphanBlob"],
+        ["usage", "recordDownload"],
+        ["notifications", "queueNotification"],
+        ["runs", "listRuns"],
+        ["auth", "getSession"],
+      ] as const
+    ) {
+      assertEquals(
+        typeof (store.repositories[domain] as unknown as Record<string, unknown>)[method],
+        "function",
+        `${domain}.${method} must be reachable through the facade`,
+      );
+    }
   });
 }
 
