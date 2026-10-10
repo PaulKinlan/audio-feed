@@ -222,6 +222,98 @@ Deno.test("caller cancellation during the body read surfaces as-is (audio-feed-b
   }
 });
 
+Deno.test("a deadline during a non-2xx error-body read is named with its deadline (audio-feed-icl4)", async () => {
+  // The same path the incident took, one branch over: a proxy/gateway 5xx whose error body streams
+  // slowly. The old bare `catch {}` swallowed the abort, so the persisted cause read like an
+  // ordinary provider rejection with an empty body and our own bound was invisible.
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener("abort", () => controller.error(init.signal!.reason));
+      },
+    });
+    return Promise.resolve(
+      new Response(body, {
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: { "content-type": "text/html" },
+      }),
+    );
+  }) as typeof fetch;
+
+  const caller = new AbortController(); // live but never fired, like the worker's lease signal
+  let error: unknown;
+  try {
+    // Through synthesizeNarration, because that is where `permanent` is decided: the wrapper reads
+    // the inner provider verdict and must keep reading it the same way.
+    await client(streaming, { timeoutMs: 150, retryOn: "none" })
+      .synthesizeNarration({ title: "Title", body: "hello" }, { signal: caller.signal });
+  } catch (caught) {
+    error = caught;
+  }
+
+  if (!(error instanceof GeminiTtsError)) {
+    throw new Error(`expected a GeminiTtsError, got ${error}`);
+  }
+  // Named with the deadline that fired…
+  if (!/timed out after 150ms while reading the error response body/.test(error.message)) {
+    throw new Error(`deadline must be named on the non-2xx path, got: ${error.message}`);
+  }
+  // …while the classification is untouched: the PROVIDER's status survives, so the failure stays
+  // permanent and describeSynthesisFailure still labels it "provider status 503".
+  if (error.status !== 503) throw new Error(`provider status must survive, got ${error.status}`);
+  if (error.permanent !== true) throw new Error("a provider verdict must stay permanent");
+  if (!/503/.test(error.message)) {
+    throw new Error(`status text must survive, got: ${error.message}`);
+  }
+
+  // The inner error keeps the non-Error provider-response shape the status label is read from.
+  const inner = error.details;
+  if (!(inner instanceof GeminiTtsError) || inner.status !== 503) {
+    throw new Error(`the inner failure must stay a 503 provider error, got ${inner}`);
+  }
+  if (inner.details === undefined || inner.details instanceof Error) {
+    throw new Error("inner details must stay the non-Error { statusText } stand-in");
+  }
+});
+
+Deno.test("caller cancellation during a non-2xx error-body read surfaces as-is (audio-feed-icl4)", async () => {
+  // A lease expiry is not a provider error, so it must not be dressed up as a 503 the way the old
+  // swallow did (the ok branch already had this precedence, audio-feed-bp6r).
+  const caller = new AbortController();
+  caller.abort(new Error("caller gave up"));
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          controller.error(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => controller.error(signal.reason));
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 503, statusText: "Service Unavailable" }),
+    );
+  }) as typeof fetch;
+
+  let error: unknown;
+  try {
+    await client(streaming, { timeoutMs: 30_000, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (caught) {
+    error = caught;
+  }
+
+  if (error instanceof GeminiTtsError) {
+    throw new Error(`a lease abort must not become a provider error, got: ${error.message}`);
+  }
+  if (!/caller gave up/.test(String((error as Error)?.message ?? error))) {
+    throw new Error(`caller abort must surface raw, got: ${error}`);
+  }
+});
+
 Deno.test("caller cancellation is never retried and surfaces as-is", async () => {
   const controller = new AbortController();
   let attempts = 0;

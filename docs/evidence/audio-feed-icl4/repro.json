@@ -1,0 +1,27 @@
+{
+  "bead": "audio-feed-icl4",
+  "capturedAt": "2026-10-10T22:16:13.763Z",
+  "capturedAgainst": "post-fix; the pre-fix persisted string is quoted from the reviewer's bead evidence",
+  "preFixPersistedError": "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: Service Unavailable [model=gemini-3.8-flash-tts, inputBytes=..., estimatedInputTokens<=..., maxOutputTokens=16384] [mode direct; claim 1/3; provider status 503]",
+  "caseA_deadlineKilledErrorBody": {
+    "description": "503 + a never-enqueuing error body, per-attempt deadline 200ms, 15-minute lease signal live but never fired. Driven through createGeminiSynthesizer + runSynthesisBatch, so the recorded string is the one an operator would see.",
+    "status": "failed",
+    "persistedError": "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: Service Unavailable (Gemini TTS request timed out after 200ms while reading the error response body) [model=gemini-3.8-flash-tts, inputBytes=111, estimatedInputTokens<=111 (UTF-8-byte bound), maxOutputTokens=16384] [mode direct; claim 1/3; provider status 503]",
+    "failed": [
+      {
+        "episodeId": "episode-1",
+        "error": "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: Service Unavailable (Gemini TTS request timed out after 200ms while reading the error response body) [model=gemini-3.8-flash-tts, inputBytes=111, estimatedInputTokens<=111 (UTF-8-byte bound), maxOutputTokens=16384] [mode direct; claim 1/3; provider status 503]",
+        "title": "An Article"
+      }
+    ],
+    "namesTheDeadline": true,
+    "keepsProviderStatus": true
+  },
+  "caseB_callerAbortedErrorBody": {
+    "description": "The CALLER's signal aborts while the error body is being read. The lease expiry must surface as itself, not be dressed up as provider status 503.",
+    "result": "failure",
+    "isProviderError": false,
+    "name": "Error",
+    "message": "lease expired"
+  }
+}
