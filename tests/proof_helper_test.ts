@@ -8,8 +8,63 @@
  * - Premature harness exit before /health is detected and fails fast
  */
 
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { createTempChromeProfile, spawnHarness } from "../scripts/proof-helper.ts";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "../scripts/proof-helper.ts";
+
+Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
+  try {
+    const chrome = newestChrome();
+    assertStringIncludes(chrome, "chrome-linux64/chrome");
+  } catch (err) {
+    assertStringIncludes((err as Error).message, "No Chrome binaries found under");
+  }
+});
+
+Deno.test("proof-helper: newestChrome throws descriptive error for absent cache directory", () => {
+  const absentDir = "/nonexistent-audiofeed-puppeteer-chrome";
+  assertThrows(
+    () => newestChrome(absentDir),
+    Error,
+    `No Chrome binaries found under ${absentDir}`,
+  );
+});
+
+Deno.test({
+  name:
+    "proof-helper: newestChrome handles controlled absent/empty cache fixtures and resolves newest version",
+  ignore: (await Deno.permissions.query({ name: "write" })).state !== "granted",
+  async fn() {
+    const tempDir = await Deno.makeTempDir({ prefix: "audiofeed-chrome-test-" });
+    try {
+      const absentDir = `${tempDir}/absent-puppeteer-chrome`;
+      const emptyDir = `${tempDir}/empty-puppeteer-chrome`;
+      await Deno.mkdir(emptyDir);
+
+      assertThrows(
+        () => newestChrome(absentDir),
+        Error,
+        `No Chrome binaries found under ${absentDir}`,
+      );
+
+      assertThrows(
+        () => newestChrome(emptyDir),
+        Error,
+        `No Chrome binaries found under ${emptyDir}`,
+      );
+
+      const v1 = `${tempDir}/mock-cache/120.0.0`;
+      const v2 = `${tempDir}/mock-cache/121.0.0`;
+      await Deno.mkdir(v1, { recursive: true });
+      await Deno.mkdir(v2, { recursive: true });
+      assertEquals(
+        newestChrome(`${tempDir}/mock-cache`),
+        `${tempDir}/mock-cache/121.0.0/chrome-linux64/chrome`,
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+    }
+  },
+});
 
 Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes temp dir", async () => {
   const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-profile-");

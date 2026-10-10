@@ -21,20 +21,11 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { pcmToWav } from "../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { newestChrome } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-msw/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
 const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-msw-" });
 const VOICES = ["Aoede", "Charon", "Fenrir", "Kore", "Puck"];
-
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)]
-    .filter((d) => d.isDirectory)
-    .map((d) => d.name)
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
