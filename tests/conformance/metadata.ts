@@ -16,7 +16,9 @@ import { createMetadataHarness, type MetadataSuiteOptions } from "./metadata/har
 import { registerUsersCases } from "./metadata/users.ts";
 import { registerSourcesCases } from "./metadata/sources.ts";
 import { registerArticlesCases } from "./metadata/articles.ts";
-import { registerEpisodesCases } from "./metadata/episodes.ts";
+import { registerEpisodesQueueCases } from "./metadata/episodes-queue.ts";
+import { registerEpisodesClaimsCases } from "./metadata/episodes-claims.ts";
+import { registerEpisodesRegenerationCases } from "./metadata/episodes-regeneration.ts";
 import { registerUsageCases } from "./metadata/usage.ts";
 import { registerNotificationsCases } from "./metadata/notifications.ts";
 import { registerAuthCases } from "./metadata/auth.ts";
@@ -30,7 +32,9 @@ export function runMetadataConformance(options: MetadataSuiteOptions) {
   registerUsersCases(suite);
   registerSourcesCases(suite);
   registerArticlesCases(suite);
-  registerEpisodesCases(suite);
+  registerEpisodesQueueCases(suite);
+  registerEpisodesClaimsCases(suite);
+  registerEpisodesRegenerationCases(suite);
   registerUsageCases(suite);
   registerNotificationsCases(suite);
   registerAuthCases(suite);

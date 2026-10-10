@@ -1,0 +1,49 @@
+# every case body of tests/conformance/metadata/episodes.ts at main c80674a, checked against
+# episodes-queue.ts / episodes-claims.ts / episodes-regeneration.ts after the b75q split.
+# A case matches when its whitespace-normalised text appears in the new modules: no assertion,
+# label or comment inside any case was edited while moving.
+# 44 of 44 cases verbatim
+  ok   test("lists episodes newest first", async (store) => {
+  ok   test("orders identical timestamps deterministically", async (store) => {
+  ok   test("filters by source and keeps time order across modes", async (store) => {
+  ok   test("filters by mode", async (store) => {
+  ok   test("filters by source and mode together", async (store) => {
+  ok   test("filters by status so feeds exclude unfinished work", async (store) => {
+  ok   test("honours the limit", async (store) => {
+  ok   test("a filtered listEpisodes returns matches sitting beyond limit index entries", async (store) => 
+  ok   test("pages a full scan with no omission and no repeat", async (store) => {
+  ok   test("a short or empty page is not the end of the scan", async (store) => {
+  ok   test("a delete behind the cursor does not skip the next episode", async (store) => {
+  ok   test("never leaks episodes across users", async (store) => {
+  ok   test("overwrites an episode in place on status transition", async (store) => {
+  ok   test("deletes an episode and removes it from user and pending indexes", async (store) => {
+  ok   test("backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio
+  ok   test("returns copies, not live references", async (store) => {
+  ok   test("a claim takes ownership and records the lease", async (store) => {
+  ok   test("claiming an unknown episode resolves null, never throws", async (store) => {
+  ok   test("a live claim is refused", async (store) => {
+  ok   test("CONCURRENT claims produce exactly one winner", async (store) => {
+  ok   test("an expired lease is reclaimable", async (store) => {
+  ok   test("a synthesizing episode with no claim at all is reclaimable", async (store) => {
+  ok   test("terminal episodes are never claimable", async (store) => {
+  ok   test("the attempt bound abandons a poison job instead of re-billing it", async (store) => {
+  ok   test("abandonment preserves the last recorded cause (audio-feed-bp6r)", async (store) => {
+  ok   test("abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r)", asy
+  ok   test("the claim owner may write the terminal state", async (store) => {
+  ok   test("a superseded worker cannot overwrite the winner's result", async (store) => {
+  ok   test("completing an episode nobody claimed is refused", async (store) => {
+  ok   test("a completed episode leaves the feed indexes consistent", async (store) => {
+  ok   test("new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-
+  ok   test("regenerations are still served when there is no new work (audio-feed-15e)", async (store) => {
+  ok   test("an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e)", as
+  ok   test("retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2)", async (st
+  ok   test("retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2)", async (sto
+  ok   test("a retried episode survives a second failure and can be retried again (audio-feed-7s2)", async 
+  ok   test("requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)", async (store)
+  ok   test("requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz)", async (store) =>
+  ok   test("cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz)", async (store
+  ok   test("an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz)", async (st
+  ok   test("orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)", async (
+  ok   test("listPendingEpisodes returns pending episodes oldest first (FIFO)", async (store) => {
+  ok   test("listPendingEpisodes excludes ready, failed, and actively leased episodes", async (store) => {
+  ok   test("listPendingEpisodes honours limit", async (store) => {

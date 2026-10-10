@@ -1,0 +1,215 @@
+KvMetadataStore: CONCURRENT claims produce exactly one winner ... ok
+KvMetadataStore: F1 acceptance matrix - byte-safe chunking across non-ASCII, CJK, and emoji (audio-feed-cei) ... ok
+KvMetadataStore: F2 hydration refusal - missing chunk throws naming id, expected and found count (audio-feed-cei) ...
+KvMetadataStore: F2 hydration refusal - missing chunk throws naming id, expected and found count (audio-feed-cei) ... ok
+KvMetadataStore: a FAILED run is recorded, not dropped ... ok
+KvMetadataStore: a WebAuthn challenge is consumable exactly once (audio-feed-8fc) ... ok
+KvMetadataStore: a busy job cannot evict a quiet one's history (audio-feed-ct1) ... ok
+KvMetadataStore: a call through a domain view is the same call, and the same result ... ok
+KvMetadataStore: a claim takes ownership and records the lease ... ok
+KvMetadataStore: a completed episode leaves the feed indexes consistent ... ok
+KvMetadataStore: a delete behind the cursor does not skip the next episode ... ok
+KvMetadataStore: a filtered listEpisodes returns matches sitting beyond limit index entries ... ok
+KvMetadataStore: a live claim is refused ... ok
+KvMetadataStore: a passkey can only be deleted by its owner (audio-feed-8fc) ... ok
+KvMetadataStore: a retried episode survives a second failure and can be retried again (audio-feed-7s2) ... ok
+KvMetadataStore: a rotated feed token revokes the old one ... ok
+KvMetadataStore: a run of idle ticks is kept as one row, the latest (audio-feed-0ob) ... ok
+KvMetadataStore: a run round-trips every field ... ok
+KvMetadataStore: a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1) ... ok
+KvMetadataStore: a setup link is readable, then consumable exactly once (audio-feed-8fc) ... ok
+KvMetadataStore: a short or empty page is not the end of the scan ... ok
+KvMetadataStore: a superseded worker cannot overwrite the winner's result ... ok
+KvMetadataStore: a suspended admin does not count toward the last active admin (audio-feed-8fc) ... ok
+KvMetadataStore: a synthesizing episode with no claim at all is reclaimable ... ok
+KvMetadataStore: a user with no downloads does not appear in the breakdown ... ok
+KvMetadataStore: a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc) ... ok
+KvMetadataStore: abandonment preserves the last recorded cause (audio-feed-bp6r) ... ok
+KvMetadataStore: abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r) ... ok
+KvMetadataStore: account records never appear as users (audio-feed-8fc) ... ok
+KvMetadataStore: an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz) ... ok
+KvMetadataStore: an empty store reports empty outbox (audio-feed-np5) ... ok
+KvMetadataStore: an empty store reports no downloads ... ok
+KvMetadataStore: an empty store reports no runs ... ok
+KvMetadataStore: an empty store reports no synthesis (audio-feed-9mp) ... ok
+KvMetadataStore: an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e) ... ok
+KvMetadataStore: an expired lease is reclaimable ... ok
+KvMetadataStore: an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob) ... ok
+KvMetadataStore: an unattributable download counts toward the total only ... ok
+KvMetadataStore: an unknown, empty, or malformed feed token resolves null, never throws ... ok
+KvMetadataStore: an update preserves fields the caller did not mention ... ok
+KvMetadataStore: backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio-feed-hvn) ... ok
+KvMetadataStore: cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz) ... ok
+KvMetadataStore: carries all four user statuses, including rejected ... ok
+KvMetadataStore: chunks and reconstitutes 150,000 character article with 100% fidelity (audio-feed-cei) ... ok
+KvMetadataStore: claiming an unknown episode resolves null, never throws ... ok
+KvMetadataStore: completing an episode nobody claimed is refused ... ok
+KvMetadataStore: concurrent inserts of one email produce exactly one winner ... ok
+KvMetadataStore: daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp) ... ok
+KvMetadataStore: deleteArticle: removes article and its URL index (audio-feed-cei) ... ok
+KvMetadataStore: deletes a source ... ok
+KvMetadataStore: deletes an episode and removes it from user and pending indexes ... ok
+KvMetadataStore: does not leave a stale email index after an address change ... ok
+KvMetadataStore: exposes every domain of the store, each as its own repository ... ok
+KvMetadataStore: filters by mode ... ok
+KvMetadataStore: filters by source and keeps time order across modes ... ok
+KvMetadataStore: filters by source and mode together ... ok
+KvMetadataStore: filters by status so feeds exclude unfinished work ... ok
+KvMetadataStore: finds an article by url for dedupe ... ok
+KvMetadataStore: history is bounded ON WRITE, and keeps the newest ... ok
+KvMetadataStore: honours the limit ... ok
+KvMetadataStore: insertArticleIfAbsent and insertArticleWithEpisodeIfAbsent support chunking (audio-feed-cei) ... ok
+KvMetadataStore: insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m) ... ok
+KvMetadataStore: insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th) ... ok
+KvMetadataStore: insertUser refuses a duplicate email without throwing ... ok
+KvMetadataStore: insertUser refuses a duplicate feed token ... ok
+KvMetadataStore: insertUser refuses a duplicate id ... ok
+KvMetadataStore: insertUser writes a new user and reports success ... ok
+KvMetadataStore: ledger entries for different users at the same instant both survive ... ok
+KvMetadataStore: listPendingEpisodes excludes ready, failed, and actively leased episodes ... ok
+KvMetadataStore: listPendingEpisodes honours limit ... ok
+KvMetadataStore: listPendingEpisodes returns pending episodes oldest first (FIFO) ... ok
+KvMetadataStore: listRuns honours a limit ... ok
+KvMetadataStore: lists episodes newest first ... ok
+KvMetadataStore: looks a user up by email, case-insensitively ... ok
+KvMetadataStore: multi-batch atomic write rollback, retry, and base-atomic rollback (audio-feed-cei) ... ok
+KvMetadataStore: never leaks episodes across users ... ok
+KvMetadataStore: new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-15e) ... ok
+KvMetadataStore: orders identical timestamps deterministically ... ok
+KvMetadataStore: orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz) ... ok
+KvMetadataStore: overwrites an episode in place on status transition ... ok
+KvMetadataStore: pages a full scan with no omission and no repeat ... ok
+KvMetadataStore: preserves the approval gate fields verbatim ... ok
+KvMetadataStore: putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q) ... ok
+KvMetadataStore: queueNotification deduplicates identical episode notifications (audio-feed-np5) ... ok
+KvMetadataStore: queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5) ... ok
+KvMetadataStore: recordApproval writes the user and the ledger entry together ... ok
+KvMetadataStore: recordDownload counts per user and in total ... ok
+KvMetadataStore: recordSynthesis counts per user, total, and daily window (audio-feed-9mp) ... ok
+KvMetadataStore: recording an idle tick reads one entry, not the job's history (audio-feed-0ob) ... ok
+KvMetadataStore: regenerations are still served when there is no new work (audio-feed-15e) ... ok
+KvMetadataStore: reindexPendingEpisodes backfills pre-existing un-indexed pending episodes (audio-feed-7li) ... ok
+KvMetadataStore: requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz) ... ok
+KvMetadataStore: requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz) ... ok
+KvMetadataStore: resolves a user by feed token ... ok
+KvMetadataStore: retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2) ... ok
+KvMetadataStore: retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2) ... ok
+KvMetadataStore: returns copies, not live references ... ok
+KvMetadataStore: returns null for an unknown user ... ok
+KvMetadataStore: round-trips a session and forgets it on delete (audio-feed-8fc) ... ok
+KvMetadataStore: round-trips a user ... ok
+KvMetadataStore: round-trips every canonical user field, losing none ... ok
+KvMetadataStore: runs come back newest first ... ok
+KvMetadataStore: scopes sources to their user ... ok
+KvMetadataStore: segment reservation is claim-conditional, single-owner, and stealable after lease expiry ... ok
+KvMetadataStore: setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc) ... ok
+KvMetadataStore: stores passkeys per user and updates the counter in place (audio-feed-8fc) ... ok
+KvMetadataStore: supports multi-batch atomic chunking for 2,000,000 character article (audio-feed-cei) ... ok
+KvMetadataStore: terminal episodes are never claimable ... ok
+KvMetadataStore: the approval ledger is ordered oldest first and keeps every decision ... ok
+KvMetadataStore: the attempt bound abandons a poison job instead of re-billing it ... ok
+KvMetadataStore: the backfill moves a legacy pointer into its priority segment, leaving one ... ok
+KvMetadataStore: the claim owner may write the terminal state ... ok
+MemoryMetadataStore: CONCURRENT claims produce exactly one winner ... ok
+MemoryMetadataStore: a FAILED run is recorded, not dropped ... ok
+MemoryMetadataStore: a WebAuthn challenge is consumable exactly once (audio-feed-8fc) ... ok
+MemoryMetadataStore: a busy job cannot evict a quiet one's history (audio-feed-ct1) ... ok
+MemoryMetadataStore: a call through a domain view is the same call, and the same result ... ok
+MemoryMetadataStore: a claim takes ownership and records the lease ... ok
+MemoryMetadataStore: a completed episode leaves the feed indexes consistent ... ok
+MemoryMetadataStore: a delete behind the cursor does not skip the next episode ... ok
+MemoryMetadataStore: a filtered listEpisodes returns matches sitting beyond limit index entries ... ok
+MemoryMetadataStore: a live claim is refused ... ok
+MemoryMetadataStore: a passkey can only be deleted by its owner (audio-feed-8fc) ... ok
+MemoryMetadataStore: a retried episode survives a second failure and can be retried again (audio-feed-7s2) ... ok
+MemoryMetadataStore: a rotated feed token revokes the old one ... ok
+MemoryMetadataStore: a run of idle ticks is kept as one row, the latest (audio-feed-0ob) ... ok
+MemoryMetadataStore: a run round-trips every field ... ok
+MemoryMetadataStore: a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1) ... ok
+MemoryMetadataStore: a setup link is readable, then consumable exactly once (audio-feed-8fc) ... ok
+MemoryMetadataStore: a short or empty page is not the end of the scan ... ok
+MemoryMetadataStore: a superseded worker cannot overwrite the winner's result ... ok
+MemoryMetadataStore: a suspended admin does not count toward the last active admin (audio-feed-8fc) ... ok
+MemoryMetadataStore: a synthesizing episode with no claim at all is reclaimable ... ok
+MemoryMetadataStore: a user with no downloads does not appear in the breakdown ... ok
+MemoryMetadataStore: a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc) ... ok
+MemoryMetadataStore: abandonment preserves the last recorded cause (audio-feed-bp6r) ... ok
+MemoryMetadataStore: abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r) ... ok
+MemoryMetadataStore: account records never appear as users (audio-feed-8fc) ... ok
+MemoryMetadataStore: an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz) ... ok
+MemoryMetadataStore: an empty store reports empty outbox (audio-feed-np5) ... ok
+MemoryMetadataStore: an empty store reports no downloads ... ok
+MemoryMetadataStore: an empty store reports no runs ... ok
+MemoryMetadataStore: an empty store reports no synthesis (audio-feed-9mp) ... ok
+MemoryMetadataStore: an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e) ... ok
+MemoryMetadataStore: an expired lease is reclaimable ... ok
+MemoryMetadataStore: an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob) ... ok
+MemoryMetadataStore: an unattributable download counts toward the total only ... ok
+MemoryMetadataStore: an unknown, empty, or malformed feed token resolves null, never throws ... ok
+MemoryMetadataStore: an update preserves fields the caller did not mention ... ok
+MemoryMetadataStore: backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio-feed-hvn) ... ok
+MemoryMetadataStore: cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz) ... ok
+MemoryMetadataStore: carries all four user statuses, including rejected ... ok
+MemoryMetadataStore: claiming an unknown episode resolves null, never throws ... ok
+MemoryMetadataStore: completing an episode nobody claimed is refused ... ok
+MemoryMetadataStore: concurrent inserts of one email produce exactly one winner ... ok
+MemoryMetadataStore: daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp) ... ok
+MemoryMetadataStore: deleteArticle: removes article and its URL index (audio-feed-cei) ... ok
+MemoryMetadataStore: deletes a source ... ok
+MemoryMetadataStore: deletes an episode and removes it from user and pending indexes ... ok
+MemoryMetadataStore: does not leave a stale email index after an address change ... ok
+MemoryMetadataStore: exposes every domain of the store, each as its own repository ... ok
+MemoryMetadataStore: filters by mode ... ok
+MemoryMetadataStore: filters by source and keeps time order across modes ... ok
+MemoryMetadataStore: filters by source and mode together ... ok
+MemoryMetadataStore: filters by status so feeds exclude unfinished work ... ok
+MemoryMetadataStore: finds an article by url for dedupe ... ok
+MemoryMetadataStore: history is bounded ON WRITE, and keeps the newest ... ok
+MemoryMetadataStore: honours the limit ... ok
+MemoryMetadataStore: insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m) ... ok
+MemoryMetadataStore: insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th) ... ok
+MemoryMetadataStore: insertUser refuses a duplicate email without throwing ... ok
+MemoryMetadataStore: insertUser refuses a duplicate feed token ... ok
+MemoryMetadataStore: insertUser refuses a duplicate id ... ok
+MemoryMetadataStore: insertUser writes a new user and reports success ... ok
+MemoryMetadataStore: ledger entries for different users at the same instant both survive ... ok
+MemoryMetadataStore: listPendingEpisodes excludes ready, failed, and actively leased episodes ... ok
+MemoryMetadataStore: listPendingEpisodes honours limit ... ok
+MemoryMetadataStore: listPendingEpisodes returns pending episodes oldest first (FIFO) ... ok
+MemoryMetadataStore: listPendingEpisodes work per page is O(limit) and does not scale with backlog size N (audio-feed-2np) ... ok
+MemoryMetadataStore: listRuns honours a limit ... ok
+MemoryMetadataStore: lists episodes newest first ... ok
+MemoryMetadataStore: looks a user up by email, case-insensitively ... ok
+MemoryMetadataStore: never leaks episodes across users ... ok
+MemoryMetadataStore: new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-15e) ... ok
+MemoryMetadataStore: orders identical timestamps deterministically ... ok
+MemoryMetadataStore: orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz) ... ok
+MemoryMetadataStore: overwrites an episode in place on status transition ... ok
+MemoryMetadataStore: pages a full scan with no omission and no repeat ... ok
+MemoryMetadataStore: preserves the approval gate fields verbatim ... ok
+MemoryMetadataStore: putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q) ... ok
+MemoryMetadataStore: queueNotification deduplicates identical episode notifications (audio-feed-np5) ... ok
+MemoryMetadataStore: queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5) ... ok
+MemoryMetadataStore: recordApproval writes the user and the ledger entry together ... ok
+MemoryMetadataStore: recordDownload counts per user and in total ... ok
+MemoryMetadataStore: recordSynthesis counts per user, total, and daily window (audio-feed-9mp) ... ok
+MemoryMetadataStore: regenerations are still served when there is no new work (audio-feed-15e) ... ok
+MemoryMetadataStore: requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz) ... ok
+MemoryMetadataStore: requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz) ... ok
+MemoryMetadataStore: resolves a user by feed token ... ok
+MemoryMetadataStore: retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2) ... ok
+MemoryMetadataStore: retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2) ... ok
+MemoryMetadataStore: returns copies, not live references ... ok
+MemoryMetadataStore: returns null for an unknown user ... ok
+MemoryMetadataStore: round-trips a session and forgets it on delete (audio-feed-8fc) ... ok
+MemoryMetadataStore: round-trips a user ... ok
+MemoryMetadataStore: round-trips every canonical user field, losing none ... ok
+MemoryMetadataStore: runs come back newest first ... ok
+MemoryMetadataStore: scopes sources to their user ... ok
+MemoryMetadataStore: segment reservation is claim-conditional, single-owner, and stealable after lease expiry ... ok
+MemoryMetadataStore: setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc) ... ok
+MemoryMetadataStore: stores passkeys per user and updates the counter in place (audio-feed-8fc) ... ok
+MemoryMetadataStore: terminal episodes are never claimable ... ok
+MemoryMetadataStore: the approval ledger is ordered oldest first and keeps every decision ... ok
+MemoryMetadataStore: the attempt bound abandons a poison job instead of re-billing it ... ok
+MemoryMetadataStore: the claim owner may write the terminal state ... ok
