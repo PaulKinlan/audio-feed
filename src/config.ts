@@ -36,6 +36,17 @@ export interface AppConfig {
    * overwrites client-supplied values.
    */
   trustProxyHeaders?: boolean;
+  /**
+   * Hosts this deployment is willing to advertise (audio-feed-fp4r).
+   *
+   * From `ALLOWED_HOSTS` (comma-separated). When set, a request arriving on an
+   * unlisted host is answered `421 Misdirected Request` at the app boundary and
+   * never becomes the advertised origin — which also pins the WebAuthn RP ID,
+   * since that derives from the advertised origin's hostname. Unset keeps the
+   * request-derived origin behaviour that fixed audio-feed-0k3. The
+   * `publicBaseUrl` host is implicitly allowed; loopback always is.
+   */
+  allowedHosts?: string[];
   /** Present only when TTS is configured; 65u owns its use. */
   geminiApiKey?: string;
   /**
@@ -119,6 +130,10 @@ export function loadConfig(): AppConfig {
     // No localhost fallback. An unset value means "resolve it from the request",
     // which is the only thing that knows the real origin.
     publicBaseUrl: env("PUBLIC_BASE_URL")?.replace(/\/+$/, ""),
+    allowedHosts: env("ALLOWED_HOSTS")
+      ?.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     trustProxyHeaders: trust === "1" || trust === "true" || trust === "yes",
     notifyOutboxEnabled: env("NOTIFY_OUTBOX_ENABLED") === "true" ||
       env("NOTIFY_OUTBOX_ENABLED") === "1",

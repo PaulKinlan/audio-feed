@@ -151,6 +151,18 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         "Only correct behind a proxy that overwrites client-supplied values.",
     );
   }
+  // audio-feed-fp4r: with neither a pinned origin nor an allow-list, the
+  // advertised origin (and the WebAuthn RP ID derived from it) is whatever host
+  // each request arrived on. On Deno Deploy the platform router validates the
+  // host, but DENO_DEPLOYMENT_ID identifies the deployment, not its hostname —
+  // the pin has to come from configuration.
+  if (deploy && !config.publicBaseUrl && !config.allowedHosts?.length) {
+    console.warn(
+      "[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — " +
+        "the advertised origin and WebAuthn RP ID are derived from each request's host. " +
+        "Set ALLOWED_HOSTS to pin them.",
+    );
+  }
   if (!config.geminiApiKey) {
     console.warn("[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable");
   }

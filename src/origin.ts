@@ -47,6 +47,20 @@ export interface OriginConfig {
    * client choose the origin.
    */
   trustProxyHeaders?: boolean;
+  /**
+   * The hosts this deployment is willing to advertise (audio-feed-fp4r).
+   *
+   * Without it, the advertised origin — and with it feed `selfUrl`, enclosure
+   * `audioUrl`, redirects and the WebAuthn RP ID — is derived from the request
+   * host, which on any platform that does not validate Host is whatever the
+   * client sent. With it, a request arriving on an unlisted host never becomes
+   * the advertised origin: the pinned origin is used instead, and the app
+   * boundary answers the request `421 Misdirected Request`.
+   *
+   * The `publicBaseUrl` host is always implicitly allowed. Loopback hosts are
+   * always allowed so local development keeps working when the list is set.
+   */
+  allowedHosts?: string[];
 }
 
 export interface ResolvedOrigin {
@@ -61,6 +75,114 @@ export interface ResolvedOrigin {
    * "this page is wrong for everyone who asks after the attacker".
    */
   explicit: boolean;
+}
+
+/**
+ * The one shape both sides of the comparison use: lowercase, no IPv6 brackets
+ * (`URL.hostname` keeps them, an operator writing a list does not), no
+ * trailing dot (the same host DNS-wise, a different string).
+ */
+function bareHost(host: string): string {
+  const h = host.trim().toLowerCase().replace(/\.$/, "");
+  return h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+}
+
+/**
+ * Normalise one configured host entry for comparison. Entries are tolerated as
+ * hosts ("audio.example.com"), host:port, origins ("https://audio.example.com/")
+ * — an operator pasting the PUBLIC_BASE_URL value into ALLOWED_HOSTS has the
+ * right idea and possibly the wrong shape — and IPv6 literals. Anything that
+ * does not parse as a host at all is dropped rather than compared raw: a
+ * mis-shaped entry must not turn the gate on with a value nothing can match.
+ */
+function normaliseHost(entry: string): string {
+  const trimmed = entry.trim().toLowerCase();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    return bareHost(url.hostname);
+  } catch {
+    return "";
+  }
+}
+
+function isLoopbackHost(host: string): boolean {
+  // Exact loopback only. A `*.localhost` suffix arm would let
+  // `Host: evil.localhost` walk straight past the gate (fp4r review).
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" ||
+    host === "0.0.0.0";
+}
+
+/**
+ * The hosts a request may arrive on and still be advertised, or `null` when no
+ * allow-list is configured (the request host is then the only source of truth
+ * and is used as-is).
+ *
+ * The list only activates when the operator sets ALLOWED_HOSTS. The
+ * `publicBaseUrl` host is folded in so the canonical host never rejects
+ * itself, but setting PUBLIC_BASE_URL alone does not turn the gate on — the
+ * advertised origin is already pinned in that deployment, and gating would
+ * only break its preview URLs.
+ */
+function allowedHostSet(config: OriginConfig): Set<string> | null {
+  if (!config.allowedHosts?.length) return null;
+  const hosts = new Set<string>();
+  for (const entry of config.allowedHosts) {
+    const host = normaliseHost(entry);
+    if (host) hosts.add(host);
+  }
+  if (!isUnusableOrigin(config.publicBaseUrl)) {
+    hosts.add(bareHost(new URL(config.publicBaseUrl!).hostname));
+  }
+  return hosts.size ? hosts : null;
+}
+
+/**
+ * The host the request is effectively arriving on — the same host
+ * `requestOrigin` would derive the origin from, including an honoured
+ * `x-forwarded-host` under the explicit proxy opt-in — plus WHETHER it came
+ * from that header. A forwarded host is client-supplied text (that is the
+ * whole reason the opt-in exists), so it never earns the loopback exemption.
+ */
+function effectiveRequestHost(
+  request: Request,
+  trustProxyHeaders?: boolean,
+): { host: string; forwarded: boolean } | null {
+  if (trustProxyHeaders) {
+    const forwarded = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    if (forwarded) {
+      try {
+        // The header is a host[:port], not a URL; parse with a dummy scheme.
+        return { host: bareHost(new URL(`https://${forwarded}`).hostname), forwarded: true };
+      } catch {
+        return null;
+      }
+    }
+  }
+  try {
+    return { host: bareHost(new URL(request.url).hostname), forwarded: false };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this request arriving on a host the deployment is willing to advertise?
+ *
+ * `true` when no allow-list is configured (preserving the request-derived
+ * behaviour that fixed audio-feed-0k3), when the host is on the list, or when
+ * it is exact loopback AND the host the request actually arrived on — a local
+ * dev machine has nothing to poison but itself, and refusing it would break
+ * `deno task dev` the moment anyone sets the list. A client-supplied
+ * `x-forwarded-host: localhost` is a bypass, not a developer.
+ */
+export function requestHostAllowed(config: OriginConfig, request: Request): boolean {
+  const allowed = allowedHostSet(config);
+  if (!allowed) return true;
+  const effective = effectiveRequestHost(request, config.trustProxyHeaders);
+  if (!effective) return false;
+  if (allowed.has(effective.host)) return true;
+  return !effective.forwarded && isLoopbackHost(effective.host);
 }
 
 /** Strip trailing slashes so concatenation never produces `//feed`. */
@@ -140,6 +262,22 @@ export function requestOrigin(
 export function resolveOrigin(config: OriginConfig, request: Request): ResolvedOrigin {
   if (!isUnusableOrigin(config.publicBaseUrl)) {
     return { baseUrl: normalise(config.publicBaseUrl!), explicit: true };
+  }
+
+  // A request arriving on a host the operator has not listed must never become
+  // the advertised origin: that host is whatever the client chose to send.
+  // Pin to the first listed host instead of the attacker's. `explicit: true`
+  // because the value no longer varies with the request. The scheme comes from
+  // the request (ALLOWED_HOSTS entries are hosts, not origins); through
+  // `app.fetch` this branch is unreachable anyway — the 421 gate fires first —
+  // so it exists for direct handler callers.
+  if (!requestHostAllowed(config, request)) {
+    const pinned = [...allowedHostSet(config)!][0];
+    let proto = "https";
+    try {
+      if (new URL(request.url).protocol === "http:") proto = "http";
+    } catch { /* keep https */ }
+    return { baseUrl: `${proto}://${pinned}`, explicit: true };
   }
 
   const derived = requestOrigin(request, { trustProxyHeaders: config.trustProxyHeaders });
