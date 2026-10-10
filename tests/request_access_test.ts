@@ -5,7 +5,7 @@ import { memoryStores } from "../src/config.ts";
 import { type RateLimitStore, SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
 import { KvMetadataStore } from "../src/storage/kv.ts";
 import type { AtomicWrite } from "../src/storage/mod.ts";
-import { approveUser } from "../src/auth/users.ts";
+import { createUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -59,11 +59,11 @@ Deno.test("POST /api/request-access: creates pending user without leaking token 
     }),
   );
 
-  assertEquals(res.status, 201);
+  assertEquals(res.status, 200);
   const data = await res.json();
   assertEquals(data.ok, true);
-  assertEquals(data.status, "pending");
-  assertStringIncludes(data.message, "administrator will review");
+  assertEquals(data.status, undefined);
+  assertStringIncludes(data.message, "reviewed by an administrator");
   // CRITICAL: no token or capability URL in response
   assertEquals(data.feedToken, undefined);
   assertEquals(data.token, undefined);
@@ -96,7 +96,7 @@ Deno.test("POST /api/request-access: supports form urlencoded submission (audio-
     }),
   );
 
-  assertEquals(res.status, 201);
+  assertEquals(res.status, 200);
   const user = await stores.metadata.getUserByEmail("bob@example.com");
   assert(user !== null);
   assertEquals(user.status, "pending");
@@ -143,9 +143,9 @@ Deno.test("POST /api/request-access: rate limiter returns 429 when abuse thresho
     );
 
   // Requests 1, 2, 3 succeed
-  assertEquals((await req(1)).status, 201);
-  assertEquals((await req(2)).status, 201);
-  assertEquals((await req(3)).status, 201);
+  assertEquals((await req(1)).status, 200);
+  assertEquals((await req(2)).status, 200);
+  assertEquals((await req(3)).status, 200);
 
   // Request 4 from same IP is refused with 429
   const res4 = await req(4);
@@ -157,94 +157,76 @@ Deno.test("POST /api/request-access: rate limiter returns 429 when abuse thresho
 
   // Request from a different IP is permitted
   const resOtherIp = await req(5, "192.168.1.200");
-  assertEquals(resOtherIp.status, 201);
+  assertEquals(resOtherIp.status, 200);
 });
 
-Deno.test("POST /api/request-access: idempotent on re-submission without row duplication (audio-feed-r97)", async () => {
-  const { fetch, stores } = setup();
+Deno.test("POST /api/request-access: identical public response across account states (audio-feed-jesu)", async () => {
+  const { fetch, stores } = setup(20);
+  for (const status of ["pending", "approved", "rejected", "suspended"] as const) {
+    const user = await createUser(stores.metadata, { email: `${status}@example.com` });
+    if (status !== "pending") await stores.metadata.putUser({ ...user, status });
+  }
 
-  // First request
-  const res1 = await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "charlie@example.com" }),
-    }),
-  );
-  assertEquals(res1.status, 201);
+  const responses = [];
+  for (
+    const email of [
+      "unknown@example.com",
+      "pending@example.com",
+      "approved@example.com",
+      "rejected@example.com",
+      "suspended@example.com",
+    ]
+  ) {
+    const res = await fetch(
+      new Request(`${BASE}/api/request-access`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      }),
+    );
+    responses.push({ status: res.status, headers: [...res.headers], body: await res.text() });
+  }
+  for (const response of responses) assertEquals(response, responses[0]);
+  assertEquals(responses[0]?.status, 200);
+  assertEquals(JSON.parse(responses[0]!.body).status, undefined);
+  assertEquals(JSON.parse(responses[0]!.body).feedToken, undefined);
+  const users = await stores.metadata.listUsers();
+  assertEquals(users.length, 5, "only the unknown address was inserted");
+  for (const status of ["pending", "approved", "rejected", "suspended"] as const) {
+    assertEquals(users.find((user) => user.email === `${status}@example.com`)?.status, status);
+  }
 
-  // Second request with same email
-  const res2 = await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "charlie@example.com" }),
-    }),
-  );
-  assertEquals(res2.status, 200);
-  const data2 = await res2.json();
-  assertEquals(data2.ok, true);
-  assertEquals(data2.status, "pending");
-  assertStringIncludes(data2.message, "already pending");
-
-  // Only one user exists
-  const allUsers = await stores.metadata.listUsers();
-  assertEquals(allUsers.filter((u) => u.email === "charlie@example.com").length, 1);
-});
-
-Deno.test("POST /api/request-access: approved user resubmission states approval without leaking token (audio-feed-r97)", async () => {
-  const { fetch, stores } = setup();
-
-  // Create and approve user
-  await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "diana@example.com" }),
-    }),
-  );
-  const user = await stores.metadata.getUserByEmail("diana@example.com");
-  await approveUser(stores.metadata, user!.id, "admin");
-
-  // Resubmit
-  const res = await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "diana@example.com" }),
-    }),
-  );
-  assertEquals(res.status, 200);
-  const data = await res.json();
-  assertEquals(data.status, "approved");
-  assertStringIncludes(data.message, "already approved");
-  assertEquals(data.feedToken, undefined);
-});
-
-Deno.test("POST /api/request-access: suspended account resubmission clearly states suspension (audio-feed-r97)", async () => {
-  const { fetch, stores } = setup();
-
-  await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "suspended@example.com" }),
-    }),
-  );
-  const user = await stores.metadata.getUserByEmail("suspended@example.com");
-  await stores.metadata.putUser({ ...user!, status: "suspended" });
-
-  const res = await fetch(
-    new Request(`${BASE}/api/request-access`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "suspended@example.com" }),
-    }),
-  );
-  assertEquals(res.status, 200);
-  const data = await res.json();
-  assertEquals(data.status, "suspended");
-  assertStringIncludes(data.message, "account is suspended");
+  // Browser form responses have per-response CSP nonces; compare all other bytes.
+  const htmlResponses = [];
+  for (
+    const email of [
+      "html-unknown@example.com",
+      "pending@example.com",
+      "approved@example.com",
+      "rejected@example.com",
+      "suspended@example.com",
+    ]
+  ) {
+    const res = await fetch(
+      new Request(`${BASE}/api/request-access`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "accept": "text/html",
+        },
+        body: new URLSearchParams({ email }),
+      }),
+    );
+    htmlResponses.push({
+      status: res.status,
+      headers: [...res.headers].map((
+        [key, value],
+      ) => [key, value.replaceAll(/nonce-[A-Za-z0-9+/]+/g, "nonce-REDACTED")]),
+      body: (await res.text()).replaceAll(/nonce="[A-Za-z0-9+/]+"/g, 'nonce="REDACTED"'),
+    });
+  }
+  for (const response of htmlResponses) assertEquals(response, htmlResponses[0]);
+  assertEquals(htmlResponses[0]?.status, 200);
 });
 
 Deno.test("POST /api/request-access: returns HTML confirmation for browser form post (audio-feed-r97)", async () => {
@@ -264,7 +246,7 @@ Deno.test("POST /api/request-access: returns HTML confirmation for browser form 
     }),
   );
 
-  assertEquals(res.status, 201);
+  assertEquals(res.status, 200);
   assertStringIncludes(res.headers.get("content-type") ?? "", "text/html");
   const html = await res.text();
   assertStringIncludes(html, "Access Request Received");
@@ -432,10 +414,10 @@ Deno.test("SlidingWindowRateLimiter: reset keeps a TTL on the row (audio-feed-2z
   assertEquals(seenTtl, 120_000, "a reset must not leave a permanent row");
 });
 
-Deno.test("POST /api/request-access: HTML error and confirmation paths escape markup against XSS (audio-feed-hn4)", async () => {
+Deno.test("POST /api/request-access: HTML confirmation does not echo submitted markup (audio-feed-jesu)", async () => {
   const { fetch, stores } = setup();
 
-  // Simulate concurrent signup race: getUserByEmail misses, but insertUser refuses duplicate
+  // Simulate a concurrent signup race: the atomic insert refuses the duplicate.
   const maliciousEmail = "<b>probe</b>@example.com";
   stores.metadata.insertUser = () => Promise.resolve(false);
 
@@ -454,11 +436,26 @@ Deno.test("POST /api/request-access: HTML error and confirmation paths escape ma
     }),
   );
 
-  assertEquals(res.status, 400);
+  assertEquals(res.status, 200);
   const html = await res.text();
-  // Must NOT contain raw <b>probe</b> tag
-  assertEquals(html.includes("<b>probe</b>"), false, "raw unescaped HTML tag must not appear");
-  assertStringIncludes(html, "&lt;b&gt;probe&lt;/b&gt;");
+  assertEquals(html.includes(maliciousEmail), false, "submitted address must not be echoed");
+  assertStringIncludes(html, "Access Request Received");
+});
+
+Deno.test("POST /api/request-access: storage failures remain errors without leaking internals (audio-feed-jesu)", async () => {
+  const { fetch, stores } = setup();
+  stores.metadata.insertUser = () => Promise.reject(new Error("private storage detail"));
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "new@example.com" }),
+    }),
+  );
+  assertEquals(res.status, 500);
+  assertEquals(await res.json(), {
+    error: "Could not process access request. Please try again later.",
+  });
 });
 
 Deno.test("POST /api/request-access: HTML 429 response includes Retry-After header (audio-feed-hn4)", async () => {
@@ -477,7 +474,7 @@ Deno.test("POST /api/request-access: HTML 429 response includes Retry-After head
     );
 
   const res1 = await req();
-  assertEquals(res1.status, 201);
+  assertEquals(res1.status, 200);
 
   const res2 = await req();
   assertEquals(res2.status, 429);
@@ -497,7 +494,7 @@ Deno.test("POST /api/request-access: spend gate authority & end-to-end access li
       body: JSON.stringify({ email: "eve@example.com" }),
     }),
   );
-  assertEquals(reqRes.status, 201);
+  assertEquals(reqRes.status, 200);
 
   const pendingUser = await stores.metadata.getUserByEmail("eve@example.com");
   assert(pendingUser !== null);

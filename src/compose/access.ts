@@ -8,13 +8,18 @@
  * ABUSE POSTURE:
  * - Rate-limited by client IP (default: 5 requests per hour).
  * - Exceeding rate limit returns 429 with Retry-After header.
- * - Email deduplication: re-submitting an existing email returns an honest status
- *   without creating additional rows or leaking private tokens.
+ * - Atomic email deduplication: re-submitting an existing email does not create
+ *   another row or reveal the account's existence/status.
  * - Tokens are NEVER returned to the applicant.
  */
 
 import type { AppContext, AppHandlers } from "../app.ts";
-import { createUser, isValidEmail, normaliseEmail } from "../auth/users.ts";
+import {
+  createUser,
+  DuplicateUserEmailError,
+  isValidEmail,
+  normaliseEmail,
+} from "../auth/users.ts";
 import { esc } from "../routes/html.ts";
 import { htmlContentSecurityPolicy, newCspNonce } from "../routes/csp.ts";
 import {
@@ -150,66 +155,32 @@ export function createRequestAccessHandler(
     const cleanEmail = normaliseEmail(email);
     const cleanName = displayName.slice(0, 100) || undefined;
 
-    // 4. Idempotency & user lookup
-    const existing = await ctx.stores.metadata.getUserByEmail(cleanEmail);
-    if (existing) {
-      if (existing.status === "approved") {
-        const message =
-          "An account with this email is already approved. You can sign in at /login or use your feed token.";
-        if (isHtml) return sendHtml("Account Approved", message);
-        return Response.json(
-          { ok: true, status: "approved", message },
-          { status: 200, headers: { "cache-control": "no-store" } },
-        );
-      }
-
-      if (existing.status === "suspended") {
-        const message = "This account is suspended. Please contact the administrator.";
-        if (isHtml) return sendHtml("Account Suspended", message, 403);
-        return Response.json(
-          { ok: false, status: "suspended", message },
-          { status: 200, headers: { "cache-control": "no-store" } },
-        );
-      }
-
-      if (existing.status === "rejected") {
-        const message = "This access request was declined by an administrator.";
-        if (isHtml) return sendHtml("Request Declined", message, 403);
-        return Response.json(
-          { ok: false, status: "rejected", message },
-          { status: 200, headers: { "cache-control": "no-store" } },
-        );
-      }
-
-      const message = "Your access request is already pending administrator review.";
-      if (isHtml) return sendHtml("Request Pending", message);
-      return Response.json(
-        { ok: true, status: existing.status, message },
-        { status: 200, headers: { "cache-control": "no-store" } },
-      );
-    }
-
-    // 5. Create new pending user
+    // Always attempt the same atomic insert: a preliminary lookup would both
+    // reveal account state and skip token generation/write work for known emails.
     try {
       await createUser(ctx.stores.metadata, {
         email: cleanEmail,
         displayName: cleanName,
       });
-
-      const message =
-        "Access request received. An administrator will review your request before audio generation is enabled.";
-      if (isHtml) return sendHtml("Access Request Received", message, 201);
-      return Response.json(
-        { ok: true, status: "pending", message },
-        { status: 201, headers: { "cache-control": "no-store" } },
-      );
     } catch (err) {
-      const message = (err as Error)?.message ?? "Could not create access request.";
-      if (isHtml) return sendHtml("Error", message, 400);
-      return Response.json(
-        { error: message },
-        { status: 400, headers: { "cache-control": "no-store" } },
-      );
+      // A duplicate (including a concurrent signup) is an accepted request.
+      // Do not turn unrelated storage failures into apparent successes.
+      if (!(err instanceof DuplicateUserEmailError)) {
+        const message = "Could not process access request. Please try again later.";
+        if (isHtml) return sendHtml("Error", message, 500);
+        return Response.json(
+          { error: message },
+          { status: 500, headers: { "cache-control": "no-store" } },
+        );
+      }
     }
+
+    const message =
+      "If this address is eligible, your access request will be reviewed by an administrator.";
+    if (isHtml) return sendHtml("Access Request Received", message);
+    return Response.json(
+      { ok: true, message },
+      { status: 200, headers: { "cache-control": "no-store" } },
+    );
   };
 }

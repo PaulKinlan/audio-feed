@@ -74,6 +74,13 @@ export async function requireAdminToken(provided: string | null, expected: strin
  * The feed token is minted here, so a user is subscribable from the moment it
  * exists and no caller has to handle a user with a missing capability.
  */
+export class DuplicateUserEmailError extends Error {
+  constructor(email: string) {
+    super(`Email already registered: ${email}`);
+    this.name = "DuplicateUserEmailError";
+  }
+}
+
 export async function createUser(
   store: MetadataStore,
   input: {
@@ -105,7 +112,7 @@ export async function createUser(
   // Atomic in the store, so two concurrent signups for one email cannot both
   // succeed. A read-then-write here would let exactly that through.
   if (!(await store.insertUser(user))) {
-    throw new Error(`Email already registered: ${email}`);
+    throw new DuplicateUserEmailError(email);
   }
   return user;
 }
