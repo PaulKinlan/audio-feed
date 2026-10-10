@@ -12,7 +12,7 @@ import type { BlobStore, MetadataStore } from "./storage/mod.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "./storage/memory.ts";
 import { KvMetadataStore } from "./storage/kv.ts";
 import { S3BlobStore } from "./storage/s3.ts";
-import { GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tts/gemini.ts";
+import { DEFAULT_TIMEOUT_MS, GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tts/gemini.ts";
 
 export interface AppConfig {
   port: number;
@@ -38,6 +38,13 @@ export interface AppConfig {
   trustProxyHeaders?: boolean;
   /** Present only when TTS is configured; 65u owns its use. */
   geminiApiKey?: string;
+  /**
+   * Per-attempt TTS deadline in ms (TTS_TIMEOUT_MS, audio-feed-9yu8). Defaults to
+   * DEFAULT_TIMEOUT_MS (120s). Keep it below the claim lease: the lease AbortSignal is what
+   * actually bounds an episode, and a deadline longer than the lease can only end in a claim
+   * that expires mid-synthesis.
+   */
+  ttsTimeoutMs?: number;
   adminToken?: string;
   /**
    * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
@@ -93,6 +100,20 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  // audio-feed-9yu8: the per-attempt TTS deadline is an operator knob, so a latency spike can be
+  // absorbed without a redeploy. Fail closed at boot for the same reason PORT does: a typo that
+  // silently fell back to the default would look healthy while every long segment kept dying.
+  const ttsTimeoutRaw = env("TTS_TIMEOUT_MS");
+  let ttsTimeoutMs: number | undefined;
+  if (ttsTimeoutRaw !== undefined) {
+    ttsTimeoutMs = Number(ttsTimeoutRaw);
+    if (!Number.isInteger(ttsTimeoutMs) || ttsTimeoutMs <= 0) {
+      throw new Error(
+        `Invalid TTS_TIMEOUT_MS: "${ttsTimeoutRaw}". Expected a positive integer number of milliseconds.`,
+      );
+    }
+  }
+
   return {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
@@ -102,6 +123,7 @@ export function loadConfig(): AppConfig {
     notifyOutboxEnabled: env("NOTIFY_OUTBOX_ENABLED") === "true" ||
       env("NOTIFY_OUTBOX_ENABLED") === "1",
     geminiApiKey: env("GEMINI_API_KEY"),
+    ttsTimeoutMs: ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
     webAuthnRpId: env("WEBAUTHN_RP_ID"),

@@ -44,6 +44,7 @@ import {
   GeminiTtsTruncatedError,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
+  ttsClientConfig,
 } from "../tts/gemini.ts";
 import type { DecodedAudioResult, DialogueSpeaker } from "../tts/gemini.ts";
 import type { AppContext } from "../app.ts";
@@ -190,6 +191,10 @@ function supersededEntry(
 
 /** A failure that retrying cannot fix, so the episode is marked failed immediately. */
 function isPermanent(error: unknown): boolean {
+  // audio-feed-9yu8: the whole-episode wrapper carries the verdict explicitly, because its own
+  // status is not the provider's. A status-less deadline abort is retryable here; a provider
+  // verdict, our spend-guard 409 or a truncation is not, whatever number it happens to carry.
+  if (error instanceof GeminiTtsError && error.permanent) return true;
   if (error instanceof GeminiTtsTruncatedError) return true;
   const status = (error as { status?: number }).status;
   if (typeof status === "number") {
@@ -204,17 +209,14 @@ function isPermanent(error: unknown): boolean {
 /**
  * The failure reason persisted on an episode and shown in the UI (audio-feed-bp6r).
  *
- * The TTS client wraps a turn failure as "TTS turn failed; refusing whole-episode
- * retry: <inner>" with a HARDCODED status 400 — that 400 is ours, not the
- * provider's, so persisting it would mislabel a client-side timeout as a provider
- * rejection. The wrapper carries the inner error in `details`; unwrap the chain so
- * the record keeps the true root: which timeout fired and its duration, or the
- * provider's real HTTP status. A status is reported as `provider status` only when
- * the root error came from an actual API response (its details carry the parsed
- * response body, never an Error); our own client-side statuses — the wrapper's 400,
- * the spend-guard 409 — are never dressed up as the provider's. Claim and mode make
- * the record actionable on their own: "claim 2/3" says the episode is about to be
- * abandoned.
+ * The TTS client wraps a turn failure as "TTS turn failed; ..." (audio-feed-bp6r) — its own status
+ * is never the provider's, so persisting it would mislabel a client-side timeout as a provider
+ * rejection. The wrapper carries the inner error in `details`; unwrap the chain so the record keeps
+ * the true root: which timeout fired and its duration, or the provider's real HTTP status. A status
+ * is reported as `provider status` only when the root error came from an actual API response (its
+ * details carry the parsed response body, never an Error); our own client-side statuses — the
+ * spend-guard 409 — are never dressed up as the provider's. Claim and mode make the record
+ * actionable on their own: "claim 2/3" says the episode is about to be abandoned.
  */
 export function describeSynthesisFailure(
   lastError: unknown,
@@ -317,7 +319,7 @@ export function createGeminiSynthesizer(
     scriptTimeoutMs?: number;
   } = {},
 ): Synthesizer {
-  const client = deps.client ?? new GeminiTtsClient({ apiKey: ctx.config.geminiApiKey });
+  const client = deps.client ?? new GeminiTtsClient(ttsClientConfig(ctx.config));
   const scriptGenerator = deps.scriptGenerator === null ? null : deps.scriptGenerator ??
     (ctx.config.geminiApiKey
       ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })

@@ -13,7 +13,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
 import { describeSynthesisFailure } from "../src/worker/synthesis.ts";
-import { GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
+import { GeminiTtsClient, GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
@@ -180,6 +180,62 @@ Deno.test("a permanent failure is not retried at all", async () => {
     (await stores.metadata.getEpisode("user-1", "episode-1"))?.status,
     "failed",
   );
+});
+
+Deno.test("a status-less deadline failure is retried at the episode level (audio-feed-9yu8)", async () => {
+  // The whole chain: real client -> real wrapper -> real worker loop. Before this, the wrapper's
+  // hardcoded 400 made every deadline permanent and the episode died on its first attempt.
+  const { ctx, stores } = await queued();
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "test-key",
+    fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as typeof fetch,
+    timeoutMs: 40,
+    retryOn: "none",
+    retryBaseDelayMs: 1,
+  });
+  const synthesize: Synthesizer = () =>
+    client.synthesizeNarration({ title: "An Article", body: "hello" });
+
+  await runSynthesisBatch(ctx, synthesize, { maxAttempts: 3, retryBaseDelayMs: 1 });
+  assertEquals(calls, 3, "a deadline is transient: one paid attempt per worker attempt");
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "timed out after 40ms");
+  assertStringIncludes(episode?.error ?? "", "mode direct");
+});
+
+Deno.test("a provider verdict under the wrapper is never retried at the episode level (audio-feed-9yu8)", async () => {
+  const { ctx, stores } = await queued();
+  let calls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "test-key",
+    fetchFn: (() => {
+      calls++;
+      return Promise.resolve(
+        new Response(JSON.stringify({ error: { message: "quota" } }), { status: 500 }),
+      );
+    }) as typeof fetch,
+    retryOn: "none",
+    retryBaseDelayMs: 1,
+  });
+  const synthesize: Synthesizer = () =>
+    client.synthesizeNarration({ title: "An Article", body: "hello" });
+
+  await runSynthesisBatch(ctx, synthesize, { maxAttempts: 5, retryBaseDelayMs: 1 });
+  assertEquals(
+    calls,
+    1,
+    "the re-billing guard must still refuse an episode retry for a provider 500",
+  );
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "provider status 500");
 });
 
 Deno.test("truncated audio is a permanent failure, never published", async () => {

@@ -243,7 +243,10 @@ Deno.test("a failed later turn is terminal, not a retry of earlier paid turns", 
   });
   const error = await assertRejects(() => client.synthesizeNarration(input));
   assert(error instanceof Error);
-  assertEquals((error as { status?: number }).status, 400);
+  // audio-feed-9yu8: the wrapper no longer invents a 400. The provider's own status survives, and
+  // `permanent` is what keeps the turn terminal — the re-billing guard, not the number.
+  assertEquals((error as { status?: number }).status, 429);
+  assertEquals((error as { permanent?: boolean }).permanent, true);
   assertStringIncludes(error.message, "refusing whole-episode retry");
   assertEquals(calls, 2);
 });

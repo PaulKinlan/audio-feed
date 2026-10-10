@@ -79,13 +79,31 @@ export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 export const MAX_TTS_INPUT_BYTES = 6_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
-/** Bound paid calls per episode below the 15-minute claim lease (each attempt has a 60s deadline).
- * Further adaptive splits count too; long articles fail before sending any requests. */
+/** Bound paid calls per episode (audio-feed-9yu8). Further adaptive splits count too; long
+ * articles fail before sending any requests. The claim lease — not this cap — is the wall-clock
+ * outer bound: the worker stops paid work 60s before expiry and passes a lease AbortSignal, and
+ * resumable segments (audio-feed-wr1u) mean a claim that expires mid-episode re-pays only the
+ * segment that was in flight. */
 export const MAX_TTS_SEGMENTS = 12;
-/** Per-attempt deadline. A hung request must not hold a synthesis worker forever. */
-export const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * Per-attempt deadline: a hung request must not hold a synthesis worker forever. 120s answers the
+ * 2026-10-09 incident (audio-feed-bp6r): 9vns measured segments at 45-55s wall-clock, and the
+ * recorded failure returned HTTP 200 headers at 59.8s before the old 60s killed the body read —
+ * the deadline sat INSIDE the real distribution. Settable per environment with TTS_TIMEOUT_MS
+ * (src/config.ts); keep it below the claim lease.
+ */
+export const DEFAULT_TIMEOUT_MS = 120_000;
 /** Retries AFTER the first attempt. */
 export const DEFAULT_MAX_RETRIES = 1;
+/**
+ * Extra attempts allowed after a per-attempt DEADLINE fires, on top of `maxRetries`
+ * (audio-feed-9yu8). Multi-segment episodes force `maxRetries: 0` per segment, so without a
+ * budget of its own a single slow segment would end the whole episode. One retry bounds the
+ * cost: a deadline can fire after the provider generated (and billed) that one segment, and the
+ * alternative is strictly worse — the episode fails, then up to 3 claim leases are burned
+ * before abandonment.
+ */
+export const DEFAULT_TIMEOUT_RETRIES = 1;
 /**
  * Statuses where the API definitively did not process the request, so retrying cannot double-charge.
  * Other 5xx and network failures may already have generated (and billed) audio — retrying those is a
@@ -258,12 +276,14 @@ export interface SynthesisOptions {
   temperature?: number;
   signal?: AbortSignal;
   /**
-   * Per-attempt deadline in ms. Defaults to the client's timeoutMs (60s). A hung request would
+   * Per-attempt deadline in ms. Defaults to the client's timeoutMs (120s). A hung request would
    * otherwise hold a synthesis worker forever.
    */
   timeoutMs?: number;
   /** Override the client's maxRetries for this call. */
   maxRetries?: number;
+  /** Override the client's timeoutRetries (extra attempts after a deadline fires). */
+  timeoutRetries?: number;
   /**
    * Durable resumable chunking (audio-feed-wr1u). The worker persists each paid segment so a
    * run that dies mid-episode resumes instead of re-billing every segment.
@@ -323,6 +343,14 @@ export class GeminiTtsError extends Error {
     message: string,
     public readonly status?: number,
     public readonly details?: unknown,
+    /**
+     * Retrying cannot help and may double-bill: a provider verdict (HTTP status), our spend-guard
+     * 409, or a truncation. The worker's isPermanent() reads this BEFORE its status heuristic
+     * (audio-feed-9yu8), so a wrapper can mark a failure terminal without inventing a status —
+     * which is how the whole-episode guard kept the re-billing refusal for provider verdicts
+     * while letting a status-less deadline abort be retried.
+     */
+    public readonly permanent: boolean = false,
   ) {
     super(message);
     this.name = "GeminiTtsError";
@@ -354,14 +382,59 @@ export interface GeminiTtsClientConfig {
   model?: string;
   baseUrl?: string;
   fetchFn?: typeof fetch;
-  /** Per-attempt deadline in ms (default 60000). */
+  /** Per-attempt deadline in ms (default 120000). */
   timeoutMs?: number;
   /** Retry attempts after the first try (default 1). */
   maxRetries?: number;
+  /**
+   * Extra attempts after a per-attempt DEADLINE fires, on top of `maxRetries` (default 1,
+   * audio-feed-9yu8). Bounded separately so multi-segment episodes — which force `maxRetries: 0`
+   * per segment — can still retry one slow segment.
+   */
+  timeoutRetries?: number;
   /** Which failures may be retried (default "transient": 429 and 503 only). */
   retryOn?: RetryPolicy;
   /** Base backoff in ms, doubled per attempt and jittered (default 250). */
   retryBaseDelayMs?: number;
+}
+
+/**
+ * Build the paid TTS client's configuration from app config (audio-feed-9yu8). Both production call
+ * sites go through this — the worker's synthesizer and the voice-sample route — so the configured
+ * per-attempt deadline cannot drift from the client default, and a test can drive the real deadline
+ * through a hanging fetchFn instead of asserting on a helper the call site may not use.
+ */
+export function ttsClientConfig(
+  config: { geminiApiKey?: string; ttsTimeoutMs?: number },
+): GeminiTtsClientConfig {
+  return { apiKey: config.geminiApiKey, timeoutMs: config.ttsTimeoutMs };
+}
+
+/**
+ * Wrap a turn failure for the worker (audio-feed-9yu8).
+ *
+ * The wrapper's own status must never manufacture a verdict the inner error did not have: a
+ * per-attempt deadline is OUR abort, not the provider's, so it stays status-less and the worker's
+ * maxAttempts may retry the episode (audio-feed-wr1u resume re-pays only the failed segment). A
+ * failure that already carries a verdict — a provider HTTP status, our spend-guard 409, or a
+ * truncation — is marked `permanent`, so the re-billing guard still refuses the episode retry for
+ * exactly the cases where a retry could pay twice. Marking it explicitly rather than reusing a
+ * hardcoded 400 is what keeps a truncation terminal: its own class carries no status, so a
+ * status-only propagation would have silently made it retryable and thrice-billed that segment.
+ */
+function wrapTurnFailure(error: unknown): GeminiTtsError {
+  const detail = error instanceof Error ? error.message : String(error);
+  const status = error instanceof GeminiTtsError ? error.status : undefined;
+  const permanent = error instanceof GeminiTtsError &&
+    (error.status !== undefined || error instanceof GeminiTtsTruncatedError);
+  return new GeminiTtsError(
+    permanent
+      ? `TTS turn failed; refusing whole-episode retry: ${detail}`
+      : `TTS turn failed (transient; the episode may be retried): ${detail}`,
+    status,
+    error,
+    permanent,
+  );
 }
 
 /**
@@ -1378,6 +1451,7 @@ export class GeminiTtsClient {
   private fetchFn: typeof fetch;
   private timeoutMs: number;
   private maxRetries: number;
+  private timeoutRetries: number;
   private retryOn: RetryPolicy;
   private retryBaseDelayMs: number;
 
@@ -1401,6 +1475,7 @@ export class GeminiTtsClient {
     this.fetchFn = config.fetchFn || fetch;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.timeoutRetries = config.timeoutRetries ?? DEFAULT_TIMEOUT_RETRIES;
     this.retryOn = config.retryOn ?? "transient";
     this.retryBaseDelayMs = config.retryBaseDelayMs ?? 250;
   }
@@ -1473,13 +1548,7 @@ export class GeminiTtsClient {
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      throw new GeminiTtsError(
-        `TTS turn failed; refusing whole-episode retry: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        400,
-        error,
-      );
+      throw wrapTurnFailure(error);
     }
   }
 
@@ -1566,13 +1635,7 @@ export class GeminiTtsClient {
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      throw new GeminiTtsError(
-        `TTS turn failed; refusing whole-episode retry: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        400,
-        error,
-      );
+      throw wrapTurnFailure(error);
     }
   }
 
@@ -1603,10 +1666,20 @@ export class GeminiTtsClient {
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     const maxRetries = options.maxRetries ?? this.maxRetries;
     const retryOn = options.retryOn ?? this.retryOn;
-    const attempts = Math.max(1, maxRetries + 1);
+    // audio-feed-9yu8: each failure class carries its own retry budget. A deadline abort must not
+    // consume the status-retry budget, because multi-segment episodes force `maxRetries: 0` per
+    // segment and would otherwise make one slow segment terminal.
+    const maxStatusRetries = Math.max(0, maxRetries);
+    const maxTimeoutRetries = retryOn === "none"
+      ? 0
+      : Math.max(0, options.timeoutRetries ?? this.timeoutRetries);
+    let statusRetries = 0;
+    let timeoutRetries = 0;
 
     let lastError: unknown;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    while (true) {
+      // Attempt number is only there to scale backoff, so a refused retry must leave it alone.
+      const attempt = 1 + statusRetries + timeoutRetries;
       const deadline = AbortSignal.timeout(timeoutMs);
       // The caller's signal (if any) still wins; the timeout is the floor, never a replacement for it.
       const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
@@ -1625,17 +1698,26 @@ export class GeminiTtsClient {
         // CALLER's signal did not fire. The old `!options.signal` guard mislabelled every
         // production timeout — the worker always passes a lease signal, so Paul's UI showed
         // the raw "The operation was aborted due to timeout" with no timeout value attached.
-        lastError = deadline.aborted && !options.signal?.aborted
+        const timedOut = deadline.aborted && !options.signal?.aborted;
+        lastError = timedOut
           ? new GeminiTtsError(
             `Gemini TTS request timed out after ${timeoutMs}ms`,
             undefined,
             error,
           )
           : error;
-        const retryable = retryOn === "all" && attempt < attempts;
-        if (!retryable) throw lastError;
-        await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
-        continue;
+        if (timedOut && timeoutRetries < maxTimeoutRetries) {
+          timeoutRetries++;
+          await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+          continue;
+        }
+        // Other network failures stay opt-in (`retryOn: "all"`) — a retry may double-charge.
+        if (!timedOut && retryOn === "all" && statusRetries < maxStatusRetries) {
+          statusRetries++;
+          await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+          continue;
+        }
+        throw lastError;
       }
 
       if (res.ok) {
@@ -1648,13 +1730,22 @@ export class GeminiTtsClient {
           // 59.8s, then the abort killed the body read. Name it with the deadline that
           // fired, unless the caller's own signal did.
           if (options.signal?.aborted) throw error;
-          throw deadline.aborted
-            ? new GeminiTtsError(
+          if (deadline.aborted) {
+            lastError = new GeminiTtsError(
               `Gemini TTS request timed out after ${timeoutMs}ms while reading the response body`,
               undefined,
               error,
-            )
-            : error;
+            );
+            // Same budget as the fetch-stage deadline: the incident took THIS path, and a
+            // never-retried body read is why one slow segment ended the episode.
+            if (timeoutRetries < maxTimeoutRetries) {
+              timeoutRetries++;
+              await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+              continue;
+            }
+            throw lastError;
+          }
+          throw error;
         }
         return decodeAudioResponse(json, undefined, {
           allowTruncated: options.allowTruncated,
@@ -1696,13 +1787,12 @@ export class GeminiTtsClient {
         // than leaving details undefined and losing the provider-status label.
         errDetails ?? { statusText: res.statusText },
       );
-      const retryable = retryOn !== "none" && attempt < attempts &&
+      const retryable = retryOn !== "none" && statusRetries < maxStatusRetries &&
         (TRANSIENT_STATUSES.has(res.status) ||
           (retryOn === "all" && res.status >= 500));
       if (!retryable) throw lastError;
+      statusRetries++;
       await sleep(backoffMs(attempt, this.retryBaseDelayMs, res.headers.get("retry-after")));
     }
-
-    throw lastError instanceof Error ? lastError : new GeminiTtsError("Gemini TTS request failed");
   }
 }
