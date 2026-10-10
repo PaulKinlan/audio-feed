@@ -28,20 +28,12 @@ import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { newestChrome } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
 const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-3xq-" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
-
-function newestChrome(): string {
-  const home = Deno.env.get("HOME")!;
-  const root = `${home}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
 
 // -- in-process app, seeded ---------------------------------------------------
 const stores: Stores = memoryStores();
@@ -223,7 +215,9 @@ try {
     "module served as immutable text/javascript",
     moduleRes?.headers?.["content-type"]?.startsWith("text/javascript") === true &&
       moduleRes?.headers?.["cache-control"] === "public, max-age=31536000, immutable",
-    `content-type: ${moduleRes?.headers?.["content-type"]}, cache-control: ${moduleRes?.headers?.["cache-control"]}`,
+    `content-type: ${moduleRes?.headers?.["content-type"]}, cache-control: ${
+      moduleRes?.headers?.["cache-control"]
+    }`,
   );
 
   // 2. The island the server rendered is the island the client read.
@@ -266,7 +260,11 @@ try {
   const sourceTitle = String(
     await js(`document.querySelector("#manageSourcesBody td")?.textContent`),
   );
-  check("manage pane lists the subscriber's feed", sourceTitle === "Stratechery", `got: ${sourceTitle}`);
+  check(
+    "manage pane lists the subscriber's feed",
+    sourceTitle === "Stratechery",
+    `got: ${sourceTitle}`,
+  );
 
   // 5. askConfirm (now inside the module) guards the destructive action for real.
   const deletesBefore = events.filter(
@@ -277,7 +275,11 @@ try {
   );
   await until(`document.getElementById("confirmDialog")?.open`, "confirm dialog open");
   const dialogMessage = String(await js(`document.getElementById("confirmMessage")?.textContent`));
-  check("Remove raises the native confirm dialog", dialogMessage.includes("Stratechery"), dialogMessage);
+  check(
+    "Remove raises the native confirm dialog",
+    dialogMessage.includes("Stratechery"),
+    dialogMessage,
+  );
   await js(`document.getElementById("confirmCancelBtn").click()`);
   await until(`!document.getElementById("confirmDialog")?.open`, "dialog closed");
   await sleep(250);
@@ -308,7 +310,8 @@ try {
 
   // 6. Zero console errors or exceptions across everything above.
   const consoleErrors = events.filter((e) =>
-    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type ?? "")) ||
+    (e.method === "Runtime.consoleAPICalled" &&
+      ["error", "warning"].includes(e.params.type ?? "")) ||
     e.method === "Runtime.exceptionThrown" ||
     (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
   );
@@ -335,9 +338,13 @@ try {
   });
   await cdp("Page.navigate", { url: `${BASE}/admin` });
   await until(`document.readyState === "complete"`, "admin page reloaded at 390x844");
-  await until(`document.getElementById("usersBody")?.children?.length > 0`, "users loaded at 390x844");
+  await until(
+    `document.getElementById("usersBody")?.children?.length > 0`,
+    "users loaded at 390x844",
+  );
   const phoneErrors = events.filter((e) =>
-    (e.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(e.params.type ?? "")) ||
+    (e.method === "Runtime.consoleAPICalled" &&
+      ["error", "warning"].includes(e.params.type ?? "")) ||
     e.method === "Runtime.exceptionThrown" ||
     (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
   );

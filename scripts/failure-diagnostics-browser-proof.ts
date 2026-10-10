@@ -19,18 +19,10 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { newestChrome } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-e1d/", import.meta.url).pathname;
-const HOME = Deno.env.get("HOME")!;
 const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-e1d-" });
-
-function newestChrome(): string {
-  const root = `${HOME}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
@@ -127,7 +119,9 @@ const chrome = new Deno.Command(newestChrome(), {
 let debugPort = "";
 for (let i = 0; i < 100 && !debugPort; i++) {
   await sleep(100);
-  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split("\n")[0]!;
+  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+    "\n",
+  )[0]!;
 }
 
 const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
@@ -248,7 +242,10 @@ try {
   // 2. Visit /listen/:token (player)
   await cdp("Page.navigate", { url: `${BASE}/listen/${user.feedToken}` });
   await until(`document.readyState === "complete"`, "player loaded");
-  await until(`document.querySelectorAll("#episodes .episode").length > 0`, "episodes loaded in player");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length > 0`,
+    "episodes loaded in player",
+  );
 
   // Click download on the episode whose audio 404s
   await js(`document.querySelector(".ep-download").click()`);
@@ -303,7 +300,9 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join(
   console.error(err);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   await server.shutdown().catch(() => {});
   await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
 }

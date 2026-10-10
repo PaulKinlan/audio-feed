@@ -9,7 +9,16 @@
  */
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { createTempChromeProfile, spawnHarness } from "../scripts/proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "../scripts/proof-helper.ts";
+
+Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
+  try {
+    const chrome = newestChrome();
+    assertStringIncludes(chrome, "chrome-linux64/chrome");
+  } catch (err) {
+    assertStringIncludes((err as Error).message, "No Chrome binaries found under");
+  }
+});
 
 Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes temp dir", async () => {
   const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-profile-");

@@ -1,5 +1,5 @@
 /**
- * Shared test & proof harness utilities (audio-feed-9se).
+ * Shared test & proof harness utilities (audio-feed-9se, audio-feed-kv91).
  *
  * Solves:
  * 1. Port conflicts: binds port 0 and reads back the assigned ephemeral port.
@@ -7,6 +7,13 @@
  * 3. Harness visibility: captures and retains harness stdout & stderr.
  * 4. Premature exit detection: monitors harness process status during health check loop
  *    and fails fast if the child process dies or /health never answers.
+ * 5. Chrome discovery: single canonical `newestChrome()` resolver across all proofs.
+ *
+ * Note on `scripts/*-browser-proof.ts`:
+ * Browser-proof scripts are manual-only, on-demand verification harnesses designed
+ * to drive headless Chrome over CDP to satisfy the Functional Verification Mandate
+ * (AGENTS.md) when changing UI, shell, or auth surfaces. They are not run by the
+ * automated CI gate (`deno task gate`), which only executes `tests/*_test.ts`.
  */
 
 export interface SupervisedHarness {
@@ -141,7 +148,9 @@ export async function spawnHarness(
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  try { process.kill(); } catch { /* ignore */ }
+  try {
+    process.kill();
+  } catch { /* ignore */ }
   throw new Error(
     `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}.\n` +
       `Assigned port: ${assignedPort}\nStdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,

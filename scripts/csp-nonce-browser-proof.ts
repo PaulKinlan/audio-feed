@@ -21,20 +21,12 @@ import { memoryStores } from "../src/config.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { bytes, makeArticle, makeEpisode, makeSource, makeUser } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { newestChrome } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-syhu/", import.meta.url).pathname;
 const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-syhu-" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
-
-function newestChrome(): string {
-  const home = Deno.env.get("HOME")!;
-  const root = `${home}/.cache/puppeteer/chrome`;
-  const dirs = [...Deno.readDirSync(root)].filter((d) => d.isDirectory).map((d) => d.name).sort(
-    (a, b) => a.localeCompare(b, undefined, { numeric: true }),
-  );
-  return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
-}
 
 const stores: Stores = memoryStores();
 const config: AppConfig = { port: 0, adminToken: "short-token" };
