@@ -1639,7 +1639,23 @@ export class GeminiTtsClient {
       }
 
       if (res.ok) {
-        const json = await res.json();
+        let json: unknown;
+        try {
+          json = await res.json();
+        } catch (error) {
+          // The deadline can fire while the multi-MB base64 body is still streaming —
+          // that was the 2026-10-09 incident path (audio-feed-bp6r): 200 headers at
+          // 59.8s, then the abort killed the body read. Name it with the deadline that
+          // fired, unless the caller's own signal did.
+          if (options.signal?.aborted) throw error;
+          throw deadline.aborted
+            ? new GeminiTtsError(
+              `Gemini TTS request timed out after ${timeoutMs}ms while reading the response body`,
+              undefined,
+              error,
+            )
+            : error;
+        }
         return decodeAudioResponse(json, undefined, {
           allowTruncated: options.allowTruncated,
         });

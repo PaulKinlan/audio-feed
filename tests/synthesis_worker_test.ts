@@ -12,6 +12,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
+import { describeSynthesisFailure } from "../src/worker/synthesis.ts";
 import { GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
@@ -847,7 +848,9 @@ Deno.test("a failed episode records the unwrapped cause with mode, claim and pro
   // The TTS client wraps a turn failure with a hardcoded status 400 that is OURS, not the
   // provider's. The persisted episode error must keep the real root cause instead.
   const { ctx, stores } = await queued();
-  const inner = new GeminiTtsError("Gemini API error: boom 500", 500);
+  const inner = new GeminiTtsError("Gemini API error: boom 500", 500, {
+    error: { message: "boom 500" },
+  });
   const wrapped = new GeminiTtsError(
     `TTS turn failed; refusing whole-episode retry: ${inner.message}`,
     400,
@@ -868,77 +871,25 @@ Deno.test("a failed episode records the unwrapped cause with mode, claim and pro
     !episode!.error!.includes("provider status 400"),
     "the wrapper's own 400 must not be reported as the provider's status",
   );
-});
 
-Deno.test("an abandoned episode keeps the last recorded cause (audio-feed-bp6r)", async () => {
-  // The 2026-10-09 incident: nine live episodes showed only "abandoned after 3 attempts".
-  // When any claim managed to record a cause, abandonment must preserve it.
-  const { stores } = await queued();
-  const leaseMs = 60_000;
-  const claim = (t: number) =>
-    stores.metadata.claimEpisode("user-1", "episode-1", {
-      owner: "w",
-      now: new Date(t).toISOString(),
-      leaseMs,
-      maxClaims: 3,
-    });
-  let t = Date.parse("2026-10-09T00:00:00Z");
-  for (let i = 1; i <= 3; i++) {
-    assert(await claim(t), `claim ${i} should succeed`);
-    if (i === 3) {
-      // The last claim's worker got as far as recording the failure before dying.
-      const current = await stores.metadata.getEpisode("user-1", "episode-1");
-      await stores.metadata.putEpisode({
-        ...current!,
-        error:
-          "TTS turn failed; refusing whole-episode retry: Gemini TTS request timed out after 60000ms",
-      });
-    }
-    t += leaseMs + 1_000; // let the lease expire so the next tick can reclaim
-  }
-  assertEquals(await claim(t), null, "out of claims is out of claims");
-  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
-  assertEquals(episode?.status, "failed");
-  assertStringIncludes(episode?.error ?? "", "abandoned after 3 attempts");
-  assertStringIncludes(
-    episode?.error ?? "",
-    "timed out after 60000ms",
-    "the recorded cause must survive abandonment",
+  // Our own client-side statuses must never be dressed up as the provider's
+  // (review finding on bp6r): the spend-guard 409 chain carries no API response
+  // body, so no provider status may be reported for it.
+  const held = new GeminiTtsError(
+    "TTS turn failed; refusing whole-episode retry: Synthesis segment is reserved by another live claimant; refusing double spend",
+    400,
+    new GeminiTtsError(
+      "Synthesis segment is reserved by another live claimant; refusing double spend",
+      409,
+    ),
   );
-});
-
-Deno.test("an abandoned episode with no recorded cause says the worker died before writing (audio-feed-bp6r)", async () => {
-  // The other half of the incident: claims that never wrote a result. The abandoned record
-  // must say THAT — it distinguishes "the provider rejected us" from "our worker vanished".
-  const { stores } = await queued();
-  const leaseMs = 60_000;
-  let t = Date.parse("2026-10-09T00:00:00Z");
-  for (let i = 1; i <= 3; i++) {
-    assert(
-      await stores.metadata.claimEpisode("user-1", "episode-1", {
-        owner: "w",
-        now: new Date(t).toISOString(),
-        leaseMs,
-        maxClaims: 3,
-      }),
-      `claim ${i} should succeed`,
-    );
-    t += leaseMs + 1_000;
-  }
-  assertEquals(
-    await stores.metadata.claimEpisode("user-1", "episode-1", {
-      owner: "w",
-      now: new Date(t).toISOString(),
-      leaseMs,
-      maxClaims: 3,
-    }),
-    null,
+  const described = describeSynthesisFailure(held, { attempts: 1, mode: "direct" }, 3);
+  assert(
+    !described.includes("provider status"),
+    `a client-side 409 must not be labelled a provider status: ${described}`,
   );
-  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
-  assertEquals(episode?.status, "failed");
-  assertStringIncludes(episode?.error ?? "", "abandoned after 3 attempts");
-  assertStringIncludes(episode?.error ?? "", "no claim recorded a cause");
-  assertStringIncludes(episode?.error ?? "", "last claim by w at");
+  assertStringIncludes(described, "mode direct");
+  assertStringIncludes(described, "claim 1/3");
 });
 
 Deno.test("article content exceeding maxInputCharacters fails closed without spending (audio-feed-3hb)", async () => {

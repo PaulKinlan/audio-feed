@@ -820,6 +820,67 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assert(stored?.error?.includes("attempts"), `expected a readable reason, got ${stored?.error}`);
   });
 
+  test("abandonment preserves the last recorded cause (audio-feed-bp6r)", async (store) => {
+    // The 2026-10-09 incident: nine live episodes showed only "abandoned after 3
+    // attempts". When a claim managed to record a cause, abandonment must not
+    // overwrite it.
+    await store.putEpisode(queued());
+    for (const minute of ["00", "01", "02"]) {
+      const claimed = await store.claimEpisode("user-1", "e1", {
+        ...CLAIM,
+        now: `2026-09-20T12:${minute}:00.000Z`,
+      });
+      assert(claimed, `claim at 12:${minute} should be granted`);
+    }
+    // The last claim's worker got as far as recording the failure before dying.
+    const current = await store.getEpisode("user-1", "e1");
+    await store.putEpisode({
+      ...current!,
+      error:
+        "TTS turn failed; refusing whole-episode retry: Gemini TTS request timed out after 60000ms",
+    });
+
+    const fourth = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      now: "2026-09-20T12:10:00.000Z",
+    });
+    assertEquals(fourth, null, "out of claims is out of claims");
+
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "failed");
+    assert(stored?.error?.includes("abandoned after 3 attempts"), stored?.error);
+    assert(
+      stored?.error?.includes("timed out after 60000ms"),
+      `the recorded cause must survive abandonment, got ${stored?.error}`,
+    );
+  });
+
+  test("abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r)", async (store) => {
+    // The other half of the incident: claims that never wrote a result. The abandoned
+    // record must say THAT — it distinguishes "the provider rejected us" from "our
+    // worker vanished".
+    await store.putEpisode(queued());
+    for (const minute of ["00", "01", "02"]) {
+      assert(
+        await store.claimEpisode("user-1", "e1", {
+          ...CLAIM,
+          now: `2026-09-20T12:${minute}:00.000Z`,
+        }),
+        `claim at 12:${minute} should be granted`,
+      );
+    }
+    assertEquals(
+      await store.claimEpisode("user-1", "e1", { ...CLAIM, now: "2026-09-20T12:10:00.000Z" }),
+      null,
+    );
+
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "failed");
+    assert(stored?.error?.includes("abandoned after 3 attempts"), stored?.error);
+    assert(stored?.error?.includes("no claim recorded a cause"), stored?.error);
+    assert(stored?.error?.includes("last claim by worker-a at"), stored?.error);
+  });
+
   // -- completeEpisode ----------------------------------------------------
 
   test("the claim owner may write the terminal state", async (store) => {

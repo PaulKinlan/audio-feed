@@ -209,8 +209,12 @@ function isPermanent(error: unknown): boolean {
  * provider's, so persisting it would mislabel a client-side timeout as a provider
  * rejection. The wrapper carries the inner error in `details`; unwrap the chain so
  * the record keeps the true root: which timeout fired and its duration, or the
- * provider's real HTTP status. Claim and mode make the record actionable on their
- * own: "claim 2/3" says the episode is about to be abandoned.
+ * provider's real HTTP status. A status is reported as `provider status` only when
+ * the root error came from an actual API response (its details carry the parsed
+ * response body, never an Error); our own client-side statuses — the wrapper's 400,
+ * the spend-guard 409 — are never dressed up as the provider's. Claim and mode make
+ * the record actionable on their own: "claim 2/3" says the episode is about to be
+ * abandoned.
  */
 export function describeSynthesisFailure(
   lastError: unknown,
@@ -224,7 +228,12 @@ export function describeSynthesisFailure(
   const message = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
   const parts = [`mode ${claimed.mode}`, `claim ${claimed.attempts ?? "?"}/${maxClaims}`];
   const status = (root as { status?: unknown })?.status;
-  if (typeof status === "number") parts.push(`provider status ${status}`);
+  const rootDetails = root instanceof GeminiTtsError ? root.details : undefined;
+  if (
+    typeof status === "number" && rootDetails !== undefined && !(rootDetails instanceof Error)
+  ) {
+    parts.push(`provider status ${status}`);
+  }
   return `${message} [${parts.join("; ")}]`;
 }
 

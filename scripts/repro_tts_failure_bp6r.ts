@@ -16,6 +16,11 @@
  *     3 expiring claims and show the 4th claim overwriting the recorded error
  *     with "abandoned after 3 attempts".
  *
+ * NOTE: the committed repro.json was captured against the PRE-FIX tree (the gate
+ * started before 4be918d was written), so it demonstrates the bug; the post-fix
+ * behaviour is pinned by tests. Re-running this script today captures post-fix
+ * behaviour (and makes real paid TTS calls through the proxy).
+ *
  * Run: GEMINI_API_KEY=dummy-via-proxy timeout -k 30 900 deno run -A scripts/repro_tts_failure_bp6r.ts
  */
 import { GeminiTtsClient, GeminiTtsError } from "../src/tts/gemini.ts";

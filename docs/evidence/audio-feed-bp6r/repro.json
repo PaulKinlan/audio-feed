@@ -90,5 +90,6 @@
     "errorAfterAbandon": "abandoned after 3 attempts",
     "statusAfterAbandon": "failed",
     "realCauseSurvives": false
-  }
+  },
+  "capturedAgainst": "pre-fix (fleet/ttsfail 7285f04 gate run started before the 4be918d fix was written; it demonstrates the bug). Post-fix behaviour is pinned by tests: tts_hardening_test.ts (deadline-named timeouts incl. body-read), synthesis_worker_test.ts (describeSynthesisFailure), conformance/metadata.ts (abandon preserves cause, both stores)."
 }

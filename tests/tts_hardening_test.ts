@@ -159,6 +159,36 @@ Deno.test("a per-attempt timeout is named with its deadline even when a caller s
   if (!/timed out after 150ms/.test(message)) throw new Error(`unexpected error: ${message}`);
 });
 
+Deno.test("a timeout during the response body read is named with its deadline (audio-feed-bp6r)", async () => {
+  // The incident path itself: the provider returned 200 headers just inside the deadline
+  // and the abort fired while the multi-MB base64 body was still streaming — that throw
+  // never enters the fetch-await catch. Simulate a real streaming body: it errors with the
+  // abort reason, exactly as a fetch response body does when the request signal fires.
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener("abort", () => controller.error(init.signal!.reason));
+        // never enqueues: the body read hangs until the signal fires
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  }) as typeof fetch;
+
+  const caller = new AbortController(); // live but never fired, like the worker's lease signal
+  let message = "";
+  try {
+    await client(streaming, { timeoutMs: 150, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 150ms while reading the response body/.test(message)) {
+    throw new Error(`unexpected error: ${message}`);
+  }
+});
+
 Deno.test("caller cancellation is never retried and surfaces as-is", async () => {
   const controller = new AbortController();
   let attempts = 0;
