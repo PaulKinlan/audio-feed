@@ -5,29 +5,52 @@
  * the tests. A one-file change pays for all of it. This script runs the cheap
  * whole-repo checks (fmt, lint, type-check — ~10s together, and type errors
  * propagate transitively so checking only changed files would miss breakage
- * in their importers) plus ONLY the tests that can observe a changed file:
+ * in their importers) plus the tests selected for a change:
  *
  *   - a changed tests/foo_test.ts runs directly;
- *   - a changed src/ or scripts/ file runs every test that can reach it
- *     through the repo's static import graph (reverse reachability);
- *   - anything the graph cannot account for — deno.json/deno.lock, a changed
- *     code file NO test reaches, an unparseable import — falls back to the
- *     FULL suite. Safe beats fast: a fast tier that can silently skip a
- *     relevant test is worse than no fast tier.
+ *   - a changed src/ file runs every test that reaches it through the repo's
+ *     static import graph WITHOUT crossing a hub (src/app.ts, src/compose.ts,
+ *     src/compose/*), plus the name-matched tests: the route tests boot the
+ *     whole app through the hub (createApp + createHandlers), so the graph
+ *     alone cannot see that listen_test.ts is ABOUT listen.ts — the
+ *     `<stem>_test.ts` / `<stem>_*_test.ts` / mirrored-subdirectory
+ *     convention is what knows. Uncut, the hubs connect every route to every
+ *     app-booting test — measured: a listen.ts change selected 58 of 80 files
+ *     and saved nothing. Cut + name-matched, the same change selects ~10.
+ *   - a changed HUB or cross-cutting file (app/compose/router/http/config/
+ *     server/origin) runs the FULL suite — every test exercises it;
+ *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
+ *     the FULL suite. Safe beats fast.
+ *
+ * This tier is an ITERATION aid for implementer lanes: the merger still runs
+ * the full `deno task gate` on the merged union before anything lands, so a
+ * selection miss here is caught there, not shipped.
  *
  * Usage:
- *   deno task test:fast            # affected tests for changes vs origin/main + uncommitted
- *   deno task test:fast -- --all   # force the full suite (what the merger runs anyway)
+ *   deno task test:fast          # affected tests for changes vs origin/main + uncommitted
+ *   deno task test:fast --all    # force the full suite
  *
  * Exit code is non-zero when any step fails. Wired as CHECK_FAST_CMD in
  * ~/.fleet/check.conf on the fleet VM (VM-local; the durable copy is this
  * script plus the AGENTS.md note).
  */
 
-import { join, relative, resolve } from "@std/path";
-
 const ROOT = new URL("..", import.meta.url).pathname;
 const CODE_DIRS = ["src", "tests", "scripts"];
+/** Walking OUT of these into their importers connects everything to everything. */
+const HUBS = new Set(["src/app.ts", "src/compose.ts"]);
+const HUB_DIRS = ["src/compose/"];
+/** Changing one of these can break any app-booting test: always full suite. */
+const CORE = new Set([
+  "src/app.ts",
+  "src/compose.ts",
+  "src/router.ts",
+  "src/http.ts",
+  "src/config.ts",
+  "src/server.ts",
+  "src/origin.ts",
+]);
+
 const TEST_FLAGS = [
   "--allow-net",
   "--allow-env",
@@ -36,6 +59,29 @@ const TEST_FLAGS = [
   "--allow-run",
   "--unstable-kv",
 ];
+
+/**
+ * Repo paths are always relative POSIX strings, so the tiny bit of joining and
+ * normalising this script needs is done by hand: importing @std/path would
+ * rewrite deno.lock on FIRST RUN on any lane (the lock did not carry it),
+ * and a dirty deno.lock both pollutes the lane's diff and trips this script's
+ * own config-changed fallback into the full suite.
+ */
+function normalise(path: string): string {
+  const parts: string[] = [];
+  for (const seg of path.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+/** Resolve a relative import specifier against the importing file, repo-relative. */
+function resolveImport(importer: string, spec: string): string {
+  const dir = importer.split("/").slice(0, -1).join("/");
+  return normalise(`${dir}/${spec}`);
+}
 
 async function git(...args: string[]): Promise<string> {
   const out = await new Deno.Command("git", { args, cwd: ROOT, stdout: "piped", stderr: "null" })
@@ -74,7 +120,7 @@ async function importsOf(path: string): Promise<string[]> {
   ) {
     const spec = m[1] ?? m[2];
     if (!spec?.startsWith(".")) continue; // only repo-internal edges
-    out.push(relative(ROOT, resolve(join(ROOT, path, ".."), spec)));
+    out.push(resolveImport(path, spec));
   }
   return out;
 }
@@ -88,8 +134,8 @@ async function reverseGraph(): Promise<Map<string, string[]>> {
     reverse.set(imported, list);
   };
   for (const dir of CODE_DIRS) {
-    for await (const f of tsFiles(join(ROOT, dir))) {
-      const rel = relative(ROOT, f);
+    for await (const f of tsFiles(`${ROOT}${dir}`)) {
+      const rel = f.slice(ROOT.length);
       for (const dep of await importsOf(rel)) add(dep, rel);
     }
   }
@@ -97,27 +143,97 @@ async function reverseGraph(): Promise<Map<string, string[]>> {
   return reverse;
 }
 
-/** Every test file that can observe one of the changed files. */
-function reachableTests(reverse: Map<string, string[]>, changed: string[]): {
+function isHub(file: string): boolean {
+  return HUBS.has(file) || HUB_DIRS.some((d) => file.startsWith(d));
+}
+
+/**
+ * Every test file that can observe one of the changed files.
+ *
+ * Coverage is judged per CHANGED file, not per node reached mid-walk: the
+ * reverse graph from src/routes/listen.ts legitimately passes through app.ts
+ * and server.ts into scripts/* (dev tools no test imports), and those interior
+ * nodes say nothing about whether the CHANGE is covered. scripts/ changes
+ * themselves select no tests — they are dev/proof tooling, type-checked by the
+ * always-run `deno task check` and exercised by hand.
+ *
+ * The walk does not cross a hub: app.ts/compose.ts import every route, so
+ * crossing them selects every app-booting test for any route change. A test
+ * that only reaches the changed file THROUGH the hub boots the whole app but
+ * does not exercise that route's behaviour; the changed file's direct tests
+ * are the ones that do.
+ */
+export function reachableTests(reverse: Map<string, string[]>, changed: string[]): {
   tests: Set<string>;
   uncovered: string[];
 } {
   const tests = new Set<string>();
   const uncovered: string[] = [];
-  const queue = [...changed];
-  const seen = new Set<string>();
-  while (queue.length) {
-    const file = queue.pop()!;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    if (/_test\.ts$/.test(file)) tests.add(file);
-    const importers = reverse.get(file);
-    if (!importers?.length && /^(src|scripts)\//.test(file) && !/_test\.ts$/.test(file)) {
-      uncovered.push(file);
+
+  for (const start of changed) {
+    if (/_test\.ts$/.test(start)) {
+      tests.add(start);
+      continue;
     }
-    for (const importer of importers ?? []) queue.push(importer);
+    if (/^scripts\//.test(start)) continue; // dev tooling: type-check only
+    if (!/^(src\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
+
+    let covered = false;
+    const queue = [start];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const file = queue.pop()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      if (/_test\.ts$/.test(file)) {
+        tests.add(file);
+        covered = true;
+        continue; // a test file's own importers are not evidence of anything
+      }
+      for (const importer of reverse.get(file) ?? []) {
+        if (importer !== start && isHub(importer)) continue; // do not cross hubs
+        queue.push(importer);
+      }
+    }
+    if (!covered) uncovered.push(start);
   }
   return { tests, uncovered };
+}
+
+/**
+ * The name-convention complement to the graph: src/routes/listen.ts is covered
+ * by tests/listen_test.ts and tests/listen_*_test.ts; src/auth/passkeys.ts
+ * additionally by everything in the mirrored tests/auth/ directory.
+ */
+export async function nameMatchedTests(
+  changed: string[],
+  testsDir: string = `${ROOT}tests`,
+): Promise<Map<string, string[]>> {
+  const matched = new Map<string, string[]>();
+  const stems: { file: string; stem: string; subdir: string | null }[] = [];
+  for (const file of changed) {
+    if (!/^src\//.test(file) || !file.endsWith(".ts")) continue;
+    const parts = file.split("/");
+    stems.push({
+      file,
+      stem: parts[parts.length - 1]!.replace(/\.ts$/, ""),
+      subdir: parts.length > 2 ? parts.slice(1, -1).join("/") : null,
+    });
+  }
+  if (!stems.length) return matched;
+
+  for await (const f of tsFiles(testsDir)) {
+    const rel = f.slice(testsDir.length - "tests".length); // tests/...
+    if (!rel.endsWith("_test.ts")) continue;
+    const base = rel.split("/").pop()!;
+    for (const { file, stem, subdir } of stems) {
+      const hit = base === `${stem}_test.ts` ||
+        (base.startsWith(`${stem}_`) && base.endsWith("_test.ts")) ||
+        (subdir !== null && rel.startsWith(`tests/${subdir}/`));
+      if (hit) matched.set(file, [...matched.get(file) ?? [], rel]);
+    }
+  }
+  return matched;
 }
 
 async function run(args: string[]): Promise<number> {
@@ -143,6 +259,7 @@ if (import.meta.main) {
   const changed = await changedFiles();
   const codeChanged = changed.filter((f) => /\.ts$/.test(f));
   const configChanged = changed.some((f) => f === "deno.json" || f === "deno.lock");
+  const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
 
   let testFiles: string[] | null = null; // null = full suite
   let reason = "";
@@ -150,13 +267,20 @@ if (import.meta.main) {
     reason = "--all given";
   } else if (configChanged) {
     reason = "deno.json/deno.lock changed — import graph may have moved";
+  } else if (coreChanged.length) {
+    reason = `cross-cutting file(s) changed: ${coreChanged.join(", ")}`;
   } else if (codeChanged.length === 0) {
     testFiles = [];
     reason = "no .ts changed";
   } else {
     const { tests, uncovered } = reachableTests(await reverseGraph(), codeChanged);
-    if (uncovered.length) {
-      reason = `no test reaches: ${uncovered.join(", ")}`;
+    const named = await nameMatchedTests(codeChanged);
+    for (const list of named.values()) for (const f of list) tests.add(f);
+    // A file with name-matched tests is covered even when the graph cannot
+    // see it (the route tests boot the app through the hub).
+    const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
+    if (stillUncovered.length) {
+      reason = `no test reaches: ${stillUncovered.join(", ")}`;
     } else {
       testFiles = [...tests].sort();
       reason = `affected by: ${codeChanged.join(", ")}`;
