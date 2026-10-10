@@ -1621,7 +1621,11 @@ export class GeminiTtsClient {
         });
       } catch (error) {
         if (options.signal?.aborted) throw error; // caller cancelled: never retry
-        lastError = deadline.aborted && !options.signal
+        // audio-feed-bp6r: attribute the abort to the per-attempt deadline whenever the
+        // CALLER's signal did not fire. The old `!options.signal` guard mislabelled every
+        // production timeout — the worker always passes a lease signal, so Paul's UI showed
+        // the raw "The operation was aborted due to timeout" with no timeout value attached.
+        lastError = deadline.aborted && !options.signal?.aborted
           ? new GeminiTtsError(
             `Gemini TTS request timed out after ${timeoutMs}ms`,
             undefined,

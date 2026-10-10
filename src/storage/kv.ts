@@ -883,8 +883,26 @@ export class KvMetadataStore implements MetadataStore {
       // Abandon rather than re-bill. Still checked, so this cannot clobber a
       // worker that legitimately claimed between our read and this write.
       // A regeneration goes back to ready on its old audio instead (audio-feed-8oz).
+      //
+      // audio-feed-bp6r: preserve the last recorded cause. Nine live episodes
+      // showed only "abandoned after 3 attempts" because this write overwrote
+      // whatever the last failing claim had recorded. When nothing was ever
+      // recorded, say so plainly — that itself is the diagnostic (every claim
+      // died before its terminal write).
+      const prior = typeof found.error === "string" && found.error.length > 0
+        ? found.error
+        : null;
+      const provenance = found.claimedAt
+        ? `last claim by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
+        : "no claim details";
       const abandoned: Episode = {
-        ...unsynthesized(found, `abandoned after ${claim.maxClaims} attempts`),
+        ...unsynthesized(
+          found,
+          prior
+            ? `abandoned after ${claim.maxClaims} attempts; last recorded error: ${prior}`
+            : `abandoned after ${claim.maxClaims} attempts; no claim recorded a cause (${provenance}) — ` +
+              "each claim ended before its terminal write, so the worker died or its isolate was stopped mid-synthesis",
+        ),
         claimedAt: undefined,
         claimedBy: undefined,
       };

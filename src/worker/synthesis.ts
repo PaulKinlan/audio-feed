@@ -202,6 +202,33 @@ function isPermanent(error: unknown): boolean {
 }
 
 /**
+ * The failure reason persisted on an episode and shown in the UI (audio-feed-bp6r).
+ *
+ * The TTS client wraps a turn failure as "TTS turn failed; refusing whole-episode
+ * retry: <inner>" with a HARDCODED status 400 — that 400 is ours, not the
+ * provider's, so persisting it would mislabel a client-side timeout as a provider
+ * rejection. The wrapper carries the inner error in `details`; unwrap the chain so
+ * the record keeps the true root: which timeout fired and its duration, or the
+ * provider's real HTTP status. Claim and mode make the record actionable on their
+ * own: "claim 2/3" says the episode is about to be abandoned.
+ */
+export function describeSynthesisFailure(
+  lastError: unknown,
+  claimed: Pick<Episode, "attempts" | "mode">,
+  maxClaims: number,
+): string {
+  let root = lastError;
+  while (root instanceof GeminiTtsError && root.details instanceof Error) {
+    root = root.details;
+  }
+  const message = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
+  const parts = [`mode ${claimed.mode}`, `claim ${claimed.attempts ?? "?"}/${maxClaims}`];
+  const status = (root as { status?: unknown })?.status;
+  if (typeof status === "number") parts.push(`provider status ${status}`);
+  return `${message} [${parts.join("; ")}]`;
+}
+
+/**
  * Default synthesizer: the real client, with voices resolved per audio-feed-4xt.
  *
  * Direct-mode narrator order: source voice, then the user's own preference
@@ -790,7 +817,7 @@ export async function runSynthesisBatch(
     }
 
     if (!audio) {
-      const error = String((lastError as Error)?.message ?? lastError ?? "synthesis failed");
+      const error = describeSynthesisFailure(lastError, claimed, opts.maxClaims);
       console.error(
         `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
       );

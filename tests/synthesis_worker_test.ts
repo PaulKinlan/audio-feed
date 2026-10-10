@@ -843,6 +843,104 @@ Deno.test("a job that keeps crashing is abandoned rather than re-billed forever"
   assertEquals(episode?.status, "failed", "an exhausted job must be visibly abandoned");
 });
 
+Deno.test("a failed episode records the unwrapped cause with mode, claim and provider status (audio-feed-bp6r)", async () => {
+  // The TTS client wraps a turn failure with a hardcoded status 400 that is OURS, not the
+  // provider's. The persisted episode error must keep the real root cause instead.
+  const { ctx, stores } = await queued();
+  const inner = new GeminiTtsError("Gemini API error: boom 500", 500);
+  const wrapped = new GeminiTtsError(
+    `TTS turn failed; refusing whole-episode retry: ${inner.message}`,
+    400,
+    inner,
+  );
+  const result = await runSynthesisBatch(ctx, () => Promise.reject(wrapped), {
+    maxAttempts: 3,
+    retryBaseDelayMs: 1,
+  });
+  assertEquals(result.failed.length, 1);
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "refusing whole-episode retry");
+  assertStringIncludes(episode?.error ?? "", "mode direct");
+  assertStringIncludes(episode?.error ?? "", "claim 1/3");
+  assertStringIncludes(episode?.error ?? "", "provider status 500");
+  assert(
+    !episode!.error!.includes("provider status 400"),
+    "the wrapper's own 400 must not be reported as the provider's status",
+  );
+});
+
+Deno.test("an abandoned episode keeps the last recorded cause (audio-feed-bp6r)", async () => {
+  // The 2026-10-09 incident: nine live episodes showed only "abandoned after 3 attempts".
+  // When any claim managed to record a cause, abandonment must preserve it.
+  const { stores } = await queued();
+  const leaseMs = 60_000;
+  const claim = (t: number) =>
+    stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "w",
+      now: new Date(t).toISOString(),
+      leaseMs,
+      maxClaims: 3,
+    });
+  let t = Date.parse("2026-10-09T00:00:00Z");
+  for (let i = 1; i <= 3; i++) {
+    assert(await claim(t), `claim ${i} should succeed`);
+    if (i === 3) {
+      // The last claim's worker got as far as recording the failure before dying.
+      const current = await stores.metadata.getEpisode("user-1", "episode-1");
+      await stores.metadata.putEpisode({
+        ...current!,
+        error:
+          "TTS turn failed; refusing whole-episode retry: Gemini TTS request timed out after 60000ms",
+      });
+    }
+    t += leaseMs + 1_000; // let the lease expire so the next tick can reclaim
+  }
+  assertEquals(await claim(t), null, "out of claims is out of claims");
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "abandoned after 3 attempts");
+  assertStringIncludes(
+    episode?.error ?? "",
+    "timed out after 60000ms",
+    "the recorded cause must survive abandonment",
+  );
+});
+
+Deno.test("an abandoned episode with no recorded cause says the worker died before writing (audio-feed-bp6r)", async () => {
+  // The other half of the incident: claims that never wrote a result. The abandoned record
+  // must say THAT — it distinguishes "the provider rejected us" from "our worker vanished".
+  const { stores } = await queued();
+  const leaseMs = 60_000;
+  let t = Date.parse("2026-10-09T00:00:00Z");
+  for (let i = 1; i <= 3; i++) {
+    assert(
+      await stores.metadata.claimEpisode("user-1", "episode-1", {
+        owner: "w",
+        now: new Date(t).toISOString(),
+        leaseMs,
+        maxClaims: 3,
+      }),
+      `claim ${i} should succeed`,
+    );
+    t += leaseMs + 1_000;
+  }
+  assertEquals(
+    await stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "w",
+      now: new Date(t).toISOString(),
+      leaseMs,
+      maxClaims: 3,
+    }),
+    null,
+  );
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "abandoned after 3 attempts");
+  assertStringIncludes(episode?.error ?? "", "no claim recorded a cause");
+  assertStringIncludes(episode?.error ?? "", "last claim by w at");
+});
+
 Deno.test("article content exceeding maxInputCharacters fails closed without spending (audio-feed-3hb)", async () => {
   const { ctx, stores } = await queued();
   // Article with 1,000 chars, limit set to 500

@@ -138,6 +138,27 @@ Deno.test("a hung request is killed by the per-attempt timeout", async () => {
   if (elapsed > 5_000) throw new Error(`timeout took ${elapsed}ms`);
 });
 
+Deno.test("a per-attempt timeout is named with its deadline even when a caller signal exists (audio-feed-bp6r)", async () => {
+  // The worker always passes a lease signal, and the old `!options.signal` guard then let the
+  // raw TimeoutError through — which is how the 2026-10-09 incident surfaced as a bare
+  // "The operation was aborted due to timeout" with no deadline attached.
+  const hang =
+    ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      })) as typeof fetch;
+
+  const caller = new AbortController(); // never fired: the per-attempt deadline must win the name
+  let message = "";
+  try {
+    await client(hang, { timeoutMs: 150, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 150ms/.test(message)) throw new Error(`unexpected error: ${message}`);
+});
+
 Deno.test("caller cancellation is never retried and surfaces as-is", async () => {
   const controller = new AbortController();
   let attempts = 0;
