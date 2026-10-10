@@ -1,40 +1,3 @@
-/**
- * Deno KV metadata adapter — the production `MetadataStore`.
- *
- * Key design notes:
- *   - Episodes are indexed for the two reads the feeds actually perform:
- *     "newest N for a user" (master feed) and "newest N for a source+mode"
- *     (per-source feed). Both are `list` scans over a time-ordered key, not a
- *     full table scan, because the master feed is hit by every podcast client
- *     on a polling interval.
- *   - Sort keys use a descending timestamp so KV's natural ascending order
- *     yields newest-first without buffering the whole set.
- *
- * KEY OWNERSHIP (audio-feed-ruw): this module is the ONLY writer of `["user",
- * id]`. `src/auth/users.ts` used to write the same key with a different record
- * shape, so whichever ran last silently dropped the other's fields. Policy now
- * lives in `auth/users.ts` and persistence lives here. Do not reintroduce a
- * second writer — if a caller needs a new user query, add it to `MetadataStore`.
- *
- * Index keys, all distinct first parts so a `["user"]` prefix scan returns user
- * records and nothing else:
- *   ["user", id]                  the record
- *   ["user_by_email", email]      -> id
- *   ["user_by_feed_token", token] -> id
- *   ["approval_log", at, userId]  the admin audit trail
- *
- * Accounts (audio-feed-8fc), none under a ["user"] prefix:
- *   ["session", idHash]                          session, expireIn = its expiry
- *   ["passkey", credentialId]                    the credential
- *   ["passkey_by_user", userId, createdAt, id]   -> credentialId
- *   ["setup_link", tokenHash]                    one-time enrolment link
- *   ["auth_challenge", challenge]                pending WebAuthn challenge
- *   ["atomic", key]                              shared counter/CAS row, expireIn honoured
- *
- * Owned by: audio-feed-0h8, extended by audio-feed-ruw.
- */
-
-import v8 from "node:v8";
 import type {
   ApprovalRecord,
   Article,
@@ -48,14 +11,7 @@ import type {
   SynthesisCounts,
   User,
 } from "../types.ts";
-import {
-  DEFAULT_CLAIM_LEASE_MS,
-  isClaimExpired,
-  isPublishable,
-  SynthesisSegmentRecord,
-  unsynthesized,
-  utcDayKey,
-} from "../types.ts";
+import { SynthesisSegmentRecord } from "../types.ts";
 import type {
   AtomicWrite,
   DownloadCounts,
@@ -69,108 +25,57 @@ import type {
   MetadataStore,
   RunRecord,
 } from "./mod.ts";
-import {
-  compareRunsNewestFirst,
-  metadataRepositories,
-  RUN_HISTORY_LIMIT,
-  RUN_KINDS,
-} from "./mod.ts";
+import { createKvCore } from "./kv/core.ts";
+import type { KvCore } from "./kv/core.ts";
+import { pendingKey } from "./kv/core.ts";
+import { createUsersRepository } from "./kv/users.ts";
+import { createSourcesRepository } from "./kv/sources.ts";
+import { createArticlesRepository } from "./kv/articles.ts";
+import { createEpisodesRepository } from "./kv/episodes.ts";
+import { createSegmentsRepository } from "./kv/synthesis-segments.ts";
+import { createOrphanBlobsRepository } from "./kv/orphan-blobs.ts";
+import { createUsageRepository } from "./kv/usage.ts";
+import { createNotificationsRepository } from "./kv/notifications.ts";
+import { createRunsRepository } from "./kv/runs.ts";
+import { createAuthRepository } from "./kv/auth.ts";
 
-const MAX_TIME = 9_999_999_999_999; // ~year 2286, comfortably past any real createdAt
-
-/**
- * How many index entries one `listEpisodePage` / `getArticles` call fetches per `getMany`
- * (audio-feed-3jb). The cap is Deno KV's own: `getMany` accepts AT MOST 10 ranges, and asking
- * for more fails the whole read with "Too many ranges (max 10)" — so the batch size IS that limit.
- * The N+1 this replaces awaited one remote `getEpisode` PER ENTRY; the index value already names
- * the episode, so a chunk is one read for up to ten episodes.
- */
-export const EPISODE_READ_BATCH = 10;
-
-/**
- * Maximum character/byte length of an article chunk in KV (audio-feed-cei).
- * Deno KV limits single values to 65,536 bytes. 48,000 bytes provides headroom for
- * V8 serialization overhead and index keys.
- */
-export const ARTICLE_CHUNK_SIZE = 48_000;
-
-/** Maximum V8 serialized bytes allowed per chunk to guarantee Deno KV acceptance. */
-const MAX_KV_VALUE_BYTES = 60_000;
-
-/**
- * An open `kv.atomic()` builder. Derived from the method rather than named: Deno
- * does not export the transaction type under a stable `Deno.*` name, so this
- * cannot go stale when it renames.
- */
-type KvAtomic = ReturnType<Deno.Kv["atomic"]>;
-
-/**
- * Descending sort token: lexicographic ascending order over these strings is
- * chronological descending order over the source timestamps.
- */
-export function descendingKey(iso: string, id: string): string {
-  const ms = Date.parse(iso);
-  const inverted = MAX_TIME - (Number.isFinite(ms) ? ms : 0);
-  return `${inverted.toString().padStart(13, "0")}:${id}`;
-}
-
-/**
- * KV's own expiry for a record that carries `expiresAt`. At least one minute, so
- * a record written at its deadline is still readable by the policy that rejects
- * it; the policy's `expiresAt` check is authoritative, this is only cleanup.
- */
-function expireInMs(expiresAt: string): number {
-  const ms = Date.parse(expiresAt) - Date.now();
-  return Number.isFinite(ms) ? Math.max(ms, 60_000) : 60_000;
-}
-
-/**
- * An article whose chunk set does not match its recorded `chunkCount` (audio-feed-cei).
- *
- * Thrown rather than silently joined: truncated article text must never reach a TTS queue. Callers that
- * render a list may degrade one row to null (see getArticles); callers that synthesize must not.
- * Exported so the two can be distinguished by identity — a blanket catch would also swallow quota,
- * timeout and genuine bugs in hydration and hide an outage behind a missing row.
- */
-export class CorruptArticleError extends Error {
-  readonly articleId: string;
-  readonly expectedChunks: number;
-  readonly foundChunks: number;
-
-  constructor(articleId: string, expectedChunks: number, foundChunks: number) {
-    super(
-      `Corrupted article storage for ${articleId}: expected ${expectedChunks} chunks, found ${foundChunks}`,
-    );
-    this.name = "CorruptArticleError";
-    this.articleId = articleId;
-    this.expectedChunks = expectedChunks;
-    this.foundChunks = foundChunks;
-  }
-}
-
-/**
- * Type guard for the one storage failure a list read may degrade (audio-feed-jnor). Exported so the
- * discriminator is testable on its own: without it, a blanket `catch { return null }` would satisfy
- * every behavioural test in the file while also swallowing KV faults as quietly absent content.
- */
-export function isCorruptArticleError(err: unknown): err is CorruptArticleError {
-  return err instanceof CorruptArticleError;
-}
+export {
+  ARTICLE_CHUNK_SIZE,
+  CorruptArticleError,
+  descendingKey,
+  EPISODE_READ_BATCH,
+  isCorruptArticleError,
+} from "./kv/core.ts";
 
 export class KvMetadataStore implements MetadataStore {
   #kv: Deno.Kv;
   #ownsConnection: boolean;
+  #core: KvCore;
 
   /**
-   * The per-domain views of this store (audio-feed-d9sl Phase 1). Every member is this store, so
-   * `repositories.episodes.getEpisode(a, b)` and `getEpisode(a, b)` are the same call; the value is
-   * the type boundary that lets a lane depend on one domain instead of all 62 methods.
+   * The per-domain implementations (audio-feed-8r1e). Each member is the object that owns
+   * that entity's keys and logic, not a view of this store: `repositories.episodes.getEpisode`
+   * and `getEpisode` below are the same call, but the work happens in
+   * `src/storage/kv/episodes.ts`.
    */
-  readonly repositories: MetadataRepositories = metadataRepositories(this);
+  readonly repositories: MetadataRepositories;
 
   constructor(kv: Deno.Kv, opts?: { ownsConnection?: boolean }) {
     this.#kv = kv;
     this.#ownsConnection = opts?.ownsConnection ?? false;
+    this.#core = createKvCore(kv);
+    this.repositories = {
+      users: createUsersRepository(this.#core, () => this),
+      sources: createSourcesRepository(this.#core, () => this),
+      articles: createArticlesRepository(this.#core, () => this),
+      episodes: createEpisodesRepository(this.#core, () => this),
+      segments: createSegmentsRepository(this.#core, () => this),
+      orphanBlobs: createOrphanBlobsRepository(this.#core, () => this),
+      usage: createUsageRepository(this.#core, () => this),
+      notifications: createNotificationsRepository(this.#core, () => this),
+      runs: createRunsRepository(this.#core, () => this),
+      auth: createAuthRepository(this.#core, () => this),
+    };
   }
 
   static async open(path?: string): Promise<KvMetadataStore> {
@@ -185,6 +90,7 @@ export class KvMetadataStore implements MetadataStore {
    * Scans ["episode"] prefix and ensures ["pending_episodes"] and ["synthesizing_episodes"]
    * index pointers exist for any legacy un-indexed episodes.
    */
+
   async reindexPendingEpisodes(): Promise<{ scanned: number; indexed: number }> {
     let scanned = 0;
     let indexed = 0;
@@ -194,7 +100,7 @@ export class KvMetadataStore implements MetadataStore {
       if (!ep) continue;
       if (ep.status === "pending") {
         // Priority-aware, so a fresh backfill never recreates the single-queue shape (15e).
-        const indexKey: Deno.KvKey = KvMetadataStore.#pendingKey(ep);
+        const indexKey: Deno.KvKey = pendingKey(ep);
         if (!(await this.#kv.get(indexKey)).value) {
           await this.#kv.set(indexKey, { userId: ep.userId, id: ep.id });
           indexed++;
@@ -245,754 +151,131 @@ export class KvMetadataStore implements MetadataStore {
    * both committing. Resolves `false` rather than throwing so the caller owns
    * the wording of the duplicate error.
    */
-  async insertUser(user: User): Promise<boolean> {
-    const email = user.email.toLowerCase();
-    const userKey: Deno.KvKey = ["user", user.id];
-    const emailKey: Deno.KvKey = ["user_by_email", email];
-    const tokenKey: Deno.KvKey = ["user_by_feed_token", user.feedToken];
 
-    const [existingUser, existingEmail, existingToken] = await Promise.all([
-      this.#kv.get<User>(userKey),
-      this.#kv.get<string>(emailKey),
-      this.#kv.get<string>(tokenKey),
-    ]);
-    if (existingUser.value || existingEmail.value || existingToken.value) return false;
-
-    const result = await this.#kv.atomic()
-      .check(existingUser)
-      .check(existingEmail)
-      .check(existingToken)
-      .set(userKey, user)
-      .set(emailKey, user.id)
-      .set(tokenKey, user.id)
-      .commit();
-
-    // A failed check means someone else won the race, which is the same answer
-    // as "already taken" — not an error condition.
-    return result.ok;
+  // -- users --
+  insertUser(user: User): Promise<boolean> {
+    return this.repositories.users.insertUser(user);
   }
-
-  async putUser(user: User): Promise<void> {
-    const email = user.email.toLowerCase();
-    const existing = await this.#kv.get<User>(["user", user.id]);
-
-    const tx = this.#kv.atomic()
-      .set(["user", user.id], user)
-      .set(["user_by_email", email], user.id)
-      .set(["user_by_feed_token", user.feedToken], user.id);
-
-    // A changed email or a rotated token must not leave a stale index entry
-    // pointing at this user — a rotated feed token that still resolves has not
-    // actually been revoked.
-    const previous = existing.value;
-    if (previous) {
-      const previousEmail = previous.email.toLowerCase();
-      if (previousEmail !== email) tx.delete(["user_by_email", previousEmail]);
-      if (previous.feedToken !== user.feedToken) {
-        tx.delete(["user_by_feed_token", previous.feedToken]);
-      }
-    }
-
-    const result = await tx.commit();
-    if (!result.ok) throw new Error(`putUser failed for ${user.id}`);
+  putUser(user: User): Promise<void> {
+    return this.repositories.users.putUser(user);
   }
-
-  async getUser(id: string): Promise<User | null> {
-    return (await this.#kv.get<User>(["user", id])).value;
+  getUser(id: string): Promise<User | null> {
+    return this.repositories.users.getUser(id);
   }
-
-  async getUserByEmail(email: string): Promise<User | null> {
-    const pointer = await this.#kv.get<string>(["user_by_email", email.toLowerCase()]);
-    if (!pointer.value) return null;
-    return await this.getUser(pointer.value);
+  getUserByEmail(email: string): Promise<User | null> {
+    return this.repositories.users.getUserByEmail(email);
   }
-
-  async getUserByFeedToken(token: string): Promise<User | null> {
-    // An empty key part throws in Deno KV; a feed route must answer 404, not 500.
-    if (!token) return null;
-    const pointer = await this.#kv.get<string>(["user_by_feed_token", token]);
-    if (!pointer.value) return null;
-    return await this.getUser(pointer.value);
+  getUserByFeedToken(token: string): Promise<User | null> {
+    return this.repositories.users.getUserByFeedToken(token);
   }
-
-  async listUsers(): Promise<User[]> {
-    const out: User[] = [];
-    for await (const entry of this.#kv.list<User>({ prefix: ["user"] })) {
-      out.push(entry.value);
-    }
-    return out;
+  listUsers(): Promise<User[]> {
+    return this.repositories.users.listUsers();
   }
-
-  /** One commit, so the ledger can never disagree with the user it describes. */
-  async recordApproval(user: User, record: ApprovalRecord): Promise<void> {
-    const result = await this.#kv.atomic()
-      .set(["user", user.id], user)
-      .set(["approval_log", record.at, record.userId], record)
-      .commit();
-    if (!result.ok) throw new Error(`recordApproval failed for ${user.id}`);
+  recordApproval(user: User, record: ApprovalRecord): Promise<void> {
+    return this.repositories.users.recordApproval(user, record);
   }
-
-  /**
-   * A demotion `check`s every other approved admin it counted, so of two
-   * concurrent demotions the second commit fails and its retry sees one admin.
-   */
-  async setAdminRole(
+  listApprovalLog(): Promise<ApprovalRecord[]> {
+    return this.repositories.users.listApprovalLog();
+  }
+  setAdminRole(
     userId: string,
     isAdmin: boolean,
     by: { adminId: string; at: string },
   ): Promise<"changed" | "unchanged" | "last-admin" | "missing"> {
-    while (true) {
-      const target = await this.#kv.get<User>(["user", userId]);
-      if (!target.value) return "missing";
-      if (target.value.isAdmin === isAdmin) return "unchanged";
-      const tx = this.#kv.atomic().check(target);
-      if (!isAdmin && target.value.status === "approved") {
-        const others: Deno.KvEntry<User>[] = [];
-        for await (const entry of this.#kv.list<User>({ prefix: ["user"] })) {
-          const u = entry.value;
-          if (u.id !== userId && u.isAdmin && u.status === "approved") others.push(entry);
-        }
-        if (others.length === 0) return "last-admin";
-        for (const entry of others) tx.check(entry);
-      }
-      const record: ApprovalRecord = {
-        userId,
-        action: "role",
-        adminId: by.adminId,
-        at: by.at,
-        fromRole: isAdmin ? "user" : "admin",
-        toRole: isAdmin ? "admin" : "user",
-      };
-      const result = await tx
-        .set(["user", userId], { ...target.value, isAdmin })
-        .set(["approval_log", record.at, userId], record)
-        .commit();
-      if (result.ok) return "changed";
-    }
+    return this.repositories.users.setAdminRole(userId, isAdmin, by);
   }
-
-  async listApprovalLog(): Promise<ApprovalRecord[]> {
-    const out: ApprovalRecord[] = [];
-    // Key order is [at, userId], so an ascending scan is already oldest-first.
-    for await (const entry of this.#kv.list<ApprovalRecord>({ prefix: ["approval_log"] })) {
-      out.push(entry.value);
-    }
-    return out;
+  // -- sources --
+  putSource(source: Source): Promise<void> {
+    return this.repositories.sources.putSource(source);
   }
-
-  // -- sources --------------------------------------------------------------
-
-  async putSource(source: Source): Promise<void> {
-    await this.#kv.set(["source", source.userId, source.id], source);
+  getSource(userId: string, id: string): Promise<Source | null> {
+    return this.repositories.sources.getSource(userId, id);
   }
-
-  async getSource(userId: string, id: string): Promise<Source | null> {
-    return (await this.#kv.get<Source>(["source", userId, id])).value;
+  listSources(userId: string): Promise<Source[]> {
+    return this.repositories.sources.listSources(userId);
   }
-
-  async listSources(userId: string): Promise<Source[]> {
-    const out: Source[] = [];
-    for await (const entry of this.#kv.list<Source>({ prefix: ["source", userId] })) {
-      out.push(entry.value);
-    }
-    return out;
+  deleteSource(userId: string, id: string): Promise<void> {
+    return this.repositories.sources.deleteSource(userId, id);
   }
-
-  async deleteSource(userId: string, id: string): Promise<void> {
-    await this.#kv.delete(["source", userId, id]);
+  // -- articles --
+  putArticle(article: Article): Promise<void> {
+    return this.repositories.articles.putArticle(article);
   }
-
-  // -- articles -------------------------------------------------------------
-
-  static #splitArticleForStorage(article: Article): { baseArticle: Article; chunks: string[] } {
-    const encoder = new TextEncoder();
-    const totalUtf8Bytes = encoder.encode(article.content).length;
-    const totalV8Bytes = v8.serialize(article.content).byteLength;
-    // An article whose UTF-8 bytes and V8 serialized bytes fit within limits needs no chunking.
-    if (totalUtf8Bytes <= ARTICLE_CHUNK_SIZE && totalV8Bytes <= MAX_KV_VALUE_BYTES) {
-      return {
-        baseArticle: {
-          ...article,
-          chunkCount: 0,
-        },
-        chunks: [],
-      };
-    }
-
-    const chunks: string[] = [];
-    let startIndex = 0;
-    const text = article.content;
-
-    while (startIndex < text.length) {
-      const loopStart = startIndex;
-      let sliceLength = Math.min(text.length - startIndex, ARTICLE_CHUNK_SIZE);
-      let slice = text.slice(startIndex, startIndex + sliceLength);
-      let utf8Bytes = encoder.encode(slice).length;
-      let v8Bytes = v8.serialize(slice).byteLength;
-
-      while ((utf8Bytes > ARTICLE_CHUNK_SIZE || v8Bytes > MAX_KV_VALUE_BYTES) && sliceLength > 1) {
-        const ratio = Math.min(ARTICLE_CHUNK_SIZE / utf8Bytes, MAX_KV_VALUE_BYTES / v8Bytes);
-        sliceLength = Math.max(1, Math.floor(sliceLength * ratio));
-        slice = text.slice(startIndex, startIndex + sliceLength);
-
-        // Do not split surrogate pair
-        const lastCode = slice.charCodeAt(slice.length - 1);
-        if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
-          sliceLength--;
-          slice = text.slice(startIndex, startIndex + sliceLength);
-        }
-
-        utf8Bytes = encoder.encode(slice).length;
-        v8Bytes = v8.serialize(slice).byteLength;
-      }
-
-      const lastCode = slice.charCodeAt(slice.length - 1);
-      // Only step back when there is something to step back to. At sliceLength === 1 the decrement made
-      // the slice empty and startIndex never advanced, so the loop spun forever on an article ending in
-      // an unpaired high surrogate (audio-feed-64wu). A lone surrogate is emitted as its own chunk.
-      if (lastCode >= 0xd800 && lastCode <= 0xdbff && sliceLength > 1) {
-        sliceLength--;
-        slice = text.slice(startIndex, startIndex + sliceLength);
-      }
-
-      // Invariant assertion: must strictly fit in Deno KV (65,536 bytes)
-      const finalV8 = v8.serialize(slice).byteLength;
-      const finalUtf8 = encoder.encode(slice).length;
-      if (finalV8 > 65_536 || finalUtf8 > 65_536) {
-        throw new Error(
-          `Chunk ${chunks.length} of article ${article.id} exceeds max KV value size (v8=${finalV8}, utf8=${finalUtf8} > 65536 bytes)`,
-        );
-      }
-
-      chunks.push(slice);
-      startIndex += sliceLength;
-      // Progress invariant, not a size limit: any future edit that lets a chunk consume nothing must
-      // surface as a thrown error rather than a permanently pinned core. The loop is synchronous, so no
-      // timer, watchdog or Promise.race on this isolate could observe a stall (audio-feed-64wu).
-      if (startIndex <= loopStart) {
-        throw new Error(
-          `Article chunking stalled for ${article.id} at index ${startIndex} (sliceLength=${sliceLength})`,
-        );
-      }
-    }
-
-    return {
-      baseArticle: {
-        ...article,
-        content: "",
-        chunkCount: chunks.length,
-      },
-      chunks,
-    };
+  insertArticleIfAbsent(article: Article): Promise<boolean> {
+    return this.repositories.articles.insertArticleIfAbsent(article);
   }
-
-  async #writeArticleChunks(userId: string, id: string, chunks: string[]): Promise<void> {
-    let writtenCount = 0;
-    try {
-      for (let i = 0; i < chunks.length; i += 10) {
-        const tx = this.#kv.atomic();
-        const end = Math.min(i + 10, chunks.length);
-        for (let j = i; j < end; j++) {
-          tx.set(["article_chunk", userId, id, j], chunks[j]);
-        }
-        const res = await tx.commit();
-        if (!res.ok) throw new Error(`Failed to commit article chunks for ${id}`);
-        writtenCount = end;
-      }
-    } catch (err) {
-      if (writtenCount > 0) {
-        await this.#deleteArticleChunks(userId, id, writtenCount);
-      }
-      throw err;
-    }
+  insertArticleWithEpisodeIfAbsent(article: Article, episode: Episode): Promise<boolean> {
+    return this.repositories.articles.insertArticleWithEpisodeIfAbsent(article, episode);
   }
-
-  async #deleteArticleChunks(userId: string, id: string, chunkCount?: number): Promise<void> {
-    if (typeof chunkCount === "number" && chunkCount > 0) {
-      for (let i = 0; i < chunkCount; i += 10) {
-        const tx = this.#kv.atomic();
-        const end = Math.min(i + 10, chunkCount);
-        for (let j = i; j < end; j++) {
-          tx.delete(["article_chunk", userId, id, j]);
-        }
-        await tx.commit();
-      }
-    } else {
-      for await (const entry of this.#kv.list({ prefix: ["article_chunk", userId, id] })) {
-        await this.#kv.delete(entry.key);
-      }
-    }
+  putArticleWithEpisode(article: Article, episode: Episode): Promise<void> {
+    return this.repositories.articles.putArticleWithEpisode(article, episode);
   }
-
-  async #hydrateArticle(userId: string, article: Article): Promise<Article> {
-    if (!article.chunkCount || article.chunkCount <= 0) {
-      return article;
-    }
-    const chunkKeys: Deno.KvKey[] = [];
-    for (let i = 0; i < article.chunkCount; i++) {
-      chunkKeys.push(["article_chunk", userId, article.id, i]);
-    }
-    const chunkPieces: string[] = [];
-    for (let start = 0; start < chunkKeys.length; start += 10) {
-      const batch = chunkKeys.slice(start, start + 10);
-      const rows = (await this.#kv.getMany(batch)) as Deno.KvEntryMaybe<string>[];
-      for (const row of rows) {
-        if (typeof row.value === "string") {
-          chunkPieces.push(row.value);
-        }
-      }
-    }
-    if (chunkPieces.length !== article.chunkCount) {
-      throw new CorruptArticleError(article.id, article.chunkCount, chunkPieces.length);
-    }
-    return {
-      ...article,
-      content: chunkPieces.join(""),
-    };
+  getArticle(userId: string, id: string): Promise<Article | null> {
+    return this.repositories.articles.getArticle(userId, id);
   }
-
-  async putArticle(article: Article): Promise<void> {
-    const existing = (await this.#kv.get<Article>(["article", article.userId, article.id])).value;
-    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
-    if (chunks.length > 0) {
-      await this.#writeArticleChunks(article.userId, article.id, chunks);
-    }
-    const result = await this.#kv.atomic()
-      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
-      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id)
-      .commit();
-    if (!result.ok) {
-      if (chunks.length > 0) {
-        await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
-      }
-      throw new Error(`putArticle failed for ${article.id}`);
-    }
-    if (existing?.chunkCount && existing.chunkCount > chunks.length) {
-      for (let i = chunks.length; i < existing.chunkCount; i++) {
-        await this.#kv.delete(["article_chunk", article.userId, article.id, i]);
-      }
-    }
+  getArticles(userId: string, ids: string[]): Promise<(Article | null)[]> {
+    return this.repositories.articles.getArticles(userId, ids);
   }
-
-  async insertArticleIfAbsent(article: Article): Promise<boolean> {
-    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
-    if (chunks.length > 0) {
-      const existing = await this.#kv.get(["article_by_url", article.userId, article.url]);
-      if (existing.value !== null) return false;
-      await this.#writeArticleChunks(article.userId, article.id, chunks);
-    }
-    const result = await this.#kv.atomic()
-      .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
-      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
-      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id)
-      .commit();
-    if (!result.ok && chunks.length > 0) {
-      await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
-    }
-    return result.ok;
+  findArticleByUrl(userId: string, url: string): Promise<Article | null> {
+    return this.repositories.articles.findArticleByUrl(userId, url);
   }
-
-  async insertArticleWithEpisodeIfAbsent(
-    article: Article,
-    episode: Episode,
-  ): Promise<boolean> {
-    // One transaction, so the pair either exists together or does not exist at
-    // all (audio-feed-2th). The URL check is the audio-feed-33m guard: a losing
-    // commit writes neither record.
-    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
-    if (chunks.length > 0) {
-      const existing = await this.#kv.get(["article_by_url", article.userId, article.url]);
-      if (existing.value !== null) return false;
-      await this.#writeArticleChunks(article.userId, article.id, chunks);
-    }
-    const tx = this.#kv.atomic()
-      .check({ key: ["article_by_url", article.userId, article.url], versionstamp: null })
-      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
-      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id);
-    KvMetadataStore.#writeEpisode(tx, episode);
-    const result = await tx.commit();
-    if (!result.ok && chunks.length > 0) {
-      await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
-    }
-    return result.ok;
+  deleteArticle(userId: string, id: string): Promise<void> {
+    return this.repositories.articles.deleteArticle(userId, id);
   }
-
-  async putArticleWithEpisode(article: Article, episode: Episode): Promise<void> {
-    // Same single-commit guarantee as the dedupe variant, without the URL check
-    // (audio-feed-d8q): the inbox re-write of a URL is a new episode by request, but
-    // it must never be half a pair.
-    const existing = (await this.#kv.get<Article>(["article", article.userId, article.id])).value;
-    const { baseArticle, chunks } = KvMetadataStore.#splitArticleForStorage(article);
-    if (chunks.length > 0) {
-      await this.#writeArticleChunks(article.userId, article.id, chunks);
-    }
-    const tx = this.#kv.atomic()
-      .set(["article", baseArticle.userId, baseArticle.id], baseArticle)
-      .set(["article_by_url", baseArticle.userId, baseArticle.url], baseArticle.id);
-    KvMetadataStore.#writeEpisode(tx, episode);
-    const result = await tx.commit();
-    if (!result.ok) {
-      if (chunks.length > 0) {
-        await this.#deleteArticleChunks(article.userId, article.id, chunks.length);
-      }
-      throw new Error(`putArticleWithEpisode failed for ${article.id}`);
-    }
-    if (existing?.chunkCount && existing.chunkCount > chunks.length) {
-      for (let i = chunks.length; i < existing.chunkCount; i++) {
-        await this.#kv.delete(["article_chunk", article.userId, article.id, i]);
-      }
-    }
+  // -- episodes --
+  putEpisode(episode: Episode): Promise<void> {
+    return this.repositories.episodes.putEpisode(episode);
   }
-
-  async getArticle(userId: string, id: string): Promise<Article | null> {
-    const entry = await this.#kv.get<Article>(["article", userId, id]);
-    if (!entry.value) return null;
-    return await this.#hydrateArticle(userId, entry.value);
+  getEpisode(userId: string, id: string): Promise<Episode | null> {
+    return this.repositories.episodes.getEpisode(userId, id);
   }
-
-  async getArticles(userId: string, ids: string[]): Promise<(Article | null)[]> {
-    if (ids.length === 0) return [];
-    const articles: (Article | null)[] = [];
-    for (let start = 0; start < ids.length; start += EPISODE_READ_BATCH) {
-      const chunk = ids.slice(start, start + EPISODE_READ_BATCH);
-      const rows =
-        (await this.#kv.getMany(chunk.map((id) => ["article", userId, id]))) as Deno.KvEntryMaybe<
-          Article
-        >[];
-      for (const row of rows) articles.push(row.value);
-    }
-    return await Promise.all(
-      articles.map((art) =>
-        art
-          ? this.#hydrateArticle(userId, art).catch((err: unknown) => {
-            // Only a corrupt article degrades to a missing row. Anything else — a KV fault, a bug in
-            // hydration — has to keep travelling, or an outage shows up as quietly absent content and
-            // nobody notices. The single-article read path deliberately has no equivalent handler:
-            // synthesis must fail closed rather than speak truncated text (audio-feed-jnor).
-            if (!isCorruptArticleError(err)) throw err;
-            console.warn(JSON.stringify({
-              event: "article.corrupt",
-              articleId: err.articleId,
-              expectedChunks: err.expectedChunks,
-              foundChunks: err.foundChunks,
-              action: "omitted-from-batch",
-            }));
-            return null;
-          })
-          : Promise.resolve(null)
-      ),
-    );
+  deleteEpisode(userId: string, id: string): Promise<boolean> {
+    return this.repositories.episodes.deleteEpisode(userId, id);
   }
-
-  async findArticleByUrl(userId: string, url: string): Promise<Article | null> {
-    const pointer = await this.#kv.get<string>(["article_by_url", userId, url]);
-    if (!pointer.value) return null;
-    return await this.getArticle(userId, pointer.value);
+  backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean> {
+    return this.repositories.episodes.backfillEpisodeSourceTitle(userId, id, sourceTitle);
   }
-
-  async deleteArticle(userId: string, id: string): Promise<void> {
-    const article = (await this.#kv.get<Article>(["article", userId, id])).value;
-    await this.#deleteArticleChunks(userId, id, article?.chunkCount);
-    if (article) {
-      await this.#kv.atomic()
-        .delete(["article", userId, id])
-        .delete(["article_by_url", userId, article.url])
-        .commit();
-    }
+  listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
+    return this.repositories.episodes.listEpisodes(query);
   }
-
-  // -- episodes -------------------------------------------------------------
-
-  /**
-   * Add the episode and every index entry that points at it to an open
-   * transaction. Shared by `putEpisode` and the article+episode pair so the
-   * index set cannot drift between the two write paths.
-   */
-  static #writeEpisode(tx: KvAtomic, episode: Episode): void {
-    const sortKey = descendingKey(episode.createdAt, episode.id);
-    tx.set(["episode", episode.userId, episode.id], episode)
-      // master feed index
-      .set(["episode_by_user", episode.userId, sortKey], episode.id)
-      // per-source-and-mode feed index
-      .set(
-        ["episode_by_source", episode.userId, episode.sourceId, episode.mode, sortKey],
-        episode.id,
-      );
-
-    KvMetadataStore.#writeQueueIndexes(tx, episode);
+  listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {
+    return this.repositories.episodes.listEpisodePage(query);
   }
-
-  /**
-   * The queue key for a pending episode: a priority segment, then createdAt, then id.
-   *
-   * "0" is work the subscriber has never heard. "1" is a regeneration - an episode they can
-   * already play, re-rendered because a prompt changed (audio-feed-15e).
-   *
-   * A regeneration keeps its original createdAt, correctly: that date is the episode's position
-   * in the feed and in the player. Keying one queue by createdAt alone therefore let a
-   * "Regenerate all" after a prompt change put every re-render ahead of anything ingested
-   * afterwards, because the old episodes are all older - the subscriber's newest article waited
-   * behind work on audio they already had.
-   *
-   * Putting a priority segment BEFORE the date fixes that without touching the date, and it stays
-   * a single lexicographic scan: same prefix, same cursor, same `limit` bounds-the-scan
-   * behaviour, and regenerations still run whenever the "0" segment is exhausted.
-   */
-  static #pendingKey(episode: Episode): Deno.KvKey {
-    // Derived from #pendingKeys rather than restating the segments: two definitions of one key
-    // is how the write path and the backfill start disagreeing about where an episode lives.
-    const [newWork, regeneration] = KvMetadataStore.#pendingKeys(episode);
-    return episode.regenerating ? regeneration : newWork;
+  listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult> {
+    return this.repositories.episodes.listPendingEpisodes(opts);
   }
-
-  /** Both priority segments for an episode's date, so a flag change can be undone without
-   *  reading the previous record first. */
-  static #pendingKeys(episode: Episode): [Deno.KvKey, Deno.KvKey] {
-    return [
-      ["pending_episodes", "0", episode.createdAt, episode.id],
-      ["pending_episodes", "1", episode.createdAt, episode.id],
-    ];
+  claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
+    return this.repositories.episodes.claimEpisode(userId, episodeId, claim);
   }
-
-  /**
-   * Apply the queue half of an episode write: exactly one pointer, in the priority its flag
-   * selects.
-   *
-   * This is the only place that decision is written, on purpose. Two copies is how an episode
-   * ends up with no pointer - not a visible bug, but an episode that silently never synthesises -
-   * and how it ends up with two, which bills the same work twice.
-   */
-  static #writeQueueIndexes(tx: KvAtomic, episode: Episode): void {
-    const [newWork, regeneration] = KvMetadataStore.#pendingKeys(episode);
-    const own = episode.regenerating ? regeneration : newWork;
-    const other = own === newWork ? regeneration : newWork;
-    const synthesizingKey: Deno.KvKey = [
-      "synthesizing_episodes",
-      episode.createdAt,
-      episode.id,
-    ];
-
-    if (episode.status === "pending") {
-      tx.set(own, { userId: episode.userId, id: episode.id });
-      // The other segment is cleared rather than left alone: requeueEpisode() and
-      // cancelRegeneration() move an episode between priorities while its createdAt - and so the
-      // remainder of its key - stays the same.
-      tx.delete(other);
-      tx.delete(synthesizingKey);
-    } else if (episode.status === "synthesizing") {
-      tx.delete(newWork);
-      tx.delete(regeneration);
-      tx.set(synthesizingKey, { userId: episode.userId, id: episode.id });
-    } else {
-      tx.delete(newWork);
-      tx.delete(regeneration);
-      tx.delete(synthesizingKey);
-    }
+  completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    return this.repositories.episodes.completeEpisode(episode, owner);
   }
-
-  async putEpisode(episode: Episode): Promise<void> {
-    const tx = this.#kv.atomic();
-    KvMetadataStore.#writeEpisode(tx, episode);
-    const result = await tx.commit();
-    if (!result.ok) throw new Error(`putEpisode failed for ${episode.id}`);
+  retryEpisode(userId: string, id: string): Promise<Episode | null> {
+    return this.repositories.episodes.retryEpisode(userId, id);
   }
-
-  async getEpisode(userId: string, id: string): Promise<Episode | null> {
-    return (await this.#kv.get<Episode>(["episode", userId, id])).value;
+  requeueEpisode(userId: string, id: string): Promise<Episode | null> {
+    return this.repositories.episodes.requeueEpisode(userId, id);
   }
-
-  async deleteEpisode(userId: string, id: string): Promise<boolean> {
-    const key: Deno.KvKey = ["episode", userId, id];
-    const entry = await this.#kv.get<Episode>(key);
-    if (!entry.value) return false;
-    const ep = entry.value;
-    const sortKey = descendingKey(ep.createdAt, ep.id);
-    const result = await this.#kv.atomic()
-      .check(entry)
-      .delete(key)
-      .delete(["episode_by_user", userId, sortKey])
-      .delete(["episode_by_source", userId, ep.sourceId, ep.mode, sortKey])
-      .delete(["pending_episodes", "0", ep.createdAt, ep.id])
-      .delete(["pending_episodes", "1", ep.createdAt, ep.id])
-      .delete(["synthesizing_episodes", ep.createdAt, ep.id])
-      .commit();
-    if (result.ok) return true;
-
-    const retry = await this.#kv.get<Episode>(key);
-    if (!retry.value) return false;
-    const retrySortKey = descendingKey(retry.value.createdAt, retry.value.id);
-    const retryResult = await this.#kv.atomic()
-      .check(retry)
-      .delete(key)
-      .delete(["episode_by_user", userId, retrySortKey])
-      .delete([
-        "episode_by_source",
-        userId,
-        retry.value.sourceId,
-        retry.value.mode,
-        retrySortKey,
-      ])
-      .delete(["pending_episodes", "0", retry.value.createdAt, retry.value.id])
-      .delete(["pending_episodes", "1", retry.value.createdAt, retry.value.id])
-      .delete(["synthesizing_episodes", retry.value.createdAt, retry.value.id])
-      .commit();
-    return retryResult.ok;
+  cancelRegeneration(userId: string, id: string): Promise<boolean> {
+    return this.repositories.episodes.cancelRegeneration(userId, id);
   }
-
-  async backfillEpisodeSourceTitle(
-    userId: string,
-    id: string,
-    sourceTitle: string,
-  ): Promise<boolean> {
-    const key: Deno.KvKey = ["episode", userId, id];
-    const entry = await this.#kv.get<Episode>(key);
-    if (!entry.value) return false;
-    if (entry.value.sourceTitle) return true;
-    const updated: Episode = { ...entry.value, sourceTitle };
-    const res = await this.#kv.atomic()
-      .check(entry)
-      .set(key, updated)
-      .commit();
-    if (res.ok) return true;
-
-    // Retry once if atomic check collided
-    const retry = await this.#kv.get<Episode>(key);
-    if (!retry.value) return false;
-    if (retry.value.sourceTitle) return true;
-    const retryUpdated: Episode = { ...retry.value, sourceTitle };
-    const retryRes = await this.#kv.atomic()
-      .check(retry)
-      .set(key, retryUpdated)
-      .commit();
-    return retryRes.ok;
-  }
-
-  /**
-   * Compare-and-swap claim. The `.check(entry)` is the entire point.
-   *
-   * A read-then-write lets two isolates both observe `pending`, both write
-   * `synthesizing`, and both call a paid API for one episode — the second write
-   * wins silently and the first synthesis is billed and thrown away
-   * (audio-feed-vfs). The check makes the loser's commit fail against the
-   * versionstamp it read, so exactly one worker proceeds.
-   */
-  async claimEpisode(
-    userId: string,
-    episodeId: string,
-    claim: EpisodeClaim,
-  ): Promise<Episode | null> {
-    const key: Deno.KvKey = ["episode", userId, episodeId];
-    const entry = await this.#kv.get<Episode>(key);
-    const found = entry.value;
-    if (!found) return null;
-
-    const nowMs = Date.parse(claim.now);
-    const claimable = found.status === "pending" ||
-      (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
-    if (!claimable) return null;
-
-    const attempts = (found.attempts ?? 0) + 1;
-    if (attempts > claim.maxClaims) {
-      // Abandon rather than re-bill. Still checked, so this cannot clobber a
-      // worker that legitimately claimed between our read and this write.
-      // A regeneration goes back to ready on its old audio instead (audio-feed-8oz).
-      //
-      // audio-feed-bp6r: preserve the last recorded cause. Nine live episodes
-      // showed only "abandoned after 3 attempts" because this write overwrote
-      // whatever the last failing claim had recorded. When nothing was ever
-      // recorded, say so plainly — that itself is the diagnostic (every claim
-      // died before its terminal write).
-      const prior = typeof found.error === "string" && found.error.length > 0 ? found.error : null;
-      const provenance = found.claimedAt
-        ? `last claim by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
-        : "no claim details";
-      const abandoned: Episode = {
-        ...unsynthesized(
-          found,
-          prior
-            ? `abandoned after ${claim.maxClaims} attempts; last recorded error: ${prior}`
-            : `abandoned after ${claim.maxClaims} attempts; no claim recorded a cause (${provenance}) — ` +
-              "each claim ended before its terminal write, so the worker died or its isolate was stopped mid-synthesis",
-        ),
-        claimedAt: undefined,
-        claimedBy: undefined,
-      };
-      await this.#atomicPutEpisode(abandoned, entry);
-      return null;
-    }
-
-    const claimed: Episode = {
-      ...found,
-      status: "synthesizing",
-      claimedAt: claim.now,
-      claimedBy: claim.owner,
-      attempts,
-    };
-    const ok = await this.#atomicPutEpisode(claimed, entry);
-    // A failed check means another worker won the race — the normal answer, not
-    // an error. The caller moves on to the next job.
-    return ok ? claimed : null;
-  }
-
-  async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
-    const key: Deno.KvKey = ["episode", episode.userId, episode.id];
-    const entry = await this.#kv.get<Episode>(key);
-    const current = entry.value;
-    // Superseded: the lease expired and another worker already finished this.
-    // Writing anyway would overwrite the winner's audio with ours, silently.
-    if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
-      return false;
-    }
-    return await this.#atomicPutEpisode(episode, entry);
-  }
-
-  /**
-   * Segment reservation with TWO versionstamp checks (audio-feed-wr1u): the episode entry
-   * (the claim this worker read must still be its claim) and the segment slot (nobody
-   * reserved or finalized it since we looked). A failed commit means the world moved under
-   * us — re-read once to classify, because "finalized" is a reuse answer, not a retry.
-   */
-  async reserveSynthesisSegment(
+  // -- segments --
+  reserveSynthesisSegment(
     userId: string,
     episodeId: string,
     record: SynthesisSegmentRecord,
     nowMs: number,
     leaseMs: number,
   ): Promise<"reserved" | "finalized" | "no-claim"> {
-    const episodeKey: Deno.KvKey = ["episode", userId, episodeId];
-    const segmentKey: Deno.KvKey = [
-      "synthesis-segment",
+    return this.repositories.segments.reserveSynthesisSegment(
       userId,
       episodeId,
-      record.textHash,
-      record.promptVersion,
-      record.voice,
-    ];
-    const [episodeEntry, segmentEntry] = await Promise.all([
-      this.#kv.get<Episode>(episodeKey),
-      this.#kv.get<SynthesisSegmentRecord>(segmentKey),
-    ]);
-    const episode = episodeEntry.value;
-    if (
-      !episode || episode.status !== "synthesizing" || episode.claimedBy !== record.owner ||
-      isClaimExpired(episode, nowMs, leaseMs)
-    ) {
-      return "no-claim";
-    }
-    if (segmentEntry.value?.finalized) return "finalized";
-    const ok = await this.#kv.atomic()
-      .check(episodeEntry)
-      .check(segmentEntry)
-      .set(segmentKey, record)
-      .commit();
-    if (ok) return "reserved";
-    // Lost the race: classify against the current world. A finalized slot is reusable
-    // audio; anything else means this worker no longer owns the spend.
-    const nowSegment = await this.#kv.get<SynthesisSegmentRecord>(segmentKey);
-    return nowSegment.value?.finalized ? "finalized" : "no-claim";
+      record,
+      nowMs,
+      leaseMs,
+    );
   }
-
-  async finalizeSynthesisSegment(
+  finalizeSynthesisSegment(
     userId: string,
     episodeId: string,
     slot: { textHash: string; promptVersion: string; voice: string },
@@ -1001,606 +284,103 @@ export class KvMetadataStore implements MetadataStore {
     nowMs: number,
     leaseMs: number,
   ): Promise<boolean> {
-    const episodeKey: Deno.KvKey = ["episode", userId, episodeId];
-    const segmentKey: Deno.KvKey = [
-      "synthesis-segment",
+    return this.repositories.segments.finalizeSynthesisSegment(
       userId,
       episodeId,
-      slot.textHash,
-      slot.promptVersion,
-      slot.voice,
-    ];
-    const [episodeEntry, segmentEntry] = await Promise.all([
-      this.#kv.get<Episode>(episodeKey),
-      this.#kv.get<SynthesisSegmentRecord>(segmentKey),
-    ]);
-    const episode = episodeEntry.value;
-    const current = segmentEntry.value;
-    if (
-      !episode || episode.status !== "synthesizing" || episode.claimedBy !== owner ||
-      isClaimExpired(episode, nowMs, leaseMs)
-    ) {
-      return false;
-    }
-    if (!current || current.finalized || current.owner !== owner) return false;
-    const finalized: SynthesisSegmentRecord = {
-      ...current,
-      audioKey: audio.audioKey,
-      byteLength: audio.byteLength,
-      finalized: true,
-    };
-    const committed = await this.#kv.atomic()
-      .check(episodeEntry)
-      .check(segmentEntry)
-      .set(segmentKey, finalized)
-      .commit();
-    return committed.ok;
-  }
-
-  async listSynthesisSegments(
-    userId: string,
-    episodeId: string,
-  ): Promise<SynthesisSegmentRecord[]> {
-    const records: SynthesisSegmentRecord[] = [];
-    for await (
-      const entry of this.#kv.list<SynthesisSegmentRecord>({
-        prefix: ["synthesis-segment", userId, episodeId],
-      })
-    ) {
-      if (entry.value) records.push(entry.value);
-    }
-    return records;
-  }
-
-  async clearSynthesisSegments(userId: string, episodeId: string): Promise<void> {
-    // Best-effort sweep after the stitched audio is committed; a record left behind is
-    // inert (text-hash keyed, prompt-version and voice gated) and its blob is deleted by
-    // the caller, which records orphans on failure.
-    const deletes: Deno.KvKey[] = [];
-    for await (
-      const entry of this.#kv.list<SynthesisSegmentRecord>({
-        prefix: ["synthesis-segment", userId, episodeId],
-      })
-    ) {
-      deletes.push(entry.key);
-    }
-    for (const key of deletes) await this.#kv.delete(key);
-  }
-
-  /** Versionstamp-checked, so it cannot clobber a claim taken between read and write. */
-  async requeueEpisode(userId: string, id: string): Promise<Episode | null> {
-    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
-    const found = entry.value;
-    if (!found || found.status !== "ready" || !isPublishable(found)) return null;
-    const queued: Episode = {
-      ...found,
-      status: "pending",
-      regenerating: true,
-      attempts: undefined,
-      claimedAt: undefined,
-      claimedBy: undefined,
-      error: undefined,
-    };
-    return (await this.#atomicPutEpisode(queued, entry)) ? queued : null;
-  }
-
-  async retryEpisode(userId: string, id: string): Promise<Episode | null> {
-    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
-    const found = entry.value;
-    // `failed` only, and the versionstamp check makes a concurrent claim or requeue win
-    // rather than interleave.
-    if (!found || found.status !== "failed") return null;
-    const queued: Episode = {
-      ...found,
-      status: "pending",
-      attempts: undefined,
-      claimedAt: undefined,
-      claimedBy: undefined,
-      error: undefined,
-      // regenerating is NOT set: a failed render has no audio worth playing while it retries,
-      // and setting it would put those bytes back into the subscriber's feed.
-      regenerating: undefined,
-    };
-    return (await this.#atomicPutEpisode(queued, entry)) ? queued : null;
-  }
-
-  async cancelRegeneration(userId: string, id: string): Promise<boolean> {
-    const entry = await this.#kv.get<Episode>(["episode", userId, id]);
-    const found = entry.value;
-    if (
-      !found?.regenerating || (found.status !== "pending" && found.status !== "synthesizing")
-    ) {
-      return false;
-    }
-    return await this.#atomicPutEpisode({
-      ...found,
-      status: "ready",
-      regenerating: undefined,
-      claimedAt: undefined,
-      claimedBy: undefined,
-    }, entry);
-  }
-
-  /**
-   * `putEpisode`'s write set, guarded by the versionstamp the caller read.
-   * Keeps the feed indexes in step with the record in one commit.
-   */
-  async #atomicPutEpisode(
-    episode: Episode,
-    guard: Deno.KvEntryMaybe<Episode>,
-  ): Promise<boolean> {
-    const sortKey = descendingKey(episode.createdAt, episode.id);
-    const tx = this.#kv.atomic()
-      .check(guard)
-      .set(["episode", episode.userId, episode.id], episode)
-      .set(["episode_by_user", episode.userId, sortKey], episode.id)
-      .set(
-        ["episode_by_source", episode.userId, episode.sourceId, episode.mode, sortKey],
-        episode.id,
-      );
-
-    KvMetadataStore.#writeQueueIndexes(tx, episode);
-
-    const result = await tx.commit();
-    return result.ok;
-  }
-
-  async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
-    // `limit` bounds MATCHES here, not entries examined. A filtered query's
-    // matches can sit arbitrarily deep in a newest-first index scan, so one
-    // page of `listEpisodePage` (whose limit bounds the underlying scan) is not
-    // equivalent to what this method has always returned. The two drain loops in
-    // createAdminDeleteSourceHandler stop on `batch.length === 0`, so returning
-    // short here silently abandons episodes for a feed that is being deleted
-    // (audio-feed-m04, the audio-feed-4qj shape arriving through a changed seam).
-    const limit = query.limit ?? 50;
-    if (!Number.isFinite(limit)) return (await this.listEpisodePage(query)).episodes;
-
-    const out: Episode[] = [];
-    let cursor: string | undefined;
-    for (;;) {
-      const page = await this.listEpisodePage({ ...query, limit, cursor });
-      out.push(...page.episodes);
-      if (out.length >= limit || !page.cursor || page.cursor === cursor) break;
-      cursor = page.cursor;
-    }
-    return out.slice(0, limit);
-  }
-
-  async listEpisodePage(query: EpisodePage): Promise<EpisodePageResult> {
-    const limit = query.limit ?? 50;
-    const prefix = this.#indexPrefix(query);
-
-    const iter = this.#kv.list<string>({ prefix }, {
-      cursor: query.cursor,
-      limit: Number.isFinite(limit) ? limit : undefined,
-    });
-    // Keys are stored newest-first, so a plain ascending scan is already ordered.
-    //
-    // BATCHED reads (audio-feed-3jb): drain the (limit-bounded) index first, then fetch the
-    // episodes in `getMany` chunks. Draining before fetching keeps the cursor semantics exactly
-    // as they were — the cursor names the position after the last index entry this page
-    // considered — while a page of N entries costs ceil(N / EPISODE_READ_BATCH) remote reads
-    // instead of N serial `getEpisode` awaits.
-    const ids: string[] = [];
-    for await (const entry of iter) ids.push(entry.value);
-    const cursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
-
-    const episodes: Episode[] = [];
-    for (let start = 0; start < ids.length; start += EPISODE_READ_BATCH) {
-      const chunk = ids.slice(start, start + EPISODE_READ_BATCH);
-      const keys: Deno.KvKey[] = chunk.map((id) => ["episode", query.userId, id]);
-      const rows = (await this.#kv.getMany(keys)) as Deno.KvEntryMaybe<Episode>[];
-      for (const row of rows) {
-        const episode = row.value;
-        if (!episode) continue;
-        if (query.sourceId && episode.sourceId !== query.sourceId) continue;
-        if (query.mode && episode.mode !== query.mode) continue;
-        if (query.status && episode.status !== query.status) continue;
-        episodes.push(episode);
-        if (episodes.length >= limit) break;
-      }
-      if (episodes.length >= limit) break;
-    }
-
-    return { episodes, cursor };
-  }
-
-  async listPendingEpisodes(
-    opts: ListPendingOptions = {},
-  ): Promise<ListPendingResult> {
-    const limit = opts.limit ?? 50;
-    const nowMs = opts.nowMs ?? Date.now();
-    const leaseMs = opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS;
-
-    const episodes: Episode[] = [];
-
-    // Native Deno KV iterator with cursor and limit — zero skip overhead (audio-feed-bbb, xxn)
-    const iter = this.#kv.list<{ userId: string; id: string }>(
-      { prefix: ["pending_episodes"] },
-      {
-        cursor: opts.cursor,
-        limit: Number.isFinite(limit) ? limit : undefined,
-      },
+      slot,
+      audio,
+      owner,
+      nowMs,
+      leaseMs,
     );
-
-    for await (const entry of iter) {
-      const { userId, id } = entry.value;
-      const episode = await this.getEpisode(userId, id);
-      if (episode && episode.status === "pending") {
-        episodes.push(episode);
-      }
-    }
-
-    const nextCursor = iter.cursor && iter.cursor !== "" ? iter.cursor : undefined;
-
-    // Check synthesizing episodes with expired claims only on initial scan (cursor undefined)
-    let mergedExpired = false;
-    if (!opts.cursor && (!Number.isFinite(limit) || episodes.length < limit)) {
-      for await (
-        const entry of this.#kv.list<{ userId: string; id: string }>({
-          prefix: ["synthesizing_episodes"],
-        })
-      ) {
-        const { userId, id } = entry.value;
-        const episode = await this.getEpisode(userId, id);
-        if (
-          episode &&
-          episode.status === "synthesizing" &&
-          isClaimExpired(episode, nowMs, leaseMs)
-        ) {
-          episodes.push(episode);
-          mergedExpired = true;
-        }
-      }
-      // Re-sort ONLY when something was merged. The queue scan is already in priority order, and
-      // this sort used to run unconditionally - which silently undid audio-feed-15e, because a
-      // requeued episode's createdAt is old BY DESIGN, so sorting the whole result by date put
-      // every regeneration back in front of the new article the queue key had just moved ahead.
-      // When a merge is needed the order must be the queue's order: priority, then FIFO.
-      if (mergedExpired) {
-        episodes.sort((a, b) => {
-          const ap = a.regenerating ? 1 : 0;
-          const bp = b.regenerating ? 1 : 0;
-          if (ap !== bp) return ap - bp;
-          const timeDiff = a.createdAt.localeCompare(b.createdAt);
-          return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
-        });
-      }
-    }
-
-    return {
-      episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
-      cursor: nextCursor,
-    };
   }
-
-  /**
-   * Only two prefixes are time-ordered end-to-end:
-   *   - `episode_by_user/<user>`                    → newest across everything
-   *   - `episode_by_source/<user>/<source>/<mode>`  → newest within one feed
-   *
-   * A `sourceId` without a `mode` must NOT scan `episode_by_source/<user>/<source>`:
-   * the next key segment is `mode`, so that scan orders by mode first and only
-   * then by time, i.e. every `deepdive` episode ahead of every `direct` one.
-   * Fall back to the user index and filter — correct order beats a tighter scan.
-   */
-  #indexPrefix(query: EpisodeQuery): Deno.KvKey {
-    if (query.sourceId && query.mode) {
-      return ["episode_by_source", query.userId, query.sourceId, query.mode];
-    }
-    return ["episode_by_user", query.userId];
+  listSynthesisSegments(userId: string, episodeId: string): Promise<SynthesisSegmentRecord[]> {
+    return this.repositories.segments.listSynthesisSegments(userId, episodeId);
   }
-
-  async recordOrphanBlob(key: string): Promise<void> {
-    await this.#kv.set(["orphan_blob", key], true);
+  clearSynthesisSegments(userId: string, episodeId: string): Promise<void> {
+    return this.repositories.segments.clearSynthesisSegments(userId, episodeId);
   }
-
-  async listOrphanBlobs(limit: number): Promise<string[]> {
-    const keys: string[] = [];
-    for await (const entry of this.#kv.list({ prefix: ["orphan_blob"] }, { limit })) {
-      if (typeof entry.key[1] === "string") keys.push(entry.key[1]);
-    }
-    return keys;
+  // -- orphanBlobs --
+  recordOrphanBlob(key: string): Promise<void> {
+    return this.repositories.orphanBlobs.recordOrphanBlob(key);
   }
-
-  async forgetOrphanBlob(key: string): Promise<void> {
-    await this.#kv.delete(["orphan_blob", key]);
+  listOrphanBlobs(limit: number): Promise<string[]> {
+    return this.repositories.orphanBlobs.listOrphanBlobs(limit);
   }
-
-  // -- operational stats (audio-feed-ndc) ------------------------------------
-
-  /**
-   * `.sum()` on a `KvU64`, not read-then-write.
-   *
-   * Measured on this runtime: 200 concurrent read-modify-writes landed 1 of
-   * 200; 200 atomic sums landed all 200. `/audio/:key+` is the route podcast
-   * clients hammer, so the naive form would undercount by orders of magnitude
-   * exactly when the number matters.
-   */
-  async recordDownload(userId: string | null): Promise<void> {
-    try {
-      const tx = this.#kv.atomic().sum(["download_total"], 1n);
-      if (userId) tx.sum(["download_by_user", userId], 1n);
-      await tx.commit();
-    } catch {
-      // A counter is not worth failing a download for. The episode still plays.
-    }
+  forgetOrphanBlob(key: string): Promise<void> {
+    return this.repositories.orphanBlobs.forgetOrphanBlob(key);
   }
-
-  async getDownloadCounts(): Promise<DownloadCounts> {
-    const total = await this.#kv.get<Deno.KvU64>(["download_total"]);
-    const perUser: { userId: string; count: number }[] = [];
-    for await (const entry of this.#kv.list<Deno.KvU64>({ prefix: ["download_by_user"] })) {
-      const userId = entry.key[1];
-      if (typeof userId !== "string" || !entry.value) continue;
-      perUser.push({ userId, count: Number(entry.value.value) });
-    }
-    perUser.sort((a, b) => b.count - a.count);
-    return { total: Number(total.value?.value ?? 0n), perUser };
+  // -- usage --
+  recordDownload(userId: string | null): Promise<void> {
+    return this.repositories.usage.recordDownload(userId);
   }
-
-  // Synthesis stats & budget tracking (audio-feed-9mp, audio-feed-akm)
-  async recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
-    const day = utcDayKey(at);
-    let lastError: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const tx = this.#kv.atomic()
-          .sum(["synthesis_total"], 1n)
-          .sum(["synthesis_total_bytes"], BigInt(bytes))
-          .sum(["synthesis_by_user", userId], 1n)
-          .sum(["synthesis_bytes_by_user", userId], BigInt(bytes))
-          .sum(["synthesis_daily", userId, day], 1n);
-        const res = await tx.commit();
-        if (res.ok) return;
-        lastError = new Error(`atomic commit failed (attempt ${attempt + 1}/3)`);
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    console.error(
-      `[audio-feed] recordSynthesis failed for user ${userId} (${bytes} bytes):`,
-      lastError,
-    );
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  getDownloadCounts(): Promise<DownloadCounts> {
+    return this.repositories.usage.getDownloadCounts();
   }
-
-  async getSynthesisCounts(today = utcDayKey()): Promise<SynthesisCounts> {
-    const [totalEntry, bytesEntry] = await Promise.all([
-      this.#kv.get<Deno.KvU64>(["synthesis_total"]),
-      this.#kv.get<Deno.KvU64>(["synthesis_total_bytes"]),
-    ]);
-    const perUser: { userId: string; count: number; bytes: number; todayCount: number }[] = [];
-    for await (const entry of this.#kv.list<Deno.KvU64>({ prefix: ["synthesis_by_user"] })) {
-      const userId = entry.key[1];
-      if (typeof userId !== "string" || !entry.value) continue;
-      const [userBytes, todayEntry] = await Promise.all([
-        this.#kv.get<Deno.KvU64>(["synthesis_bytes_by_user", userId]),
-        this.#kv.get<Deno.KvU64>(["synthesis_daily", userId, today]),
-      ]);
-      perUser.push({
-        userId,
-        count: Number(entry.value.value),
-        bytes: Number(userBytes.value?.value ?? 0n),
-        todayCount: Number(todayEntry.value?.value ?? 0n),
-      });
-    }
-    perUser.sort((a, b) => b.count - a.count);
-    return {
-      total: Number(totalEntry.value?.value ?? 0n),
-      totalBytes: Number(bytesEntry.value?.value ?? 0n),
-      perUser,
-    };
+  recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void> {
+    return this.repositories.usage.recordSynthesis(userId, bytes, at);
   }
-
-  async getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
-    const entry = await this.#kv.get<Deno.KvU64>(["synthesis_daily", userId, day]);
-    return Number(entry.value?.value ?? 0n);
+  getSynthesisCounts(today?: string): Promise<SynthesisCounts> {
+    return this.repositories.usage.getSynthesisCounts(today);
   }
-
-  // -- outbox notifications (audio-feed-np5) --------------------------------
-
-  async queueNotification(notification: OutboxNotification): Promise<void> {
-    const dedupeKey = ["outbox_dedupe", notification.episodeId, notification.status];
-    const existing = await this.#kv.get(dedupeKey);
-    if (existing.value) return; // Deduplicate: already queued for this episode and status
-
-    const tx = this.#kv.atomic()
-      .check(existing)
-      .set(dedupeKey, notification.id, { expireIn: 14 * 86400 * 1000 })
-      .set(["outbox", notification.id], notification, { expireIn: 14 * 86400 * 1000 })
-      .set(["outbox_pending", notification.createdAt, notification.id], notification.id, {
-        expireIn: 14 * 86400 * 1000,
-      });
-    const res = await tx.commit();
-    if (!res.ok) {
-      // If atomic commit failed due to race, re-check if dedupe key was set by another worker
-      const raced = await this.#kv.get(dedupeKey);
-      if (raced.value) return;
-      throw new Error(`queueNotification failed for ${notification.id}`);
-    }
+  getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
+    return this.repositories.usage.getUserDailySynthesisCount(userId, day);
   }
-
-  async listOutbox(limit = 50): Promise<OutboxNotification[]> {
-    const notifications: OutboxNotification[] = [];
-    for await (const entry of this.#kv.list<string>({ prefix: ["outbox_pending"] }, { limit })) {
-      const id = entry.value;
-      const n = await this.#kv.get<OutboxNotification>(["outbox", id]);
-      if (n.value && !n.value.deliveredAt) notifications.push(n.value);
-    }
-    return notifications;
+  // -- notifications --
+  queueNotification(notification: OutboxNotification): Promise<void> {
+    return this.repositories.notifications.queueNotification(notification);
   }
-
-  async ackNotification(id: string): Promise<boolean> {
-    const entry = await this.#kv.get<OutboxNotification>(["outbox", id]);
-    if (!entry.value || entry.value.deliveredAt) return false;
-    const n = structuredClone(entry.value);
-    n.deliveredAt = new Date().toISOString();
-    const tx = this.#kv.atomic()
-      .check(entry)
-      .set(["outbox", id], n, { expireIn: 7 * 86400 * 1000 })
-      .delete(["outbox_pending", n.createdAt, n.id]);
-    const res = await tx.commit();
-    return res.ok;
+  listOutbox(limit?: number): Promise<OutboxNotification[]> {
+    return this.repositories.notifications.listOutbox(limit);
   }
-
-  /**
-   * Newest-first key under the job's own prefix, then prune that job past the
-   * limit.
-   *
-   * Bounded on WRITE rather than on read: an unbounded history reads cheaply
-   * today and is a multi-megabyte scan a year in, which is the audio-feed-att
-   * failure. The prune costs one bounded list per run, and runs are minutes
-   * apart.
-   *
-   * Keyed and pruned PER JOB (audio-feed-ct1). Under one shared ["run"] prefix
-   * the synthesis cron's idle ticks evicted every feed poll within about 100
-   * minutes.
-   */
-  async recordRun(record: RunRecord): Promise<void> {
-    try {
-      const job = ["run", record.kind];
-      const key = [...job, descendingKey(record.startedAt, record.id)];
-      if (record.idle) {
-        // A run of idle ticks is kept as one row, the latest (audio-feed-0ob). When
-        // the job's newest row is an idle tick that started no later, swap this
-        // one in for it: the history does not grow, so there is nothing to prune,
-        // and the write reads one entry instead of the job's whole history.
-        for await (const newest of this.#kv.list<RunRecord>({ prefix: job }, { limit: 1 })) {
-          if (
-            newest.value?.idle &&
-            Date.parse(newest.value.startedAt) <= Date.parse(record.startedAt)
-          ) {
-            const swap = this.#kv.atomic().check(newest).delete(newest.key).set(key, record);
-            // If the row changed underneath us, fall through to an ordinary insert.
-            if ((await swap.commit()).ok) return;
-          }
-        }
-      }
-      await this.#kv.set(key, record);
-      // Drop anything past the limit. `list` is ascending over descending keys,
-      // so everything after the first RUN_HISTORY_LIMIT entries is older.
-      let seen = 0;
-      for await (const entry of this.#kv.list<RunRecord>({ prefix: job })) {
-        seen++;
-        if (seen > RUN_HISTORY_LIMIT) await this.#kv.delete(entry.key);
-      }
-    } catch {
-      // History is diagnostic. Losing a record must not fail the run it describes.
-    }
+  ackNotification(id: string): Promise<boolean> {
+    return this.repositories.notifications.ackNotification(id);
   }
-
-  /** Every job's newest-first history, merged. No job can contribute more than `limit`. */
-  async listRuns(limit = RUN_HISTORY_LIMIT * RUN_KINDS.length): Promise<RunRecord[]> {
-    const out: RunRecord[] = [];
-    for (const kind of RUN_KINDS) {
-      for await (const entry of this.#kv.list<RunRecord>({ prefix: ["run", kind] }, { limit })) {
-        if (entry.value) out.push(entry.value);
-      }
-    }
-    return out.sort(compareRunsNewestFirst).slice(0, limit);
+  // -- runs --
+  recordRun(record: RunRecord): Promise<void> {
+    return this.repositories.runs.recordRun(record);
   }
-
-  // -- accounts (audio-feed-8fc) --------------------------------------------
-
-  async putSession(session: Session): Promise<void> {
-    await this.#kv.set(["session", session.idHash], session, {
-      expireIn: expireInMs(session.expiresAt),
-    });
+  listRuns(limit?: number): Promise<RunRecord[]> {
+    return this.repositories.runs.listRuns(limit);
   }
-
-  async getSession(idHash: string): Promise<Session | null> {
-    return (await this.#kv.get<Session>(["session", idHash])).value;
+  // -- auth --
+  putSession(session: Session): Promise<void> {
+    return this.repositories.auth.putSession(session);
   }
-
-  async deleteSession(idHash: string): Promise<void> {
-    await this.#kv.delete(["session", idHash]);
+  getSession(idHash: string): Promise<Session | null> {
+    return this.repositories.auth.getSession(idHash);
   }
-
-  async putCredential(credential: PasskeyCredential): Promise<void> {
-    const result = await this.#kv.atomic()
-      .set(["passkey", credential.id], credential)
-      .set(
-        ["passkey_by_user", credential.userId, credential.createdAt, credential.id],
-        credential.id,
-      )
-      .commit();
-    if (!result.ok) throw new Error(`putCredential failed for ${credential.id}`);
+  deleteSession(idHash: string): Promise<void> {
+    return this.repositories.auth.deleteSession(idHash);
   }
-
-  async getCredential(id: string): Promise<PasskeyCredential | null> {
-    return (await this.#kv.get<PasskeyCredential>(["passkey", id])).value;
+  putCredential(credential: PasskeyCredential): Promise<void> {
+    return this.repositories.auth.putCredential(credential);
   }
-
-  async listCredentials(userId: string): Promise<PasskeyCredential[]> {
-    const out: PasskeyCredential[] = [];
-    for await (const entry of this.#kv.list<string>({ prefix: ["passkey_by_user", userId] })) {
-      const credential = await this.getCredential(entry.value);
-      if (credential && credential.userId === userId) out.push(credential);
-    }
-    return out;
+  getCredential(id: string): Promise<PasskeyCredential | null> {
+    return this.repositories.auth.getCredential(id);
   }
-
-  /**
-   * The count and the delete are one commit: every index row the count read is
-   * `check`ed, so a concurrent delete of a sibling fails this commit and the
-   * retry sees the smaller count.
-   */
-  async deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing"> {
-    while (true) {
-      const entry = await this.#kv.get<PasskeyCredential>(["passkey", id]);
-      if (!entry.value || entry.value.userId !== userId) return "missing";
-      const index: Deno.KvEntry<string>[] = [];
-      for await (const row of this.#kv.list<string>({ prefix: ["passkey_by_user", userId] })) {
-        index.push(row);
-      }
-      if (new Set(index.map((row) => row.value)).size <= 1) return "last";
-      const tx = this.#kv.atomic().check(entry);
-      for (const row of index) tx.check(row);
-      const result = await tx
-        .delete(["passkey", id])
-        .delete(["passkey_by_user", userId, entry.value.createdAt, id])
-        .commit();
-      if (result.ok) return "deleted";
-    }
+  listCredentials(userId: string): Promise<PasskeyCredential[]> {
+    return this.repositories.auth.listCredentials(userId);
   }
-
-  async putSetupLink(link: SetupLink): Promise<void> {
-    await this.#kv.set(["setup_link", link.tokenHash], link, {
-      expireIn: expireInMs(link.expiresAt),
-    });
+  deleteCredential(userId: string, id: string): Promise<"deleted" | "last" | "missing"> {
+    return this.repositories.auth.deleteCredential(userId, id);
   }
-
-  async getSetupLink(tokenHash: string): Promise<SetupLink | null> {
-    return (await this.#kv.get<SetupLink>(["setup_link", tokenHash])).value;
+  putSetupLink(link: SetupLink): Promise<void> {
+    return this.repositories.auth.putSetupLink(link);
   }
-
+  getSetupLink(tokenHash: string): Promise<SetupLink | null> {
+    return this.repositories.auth.getSetupLink(tokenHash);
+  }
   consumeSetupLink(tokenHash: string): Promise<SetupLink | null> {
-    return this.#consume<SetupLink>(["setup_link", tokenHash]);
+    return this.repositories.auth.consumeSetupLink(tokenHash);
   }
-
-  async putChallenge(challenge: AuthChallenge): Promise<void> {
-    await this.#kv.set(["auth_challenge", challenge.challenge], challenge, {
-      expireIn: expireInMs(challenge.expiresAt),
-    });
+  putChallenge(challenge: AuthChallenge): Promise<void> {
+    return this.repositories.auth.putChallenge(challenge);
   }
-
   consumeChallenge(challenge: string): Promise<AuthChallenge | null> {
-    return this.#consume<AuthChallenge>(["auth_challenge", challenge]);
+    return this.repositories.auth.consumeChallenge(challenge);
   }
 
-  /**
-   * Shared counters (audio-feed-2zvc). The versionstamp check is the whole
-   * point: a read-then-set lets two isolates both observe the same count and
-   * both admit an attempt, which is exactly the per-isolate hole this closes.
-   * The loser of a race retries against what the winner wrote.
-   *
-   * If every attempt loses — a burst of writers all re-colliding — the row is
-   * returned unmodified with `committed: false`, so a caller that must not act
-   * on an unwritten value can fail closed. Never claim a write that did not
-   * land.
-   */
   async atomicUpdate<T>(
     key: string,
     mutate: (current: T | null) => T | null,
@@ -1629,12 +409,6 @@ export class KvMetadataStore implements MetadataStore {
    * Read and delete in one compare-and-swap: of two concurrent consumers the
    * second commit fails its check, so exactly one gets the value.
    */
-  async #consume<T>(key: Deno.KvKey): Promise<T | null> {
-    const entry = await this.#kv.get<T>(key);
-    if (entry.value === null) return null;
-    const result = await this.#kv.atomic().check(entry).delete(key).commit();
-    return result.ok ? entry.value : null;
-  }
 
   close(): Promise<void> {
     if (this.#ownsConnection) this.#kv.close();

@@ -2003,14 +2003,14 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
     assertEquals(await store.listSynthesisSegments("user-1", "e-seg"), []);
   });
 
-  // -- domain repositories (audio-feed-d9sl Phase 1) ---------------------------
+  // -- domain repositories (audio-feed-d9sl Phase 1, one implementation per domain in audio-feed-8r1e)
   //
-  // The facade is a type boundary, not a second implementation: in Phase 1 every view IS the
-  // store, which is exactly what makes the grouping behaviour-preserving. These cases pin that
-  // for every adapter. A Phase 2 that gives a domain its own implementation has to come here and
-  // change the identity case deliberately, which is the point — it is a decision, not a drift.
+  // Phase 1's case here pinned that every view WAS the store, which is exactly what made that split
+  // behaviour-preserving. Giving a domain its own implementation had to come back and change it —
+  // that was the point, so that it read as a decision rather than as drift. What replaces it:
+  // the domain list, that each view is its own object, and that a view stays NARROW.
 
-  test("exposes every domain of the store, and each view is the store itself", (store) => {
+  test("exposes every domain of the store, each as its own repository", (store) => {
     const repositories = store.repositories;
     assertEquals(
       Object.keys(repositories).sort(),
@@ -2028,11 +2028,32 @@ export function runMetadataConformance({ name, create }: MetadataSuiteOptions) {
       ],
       "the domain list is the contract: adding an entity means adding a domain",
     );
-    for (const [domain, view] of Object.entries(repositories)) {
-      assert(
-        view === store,
-        `${domain} must be the store itself in Phase 1, not a wrapper over it`,
-      );
+    assert(
+      (repositories.episodes as unknown) !== (store as unknown),
+      "a domain is now its own implementation, not the store narrowed by type",
+    );
+    // One method the domain must have, one it must NOT expose. The second half is the collision the
+    // split exists to remove: a lane editing episodes must not be able to reach the user methods
+    // through its own handle and quietly keep the shared file shared.
+    const spotChecks: Record<string, [own: string, foreign: string]> = {
+      users: ["getUser", "getEpisode"],
+      sources: ["listSources", "getUser"],
+      articles: ["getArticle", "getEpisode"],
+      episodes: ["getEpisode", "getArticle"],
+      segments: ["listSynthesisSegments", "getEpisode"],
+      orphanBlobs: ["listOrphanBlobs", "getArticle"],
+      usage: ["getDownloadCounts", "getEpisode"],
+      notifications: ["listOutbox", "getArticle"],
+      runs: ["listRuns", "getEpisode"],
+      auth: ["getSession", "getUser"],
+    };
+    for (const [domain, [own, foreign]] of Object.entries(spotChecks)) {
+      const view = repositories[domain as keyof typeof repositories] as unknown as Record<
+        string,
+        unknown
+      >;
+      assertEquals(typeof view[own], "function", `${domain}.${own} must exist`);
+      assertEquals(foreign in view, false, `${domain} must not expose ${foreign}`);
     }
   });
 

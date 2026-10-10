@@ -1,5 +1,6 @@
 /**
- * The domain split of `MetadataStore` (audio-feed-d9sl Phase 1).
+ * The domain split of `MetadataStore` (audio-feed-d9sl Phase 1, implementations per domain in
+ * audio-feed-8r1e).
  *
  * This file is mostly a COMPILE-TIME proof. The risk in a type-level split is not that a call breaks
  * — the composed `MetadataStore` still has every method, so nothing can break — but that the
@@ -9,7 +10,7 @@
  * check` fails on all three here, before any test runs.
  *
  * The runtime cases pin the facade's shape for both adapters that `tests/storage_test.ts` wires up
- * through the conformance suite; here they check the free function and the exported domain record.
+ * through the conformance suite; here they check the exported domain record.
  */
 import { assert, assertEquals } from "@std/assert";
 import { MemoryMetadataStore } from "../src/storage/memory.ts";
@@ -18,7 +19,6 @@ import {
   type AuthRepository,
   type EpisodeRepository,
   type MetadataRepositories,
-  metadataRepositories,
   type MetadataStore,
   type NotificationRepository,
   type OrphanBlobRepository,
@@ -88,7 +88,8 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
   assertEquals(Object.keys(store.repositories).sort(), [...DOMAIN_NAMES]);
 
   // Each of these is a compile-time statement that the view has the domain's type, and a runtime
-  // statement that it is the store.
+  // statement that it is that domain's own implementation: in Phase 1 the views WERE the store,
+  // which is what made the type split behaviour-preserving; Phase 2 replaced them, deliberately.
   const views: [
     UserRepository,
     SourceRepository,
@@ -112,17 +113,29 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
     store.repositories.runs,
     store.repositories.auth,
   ];
-  for (const view of views) assert(view === store, "Phase 1 views are the store itself");
+  for (const view of views) {
+    assert(view !== (store as unknown as UserRepository), "a domain is its own implementation now");
+  }
 });
 
-Deno.test("metadataRepositories() is the same facade as store.repositories (audio-feed-d9sl)", () => {
+Deno.test("a domain object exposes its own methods only (audio-feed-8r1e)", () => {
+  // The other half of the collision guarantee: the compile-time check above proves no METHOD is
+  // reachable from two domains, and this proves the runtime objects agree with it. Without it, a
+  // domain could forward a neighbour's method and the file every lane edits would stay shared.
   const store = new MemoryMetadataStore();
-  const viaHelper: MetadataRepositories = metadataRepositories(store);
-  assertEquals(Object.keys(viaHelper).sort(), [...DOMAIN_NAMES]);
-  for (const domain of DOMAIN_NAMES) {
-    assert(
-      viaHelper[domain] === store.repositories[domain],
-      `${domain}: the helper and the store property must not diverge`,
-    );
+  const foreign: Record<string, string[]> = {
+    users: ["getEpisode", "getArticle", "getSession"],
+    articles: ["getEpisode", "getUser"],
+    episodes: ["getArticle", "getUser"],
+    auth: ["getUser", "getEpisode"],
+  };
+  for (const [domain, names] of Object.entries(foreign)) {
+    const view = store.repositories[domain as keyof MetadataRepositories] as unknown as Record<
+      string,
+      unknown
+    >;
+    for (const name of names) {
+      assertEquals(name in view, false, `${domain} must not expose ${name}`);
+    }
   }
 });

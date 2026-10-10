@@ -664,14 +664,16 @@ export interface MetadataStore
 }
 
 /**
- * The per-domain views of one metadata store (audio-feed-d9sl Phase 1).
+ * The per-domain repositories of one metadata store.
  *
- * Phase 1 is a facade, and saying so matters: every member IS the store, narrowed to one domain's
- * methods. The value is that a lane can now take `EpisodeRepository` instead of the 60-method God
- * interface, migrate its call sites one domain at a time, and stop conflicting with a lane that
- * owns `AuthRepository`. Isolation of the *implementations* per domain is Phase 2
- * (docs/adr/0001-domain-repositories.md) — until then a defect in one domain still lives in the
- * same file as the others, and this facade must not be mistaken for that fix.
+ * Each member is the object that actually implements that domain — since audio-feed-8r1e it is a
+ * real per-domain implementation (`src/storage/kv/<domain>.ts`, `src/storage/memory/<domain>.ts`),
+ * not the store narrowed by type. A lane can depend on `EpisodeRepository` instead of the 60-method
+ * God interface, and change one entity without editing the file every other lane also edits.
+ *
+ * A store still implements `MetadataStore` in full, and every method there forwards to the same
+ * object this exposes, so the two are interchangeable calls. That is deliberate: it keeps ~70 call
+ * sites working and gives the conformance suite one entry point to keep pinning.
  */
 export interface MetadataRepositories {
   readonly users: UserRepository;
@@ -684,25 +686,6 @@ export interface MetadataRepositories {
   readonly notifications: NotificationRepository;
   readonly runs: RunRepository;
   readonly auth: AuthRepository;
-}
-
-/**
- * The domain views of `store`, for callers holding the composed interface rather than a concrete
- * store. Every member is `store` itself, narrowed by type.
- */
-export function metadataRepositories(store: MetadataStore): MetadataRepositories {
-  return {
-    users: store,
-    sources: store,
-    articles: store,
-    episodes: store,
-    segments: store,
-    orphanBlobs: store,
-    usage: store,
-    notifications: store,
-    runs: store,
-    auth: store,
-  };
 }
 
 /** The outcome of `MetadataStore.atomicUpdate`: what is stored, and whether we wrote it. */
