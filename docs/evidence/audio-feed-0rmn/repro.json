@@ -1,0 +1,43 @@
+{
+  "bead": "audio-feed-0rmn",
+  "ranAt": "2026-10-10T22:58:50.393Z",
+  "runtime": "deno 2.9.7",
+  "property": "A body read that our deadline killed (or that the caller cancelled) must say so, instead of reading back as an ordinary provider verdict; the refusal's status must survive it.",
+  "beforeFix": {
+    "measuredAt": "326e294 (origin/main before this branch; the fix reverted in src/worker/script.ts)",
+    "how": "deno test -A tests/grounded_script_test.ts --filter 0rmn, reading the assertion output",
+    "caseDeadlineRefusal": "script request was refused with 503",
+    "caseDeadlineOk": "script response was not JSON",
+    "caseCancelRefusal": "script request was refused with 503",
+    "caseCancelOk": "script response was not JSON",
+    "note": "No deadline value, no cancellation, and — for the two cancel cases — a lease expiry reported as a provider refusal."
+  },
+  "afterFix": {
+    "caseDeadlineRefusal": {
+      "message": "script request was refused with 503: the request timed out after 200ms while reading the error response body",
+      "status": 503,
+      "type": "GroundedScriptError"
+    },
+    "caseDeadlineOk": {
+      "message": "script request timed out after 200ms while reading the response body",
+      "type": "GroundedScriptError"
+    },
+    "caseCancelRefusal": {
+      "message": "script request was cancelled by the caller",
+      "type": "GroundedScriptError"
+    },
+    "caseCancelOk": {
+      "message": "script request was cancelled by the caller",
+      "type": "GroundedScriptError"
+    },
+    "caseUnreadableRefusal": {
+      "message": "script request was refused with 502",
+      "status": 502,
+      "type": "GroundedScriptError"
+    },
+    "caseMalformedJson": {
+      "message": "script response was not JSON",
+      "type": "GroundedScriptError"
+    }
+  }
+}
