@@ -35,7 +35,9 @@
  * script plus the AGENTS.md note).
  */
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// The script lives in <repo>/scripts/ by definition; strip that segment.
+// (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
+const ROOT = import.meta.dirname!.replace(/\/scripts$/, "") + "/";
 const CODE_DIRS = ["src", "tests", "scripts"];
 /** Walking OUT of these into their importers connects everything to everything. */
 const HUBS = new Set(["src/app.ts", "src/compose.ts"]);
@@ -83,20 +85,27 @@ function resolveImport(importer: string, spec: string): string {
   return normalise(`${dir}/${spec}`);
 }
 
-async function git(...args: string[]): Promise<string> {
+async function git(...args: string[]): Promise<string | null> {
   const out = await new Deno.Command("git", { args, cwd: ROOT, stdout: "piped", stderr: "null" })
     .output();
+  // A failed git call must never read as "no changes": that turns a missing
+  // or stale origin/main (a fresh lane worktree is exactly that) into a green
+  // run that tested nothing.
+  if (!out.success) return null;
   return new TextDecoder().decode(out.stdout);
 }
 
-/** Committed diff vs origin/main plus anything uncommitted or untracked. */
-async function changedFiles(): Promise<string[]> {
+/** Committed diff vs origin/main plus anything uncommitted or untracked. null = unknown. */
+async function changedFiles(): Promise<string[] | null> {
   const files = new Set<string>();
   const committed = await git("diff", "--name-only", "origin/main...HEAD");
+  if (committed === null) return null;
   for (const f of committed.split("\n")) f.trim() && files.add(f.trim());
   const uncommitted = await git("diff", "--name-only", "HEAD");
+  if (uncommitted === null) return null;
   for (const f of uncommitted.split("\n")) f.trim() && files.add(f.trim());
   const untracked = await git("ls-files", "--others", "--exclude-standard");
+  if (untracked === null) return null;
   for (const f of untracked.split("\n")) f.trim() && files.add(f.trim());
   return [...files];
 }
@@ -115,10 +124,10 @@ async function importsOf(path: string): Promise<string[]> {
   const out: string[] = [];
   for (
     const m of text.matchAll(
-      /(?:import|export)[^'"]*?from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g,
+      /(?:import|export)[^'"]*?from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']/g,
     )
   ) {
-    const spec = m[1] ?? m[2];
+    const spec = m[1] ?? m[2] ?? m[3];
     if (!spec?.startsWith(".")) continue; // only repo-internal edges
     out.push(resolveImport(path, spec));
   }
@@ -245,6 +254,57 @@ async function run(args: string[]): Promise<number> {
   return out.code;
 }
 
+/**
+ * The whole selection decision, pure so the tests can pin every fallback:
+ * `testFiles: null` means "run the FULL suite".
+ */
+export function planTests(
+  changed: string[],
+  reverse: Map<string, string[]>,
+  named: Map<string, string[]>,
+): { testFiles: string[] | null; reason: string } {
+  if (changed.some((f) => f === "deno.json" || f === "deno.lock")) {
+    return { testFiles: null, reason: "deno.json/deno.lock changed — import graph may have moved" };
+  }
+
+  const codeChanged = changed.filter((f) => f.endsWith(".ts"));
+
+  // Non-TypeScript under src/ or tests/ is still test-asserted content —
+  // src/assets/*.js|css have tests pinning their bytes, tests/fixtures/*.html
+  // feed parsers — and the import graph cannot see any of it.
+  const nonTsCode = changed.filter((f) => !f.endsWith(".ts") && /^(src|tests)\//.test(f));
+  if (nonTsCode.length) {
+    return {
+      testFiles: null,
+      reason: `non-TypeScript code/fixture(s) changed: ${nonTsCode.join(", ")}`,
+    };
+  }
+
+  const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
+  if (coreChanged.length) {
+    return { testFiles: null, reason: `cross-cutting file(s) changed: ${coreChanged.join(", ")}` };
+  }
+
+  // A changed tests/ helper (fixtures.ts, listen_client.ts, ...) fans out to
+  // dozens of suites; selecting its importers IS most of the suite anyway.
+  const helpers = codeChanged.filter((f) => f.startsWith("tests/") && !f.endsWith("_test.ts"));
+  if (helpers.length) {
+    return { testFiles: null, reason: `shared test helper(s) changed: ${helpers.join(", ")}` };
+  }
+
+  if (!codeChanged.length) return { testFiles: [], reason: "no testable change" };
+
+  const { tests, uncovered } = reachableTests(reverse, codeChanged);
+  for (const list of named.values()) for (const f of list) tests.add(f);
+  // A file with name-matched tests is covered even when the graph cannot
+  // see it (the route tests boot the app through the hub).
+  const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
+  if (stillUncovered.length) {
+    return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
+  }
+  return { testFiles: [...tests].sort(), reason: `affected by: ${codeChanged.join(", ")}` };
+}
+
 if (import.meta.main) {
   const forceAll = Deno.args.includes("--all");
   const started = performance.now();
@@ -257,35 +317,18 @@ if (import.meta.main) {
   }
 
   const changed = await changedFiles();
-  const codeChanged = changed.filter((f) => /\.ts$/.test(f));
-  const configChanged = changed.some((f) => f === "deno.json" || f === "deno.lock");
-  const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
-
-  let testFiles: string[] | null = null; // null = full suite
-  let reason = "";
+  let plan: { testFiles: string[] | null; reason: string };
   if (forceAll) {
-    reason = "--all given";
-  } else if (configChanged) {
-    reason = "deno.json/deno.lock changed — import graph may have moved";
-  } else if (coreChanged.length) {
-    reason = `cross-cutting file(s) changed: ${coreChanged.join(", ")}`;
-  } else if (codeChanged.length === 0) {
-    testFiles = [];
-    reason = "no .ts changed";
+    plan = { testFiles: null, reason: "--all given" };
+  } else if (changed === null) {
+    // Never silently green: an unknown change set gets the full suite.
+    plan = { testFiles: null, reason: "git diff failed (stale or missing origin/main?)" };
   } else {
-    const { tests, uncovered } = reachableTests(await reverseGraph(), codeChanged);
-    const named = await nameMatchedTests(codeChanged);
-    for (const list of named.values()) for (const f of list) tests.add(f);
-    // A file with name-matched tests is covered even when the graph cannot
-    // see it (the route tests boot the app through the hub).
-    const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
-    if (stillUncovered.length) {
-      reason = `no test reaches: ${stillUncovered.join(", ")}`;
-    } else {
-      testFiles = [...tests].sort();
-      reason = `affected by: ${codeChanged.join(", ")}`;
-    }
+    const reverse = await reverseGraph();
+    const named = await nameMatchedTests(changed);
+    plan = planTests(changed, reverse, named);
   }
+  const { testFiles, reason } = plan;
 
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);

@@ -10,7 +10,7 @@
  */
 
 import { assertEquals } from "@std/assert";
-import { nameMatchedTests, reachableTests } from "../scripts/fast-check.ts";
+import { nameMatchedTests, planTests, reachableTests } from "../scripts/fast-check.ts";
 
 // A miniature of the repo's real shape: routes flow through the compose/app
 // hubs into whole-app tests; the listen route additionally has direct
@@ -21,6 +21,9 @@ const GRAPH = new Map<string, string[]>([
   ["src/compose.ts", ["tests/listen_test.ts", "tests/app_test.ts"]],
   ["src/app.ts", ["tests/app_test.ts"]],
   ["src/routes/home.ts", ["src/app.ts", "tests/home_test.ts"]],
+  // widgets.ts is reachable ONLY through the hub: the walk must refuse to
+  // cross into app.ts and must report the file uncovered.
+  ["src/routes/widgets.ts", ["src/app.ts"]],
 ]);
 
 Deno.test("a route change selects direct tests, not every app-booting test", () => {
@@ -31,12 +34,9 @@ Deno.test("a route change selects direct tests, not every app-booting test", () 
 });
 
 Deno.test("the hub cut does not strand a change that only the hub sees", () => {
-  // widgets.ts is imported by compose.ts but no test imports it directly and
-  // no name-matched test exists: reachableTests alone must call it uncovered
-  // so the runner falls back to the full suite.
   const { tests, uncovered } = reachableTests(GRAPH, ["src/routes/widgets.ts"]);
 
-  assertEquals([...tests], []);
+  assertEquals([...tests], [], "app_test boots the app but never exercises widgets");
   assertEquals(uncovered, ["src/routes/widgets.ts"]);
 });
 
@@ -81,4 +81,52 @@ Deno.test("the name convention finds the route's own whole-app test", async () =
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// planTests: every fallback class, pinned
+// ---------------------------------------------------------------------------
+
+const NO_NAMED = new Map<string, string[]>();
+
+Deno.test("planTests: a graph-uncovered file rescued by a name-matched test", () => {
+  // widgets.ts is uncovered by the graph (hub-only), but a widgets_test.ts
+  // exists by convention: covered, selected, no full-suite fallback.
+  const named = new Map([["src/routes/widgets.ts", ["tests/widgets_test.ts"]]]);
+  const plan = planTests(["src/routes/widgets.ts"], GRAPH, named);
+
+  assertEquals(plan.testFiles, ["tests/widgets_test.ts"]);
+});
+
+Deno.test("planTests: graph-uncovered with NO name match falls back to the full suite", () => {
+  const plan = planTests(["src/routes/widgets.ts"], GRAPH, NO_NAMED);
+  assertEquals(plan.testFiles, null);
+});
+
+Deno.test("planTests: deno.json, a core file, a test helper, and a non-ts asset all fall back", () => {
+  for (
+    const changed of [
+      ["deno.json"],
+      ["deno.lock"],
+      ["src/router.ts"],
+      ["src/app.ts"],
+      ["src/compose/access.ts"],
+      ["tests/fixtures.ts"],
+      ["src/assets/listen.js"],
+      ["tests/fixtures/page.html"],
+    ]
+  ) {
+    const plan = planTests(changed, GRAPH, NO_NAMED);
+    assertEquals(plan.testFiles, null, `${changed} must run the full suite: ${plan.reason}`);
+  }
+});
+
+Deno.test("planTests: docs-only and empty change sets run no tests", () => {
+  assertEquals(planTests(["README.md"], GRAPH, NO_NAMED).testFiles, []);
+  assertEquals(planTests([], GRAPH, NO_NAMED).testFiles, []);
+});
+
+Deno.test("planTests: a changed test file runs itself without the graph", () => {
+  const plan = planTests(["tests/http_test.ts"], new Map(), NO_NAMED);
+  assertEquals(plan.testFiles, ["tests/http_test.ts"]);
 });

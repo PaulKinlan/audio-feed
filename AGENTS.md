@@ -30,8 +30,11 @@ the whole-repo type-check, then only the tests a change can affect: tests that r
 in the static import graph without crossing the app/compose hubs, plus the name-convention tests
 (`<stem>_test.ts`, `<stem>_*_test.ts`, mirrored test subdirectories). It falls back to the FULL
 suite when deno.json/deno.lock changes, when a cross-cutting file
-(app/compose/router/http/config/server/origin) changes, or when a changed src file has no covering
-test. Safe beats fast.
+(app/compose/router/http/config/server/origin) changes, when a changed src file has no covering
+test, when a shared test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript
+file under src/ or tests/ changes (assets, HTML fixtures — the import graph cannot see them), or
+when the git diff itself fails (a stale/missing origin/main must never read as "no changes"). Safe
+beats fast.
 
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.
