@@ -1,0 +1,107 @@
+# every case body of tests/conformance/metadata.ts at main 54dd674, checked against the
+# modules in tests/conformance/metadata/ after the fydf split. A case matches when its
+# whitespace-normalised text appears there, i.e. no assertion, label or comment inside any
+# case was edited while moving — which is the claim a diff of this file cannot support.
+# 102 of 102 cases verbatim
+  ok   test("round-trips a user", async (store) => {
+  ok   test("returns null for an unknown user", async (store) => {
+  ok   test("looks a user up by email, case-insensitively", async (store) => {
+  ok   test("does not leave a stale email index after an address change", async (store) => {
+  ok   test("preserves the approval gate fields verbatim", async (store) => {
+  ok   test("round-trips every canonical user field, losing none", async (store) => {
+  ok   test("an update preserves fields the caller did not mention", async (store) => {
+  ok   test("carries all four user statuses, including rejected", async (store) => {
+  ok   test("insertUser writes a new user and reports success", async (store) => {
+  ok   test("insertUser refuses a duplicate email without throwing", async (store) => {
+  ok   test("insertUser refuses a duplicate feed token", async (store) => {
+  ok   test("insertUser refuses a duplicate id", async (store) => {
+  ok   test("concurrent inserts of one email produce exactly one winner", async (store) => {
+  ok   test("resolves a user by feed token", async (store) => {
+  ok   test("an unknown, empty, or malformed feed token resolves null, never throws", async (store) => {
+  ok   test("a rotated feed token revokes the old one", async (store) => {
+  ok   test("recordApproval writes the user and the ledger entry together", async (store) => {
+  ok   test("the approval ledger is ordered oldest first and keeps every decision", async (store) => {
+  ok   test("ledger entries for different users at the same instant both survive", async (store) => {
+  ok   test("scopes sources to their user", async (store) => {
+  ok   test("deletes a source", async (store) => {
+  ok   test("finds an article by url for dedupe", async (store) => {
+  ok   test("insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m)", a
+  ok   test("insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th)", as
+  ok   test("putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q)", asyn
+  ok   test("deleteArticle: removes article and its URL index (audio-feed-cei)", async (store) => {
+  ok   test("lists episodes newest first", async (store) => {
+  ok   test("orders identical timestamps deterministically", async (store) => {
+  ok   test("filters by source and keeps time order across modes", async (store) => {
+  ok   test("filters by mode", async (store) => {
+  ok   test("filters by source and mode together", async (store) => {
+  ok   test("filters by status so feeds exclude unfinished work", async (store) => {
+  ok   test("honours the limit", async (store) => {
+  ok   test("a filtered listEpisodes returns matches sitting beyond limit index entries", async (store) => 
+  ok   test("pages a full scan with no omission and no repeat", async (store) => {
+  ok   test("a short or empty page is not the end of the scan", async (store) => {
+  ok   test("a delete behind the cursor does not skip the next episode", async (store) => {
+  ok   test("never leaks episodes across users", async (store) => {
+  ok   test("overwrites an episode in place on status transition", async (store) => {
+  ok   test("deletes an episode and removes it from user and pending indexes", async (store) => {
+  ok   test("backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio
+  ok   test("returns copies, not live references", async (store) => {
+  ok   test("a claim takes ownership and records the lease", async (store) => {
+  ok   test("claiming an unknown episode resolves null, never throws", async (store) => {
+  ok   test("a live claim is refused", async (store) => {
+  ok   test("CONCURRENT claims produce exactly one winner", async (store) => {
+  ok   test("an expired lease is reclaimable", async (store) => {
+  ok   test("a synthesizing episode with no claim at all is reclaimable", async (store) => {
+  ok   test("terminal episodes are never claimable", async (store) => {
+  ok   test("the attempt bound abandons a poison job instead of re-billing it", async (store) => {
+  ok   test("abandonment preserves the last recorded cause (audio-feed-bp6r)", async (store) => {
+  ok   test("abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r)", asy
+  ok   test("the claim owner may write the terminal state", async (store) => {
+  ok   test("a superseded worker cannot overwrite the winner's result", async (store) => {
+  ok   test("completing an episode nobody claimed is refused", async (store) => {
+  ok   test("a completed episode leaves the feed indexes consistent", async (store) => {
+  ok   test("new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-
+  ok   test("regenerations are still served when there is no new work (audio-feed-15e)", async (store) => {
+  ok   test("an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e)", as
+  ok   test("retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2)", async (st
+  ok   test("retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2)", async (sto
+  ok   test("a retried episode survives a second failure and can be retried again (audio-feed-7s2)", async 
+  ok   test("requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)", async (store)
+  ok   test("requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz)", async (store) =>
+  ok   test("cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz)", async (store
+  ok   test("an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz)", async (st
+  ok   test("orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)", async (
+  ok   test("listPendingEpisodes returns pending episodes oldest first (FIFO)", async (store) => {
+  ok   test("listPendingEpisodes excludes ready, failed, and actively leased episodes", async (store) => {
+  ok   test("listPendingEpisodes honours limit", async (store) => {
+  ok   test("an empty store reports no downloads", async (store) => {
+  ok   test("recordDownload counts per user and in total", async (store) => {
+  ok   test("an unattributable download counts toward the total only", async (store) => {
+  ok   test("a user with no downloads does not appear in the breakdown", async (store) => {
+  ok   test("an empty store reports no synthesis (audio-feed-9mp)", async (store) => {
+  ok   test("recordSynthesis counts per user, total, and daily window (audio-feed-9mp)", async (store) => {
+  ok   test("daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp)", async (st
+  ok   test("an empty store reports empty outbox (audio-feed-np5)", async (store) => {
+  ok   test("queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5)", a
+  ok   test("queueNotification deduplicates identical episode notifications (audio-feed-np5)", async (store
+  ok   test("an empty store reports no runs", async (store) => {
+  ok   test("a run round-trips every field", async (store) => {
+  ok   test("a FAILED run is recorded, not dropped", async (store) => {
+  ok   test("runs come back newest first", async (store) => {
+  ok   test("listRuns honours a limit", async (store) => {
+  ok   test("history is bounded ON WRITE, and keeps the newest", async (store) => {
+  ok   test("a busy job cannot evict a quiet one's history (audio-feed-ct1)", async (store) => {
+  ok   test("a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1)", async (store) =
+  ok   test("a run of idle ticks is kept as one row, the latest (audio-feed-0ob)", async (store) => {
+  ok   test("an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob)", async (store) 
+  ok   test("round-trips a session and forgets it on delete (audio-feed-8fc)", async (store) => {
+  ok   test("stores passkeys per user and updates the counter in place (audio-feed-8fc)", async (store) => 
+  ok   test("a passkey can only be deleted by its owner (audio-feed-8fc)", async (store) => {
+  ok   test("a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc)", async (s
+  ok   test("setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc)", a
+  ok   test("a suspended admin does not count toward the last active admin (audio-feed-8fc)", async (store)
+  ok   test("a setup link is readable, then consumable exactly once (audio-feed-8fc)", async (store) => {
+  ok   test("a WebAuthn challenge is consumable exactly once (audio-feed-8fc)", async (store) => {
+  ok   test("account records never appear as users (audio-feed-8fc)", async (store) => {
+  ok   test("segment reservation is claim-conditional, single-owner, and stealable after lease expiry", asy
+  ok   test("exposes every domain of the store, each as its own repository", (store) => {
+  ok   test("a call through a domain view is the same call, and the same result", async (store) => {

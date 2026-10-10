@@ -1,0 +1,104 @@
+# case manifest of tests/conformance/metadata.ts at main 54dd674, one case per line.
+# 102 cases. Compared against manifest-after.txt by audio-feed-fydf.
+  1. round-trips a user
+  2. returns null for an unknown user
+  3. looks a user up by email, case-insensitively
+  4. does not leave a stale email index after an address change
+  5. preserves the approval gate fields verbatim
+  6. round-trips every canonical user field, losing none
+  7. an update preserves fields the caller did not mention
+  8. carries all four user statuses, including rejected
+  9. insertUser writes a new user and reports success
+ 10. insertUser refuses a duplicate email without throwing
+ 11. insertUser refuses a duplicate feed token
+ 12. insertUser refuses a duplicate id
+ 13. concurrent inserts of one email produce exactly one winner
+ 14. resolves a user by feed token
+ 15. an unknown, empty, or malformed feed token resolves null, never throws
+ 16. a rotated feed token revokes the old one
+ 17. recordApproval writes the user and the ledger entry together
+ 18. the approval ledger is ordered oldest first and keeps every decision
+ 19. ledger entries for different users at the same instant both survive
+ 20. scopes sources to their user
+ 21. deletes a source
+ 22. finds an article by url for dedupe
+ 23. insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m)
+ 24. insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th)
+ 25. putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q)
+ 26. deleteArticle: removes article and its URL index (audio-feed-cei)
+ 27. lists episodes newest first
+ 28. orders identical timestamps deterministically
+ 29. filters by source and keeps time order across modes
+ 30. filters by mode
+ 31. filters by source and mode together
+ 32. filters by status so feeds exclude unfinished work
+ 33. honours the limit
+ 34. a filtered listEpisodes returns matches sitting beyond limit index entries
+ 35. pages a full scan with no omission and no repeat
+ 36. a short or empty page is not the end of the scan
+ 37. a delete behind the cursor does not skip the next episode
+ 38. never leaks episodes across users
+ 39. overwrites an episode in place on status transition
+ 40. deletes an episode and removes it from user and pending indexes
+ 41. backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio-feed-hvn)
+ 42. returns copies, not live references
+ 43. a claim takes ownership and records the lease
+ 44. claiming an unknown episode resolves null, never throws
+ 45. a live claim is refused
+ 46. CONCURRENT claims produce exactly one winner
+ 47. an expired lease is reclaimable
+ 48. a synthesizing episode with no claim at all is reclaimable
+ 49. terminal episodes are never claimable
+ 50. the attempt bound abandons a poison job instead of re-billing it
+ 51. abandonment preserves the last recorded cause (audio-feed-bp6r)
+ 52. abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r)
+ 53. the claim owner may write the terminal state
+ 54. a superseded worker cannot overwrite the winner's result
+ 55. completing an episode nobody claimed is refused
+ 56. a completed episode leaves the feed indexes consistent
+ 57. new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-15e)
+ 58. regenerations are still served when there is no new work (audio-feed-15e)
+ 59. an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e)
+ 60. retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2)
+ 61. retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2)
+ 62. a retried episode survives a second failure and can be retried again (audio-feed-7s2)
+ 63. requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)
+ 64. requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz)
+ 65. cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz)
+ 66. an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz)
+ 67. orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)
+ 68. listPendingEpisodes returns pending episodes oldest first (FIFO)
+ 69. listPendingEpisodes excludes ready, failed, and actively leased episodes
+ 70. listPendingEpisodes honours limit
+ 71. an empty store reports no downloads
+ 72. recordDownload counts per user and in total
+ 73. an unattributable download counts toward the total only
+ 74. a user with no downloads does not appear in the breakdown
+ 75. an empty store reports no synthesis (audio-feed-9mp)
+ 76. recordSynthesis counts per user, total, and daily window (audio-feed-9mp)
+ 77. daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp)
+ 78. an empty store reports empty outbox (audio-feed-np5)
+ 79. queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5)
+ 80. queueNotification deduplicates identical episode notifications (audio-feed-np5)
+ 81. an empty store reports no runs
+ 82. a run round-trips every field
+ 83. a FAILED run is recorded, not dropped
+ 84. runs come back newest first
+ 85. listRuns honours a limit
+ 86. history is bounded ON WRITE, and keeps the newest
+ 87. a busy job cannot evict a quiet one's history (audio-feed-ct1)
+ 88. a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1)
+ 89. a run of idle ticks is kept as one row, the latest (audio-feed-0ob)
+ 90. an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob)
+ 91. round-trips a session and forgets it on delete (audio-feed-8fc)
+ 92. stores passkeys per user and updates the counter in place (audio-feed-8fc)
+ 93. a passkey can only be deleted by its owner (audio-feed-8fc)
+ 94. a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc)
+ 95. setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc)
+ 96. a suspended admin does not count toward the last active admin (audio-feed-8fc)
+ 97. a setup link is readable, then consumable exactly once (audio-feed-8fc)
+ 98. a WebAuthn challenge is consumable exactly once (audio-feed-8fc)
+ 99. account records never appear as users (audio-feed-8fc)
+100. segment reservation is claim-conditional, single-owner, and stealable after lease expiry
+101. exposes every domain of the store, each as its own repository
+102. a call through a domain view is the same call, and the same result

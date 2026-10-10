@@ -1,0 +1,104 @@
+# case manifest of tests/conformance/metadata/*.ts after the fydf split, one case per line.
+# 102 cases, grouped by domain instead of one file. Compare with manifest-before.txt.
+  1. finds an article by url for dedupe
+  2. insertArticleIfAbsent: inserts when absent, refuses duplicates atomically (audio-feed-33m)
+  3. insertArticleWithEpisodeIfAbsent: writes the pair together or not at all (audio-feed-2th)
+  4. putArticleWithEpisode: writes the pair, and a re-send is a second pair (audio-feed-d8q)
+  5. deleteArticle: removes article and its URL index (audio-feed-cei)
+  6. round-trips a session and forgets it on delete (audio-feed-8fc)
+  7. stores passkeys per user and updates the counter in place (audio-feed-8fc)
+  8. a passkey can only be deleted by its owner (audio-feed-8fc)
+  9. a user's last passkey is never deleted, even by concurrent deletes (audio-feed-8fc)
+ 10. setAdminRole records who changed which role, and never leaves zero admins (audio-feed-8fc)
+ 11. a suspended admin does not count toward the last active admin (audio-feed-8fc)
+ 12. a setup link is readable, then consumable exactly once (audio-feed-8fc)
+ 13. a WebAuthn challenge is consumable exactly once (audio-feed-8fc)
+ 14. account records never appear as users (audio-feed-8fc)
+ 15. lists episodes newest first
+ 16. orders identical timestamps deterministically
+ 17. filters by source and keeps time order across modes
+ 18. filters by mode
+ 19. filters by source and mode together
+ 20. filters by status so feeds exclude unfinished work
+ 21. honours the limit
+ 22. a filtered listEpisodes returns matches sitting beyond limit index entries
+ 23. pages a full scan with no omission and no repeat
+ 24. a short or empty page is not the end of the scan
+ 25. a delete behind the cursor does not skip the next episode
+ 26. never leaks episodes across users
+ 27. overwrites an episode in place on status transition
+ 28. deletes an episode and removes it from user and pending indexes
+ 29. backfillEpisodeSourceTitle backfills sourceTitle and does not resurrect absent episodes (audio-feed-hvn)
+ 30. returns copies, not live references
+ 31. a claim takes ownership and records the lease
+ 32. claiming an unknown episode resolves null, never throws
+ 33. a live claim is refused
+ 34. CONCURRENT claims produce exactly one winner
+ 35. an expired lease is reclaimable
+ 36. a synthesizing episode with no claim at all is reclaimable
+ 37. terminal episodes are never claimable
+ 38. the attempt bound abandons a poison job instead of re-billing it
+ 39. abandonment preserves the last recorded cause (audio-feed-bp6r)
+ 40. abandonment with no recorded cause says the claims died before writing (audio-feed-bp6r)
+ 41. the claim owner may write the terminal state
+ 42. a superseded worker cannot overwrite the winner's result
+ 43. completing an episode nobody claimed is refused
+ 44. a completed episode leaves the feed indexes consistent
+ 45. new work is listed ahead of a backlog of regenerations, and each group stays FIFO (audio-feed-15e)
+ 46. regenerations are still served when there is no new work (audio-feed-15e)
+ 47. an episode holds exactly one queue pointer across a requeue and a cancel (audio-feed-15e)
+ 48. retryEpisode re-queues a FAILED episode with a fresh claim budget (audio-feed-7s2)
+ 49. retryEpisode touches nothing it should not, and stays idempotent (audio-feed-7s2)
+ 50. a retried episode survives a second failure and can be retried again (audio-feed-7s2)
+ 51. requeueEpisode queues a ready episode and keeps its old audio (audio-feed-8oz)
+ 52. requeueEpisode is idempotent and only takes ready episodes (audio-feed-8oz)
+ 53. cancelRegeneration restores the ready episode on its old audio (audio-feed-8oz)
+ 54. an abandoned regeneration keeps the old audio rather than failing (audio-feed-8oz)
+ 55. orphan blobs are recorded once, listed up to a limit, and forgotten (audio-feed-8oz)
+ 56. listPendingEpisodes returns pending episodes oldest first (FIFO)
+ 57. listPendingEpisodes excludes ready, failed, and actively leased episodes
+ 58. listPendingEpisodes honours limit
+ 59. an empty store reports empty outbox (audio-feed-np5)
+ 60. queueNotification stores entries and ackNotification marks them delivered (audio-feed-np5)
+ 61. queueNotification deduplicates identical episode notifications (audio-feed-np5)
+ 62. an empty store reports no runs
+ 63. a run round-trips every field
+ 64. a FAILED run is recorded, not dropped
+ 65. runs come back newest first
+ 66. listRuns honours a limit
+ 67. history is bounded ON WRITE, and keeps the newest
+ 68. a busy job cannot evict a quiet one's history (audio-feed-ct1)
+ 69. a same-millisecond tie breaks the same way on every adapter (audio-feed-ct1)
+ 70. a run of idle ticks is kept as one row, the latest (audio-feed-0ob)
+ 71. an idle tick replaces only an OLDER idle row of the SAME job (audio-feed-0ob)
+ 72. exposes every domain of the store, each as its own repository
+ 73. a call through a domain view is the same call, and the same result
+ 74. segment reservation is claim-conditional, single-owner, and stealable after lease expiry
+ 75. scopes sources to their user
+ 76. deletes a source
+ 77. an empty store reports no downloads
+ 78. recordDownload counts per user and in total
+ 79. an unattributable download counts toward the total only
+ 80. a user with no downloads does not appear in the breakdown
+ 81. an empty store reports no synthesis (audio-feed-9mp)
+ 82. recordSynthesis counts per user, total, and daily window (audio-feed-9mp)
+ 83. daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp)
+ 84. round-trips a user
+ 85. returns null for an unknown user
+ 86. looks a user up by email, case-insensitively
+ 87. does not leave a stale email index after an address change
+ 88. preserves the approval gate fields verbatim
+ 89. round-trips every canonical user field, losing none
+ 90. an update preserves fields the caller did not mention
+ 91. carries all four user statuses, including rejected
+ 92. insertUser writes a new user and reports success
+ 93. insertUser refuses a duplicate email without throwing
+ 94. insertUser refuses a duplicate feed token
+ 95. insertUser refuses a duplicate id
+ 96. concurrent inserts of one email produce exactly one winner
+ 97. resolves a user by feed token
+ 98. an unknown, empty, or malformed feed token resolves null, never throws
+ 99. a rotated feed token revokes the old one
+100. recordApproval writes the user and the ledger entry together
+101. the approval ledger is ordered oldest first and keeps every decision
+102. ledger entries for different users at the same instant both survive
