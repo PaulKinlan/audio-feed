@@ -112,7 +112,7 @@ import { getUserByFeedToken } from "../auth/users.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { speculationRules } from "./shell.ts";
-import { htmlContentSecurityPolicy, newCspNonce } from "./csp.ts";
+import { htmlResponse, newCspNonce } from "./csp.ts";
 import {
   type AudioMode,
   type Episode,
@@ -716,11 +716,8 @@ export async function handleListen(
     failed: activity.failed.length,
   });
 
-  return new Response(html, {
-    status: 200,
+  return htmlResponse(html, nonce, {
     headers: {
-      "content-type": "text/html; charset=utf-8",
-      "content-security-policy": htmlContentSecurityPolicy(nonce),
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",

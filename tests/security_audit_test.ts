@@ -694,3 +694,47 @@ Deno.test("audio route: out-of-range Range checks user approval before returning
   assertEquals(appRes.headers.get("content-range"), "bytes */200");
   await appRes.body?.cancel();
 });
+
+// ===========================================================================
+// audio-feed-ivbt: htmlResponse is the ONLY place an HTML route attaches CSP
+// ===========================================================================
+
+/**
+ * csp.ts documents htmlResponse() as the single way an HTML response gets its
+ * nonce-bearing policy, and router.ts's fallback comment repeats the claim.
+ * The claim went stale once: four HTML routes hand-rolled the same 8-line
+ * `new Response(html, { headers: { "content-security-policy": ... } })`
+ * construction, and nothing noticed until a weekly review diffed the docs
+ * against the code. This test is the thing that notices next time: any
+ * content-security-policy header set outside csp.ts (the definition) and
+ * router.ts (the strict fallbacks) fails the suite.
+ */
+Deno.test("no route hand-rolls a content-security-policy header outside csp.ts", async () => {
+  const allowed = new Set([
+    "src/routes/csp.ts", // the definition: htmlResponse + htmlContentSecurityPolicy
+    "src/router.ts", // the strict no-nonce fallbacks for a route that forgot
+  ]);
+  const offenders: string[] = [];
+
+  async function scan(dir: string): Promise<void> {
+    for await (const entry of Deno.readDir(dir)) {
+      const path = `${dir}/${entry.name}`;
+      if (entry.isDirectory) {
+        await scan(path);
+      } else if (entry.name.endsWith(".ts")) {
+        const text = await Deno.readTextFile(path);
+        if (!allowed.has(path) && text.includes('"content-security-policy"')) {
+          offenders.push(path);
+        }
+      }
+    }
+  }
+  await scan("src");
+
+  assertEquals(
+    offenders,
+    [],
+    "HTML routes must attach CSP via htmlResponse() (src/routes/csp.ts); " +
+      "hand-rolled copies are exactly the drift this bead removed: " + offenders.join(", "),
+  );
+});

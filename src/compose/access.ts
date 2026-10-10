@@ -21,7 +21,7 @@ import {
   normaliseEmail,
 } from "../auth/users.ts";
 import { esc } from "../routes/html.ts";
-import { htmlContentSecurityPolicy, newCspNonce } from "../routes/csp.ts";
+import { htmlResponse, newCspNonce } from "../routes/csp.ts";
 import {
   extractClientIp,
   type RateLimitConfig,
@@ -64,7 +64,7 @@ export function createRequestAccessHandler(
       extraHeaders: Record<string, string> = {},
     ) => {
       const nonce = newCspNonce();
-      return new Response(
+      return htmlResponse(
         `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${
           esc(title)
         } — Audio Feed</title><meta name="viewport" content="width=device-width, initial-scale=1"><style nonce="${nonce}">body{font-family:system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:1.5rem;line-height:1.6;color:#17151f;background:#f7f6fb}.card{background:#fff;padding:2rem;border-radius:12px;border:1px solid #dcd8e8}h1{font-size:1.4rem;margin-top:0}a{color:#5b3fc4;text-decoration:underline}.return-link{margin-top:2rem}</style></head><body><div class="card"><h1>${
@@ -72,11 +72,10 @@ export function createRequestAccessHandler(
         }</h1><p>${
           esc(msg)
         }</p><p class="return-link"><a href="/">← Return to Audio Feed</a></p></div></body></html>`,
+        nonce,
         {
           status,
           headers: {
-            "content-type": "text/html; charset=utf-8",
-            "content-security-policy": htmlContentSecurityPolicy(nonce),
             "cache-control": "no-store",
             ...extraHeaders,
           },
