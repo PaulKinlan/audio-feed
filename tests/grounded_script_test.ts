@@ -660,3 +660,152 @@ Deno.test("synthesis: a generator that hangs forever still produces an episode",
     console.warn = originalWarn;
   }
 });
+
+// ─── a deadline that fires mid-body (audio-feed-0rmn) ────────────────────────
+// The fetch-stage catch named the deadline, but both body-read paths swallowed the abort: a stalled
+// gateway (headers arrive, the body never does) reported "refused with 503" with nothing attached,
+// and a stalled 200 reported "not JSON" — our own bound dressed up as a provider verdict. These pin
+// the naming, the status classification, and the caller's precedence over our deadline.
+
+/** Headers arrive, the body never does: only the deadline (or a caller cancel) ends the read. */
+const hangingBody = (status: number, statusText: string): typeof fetch =>
+  ((_input: RequestInfo | URL, init?: RequestInit) =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const signal = init?.signal;
+            if (signal?.aborted) {
+              controller.error(signal.reason);
+              return;
+            }
+            signal?.addEventListener("abort", () => controller.error(signal.reason));
+          },
+        }),
+        { status, statusText },
+      ),
+    )) as typeof fetch;
+
+Deno.test("script request: a deadline-killed error body is named, not a bare refusal (0rmn)", async () => {
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 50,
+    fetchFn: hangingBody(503, "Service Unavailable"),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "refused with 503");
+  assertStringIncludes(error.message, "timed out after 50ms");
+  assertStringIncludes(error.message, "error response body");
+  // The response came from the provider, so the refusal is still a refusal: classification unchanged.
+  assertEquals(error.status, 503);
+});
+
+Deno.test("script request: a deadline-killed 200 body is a timeout, not 'not JSON' (0rmn)", async () => {
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 50,
+    fetchFn: hangingBody(200, "OK"),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "timed out after 50ms while reading the response body");
+  // Our own bound is not a provider verdict, so it carries no status — same as the fetch-stage
+  // timeout above it.
+  assertEquals(error.status, undefined);
+});
+
+/** The caller's signal aborts one macrotask after the response headers land. */
+const cancelDuringBody = (status: number, statusText: string, controller: AbortController) =>
+  ((_input: RequestInfo | URL, init?: RequestInit) =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(streamController) {
+            init?.signal?.addEventListener("abort", () =>
+              streamController.error(init.signal?.reason));
+            setTimeout(() =>
+              controller.abort(new Error("lease expired")), 0);
+          },
+        }),
+        { status, statusText },
+      ),
+    )) as typeof fetch;
+
+Deno.test("script request: a caller cancel during an error-body read is a cancel (0rmn)", async () => {
+  const controller = new AbortController();
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 5_000,
+    fetchFn: cancelDuringBody(503, "Service Unavailable", controller),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }, { signal: controller.signal }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "cancelled by the caller");
+  // A lease expiry is not a refusal and not a timeout.
+  assertEquals(error.status, undefined);
+});
+
+Deno.test("script request: a caller cancel during a 200 body read is a cancel (0rmn)", async () => {
+  const controller = new AbortController();
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 5_000,
+    fetchFn: cancelDuringBody(200, "OK", controller),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }, { signal: controller.signal }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "cancelled by the caller");
+  assertEquals(error.status, undefined);
+});
+
+Deno.test("script request: an unreadable error body still refuses, with no invented detail (0rmn)", async () => {
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 5_000,
+    // Fails on its own, with no deadline and no caller involved: the refusal must survive it.
+    fetchFn: () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error("connection reset"));
+            },
+          }),
+          { status: 502, statusText: "Bad Gateway" },
+        ),
+      ),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "refused with 502");
+  assert(
+    !error.message.includes("timed out"),
+    `a plain failure must not claim a timeout: ${error.message}`,
+  );
+  assertEquals(error.status, 502);
+});
+
+Deno.test("script request: malformed JSON with no deadline still reports not-JSON (0rmn)", async () => {
+  const generator = createGroundedScriptGenerator({
+    apiKey: "test-key",
+    timeoutMs: 5_000,
+    fetchFn: () => Promise.resolve(new Response("{not json", { status: 200 })),
+  });
+  const error = await assertRejects(
+    () => generator({ article: ARTICLE, speakers: [...SPEAKERS] }),
+    GroundedScriptError,
+  );
+  assertStringIncludes(error.message, "was not JSON");
+  assertEquals(error.status, undefined);
+});

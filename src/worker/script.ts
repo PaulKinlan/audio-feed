@@ -493,7 +493,26 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
           });
         }
         if (!response.ok) {
-          const detail = await response.text().catch(() => "");
+          // audio-feed-0rmn: the old `.catch(() => "")` swallowed the abort, so a gateway that sent
+          // headers and then stalled on the error body read back as an ordinary refusal with nothing
+          // attached — our own bound, invisible. The response did come from the provider, so the
+          // refusal and its status still stand; what changes is that the deadline (or the caller)
+          // now says what happened.
+          let detail = "";
+          try {
+            detail = await response.text();
+          } catch (error) {
+            if (options?.signal?.aborted) {
+              throw new GroundedScriptError("script request was cancelled by the caller", {
+                cause: error,
+              });
+            }
+            if (deadline.timedOut()) {
+              detail =
+                `the request timed out after ${timeoutMs}ms while reading the error response body`;
+            }
+            // Otherwise the body was unreadable for its own reasons: keep the refusal, no detail.
+          }
           throw new GroundedScriptError(
             `script request was refused with ${response.status}${
               detail ? `: ${detail.slice(0, 200)}` : ""
@@ -505,6 +524,20 @@ export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptG
         try {
           payload = await response.json();
         } catch (error) {
+          // audio-feed-0rmn: the deadline can fire while the JSON body is still streaming, and
+          // "was not JSON" made our own bound look like a malformed provider response. Our timeout
+          // carries no status: it is not a provider verdict, exactly like the fetch-stage one above.
+          if (options?.signal?.aborted) {
+            throw new GroundedScriptError("script request was cancelled by the caller", {
+              cause: error,
+            });
+          }
+          if (deadline.timedOut()) {
+            throw new GroundedScriptError(
+              `script request timed out after ${timeoutMs}ms while reading the response body`,
+              { cause: error },
+            );
+          }
           throw new GroundedScriptError("script response was not JSON", { cause: error });
         }
         grounded.push(...sourcesFromGrounding(payload));
