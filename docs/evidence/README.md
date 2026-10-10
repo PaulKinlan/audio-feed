@@ -8,10 +8,11 @@ git, so it is budgeted.
 
 1. **Compress before you commit.** Run `deno task evidence:compress` after capturing screenshots. It
    recompresses every PNG to a 256-colour palette (PNG8 via ImageMagick) and keeps the result only
-   when it is smaller — typically ~3x smaller and visually identical at review scale.
-2. **Per-file budget: 150KB.** `tests/evidence_size_test.ts` fails the suite when any evidence PNG
-   exceeds it. If a compressed screenshot still exceeds the budget, capture a smaller viewport or
-   crop to the element under test — do not raise the budget to fit one file.
+   when it is smaller — typically ~3x smaller and indistinguishable at review scale (at 1:1, smooth
+   gradients may show faint banding; the UI under test is unaffected).
+2. **Budgets: 150KB per file, 8MB for the whole tree.** `tests/evidence_size_test.ts` fails the
+   suite over either. If a compressed screenshot still exceeds the per-file budget, capture a
+   smaller viewport or crop to the element under test — do not raise the budget to fit one file.
 3. **Prune stale evidence.** Evidence for a bead whose change has since been redesigned (the
    screenshot no longer shows anything that exists) may be deleted outright — the bead comment keeps
    the verification record, and git history keeps the bytes. When in doubt, keep it.

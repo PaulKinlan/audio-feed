@@ -5,26 +5,39 @@
  * Mandate requires evidence, but a full-page 1280px PNG screenshot is ~285KB;
  * 100 of them were 15MB and 18 of the 20 largest files in the repo. The same
  * screenshot quantised to a 256-colour palette (PNG8, what pngquant does) is
- * ~95KB and visually identical at review scale.
+ * ~95-130KB and indistinguishable at review scale. `-colors 256` matters:
+ * ImageMagick's default PNG8 palette is 67-135 colours and a dark gradient
+ * visibly bands; an explicit 256 keeps the error ~10-20x lower and every file
+ * still lands under budget (fp4r-style review measurement on the bead).
  *
  *   deno task evidence:compress          recompress every PNG, replace when smaller
  *   deno task evidence:compress --check  fail if any PNG exceeds the budget
  *
- * `--check` is what tests/evidence_size_test.ts runs, so an oversized
+ * `--check` is what tests/evidence_size_test.ts enforces, so an oversized
  * screenshot fails the suite at commit time rather than inflating the tree
  * silently. Requires ImageMagick's `convert` on PATH (present on the fleet
  * VMs); the script refuses to guess with anything else.
  */
 
-const EVIDENCE_DIR = new URL("../docs/evidence/", import.meta.url).pathname;
-/** Per-file budget after compression. 285KB full-page shots land at ~95-115KB. */
+/** import.meta.dirname: new URL(...).pathname percent-encodes spaces. */
+export const EVIDENCE_DIR = `${import.meta.dirname}/../docs/evidence`;
+/** Per-file budget after compression. 285KB full-page shots land at ~95-130KB. */
 export const EVIDENCE_PNG_BUDGET_BYTES = 150 * 1024;
+/** Aggregate budget: the bead's harm was tree inflation, and 100 files just under a per-file cap would reproduce it. */
+export const EVIDENCE_TOTAL_BUDGET_BYTES = 8 * 1024 * 1024;
 
-async function* pngs(dir: string): AsyncGenerator<string> {
+export async function* evidencePngs(dir: string = EVIDENCE_DIR): AsyncGenerator<string> {
   for await (const entry of Deno.readDir(dir)) {
     const path = `${dir}/${entry.name}`;
-    if (entry.isDirectory) yield* pngs(path);
-    else if (entry.name.toLowerCase().endsWith(".png")) yield path;
+    if (entry.isDirectory) {
+      yield* evidencePngs(path);
+    } else if (entry.name.endsWith(".png8.tmp")) {
+      // Left by a killed run: invisible to the .png scanners, committed
+      // silently. Reaping it here keeps the tree clean.
+      await Deno.remove(path).catch(() => {});
+    } else if (entry.name.toLowerCase().endsWith(".png")) {
+      yield path;
+    }
   }
 }
 
@@ -32,7 +45,7 @@ async function compressOne(path: string): Promise<{ before: number; after: numbe
   const before = (await Deno.stat(path)).size;
   const tmp = `${path}.png8.tmp`;
   const out = await new Deno.Command("convert", {
-    args: [path, "-strip", `PNG8:${tmp}`],
+    args: [path, "-strip", "-colors", "256", `PNG8:${tmp}`],
     stdout: "null",
     stderr: "piped",
   }).output();
@@ -56,27 +69,31 @@ if (import.meta.main) {
   let saved = 0;
   const oversized: string[] = [];
 
-  for await (const path of pngs(EVIDENCE_DIR)) {
-    const size = (await Deno.stat(path)).size;
-    total += size;
+  for await (const path of evidencePngs()) {
     if (check) {
+      const size = (await Deno.stat(path)).size;
+      total += size;
       if (size > EVIDENCE_PNG_BUDGET_BYTES) oversized.push(path);
       continue;
     }
     const { before, after } = await compressOne(path);
+    total += after;
     saved += before - after;
     if (after > EVIDENCE_PNG_BUDGET_BYTES) oversized.push(path);
     if (before !== after) {
       console.log(
-        `${path.slice(EVIDENCE_DIR.length)}: ${(before / 1024).toFixed(0)}KB -> ${
+        `${path.slice(EVIDENCE_DIR.length + 1)}: ${(before / 1024).toFixed(0)}KB -> ${
           (after / 1024).toFixed(0)
         }KB`,
       );
     }
   }
 
+  const overTotal = total > EVIDENCE_TOTAL_BUDGET_BYTES;
   console.log(
-    `${oversized.length ? "OVERSIZED" : "ok"}: ${(total / 1024 / 1024).toFixed(1)}MB total` +
+    `${oversized.length || overTotal ? "OVERSIZED" : "ok"}: ${
+      (total / 1024 / 1024).toFixed(1)
+    }MB total` +
       (check ? "" : `, saved ${(saved / 1024 / 1024).toFixed(1)}MB`),
   );
   for (const path of oversized) {
@@ -87,5 +104,12 @@ if (import.meta.main) {
           : " (already compressed; consider a smaller viewport)"),
     );
   }
-  if (oversized.length) Deno.exit(1);
+  if (overTotal) {
+    console.error(
+      `tree total ${(total / 1024 / 1024).toFixed(1)}MB exceeds the ${
+        (EVIDENCE_TOTAL_BUDGET_BYTES / 1024 / 1024).toFixed(0)
+      }MB aggregate budget — prune stale evidence (docs/evidence/README.md)`,
+    );
+  }
+  if (oversized.length || overTotal) Deno.exit(1);
 }
