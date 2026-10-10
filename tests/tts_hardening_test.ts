@@ -418,3 +418,76 @@ Deno.test("the API key never appears in the request URL", async () => {
   const headers = calls[0]!.init?.headers as Record<string, string>;
   if (headers["x-goog-api-key"] !== "test-key") throw new Error("header missing");
 });
+
+/**
+ * audio-feed-0cmu. This defect is about PROCESS LIFETIME, so it cannot be asserted in-process:
+ * Deno's test runner exits without draining the event loop (measured — a test that leaves a live
+ * 60s timer behind still passes, and `deno test` returns in ~1s), which is exactly why the old
+ * `AbortSignal.any` composite went unnoticed for weeks. It only shows up in a one-shot process,
+ * so this runs the real client and the real script generator in a child with the production shape
+ * — a caller signal that will not fire for ten minutes, and per-attempt deadlines that do — and
+ * requires the child to exit by itself. Before the fix the child stayed alive for the whole ten
+ * minutes; the SIGKILL below is what a regression looks like.
+ */
+Deno.test("a timed-out attempt leaves nothing holding the process open (audio-feed-0cmu)", async () => {
+  const clientUrl = new URL("../src/tts/gemini.ts", import.meta.url).href;
+  const scriptUrl = new URL("../src/worker/script.ts", import.meta.url).href;
+  const child = `
+const { GeminiTtsClient } = await import(${JSON.stringify(clientUrl)});
+const { createGroundedScriptGenerator } = await import(${JSON.stringify(scriptUrl)});
+const hanging = (_input, init) =>
+  Promise.resolve(new Response(new ReadableStream({
+    start(controller) {
+      const signal = init?.signal;
+      if (signal?.aborted) { controller.error(signal.reason); return; }
+      signal?.addEventListener("abort", () => controller.error(signal.reason));
+    },
+  }), { status: 503, statusText: "Service Unavailable" }));
+
+// The worker's shape: a claim lease that is ten minutes away, and a deadline that fires.
+const lease = AbortSignal.timeout(600_000);
+const tts = new GeminiTtsClient({ apiKey: "k", fetchFn: hanging, timeoutMs: 150, retryOn: "none" });
+await tts.sendRequest(${JSON.stringify(request)}, { signal: lease }).catch(() => {});
+console.log("tts attempt finished");
+
+const generator = createGroundedScriptGenerator({
+  apiKey: "k",
+  timeoutMs: 150,
+  fetchFn: (_input, init) => new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }),
+});
+await generator({
+  article: { title: "t", body: "b" },
+  speakers: [{ name: "Alex", role: "expert", voice: "Charon" }, { name: "Sam", role: "curious_foil", voice: "Puck" }],
+}, { signal: lease }).catch(() => {});
+console.log("script attempt finished");
+`;
+  const job = new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      "-A",
+      "--config",
+      new URL("../deno.json", import.meta.url).pathname,
+      child,
+    ],
+    cwd: new URL("../", import.meta.url).pathname,
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const giveUp = setTimeout(() => job.kill("SIGKILL"), 20_000);
+  const started = Date.now();
+  const { code, stdout, stderr } = await job.output();
+  clearTimeout(giveUp);
+  const elapsed = Date.now() - started;
+  const output = new TextDecoder().decode(stdout) + new TextDecoder().decode(stderr);
+  if (!output.includes("tts attempt finished")) throw new Error(`tts attempt never ran: ${output}`);
+  if (!output.includes("script attempt finished")) {
+    throw new Error(`script attempt never ran: ${output}`);
+  }
+  if (code !== 0) throw new Error(`child exited ${code} after ${elapsed}ms: ${output}`);
+  if (elapsed > 15_000) throw new Error(`child took ${elapsed}ms to exit: ${output}`);
+});
