@@ -12,6 +12,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
+import { describeSynthesisFailure } from "../src/worker/synthesis.ts";
 import { GeminiTtsError, GeminiTtsTruncatedError } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
@@ -841,6 +842,54 @@ Deno.test("a job that keeps crashing is abandoned rather than re-billed forever"
   assert(paid <= 3, `a poison job must stop being billed, got ${paid} charges`);
   const episode = await stores.metadata.getEpisode("user-1", "ep-0");
   assertEquals(episode?.status, "failed", "an exhausted job must be visibly abandoned");
+});
+
+Deno.test("a failed episode records the unwrapped cause with mode, claim and provider status (audio-feed-bp6r)", async () => {
+  // The TTS client wraps a turn failure with a hardcoded status 400 that is OURS, not the
+  // provider's. The persisted episode error must keep the real root cause instead.
+  const { ctx, stores } = await queued();
+  const inner = new GeminiTtsError("Gemini API error: boom 500", 500, {
+    error: { message: "boom 500" },
+  });
+  const wrapped = new GeminiTtsError(
+    `TTS turn failed; refusing whole-episode retry: ${inner.message}`,
+    400,
+    inner,
+  );
+  const result = await runSynthesisBatch(ctx, () => Promise.reject(wrapped), {
+    maxAttempts: 3,
+    retryBaseDelayMs: 1,
+  });
+  assertEquals(result.failed.length, 1);
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(episode?.error ?? "", "refusing whole-episode retry");
+  assertStringIncludes(episode?.error ?? "", "mode direct");
+  assertStringIncludes(episode?.error ?? "", "claim 1/3");
+  assertStringIncludes(episode?.error ?? "", "provider status 500");
+  assert(
+    !episode!.error!.includes("provider status 400"),
+    "the wrapper's own 400 must not be reported as the provider's status",
+  );
+
+  // Our own client-side statuses must never be dressed up as the provider's
+  // (review finding on bp6r): the spend-guard 409 chain carries no API response
+  // body, so no provider status may be reported for it.
+  const held = new GeminiTtsError(
+    "TTS turn failed; refusing whole-episode retry: Synthesis segment is reserved by another live claimant; refusing double spend",
+    400,
+    new GeminiTtsError(
+      "Synthesis segment is reserved by another live claimant; refusing double spend",
+      409,
+    ),
+  );
+  const described = describeSynthesisFailure(held, { attempts: 1, mode: "direct" }, 3);
+  assert(
+    !described.includes("provider status"),
+    `a client-side 409 must not be labelled a provider status: ${described}`,
+  );
+  assertStringIncludes(described, "mode direct");
+  assertStringIncludes(described, "claim 1/3");
 });
 
 Deno.test("article content exceeding maxInputCharacters fails closed without spending (audio-feed-3hb)", async () => {

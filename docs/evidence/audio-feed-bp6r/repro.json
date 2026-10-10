@@ -1,0 +1,95 @@
+{
+  "bead": "audio-feed-bp6r",
+  "capturedAt": "2026-10-10T20:44:51.857Z",
+  "provider": {
+    "endpoint": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+    "note": "gemini.int.exe.xyz injects Paul's real API key; the client sends a dummy key",
+    "model": "gemini-3.8-flash-tts"
+  },
+  "partA_realMultiSegment": {
+    "description": "Full 8-segment narration through the production client, production timeout (60s), production retry policy (multi-segment forces maxRetries 0 per segment)",
+    "segmentCount": 8,
+    "segmentBytes": [
+      5841,
+      5989,
+      5974,
+      5834,
+      5975,
+      5830,
+      5858,
+      5706
+    ],
+    "outcome": {
+      "result": "failure",
+      "totalMs": 60061,
+      "errorName": "GeminiTtsError",
+      "errorMessage": "TTS turn failed; refusing whole-episode retry: The operation was aborted due to timeout",
+      "errorStatus": 400,
+      "innerError": {
+        "name": "TimeoutError",
+        "message": "The operation was aborted due to timeout"
+      }
+    },
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "startedAt": "2026-10-10T20:44:51.917Z",
+        "durationMs": 59764,
+        "status": 200,
+        "statusText": "OK"
+      }
+    ]
+  },
+  "partB_forcedTimeout": {
+    "description": "Same client, per-attempt deadline 1.5s so the first segment aborts. Proves: (1) multi-segment input gets maxRetries 0 -> exactly one HTTP call, (2) the timeout is rethrown (retryOn 'transient' covers only 429/503), (3) the wrapper re-labels it status 400, which the worker's isPermanent() treats as terminal on attempt 1.",
+    "httpCallsMade": 1,
+    "outcome": {
+      "result": "failure",
+      "totalMs": 1534,
+      "errorName": "GeminiTtsError",
+      "errorMessage": "TTS turn failed; refusing whole-episode retry: Gemini TTS request timed out after 1500ms",
+      "wrappedStatus": 400,
+      "innerError": {
+        "name": "GeminiTtsError",
+        "message": "Gemini TTS request timed out after 1500ms"
+      }
+    },
+    "http": [
+      {
+        "seq": 1,
+        "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
+        "startedAt": "2026-10-10T20:45:51.983Z",
+        "durationMs": 1502,
+        "errorName": "TimeoutError",
+        "errorMessage": "The operation was aborted due to timeout"
+      }
+    ]
+  },
+  "partC_abandonOverwrite": {
+    "description": "3 expired claims, the last of which recorded the real timeout cause; the 4th claim attempt hits maxClaims and the store abandons the episode.",
+    "claims": [
+      {
+        "claim": 1,
+        "attempts": 1,
+        "status": "synthesizing"
+      },
+      {
+        "claim": 2,
+        "attempts": 2,
+        "status": "synthesizing"
+      },
+      {
+        "claim": 3,
+        "attempts": 3,
+        "status": "synthesizing"
+      }
+    ],
+    "fourthClaimReturned": null,
+    "errorBeforeAbandon": "TTS turn failed; refusing whole-episode retry: Gemini TTS request timed out after 60000ms",
+    "errorAfterAbandon": "abandoned after 3 attempts",
+    "statusAfterAbandon": "failed",
+    "realCauseSurvives": false
+  },
+  "capturedAgainst": "pre-fix (fleet/ttsfail 7285f04 gate run started before the 4be918d fix was written; it demonstrates the bug). Post-fix behaviour is pinned by tests: tts_hardening_test.ts (deadline-named timeouts incl. body-read), synthesis_worker_test.ts (describeSynthesisFailure), conformance/metadata.ts (abandon preserves cause, both stores)."
+}

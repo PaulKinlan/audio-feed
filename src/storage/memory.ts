@@ -519,10 +519,22 @@ export class MemoryMetadataStore implements MetadataStore {
     if (attempts > claim.maxClaims) {
       // Abandon rather than re-bill: an input that keeps killing its host would
       // otherwise be re-claimed forever on lease expiry.
+      // audio-feed-bp6r: preserve the last recorded cause rather than overwriting
+      // it with the bare attempt count (see kv.ts claimEpisode for the full note).
+      const prior = typeof found.error === "string" && found.error.length > 0 ? found.error : null;
+      const provenance = found.claimedAt
+        ? `last claim by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
+        : "no claim details";
       this.#removePendingPointer(found);
       removeSortedIndex(this.#synthesizingIndex, oldSortKey);
       this.#episodes.set(key, {
-        ...unsynthesized(structuredClone(found), `abandoned after ${claim.maxClaims} attempts`),
+        ...unsynthesized(
+          structuredClone(found),
+          prior
+            ? `abandoned after ${claim.maxClaims} attempts; last recorded error: ${prior}`
+            : `abandoned after ${claim.maxClaims} attempts; no claim recorded a cause (${provenance}) — ` +
+              "each claim ended before its terminal write, so the worker died or its isolate was stopped mid-synthesis",
+        ),
         claimedAt: undefined,
         claimedBy: undefined,
       });

@@ -138,6 +138,90 @@ Deno.test("a hung request is killed by the per-attempt timeout", async () => {
   if (elapsed > 5_000) throw new Error(`timeout took ${elapsed}ms`);
 });
 
+Deno.test("a per-attempt timeout is named with its deadline even when a caller signal exists (audio-feed-bp6r)", async () => {
+  // The worker always passes a lease signal, and the old `!options.signal` guard then let the
+  // raw TimeoutError through — which is how the 2026-10-09 incident surfaced as a bare
+  // "The operation was aborted due to timeout" with no deadline attached.
+  const hang =
+    ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      })) as typeof fetch;
+
+  const caller = new AbortController(); // never fired: the per-attempt deadline must win the name
+  let message = "";
+  try {
+    await client(hang, { timeoutMs: 150, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 150ms/.test(message)) throw new Error(`unexpected error: ${message}`);
+});
+
+Deno.test("a timeout during the response body read is named with its deadline (audio-feed-bp6r)", async () => {
+  // The incident path itself: the provider returned 200 headers just inside the deadline
+  // and the abort fired while the multi-MB base64 body was still streaming — that throw
+  // never enters the fetch-await catch. Simulate a real streaming body: it errors with the
+  // abort reason, exactly as a fetch response body does when the request signal fires.
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener("abort", () => controller.error(init.signal!.reason));
+        // never enqueues: the body read hangs until the signal fires
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  }) as typeof fetch;
+
+  const caller = new AbortController(); // live but never fired, like the worker's lease signal
+  let message = "";
+  try {
+    await client(streaming, { timeoutMs: 150, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 150ms while reading the response body/.test(message)) {
+    throw new Error(`unexpected error: ${message}`);
+  }
+});
+
+Deno.test("caller cancellation during the body read surfaces as-is (audio-feed-bp6r)", async () => {
+  // The body-read catch must keep the same caller-first precedence as the fetch stage:
+  // a caller abort mid-stream is the lease expiring, not the per-attempt deadline.
+  const caller = new AbortController();
+  caller.abort(new Error("caller gave up"));
+  const streaming = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          controller.error(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => controller.error(signal.reason));
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  }) as typeof fetch;
+
+  let message = "";
+  try {
+    await client(streaming, { timeoutMs: 30_000, retryOn: "none" })
+      .sendRequest(request, { signal: caller.signal });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/caller gave up/.test(message)) {
+    throw new Error(`caller abort must surface raw, got: ${message}`);
+  }
+});
+
 Deno.test("caller cancellation is never retried and surfaces as-is", async () => {
   const controller = new AbortController();
   let attempts = 0;

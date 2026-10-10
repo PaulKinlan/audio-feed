@@ -1621,7 +1621,11 @@ export class GeminiTtsClient {
         });
       } catch (error) {
         if (options.signal?.aborted) throw error; // caller cancelled: never retry
-        lastError = deadline.aborted && !options.signal
+        // audio-feed-bp6r: attribute the abort to the per-attempt deadline whenever the
+        // CALLER's signal did not fire. The old `!options.signal` guard mislabelled every
+        // production timeout — the worker always passes a lease signal, so Paul's UI showed
+        // the raw "The operation was aborted due to timeout" with no timeout value attached.
+        lastError = deadline.aborted && !options.signal?.aborted
           ? new GeminiTtsError(
             `Gemini TTS request timed out after ${timeoutMs}ms`,
             undefined,
@@ -1635,7 +1639,23 @@ export class GeminiTtsClient {
       }
 
       if (res.ok) {
-        const json = await res.json();
+        let json: unknown;
+        try {
+          json = await res.json();
+        } catch (error) {
+          // The deadline can fire while the multi-MB base64 body is still streaming —
+          // that was the 2026-10-09 incident path (audio-feed-bp6r): 200 headers at
+          // 59.8s, then the abort killed the body read. Name it with the deadline that
+          // fired, unless the caller's own signal did.
+          if (options.signal?.aborted) throw error;
+          throw deadline.aborted
+            ? new GeminiTtsError(
+              `Gemini TTS request timed out after ${timeoutMs}ms while reading the response body`,
+              undefined,
+              error,
+            )
+            : error;
+        }
         return decodeAudioResponse(json, undefined, {
           allowTruncated: options.allowTruncated,
         });
@@ -1669,7 +1689,12 @@ export class GeminiTtsClient {
         `${errMsg} [model=${model}, inputBytes=${inputBytes}, estimatedInputTokens<=${inputBytes} (UTF-8-byte bound), ` +
           `maxOutputTokens=${request.generationConfig.maxOutputTokens ?? "unset"}]`,
         res.status,
-        errDetails,
+        // audio-feed-bp6r: details must ALWAYS be a non-Error object here —
+        // describeSynthesisFailure reads that shape as "this status came from a real
+        // API response". An unparseable body (proxy/gateway 5xx, HTML error page)
+        // still came from the provider, so stand in with the status text rather
+        // than leaving details undefined and losing the provider-status label.
+        errDetails ?? { statusText: res.statusText },
       );
       const retryable = retryOn !== "none" && attempt < attempts &&
         (TRANSIENT_STATUSES.has(res.status) ||
