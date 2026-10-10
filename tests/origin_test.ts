@@ -373,10 +373,55 @@ Deno.test("fp4r: allow-list entries tolerate origins, ports and trailing dots", 
   );
 });
 
-Deno.test("fp4r: loopback is always allowed so local dev survives setting the list", () => {
+Deno.test("fp4r: exact loopback is always allowed so local dev survives setting the list", () => {
   const config = { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] };
   assertEquals(requestHostAllowed(config, req("http://localhost:8000/")), true);
   assertEquals(requestHostAllowed(config, req("http://127.0.0.1:8000/")), true);
+  assertEquals(requestHostAllowed(config, req("http://[::1]:8000/")), true);
+});
+
+Deno.test("fp4r: a *.localhost name is NOT loopback — Host: evil.localhost is refused", () => {
+  // The review catch: a suffix arm on the loopback exemption let an
+  // attacker-chosen host ending in .localhost straight past the gate.
+  const config = { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] };
+  assertEquals(requestHostAllowed(config, req("http://evil.localhost/")), false);
+  const resolved = resolveOrigin(config, req("http://evil.localhost/"));
+  assert(!resolved.baseUrl.includes("evil.localhost"));
+});
+
+Deno.test("fp4r: a client-supplied forwarded loopback never earns the exemption", () => {
+  const config = {
+    trustProxyHeaders: true,
+    allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"],
+  };
+  assertEquals(
+    requestHostAllowed(config, req("https://evil.example/", { "x-forwarded-host": "localhost" })),
+    false,
+  );
+  assertEquals(
+    requestHostAllowed(config, req(`${DEPLOYED}/`, { "x-forwarded-host": "app.localhost" })),
+    false,
+  );
+});
+
+Deno.test("fp4r: IPv6 hosts can be listed and match", () => {
+  const config = { allowedHosts: ["[2001:db8::1]"] };
+  assertEquals(requestHostAllowed(config, req("http://[2001:db8::1]:8080/")), true);
+  assertEquals(requestHostAllowed(config, req("http://[2001:db8::2]/")), false);
+});
+
+Deno.test("fp4r: an empty allow-list keeps the gate inert", () => {
+  assertEquals(requestHostAllowed({ allowedHosts: [] }, req("https://anything.example/")), true);
+  assertEquals(
+    requestHostAllowed({ allowedHosts: ["  ", ""] }, req("https://anything.example/")),
+    true,
+  );
+});
+
+Deno.test("fp4r: a mis-shaped entry with a path still matches its host", () => {
+  // The shape an operator copies out of PUBLIC_BASE_URL.
+  const config = { allowedHosts: ["audio-feed.example.com/"] };
+  assertEquals(requestHostAllowed(config, req("https://audio-feed.example.com/")), true);
 });
 
 Deno.test("fp4r: the publicBaseUrl host is implicitly allowed", () => {
@@ -417,7 +462,14 @@ Deno.test("fp4r: the app answers a forged Host 421 before any route runs", async
     const res = await fetch(req(`https://evil.example${path}`));
     await res.body?.cancel();
     assertEquals(res.status, 421, `${path} must not be served on a spoofed host`);
+    // The early return must not be a hole in the response-header contract.
+    assertEquals(res.headers.get("x-content-type-options"), "nosniff");
   }
+
+  // The *.localhost bypass stays closed end to end.
+  const sneaky = await fetch(req("http://evil.localhost/"));
+  await sneaky.body?.cancel();
+  assertEquals(sneaky.status, 421);
 
   // And the real host is served normally.
   const ok = await fetch(req("https://audio-feed.paulkinlan-ea.deno.net/"));

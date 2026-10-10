@@ -28,7 +28,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { type Handler, Router } from "./router.ts";
+import { applySecurityHeaders, type Handler, Router } from "./router.ts";
 import { json, problem } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { handleHome } from "./routes/home.ts";
@@ -355,11 +355,15 @@ export function createApp(
       // unlisted host is answered before any route runs — the advertised origin,
       // feed URLs, redirects and the WebAuthn RP ID never see a spoofed Host.
       if (!requestHostAllowed(ctx.config, req)) {
-        return problem({
-          status: 421,
-          title: "misdirected_request",
-          detail: "This deployment does not serve the requested host.",
-        });
+        return applySecurityHeaders(
+          problem({
+            status: 421,
+            title: "misdirected_request",
+            detail: "This deployment does not serve the requested host.",
+          }),
+          req,
+          { trustProxyHeaders: Boolean(ctx.config.trustProxyHeaders) },
+        );
       }
       return await handle(req, info);
     },

@@ -156,7 +156,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // each request arrived on. On Deno Deploy the platform router validates the
   // host, but DENO_DEPLOYMENT_ID identifies the deployment, not its hostname —
   // the pin has to come from configuration.
-  if (isDeploy && !config.publicBaseUrl && !config.allowedHosts?.length) {
+  if (deploy && !config.publicBaseUrl && !config.allowedHosts?.length) {
     console.warn(
       "[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — " +
         "the advertised origin and WebAuthn RP ID are derived from each request's host. " +
