@@ -65,30 +65,32 @@ So: the ingest contract, the severity bands and the LCP path are verified end to
 browser. INP and CLS are verified as far as the parser, severities and refusals, and are honestly
 marked as not-yet-observed from a browser rather than claimed.
 
-## The interaction count, checked in a real browser (audio-feed-dzgj)
+## The interaction count: attempted, measured, and withdrawn (audio-feed-dzgj)
 
-INP needs the number of interactions, because the platform's reporter clamps at 16ms and never
-reports the interactions it suppresses. That count is load-bearing, so
-`scripts/verify_i7vi_browser.ts` dispatches a KNOWN number (three mouse press/releases, each also
-emitting a click, plus two key presses) and reads the collector's own count back out of the page.
-Transcript: `verify-browser-count.txt`.
+INP needs the number of interactions, because the platform never reports the interactions it
+suppresses below its 16ms clamp. Two ways of counting were tried and BOTH were withdrawn on
+measurement rather than on argument:
 
-WHAT WAS OBSERVED, across six runs: the page counted **2, 2, 4, 2, 2, 4** of the 5 dispatched, and
-every reported duration was 32-96ms — the durations of the mouse interactions. No key interaction
-was ever counted, and `Page.bringToFront` plus focusing the body did not change that, so keyboard
-clicks in a headless page do not reach the collector at all. The overcount direction was never
-observed.
+1. **Counting input events** (`pointerdown`/`keydown`). A pointerdown on a scroll is not an
+   interaction, so this OVERCOUNTED, which shifts the percentile's rank down and reports a poor
+   interaction as good — the dangerous direction. A held key also repeats `keydown`, which the
+   platform counts as one interaction, and that inflated the count too.
+2. **Deriving the count from the ids** (`max(interactionId)`), on the premise that Chromium assigns
+   ids sequentially from 1. Measure that premise and it fails: in a real headless browser the
+   highest id seen was **3892** in one run and **7381** in another, because `interactionId` is a
+   browser-wide identifier, not a per-document count. Used as N it makes the nearest rank fall
+   inside the "not reported" range for any realistic page, so INP collapses to the threshold — every
+   page reported fast, the dangerous direction again, and worse than the bias it was meant to
+   remove.
 
-WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that the collector counts the interactions the
-page actually receives, that it never overcounted in six runs, and that the one concrete overcount
-mechanism found while doing this — a held key repeating keydown, which the platform counts as ONE
-interaction — is now guarded in the collector, because an inflated count makes `inpFromObserved`
-subtract unobserved interactions that never existed and thereby UNDERSTATES INP. It does NOT
-establish that `keydown` is counted when it does arrive, because this harness could not deliver one,
-and it does not establish that the count is complete under real input in a real browser.
+**What ships:** INP as the nearest-rank p98 over the interactions the observer REPORTED, grouped by
+`interactionId` so one interaction contributes one latency, with `interactionId` 0 excluded because
+a scroll or hover is not an interaction. That is an UPPER BOUND when short interactions were
+suppressed: it can overstate a page's INP, and it can never report a poor interaction as good. The
+standard web-vitals library reports the same bound for the same reason — the platform does not
+expose a usable count.
 
-WHY AN UNDERCOUNT IS RECORDED RATHER THAN FIXED FURTHER: it is safe by construction.
-`inpFromObserved` clamps `u = max(0, N - k)`, so a short count degrades to a percentile over the
-reported entries — the upper bound this work exists to improve on — and can never subtract imagined
-interactions from the rank. The honest claim is conditional: INP is the true 98th percentile when
-every interaction is counted, and an upper bound when interactions went uncounted.
+**What the harness still verifies** (`verify-browser-count.txt`, run per dispatch kind): the
+collector is in the page, real LCP values arrive, a beacon is sent and read back out of the store,
+the beacon never becomes a request-log field, and the observed interaction durations are reported —
+16ms entries now appear, which the earlier 40ms threshold had been hiding.

@@ -91,37 +91,29 @@ function interactionLatencies(entries) {
   return [...longest.values()];
 }
 
-/** INP: the nearest-rank 98th percentile ACROSS DISTINCT INTERACTIONS, not across entries. */
+/**
+ * THE INTERACTION COUNT CANNOT BE DERIVED, measured rather than assumed (audio-feed-dzgj).
+ *
+ * The proposal was to take the highest observed `interactionId` as the interaction count, on the
+ * premise that Chromium assigns ids sequentially from 1. It does not: measured in a real headless
+ * browser, the highest id seen was 3892 in one run and 7381 in another, because the id is a
+ * browser-wide monotonic identifier rather than a per-document count. Using it as N made every page
+ * look fast — with N in the thousands, the nearest rank falls inside the "not reported" range for any
+ * realistic page, so the value collapses to the threshold. That is the dangerous direction, and worse
+ * than the bias it was meant to remove.
+ *
+ * So INP is the percentile over the interactions the observer REPORTED, which is an UPPER BOUND when
+ * the observer suppressed short interactions: it can overstate a page's INP but can never report a poor
+ * interaction as good. The honest fix would be an interaction count the platform does not expose; the
+ * standard library has the same limitation and reports the same bound.
+ */
+/**
+ * INP: the nearest-rank 98th percentile across DISTINCT INTERACTIONS (see interactionLatencies), and an
+ * upper bound when the observer suppressed short interactions — see the note above on why the count
+ * cannot be derived from the ids (audio-feed-dzgj).
+ */
 function interactionP98(entries) {
   return p98(interactionLatencies(entries));
-}
-
-/**
- * INP from the entries an observer actually REPORTED, plus the number of interactions there were.
- *
- * The observer only reports entries at or above its `durationThreshold`, and the platform clamps that
- * at 16ms — so a page with fifty-nine 8ms interactions and one 1000ms one reports a SINGLE entry, and
- * a percentile over reported entries answers 1000 for a page whose real p98 is 8ms. Lowering the
- * threshold does not fix that; it only moves which interactions are invisible. What makes the
- * threshold an optimisation is knowing how many interactions there were (audio-feed-dzgj).
- *
- * With N interactions and k reported (all >= threshold), u = N - k are below it. The nearest rank for
- * p98 is r = ceil(0.98 * N): if r <= u the value at that rank was never reported, so it is below the
- * threshold and the page is fast; otherwise the value at that rank is the (r - u)-th smallest
- * REPORTED duration.
- *
- * If N is undercounted this degrades to a percentile over what was reported — an upper bound, which is
- * the honest failure and the reason the caller has to count independently.
- */
-function inpFromObserved(observed, interactions) {
-  if (interactions <= 0) return 0;
-  if (observed.length === 0) return 16;
-  const rank = Math.ceil(0.98 * interactions);
-  const unobserved = Math.max(0, interactions - observed.length);
-  if (rank <= unobserved) return 16;
-  const sorted = observed.slice().sort((a, b) => a - b);
-  const index = Math.max(0, Math.min(sorted.length - 1, rank - unobserved - 1));
-  return sorted[index];
 }
 
 globalThis.cwvStats = {
@@ -129,5 +121,4 @@ globalThis.cwvStats = {
   largestSessionWindow,
   interactionLatencies,
   interactionP98,
-  inpFromObserved,
 };

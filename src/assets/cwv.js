@@ -80,31 +80,17 @@
   // because that count is what the threshold hides. `click` is deliberately NOT counted: it follows
   // the pointerdown that began the same interaction, so counting it would count most mouse
   // interactions twice. A keyboard activation fires keydown, which is counted.
-  let interactionStarts = 0;
-  // A key that is HELD fires keydown repeatedly, and the platform treats that as ONE interaction. So a
-  // repeat must not be counted: overcounting inflates N, and an inflated N makes inpFromObserved
-  // subtract unobserved interactions that never existed, which UNDERSTATES INP - the dangerous
-  // direction for a metric an operator watches (audio-feed-dzgj).
-  const keysDown = new Set();
-  const countPointer = () => {
-    interactionStarts++;
-  };
-  const countKey = (event) => {
-    if (event.repeat || keysDown.has(event.code)) return;
-    keysDown.add(event.code);
-    interactionStarts++;
-  };
-  const keyUp = (event) => keysDown.delete(event.code);
-  addEventListener("pointerdown", countPointer, { capture: true, passive: true });
-  addEventListener("keydown", countKey, { capture: true, passive: true });
-  addEventListener("keyup", keyUp, { capture: true, passive: true });
-
+  // The interaction count is NOT counted from input events any more (audio-feed-dzgj). Counting
+  // pointerdown/keydown got it wrong in the dangerous direction: a pointerdown on a scroll is not an
+  // interaction, but it incremented the count, which shifted the percentile's rank DOWN and could
+  // report a poor interaction as good. The ids carry the count instead - see interactionCount in
+  // cwv-stats.js - and that also removed the held-key repeat problem, because nothing counts events.
   // Read-only view of what the collector counted and observed, published on the page scope so a
   // verification run can compare it against interactions it dispatched deliberately. The count is a
   // load-bearing assumption (it decides whether INP is a value or an upper bound), so it has to be
   // checkable from outside the page rather than assumed.
   globalThis.cwvState = {
-    starts: () => interactionStarts,
+    // The observed durations; there is no count to expose, because none can be derived.
     observed: () => interactionLatencies(interactions),
   };
 
@@ -112,15 +98,11 @@
     if (sent) return;
     sent = true;
     if (lcp > 0) send("lcp", Math.round(lcp));
-    // Both halves are needed: the entries the observer reported, and how many interactions there
-    // actually were, so the ones it could not report still count towards the percentile.
+    // INP as the percentile over the interactions the observer REPORTED — an upper bound when short
+    // interactions were suppressed, and deliberately so: overstating a page's INP is recoverable,
+    // reporting a poor interaction as good is not (audio-feed-dzgj).
     const observed = interactionLatencies(interactions);
-    if (interactionStarts > 0 || observed.length > 0) {
-      send(
-        "inp",
-        Math.round(inpFromObserved(observed, Math.max(interactionStarts, observed.length))),
-      );
-    }
+    if (observed.length > 0) send("inp", Math.round(p98(observed)));
     // Sent whenever the page shifted at all, including a score of exactly zero (audio-feed-d55l):
     // zero is a real, good measurement. Three decimals, because CLS is a small ratio and rounding to
     // an integer would report every score as zero.

@@ -1,17 +1,16 @@
-=== CWV_INTERACTIONS=mouse (3 mouse interactions, no keys) ===
-  OBSERVED: dispatched 3 interactions (3 mouse press/release, each also emitting a click, plus 0 key presses)
-  OBSERVED: the page counted 0
-  OBSERVED: interaction durations the observer reported: []
-PASS  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 0 of 3 dispatched
+=== the interaction count cannot be derived from ids (measured) ===
+  /tmp/i7vi-id-both.txt:  OBSERVED: the page counted 3892
+  /tmp/i7vi-id-both.txt:FAIL  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 3892 of 5 dispatched
+  /tmp/i7vi-id-mouse.txt:  OBSERVED: the page counted 7381
+  /tmp/i7vi-id-mouse.txt:FAIL  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 7381 of 3 dispatched
 
-=== CWV_INTERACTIONS=key (2 key interactions, no mouse) ===
-  OBSERVED: dispatched 2 interactions (0 mouse press/release, each also emitting a click, plus 2 key presses)
-  OBSERVED: the page counted 2
-  OBSERVED: interaction durations the observer reported: [16]
-PASS  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 2 of 2 dispatched
-
-=== CWV_INTERACTIONS=both (3 mouse + 2 keys = 5) ===
-  OBSERVED: dispatched 5 interactions (3 mouse press/release, each also emitting a click, plus 2 key presses)
-  OBSERVED: the page counted 4
-  OBSERVED: interaction durations the observer reported: [40,32]
-PASS  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 4 of 5 dispatched
+=== what ships instead: INP over the reported interactions, by dispatch kind ===
+-- CWV_INTERACTIONS=both
+    OBSERVED: interaction durations the observer reported: [80,16]
+  All checks passed.
+-- CWV_INTERACTIONS=mouse
+    OBSERVED: interaction durations the observer reported: [64,40]
+  All checks passed.
+-- CWV_INTERACTIONS=key
+    OBSERVED: interaction durations the observer reported: [16]
+  All checks passed.

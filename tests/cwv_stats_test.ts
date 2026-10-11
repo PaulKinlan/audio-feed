@@ -12,20 +12,24 @@
 import { assert, assertEquals } from "@std/assert";
 
 const source = await Deno.readTextFile("src/assets/cwv-stats.js");
-const { p98, largestSessionWindow, interactionLatencies, interactionP98, inpFromObserved } =
-  new Function(
-    `${source}\nreturn { p98, largestSessionWindow, interactionLatencies, interactionP98, inpFromObserved };`,
-  )() as {
-    inpFromObserved: (observed: number[], interactions: number) => number;
-    p98: (values: number[]) => number;
-    interactionLatencies: (
-      entries: { interactionId: number; duration: number }[],
-    ) => number[];
-    interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
-    largestSessionWindow: (
-      entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
-    ) => { value: number; observed: boolean };
-  };
+const {
+  p98,
+  largestSessionWindow,
+  interactionLatencies,
+  interactionP98,
+} = new Function(
+  `${source}\nreturn { p98, largestSessionWindow, interactionLatencies, interactionP98 };`,
+)() as {
+  inpFromObserved: (observed: number[], interactions: number) => number;
+  p98: (values: number[]) => number;
+  interactionLatencies: (
+    entries: { interactionId: number; duration: number }[],
+  ) => number[];
+  interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
+  largestSessionWindow: (
+    entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
+  ) => { value: number; observed: boolean };
+};
 
 const shift = (startTime: number, value: number, hadRecentInput = false) => ({
   startTime,
@@ -134,42 +138,30 @@ Deno.test("INP groups entries by interactionId before taking the percentile (aud
   assertEquals(interactionP98([event(0, 500)]), 0, "no interaction means nothing to report");
 });
 
-Deno.test("INP is not an upper bound when the observer suppressed the fast interactions (audio-feed-dzgj)", () => {
-  const THRESHOLD = 16; // the platform's clamp: entries below this are never reported
+Deno.test("INP is reported as an upper bound, because the interaction count cannot be derived (audio-feed-dzgj)", () => {
   const event = (interactionId: number, duration: number) => ({ interactionId, duration });
 
-  // The reviewer's reproduction, WITH the threshold applied: 59 interactions at 8ms are suppressed by
-  // the observer, so only the single 1000ms interaction is reported. A percentile over reported
-  // entries answers 1000 for a page whose real p98 across 60 interactions is 8ms.
-  const all = [
-    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 8)),
-    event(60, 1000),
-  ];
-  const reported = all.filter((entry) => entry.duration >= THRESHOLD);
-  const observed = interactionLatencies(reported);
-  assertEquals(observed, [1000], "the observer reported only the slow interaction");
+  // MEASURED, not assumed: the ids are not a per-document count. In a real headless browser the
+  // highest id seen was 3892 in one run and 7381 in another, so a scheme that used max(interactionId)
+  // as the interaction count would place the nearest rank deep inside the suppressed range for any
+  // realistic page and collapse INP to the threshold — reporting every page as fast. That is the
+  // dangerous direction, so the correction is withdrawn.
+  //
+  // What ships instead: the percentile over the reported interactions. A page whose observed
+  // interaction is poor is reported as poor even when its fast interactions were suppressed (the
+  // upper-bound direction, which is safe); the cost is that a page with many suppressed fast
+  // interactions is over-reported rather than under-reported.
+  const observed = [1000];
+  assertEquals(p98(observed), 1000, "an observed poor interaction is reported as poor");
+  const mixed = [80, 80, 1000];
+  assertEquals(p98(mixed), 1000);
+  assert(p98(mixed) >= 80, "never below the observed distribution");
+
+  // Grouping and the zero-id exclusion still hold: they are what the observer's entries mean.
   assertEquals(
-    interactionP98(all),
-    8,
-    "a percentile over ALL entries would be right but unavailable",
+    interactionLatencies([event(1, 40), event(1, 120)]),
+    [120],
+    "one interaction, one latency",
   );
-
-  // With the interaction count known, the answer is correct rather than an upper bound: 60
-  // interactions, rank 59, and 59 of them were below the threshold, so the value at that rank was
-  // never reported — the page is fast.
-  const value = inpFromObserved(observed, 60);
-  assertEquals(value, 16);
-  assert(value < 1000, "one slow interaction cannot define the page's INP");
-
-  // When the slow interactions are numerous enough to reach the rank, the reported ones decide.
-  const manySlow = [
-    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 200)),
-    event(60, 1000),
-  ];
-  const observedSlow = interactionLatencies(manySlow.filter((e) => e.duration >= THRESHOLD));
-  assertEquals(observedSlow.length, 60);
-  assertEquals(inpFromObserved(observedSlow, 60), 200, "rank 59 of 60 is the 200ms interaction");
-
-  // And an undercounted interaction count degrades to the old upper bound rather than to nonsense.
-  assertEquals(inpFromObserved([1000], 1), 1000, "one interaction, one report, that is the value");
+  assertEquals(interactionLatencies([event(0, 900)]).length, 0, "a scroll is not an interaction");
 });
