@@ -22,7 +22,9 @@ import {
   isClaimExpired,
   isPublishable,
   unsynthesized,
+  utcDayKey,
 } from "../../types.ts";
+import type { EpisodeBilling } from "../mod.ts";
 import { descendingKey, EPISODE_READ_BATCH } from "./core.ts";
 
 /**
@@ -33,6 +35,7 @@ async function atomicPutEpisode(
   core: KvCore,
   episode: Episode,
   guard: Deno.KvEntryMaybe<Episode>,
+  billing?: EpisodeBilling,
 ): Promise<boolean> {
   const sortKey = descendingKey(episode.createdAt, episode.id);
   const tx = core.kv.atomic()
@@ -45,6 +48,18 @@ async function atomicPutEpisode(
     );
 
   core.writeQueueIndexes(tx, episode);
+
+  // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
+  // Billing is committed in the exact same atomic transaction as episode completion.
+  if (billing && episode.status === "ready") {
+    const day = utcDayKey(billing.at ?? new Date());
+    tx.sum(["synthesis_total"], 1n)
+      .sum(["synthesis_total_bytes"], BigInt(billing.byteLength))
+      .sum(["synthesis_by_user", episode.userId], 1n)
+      .sum(["synthesis_bytes_by_user", episode.userId], BigInt(billing.byteLength))
+      .sum(["synthesis_daily", episode.userId, day], 1n)
+      .sum(["synthesis_daily_all", day], 1n);
+  }
 
   const result = await tx.commit();
   return result.ok;
@@ -431,7 +446,11 @@ export function createEpisodesRepository(
       };
       return await atomicPutEpisode(core, yielded, entry);
     },
-    async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    async completeEpisode(
+      episode: Episode,
+      owner: string,
+      billing?: EpisodeBilling,
+    ): Promise<boolean> {
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;
@@ -448,7 +467,7 @@ export function createEpisodesRepository(
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
-      return await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry);
+      return await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry, billing);
     },
     async retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const entry = await core.kv.get<Episode>(["episode", userId, id]);

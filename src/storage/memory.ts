@@ -21,6 +21,7 @@ import {
   type ByteRange,
   collect,
   type DownloadCounts,
+  type EpisodeBilling,
   type EpisodeClaim,
   type EpisodeQuery,
   type MetadataRepositories,
@@ -259,8 +260,12 @@ export class MemoryMetadataStore implements MetadataStore {
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
     return this.repositories.episodes.claimEpisode(userId, episodeId, claim);
   }
-  completeEpisode(episode: Episode, owner: string): Promise<boolean> {
-    return this.repositories.episodes.completeEpisode(episode, owner);
+  completeEpisode(
+    episode: Episode,
+    owner: string,
+    billing?: EpisodeBilling,
+  ): Promise<boolean> {
+    return this.repositories.episodes.completeEpisode(episode, owner, billing);
   }
   touchEpisodeClaim(
     userId: string,

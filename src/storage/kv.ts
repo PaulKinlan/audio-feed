@@ -15,6 +15,7 @@ import { SynthesisSegmentRecord } from "../types.ts";
 import type {
   AtomicWrite,
   DownloadCounts,
+  EpisodeBilling,
   EpisodeClaim,
   EpisodePage,
   EpisodePageResult,
@@ -261,8 +262,12 @@ export class KvMetadataStore implements MetadataStore {
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
     return this.repositories.episodes.claimEpisode(userId, episodeId, claim);
   }
-  completeEpisode(episode: Episode, owner: string): Promise<boolean> {
-    return this.repositories.episodes.completeEpisode(episode, owner);
+  completeEpisode(
+    episode: Episode,
+    owner: string,
+    billing?: EpisodeBilling,
+  ): Promise<boolean> {
+    return this.repositories.episodes.completeEpisode(episode, owner, billing);
   }
   touchEpisodeClaim(
     userId: string,

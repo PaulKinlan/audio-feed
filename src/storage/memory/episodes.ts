@@ -14,7 +14,12 @@ import {
   isPublishable,
   unsynthesized,
 } from "../../types.ts";
-import { type EpisodeClaim, type EpisodeQuery, type MetadataStore } from "../mod.ts";
+import {
+  type EpisodeBilling,
+  type EpisodeClaim,
+  type EpisodeQuery,
+  type MetadataStore,
+} from "../mod.ts";
 import type { EpisodeRepository } from "../mod.ts";
 import type { MemoryState } from "./state.ts";
 import {
@@ -301,7 +306,11 @@ export function createEpisodesRepository(
       writeEpisode(state, yielded);
       return Promise.resolve(true);
     },
-    completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    completeEpisode(
+      episode: Episode,
+      owner: string,
+      billing?: EpisodeBilling,
+    ): Promise<boolean> {
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
       if (!current) return Promise.resolve(false);
@@ -320,6 +329,12 @@ export function createEpisodesRepository(
       removeSortedIndex(state.synthesizingIndex, sortKey);
       removePendingPointer(state, current);
       state.episodes.set(key, structuredClone({ ...episode, claimedBy: owner }));
+
+      // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
+      if (billing && episode.status === "ready") {
+        host().recordSynthesis(episode.userId, billing.byteLength, billing.at).catch(() => {});
+      }
+
       return Promise.resolve(true);
     },
     retryEpisode(userId: string, id: string): Promise<Episode | null> {

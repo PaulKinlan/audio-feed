@@ -999,76 +999,6 @@ export function buildSegmentResume(
  * Exported separately from the loop so a test (and an operator with a CLI) can
  * drain the queue once without starting a timer.
  */
-interface PendingAccountingItem {
-  id: string;
-  userId: string;
-  byteLength: number;
-  accountingKey: string;
-  at: number;
-}
-
-interface PendingAccountingQueue {
-  pending: PendingAccountingItem[];
-}
-
-/**
- * Idempotent synthesis accounting (audio-feed-uecw, audio-feed-ori8):
- * Keyed on a stable per-charge key (settled_charge:episodeId:stagingKey) with a TTL in durable store.
- * Missing key = unsettled; existing key = settled. Eliminates unbounded single-value growth.
- */
-const SETTLED_CHARGE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-interface SettledChargeRecord {
-  state: "settled" | "recording" | "unsettled";
-  settledAt?: number;
-}
-
-async function recordSynthesisIdempotent(
-  metadata: MetadataStore,
-  userId: string,
-  byteLength: number,
-  accountingKey: string,
-  at: Date,
-): Promise<void> {
-  const settledKey = `settled_charge:${accountingKey}`;
-  let alreadySettled = false;
-  const res = await metadata.atomicUpdate<SettledChargeRecord>(
-    settledKey,
-    (current) => {
-      if (current?.state === "settled") {
-        alreadySettled = true;
-        return current;
-      }
-      return { state: "recording" };
-    },
-    SETTLED_CHARGE_TTL_MS,
-  );
-
-  if (alreadySettled || !res.committed) {
-    if (alreadySettled) return;
-    throw new Error(`Failed to claim idempotency key for ${accountingKey}`);
-  }
-
-  try {
-    await metadata.recordSynthesis(userId, byteLength, at);
-  } catch (err) {
-    // If recording failed, mark unsettled so retry can re-attempt
-    await metadata.atomicUpdate<SettledChargeRecord>(
-      settledKey,
-      () => ({ state: "unsettled" }),
-      SETTLED_CHARGE_TTL_MS,
-    ).catch(() => {});
-    throw err;
-  }
-
-  // Mark settled permanently
-  await metadata.atomicUpdate<SettledChargeRecord>(
-    settledKey,
-    () => ({ state: "settled", settledAt: Date.now() }),
-    SETTLED_CHARGE_TTL_MS,
-  );
-}
-
 /**
  * Shared terminal settlement helper (audio-feed-y0da, audio-feed-g5bi, audio-feed-n8wk).
  * Owns the commit/settle/delete decision from durable state across cleanupOnAbort,
@@ -1108,70 +1038,6 @@ async function settleTerminalPersistence(
   await blobs.delete(stagingKey).catch(() => {});
   await metadata.recordOrphanBlob(stagingKey).catch(() => {});
   return { committed: false };
-}
-
-async function queuePendingAccounting(
-  metadata: MetadataStore,
-  userId: string,
-  byteLength: number,
-  accountingKey: string,
-  at: number,
-): Promise<void> {
-  const item: PendingAccountingItem = {
-    id: crypto.randomUUID(),
-    userId,
-    byteLength,
-    accountingKey,
-    at,
-  };
-  // Retry atomicUpdate until committed so it is never dropped (audio-feed-uecw)
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await metadata.atomicUpdate<PendingAccountingQueue>(
-      "pending_synthesis_accounting",
-      (current) => ({
-        pending: [...(current?.pending ?? []), item],
-      }),
-    );
-    if (res.committed) return;
-  }
-  throw new Error(`Failed to persist durable pending accounting for user ${userId}`);
-}
-
-async function drainPendingAccounting(metadata: MetadataStore): Promise<void> {
-  // At-least-once delivery + idempotent sink deduplication = exactly-once (audio-feed-uecw).
-  // Read/peek head without mutating, settle with idempotent accounting, and only then pop by ID.
-  // Any crash or failure leaves the item safely queued for a harmless idempotent retry.
-  while (true) {
-    let nextItem: PendingAccountingItem | undefined;
-    const readRes = await metadata.atomicUpdate<PendingAccountingQueue>(
-      "pending_synthesis_accounting",
-      (current) => {
-        nextItem = current?.pending?.[0];
-        return current; // Peek without mutating
-      },
-    );
-    if (!readRes.committed || !nextItem) {
-      break;
-    }
-
-    // 1. Settle with idempotent sink
-    await recordSynthesisIdempotent(
-      metadata,
-      nextItem.userId,
-      nextItem.byteLength,
-      nextItem.accountingKey,
-      new Date(nextItem.at),
-    );
-
-    // 2. Pop this specific item by ID only after recordSynthesisIdempotent succeeded
-    const targetId = nextItem.id;
-    await metadata.atomicUpdate<PendingAccountingQueue>(
-      "pending_synthesis_accounting",
-      (current) => ({
-        pending: (current?.pending ?? []).filter((p) => p.id !== targetId),
-      }),
-    );
-  }
 }
 
 export async function runSynthesisBatch(
@@ -1367,13 +1233,6 @@ export async function runSynthesisBatch(
   }
 
   let claimedAny = false;
-  // Settle any durable pending accounting from previous ticks (audio-feed-uecw)
-  try {
-    await drainPendingAccounting(metadata);
-  } catch (err) {
-    console.error("[audio-feed] failed to drain pending synthesis accounting:", err);
-  }
-
   const inFlightUploadKeys = new Set<string>();
   for (const { episode } of pending) {
     // Two approval checks, each for a different job:
@@ -1741,49 +1600,29 @@ export async function runSynthesisBatch(
         }
 
         const byteLength = stored.size ?? bytes.length;
-        const wrote = await metadata.completeEpisode({
-          ...currentEpisode,
-          status: "ready",
-          audioKey: stagingKey,
-          byteLength,
-          contentType: "audio/wav",
-          durationSeconds: audio.durationSeconds,
-          readyAt: previousKey && currentEpisode.readyAt
-            ? currentEpisode.readyAt
-            : new Date().toISOString(),
-          promptVersion: PROMPT_VERSION,
-          regenerating: undefined,
-          error: undefined,
-          phase: "ready",
-          lastHeartbeat: new Date().toISOString(),
-          scriptTurns: undefined,
-        }, opts.owner);
-
-        if (wrote) {
-          // Invariant 2: Idempotent synthesis accounting keyed on episode + stagingKey (audio-feed-uecw)
-          const accountingKey = `${currentEpisode.id}:${stagingKey}`;
-          try {
-            await recordSynthesisIdempotent(
-              metadata,
-              currentEpisode.userId,
-              byteLength,
-              accountingKey,
-              new Date(nowMs),
-            );
-          } catch (err) {
-            console.error(
-              `[audio-feed] recordSynthesis failed for episode ${currentEpisode.id}:`,
-              err,
-            );
-            await queuePendingAccounting(
-              metadata,
-              currentEpisode.userId,
-              byteLength,
-              accountingKey,
-              nowMs,
-            );
-          }
-        }
+        // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
+        // Billing mutations are appended to the exact same atomic transaction as episode completion.
+        const wrote = await metadata.completeEpisode(
+          {
+            ...currentEpisode,
+            status: "ready",
+            audioKey: stagingKey,
+            byteLength,
+            contentType: "audio/wav",
+            durationSeconds: audio.durationSeconds,
+            readyAt: previousKey && currentEpisode.readyAt
+              ? currentEpisode.readyAt
+              : new Date().toISOString(),
+            promptVersion: PROMPT_VERSION,
+            regenerating: undefined,
+            error: undefined,
+            phase: "ready",
+            lastHeartbeat: new Date().toISOString(),
+            scriptTurns: undefined,
+          },
+          opts.owner,
+          { byteLength, at: new Date(nowMs) },
+        );
 
         return { stored, byteLength, wrote };
       },
@@ -1800,25 +1639,7 @@ export async function runSynthesisBatch(
         nowMs,
       );
       if (settle.committed && settle.episode) {
-        // Commit won! Ensure synthesis accounting is settled or queued idempotently (audio-feed-uecw):
-        const accountingKey = `${currentEpisode.id}:${stagingKey}`;
-        try {
-          await recordSynthesisIdempotent(
-            metadata,
-            currentEpisode.userId,
-            settle.episode.byteLength ?? bytes.length,
-            accountingKey,
-            new Date(nowMs),
-          );
-        } catch {
-          await queuePendingAccounting(
-            metadata,
-            currentEpisode.userId,
-            settle.episode.byteLength ?? bytes.length,
-            accountingKey,
-            nowMs,
-          ).catch(() => {});
-        }
+        // Complete won! Atomic billing was committed with completeEpisode (audio-feed-thrs).
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,
@@ -1847,25 +1668,7 @@ export async function runSynthesisBatch(
       );
       if (settle.committed && settle.episode) {
         // Complete won before error occurred (audio-feed-g5bi)! Blob was preserved.
-        // Queue/settle accounting and report episode as ready:
-        const accountingKey = `${currentEpisode.id}:${stagingKey}`;
-        try {
-          await recordSynthesisIdempotent(
-            metadata,
-            currentEpisode.userId,
-            settle.episode.byteLength ?? bytes.length,
-            accountingKey,
-            new Date(nowMs),
-          );
-        } catch {
-          await queuePendingAccounting(
-            metadata,
-            currentEpisode.userId,
-            settle.episode.byteLength ?? bytes.length,
-            accountingKey,
-            nowMs,
-          ).catch(() => {});
-        }
+        // Atomic billing was committed with completeEpisode (audio-feed-thrs).
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,

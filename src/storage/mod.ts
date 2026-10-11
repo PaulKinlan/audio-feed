@@ -289,6 +289,11 @@ export interface ArticleRepository {
  * work, completion, failure, and the two recovery transitions (retry a failure, regenerate a
  * published episode).
  */
+export interface EpisodeBilling {
+  byteLength: number;
+  at?: Date;
+}
+
 export interface EpisodeRepository {
   putEpisode(episode: Episode): Promise<void>;
   getEpisode(userId: string, id: string): Promise<Episode | null>;
@@ -385,7 +390,11 @@ export interface EpisodeRepository {
    * The refusal is a signal worth reporting, not an error to swallow: it means
    * "you were superseded", and the caller should discard its result.
    */
-  completeEpisode(episode: Episode, owner: string): Promise<boolean>;
+  completeEpisode(
+    episode: Episode,
+    owner: string,
+    billing?: EpisodeBilling,
+  ): Promise<boolean>;
 
   /**
    * Update claim heartbeat and execution phase (audio-feed-siv1), atomically.

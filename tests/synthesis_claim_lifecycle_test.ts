@@ -1659,20 +1659,14 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
   assertEquals(count, 1, "daily synthesis count must be recorded as part of terminal path");
 });
 
-Deno.test("audio-feed-uecw: pending accounting queue settles and drains atomically on subsequent ticks", async () => {
+Deno.test("audio-feed-uecw: terminal completion commits episode ready and billing counters in a single atomic transaction", async () => {
   const { ctx, stores } = await setupEnv();
-  // Simulate transient failure in recordSynthesis during batch
-  const origRecord = stores.metadata.recordSynthesis.bind(stores.metadata);
-  let failRecord = true;
-  stores.metadata.recordSynthesis = async (...args) => {
-    if (failRecord) {
-      throw new Error("transient accounting store failure");
-    }
-    return await origRecord(...args);
-  };
+  const today = new Date().toISOString().slice(0, 10);
+  const initialCount = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(initialCount, 0, "initial count zero");
 
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
-    owner: "review-accounting-drain",
+    owner: "review-atomic-billing",
     maxInvocationDurationMs: 10_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
@@ -1680,44 +1674,24 @@ Deno.test("audio-feed-uecw: pending accounting queue settles and drains atomical
   });
   assertEquals(result.ready.length, 1, "episode completed ready");
 
-  // Verify pending accounting queue in durable store holds the pending record
-  const queue = await stores.metadata.atomicUpdate<
-    { pending: Array<{ id: string; userId: string; byteLength: number }> }
-  >(
-    "pending_synthesis_accounting",
-    (c) => c,
-  );
-  assertEquals(
-    queue.value?.pending.length,
-    1,
-    "pending accounting record must be queued in durable store",
-  );
-
-  // On next tick with store healthy, drainPendingAccounting drains and acknowledges the item
-  failRecord = false;
-  await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
-    owner: "review-accounting-drain-2",
-    maxInvocationDurationMs: 10_000,
-    estimatedTurnDurationMs: 1,
-    estimatedUploadDurationMs: 1,
-    flushMarginMs: 5,
-  });
-
-  const today = new Date().toISOString().slice(0, 10);
   const count = await stores.metadata.getDailySynthesisCount(today);
-  assertEquals(count, 1, "daily synthesis count must be credited after durable queue drain");
-
-  const queueAfter = await stores.metadata.atomicUpdate<
-    { pending: Array<{ id: string; userId: string }> }
-  >(
-    "pending_synthesis_accounting",
-    (c) => c,
-  );
   assertEquals(
-    queueAfter.value?.pending.length,
-    0,
-    "drained item must be atomically popped from queue",
+    count,
+    1,
+    "daily synthesis count must be credited atomically with episode completion",
   );
+
+  // A superseded attempt cannot increment counters
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assert(ep);
+  const superseded = await stores.metadata.completeEpisode(
+    ep,
+    "superseded-worker",
+    { byteLength: 500 },
+  );
+  assertEquals(superseded, false, "superseded worker write must fail");
+  const countAfterSuperseded = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(countAfterSuperseded, 1, "failed completion must never increment billing counters");
 });
 
 Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak uncommitted blob", async () => {
@@ -1753,9 +1727,8 @@ Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak unco
   );
 });
 
-Deno.test("audio-feed-mkkb: idempotent accounting prevents double charge on replay", async () => {
+Deno.test("audio-feed-mkkb: idempotent completeEpisode replay never double charges", async () => {
   const { ctx, stores } = await setupEnv();
-  // Run batch to generate an episode
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-idempotent-accounting",
     maxInvocationDurationMs: 10_000,
@@ -1768,58 +1741,28 @@ Deno.test("audio-feed-mkkb: idempotent accounting prevents double charge on repl
   const initialCount = await stores.metadata.getDailySynthesisCount(today);
   assertEquals(initialCount, 1, "initial charge recorded");
 
-  // Re-run batch with identical episode data or manually inject the same accounting charge
   const ep = await stores.metadata.getEpisode("user-1", "episode-1");
   assert(ep?.audioKey);
 
-  // Directly queue the same accountingKey into pending_synthesis_accounting to simulate drain replay
-  await stores.metadata.atomicUpdate<
-    {
-      pending: Array<
-        { id: string; userId: string; byteLength: number; accountingKey: string; at: number }
-      >;
-    }
-  >(
-    "pending_synthesis_accounting",
-    (c) => ({
-      pending: [
-        ...(c?.pending ?? []),
-        {
-          id: crypto.randomUUID(),
-          userId: "user-1",
-          byteLength: ep.byteLength ?? 100,
-          accountingKey: `episode-1:${ep.audioKey}`,
-          at: Date.now(),
-        },
-      ],
-    }),
+  // Re-invoking completeEpisode idempotently for the same owner and audioKey must not increment counters
+  const replayed = await stores.metadata.completeEpisode(
+    ep,
+    "review-idempotent-accounting",
+    { byteLength: ep.byteLength ?? 100 },
   );
-
-  // Next batch drains the queue
-  await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
-    owner: "review-idempotent-accounting-drain",
-    maxInvocationDurationMs: 10_000,
-    estimatedTurnDurationMs: 1,
-    estimatedUploadDurationMs: 1,
-    flushMarginMs: 5,
-  });
+  assertEquals(replayed, true, "idempotent completion must return true");
 
   const countAfterReplay = await stores.metadata.getDailySynthesisCount(today);
-  assertEquals(countAfterReplay, 1, "idempotent accounting must not double count on replay");
+  assertEquals(countAfterReplay, 1, "idempotent completion replay must never double charge");
 });
 
 Deno.test("audio-feed-g5bi: error in terminal_persistence after completeEpisode does not delete committed blob", async () => {
   const { ctx, stores } = await setupEnv();
   // Simulate completeEpisode succeeding, but subsequent logic inside fn throwing
-  stores.metadata.recordSynthesis = () => {
-    return Promise.reject(new Error("unhandled terminal failure after commit"));
-  };
-  const origAtomic = stores.metadata.atomicUpdate.bind(stores.metadata);
-  stores.metadata.atomicUpdate = (...args) => {
-    if (args[0] === "pending_synthesis_accounting") {
-      return Promise.reject(new Error("queue failure simulation"));
-    }
-    return origAtomic(...args);
+  const origComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    const _res = await origComplete(...args);
+    throw new Error("simulated post-commit failure inside terminal_persistence");
   };
 
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
@@ -1836,4 +1779,8 @@ Deno.test("audio-feed-g5bi: error in terminal_persistence after completeEpisode 
   assert(ep?.audioKey);
   const blob = await stores.blobs.get(ep.audioKey);
   assert(blob !== null, "committed blob must never be deleted by error handler");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 1, "atomic billing committed with completeEpisode");
 });
