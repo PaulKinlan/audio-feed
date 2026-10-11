@@ -14,11 +14,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { OFFLINE_CACHE } from "../src/routes/pwa.ts";
+import { OFFLINE_CACHE, SHELL_CACHE } from "../src/routes/pwa.ts";
+import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
-import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { playerClient, playerData } from "./listen_client.ts";
 import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -446,6 +446,112 @@ Deno.test("tapping the download notification focuses the open player instead of 
   harness.openClients = [];
   await harness.dispatch("backgroundfetchclick");
   assertEquals(harness.opened, ["/listen"]);
+});
+
+function navigateRequest(url: string, headers: HeadersInit = {}): Request {
+  const req = new Request(url, { headers });
+  Object.defineProperty(req, "mode", { value: "navigate" });
+  return req;
+}
+
+Deno.test("the service worker does not cache capability-bearing or admin navigation responses (audio-feed-s3f0)", async () => {
+  const { fetch: appFetch, stores } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+
+  // Create admin user and sessions
+  const adminUser = makeUser({
+    id: "admin-user",
+    isAdmin: true,
+    status: "approved",
+    feedToken: "admin-feed-tok",
+  });
+  await stores.metadata.putUser(adminUser);
+  const adminCookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, adminUser.id)}`;
+  const userCookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-1")}`;
+
+  const harness = createServiceWorkerHarness(swText, appFetch);
+
+  // 1. Navigation to capability-bearing player: /listen/<token>
+  const listenRes = await harness.dispatch("fetch", {
+    request: navigateRequest(`${BASE}/listen/${TOKEN}`, { accept: "text/html" }),
+  });
+  assertEquals(listenRes.response?.status, 200);
+
+  // 2. Navigation to admin console: /admin
+  const adminRes = await harness.dispatch("fetch", {
+    request: navigateRequest(`${BASE}/admin`, {
+      accept: "text/html",
+      cookie: adminCookie,
+    }),
+  });
+  assertEquals(adminRes.response?.status, 200);
+
+  // 3. Navigation to account page: /account
+  const accountRes = await harness.dispatch("fetch", {
+    request: navigateRequest(`${BASE}/account`, {
+      accept: "text/html",
+      cookie: userCookie,
+    }),
+  });
+  assertEquals(accountRes.response?.status, 200);
+
+  // Verify SHELL_CACHE contains NONE of these sensitive pages
+  const cachedShell = harness.cachedUrls(SHELL_CACHE);
+  assert(
+    !cachedShell.some((url) => url.includes("/listen/")),
+    `Capability player must not be stored in shell cache: ${cachedShell.join(", ")}`,
+  );
+  assert(
+    !cachedShell.some((url) => url.includes("/admin")),
+    `Admin console must not be stored in shell cache: ${cachedShell.join(", ")}`,
+  );
+  assert(
+    !cachedShell.some((url) => url.includes("/account")),
+    `Account page must not be stored in shell cache: ${cachedShell.join(", ")}`,
+  );
+
+  // 4. Non-sensitive navigation (e.g. unauthenticated home) CAN be cached
+  const homeRes = await harness.dispatch("fetch", {
+    request: navigateRequest(`${BASE}/`, { accept: "text/html" }),
+  });
+  assertEquals(homeRes.response?.status, 200);
+  const updatedShell = harness.cachedUrls(SHELL_CACHE);
+  assert(
+    updatedShell.includes(`${BASE}/`),
+    `Public home page should be cached in shell cache: ${updatedShell.join(", ")}`,
+  );
+});
+
+Deno.test("service worker activation purges previous shell cache versions while preserving offline audio (audio-feed-s3f0)", async () => {
+  const { fetch: appFetch } = await seeded();
+  const swText = await (await appFetch(get("/sw.js"))).text();
+  const harness = createServiceWorkerHarness(swText, appFetch);
+
+  // Seed old v1 shell cache with a sensitive URL, and offline audio cache with an episode
+  harness.seedCache(
+    "audio-feed-shell-v1",
+    `${BASE}/admin`,
+    new Response("leaked-admin-html", { status: 200 }),
+  );
+  harness.seedCache(
+    OFFLINE_CACHE,
+    `${BASE}/audio/ep-1.wav`,
+    new Response("audio-bytes", { status: 200 }),
+  );
+
+  // Activate new service worker
+  const outcome = await harness.dispatch("activate");
+  assertEquals(outcome.waits, 1, "activate handler must extend lifetime");
+
+  const names = harness.cacheNames();
+  assert(
+    !names.includes("audio-feed-shell-v1"),
+    "old audio-feed-shell-v1 cache must be deleted on activation",
+  );
+  assert(
+    names.includes(OFFLINE_CACHE),
+    "offline audio cache must survive service worker activation",
+  );
 });
 
 Deno.test("the icon is served as SVG (audio-feed-4xb)", async () => {

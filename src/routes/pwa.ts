@@ -26,7 +26,7 @@ import type { AppContext } from "../app.ts";
 
 /** Must match the cache name the player writes downloads into. */
 export const OFFLINE_CACHE = "audio-feed-offline-v1";
-export const SHELL_CACHE = "audio-feed-shell-v1";
+export const SHELL_CACHE = "audio-feed-shell-v2";
 
 export const MANIFEST = {
   name: "Audio Feed",
@@ -162,19 +162,35 @@ self.addEventListener("fetch", (event) => {
   }
 
   // Navigations: network first so new episodes appear, cache when offline.
+  // Capability-bearing URLs (e.g. /listen/:token) and authenticated views
+  // (e.g. /admin, /account) carry secrets and subscriber data that must not
+  // linger in Cache Storage across logout or token rotation (audio-feed-s3f0).
+  // The service worker respects Cache-Control: no-store / private, alongside
+  // an explicit path exclusion for capability and authenticated routes.
   if (request.mode === "navigate") {
     event.respondWith(
       (async () => {
         try {
           const fresh = await fetch(request);
           if (fresh.ok) {
-            const shell = await caches.open(SHELL_CACHE);
-            await shell.put(request, fresh.clone());
+            const cc = (fresh.headers.get("cache-control") || "").toLowerCase();
+            const isNoStore = cc.includes("no-store") || cc.includes("private");
+            const isSensitive =
+              url.pathname.startsWith("/admin") ||
+              url.pathname.startsWith("/account") ||
+              url.pathname.startsWith("/listen/") ||
+              url.pathname.startsWith("/login") ||
+              url.pathname.startsWith("/share") ||
+              url.pathname.startsWith("/feed/");
+            if (!isNoStore && !isSensitive) {
+              const shell = await caches.open(SHELL_CACHE);
+              await shell.put(request, fresh.clone());
+            }
           }
           return fresh;
         } catch {
           const shell = await caches.open(SHELL_CACHE);
-          const cached = (await shell.match(request)) || (await shell.match("/listen"));
+          const cached = await shell.match(request);
           return (
             cached ||
             new Response(
