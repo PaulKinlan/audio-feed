@@ -269,7 +269,12 @@ function isIpv4(value: string): boolean {
  */
 function isIpv6(value: string): boolean {
   if (!value.includes(":")) return false;
-  if ((value.match(/::/g) ?? []).length > 1) return false;
+  if (value.includes(":::")) return false;
+  const elisions = (value.match(/::/g) ?? []).length;
+  if (elisions > 1) return false;
+  const elided = elisions === 1;
+  // A single colon may only sit at an edge as part of `::`. `0:` and `2001:db8:` are not addresses.
+  if (!elided && (value.startsWith(":") || value.endsWith(":"))) return false;
 
   const quad = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(value);
   if (quad && !isIpv4(quad[1]!)) return false;
@@ -277,7 +282,13 @@ function isIpv6(value: string): boolean {
 
   if (!/^[0-9A-Fa-f:]*$/.test(hexPart)) return false;
   const groups = hexPart.split(":").filter((group) => group !== "");
-  return groups.length <= 8 && groups.every((group) => group.length <= 4);
+  if (groups.some((group) => group.length > 4)) return false;
+  // What makes this an address rather than a word with colons in it: without `::` an IPv6 address
+  // has exactly eight groups, and with it `::` stands for at least one elided group, so at most
+  // seven may be written. Accepting one group with a trailing colon (`0:`) was enough to rotate the
+  // key again — the check has to constrain the STRUCTURE, not just the alphabet (audio-feed-hzg1,
+  // found by review of the shape check itself).
+  return elided ? groups.length <= 7 : groups.length === 8;
 }
 
 /**

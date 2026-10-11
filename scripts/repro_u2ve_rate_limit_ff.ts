@@ -112,6 +112,26 @@ twoClientStatuses.push({
 // there was both a fresh bucket per request and an unbounded number of store rows — the same two
 // failures the forwarded chain had, on the path beside it.
 
+// The reviewer's second repro (audio-feed-hzg1): values that are NOT addresses but passed the first
+// version of the shape check, because a single hex group with a trailing colon was read as IPv6.
+// Rotating them bought a bucket each — the same bypass the shape check exists to stop, which is why
+// the check now constrains structure and not just the alphabet.
+const malformed = app();
+const malformedStatuses: number[] = [];
+for (let i = 0; i < ATTEMPTS; i++) {
+  const response = await malformed.fetch(
+    new Request("http://localhost/api/request-access", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": `${i.toString(16)}:`,
+      },
+      body: JSON.stringify({ email: `malformed-${i}@example.com`, reason: "probe" }),
+    }),
+  );
+  malformedStatuses.push(response.status);
+}
+
 const cfOnly = app();
 const cfStatuses: number[] = [];
 for (let i = 0; i < ATTEMPTS; i++) {
@@ -171,6 +191,11 @@ const report = {
     allowedThrough: cfStatuses.filter((s) => s !== 429).length,
     evaded: count(cfStatuses, 429) === 0,
   },
+  rotatingMalformedCfOnly: {
+    tooManyRequests: count(malformedStatuses, 429),
+    allowedThrough: malformedStatuses.filter((s) => s !== 429).length,
+    evaded: count(malformedStatuses, 429) === 0,
+  },
   wellFormedCfClient: {
     tooManyRequests: count(cfHonestFirst, 429),
     first429AtAttempt: cfHonestFirst.indexOf(429) + 1,
@@ -203,6 +228,14 @@ if (report.rotatingForgedPrefix.evaded) {
   console.error(
     `FAIL: a client that rotates a forged prefix was never limited (${ATTEMPTS} attempts, no 429)`,
   );
+  Deno.exit(1);
+}
+console.log(
+  `rotating malformed cf-connecting-ip values (0: .. 13:): ${report.rotatingMalformedCfOnly.tooManyRequests} x 429, ${report.rotatingMalformedCfOnly.allowedThrough} allowed through`,
+);
+
+if (report.rotatingMalformedCfOnly.evaded) {
+  console.error("FAIL: a client that rotates malformed cf-connecting-ip values was never limited");
   Deno.exit(1);
 }
 if (report.rotatingForgedCfOnly.evaded) {

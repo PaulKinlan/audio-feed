@@ -113,14 +113,27 @@ Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2
       `${value} must be usable`,
     );
   }
+  // audio-feed-hzg1: these passed the first version of this check, because it counted hex groups
+  // without requiring the structure of an address — one group plus a trailing colon was enough. A
+  // caller rotated `0:` .. `13:` through the fallback header and got a bucket per request, which is
+  // the bypass the check exists to close, so the forms are asserted individually.
   const unusable = [
     "999.0.113.7",
     "203.0.113",
     "203.0.113.7.9",
+    "1.2.3.4,",
     "unknown",
     "",
-    "1.2.3.4,",
     "2001:db8::1::2",
+    "0:",
+    "13:",
+    "abc:",
+    ":::",
+    "2001:db8:",
+    ":1:2:3:4:5:6:7",
+    "1:2:3",
+    "1:2:3:4:5:6:7:8:9",
+    "12345::1",
   ];
   for (const value of unusable) {
     assertEquals(
