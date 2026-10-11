@@ -695,9 +695,47 @@ Deno.test("audio route: out-of-range Range checks user approval before returning
   await appRes.body?.cancel();
 });
 
-// ===========================================================================
-// audio-feed-ivbt: htmlResponse is the ONLY place an HTML route attaches CSP
-// ===========================================================================
+Deno.test("cache control: authenticated and capability HTML routes set no-store (audio-feed-s3f0)", async () => {
+  const stores = memoryStores();
+  const user = makeUser({
+    id: "user-test",
+    isAdmin: true,
+    status: "approved",
+    feedToken: "feed-tok-test",
+  });
+  await stores.metadata.putUser(user);
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, user.id)}`;
+
+  const { fetch } = setupTestApp(stores);
+
+  // 1. /admin
+  const adminRes = await fetch(
+    new Request(`${BASE}/admin`, { headers: { cookie } }),
+  );
+  assertEquals(adminRes.status, 200);
+  assertStringIncludes(adminRes.headers.get("cache-control") ?? "", "no-store");
+  await adminRes.body?.cancel();
+
+  // 2. /account
+  const accountRes = await fetch(
+    new Request(`${BASE}/account`, { headers: { cookie } }),
+  );
+  assertEquals(accountRes.status, 200);
+  assertStringIncludes(accountRes.headers.get("cache-control") ?? "", "no-store");
+  await accountRes.body?.cancel();
+
+  // 3. /listen/:token (capability-bearing)
+  const listenRes = await fetch(new Request(`${BASE}/listen/${user.feedToken}`));
+  assertEquals(listenRes.status, 200);
+  assertStringIncludes(listenRes.headers.get("cache-control") ?? "", "no-store");
+  await listenRes.body?.cancel();
+
+  // 4. /login
+  const loginRes = await fetch(new Request(`${BASE}/login`));
+  assertEquals(loginRes.status, 200);
+  assertStringIncludes(loginRes.headers.get("cache-control") ?? "", "no-store");
+  await loginRes.body?.cancel();
+});
 
 /**
  * csp.ts documents htmlResponse() as the single way an HTML response gets its

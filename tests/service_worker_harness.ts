@@ -35,9 +35,13 @@ export interface ServiceWorkerHarness {
   dispatch(
     name: string,
     event?: Record<string, unknown>,
-  ): Promise<{ waits: number }>;
+  ): Promise<{ waits: number; response?: Response }>;
   /** URLs present in one cache, in insertion order. */
   cachedUrls(cacheName: string): string[];
+  /** Names of all currently stored caches. */
+  cacheNames(): string[];
+  /** Seed an entry into a cache before dispatching events. */
+  seedCache(cacheName: string, request: Request | string, response: Response): void;
   /** Notification updates the worker asked for, in order. */
   updates: Array<Record<string, unknown>>;
   /** Windows the worker focused, in order. */
@@ -57,7 +61,10 @@ interface StubCache {
 const keyOf = (request: Request | string): string =>
   typeof request === "string" ? request : request.url;
 
-export function createServiceWorkerHarness(script: string): ServiceWorkerHarness {
+export function createServiceWorkerHarness(
+  script: string,
+  customFetch?: (req: Request) => Promise<Response>,
+): ServiceWorkerHarness {
   const cachesByName = new Map<string, Map<string, Response>>();
 
   const openCache = (name: string): Promise<StubCache> => {
@@ -97,6 +104,15 @@ export function createServiceWorkerHarness(script: string): ServiceWorkerHarness
     opened,
     openClients: [],
     cachedUrls: (cacheName) => [...(cachesByName.get(cacheName)?.keys() ?? [])],
+    cacheNames: () => [...cachesByName.keys()],
+    seedCache: (cacheName, request, response) => {
+      let entries = cachesByName.get(cacheName);
+      if (!entries) {
+        entries = new Map();
+        cachesByName.set(cacheName, entries);
+      }
+      entries.set(keyOf(request), response);
+    },
     dispatch: async (name, event = {}) => {
       const handlers = listeners.get(name);
       if (!handlers || handlers.length === 0) {
@@ -106,7 +122,16 @@ export function createServiceWorkerHarness(script: string): ServiceWorkerHarness
         );
       }
       const waits: Array<Promise<unknown>> = [];
+      let response: Response | undefined;
       const target: Record<string, unknown> = {
+        respondWith: (promise: Promise<Response>) => {
+          waits.push(
+            Promise.resolve(promise).then((r) => {
+              response = r;
+              return r;
+            }),
+          );
+        },
         ...event,
         waitUntil: (promise: Promise<unknown>) => {
           waits.push(promise);
@@ -118,7 +143,7 @@ export function createServiceWorkerHarness(script: string): ServiceWorkerHarness
       };
       for (const handler of handlers) handler(target);
       await Promise.all(waits);
-      return { waits: waits.length };
+      return { waits: waits.length, response };
     },
   };
 
@@ -145,8 +170,13 @@ export function createServiceWorkerHarness(script: string): ServiceWorkerHarness
 
   // Parameters shadow the globals of the same name, so the served script sees the
   // stubs without mutating anything in the test process.
-  const run = new Function("self", "caches", script);
-  run(selfStub, cachesStub);
+  const fetchFn = customFetch
+    ? (input: RequestInfo | URL, init?: RequestInit) =>
+      customFetch(input instanceof Request && !init ? input : new Request(input, init))
+    : globalThis.fetch.bind(globalThis);
+
+  const run = new Function("self", "caches", "fetch", script);
+  run(selfStub, cachesStub, fetchFn);
 
   return harness;
 }
