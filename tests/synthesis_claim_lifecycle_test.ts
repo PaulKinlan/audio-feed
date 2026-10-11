@@ -923,3 +923,160 @@ Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptT
     performance.now = originalNow;
   }
 });
+
+Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pending with attempts 0 (not failed)", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-budget-abort-tts",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let paidCalls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      paidCalls++;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-budget-tts",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(paidCalls, 1, "TTS call was initiated");
+  assertEquals(result.failed.length, 0, "must NOT fail episode on budget abort");
+  assertEquals(result.yielded.length, 1, "must report episode as yielded");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-tts");
+  assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
+  assertEquals(ep?.attempts, 0, "attempts must be reset to 0");
+  assert(ep?.phase?.startsWith("synthesized_"), "phase must indicate progress or yield");
+});
+
+Deno.test("audio-feed-q7zy: (b) genuine provider error still fails with its reason", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-genuine-provider-error",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: () => {
+      // Real 500 error from upstream provider
+      return Promise.resolve(new Response("Internal Server Error", { status: 500 }));
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-genuine-err",
+    maxAttempts: 1,
+  });
+
+  assertEquals(result.yielded.length, 0, "genuine error must not yield");
+  assertEquals(result.failed.length, 1, "genuine error must fail episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "500", "error must describe provider error");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-genuine-provider-error");
+  assertEquals(ep?.status, "failed", "episode status must be failed");
+  assertStringIncludes(ep?.error ?? "", "500");
+});
+
+Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to pending with attempts 0", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-budget-abort-script",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  let scriptCalls = 0;
+  const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
+    scriptCalls++;
+    return new Promise<{
+      turns: { speaker: "Alex" | "Sam"; text: string }[];
+      sources: [];
+      counterarguments: [];
+      researchSummary: "";
+    }>((_resolve, reject) => {
+      options?.signal?.addEventListener(
+        "abort",
+        () => reject(options.signal?.reason ?? new Error("aborted")),
+        { once: true },
+      );
+    });
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "dummy" });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: slowScriptGenerator,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 1,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-budget-script",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 1,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(result.failed.length, 0, "script budget abort must NOT fail episode");
+  assertEquals(result.yielded.length, 1, "script budget abort must yield");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-script");
+  assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
+  assertEquals(ep?.attempts, 0, "attempts must be reset to 0");
+});

@@ -757,6 +757,22 @@ export function createGeminiSynthesizer(
           codeSummarizer: deps.codeSummarizer,
         }, ttsOptions);
       } catch (error) {
+        if (
+          budgetSignal?.aborted ||
+          error instanceof SynthesisYieldError ||
+          (error instanceof Error &&
+            (error.name === "AbortError" || error.name === "TimeoutError") &&
+            remainingTtsBudgetMs !== undefined)
+        ) {
+          if (error instanceof SynthesisYieldError) throw error;
+          throw new SynthesisYieldError(
+            newlySynthesizedCount,
+            turns?.length ?? MAX_TTS_SEGMENTS,
+            `Invocation budget deadline (${
+              Math.round(remainingTtsBudgetMs ?? 0)
+            }ms) reached during dialogue TTS`,
+          );
+        }
         if (leaseSignal?.aborted) {
           throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
         }
@@ -794,6 +810,22 @@ export function createGeminiSynthesizer(
         codeSummarizer: deps.codeSummarizer,
       }, ttsOptions);
     } catch (error) {
+      if (
+        budgetSignal?.aborted ||
+        error instanceof SynthesisYieldError ||
+        (error instanceof Error &&
+          (error.name === "AbortError" || error.name === "TimeoutError") &&
+          remainingTtsBudgetMs !== undefined)
+      ) {
+        if (error instanceof SynthesisYieldError) throw error;
+        throw new SynthesisYieldError(
+          newlySynthesizedCount,
+          MAX_TTS_SEGMENTS,
+          `Invocation budget deadline (${
+            Math.round(remainingTtsBudgetMs ?? 0)
+          }ms) reached during narration TTS`,
+        );
+      }
       if (leaseSignal?.aborted) {
         throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
       }
@@ -1335,21 +1367,30 @@ export async function runSynthesisBatch(
         break;
       } catch (error) {
         lastError = error;
-        if (error instanceof SynthesisYieldError) {
-          // audio-feed-vqu4: clean yield to respect invocation budget
+        if (
+          error instanceof SynthesisYieldError ||
+          (error instanceof Error &&
+            (error.name === "AbortError" || error.name === "TimeoutError") &&
+            maxInvocationDurationMs)
+        ) {
+          const yieldErr = error instanceof SynthesisYieldError
+            ? error
+            : new SynthesisYieldError(0, 0, "Invocation budget reached");
+          lastError = yieldErr;
+          // audio-feed-vqu4, audio-feed-q7zy: clean yield to respect invocation budget
           const yielded = await metadata.yieldEpisodeClaim(
             currentEpisode.userId,
             currentEpisode.id,
             opts.owner,
             {
-              phase: `synthesized_${error.completedTurns}_of_${error.totalTurns}`,
+              phase: `synthesized_${yieldErr.completedTurns}_of_${yieldErr.totalTurns}`,
             },
           );
           if (yielded) {
             result.yielded.push({
               episodeId: currentEpisode.id,
-              completedTurns: error.completedTurns,
-              totalTurns: error.totalTurns,
+              completedTurns: yieldErr.completedTurns,
+              totalTurns: yieldErr.totalTurns,
             });
           } else {
             result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
