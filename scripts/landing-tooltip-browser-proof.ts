@@ -167,12 +167,19 @@ try {
 
   // --- landing, fresh (no stored token): assets + form flow -----------------
   await navigate(`${BASE}/listen`);
-  const assetResponse = (suffix: string) =>
-    events.find(
+  // audio-feed-dc2y: compiled once per distinct suffix instead of once per captured CDP event
+  // (perf-review INFO). The pattern is static for a given suffix, so recompiling it inside the
+  // predicate was pure overhead on every event in the log.
+  const assetPatterns = new Map<string, RegExp>();
+  const assetResponse = (suffix: string) => {
+    const pattern = assetPatterns.get(suffix) ??
+      assetPatterns.set(suffix, new RegExp(`/assets/[0-9a-f]+\\.${suffix}$`)).get(suffix)!;
+    return events.find(
       (e) =>
         e.method === "Network.responseReceived" &&
-        new RegExp(`/assets/[0-9a-f]+\\.${suffix}$`).test(e.params.response?.url ?? ""),
+        pattern.test(e.params.response?.url ?? ""),
     )?.params.response;
+  };
   const cssRes = assetResponse("listen-landing\\.css");
   check(
     "listen-landing.css fetched content-addressed, immutable, text/css",

@@ -206,25 +206,31 @@ export function renderAdminPage(
 
   <section class="card" aria-labelledby="create-h">
     <h2 id="create-h">2. Create a subscriber</h2>
-    <form id="createForm" novalidate>
+    <!-- audio-feed-dc2y: WebMCP annotations, inert where WebMCP is absent. novalidate and the
+         existing JS validation are deliberately unchanged. -->
+    <form id="createForm" novalidate toolname="create_subscriber"
+          tooldescription="Create an Audio Feed subscriber with an email address, an optional display name and an optional initial RSS feed URL.">
       <div class="field">
         <label for="email">Email
           <span class="hint">Also the sign-in identity for the subscriber.</span>
         </label>
         <input id="email" name="email" type="email" required autocomplete="off"
-               aria-describedby="createFeedback" />
+               aria-describedby="createFeedback"
+               toolparamdescription="Email address of the new subscriber; also their sign-in identity" />
       </div>
       <div class="field">
         <label for="displayName">Display name
           <span class="hint">Shown as the podcast title, e.g. "Paul's Audio Feed".</span>
         </label>
-        <input id="displayName" name="displayName" type="text" class="field-auto" autocomplete="off" />
+        <input id="displayName" name="displayName" type="text" class="field-auto" autocomplete="off"
+               toolparamdescription="Display name for the subscriber, used as their podcast title" />
       </div>
       <div class="field">
         <label for="feedUrl">Initial RSS feed URL (optional)
           <span class="hint">Subscribes the new user immediately and queues recent posts.</span>
         </label>
-        <input id="feedUrl" name="feedUrl" type="url" placeholder="https://example.com/feed.xml" autocomplete="off" />
+        <input id="feedUrl" name="feedUrl" type="url" placeholder="https://example.com/feed.xml" autocomplete="off"
+               toolparamdescription="Optional RSS feed URL to subscribe the new subscriber to immediately" />
       </div>
       <div class="field">
         <label for="newFeedCodeHandling">Code handling

@@ -49,6 +49,10 @@ Deno.test("the admin page renders the console with accessible controls (audio-fe
   const html = renderAdminPage({ nonce: "test-nonce", publicBaseUrl: BASE, adminConfigured: true });
   // The core controls an admin actually needs, present in the document.
   assertStringIncludes(html, 'id="createForm"');
+  // The form is also an agent tool (audio-feed-dc2y); the annotations are inert without WebMCP but
+  // pinned here so they cannot be dropped in a refactor of the markup.
+  assertStringIncludes(html, 'toolname="create_subscriber"');
+  assertStringIncludes(html, 'toolparamdescription="Email address of the new subscriber');
   assertStringIncludes(html, 'id="usersBody"');
   // Token paste controls are removed in audio-feed-0jp; passkey sign-in is used
   assertEquals(html.includes('id="adminToken"'), false);

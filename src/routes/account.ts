@@ -257,13 +257,18 @@ ${
   const sendSection = prefill ? "" : `<section class="panel send" aria-labelledby="send-h">
     <h2 id="send-h">Send an article to audio</h2>
     <p class="sub">Paste a link. It's queued, narrated, and added to your feed.</p>
-    <form id="sendForm">
+    <!-- audio-feed-dc2y: WebMCP annotations. Inert in browsers without WebMCP support, and the
+         submit path below is untouched: an agent submits the same form a person does. -->
+    <form id="sendForm" toolname="send_article"
+          tooldescription="Queue a public article URL to be narrated and added to the signed-in user's private audio feed. The optional mode selects read-aloud or two-voice deep dive.">
       <div class="send-row">
         <div class="field"><label for="sendUrl">Article URL</label>
-          <input id="sendUrl" type="url" required placeholder="https://example.com/an-article" autocomplete="url" spellcheck="false"></div>
+          <input id="sendUrl" type="url" required placeholder="https://example.com/an-article" autocomplete="url" spellcheck="false"
+                 toolparamdescription="Public http(s) URL of the article to narrate"></div>
         <button class="btn" type="submit"${approved ? "" : " disabled"}>Send to Audio</button>
       </div>
-      <div class="choices" role="radiogroup" aria-label="How should it sound?">
+      <fieldset class="choices" aria-label="How should it sound?"
+                toolparamdescription="Narration style: read aloud in one voice, or a two-voice deep dive between an expert and an interviewer">
         <label><input type="radio" name="sendMode" value="direct" checked> Read aloud</label>
         <label><input type="radio" name="sendMode" value="deepdive"> Deep dive, two voices</label>
       </div>

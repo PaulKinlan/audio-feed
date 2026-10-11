@@ -45,6 +45,28 @@ async function get(
   return fetch(new Request(`${BASE}${path}`, { headers }));
 }
 
+Deno.test("GET /account annotates the send-article form as an agent tool (audio-feed-dc2y)", async () => {
+  const { fetch, stores } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", displayName: "Paul", status: "approved", feedToken: "token-user-1" }),
+  );
+  const res = await get(fetch, "/account", stores, "user-1");
+  assertEquals(res.status, 200);
+  const html = await res.text();
+
+  // The page's core action, declared as a tool: the form, the URL parameter, and the narration
+  // style. The guidance is explicit that a parameter description for a GROUP of controls attaches
+  // through the nearest parent fieldset, which is why the radio group is one (audio-feed-dc2y).
+  assertStringIncludes(html, 'toolname="send_article"');
+  assertStringIncludes(html, 'toolparamdescription="Public http(s) URL of the article to narrate"');
+  assertStringIncludes(html, '<fieldset class="choices"');
+  assertStringIncludes(html, 'toolparamdescription="Narration style');
+
+  // Unchanged behaviour that the annotations must not have disturbed.
+  assertStringIncludes(html, 'id="sendUrl"');
+  assertStringIncludes(html, 'name="sendMode"');
+});
+
 Deno.test("GET /account with no session redirects to /login (audio-feed-8fc)", async () => {
   const { fetch } = app();
   const res = await get(fetch, "/account");
