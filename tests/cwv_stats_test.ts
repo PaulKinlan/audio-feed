@@ -12,18 +12,20 @@
 import { assert, assertEquals } from "@std/assert";
 
 const source = await Deno.readTextFile("src/assets/cwv-stats.js");
-const { p98, largestSessionWindow, interactionLatencies, interactionP98 } = new Function(
-  `${source}\nreturn { p98, largestSessionWindow, interactionLatencies, interactionP98 };`,
-)() as {
-  p98: (values: number[]) => number;
-  interactionLatencies: (
-    entries: { interactionId: number; duration: number }[],
-  ) => number[];
-  interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
-  largestSessionWindow: (
-    entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
-  ) => { value: number; observed: boolean };
-};
+const { p98, largestSessionWindow, interactionLatencies, interactionP98, inpFromObserved } =
+  new Function(
+    `${source}\nreturn { p98, largestSessionWindow, interactionLatencies, interactionP98, inpFromObserved };`,
+  )() as {
+    inpFromObserved: (observed: number[], interactions: number) => number;
+    p98: (values: number[]) => number;
+    interactionLatencies: (
+      entries: { interactionId: number; duration: number }[],
+    ) => number[];
+    interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
+    largestSessionWindow: (
+      entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
+    ) => { value: number; observed: boolean };
+  };
 
 const shift = (startTime: number, value: number, hadRecentInput = false) => ({
   startTime,
@@ -130,4 +132,44 @@ Deno.test("INP groups entries by interactionId before taking the percentile (aud
   // rather than becoming a phantom interaction with id 0.
   assertEquals(interactionLatencies([event(0, 500), event(1, 30)]), [30]);
   assertEquals(interactionP98([event(0, 500)]), 0, "no interaction means nothing to report");
+});
+
+Deno.test("INP is not an upper bound when the observer suppressed the fast interactions (audio-feed-dzgj)", () => {
+  const THRESHOLD = 16; // the platform's clamp: entries below this are never reported
+  const event = (interactionId: number, duration: number) => ({ interactionId, duration });
+
+  // The reviewer's reproduction, WITH the threshold applied: 59 interactions at 8ms are suppressed by
+  // the observer, so only the single 1000ms interaction is reported. A percentile over reported
+  // entries answers 1000 for a page whose real p98 across 60 interactions is 8ms.
+  const all = [
+    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 8)),
+    event(60, 1000),
+  ];
+  const reported = all.filter((entry) => entry.duration >= THRESHOLD);
+  const observed = interactionLatencies(reported);
+  assertEquals(observed, [1000], "the observer reported only the slow interaction");
+  assertEquals(
+    interactionP98(all),
+    8,
+    "a percentile over ALL entries would be right but unavailable",
+  );
+
+  // With the interaction count known, the answer is correct rather than an upper bound: 60
+  // interactions, rank 59, and 59 of them were below the threshold, so the value at that rank was
+  // never reported — the page is fast.
+  const value = inpFromObserved(observed, 60);
+  assertEquals(value, 16);
+  assert(value < 1000, "one slow interaction cannot define the page's INP");
+
+  // When the slow interactions are numerous enough to reach the rank, the reported ones decide.
+  const manySlow = [
+    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 200)),
+    event(60, 1000),
+  ];
+  const observedSlow = interactionLatencies(manySlow.filter((e) => e.duration >= THRESHOLD));
+  assertEquals(observedSlow.length, 60);
+  assertEquals(inpFromObserved(observedSlow, 60), 200, "rank 59 of 60 is the 200ms interaction");
+
+  // And an undercounted interaction count degrades to the old upper bound rather than to nonsense.
+  assertEquals(inpFromObserved([1000], 1), 1000, "one interaction, one report, that is the value");
 });

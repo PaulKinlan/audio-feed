@@ -96,4 +96,38 @@ function interactionP98(entries) {
   return p98(interactionLatencies(entries));
 }
 
-globalThis.cwvStats = { p98, largestSessionWindow, interactionLatencies, interactionP98 };
+/**
+ * INP from the entries an observer actually REPORTED, plus the number of interactions there were.
+ *
+ * The observer only reports entries at or above its `durationThreshold`, and the platform clamps that
+ * at 16ms — so a page with fifty-nine 8ms interactions and one 1000ms one reports a SINGLE entry, and
+ * a percentile over reported entries answers 1000 for a page whose real p98 is 8ms. Lowering the
+ * threshold does not fix that; it only moves which interactions are invisible. What makes the
+ * threshold an optimisation is knowing how many interactions there were (audio-feed-dzgj).
+ *
+ * With N interactions and k reported (all >= threshold), u = N - k are below it. The nearest rank for
+ * p98 is r = ceil(0.98 * N): if r <= u the value at that rank was never reported, so it is below the
+ * threshold and the page is fast; otherwise the value at that rank is the (r - u)-th smallest
+ * REPORTED duration.
+ *
+ * If N is undercounted this degrades to a percentile over what was reported — an upper bound, which is
+ * the honest failure and the reason the caller has to count independently.
+ */
+function inpFromObserved(observed, interactions) {
+  if (interactions <= 0) return 0;
+  if (observed.length === 0) return 16;
+  const rank = Math.ceil(0.98 * interactions);
+  const unobserved = Math.max(0, interactions - observed.length);
+  if (rank <= unobserved) return 16;
+  const sorted = observed.slice().sort((a, b) => a - b);
+  const index = Math.max(0, Math.min(sorted.length - 1, rank - unobserved - 1));
+  return sorted[index];
+}
+
+globalThis.cwvStats = {
+  p98,
+  largestSessionWindow,
+  interactionLatencies,
+  interactionP98,
+  inpFromObserved,
+};

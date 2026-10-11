@@ -54,9 +54,10 @@
   // entries can belong to one interaction and only interactionP98 can turn them into the metric
   // (audio-feed-dzgj).
   //
-  // durationThreshold is 16ms, the lowest the platform allows, and it is an OPTIMISATION ONLY: a
-  // higher value (40, or the 104 default) silently drops short interactions, which biases the
-  // percentile upward — the reported value must not depend on how much work the observer chose to do.
+  // durationThreshold is 16ms, the lowest the platform allows. That does NOT make it an optimisation
+  // by itself: entries below it are never reported, so the page's short interactions are invisible and
+  // a percentile over reported entries alone is an upper bound. It is defeated by counting the
+  // interactions SEPARATELY (below) and handing that count to inpFromObserved.
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
@@ -75,11 +76,30 @@
     }
   };
 
+  // Interactions are counted from the input events that BEGIN one, independently of Event Timing,
+  // because that count is what the threshold hides. `click` is deliberately NOT counted: it follows
+  // the pointerdown that began the same interaction, so counting it would count most mouse
+  // interactions twice. A keyboard activation fires keydown, which is counted.
+  let interactionStarts = 0;
+  const countStart = () => {
+    interactionStarts++;
+  };
+  addEventListener("pointerdown", countStart, { capture: true, passive: true });
+  addEventListener("keydown", countStart, { capture: true, passive: true });
+
   const flush = () => {
     if (sent) return;
     sent = true;
     if (lcp > 0) send("lcp", Math.round(lcp));
-    if (interactions.length > 0) send("inp", Math.round(interactionP98(interactions)));
+    // Both halves are needed: the entries the observer reported, and how many interactions there
+    // actually were, so the ones it could not report still count towards the percentile.
+    const observed = interactionLatencies(interactions);
+    if (interactionStarts > 0 || observed.length > 0) {
+      send(
+        "inp",
+        Math.round(inpFromObserved(observed, Math.max(interactionStarts, observed.length))),
+      );
+    }
     // Sent whenever the page shifted at all, including a score of exactly zero (audio-feed-d55l):
     // zero is a real, good measurement. Three decimals, because CLS is a small ratio and rounding to
     // an integer would report every score as zero.
