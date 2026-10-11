@@ -201,3 +201,25 @@ export function normaliseMethod(raw: string): string {
 export function isHighVolumeRoute(pattern: string): boolean {
   return HIGH_VOLUME_ROUTES.has(pattern);
 }
+
+/**
+ * The observability API's own endpoints, which must not be recorded as events (audio-feed-s2pi).
+ *
+ * AN OBSERVER MUST NOT FEED ITSELF. A poller is a client of this API, so recording each successful
+ * poll puts an event into the very store the poller is asking about: `summary` could never report
+ * "nothing changed", and the feed would fill with evidence of being read. The API would be correct
+ * and useless, and the failure is invisible from a unit test that drives `createApp` — which does
+ * not log at all — so it is only reachable by running the real server and polling it.
+ *
+ * Successes only: a failed poll (401, 410) is still recorded, because a rejected caller is exactly
+ * the kind of thing an operator wants to see, and it does not create the endless self-reference a
+ * 200 would.
+ */
+const OBSERVABILITY_ROUTES = new Set([
+  "/api/observability/errors",
+  "/api/observability/summary",
+]);
+
+export function isObservabilityRoute(pattern: string): boolean {
+  return OBSERVABILITY_ROUTES.has(pattern);
+}

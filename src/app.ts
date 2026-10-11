@@ -70,6 +70,9 @@ export interface AppHandlers {
   sourceFeed?: Handler<AppContext>;
   /** audio-feed-by7 — Send-to-Audio URL ingest. */
   ingest?: Handler<AppContext>;
+  /** audio-feed-s2pi / obs-1 — the authenticated errors feed and its summary. */
+  observabilityErrors?: Handler<AppContext>;
+  observabilitySummary?: Handler<AppContext>;
   /** audio-feed-7wn — multi-user admin approval. */
   approveUser?: Handler<AppContext>;
   /** audio-feed-z2s — the admin console's subscriber list, creation and suspension. */
@@ -229,6 +232,16 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     handlers.createSource ?? (() => notImplemented("Source subscription")),
   );
   router.get("/api/episodes", handlers.listEpisodes ?? (() => notImplemented("Episode listing")));
+  // audio-feed-s2pi / obs-1: the observability API. Behind a shared key, never public, and reading
+  // the obs-2 store directly rather than a second copy of the events.
+  router.get(
+    "/api/observability/errors",
+    handlers.observabilityErrors ?? (() => notImplemented("Observability errors")),
+  );
+  router.get(
+    "/api/observability/summary",
+    handlers.observabilitySummary ?? (() => notImplemented("Observability summary")),
+  );
   router.post(
     "/api/admin/users/:id/approve",
     handlers.approveUser ?? (() => notImplemented("Admin approval")),

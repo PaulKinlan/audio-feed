@@ -711,6 +711,21 @@ export interface LogSummary {
   total: number;
   bySeverity: Record<LogSeverity, number>;
   byType: { type: string; count: number }[];
+  /**
+   * The highest sequence the scan actually COUNTED, or `sinceSeq` when it counted nothing.
+   *
+   * A count is bounded, so a count on its own is not a cursor: a caller that advances past what was
+   * not counted skips events silently, which is the failure this store exists to make impossible.
+   * Reporting the boundary is what lets a reader move forward safely (audio-feed-8d6r).
+   */
+  countedThroughSeq: number;
+  /**
+   * Whether records exist AFTER what was counted, so the count is partial.
+   *
+   * True means "ask again from `countedThroughSeq`"; the summary is still correct about the window it
+   * covered, and this is how the caller knows the window it covered was not the whole story.
+   */
+  truncated: boolean;
 }
 
 export interface LogRepository {

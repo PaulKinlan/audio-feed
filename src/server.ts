@@ -21,7 +21,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
-import { createLogger, isHighVolumeRoute, normaliseMethod } from "./log.ts";
+import { createLogger, isHighVolumeRoute, isObservabilityRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -175,7 +175,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       // A successful asset or enclosure fetch is deliberately not recorded — see
       // isHighVolumeAssetPath — because podcast clients hammer it and each line would cost a
       // write for nothing. Its failures still are.
-      const worthRecording = res.status >= 400 || !isHighVolumeRoute(route);
+      // Successes on the observability API are excluded too: recording them would make the store
+      // grow every time it is read, so "nothing changed" could never be true (audio-feed-s2pi).
+      const worthRecording = res.status >= 400 ||
+        (!isHighVolumeRoute(route) && !isObservabilityRoute(route));
       if (worthRecording) {
         // AUDIT OF EVERY REQUEST-DERIVED FIELD IN THIS RECORD, since a path and then a method each
         // leaked a client-chosen string (audio-feed-pwu4, audio-feed-ao4s). The rule is that no
