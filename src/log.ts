@@ -153,7 +153,13 @@ export function nullLogger(process: LogProcess = "cli"): Logger {
  * losing its diagnostics: the failure mode of this list is noise, never silence.
  */
 const HIGH_VOLUME_ROUTES = new Set([
-  "/audio/:key+",
+  // A success here is not worth a record for one of two reasons. Volume: podcast clients hammer the
+  // enclosure and nothing is learned from each 200. Self-reference: the CWV beacon is sent by the
+  // page being measured, so recording it would put an event in the store per report — and its
+  // content is an attacker-controlled payload that must not go near the request log at all
+  // (audio-feed-i7vi). Its failures are recorded like any other, so a flood of rejected beacons is
+  // still visible.
+  "/api/cwv",
   "/assets/:name",
   "/assets/voices/:voice",
   "/icon.svg",

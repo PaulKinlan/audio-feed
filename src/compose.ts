@@ -29,6 +29,7 @@
  */
 
 import { createAccountHandlers } from "./routes/account_api.ts";
+import { createCwvHandler } from "./routes/cwv.ts";
 import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { handleCspReports } from "./routes/reports.ts";
 import { discoverFeeds } from "./ingest/url.ts";
@@ -108,6 +109,7 @@ export {
 /** Build every lane seam for a real server. Called by src/server.ts. */
 export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHandlers {
   return {
+    cwvBeacon: createCwvHandler(ctx),
     masterFeed: createMasterFeedHandler(ctx),
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),

@@ -70,6 +70,8 @@ export interface AppHandlers {
   sourceFeed?: Handler<AppContext>;
   /** audio-feed-by7 — Send-to-Audio URL ingest. */
   ingest?: Handler<AppContext>;
+  /** audio-feed-i7vi / obs-4 — the real-user Core Web Vitals beacon. */
+  cwvBeacon?: Handler<AppContext>;
   /** audio-feed-7wn — multi-user admin approval. */
   approveUser?: Handler<AppContext>;
   /** audio-feed-z2s — the admin console's subscriber list, creation and suspension. */
@@ -221,6 +223,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
 
   // -- api ------------------------------------------------------------------
   router.post("/api/ingest", handlers.ingest ?? (() => notImplemented("URL ingest")));
+  // audio-feed-i7vi / obs-4: browser-reported metrics. Public by necessity (a browser sends it), so
+  // it is bounded and rate-limited, and its payload becomes a TYPED record rather than a request
+  // field — see src/observability/cwv.ts.
+  router.post("/api/cwv", handlers.cwvBeacon ?? (() => notImplemented("CWV beacon")));
   // Feed subscriptions (audio-feed-2e5). User-scoped: the caller's feed token is
   // the identity, exactly as on /api/ingest.
   router.get("/api/sources", handlers.listSources ?? (() => notImplemented("Source list")));
