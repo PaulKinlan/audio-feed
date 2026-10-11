@@ -1706,8 +1706,15 @@ export async function runSynthesisBatch(
             throw signal.reason;
           }
 
-          // Abort-aware put with settlement cleanup token (audio-feed-fsbk):
-          const putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
+          // Abort-aware put with settlement cleanup token (audio-feed-fsbk), and
+          // genuinely abortable since audio-feed-aqms: the wrapper's signal is
+          // threaded into blobs.put, so the invocation-budget deadline closes the
+          // socket (S3 adapter) / rejects (memory adapter) instead of leaving the
+          // isolate awaiting an uninterruptible upload past its own bound.
+          const putPromise = blobs.put(stagingKey, bytes, {
+            contentType: "audio/wav",
+            signal,
+          });
           putPromise
             .finally(async () => {
               try {

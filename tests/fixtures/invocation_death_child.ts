@@ -30,22 +30,36 @@ import { makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 class HangingPutBlobStore implements BlobStore {
   started = 0;
   settled = 0;
+  aborted = 0;
   /** Monotonic ms of each put start and settlement, for the budget assertions. */
   putStartedAt: number[] = [];
   putSettledAt: number[] = [];
-  put(): Promise<BlobInfo> {
+  put(_key: string, _body: Uint8Array | ReadableStream<Uint8Array>, opts?: {
+    contentType?: string;
+    signal?: AbortSignal;
+  }): Promise<BlobInfo> {
     this.started++;
     this.putStartedAt.push(performance.now());
-    return new Promise<BlobInfo>(() => {
-      // Never settles by construction: an upload that outlasts everything.
-    }).then(() => {
-      this.settled++;
-      this.putSettledAt.push(performance.now());
-      return null as unknown as BlobInfo;
+    return new Promise<BlobInfo>((_, reject) => {
+      // Never settles on its own: an upload that outlasts everything. Since
+      // audio-feed-aqms the worker threads the budget signal into the put, so
+      // an ABORT is observable here - that is the by-construction bound.
+      opts?.signal?.addEventListener(
+        "abort",
+        () => {
+          this.aborted++;
+          reject(opts.signal?.reason ?? new Error("put aborted"));
+        },
+        { once: true },
+      );
     });
   }
-  putIfAbsent(): Promise<BlobInfo | null> {
-    return new Promise<BlobInfo | null>(() => {});
+  putIfAbsent(
+    _key: string,
+    _body: Uint8Array | ReadableStream<Uint8Array>,
+    opts?: { contentType?: string; signal?: AbortSignal },
+  ): Promise<BlobInfo | null> {
+    return this.put(_key, _body, opts) as Promise<BlobInfo | null>;
   }
   get(_key: string): Promise<BlobObject | null> {
     return Promise.resolve(null);
@@ -164,6 +178,7 @@ if (mode === "survive") {
       failed: result.failed.map((f) => f.error),
       putStarted: hangingBlobs.started,
       putSettled: hangingBlobs.settled,
+      putAborted: hangingBlobs.aborted,
       putStartedAt: hangingBlobs.putStartedAt[0] ?? null,
       awaitedMs: Math.round(yieldedAt - startedAt),
       episode: episode && {

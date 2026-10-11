@@ -64,11 +64,12 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   const episodeId = "ep-aqms-resume";
   const { ctx, stores } = await setupEnv(episodeId);
 
-  // 20 KB at the assumed 10 bytes/ms = 2000ms estimate (floor 100ms does not dominate).
-  // Budget 2500ms: a fresh invocation fits it (2500 - 100 flush > 2010), an invocation
-  // that already spent 600ms on synthesis does not (1800 < 2010) and must refuse to
-  // START the put and yield instead of dying inside it.
-  const audio = fakeAudio(20_000);
+  // 15 MB at the assumed 10_000 B/ms = 1500ms estimate (floor 100ms does not
+  // dominate). Budget 2500ms: a fresh invocation fits it (2500 - 100 flush >
+  // 1510), an invocation that already spent 1200ms on synthesis does not
+  // (1200 < 1510) and must refuse to START the put and yield instead of dying
+  // inside it.
+  const audio = fakeAudio(15_000_000);
   let putCalls = 0;
   const oldPut = stores.blobs.put.bind(stores.blobs);
   stores.blobs.put = (...args) => {
@@ -79,7 +80,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   const synth = () => {
     synthCalls++;
     if (synthCalls === 1) {
-      return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 600));
+      return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 1_200));
     }
     return Promise.resolve(audio);
   };
@@ -117,8 +118,9 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
   const episodeId = "ep-aqms-neverfits";
   const { ctx, stores } = await setupEnv(episodeId);
 
-  // 2 MB at 10 bytes/ms = 200s estimate, far over the 3s budget.
-  const audio = fakeAudio(2_000_000);
+  // 20 MB at 10_000 B/ms = 2000ms byte-scaled estimate, over the 1000ms budget
+  // even before the flush margin: no invocation at this budget can ever upload it.
+  const audio = fakeAudio(20_000_000);
   let putCalls = 0;
   const oldPut = stores.blobs.put.bind(stores.blobs);
   stores.blobs.put = (...args) => {
@@ -129,7 +131,7 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
 
   const r1 = await runSynthesisBatch(ctx, synth, {
     owner: "aqms-neverfits-1",
-    maxInvocationDurationMs: 3_000,
+    maxInvocationDurationMs: 1_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
@@ -143,7 +145,7 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
     reason.includes("cannot fit the invocation budget"),
     `reason must name the cause: ${reason}`,
   );
-  assert(reason.includes("2"), `reason must name the payload size: ${reason}`);
+  assert(reason.includes("bytes at the assumed"), `reason must name the payload: ${reason}`);
   assert(reason.includes("MAX_INVOCATION_DURATION_MS"), `reason must name the knob: ${reason}`);
 
   const ep = await stores.metadata.getEpisode("user-1", episodeId);

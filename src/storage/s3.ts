@@ -59,7 +59,7 @@ export class S3BlobStore implements BlobStore {
   async put(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo> {
     const contentType = opts?.contentType ?? "application/octet-stream";
     const headers: Record<string, string> = { "content-type": contentType };
@@ -69,10 +69,16 @@ export class S3BlobStore implements BlobStore {
     const bytes = toBodyBytes(body instanceof Uint8Array ? body : await collectStream(body));
     headers["content-length"] = String(bytes.byteLength);
 
+    // audio-feed-aqms: the signal is threaded to the underlying fetch (aws4fetch
+    // carries RequestInit.signal onto the signed Request), which makes the put
+    // GENUINELY ABORTABLE: the invocation-budget deadline closes the socket and
+    // the promise rejects with the abort reason instead of the isolate sitting in
+    // an await it cannot exit. A bound by construction, not by estimate.
     const res = await this.#client.fetch(this.#objectUrl(key), {
       method: "PUT",
       body: bytes,
       headers,
+      signal: opts?.signal,
     });
     if (!res.ok) {
       throw new Error(`S3 put failed (${res.status}): ${await safeText(res)}`);
@@ -89,7 +95,7 @@ export class S3BlobStore implements BlobStore {
   async putIfAbsent(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo | null> {
     const contentType = opts?.contentType ?? "application/octet-stream";
     const headers: Record<string, string> = {
@@ -104,6 +110,7 @@ export class S3BlobStore implements BlobStore {
       method: "PUT",
       body: bytes,
       headers,
+      signal: opts?.signal,
     });
     if (res.status === 412 || res.status === 409) {
       await res.body?.cancel();

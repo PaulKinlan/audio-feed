@@ -935,7 +935,7 @@ export interface BlobStore {
   put(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo>;
   /**
    * Atomic conditional create.
@@ -945,7 +945,7 @@ export interface BlobStore {
   putIfAbsent(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo | null>;
   /**
    * Range requests are not optional: podcast clients (Apple Podcasts, Pocket

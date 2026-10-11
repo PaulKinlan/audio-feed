@@ -58,10 +58,15 @@ export class MemoryBlobStore implements BlobStore {
   async put(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo> {
     const bytes = body instanceof Uint8Array ? body : await collect(body);
     const contentType = opts?.contentType ?? "application/octet-stream";
+    // audio-feed-aqms: honour the abort signal so the in-memory adapter mirrors
+    // the S3 adapter's genuinely-abortable put for tests.
+    if (opts?.signal?.aborted) {
+      throw opts.signal.reason ?? new Error("MemoryBlobStore.put aborted");
+    }
     this.#objects.set(key, { bytes, contentType });
     return { key, size: bytes.byteLength, contentType };
   }
@@ -74,13 +79,16 @@ export class MemoryBlobStore implements BlobStore {
   async putIfAbsent(
     key: string,
     body: Uint8Array | ReadableStream<Uint8Array>,
-    opts?: { contentType?: string },
+    opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo | null> {
     if (this.#objects.has(key)) {
       return null;
     }
     const bytes = body instanceof Uint8Array ? body : await collect(body);
     const contentType = opts?.contentType ?? "application/octet-stream";
+    if (opts?.signal?.aborted) {
+      throw opts.signal.reason ?? new Error("MemoryBlobStore.putIfAbsent aborted");
+    }
     if (this.#objects.has(key)) {
       return null;
     }

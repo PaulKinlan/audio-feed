@@ -112,23 +112,30 @@ export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
 /** Worst-case estimated duration for terminal audio blob upload in ms (audio-feed-dv4p). */
 export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
 /**
- * Assumed upload throughput in bytes per ms (audio-feed-aqms): ~10 MB/s.
+ * Assumed upload throughput in bytes per ms (audio-feed-aqms): 10_000 = 10 MB/s.
  *
- * The floor estimate above says "a small upload takes ~5s"; it says nothing about an
- * 80 MB episode WAV. A preflight bound enforced by an estimate that ignores payload
- * size is the siv1 class again - by estimate rather than by construction - because it
- * STARTS a put that cannot finish inside the remaining invocation budget, and a put
- * that outlives the isolate dies without a terminal write (the phase is checkpointed
- * BEFORE the put starts, so nothing downstream can rescue it). Scaling the estimate
- * by bytes makes the preflight honest for large payloads: it refuses to start the
- * upload and yields the claim resumably instead of dying mid-flight.
+ * THE ARITHMETIC THIS CONSTANT HAS TO SURVIVE (measured from the repo, 2026-10-13):
+ * Gemini TTS emits 24 kHz 16-bit mono PCM = 48_000 B/s of audio. Input is capped
+ * at MAX_TTS_INPUT_BYTES (6 KB) x MAX_TTS_SEGMENTS (12) = 72 KB of text ~= 80
+ * minutes of narration at typical speaking rates, so the WAV ceiling is
+ * 80 min x 48 KB/s ~= 230 MB; a typical 2_000-4_000 word article narrates to
+ * 13-27 min = 37-77 MB. To fit the default upload window (45 s budget - 5 s
+ * margin = 40 s) those payloads need 1-2 MB/s sustained to R2 from a Deploy
+ * isolate; the 230 MB absolute cap needs ~6 MB/s. R2-class object stores
+ * sustain an order of magnitude more than that, so 10 MB/s is the planning
+ * floor, not the ceiling.
  *
- * The number is a CONSERVATIVE planning assumption, not a measurement: R2 from a Deno
- * Deploy isolate typically does several times better, so the estimate errs toward
- * deferring (a later tick with a fresh budget) rather than toward starting a doomed
- * put. When it is wrong the failure mode is a 2-minute retry, not a lost episode.
+ * NOT MEASURED ON PRODUCTION from this VM (no deploy token): if reality is
+ * slower than assumed, the preflight defers more often than it should - and
+ * since audio-feed-aqms the put is GENUINELY ABORTABLE (the budget signal is
+ * threaded to the underlying fetch), a too-optimistic estimate degrades to an
+ * interrupt-and-retry at the deadline, not an uninterruptible await running
+ * past the isolate's lifetime. The estimate is advisory; the deadline is the
+ * bound. A first version of this constant was 10 (bytes/ms = 10 KB/s) - a
+ * units error of 1000x that would have refused every real episode; caught in
+ * review before landing.
  */
-export const ASSUMED_UPLOAD_BYTES_PER_MS = 10;
+export const ASSUMED_UPLOAD_BYTES_PER_MS = 10_000;
 
 /**
  * Honest worst-case duration for uploading `byteLength` bytes (audio-feed-aqms).

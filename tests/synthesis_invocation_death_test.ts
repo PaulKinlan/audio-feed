@@ -102,6 +102,7 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
       failed: string[];
       putStarted: number;
       putSettled: number;
+      putAborted: number;
       awaitedMs: number;
       episode?: { status: string; phase?: string; attempts?: number };
     };
@@ -110,7 +111,8 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
     // wrapper cannot yield before maxInvocationDurationMs (4000) minus flushMargin
     // (500) = 3500ms after batch start, and the put had already started by then.
     assertEquals(r.putStarted, 1, "the put must have been started");
-    assertEquals(r.putSettled, 0, "the put must still be pending: it outlasted the budget");
+    assertEquals(r.putSettled, 0, "the put must never complete: it outlasts the budget");
+    assertEquals(r.putAborted, 1, "the budget deadline must ABORT the put by construction");
     assertEquals(r.yielded.length, 1, "surviving invocation converts it to a clean yield");
     assertEquals(r.failed.length, 0);
     assert(
