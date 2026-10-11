@@ -131,7 +131,7 @@ export interface InvocationBudgetSpec {
  * (c) passes an AbortSignal tagged with InvocationBudgetAbortError for automatic provenance.
  * (d) returns a typed outcome (completed | budget-yield | error) so the caller cannot forget to handle it.
  */
-export async function withInvocationBudget<T>(options: {
+export interface BudgetedInvocationOptions<T> {
   name: string;
   budget?: InvocationBudgetSpec;
   flushMarginMs?: number;
@@ -139,7 +139,26 @@ export async function withInvocationBudget<T>(options: {
   completedTurns?: number;
   totalTurns?: number;
   fn: (signal?: AbortSignal) => Promise<T>;
-}): Promise<BudgetedOutcome<T>> {
+  /**
+   * Optional cleanup handler for uncancellable operations (e.g. background blob put).
+   * Called immediately on budget abort/refusal, and ALSO chained onto the in-flight
+   * promise so that when the uncancellable operation eventually settles in the background,
+   * cleanup executes again idempotently, eliminating races where delayed writes recreate blobs.
+   */
+  cleanupOnAbort?: () => Promise<void> | void;
+}
+
+/**
+ * Universal wrapper for EVERY awaitable synthesis stage (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk):
+ * (a) computes the deadline from the remaining budget minus flush margin.
+ * (b) refuses to START if worst case cannot fit (preflight check).
+ * (c) passes an AbortSignal tagged with InvocationBudgetAbortError for automatic provenance.
+ * (d) returns a typed outcome (completed | budget-yield | error) so the caller cannot forget to handle it.
+ * (e) supports idempotent settlement cleanup for uncancellable background operations.
+ */
+export async function withInvocationBudget<T>(
+  options: BudgetedInvocationOptions<T>,
+): Promise<BudgetedOutcome<T>> {
   const { budget } = options;
   if (budget?.maxDurationMs !== undefined && budget?.maxDurationMs > 0) {
     const startTime = budget.startTimeMonotonicMs ?? performance.now();
@@ -150,6 +169,13 @@ export async function withInvocationBudget<T>(options: {
 
     // (b) Preflight check: refuse to start if worst-case estimate cannot fit
     if (available < options.worstCaseEstimateMs) {
+      if (options.cleanupOnAbort) {
+        try {
+          await options.cleanupOnAbort();
+        } catch {
+          // best-effort immediate cleanup
+        }
+      }
       const error = new InvocationBudgetAbortError(
         options.completedTurns ?? 0,
         options.totalTurns ?? 0,
@@ -178,6 +204,21 @@ export async function withInvocationBudget<T>(options: {
 
     try {
       const stagePromise = options.fn(controller.signal);
+      if (options.cleanupOnAbort) {
+        // (e) Settlement cleanup: hook into uncancellable promise so delayed background
+        // operations trigger cleanup upon resolution, preventing recreated/orphaned blobs.
+        stagePromise
+          .finally(async () => {
+            if (controller.signal.aborted) {
+              try {
+                await options.cleanupOnAbort?.();
+              } catch {
+                // idempotent settlement cleanup
+              }
+            }
+          })
+          .catch(() => {}); // stagePromise is already awaited via Promise.race; avoid unhandled rejection
+      }
       const abortPromise = new Promise<never>((_, reject) => {
         controller.signal.addEventListener("abort", () => {
           reject(controller.signal.reason);
@@ -188,6 +229,13 @@ export async function withInvocationBudget<T>(options: {
       return { kind: "completed", value };
     } catch (error) {
       if (controller.signal.aborted) {
+        if (options.cleanupOnAbort) {
+          try {
+            await options.cleanupOnAbort();
+          } catch {
+            // best-effort immediate cleanup
+          }
+        }
         const reason = controller.signal.reason;
         const yieldErr = isInvocationBudgetAbort(reason)
           ? (reason as InvocationBudgetAbortError)
@@ -196,6 +244,13 @@ export async function withInvocationBudget<T>(options: {
         return { kind: "budget-yield", error: yieldErr };
       }
       if (isInvocationBudgetAbort(error)) {
+        if (options.cleanupOnAbort) {
+          try {
+            await options.cleanupOnAbort();
+          } catch {
+            // best-effort immediate cleanup
+          }
+        }
         // (d) Typed outcome: budget-yield
         return { kind: "budget-yield", error: error as InvocationBudgetAbortError };
       }

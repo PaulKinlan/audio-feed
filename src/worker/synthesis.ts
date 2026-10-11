@@ -1491,7 +1491,6 @@ export async function runSynthesisBatch(
     const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
 
     // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
-    let putPromise: Promise<{ size?: number }> | null = null;
     const terminalOutcome = await withInvocationBudget({
       name: "terminal_persistence",
       budget: {
@@ -1502,6 +1501,13 @@ export async function runSynthesisBatch(
       worstCaseEstimateMs: uploadEstimate,
       completedTurns: 1,
       totalTurns: 1,
+      cleanupOnAbort: async () => {
+        // Idempotent settlement cleanup (audio-feed-fsbk):
+        // 1. Immediately (and on background put settlement) delete stagingKey
+        await blobs.delete(stagingKey).catch(() => {});
+        // 2. Persist orphan record to KV so even if isolate terminates, scavenger sweeps it
+        await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+      },
       fn: async () => {
         await checkpointEpisodeClaim(
           metadata,
@@ -1512,8 +1518,7 @@ export async function runSynthesisBatch(
             phase: "uploading_audio",
           },
         );
-        putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
-        const stored = await putPromise;
+        const stored = await blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
         const byteLength = stored.size ?? bytes.length;
         const wrote = await metadata.completeEpisode({
           ...currentEpisode,
@@ -1537,17 +1542,6 @@ export async function runSynthesisBatch(
     });
 
     if (terminalOutcome.kind === "budget-yield") {
-      // audio-feed-fsbk: attach settlement hook to delayed putPromise so when it resolves,
-      // it is immediately deleted, preventing untracked staging blobs from lingering.
-      if (putPromise) {
-        (putPromise as Promise<{ size?: number }>).then(
-          () => blobs.delete(stagingKey).catch(() => {}),
-          () => {},
-        );
-      }
-      blobs.delete(stagingKey).catch(() => {});
-      await metadata.recordOrphanBlob(stagingKey).catch(() => {});
-
       await metadata.yieldEpisodeClaim(
         currentEpisode.userId,
         currentEpisode.id,
@@ -1566,13 +1560,7 @@ export async function runSynthesisBatch(
     }
 
     if (terminalOutcome.kind === "error") {
-      if (putPromise) {
-        (putPromise as Promise<{ size?: number }>).then(
-          () => blobs.delete(stagingKey).catch(() => {}),
-          () => {},
-        );
-      }
-      blobs.delete(stagingKey).catch(() => {});
+      await blobs.delete(stagingKey).catch(() => {});
       const error = String((terminalOutcome.error as Error)?.message ?? terminalOutcome.error);
       console.error(
         `[audio-feed] terminal persistence failed for episode "${currentEpisode.id}": ${error}`,
@@ -1600,34 +1588,77 @@ export async function runSynthesisBatch(
     if (wrote) {
       result.ready.push({ episodeId: currentEpisode.id, audioKey, byteLength });
       // The stitched audio is committed; the per-segment blobs have done their job.
-      try {
-        await segmentResume.sweep();
-      } catch (err) {
-        console.error(
-          `[audio-feed] segment sweep failed for episode ${currentEpisode.id}; orphans recorded where possible:`,
-          err,
-        );
-      }
-      await notifyOnDemand(currentEpisode, "ready");
-      // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp, audio-feed-akm).
-      // A failure here is logged as an operational alert so counter anomalies are visible.
-      try {
-        await metadata.recordSynthesis(currentEpisode.userId, byteLength, new Date(nowMs));
-      } catch (err) {
-        console.error(
-          `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
-          err,
-        );
-      }
-      // The swap is committed; the old blob is now unreferenced (audio-feed-8oz).
+      // Tail sweep, notification, statistics, and deletion path are all budgeted (audio-feed-mv1d):
+      await withInvocationBudget({
+        name: "segment_sweep",
+        budget: {
+          maxDurationMs: maxInvocationDurationMs,
+          startTimeMonotonicMs: invocationStartMonotonicMs,
+        },
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: 200,
+        fn: async () => {
+          try {
+            await segmentResume.sweep();
+          } catch (err) {
+            console.error(
+              `[audio-feed] segment sweep failed for episode ${currentEpisode.id}; orphans recorded where possible:`,
+              err,
+            );
+          }
+        },
+      });
+
+      await withInvocationBudget({
+        name: "notify_ready",
+        budget: {
+          maxDurationMs: maxInvocationDurationMs,
+          startTimeMonotonicMs: invocationStartMonotonicMs,
+        },
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: 200,
+        fn: () => notifyOnDemand(currentEpisode, "ready"),
+      });
+
+      await withInvocationBudget({
+        name: "record_synthesis",
+        budget: {
+          maxDurationMs: maxInvocationDurationMs,
+          startTimeMonotonicMs: invocationStartMonotonicMs,
+        },
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: 100,
+        fn: async () => {
+          try {
+            await metadata.recordSynthesis(currentEpisode.userId, byteLength, new Date(nowMs));
+          } catch (err) {
+            console.error(
+              `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
+              err,
+            );
+          }
+        },
+      });
+
       if (previousKey && previousKey !== audioKey) {
-        try {
-          await blobs.delete(previousKey);
-        } catch {
-          // Recorded, so a later batch retries it instead of orphaning it for good.
-          await metadata.recordOrphanBlob(previousKey).catch(() => {});
-        }
+        await withInvocationBudget({
+          name: "delete_previous_audio",
+          budget: {
+            maxDurationMs: maxInvocationDurationMs,
+            startTimeMonotonicMs: invocationStartMonotonicMs,
+          },
+          flushMarginMs: flushMargin,
+          worstCaseEstimateMs: 100,
+          fn: async () => {
+            try {
+              await blobs.delete(previousKey);
+            } catch {
+              await metadata.recordOrphanBlob(previousKey).catch(() => {});
+            }
+          },
+        });
       }
+
       // audio-feed-vqu4: stop batch if invocation time budget has expired
       if (
         maxInvocationDurationMs &&
@@ -1636,16 +1667,22 @@ export async function runSynthesisBatch(
         break;
       }
     } else {
-      // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk).
-      // It is this worker's OWN key — a first synthesis is revisioned too (audio-feed-xsu) — so
-      // removing it can never take the winner's audio with it.
-      try {
-        await blobs.delete(audioKey);
-      } catch {
-        // A failed cleanup must not vanish with the worker (audio-feed-owq): the key is
-        // recorded where later batches retry it, exactly like the previousKey swap above.
-        await metadata.recordOrphanBlob(audioKey).catch(() => {});
-      }
+      await withInvocationBudget({
+        name: "delete_superseded_audio",
+        budget: {
+          maxDurationMs: maxInvocationDurationMs,
+          startTimeMonotonicMs: invocationStartMonotonicMs,
+        },
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: 100,
+        fn: async () => {
+          try {
+            await blobs.delete(audioKey);
+          } catch {
+            await metadata.recordOrphanBlob(audioKey).catch(() => {});
+          }
+        },
+      });
       result.superseded.push(supersededEntry(claimed, opts.leaseMs));
     }
   }
