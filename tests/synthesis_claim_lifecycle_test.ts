@@ -1719,3 +1719,98 @@ Deno.test("audio-feed-uecw: pending accounting queue settles and drains atomical
     "drained item must be atomically popped from queue",
   );
 });
+
+Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak uncommitted blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  let stagingKey = "";
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    stagingKey = args[0];
+    await new Promise((resolve) => setTimeout(resolve, 135));
+    return oldPut(...args);
+  };
+
+  // Simulate concurrent heartbeat during cleanupOnAbort that updates versionstamp
+  const oldYield = stores.metadata.yieldEpisodeClaim.bind(stores.metadata);
+  stores.metadata.yieldEpisodeClaim = async (...args) => {
+    // A concurrent heartbeat happens right before yield
+    await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "review-heartbeat-race", {
+      phase: "uploading_audio",
+      now: new Date().toISOString(),
+    });
+    // The yield CAS fails due to versionstamp mismatch
+    return await oldYield(...args);
+  };
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-heartbeat-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(result.yielded.length, 1);
+  // Verify that despite yield CAS failure, cleanupOnAbort checked durable state:
+  // Since episode was NOT ready, it deleted the uncommitted blob and recorded orphan in KV (no leak!)
+  const orphanBlobs = await stores.metadata.listOrphanBlobs(10);
+  assert(
+    orphanBlobs.includes(stagingKey),
+    "orphan record must be written to KV even when yield CAS fails",
+  );
+});
+
+Deno.test("audio-feed-mkkb: idempotent accounting prevents double charge on replay", async () => {
+  const { ctx, stores } = await setupEnv();
+  // Run batch to generate an episode
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-idempotent-accounting",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1);
+  const today = new Date().toISOString().slice(0, 10);
+  const initialCount = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(initialCount, 1, "initial charge recorded");
+
+  // Re-run batch with identical episode data or manually inject the same accounting charge
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assert(ep?.audioKey);
+
+  // Directly queue the same accountingKey into pending_synthesis_accounting to simulate drain replay
+  await stores.metadata.atomicUpdate<
+    {
+      pending: Array<
+        { id: string; userId: string; byteLength: number; accountingKey: string; at: number }
+      >;
+    }
+  >(
+    "pending_synthesis_accounting",
+    (c) => ({
+      pending: [
+        ...(c?.pending ?? []),
+        {
+          id: crypto.randomUUID(),
+          userId: "user-1",
+          byteLength: ep.byteLength ?? 100,
+          accountingKey: `episode-1:${ep.audioKey}`,
+          at: Date.now(),
+        },
+      ],
+    }),
+  );
+
+  // Next batch drains the queue
+  await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-idempotent-accounting-drain",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  const countAfterReplay = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(countAfterReplay, 1, "idempotent accounting must not double count on replay");
+});
