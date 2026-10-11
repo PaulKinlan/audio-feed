@@ -800,3 +800,108 @@ Deno.test("audio-feed-n6uu: the admin console links to the page", async () => {
   assertEquals(consoleRes.status, 200);
   assertStringIncludes(body, 'href="/admin/observability"');
 });
+
+Deno.test("audio-feed-yrg4: an unreadable log store never renders a Retrying reason as blank", async () => {
+  // The finding (an m11b-class sweep over aqms's new Retrying table): the reason cell is sourced from the
+  // LOG store while the section only gates on the QUEUE read, so breaking only the log store rendered the
+  // cell silently blank - which reads as "the worker recorded no reason" when the truth is "I could not
+  // see the reasons". Same shape as audio-feed-ciuw's zero-vs-unreadable queue.
+  const { stores } = await setup();
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-r",
+      userId: "user-1",
+      sourceId: "stratechery",
+      content: "One paragraph of content.",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-r",
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-r",
+      status: "pending",
+      mode: "direct",
+      title: "An episode waiting out an upload retry",
+    }),
+  );
+  const claimed = await stores.metadata.claimEpisode("user-1", "episode-r", {
+    owner: "worker-r",
+    now: "2026-10-11T16:00:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claimed, "claim must succeed");
+  await stores.metadata.yieldEpisodeClaim("user-1", "episode-r", "worker-r", {
+    phase: "upload_retry",
+    now: "2026-10-11T16:00:04.000Z",
+  });
+
+  const broken = breakStore(stores, {
+    listLogs: () => Promise.reject(new Error("log store down")),
+  });
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200, "the page must render while the log store is broken");
+  // The row itself is DURABLE state, so it is still there: only the reason is unknown.
+  assertStringIncludes(body, "Retrying (yielded claims)");
+  assertStringIncludes(body, "upload_retry");
+  // THE ASSERTION IS THE CELL, NOT THE PAGE: the Queue card's countCell() renders the same phrase for the
+  // same failure, so a page-wide substring check passes even when the reason cell is still blank - measured
+  // by restoring the blank cell and watching the page-wide version stay green while this one goes red.
+  assertStringIncludes(
+    body,
+    "<td><strong>Unavailable — the log store could not be read</strong></td>",
+  );
+  assertEquals(
+    body.includes("no reason recorded"),
+    false,
+    "an unreadable log store must not render as 'no reason recorded'",
+  );
+});
+
+Deno.test("audio-feed-yrg4: a readable log store with no yield record says 'no reason recorded'", async () => {
+  // The third state: the log store answers and simply has no yield record for this episode. That is a real
+  // absence, and it is stated - the cell is never an empty box whose meaning has to be guessed.
+  const { stores } = await setup();
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-q",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "pending",
+      mode: "direct",
+      title: "An episode with no recorded yield reason",
+    }),
+  );
+  const claimed = await stores.metadata.claimEpisode("user-1", "episode-q", {
+    owner: "worker-q",
+    now: "2026-10-11T16:00:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claimed, "claim must succeed");
+  await stores.metadata.yieldEpisodeClaim("user-1", "episode-q", "worker-q", {
+    phase: "upload_retry",
+    now: "2026-10-11T16:00:04.000Z",
+  });
+  const ctx = { config, stores };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, "upload_retry");
+  assertStringIncludes(body, "no reason recorded");
+  assertEquals(body.includes("Unavailable — the log store could not be read"), false);
+});
