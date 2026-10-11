@@ -60,3 +60,38 @@ state what it still holds.
   never logged at all.
 - `tests/cron_test.ts` — that retention is its own daily job and registers even when synthesis is
   unconfigured, because pruning needs no provider credentials.
+
+## Review round 1: two findings, both fixed at the class level
+
+### audio-feed-pwu4 (P1) — a malformed path stored a raw capability
+
+`GET /feed/<token>/master.xml/<token>` reached the store and persisted the token. The cause was a
+policy, not a typo: `redactRoutePath` matched CANONICAL shapes, and its `/feed/<token>/...` branch
+copied every REMAINING segment through, so a token placed after `master.xml` was never examined. The
+unit test passed because it asserted the shapes I had thought of; the reviewer booted the real app
+and appended a segment to a real feed URL.
+
+The fix replaces shape-awareness with position and a fail-closed rule:
+
+1. Percent-escapes are decoded (repeatedly, bounded) BEFORE splitting, because the router decodes —
+   `%2F` is a segment separator in what is actually served even though it is not one in the text.
+2. A capability prefix (`/feed/`, `/listen/`, `/audio/`) has its first following segment replaced by
+   a marker WHATEVER it looks like: the capability is the position, not the shape. A short token
+   such as `/feed/abc/...` cannot survive by failing a "looks random" test.
+3. Every other segment survives only if it is a plain lowercase route word; anything else, including
+   a malformed escape, is redacted. An unknown route loses detail instead of risking a credential.
+
+Verification is the finding's own reproduction widened to every shape it names, driven through
+`openStores` + `bootstrap` — the real app, not a unit test: `capability-leak-verify.txt` shows all
+ten shapes safe, the original case now storing `/feed/:token/master.xml/:redacted`, and the whole
+serialised store containing no form of the token. The regression test asserts the property per case
+AND over the entire serialised store, which is the assertion that would have caught this.
+
+### audio-feed-a0gi (P2) — the ceiling counted UTF-16 units, not bytes
+
+`MAX_LOG_RECORD_BYTES` was compared against `JSON.stringify(record).length`, so a record of
+three-byte characters measured 57,741 bytes against a 32,768 ceiling and was accepted. The ceiling
+bounds what the store holds and what a reader has to parse, so it has to be measured in the units
+the store holds: `serialisedLogBytes()` now encodes with a shared `TextEncoder` and measures real
+bytes. The conformance case reproduces the arithmetic of the mismatch first (bytes over the ceiling
+while UTF-16 length is under it) and then asserts the refusal, on both adapters.

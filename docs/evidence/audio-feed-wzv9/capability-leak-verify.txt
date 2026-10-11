@@ -1,0 +1,19 @@
+[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — the advertised origin and WebAuthn RP ID are derived from each request's host. Set ALLOWED_HOSTS to pin them.
+[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
+[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
+Listening on http://0.0.0.0:36135/ (http://localhost:36135/)
+safe  404 route=/feed/:token/master.xml/:redacted  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=/feed/:token  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=/listen/:token  /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=/listen/:token/:redacted  /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/extra
+[audio-feed] audio 404: disallowed or unsafe key "[redacted]"
+safe  404 route=/audio/:key/:redacted/:redacted  /audio/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/foo/bar
+safe  404 route=/feed/:token/master.xml  /feed//kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd//master.xml
+safe  404 route=/feed/:token/master.xml  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml
+safe  404 route=/feed/:token/:redacted  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd%2Fmore
+safe  404 route=/:redacted/anything  /kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/anything
+safe  404 route=/feed/:token/master.xml  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml?token=kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+
+No stored record contains the capability, in any shape.

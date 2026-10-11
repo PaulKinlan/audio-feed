@@ -14,6 +14,8 @@ import {
   MAX_LOG_CONTEXT_LENGTH,
   MAX_LOG_MESSAGE_LENGTH,
   MAX_LOG_RECORD_BYTES,
+  sanitizeLogRecord,
+  serialisedLogBytes,
 } from "../../../src/storage/log_shape.ts";
 
 /** A minimal valid record; each case overrides what it is about. */
@@ -291,5 +293,59 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
       records.filter((r) => r.type === "synthesis.claim").length,
       3,
     );
+  });
+}
+
+/**
+ * The serialised ceiling, measured in real bytes (audio-feed-a0gi).
+ *
+ * In the shared registrar rather than a top-level test because the ceiling lives in the sanitiser
+ * BOTH adapters call, and because the harness is what supplies a store to assert a refusal against.
+ */
+export function registerLogCeilingCases(suite: MetadataHarness) {
+  const { test } = suite;
+
+  test("the ceiling is measured in real UTF-8 bytes, not UTF-16 code units", async (store) => {
+    // The finding: the ceiling compared `JSON.stringify(record).length`, which counts UTF-16 code
+    // units, so a record of three-byte characters was accepted while measuring 57741 bytes against
+    // a 32768 ceiling. The arithmetic of that mismatch is asserted directly, then the refusal.
+    const threeByte = "\u4e2d"; // 3 UTF-8 bytes, 1 UTF-16 unit — the ratio that hid the overflow
+    const oversized = rec({
+      message: threeByte.repeat(MAX_LOG_MESSAGE_LENGTH * 2),
+      stack: threeByte.repeat(MAX_LOG_MESSAGE_LENGTH * 8),
+      context: { blowup: threeByte.repeat(MAX_LOG_CONTEXT_LENGTH * 2) },
+    });
+
+    // Sanitised first, exactly as the store does, so this measures what would have been stored.
+    const sanitised = sanitizeLogRecord(oversized);
+    const utf16Length = JSON.stringify(sanitised).length;
+    const utf8Bytes = serialisedLogBytes(sanitised);
+    assert(
+      utf8Bytes > MAX_LOG_RECORD_BYTES,
+      `the payload must exceed the ceiling in bytes (got ${utf8Bytes})`,
+    );
+    assert(
+      utf16Length <= MAX_LOG_RECORD_BYTES,
+      `and must NOT exceed it in UTF-16 units — that mismatch is the bug (got ${utf16Length})`,
+    );
+
+    assertEquals(await store.appendLog(oversized), null);
+  });
+
+  test("a stored record is inside the ceiling in bytes, not just in code units", async (store) => {
+    const threeByte = "\u4e2d";
+    const stored = await store.appendLog(
+      rec({
+        message: threeByte.repeat(MAX_LOG_MESSAGE_LENGTH),
+        context: { note: threeByte.repeat(1000) },
+      }),
+    );
+    assert(stored, "a record inside the ceiling is stored");
+    assert(
+      serialisedLogBytes(stored) <= MAX_LOG_RECORD_BYTES,
+      `stored records must fit the ceiling in bytes: ${serialisedLogBytes(stored)}`,
+    );
+    // It really did keep the multi-byte content rather than mangling it.
+    assert(stored.message.includes("\u4e2d"), "multi-byte content survives storage");
   });
 }

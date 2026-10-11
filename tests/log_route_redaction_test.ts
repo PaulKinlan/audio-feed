@@ -17,7 +17,12 @@ Deno.test("a feed token in a path never reaches the log (audio-feed-wzv9)", () =
   assertEquals(redactRoutePath(`/feed/${token}/master.xml`), "/feed/:token/master.xml");
   assertEquals(redactRoutePath(`/feed/${token}`), "/feed/:token");
   // The enclosure key is a capability too: /audio/:key+ is what an authorized fetch presents.
-  assertEquals(redactRoutePath("/audio/user-1/episode-9/abc123.wav"), "/audio/:key");
+  // Everything after the capability position is redacted too, so the label keeps the route's depth
+  // without keeping any of its content.
+  assertEquals(
+    redactRoutePath("/audio/user-1/episode-9/abc123.wav"),
+    "/audio/:key/:redacted/:redacted",
+  );
 });
 
 Deno.test("a query string is never logged, whatever it holds (audio-feed-wzv9)", () => {
@@ -53,4 +58,72 @@ Deno.test("high-volume asset successes are identified so they can be left out (a
   assertEquals(isHighVolumeAssetPath("/account"), false);
   assertEquals(isHighVolumeAssetPath("/listen"), false);
   assertEquals(isHighVolumeAssetPath("/admin"), false);
+});
+
+Deno.test("every malformed shape of a capability path is redacted (audio-feed-pwu4)", () => {
+  // The finding: an exact-shape match let `GET /feed/<token>/master.xml/<token>` store the token,
+  // because the matched branch copied its remaining segments through. Each case below is a shape
+  // that broke the old version or was named in the finding as one that must not.
+  const token = "kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd";
+  const cases: [input: string, expected: string][] = [
+    [`/feed/${token}/master.xml/${token}`, "/feed/:token/master.xml/:redacted"],
+    [`/listen/${token}/extra`, "/listen/:token/:redacted"],
+    [`/audio/${token}/foo/bar`, "/audio/:key/:redacted/:redacted"],
+    [`/feed//${token}//master.xml`, "/feed/:token/master.xml"],
+    [`/feed/${token}/master.xml?dl=1&token=${token}`, "/feed/:token/master.xml"],
+    [`/${token}/anything`, "/:redacted/anything"],
+    // Percent-encoded: the router decodes, so a redaction that judged the raw text judged a
+    // different path than the one being served.
+    [`/feed/${encodeURIComponent(token)}/master.xml`, "/feed/:token/master.xml"],
+    [`/feed/a%2Fb/master.xml`, "/feed/:token/:redacted/master.xml"],
+    [`/listen/${token}%2Fextra`, "/listen/:token/:redacted"],
+    // A token short enough to survive a "looks random" test: the position decides, not the shape.
+    ["/feed/abc/master.xml", "/feed/:token/master.xml"],
+    ["/listen/abc", "/listen/:token"],
+  ];
+  for (const [input, expected] of cases) {
+    const actual = redactRoutePath(input);
+    assertEquals(actual, expected, `redacting ${input}`);
+    // The property that actually matters, asserted per case rather than assumed from the shape.
+    assertEquals(actual.includes(token), false, `${input} must not retain the token`);
+  }
+});
+
+Deno.test("NO capability reaches any stored record, in the whole serialised store (audio-feed-pwu4)", async () => {
+  // The reviewer's assertion, at the level the store is actually read at: not "the route field
+  // looks right" but "the bytes a reader would receive contain no capability anywhere". The record
+  // is built the way src/server.ts builds it, including the message, which is the second place the
+  // leaked token appeared.
+  const { MemoryMetadataStore } = await import("../src/storage/memory.ts");
+  const store = new MemoryMetadataStore();
+  const token = "kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd";
+  const paths = [
+    `/feed/${token}/master.xml/${token}`,
+    `/listen/${token}/extra?next=${token}`,
+    `/audio/${token}/x/y`,
+    `/feed/${token}%2Fmore`,
+    `/${token}`,
+  ];
+
+  for (const path of paths) {
+    const route = redactRoutePath(path);
+    const status = 404;
+    await store.appendLog({
+      time: new Date().toISOString(),
+      severity: "warn",
+      type: "http.request",
+      message: `GET ${route} -> ${status}`,
+      process: "app",
+      correlationId: "corr-1",
+      route,
+      context: { method: "GET", status },
+    });
+  }
+
+  const serialised = JSON.stringify(await store.listLogs());
+  assertEquals(serialised.includes(token), false, `no record may contain the capability`);
+  assertEquals(serialised.includes(encodeURIComponent(token)), false, "nor its encoded form");
+  // And the records are still useful: a reader can see which route was hit.
+  const records = await store.listLogs();
+  assertEquals(records[0]?.route, "/feed/:token/master.xml/:redacted");
 });
