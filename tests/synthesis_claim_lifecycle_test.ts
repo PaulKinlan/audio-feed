@@ -1730,16 +1730,9 @@ Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak unco
     return oldPut(...args);
   };
 
-  // Simulate concurrent heartbeat during cleanupOnAbort that updates versionstamp
-  const oldYield = stores.metadata.yieldEpisodeClaim.bind(stores.metadata);
-  stores.metadata.yieldEpisodeClaim = async (...args) => {
-    // A concurrent heartbeat happens right before yield
-    await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "review-heartbeat-race", {
-      phase: "uploading_audio",
-      now: new Date().toISOString(),
-    });
-    // The yield CAS fails due to versionstamp mismatch
-    return await oldYield(...args);
+  // Simulate CAS failure during cleanupOnAbort (audio-feed-22ui)
+  stores.metadata.yieldEpisodeClaim = (..._args) => {
+    return Promise.resolve(false);
   };
 
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
@@ -1813,4 +1806,34 @@ Deno.test("audio-feed-mkkb: idempotent accounting prevents double charge on repl
 
   const countAfterReplay = await stores.metadata.getDailySynthesisCount(today);
   assertEquals(countAfterReplay, 1, "idempotent accounting must not double count on replay");
+});
+
+Deno.test("audio-feed-g5bi: error in terminal_persistence after completeEpisode does not delete committed blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  // Simulate completeEpisode succeeding, but subsequent logic inside fn throwing
+  stores.metadata.recordSynthesis = () => {
+    return Promise.reject(new Error("unhandled terminal failure after commit"));
+  };
+  const origAtomic = stores.metadata.atomicUpdate.bind(stores.metadata);
+  stores.metadata.atomicUpdate = (...args) => {
+    if (args[0] === "pending_synthesis_accounting") {
+      return Promise.reject(new Error("queue failure simulation"));
+    }
+    return origAtomic(...args);
+  };
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-g5bi-error",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(result.ready.length, 1, "episode must be reported ready");
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(ep?.status, "ready");
+  assert(ep?.audioKey);
+  const blob = await stores.blobs.get(ep.audioKey);
+  assert(blob !== null, "committed blob must never be deleted by error handler");
 });

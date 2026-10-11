@@ -69,7 +69,7 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
-import { collect, type MetadataStore } from "../storage/mod.ts";
+import { type BlobStore, collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
   DEFAULT_DAILY_EPISODE_BUDGET,
@@ -1012,10 +1012,17 @@ interface PendingAccountingQueue {
 }
 
 /**
- * Idempotent synthesis accounting (audio-feed-uecw):
- * Keyed on a stable identity (episodeId + stagingKey) in durable store.
- * Repeated calls with the same key are an immediate no-op, eliminating double charges.
+ * Idempotent synthesis accounting (audio-feed-uecw, audio-feed-ori8):
+ * Keyed on a stable per-charge key (settled_charge:episodeId:stagingKey) with a TTL in durable store.
+ * Missing key = unsettled; existing key = settled. Eliminates unbounded single-value growth.
  */
+const SETTLED_CHARGE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+interface SettledChargeRecord {
+  state: "settled" | "recording" | "unsettled";
+  settledAt?: number;
+}
+
 async function recordSynthesisIdempotent(
   metadata: MetadataStore,
   userId: string,
@@ -1023,40 +1030,84 @@ async function recordSynthesisIdempotent(
   accountingKey: string,
   at: Date,
 ): Promise<void> {
+  const settledKey = `settled_charge:${accountingKey}`;
   let alreadySettled = false;
-  const res = await metadata.atomicUpdate<{ [key: string]: boolean }>(
-    "settled_synthesis_accounting",
+  const res = await metadata.atomicUpdate<SettledChargeRecord>(
+    settledKey,
     (current) => {
-      if (current && current[accountingKey]) {
+      if (current?.state === "settled") {
         alreadySettled = true;
         return current;
       }
-      return {
-        ...(current ?? {}),
-        [accountingKey]: true,
-      };
+      return { state: "recording" };
     },
+    SETTLED_CHARGE_TTL_MS,
   );
 
   if (alreadySettled || !res.committed) {
     if (alreadySettled) return;
+    throw new Error(`Failed to claim idempotency key for ${accountingKey}`);
   }
 
   try {
     await metadata.recordSynthesis(userId, byteLength, at);
   } catch (err) {
-    // If recording failed, un-claim key so retry can re-attempt
-    await metadata.atomicUpdate<{ [key: string]: boolean }>(
-      "settled_synthesis_accounting",
-      (current) => {
-        if (!current) return null;
-        const copy = { ...current };
-        delete copy[accountingKey];
-        return copy;
-      },
+    // If recording failed, mark unsettled so retry can re-attempt
+    await metadata.atomicUpdate<SettledChargeRecord>(
+      settledKey,
+      () => ({ state: "unsettled" }),
+      SETTLED_CHARGE_TTL_MS,
     ).catch(() => {});
     throw err;
   }
+
+  // Mark settled permanently
+  await metadata.atomicUpdate<SettledChargeRecord>(
+    settledKey,
+    () => ({ state: "settled", settledAt: Date.now() }),
+    SETTLED_CHARGE_TTL_MS,
+  );
+}
+
+/**
+ * Shared terminal settlement helper (audio-feed-y0da, audio-feed-g5bi, audio-feed-n8wk).
+ * Owns the commit/settle/delete decision from durable state across cleanupOnAbort,
+ * budget-yield, and error paths.
+ */
+async function settleTerminalPersistence(
+  metadata: MetadataStore,
+  blobs: BlobStore,
+  userId: string,
+  episodeId: string,
+  owner: string,
+  stagingKey: string,
+  nowMs: number,
+): Promise<{ committed: boolean; episode?: Episode }> {
+  // Direct durable check: did completeEpisode commit ready with this stagingKey?
+  const current = await metadata.getEpisode(userId, episodeId);
+  if (current?.status === "ready" && current?.audioKey === stagingKey) {
+    // Commit won! Refuse to delete blob and refuse to record orphan.
+    return { committed: true, episode: current };
+  }
+
+  // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit
+  await metadata.yieldEpisodeClaim(
+    userId,
+    episodeId,
+    owner,
+    { phase: "audio_synthesized", now: new Date(nowMs).toISOString() },
+  ).catch(() => {});
+
+  // Re-check durable state: did completeEpisode commit concurrently during the yield?
+  const checkAfter = await metadata.getEpisode(userId, episodeId);
+  if (checkAfter?.status === "ready" && checkAfter?.audioKey === stagingKey) {
+    return { committed: true, episode: checkAfter };
+  }
+
+  // Confirmed uncommitted: delete blob and record orphan in KV (audio-feed-fsbk)
+  await blobs.delete(stagingKey).catch(() => {});
+  await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+  return { committed: false };
 }
 
 async function queuePendingAccounting(
@@ -1641,35 +1692,16 @@ export async function runSynthesisBatch(
       completedTurns: 1,
       totalTurns: 1,
       cleanupOnAbort: async () => {
-        // Invariant 1: NEVER INFER FROM A FAILED CAS (audio-feed-n8wk).
-        // Read the durable episode state directly to check whether completeEpisode committed:
-        const current = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
-        if (current?.status === "ready" && current?.audioKey === stagingKey) {
-          // completeEpisode won and already committed ready with this stagingKey!
-          // Refuse to delete the committed blob and refuse to record an orphan.
-          return;
-        }
-
-        // The episode is NOT ready with stagingKey.
-        // Revert the claim to pending so completeEpisode cannot commit:
-        await metadata.yieldEpisodeClaim(
+        // Shared terminal settlement helper owns commit/settle/delete decision (audio-feed-g5bi)
+        await settleTerminalPersistence(
+          metadata,
+          blobs,
           currentEpisode.userId,
           currentEpisode.id,
           opts.owner,
-          { phase: "audio_synthesized", now: new Date(nowMs).toISOString() },
-        ).catch(() => {});
-
-        // Re-check durable state: did completeEpisode commit concurrently during the yield?
-        const checkAfter = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
-        if (checkAfter?.status === "ready" && checkAfter?.audioKey === stagingKey) {
-          // completeEpisode committed! Refuse to delete committed audio.
-          return;
-        }
-
-        // Episode is confirmed NOT ready with stagingKey.
-        // Clean up uncommitted staging blob and record orphan in KV (audio-feed-fsbk):
-        await blobs.delete(stagingKey).catch(() => {});
-        await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+          stagingKey,
+          nowMs,
+        );
       },
       fn: async (signal) => {
         await checkpointEpisodeClaim(
@@ -1758,16 +1790,23 @@ export async function runSynthesisBatch(
     });
 
     if (terminalOutcome.kind === "budget-yield") {
-      // Check if completeEpisode actually committed ready before yielding claim (audio-feed-y0da):
-      const current = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
-      if (current?.status === "ready" && current?.audioKey === stagingKey) {
+      const settle = await settleTerminalPersistence(
+        metadata,
+        blobs,
+        currentEpisode.userId,
+        currentEpisode.id,
+        opts.owner,
+        stagingKey,
+        nowMs,
+      );
+      if (settle.committed && settle.episode) {
         // Commit won! Ensure synthesis accounting is settled or queued idempotently (audio-feed-uecw):
         const accountingKey = `${currentEpisode.id}:${stagingKey}`;
         try {
           await recordSynthesisIdempotent(
             metadata,
             currentEpisode.userId,
-            current.byteLength ?? bytes.length,
+            settle.episode.byteLength ?? bytes.length,
             accountingKey,
             new Date(nowMs),
           );
@@ -1775,28 +1814,19 @@ export async function runSynthesisBatch(
           await queuePendingAccounting(
             metadata,
             currentEpisode.userId,
-            current.byteLength ?? bytes.length,
+            settle.episode.byteLength ?? bytes.length,
             accountingKey,
             nowMs,
-          );
+          ).catch(() => {});
         }
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,
-          byteLength: current.byteLength ?? bytes.length,
+          byteLength: settle.episode.byteLength ?? bytes.length,
         });
         break;
       }
 
-      await metadata.yieldEpisodeClaim(
-        currentEpisode.userId,
-        currentEpisode.id,
-        opts.owner,
-        {
-          phase: "audio_synthesized",
-          advanceAttempts: false, // Progress was made (synthesis finished), attempts reset
-        },
-      );
       result.yielded.push({
         episodeId: currentEpisode.id,
         completedTurns: 1,
@@ -1806,7 +1836,44 @@ export async function runSynthesisBatch(
     }
 
     if (terminalOutcome.kind === "error") {
-      await blobs.delete(stagingKey).catch(() => {});
+      const settle = await settleTerminalPersistence(
+        metadata,
+        blobs,
+        currentEpisode.userId,
+        currentEpisode.id,
+        opts.owner,
+        stagingKey,
+        nowMs,
+      );
+      if (settle.committed && settle.episode) {
+        // Complete won before error occurred (audio-feed-g5bi)! Blob was preserved.
+        // Queue/settle accounting and report episode as ready:
+        const accountingKey = `${currentEpisode.id}:${stagingKey}`;
+        try {
+          await recordSynthesisIdempotent(
+            metadata,
+            currentEpisode.userId,
+            settle.episode.byteLength ?? bytes.length,
+            accountingKey,
+            new Date(nowMs),
+          );
+        } catch {
+          await queuePendingAccounting(
+            metadata,
+            currentEpisode.userId,
+            settle.episode.byteLength ?? bytes.length,
+            accountingKey,
+            nowMs,
+          ).catch(() => {});
+        }
+        result.ready.push({
+          episodeId: currentEpisode.id,
+          audioKey: stagingKey,
+          byteLength: settle.episode.byteLength ?? bytes.length,
+        });
+        break;
+      }
+
       const error = String((terminalOutcome.error as Error)?.message ?? terminalOutcome.error);
       console.error(
         `[audio-feed] terminal persistence failed for episode "${currentEpisode.id}": ${error}`,
