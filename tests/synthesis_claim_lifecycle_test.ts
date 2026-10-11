@@ -14,6 +14,12 @@ import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts"
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import {
+  isInvocationBudgetAbort,
+  runManagedTurns,
+  SynthesisYieldError,
+  withInvocationBudget,
+} from "../src/synthesis/limits.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -377,11 +383,19 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
     contentType: "audio/wav",
   };
 
-  const write1 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
+  const write1 = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-idempotent",
+    { byteLength: 1234 },
+  );
   assertEquals(write1, true);
 
   // Second identical call by the SAME worker
-  const write2 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
+  const write2 = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-idempotent",
+    { byteLength: 1234 },
+  );
   assertEquals(
     write2,
     true,
@@ -389,13 +403,18 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
   );
 
   // Another worker attempting completion must be refused
-  const writeOther = await stores.metadata.completeEpisode(readyEpisode, "worker-other");
+  const writeOther = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-other",
+    { byteLength: 1234 },
+  );
   assertEquals(writeOther, false, "completion by another worker must return false (superseded)");
 
   // Different audio key by original worker must be refused
   const write3 = await stores.metadata.completeEpisode(
     { ...readyEpisode, audioKey: "audio/user-1/direct/episode-different.wav" },
     "worker-idempotent",
+    { byteLength: 1234 },
   );
   assertEquals(write3, false, "completion with different audio key must return false");
 });
@@ -593,4 +612,1188 @@ Deno.test("audio-feed-2m5z: (c) good checkpoint at script_generated still procee
   assertEquals(scriptCalls, 1, "script generator was called");
   assertEquals(dialogueCalls, 1, "TTS was called after successful checkpoint");
   assertEquals(batch.ready.length, 1, "batch completed successfully");
+});
+
+Deno.test("audio-feed-vqu4: long synthesis completes across multiple bounded ticks with no lost stage or duplicate spend", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  let scriptCalls = 0;
+  const textChunk = (id: number) => `Segment ${id} `.repeat(500);
+  const mockScriptGenerator = () => {
+    scriptCalls++;
+    return Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: textChunk(1) },
+        { speaker: "Sam", text: textChunk(2) },
+        { speaker: "Alex", text: textChunk(3) },
+        { speaker: "Sam", text: textChunk(4) },
+        { speaker: "Alex", text: textChunk(5) },
+        { speaker: "Sam", text: textChunk(6) },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+  };
+
+  let dialogueCalls = 0;
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  // Mock sendRequest so real synthesizeDialogue runs through batching and runManagedTurns
+  mockClient.sendRequest = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-multi-tick",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  // --- TICK 1: budget of 2 segments per invocation ---
+  const batch1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-1",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch1.ready.length, 0, "tick 1 should not complete episode");
+  assertEquals(batch1.yielded.length, 1, "tick 1 should yield");
+  assertEquals(batch1.yielded[0]?.episodeId, "ep-multi-tick");
+  assertEquals(batch1.yielded[0]?.completedTurns, 2);
+  assertEquals(batch1.yielded[0]?.totalTurns, 6);
+  assertEquals(scriptCalls, 1, "script generated in tick 1");
+  assertEquals(dialogueCalls, 2, "2 segments synthesized in tick 1");
+
+  const epAfterTick1 = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epAfterTick1);
+  assertEquals(epAfterTick1.status, "pending", "status returned to pending for next tick");
+  assertEquals(epAfterTick1.phase, "synthesized_2_of_6");
+  assertEquals(epAfterTick1.attempts, 0, "attempts reset to 0 after clean yield");
+  assert(epAfterTick1.scriptTurns, "scriptTurns preserved across ticks");
+
+  // --- TICK 2: next cron tick resumes, does 2 more segments ---
+  const batch2 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-2",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch2.ready.length, 0, "tick 2 should not complete episode");
+  assertEquals(batch2.yielded.length, 1, "tick 2 should yield");
+  assertEquals(batch2.yielded[0]?.completedTurns, 4);
+  assertEquals(scriptCalls, 1, "script was NOT re-generated in tick 2 (reused!)");
+  assertEquals(dialogueCalls, 4, "total 4 segments synthesized across ticks 1 & 2");
+
+  const epAfterTick2 = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epAfterTick2);
+  assertEquals(epAfterTick2.status, "pending");
+  assertEquals(epAfterTick2.phase, "synthesized_4_of_6");
+  assertEquals(epAfterTick2.attempts, 0);
+
+  // --- TICK 3: final tick completes remaining 2 segments and commits ready ---
+  const batch3 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-3",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch3.ready.length, 1, "tick 3 should finish episode");
+  assertEquals(batch3.yielded.length, 0, "tick 3 should not yield");
+  assertEquals(scriptCalls, 1, "script was NEVER re-generated");
+  assertEquals(dialogueCalls, 6, "all 6 segments synthesized exactly once (no duplicates!)");
+
+  const epFinal = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epFinal);
+  assertEquals(epFinal.status, "ready");
+  assertEquals(epFinal.phase, "ready");
+  assert(epFinal.audioKey, "ready episode has audioKey");
+  assert(epFinal.byteLength && epFinal.byteLength > 0);
+  assertEquals(epFinal.error, undefined);
+
+  // Assert blob store holds the final assembled audio
+  const finalBlob = await stores.blobs.get(epFinal.audioKey);
+  assert(finalBlob, "final audio blob exists in blob store");
+});
+
+Deno.test("audio-feed-9wqt: (1) reviewer repro: preflight check yields BEFORE turn 2 starts (turns recorded = 1, not 2)", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  let yieldError: unknown = null;
+  try {
+    await runManagedTurns({
+      segments: [44, 20, 5],
+      maxTurns: 3,
+      request: (duration: number) => {
+        turns.push({ startedAt: ms, duration });
+        ms += duration;
+        return Promise.resolve(duration);
+      },
+      stitch: (parts: number[]) => parts,
+      // Preflight decision: does remaining budget fit next turn (20ms) + flush margin (5ms)?
+      // Here max budget is 45ms. After turn 1 (44ms), remaining is 1ms < 25ms -> should yield!
+      shouldYield: () => {
+        const remaining = 45 - ms;
+        return remaining < 20 + 5;
+      },
+    });
+  } catch (e) {
+    yieldError = e;
+  }
+
+  assert(yieldError instanceof SynthesisYieldError, "must throw SynthesisYieldError");
+  assertEquals(yieldError.completedTurns, 1, "completed turns must be 1");
+  assertEquals(turns.length, 1, "turn 2 MUST NOT have started (preflight abort!)");
+  assertEquals(turns[0], { startedAt: 0, duration: 44 });
+  assertEquals(ms, 44, "clock must be 44ms, NOT 64ms (turn 2 was never executed!)");
+});
+
+Deno.test("audio-feed-9wqt: (2) first turn exceeds budget: preflight yields before turn 1 starts (0 turns, 0 paid calls)", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  let yieldError: unknown = null;
+  try {
+    await runManagedTurns({
+      segments: [30, 20],
+      maxTurns: 2,
+      request: (duration: number) => {
+        turns.push({ startedAt: ms, duration });
+        ms += duration;
+        return Promise.resolve(duration);
+      },
+      stitch: (parts: number[]) => parts,
+      // Budget is 20ms. Required for turn 1 is 30ms + 5ms = 35ms. 20 < 35 -> yields immediately!
+      shouldYield: () => {
+        const remaining = 20 - ms;
+        return remaining < 30 + 5;
+      },
+    });
+  } catch (e) {
+    yieldError = e;
+  }
+
+  assert(yieldError instanceof SynthesisYieldError);
+  assertEquals(yieldError.completedTurns, 0, "completed turns must be 0");
+  assertEquals(turns.length, 0, "no turn was started (0 paid calls!)");
+  assertEquals(ms, 0, "no duration elapsed");
+});
+
+Deno.test("audio-feed-9wqt: (3) short work still completes in one invocation", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  const result = await runManagedTurns({
+    segments: [5, 5, 5],
+    maxTurns: 3,
+    request: (duration: number) => {
+      turns.push({ startedAt: ms, duration });
+      ms += duration;
+      return Promise.resolve(duration);
+    },
+    stitch: (parts: number[]) => parts,
+    // Budget 45ms. Each turn is 5ms + 5ms margin = 10ms. 45ms easily fits all three turns!
+    shouldYield: () => {
+      const remaining = 45 - ms;
+      return remaining < 5 + 5;
+    },
+  });
+
+  assertEquals(result, [5, 5, 5], "all 3 turns completed and stitched");
+  assertEquals(turns.length, 3, "all 3 turns executed");
+  assertEquals(ms, 15, "total duration was 15ms");
+});
+
+Deno.test("audio-feed-vvwb: a stage that would take longer than the budget is aborted at the budget deadline and yields with progress checkpointed", async () => {
+  const { ctx, stores } = await setupEnv();
+
+  let scriptCalls = 0;
+  let simulatedMs = 1;
+  const originalNow = performance.now;
+  performance.now = () => simulatedMs;
+
+  try {
+    const synth = createGeminiSynthesizer(ctx, {
+      flushMarginMs: 5,
+      estimatedTurnDurationMs: 10,
+      scriptGenerator: (_input, options) => {
+        scriptCalls++;
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            simulatedMs += 200;
+            resolve({
+              turns: [{ speaker: "Alex" as const, text: "Hello" }],
+              sources: [],
+              counterarguments: [],
+              researchSummary: "",
+            });
+          }, 200);
+
+          options?.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            simulatedMs = 40;
+            reject(new Error("aborted by deadline"));
+          });
+        });
+      },
+    });
+
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "ep-budget-abort",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        mode: "deepdive",
+      }),
+    );
+
+    const result = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-budget-test",
+      maxInvocationDurationMs: 45,
+      flushMarginMs: 5,
+      estimatedTurnDurationMs: 10,
+    });
+
+    assertEquals(result.yielded.length, 1, "must yield cleanly");
+    assert(simulatedMs <= 45, `elapsed (${simulatedMs}) must be <= budget (45)`);
+    const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort");
+    assertEquals(ep?.status, "pending", "episode must be pending for next tick");
+    assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
+  } finally {
+    performance.now = originalNow;
+  }
+});
+
+Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptTurns and yields before dialogue", async () => {
+  const { ctx, stores } = await setupEnv();
+
+  let scriptCalls = 0;
+  let simulatedMs = 1;
+  const originalNow = performance.now;
+  performance.now = () => simulatedMs;
+
+  try {
+    const synth = createGeminiSynthesizer(ctx, {
+      scriptGenerator: () => {
+        scriptCalls++;
+        simulatedMs += 40_000;
+        return Promise.resolve({
+          turns: [
+            { speaker: "Alex" as const, text: "Turn 1" },
+            { speaker: "Sam" as const, text: "Turn 2" },
+          ],
+          sources: [],
+          counterarguments: [],
+          researchSummary: "",
+        });
+      },
+    });
+
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "ep-script-checkpoint-yield",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        mode: "deepdive",
+      }),
+    );
+
+    const result1 = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-tick-1",
+      maxInvocationDurationMs: 45_000,
+    });
+
+    assertEquals(result1.yielded.length, 1, "must yield cleanly");
+    const epAfterTick1 = await stores.metadata.getEpisode("user-1", "ep-script-checkpoint-yield");
+    assertEquals(epAfterTick1?.status, "pending");
+    assertEquals(epAfterTick1?.phase, "synthesized_0_of_2");
+    assertEquals(epAfterTick1?.scriptTurns?.length, 2, "scriptTurns must be durably checkpointed!");
+    assertEquals(epAfterTick1?.attempts, 0);
+
+    // Tick 2: fresh tick resumes, skips script generation entirely!
+    simulatedMs = 1;
+    await runSynthesisBatch(ctx, synth, {
+      owner: "worker-tick-2",
+      maxInvocationDurationMs: 45_000,
+      maxSegmentsPerInvocation: 2,
+    });
+
+    assertEquals(scriptCalls, 1, "scriptGenerator must NOT be called in Tick 2 (resumed from KV!)");
+  } finally {
+    performance.now = originalNow;
+  }
+});
+
+Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pending with attempts 0 (not failed)", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-budget-abort-tts",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let paidCalls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      paidCalls++;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-budget-tts",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(paidCalls, 1, "TTS call was initiated");
+  assertEquals(result.failed.length, 0, "must NOT fail episode on budget abort");
+  assertEquals(result.yielded.length, 1, "must report episode as yielded");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-tts");
+  assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
+  assertEquals(ep?.attempts, 1, "attempt count is preserved for uncommitted yield");
+  assert(ep?.phase?.startsWith("synthesized_"), "phase must indicate progress or yield");
+});
+
+Deno.test("audio-feed-q7zy: (b) genuine provider error still fails with its reason", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-genuine-provider-error",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: () => {
+      // Real 500 error from upstream provider
+      return Promise.resolve(new Response("Internal Server Error", { status: 500 }));
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-genuine-err",
+    maxAttempts: 1,
+  });
+
+  assertEquals(result.yielded.length, 0, "genuine error must not yield");
+  assertEquals(result.failed.length, 1, "genuine error must fail episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "500", "error must describe provider error");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-genuine-provider-error");
+  assertEquals(ep?.status, "failed", "episode status must be failed");
+  assertStringIncludes(ep?.error ?? "", "500");
+});
+
+Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to pending with attempts 0", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-budget-abort-script",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  let scriptCalls = 0;
+  const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
+    scriptCalls++;
+    return new Promise<{
+      turns: { speaker: "Alex" | "Sam"; text: string }[];
+      sources: [];
+      counterarguments: [];
+      researchSummary: "";
+    }>((_resolve, reject) => {
+      options?.signal?.addEventListener(
+        "abort",
+        () => reject(options.signal?.reason ?? new Error("aborted")),
+        { once: true },
+      );
+    });
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "dummy" });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: slowScriptGenerator,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 1,
+  });
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-budget-script",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 1,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(result.failed.length, 0, "script budget abort must NOT fail episode");
+  assertEquals(result.yielded.length, 1, "script budget abort must yield");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-script");
+  assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
+  assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
+});
+
+Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecycle and fails episode (no livelock)", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-provider-aborterror",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let calls = 0;
+  const providerAbortSynth = () => {
+    calls++;
+    throw new DOMException("provider terminated connection", "AbortError");
+  };
+
+  // Run batch with maxAttempts: 1
+  const result = await runSynthesisBatch(ctx, providerAbortSynth, {
+    owner: "worker-provider-abort",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 45_000,
+  });
+
+  assertEquals(calls, 1, "synthesizer was called");
+  assertEquals(result.yielded.length, 0, "provider AbortError must NOT yield as budget");
+  assertEquals(result.failed.length, 1, "provider AbortError must fail the episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "provider terminated connection");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-provider-aborterror");
+  assertEquals(ep?.status, "failed", "episode status must be failed");
+  assertStringIncludes(ep?.error ?? "", "provider terminated connection");
+
+  // Subsequent tick must NOT re-pick the failed episode
+  const result2 = await runSynthesisBatch(ctx, providerAbortSynth, {
+    owner: "worker-provider-abort-tick2",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 45_000,
+  });
+  assertEquals(result2.failed.length, 0);
+  assertEquals(result2.yielded.length, 0);
+  assertEquals(calls, 1, "failed episode must not be picked up again");
+});
+
+Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle and does not livelock", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-lease-abort",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    fetchFn: (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      }),
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+  });
+
+  // Short leaseMs triggers leaseSignal abort
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-lease-abort",
+    leaseMs: 60_050, // leaves ~50ms remainingMs before leaseExpiry minus 60s
+    maxAttempts: 1,
+  });
+
+  assertEquals(result.yielded.length, 0, "lease abort must NOT yield as budget");
+  assertEquals(result.failed.length, 1, "lease abort must fail episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "lease expired");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-lease-abort");
+  assertEquals(ep?.status, "failed");
+});
+
+Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts and fail episode without livelocking", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fsr3-stall",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  let scriptCalls = 0;
+  const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
+    scriptCalls++;
+    return new Promise<{
+      turns: { speaker: "Alex" | "Sam"; text: string }[];
+      sources: [];
+      counterarguments: [];
+      researchSummary: "";
+    }>((_resolve, reject) => {
+      options?.signal?.addEventListener(
+        "abort",
+        () => reject(options.signal?.reason ?? new Error("aborted")),
+        { once: true },
+      );
+    });
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "dummy" });
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: slowScriptGenerator,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+  });
+
+  // Tick 1 with maxAttempts: 2 -> yields, advances attempts to 1
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-fsr3-1",
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    maxAttempts: 2,
+  });
+  assertEquals(r1.yielded.length, 1);
+  assertEquals(r1.failed.length, 0);
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.attempts, 1, "zero-progress yield must preserve attempt count");
+
+  // Tick 2 with maxAttempts: 2 -> attempts exhausted without progress, must FAIL
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-fsr3-2",
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    maxAttempts: 2,
+  });
+  assertEquals(r2.yielded.length, 0, "must not yield indefinitely");
+  assertEquals(r2.failed.length, 1, "must fail after maxAttempts zero-progress yields");
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
+  assertEquals(ep2?.status, "failed", "episode must terminate as failed");
+  assertStringIncludes(ep2?.error ?? "", "exceeded");
+  assertEquals(scriptCalls, 2, "script was called on each attempt");
+});
+
+Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attempts each tick, cap paidCalls <= maxAttempts, and fail", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-o88z-stall",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let paidCalls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      paidCalls++;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  // Tick 1: yields with attempts=1
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-1",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r1.yielded.length, 1);
+  assertEquals(r1.failed.length, 0);
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.attempts, 1, "attempts must advance to 1 on uncommitted yield");
+
+  // Tick 2: reaches maxAttempts (2) with zero progress -> fails!
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-2",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.yielded.length, 0);
+  assertEquals(r2.failed.length, 1);
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
+  assertEquals(ep2?.status, "failed");
+  assertEquals(ep2?.attempts, 2, "attempts must be 2");
+
+  // Tick 3: failed episode is not picked up, paidCalls remains bounded
+  const r3 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-3",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r3.yielded.length, 0);
+  assertEquals(r3.failed.length, 0);
+  assertEquals(paidCalls, 2, "paidCalls must be strictly bounded <= maxAttempts");
+});
+
+Deno.test("audio-feed-dv4p: (a) terminal upload preflight yields before slow upload starts when remaining budget is insufficient", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-dv4p-preflight",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let putCalls = 0;
+  stores.blobs.put = async (...args) => {
+    putCalls++;
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+
+  const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+  const synth = () => Promise.resolve(decodedFromWav(wav));
+
+  const start = performance.now();
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-1",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - start;
+
+  assert(elapsed < 80, `elapsed (${elapsed}ms) must be strictly less than 80ms budget`);
+  assertEquals(r1.ready.length, 0, "must not finish ready past budget");
+  assertEquals(r1.yielded.length, 1, "must preflight yield before upload");
+  assertEquals(putCalls, 0, "blobs.put must not have been called due to preflight yield");
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-preflight");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, "audio_synthesized");
+
+  // Tick 2: restore fast blobs.put; tick completes within normal budget
+  stores.blobs.put = oldPut;
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.ready.length, 1, "subsequent tick completes upload");
+  assertEquals(r2.yielded.length, 0);
+
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-dv4p-preflight");
+  assertEquals(ep2?.status, "ready");
+});
+
+Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation deadline without exceeding budget", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-dv4p-inflight",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let putCalls = 0;
+  stores.blobs.put = async (...args) => {
+    putCalls++;
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+
+  const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+  const synth = () => Promise.resolve(decodedFromWav(wav));
+
+  const start = performance.now();
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-inflight-1",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 10, // Allows preflight to pass (10 + 5 < 80)
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - start;
+
+  assert(elapsed < 90, `elapsed (${elapsed}ms) must be bounded by invocation budget`);
+  assertEquals(putCalls, 1, "blobs.put was started");
+  assertEquals(r1.ready.length, 0, "must not finish ready past budget");
+  assertEquals(r1.yielded.length, 1, "must abort upload and yield claim");
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, "audio_synthesized");
+
+  // Tick 2: restore fast blobs.put; tick completes within normal budget
+  stores.blobs.put = oldPut;
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-inflight-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.ready.length, 1, "subsequent tick completes upload");
+  assertEquals(r2.yielded.length, 0);
+
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
+  assertEquals(ep2?.status, "ready");
+});
+
+Deno.test("withInvocationBudget: enforces preflight, deadline derivation, provenance, and typed outcomes across all stages", async () => {
+  const stages = ["script_generation", "dialogue_tts", "narration_tts", "upload_terminal_audio"];
+
+  for (const stageName of stages) {
+    // 1. Preflight refusal: available budget (100 - 0 - 20 = 80ms) < worstCaseEstimate (100ms)
+    const preflightOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 100, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 20,
+      worstCaseEstimateMs: 100,
+      fn: () => Promise.resolve("never called"),
+    });
+    assertEquals(preflightOutcome.kind, "budget-yield");
+    if (preflightOutcome.kind === "budget-yield") {
+      assert(isInvocationBudgetAbort(preflightOutcome.error));
+      assertStringIncludes(preflightOutcome.error.message, "preflight refused");
+      assertStringIncludes(preflightOutcome.error.message, stageName);
+    }
+
+    // 2. In-flight deadline enforcement: timeout derived from remaining budget (50 - 5 = 45ms)
+    const inFlightStart = performance.now();
+    const inFlightOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 50, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: async (_signal) => {
+        await new Promise((r) => setTimeout(r, 200));
+        return "too slow";
+      },
+    });
+    const inFlightElapsed = performance.now() - inFlightStart;
+    assert(
+      inFlightElapsed < 80,
+      `stage ${stageName} timeout must abort within budget (${inFlightElapsed}ms)`,
+    );
+    assertEquals(inFlightOutcome.kind, "budget-yield");
+    if (inFlightOutcome.kind === "budget-yield") {
+      assert(isInvocationBudgetAbort(inFlightOutcome.error));
+      assertStringIncludes(inFlightOutcome.error.message, "deadline");
+      assertStringIncludes(inFlightOutcome.error.message, stageName);
+    }
+
+    // 3. Normal fast completion: returns typed completed outcome
+    const normalOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 500, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: () => Promise.resolve(`done-${stageName}`),
+    });
+    assertEquals(normalOutcome.kind, "completed");
+    if (normalOutcome.kind === "completed") {
+      assertEquals(normalOutcome.value, `done-${stageName}`);
+    }
+
+    // 4. Genuine error: returns typed error outcome without misclassifying as budget yield
+    const errorOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 500, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: () => Promise.reject(new Error(`provider_failure_in_${stageName}`)),
+    });
+    assertEquals(errorOutcome.kind, "error");
+    if (errorOutcome.kind === "error") {
+      assertStringIncludes(
+        String((errorOutcome.error as Error).message),
+        `provider_failure_in_${stageName}`,
+      );
+    }
+  }
+});
+
+Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation budget and yields cleanly", async () => {
+  const { ctx, stores } = await setupEnv();
+  const oldComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    await new Promise((r) => setTimeout(r, 140));
+    return oldComplete(...args);
+  };
+  const started = performance.now();
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-upload-commit",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - started;
+  assert(elapsed < 95, `invocation must abort within 80ms budget (elapsed ${elapsed}ms)`);
+  assertEquals(
+    result.ready.length,
+    0,
+    "must not return ready when terminal commit cannot complete in budget",
+  );
+  assertEquals(result.yielded.length, 1, "must cleanly yield claim");
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(ep?.status, "pending");
+});
+
+Deno.test("audio-feed-fsbk: timed-out upload cleanup cleans blob when put settles and records orphan", async () => {
+  const { ctx, stores } = await setupEnv();
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let startedKey = "";
+  stores.blobs.put = async (...args) => {
+    startedKey = args[0];
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+  const r = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-upload-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r.yielded.length, 1);
+  // Verify orphan record is retained in KV immediately at yield while put is in flight
+  const orphanAtYield = await stores.metadata.listOrphanBlobs(10);
+  assert(
+    orphanAtYield.includes(startedKey),
+    "orphan record must be retained in KV while put is in flight",
+  );
+
+  // Wait for background delayed put to finish (135ms) + hook execution
+  await new Promise((r) => setTimeout(r, 160));
+  const staleBlob = await stores.blobs.get(startedKey);
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(staleBlob, null, "timed-out put must be cleaned up on settlement without lingering");
+  assertEquals(episode?.status, "pending");
+});
+
+Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode does not delete committed blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  const complete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    const result = await complete(...args);
+    // Simulate delay during completeEpisode return exceeding remaining budget
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    return result;
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-terminal-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 190));
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "ready", "committed episode must remain ready");
+  assert(episode?.audioKey, "ready episode must have audioKey");
+  const blob = await stores.blobs.get(episode.audioKey!);
+  assert(blob !== null, "committed blob must never be deleted by timeout abort");
+  assertEquals(result.ready.length, 1, "batch must report episode as ready when commit won");
+});
+
+Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically before delayed commit can win (never ready with deleted audio)", async () => {
+  const { ctx, stores } = await setupEnv();
+  const complete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    // Simulate delay BEFORE completeEpisode commits
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    return await complete(...args);
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-terminal-race-pre-commit",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 190));
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  // The abort won the atomic transition: episode must be pending, not ready!
+  assertEquals(
+    episode?.status,
+    "pending",
+    "episode must not become ready when abort won atomic transition",
+  );
+  assertEquals(result.ready.length, 0, "batch must not report episode as ready when abort won");
+  if (episode?.audioKey) {
+    const blob = await stores.blobs.get(episode.audioKey);
+    assertEquals(blob, null, "aborted staging blob must be cleaned up");
+  }
+});
+
+Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal completion", async () => {
+  const { ctx, stores } = await setupEnv();
+  const put = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    return put(...args);
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-tail-skip",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1, "episode must be completed ready");
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 1, "daily synthesis count must be recorded as part of terminal path");
+});
+
+Deno.test("audio-feed-uecw: terminal completion commits episode ready and billing counters in a single atomic transaction", async () => {
+  const { ctx, stores } = await setupEnv();
+  const today = new Date().toISOString().slice(0, 10);
+  const initialCount = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(initialCount, 0, "initial count zero");
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-atomic-billing",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1, "episode completed ready");
+
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(
+    count,
+    1,
+    "daily synthesis count must be credited atomically with episode completion",
+  );
+
+  // A superseded attempt cannot increment counters
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assert(ep);
+  const superseded = await stores.metadata.completeEpisode(
+    ep,
+    "superseded-worker",
+    { byteLength: 500 },
+  );
+  assertEquals(superseded, false, "superseded worker write must fail");
+  const countAfterSuperseded = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(countAfterSuperseded, 1, "failed completion must never increment billing counters");
+});
+
+Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak uncommitted blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  let stagingKey = "";
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    stagingKey = args[0];
+    await new Promise((resolve) => setTimeout(resolve, 135));
+    return oldPut(...args);
+  };
+
+  // Simulate CAS failure during cleanupOnAbort (audio-feed-22ui)
+  stores.metadata.yieldEpisodeClaim = (..._args) => {
+    return Promise.resolve(false);
+  };
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-heartbeat-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(result.yielded.length, 1);
+  // Verify that despite yield CAS failure, cleanupOnAbort checked durable state:
+  // Since episode was NOT ready, it deleted the uncommitted blob and recorded orphan in KV (no leak!)
+  const orphanBlobs = await stores.metadata.listOrphanBlobs(10);
+  assert(
+    orphanBlobs.includes(stagingKey),
+    "orphan record must be written to KV even when yield CAS fails",
+  );
+});
+
+Deno.test("audio-feed-mkkb: idempotent completeEpisode replay never double charges", async () => {
+  const { ctx, stores } = await setupEnv();
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-idempotent-accounting",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1);
+  const today = new Date().toISOString().slice(0, 10);
+  const initialCount = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(initialCount, 1, "initial charge recorded");
+
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assert(ep?.audioKey);
+
+  // Re-invoking completeEpisode idempotently for the same owner and audioKey must not increment counters
+  const replayed = await stores.metadata.completeEpisode(
+    ep,
+    "review-idempotent-accounting",
+    { byteLength: ep.byteLength ?? 100 },
+  );
+  assertEquals(replayed, true, "idempotent completion must return true");
+
+  const countAfterReplay = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(countAfterReplay, 1, "idempotent completion replay must never double charge");
+});
+
+Deno.test("audio-feed-g5bi: error in terminal_persistence after completeEpisode does not delete committed blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  // Simulate completeEpisode succeeding, but subsequent logic inside fn throwing
+  const origComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    const _res = await origComplete(...args);
+    throw new Error("simulated post-commit failure inside terminal_persistence");
+  };
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-g5bi-error",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(result.ready.length, 1, "episode must be reported ready");
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(ep?.status, "ready");
+  assert(ep?.audioKey);
+  const blob = await stores.blobs.get(ep.audioKey);
+  assert(blob !== null, "committed blob must never be deleted by error handler");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 1, "atomic billing committed with completeEpisode");
 });

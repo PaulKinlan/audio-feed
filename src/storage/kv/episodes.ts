@@ -28,7 +28,9 @@ import {
   isClaimExpired,
   isPublishable,
   unsynthesized,
+  utcDayKey,
 } from "../../types.ts";
+import type { EpisodeBilling } from "../mod.ts";
 import { descendingKey, EPISODE_READ_BATCH } from "./core.ts";
 
 /**
@@ -39,6 +41,7 @@ async function atomicPutEpisode(
   core: KvCore,
   episode: Episode,
   guard: Deno.KvEntryMaybe<Episode>,
+  billing?: EpisodeBilling,
 ): Promise<boolean> {
   const sortKey = descendingKey(episode.createdAt, episode.id);
   const tx = core.kv.atomic()
@@ -51,6 +54,18 @@ async function atomicPutEpisode(
     );
 
   core.writeQueueIndexes(tx, episode);
+
+  // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
+  // Billing is committed in the exact same atomic transaction as episode completion.
+  if (billing && episode.status === "ready") {
+    const day = utcDayKey(billing.at ?? new Date());
+    tx.sum(["synthesis_total"], 1n)
+      .sum(["synthesis_total_bytes"], BigInt(billing.byteLength))
+      .sum(["synthesis_by_user", episode.userId], 1n)
+      .sum(["synthesis_bytes_by_user", episode.userId], BigInt(billing.byteLength))
+      .sum(["synthesis_daily", episode.userId, day], 1n)
+      .sum(["synthesis_daily_all", day], 1n);
+  }
 
   const result = await tx.commit();
   return result.ok;
@@ -445,7 +460,50 @@ export function createEpisodesRepository(
       }
       return wrote;
     },
-    async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    async yieldEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update?: {
+        phase?: string;
+        now?: string;
+        advanceAttempts?: boolean;
+      },
+    ): Promise<boolean> {
+      const key: Deno.KvKey = ["episode", userId, episodeId];
+      const entry = await core.kv.get<Episode>(key);
+      const current = entry.value;
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return false;
+      }
+      const yielded: Episode = {
+        ...current,
+        status: "pending",
+        claimedAt: undefined,
+        claimedBy: undefined,
+        phase: update?.phase ?? current.phase,
+        lastHeartbeat: update?.now ?? new Date().toISOString(),
+        attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
+      };
+      return await atomicPutEpisode(core, yielded, entry);
+    },
+    async completeEpisode(
+      episode: Episode,
+      owner: string,
+      billing?: EpisodeBilling,
+    ): Promise<boolean> {
+      // Invariant enforcement (audio-feed-9gqs):
+      // A transition to "ready" requires a billing payload at the storage boundary.
+      // Unsynthesized/failed transitions (which carry episode.error) may omit billing.
+      if (
+        episode.status === "ready" &&
+        !episode.error &&
+        (!billing || typeof billing.byteLength !== "number")
+      ) {
+        throw new TypeError(
+          `completeEpisode requires a valid billing payload ({ byteLength: number }) when completing with status "ready" (audio-feed-9gqs)`,
+        );
+      }
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;
@@ -462,7 +520,7 @@ export function createEpisodesRepository(
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
-      const wrote = await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry);
+      const wrote = await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry, billing);
       if (wrote) {
         await host().appendLog(
           claimLifecycleEvent(episode, {

@@ -329,11 +329,63 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(
       await store.touchEpisodeClaim("user-1", "e1", "worker-a", { phase: "post-finish" }),
       false,
     );
+  });
+
+  test("yieldEpisodeClaim transitions synthesizing claim back to pending with attempts 0 (audio-feed-vqu4)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Non-synthesizing / non-owner rejects yield
+    assertEquals(
+      await store.yieldEpisodeClaim("user-1", "e1", "worker-a"),
+      false,
+    );
+
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+    assertEquals(claimed.attempts, 1);
+
+    // Another worker cannot yield
+    assertEquals(
+      await store.yieldEpisodeClaim("user-1", "e1", "worker-impostor"),
+      false,
+    );
+
+    // Owner yields cleanly with updated phase
+    const ok = await store.yieldEpisodeClaim("user-1", "e1", CLAIM.owner, {
+      phase: "synthesized_2_of_6",
+      now: "2026-10-11T16:00:00.000Z",
+    });
+    assertEquals(ok, true);
+
+    const yielded = await store.getEpisode("user-1", "e1");
+    assert(yielded);
+    assertEquals(yielded.status, "pending");
+    assertEquals(yielded.claimedAt, undefined);
+    assertEquals(yielded.claimedBy, undefined);
+    assertEquals(yielded.phase, "synthesized_2_of_6");
+    assertEquals(yielded.lastHeartbeat, "2026-10-11T16:00:00.000Z");
+    assertEquals(
+      yielded.attempts,
+      0,
+      "clean yield resets attempts so multi-tick progression never trips poison limit",
+    );
+
+    // Can be immediately re-claimed by the next tick/worker
+    const reclaimed = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-next-tick",
+      now: "2026-10-11T16:02:00.000Z",
+    });
+    assert(reclaimed);
+    assertEquals(reclaimed.status, "synthesizing");
+    assertEquals(reclaimed.claimedBy, "worker-next-tick");
+    assertEquals(reclaimed.attempts, 1);
   });
 
   // -- completeEpisode ----------------------------------------------------
@@ -346,6 +398,7 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const wrote = await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(wrote, true);
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
@@ -354,6 +407,7 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const idempotent = await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(idempotent, true);
   });
@@ -373,12 +427,14 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     await store.completeEpisode(
       { ...second, status: "ready", audioKey: "winner.wav", contentType: "audio/wav" },
       "worker-b",
+      { byteLength: 500 },
     );
 
     // worker-a now finishes its slow synthesis. It must not win.
     const late = await store.completeEpisode(
       { ...first, status: "ready", audioKey: "loser.wav", contentType: "audio/wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(late, false, "a lost claim must not write a terminal state");
     assertEquals(
@@ -393,6 +449,7 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const wrote = await store.completeEpisode(
       { ...queued(), status: "ready", audioKey: "k.wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(wrote, false, "a terminal write requires an owned claim");
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "pending");
@@ -405,11 +462,65 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
       "worker-a",
+      { byteLength: 500 },
     );
 
     // Claim and complete both rewrite the record; neither may duplicate it.
     const all = await store.listEpisodes({ userId: "user-1" });
     assertEquals(all.length, 1, "claim + complete must not duplicate the index entry");
     assertEquals(all[0]?.status, "ready");
+  });
+
+  test("completeEpisode with status ready requires billing payload (audio-feed-9gqs)", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    let threw = false;
+    try {
+      // @ts-expect-error missing billing payload must be refused by type and runtime
+      await store.completeEpisode(
+        { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+        "worker-a",
+      );
+    } catch (err) {
+      threw = true;
+      assert(err instanceof TypeError);
+    }
+    assertEquals(threw, true, "ready transition without billing must throw TypeError");
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "synthesizing");
+  });
+
+  test("completeEpisode with status ready atomically updates spend and replay does not double charge (audio-feed-thrs, audio-feed-a7i9)", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const initialCount = await store.getDailySynthesisCount(today);
+    assertEquals(initialCount, 0, "initial daily count zero");
+
+    // 1. Ready transition atomically increments spend
+    const wrote = await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+      { byteLength: 500 },
+    );
+    assertEquals(wrote, true);
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+
+    const countAfter = await store.getDailySynthesisCount(today);
+    assertEquals(countAfter, 1, "daily count incremented on ready transition");
+
+    // 2. Idempotent replay succeeds but NEVER double-charges (audio-feed-mkkb)
+    const idempotent = await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+      { byteLength: 500 },
+    );
+    assertEquals(idempotent, true);
+
+    const countAfterReplay = await store.getDailySynthesisCount(today);
+    assertEquals(countAfterReplay, 1, "replay must not double charge");
   });
 }

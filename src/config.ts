@@ -48,6 +48,8 @@ export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
  * nobody is watching. Set GLOBAL_DAILY_EPISODE_BUDGET for the real number.
  */
 export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
+/** Default maximum execution duration per synthesis invocation before yielding (audio-feed-vqu4). */
+export const DEFAULT_MAX_INVOCATION_DURATION_MS = 45_000;
 
 /**
  * How long the structured log store keeps a record (audio-feed-wzv9).
@@ -147,6 +149,18 @@ export interface AppConfig {
    * synthesis happens at all.
    */
   globalDailyEpisodeBudget?: number;
+  /**
+   * Maximum newly synthesized segments to produce in a single invocation before
+   * checkpointing and yielding the claim back to the queue (audio-feed-vqu4).
+   * Optional; defaults to undefined (unbounded by segment count).
+   */
+  maxSegmentsPerInvocation?: number;
+  /**
+   * Maximum duration in ms a single invocation may spend synthesizing before
+   * checkpointing and yielding back to the queue (audio-feed-vqu4).
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (45_000ms).
+   */
+  maxInvocationDurationMs?: number;
   adminToken?: string;
   /**
    * Shared key for the observability API (audio-feed-s2pi / obs-1).
@@ -269,6 +283,29 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  // audio-feed-vqu4: per-invocation work bounds to fit inside Deno Deploy cron isolate lifetime
+  const maxSegmentsRaw = env("MAX_SEGMENTS_PER_INVOCATION");
+  let maxSegmentsPerInvocation: number | undefined;
+  if (maxSegmentsRaw !== undefined) {
+    maxSegmentsPerInvocation = Number(maxSegmentsRaw);
+    if (!Number.isInteger(maxSegmentsPerInvocation) || maxSegmentsPerInvocation <= 0) {
+      throw new Error(
+        `Invalid MAX_SEGMENTS_PER_INVOCATION: "${maxSegmentsRaw}". Expected a positive integer.`,
+      );
+    }
+  }
+
+  const maxDurationRaw = env("MAX_INVOCATION_DURATION_MS");
+  let maxInvocationDurationMs: number | undefined;
+  if (maxDurationRaw !== undefined) {
+    maxInvocationDurationMs = Number(maxDurationRaw);
+    if (!Number.isInteger(maxInvocationDurationMs) || maxInvocationDurationMs <= 0) {
+      throw new Error(
+        `Invalid MAX_INVOCATION_DURATION_MS: "${maxDurationRaw}". Expected a positive integer number of milliseconds.`,
+      );
+    }
+  }
+
   return {
     logRetentionDays,
     port,
@@ -288,6 +325,8 @@ export function loadConfig(): AppConfig {
     // Resolved to a number here so the worker and the admin console read the same value; the worker
     // still treats an unusable value as absent rather than as unlimited.
     globalDailyEpisodeBudget: globalDailyEpisodeBudget ?? DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
+    maxSegmentsPerInvocation,
+    maxInvocationDurationMs: maxInvocationDurationMs ?? DEFAULT_MAX_INVOCATION_DURATION_MS,
     adminToken: env("ADMIN_TOKEN"),
     // Read here and never anywhere else, so there is one place a reviewer has to look to confirm the
     // key is not logged: nothing writes it to a record, and a request record carries no headers.

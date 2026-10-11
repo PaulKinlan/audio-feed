@@ -289,6 +289,11 @@ export interface ArticleRepository {
  * work, completion, failure, and the two recovery transitions (retry a failure, regenerate a
  * published episode).
  */
+export interface EpisodeBilling {
+  byteLength: number;
+  at?: Date;
+}
+
 export interface EpisodeRepository {
   putEpisode(episode: Episode): Promise<void>;
   getEpisode(userId: string, id: string): Promise<Episode | null>;
@@ -385,7 +390,16 @@ export interface EpisodeRepository {
    * The refusal is a signal worth reporting, not an error to swallow: it means
    * "you were superseded", and the caller should discard its result.
    */
-  completeEpisode(episode: Episode, owner: string): Promise<boolean>;
+  /**
+   * Transition an episode from synthesizing to completed (audio-feed-thrs, audio-feed-9gqs).
+   * Status "ready" requires a billing payload (byteLength) in the type and runtime.
+   * Status "failed" or unsynthesized error transitions may omit billing.
+   */
+  completeEpisode<E extends Episode>(
+    episode: E,
+    owner: string,
+    ...args: E extends { status: "ready" } ? [billing: EpisodeBilling] : [billing?: EpisodeBilling]
+  ): Promise<boolean>;
 
   /**
    * Update claim heartbeat and execution phase (audio-feed-siv1), atomically.
@@ -408,6 +422,27 @@ export interface EpisodeRepository {
       phase?: string;
       now?: string;
       scriptTurns?: Array<{ speaker: string; text: string }>;
+    },
+  ): Promise<boolean>;
+
+  /**
+   * Voluntarily yield an in-flight synthesis claim back to the queue (audio-feed-vqu4), atomically.
+   *
+   * Validates that the episode is currently `synthesizing` and owned by `owner`.
+   * Transitions `status` back to `pending`, clears `claimedAt` and `claimedBy`, updates `phase`
+   * and `lastHeartbeat`, and resets `attempts` to 0 because forward progress was made cleanly
+   * within an invocation budget.
+   *
+   * Returns `false` if the claim was lost or superseded.
+   */
+  yieldEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update?: {
+      phase?: string;
+      now?: string;
+      advanceAttempts?: boolean;
     },
   ): Promise<boolean>;
 

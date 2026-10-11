@@ -257,6 +257,7 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "audio/whatever", byteLength: 1234 },
       claim.owner,
+      { byteLength: 1234 },
     );
 
     const records = await store.listLogs();

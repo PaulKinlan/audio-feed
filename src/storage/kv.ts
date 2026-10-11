@@ -15,6 +15,7 @@ import { SynthesisSegmentRecord } from "../types.ts";
 import type {
   AtomicWrite,
   DownloadCounts,
+  EpisodeBilling,
   EpisodeClaim,
   EpisodePage,
   EpisodePageResult,
@@ -267,8 +268,16 @@ export class KvMetadataStore implements MetadataStore {
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
     return this.repositories.episodes.claimEpisode(userId, episodeId, claim);
   }
-  completeEpisode(episode: Episode, owner: string): Promise<boolean> {
-    return this.repositories.episodes.completeEpisode(episode, owner);
+  completeEpisode<E extends Episode>(
+    episode: E,
+    owner: string,
+    ...args: E extends { status: "ready" } ? [billing: EpisodeBilling] : [billing?: EpisodeBilling]
+  ): Promise<boolean> {
+    return (this.repositories.episodes.completeEpisode as (
+      ep: Episode,
+      ow: string,
+      b?: EpisodeBilling,
+    ) => Promise<boolean>)(episode, owner, args[0]);
   }
   touchEpisodeClaim(
     userId: string,
@@ -281,6 +290,18 @@ export class KvMetadataStore implements MetadataStore {
     },
   ): Promise<boolean> {
     return this.repositories.episodes.touchEpisodeClaim(userId, episodeId, owner, update);
+  }
+  yieldEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update?: {
+      phase?: string;
+      now?: string;
+      advanceAttempts?: boolean;
+    },
+  ): Promise<boolean> {
+    return this.repositories.episodes.yieldEpisodeClaim(userId, episodeId, owner, update);
   }
   retryEpisode(userId: string, id: string): Promise<Episode | null> {
     return this.repositories.episodes.retryEpisode(userId, id);

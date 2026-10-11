@@ -20,7 +20,12 @@ import {
   isPublishable,
   unsynthesized,
 } from "../../types.ts";
-import { type EpisodeClaim, type EpisodeQuery, type MetadataStore } from "../mod.ts";
+import {
+  type EpisodeBilling,
+  type EpisodeClaim,
+  type EpisodeQuery,
+  type MetadataStore,
+} from "../mod.ts";
 import type { EpisodeRepository } from "../mod.ts";
 import type { MemoryState } from "./state.ts";
 import {
@@ -305,21 +310,74 @@ export function createEpisodesRepository(
       }
       return Promise.resolve(true);
     },
-    completeEpisode(episode: Episode, owner: string): Promise<boolean> {
+    yieldEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update?: {
+        phase?: string;
+        now?: string;
+        advanceAttempts?: boolean;
+      },
+    ): Promise<boolean> {
+      const key = scoped(userId, episodeId);
+      const current = state.episodes.get(key);
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return Promise.resolve(false);
+      }
+      const oldSortKey = `${current.createdAt}\u0000${current.id}`;
+      removeSortedIndex(state.synthesizingIndex, oldSortKey);
+      const yielded: Episode = {
+        ...current,
+        status: "pending",
+        claimedAt: undefined,
+        claimedBy: undefined,
+        phase: update?.phase ?? current.phase,
+        lastHeartbeat: update?.now ?? new Date().toISOString(),
+        attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
+      };
+      writeEpisode(state, yielded);
+      return Promise.resolve(true);
+    },
+    async completeEpisode(
+      episode: Episode,
+      owner: string,
+      billing?: EpisodeBilling,
+    ): Promise<boolean> {
+      // Invariant enforcement (audio-feed-9gqs):
+      // A transition to "ready" requires a billing payload at the storage boundary.
+      // Unsynthesized/failed transitions (which carry episode.error) may omit billing.
+      if (
+        episode.status === "ready" &&
+        !episode.error &&
+        (!billing || typeof billing.byteLength !== "number")
+      ) {
+        throw new TypeError(
+          `completeEpisode requires a valid billing payload ({ byteLength: number }) when completing with status "ready" (audio-feed-9gqs)`,
+        );
+      }
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
-      if (!current) return Promise.resolve(false);
+      if (!current) return false;
       // Idempotent completion: only if already marked ready with this exact audioKey by THIS owner
       if (
         current.status === "ready" && current.audioKey === episode.audioKey &&
         current.claimedBy === owner
       ) {
-        return Promise.resolve(true);
+        return true;
       }
       // Superseded: another worker reclaimed the expired lease and finished first.
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
-        return Promise.resolve(false);
+        return false;
       }
+
+      // Atomic terminal billing (audio-feed-thrs, audio-feed-a7i9):
+      // Must record synthesis before or atomically with episode state.
+      // If billing fails, the completion fails, rethrows, and nothing is marked ready.
+      if (billing && episode.status === "ready") {
+        await host().recordSynthesis(episode.userId, billing.byteLength, billing.at);
+      }
+
       const sortKey = `${current.createdAt}\u0000${current.id}`;
       removeSortedIndex(state.synthesizingIndex, sortKey);
       removePendingPointer(state, current);
