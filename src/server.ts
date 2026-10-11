@@ -21,6 +21,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
+import { createLogger, isHighVolumeAssetPath, redactRoutePath } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -145,7 +146,51 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
   const handlers = createHandlers(ctx);
   const app = createApp(ctx, handlers);
-  const serverFetch = app.fetch;
+  // audio-feed-wzv9: the app's structured records, in one wrapper so no handler has to remember.
+  // The correlation id is minted per request and echoed in a response header, so an operator
+  // holding a failing request can find every record about it.
+  const appFetch = app.fetch;
+  const appLog = createLogger({ sink: stores.metadata, process: "app" });
+  const serverFetch = async (
+    req: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ): Promise<Response> => {
+    const correlationId = crypto.randomUUID();
+    const started = performance.now();
+    // Redacted before it becomes a field: a path can carry a capability with no name attached.
+    const path = new URL(req.url).pathname;
+    const route = redactRoutePath(path);
+    const durationMs = () => Math.round(performance.now() - started);
+    try {
+      const res = await appFetch(req, info);
+      // A successful asset or enclosure fetch is deliberately not recorded — see
+      // isHighVolumeAssetPath — because podcast clients hammer it and each line would cost a
+      // write for nothing. Its failures still are.
+      const worthRecording = res.status >= 400 || !isHighVolumeAssetPath(path);
+      if (worthRecording) {
+        const fields = {
+          correlationId,
+          route,
+          durationMs: durationMs(),
+          context: { method: req.method, status: res.status },
+        };
+        const line = `${req.method} ${route} -> ${res.status}`;
+        if (res.status >= 500) await appLog.error("http.request", line, fields);
+        else if (res.status >= 400) await appLog.warn("http.request", line, fields);
+        else await appLog.event("http.request", line, fields);
+      }
+      const headers = new Headers(res.headers);
+      headers.set("x-correlation-id", correlationId);
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    } catch (error) {
+      await appLog.failure("http.request", error, {
+        correlationId,
+        route,
+        durationMs: durationMs(),
+      });
+      throw error;
+    }
+  };
 
   console.log(
     `[audio-feed] ${stores.describe} base=${config.publicBaseUrl ?? "<derived from each request>"}`,

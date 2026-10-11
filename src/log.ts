@@ -142,3 +142,51 @@ export function nullLogger(process: LogProcess = "cli"): Logger {
   const sink: LogSink = { appendLog: () => Promise.resolve(null) };
   return createLogger({ sink, process });
 }
+
+/**
+ * Turn a request path into something safe to record (audio-feed-wzv9).
+ *
+ * A URL path is the one place this codebase carries a capability with no field name attached:
+ * `/listen/<feedToken>` opens a subscriber's private feed, `/audio/<key>` is the enclosure, and
+ * `/feed/<token>/master.xml` is what a podcast client holds. The store redacts by field NAME, so
+ * none of that protection applies here — the redaction has to happen before the value is ever a
+ * field, which is why this function exists rather than a convention at the call site.
+ *
+ * Two rules, applied in order: known routes have their capability segment replaced by a label, and
+ * any remaining segment long enough to be a token is replaced too. A query string is never logged
+ * at all, because it is where a token ends up when someone is not thinking about it.
+ */
+export function redactRoutePath(path: string): string {
+  const withoutQuery = path.split("?")[0]?.split("#")[0] ?? "";
+  const segments = withoutQuery.split("/").filter((segment) => segment.length > 0);
+  const head = segments[0] ?? "";
+
+  // Shapes the app actually serves. Named explicitly so the redaction does not depend on a
+  // heuristic noticing that a feed token happens to look random.
+  if (head === "listen" && segments.length > 1) return "/listen/:token";
+  if (head === "feed" && segments.length > 1) {
+    const rest = segments.slice(2).join("/");
+    return rest ? `/feed/:token/${rest}` : "/feed/:token";
+  }
+  if (head === "audio" && segments.length > 1) return "/audio/:key";
+
+  const redacted = segments.map((
+    segment,
+  ) => (LOOKS_LIKE_TOKEN.test(segment) ? ":redacted" : segment));
+  const joined = `/${redacted.join("/")}`;
+  return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
+}
+
+/** A segment long and uniform enough to be a capability rather than a word. */
+const LOOKS_LIKE_TOKEN = /^[A-Za-z0-9_-]{24,}$/;
+
+/**
+ * Requests whose success is not worth a record: the enclosure and asset routes. Podcast clients
+ * hammer `/audio/:key+` and nothing is learned from each 200 — obs-4's traces are about queue
+ * wait, synthesis and write, not about a static byte count. Failures on these routes ARE logged.
+ */
+export function isHighVolumeAssetPath(path: string): boolean {
+  const clean = path.split("?")[0] ?? "";
+  return clean.startsWith("/audio/") || clean.startsWith("/assets/") ||
+    clean === "/icon.svg" || clean === "/manifest.json" || clean === "/favicon.ico";
+}

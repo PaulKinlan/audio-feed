@@ -127,6 +127,42 @@ export function registerCronJobs(
   cronFn(pollJob.name, pollJob.schedule, pollJob.handler);
   registrations.push(pollJob);
 
+  // 1b. Log retention, daily (audio-feed-wzv9). Not folded into the synthesis tick: pruning is a
+  // scan of the retained window, and doing it on a two-minute schedule to delete nothing would be
+  // 720 pointless reads a day. This runs when the store is quiet.
+  const retentionJob: CronRegistration = {
+    name: "audio-feed-log-retention",
+    schedule: "17 4 * * *",
+    handler: async () => {
+      try {
+        const { ctx } = await resolveContext();
+        const days = ctx.config.logRetentionDays;
+        if (days <= 0) {
+          console.log("[audio-feed] cron log retention: disabled (LOG_RETENTION_DAYS=0)");
+          return;
+        }
+        const before = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const pruned = await ctx.stores.metadata.pruneLogs(before);
+        // The record is written after pruning on purpose: it is the one line that must survive to
+        // say the retention rule ran, and it describes the state that now exists.
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: "info",
+          type: "observability.retention",
+          message: `pruned ${pruned} log record(s) older than ${days} day(s)`,
+          process: "cron",
+          job: "log-retention",
+          context: { pruned, retentionDays: days },
+        });
+        console.log(`[audio-feed] cron log retention: pruned ${pruned} record(s)`);
+      } catch (err) {
+        console.error("[audio-feed] cron log retention error:", err);
+      }
+    },
+  };
+  cronFn(retentionJob.name, retentionJob.schedule, retentionJob.handler);
+  registrations.push(retentionJob);
+
   // 2. Synthesize queue every 2 minutes
   const isStaticUnconfigured = typeof contextOrProvider !== "function" &&
     !contextOrProvider.config.geminiApiKey && !deps.synthesizer;
