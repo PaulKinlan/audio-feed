@@ -12,10 +12,14 @@
 import { assert, assertEquals } from "@std/assert";
 
 const source = await Deno.readTextFile("src/assets/cwv-stats.js");
-const { p98, largestSessionWindow } = new Function(
-  `${source}\nreturn { p98, largestSessionWindow };`,
+const { p98, largestSessionWindow, interactionLatencies, interactionP98 } = new Function(
+  `${source}\nreturn { p98, largestSessionWindow, interactionLatencies, interactionP98 };`,
 )() as {
   p98: (values: number[]) => number;
+  interactionLatencies: (
+    entries: { interactionId: number; duration: number }[],
+  ) => number[];
+  interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
   largestSessionWindow: (
     entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
   ) => { value: number; observed: boolean };
@@ -92,4 +96,38 @@ Deno.test("a zero CLS from a page that shifted is observed, not silence (audio-f
     false,
     "no shift was observed, so there is nothing to report",
   );
+});
+
+Deno.test("INP groups entries by interactionId before taking the percentile (audio-feed-dzgj)", () => {
+  const event = (interactionId: number, duration: number) => ({ interactionId, duration });
+
+  // The reviewer's reproduction: 59 interactions at 80ms and ONE interaction at 1000ms which emitted
+  // TWO entries. Percentile-over-entries counts that slow interaction twice, so its entries alone
+  // occupy the top of an otherwise fast distribution and the shipped INP was 1000ms.
+  const entries = [
+    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 80)),
+    event(60, 1000),
+    event(60, 1000),
+  ];
+  assertEquals(entries.length, 61, "61 entries");
+  assertEquals(interactionLatencies(entries).length, 60, "but 60 distinct interactions");
+  assertEquals(
+    p98(interactionLatencies(entries)),
+    80,
+    "nearest rank over 60 interactions: the 59th smallest, so the one slow interaction is above it",
+  );
+  assertEquals(interactionP98(entries), 80, "and that is the reported INP, not 1000");
+  // Stated as the property, so a revert to percentile-over-entries fails here rather than on a count.
+  assert(
+    interactionP98(entries) < 1000,
+    "one slow interaction cannot define the page's INP by itself",
+  );
+
+  // One interaction contributes ONE latency: the longest of its entries.
+  assertEquals(interactionLatencies([event(1, 40), event(1, 120), event(1, 90)]), [120]);
+
+  // Entries with no interactionId are not interactions (a scroll or a hover), so they are excluded
+  // rather than becoming a phantom interaction with id 0.
+  assertEquals(interactionLatencies([event(0, 500), event(1, 30)]), [30]);
+  assertEquals(interactionP98([event(0, 500)]), 0, "no interaction means nothing to report");
 });

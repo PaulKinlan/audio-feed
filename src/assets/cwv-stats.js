@@ -66,4 +66,34 @@ function largestSessionWindow(entries) {
  * tests/cwv_stats_test.ts evaluates THIS file rather than a copy of the arithmetic, so the browser
  * and the test cannot drift apart.
  */
-globalThis.cwvStats = { p98, largestSessionWindow };
+/**
+ * INP from Event Timing entries: GROUP FIRST, then take the percentile.
+ *
+ * Event Timing reports EVERY event of an interaction as its own entry, all sharing one
+ * `interactionId`. Feeding those entries to a percentile counts one slow interaction several times,
+ * so its entries can occupy the whole top of the distribution on their own — a single 1000ms
+ * interaction with two entries produced a shipped INP of 1000ms where the real answer was 80
+ * (audio-feed-dzgj).
+ *
+ * One interaction contributes ONE latency: the longest entry it produced. Entries with an
+ * `interactionId` of 0 are not interactions at all (a scroll, a hover) and are excluded, which is
+ * what the metric does.
+ */
+function interactionLatencies(entries) {
+  const longest = new Map();
+  for (const entry of entries) {
+    const id = entry.interactionId;
+    if (!id) continue;
+    const duration = entry.duration;
+    const current = longest.get(id);
+    if (current === undefined || duration > current) longest.set(id, duration);
+  }
+  return [...longest.values()];
+}
+
+/** INP: the nearest-rank 98th percentile ACROSS DISTINCT INTERACTIONS, not across entries. */
+function interactionP98(entries) {
+  return p98(interactionLatencies(entries));
+}
+
+globalThis.cwvStats = { p98, largestSessionWindow, interactionLatencies, interactionP98 };

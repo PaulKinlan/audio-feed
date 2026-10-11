@@ -50,13 +50,19 @@
     }).observe({ type: "layout-shift", buffered: true });
   } catch (_) { /* as above */ }
 
-  // INP: interaction latencies are collected, and the 98th percentile is sent below.
+  // INP: ENTRIES are collected, not latencies. Event Timing reports one entry per event, so several
+  // entries can belong to one interaction and only interactionP98 can turn them into the metric
+  // (audio-feed-dzgj).
+  //
+  // durationThreshold is 16ms, the lowest the platform allows, and it is an OPTIMISATION ONLY: a
+  // higher value (40, or the 104 default) silently drops short interactions, which biases the
+  // percentile upward — the reported value must not depend on how much work the observer chose to do.
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
-        interactions.push(entry.duration);
+        interactions.push(entry);
       });
-    }).observe({ type: "event", buffered: true, durationThreshold: 40 });
+    }).observe({ type: "event", buffered: true, durationThreshold: 16 });
   } catch (_) { /* as above */ }
 
   const send = (metric, value) => {
@@ -73,7 +79,7 @@
     if (sent) return;
     sent = true;
     if (lcp > 0) send("lcp", Math.round(lcp));
-    if (interactions.length > 0) send("inp", Math.round(p98(interactions)));
+    if (interactions.length > 0) send("inp", Math.round(interactionP98(interactions)));
     // Sent whenever the page shifted at all, including a score of exactly zero (audio-feed-d55l):
     // zero is a real, good measurement. Three decimals, because CLS is a small ratio and rounding to
     // an integer would report every score as zero.
