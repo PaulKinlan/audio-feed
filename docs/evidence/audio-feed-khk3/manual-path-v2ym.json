@@ -1,0 +1,9 @@
+{
+  "bead": "audio-feed-v2ym",
+  "path": "POST /api/admin/synthesize-now",
+  "configuredCeiling": 1,
+  "requests": 12,
+  "queuedEpisodes": 60,
+  "paidTtsCalls": 1,
+  "advertisedCeiling": 1
+}

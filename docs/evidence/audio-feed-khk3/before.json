@@ -1,0 +1,90 @@
+{
+  "bead": "audio-feed-khk3",
+  "user": {
+    "id": "unbudgeted-user",
+    "dailyEpisodeBudget": null
+  },
+  "queuedEpisodes": 60,
+  "ticks": 12,
+  "batchSize": 5,
+  "paidTtsCalls": 60,
+  "readyTotal": 60,
+  "deferredTotal": 0,
+  "countedTodayInStore": 60,
+  "firstTickWithDeferral": null,
+  "deferReasons": [],
+  "perTick": [
+    {
+      "tick": 0,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 1,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 2,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 3,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 4,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 5,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 6,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 7,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 8,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 9,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 10,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 11,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    }
+  ]
+}

@@ -70,6 +70,7 @@ import {
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
 import { collect } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -119,6 +120,18 @@ export interface SynthesisWorkerOptions {
    * Defaults to MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS.
    */
   maxInputBytes?: number;
+  /**
+   * The daily per-user episode ceiling applied to a subscriber with no
+   * `dailyEpisodeBudget` of their own (audio-feed-khk3). Defaults to the deployment's
+   * `config.defaultDailyEpisodeBudget`, then to DEFAULT_DAILY_EPISODE_BUDGET — and a
+   * value that is not a finite number >= 0 falls back the same way, so there is no
+   * value of this option, and no state of the user record, that leaves a subscriber
+   * without a ceiling.
+   *
+   * Deliberately NOT a key of DEFAULTS above: the deployment value has to be able to win,
+   * and a default spread into the options object would have silently masked it.
+   */
+  defaultDailyEpisodeBudget?: number;
   /** How long a claim is honoured before another worker may take the episode. */
   leaseMs?: number;
   /** Claims per episode before it is abandoned as unprocessable. */
@@ -137,7 +150,7 @@ export interface SynthesisWorkerOptions {
  */
 const WORKER_ID = `worker-${crypto.randomUUID()}`;
 
-const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
+const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs" | "defaultDailyEpisodeBudget">> = {
   batchSize: 5,
   intervalMs: 15_000,
   maxAttempts: 3,
@@ -151,6 +164,51 @@ const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs">> = {
   // A full UUID: 8 hex digits could repeat a key still on the orphan list (audio-feed-8oz).
   revision: () => crypto.randomUUID(),
 };
+
+/**
+ * The daily ceiling in force for one subscriber, and where it came from.
+ *
+ * Called at BOTH gates — the gather-time fairness filter and the spend gate — so the two cannot
+ * disagree about who is over budget; before this they each carried their own copy of the condition.
+ *
+ * An unusable explicit budget (negative, NaN, non-integer, Infinity) is treated as ABSENT rather
+ * than as unlimited. The condition this replaces was `typeof budget === "number" && budget >= 0`,
+ * which is not a validity check: `Number("abc")` in the admin form produced NaN, NaN failed the
+ * comparison, and the budget was silently ignored — the same unbounded outcome as never setting one.
+ *
+ * A `deploymentDefault` that is not a finite number >= 0 also falls back to the constant, so no
+ * caller, test double or future refactor can hand this function a value that means "no ceiling".
+ */
+export function dailyEpisodeBudgetFor(
+  user: { dailyEpisodeBudget?: number } | null | undefined,
+  deploymentDefault?: number,
+): { limit: number; source: "user" | "default" } {
+  const own = user?.dailyEpisodeBudget;
+  if (typeof own === "number" && Number.isFinite(own) && own >= 0) {
+    return { limit: own, source: "user" };
+  }
+  const fallback = typeof deploymentDefault === "number" && Number.isFinite(deploymentDefault) &&
+      deploymentDefault >= 0
+    ? deploymentDefault
+    : DEFAULT_DAILY_EPISODE_BUDGET;
+  return { limit: fallback, source: "default" };
+}
+
+/**
+ * The deferral reason for a subscriber at their ceiling. The configured-budget wording is byte for
+ * byte what audio-feed-9mp shipped, because the admin console and its tests read it; a subscriber
+ * held by the deployment default gets the extra clause so an operator can tell a configured limit
+ * from the ceiling that was applied because nobody configured one (audio-feed-khk3).
+ */
+function budgetDeferReason(
+  budget: { limit: number; source: "user" | "default" },
+  spentToday: number,
+): string {
+  const base = `daily episode budget exceeded (limit: ${budget.limit}, used: ${spentToday}`;
+  return budget.source === "user"
+    ? `${base})`
+    : `${base}, source: deployment default - no per-user budget configured)`;
+}
 
 export interface SynthesisBatchResult {
   /** Episodes that became ready this tick. */
@@ -593,6 +651,35 @@ export async function runSynthesisBatch(
   options: SynthesisWorkerOptions = {},
 ): Promise<SynthesisBatchResult> {
   const opts = { ...DEFAULTS, ...options };
+  /**
+   * The deployment ceiling, resolved HERE from the context rather than threaded in by each caller
+   * (audio-feed-v2ym). The first version of this fix resolved it at the call sites, so the cron
+   * honoured `DEFAULT_DAILY_EPISODE_BUDGET` while the admin "synthesize now" route and
+   * `startSynthesisWorker` charged the constant instead — and the dashboard, which reads the config,
+   * advertised a limit those two paths were not applying. One resolution point means a new call site
+   * cannot forget: an explicit option (a test, an operator) wins, then the deployment's config, then
+   * the constant.
+   */
+  const deploymentDailyEpisodeBudget = options.defaultDailyEpisodeBudget ??
+    ctx.config.defaultDailyEpisodeBudget;
+  /** Users already reported as held by the deployment default this run (audio-feed-khk3). */
+  const warnedDefaultBudget = new Set<string>();
+  /**
+   * Spend visibility (audio-feed-khk3, the other half of the audio-feed-9mp ask): say so, once per
+   * run, when the ceiling that stopped work was the deployment default rather than a decision.
+   *
+   * Deliberately called from BOTH gates: the common case never reaches the spend gate at all,
+   * because a subscriber already over budget is filtered out while the batch is being gathered, so
+   * a warning that lived only in the spend gate would stay silent exactly when it matters. A
+   * configured budget stays quiet — it is doing what its owner told it to.
+   */
+  const warnDefaultCeiling = (userId: string, limit: number): void => {
+    if (warnedDefaultBudget.has(userId)) return;
+    warnedDefaultBudget.add(userId);
+    console.warn(
+      `[audio-feed] holding work for user ${userId} at the deployment default daily ceiling of ${limit} (no per-user budget configured; set DEFAULT_DAILY_EPISODE_BUDGET or this subscriber's budget) (audio-feed-khk3)`,
+    );
+  };
   const result: SynthesisBatchResult = {
     ready: [],
     failed: [],
@@ -658,13 +745,12 @@ export async function runSynthesisBatch(
     if (reason === null) {
       try {
         const user = await metadata.getUser(userId);
-        if (user && typeof user.dailyEpisodeBudget === "number" && user.dailyEpisodeBudget >= 0) {
-          const today = utcDayKey(new Date(nowMs));
-          const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
-          if (spentToday >= user.dailyEpisodeBudget) {
-            reason =
-              `daily episode budget exceeded (limit: ${user.dailyEpisodeBudget}, used: ${spentToday})`;
-          }
+        const budget = dailyEpisodeBudgetFor(user, deploymentDailyEpisodeBudget);
+        const today = utcDayKey(new Date(nowMs));
+        const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
+        if (spentToday >= budget.limit) {
+          reason = budgetDeferReason(budget, spentToday);
+          if (budget.source === "default") warnDefaultCeiling(userId, budget.limit);
         }
       } catch (err) {
         // Fail closed for spend ceiling: if daily count cannot be verified, defer rather than spending
@@ -727,21 +813,17 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    // Check budget at spend gate (audio-feed-9mp, audio-feed-akm)
+    // Check budget at spend gate (audio-feed-9mp, audio-feed-akm, audio-feed-khk3)
     try {
       const spendUser = await metadata.getUser(episode.userId);
-      if (
-        spendUser && typeof spendUser.dailyEpisodeBudget === "number" &&
-        spendUser.dailyEpisodeBudget >= 0
-      ) {
-        const today = utcDayKey(new Date(nowMs));
-        const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
-        if (spentToday >= spendUser.dailyEpisodeBudget) {
-          const reason =
-            `daily episode budget exceeded (limit: ${spendUser.dailyEpisodeBudget}, used: ${spentToday})`;
-          result.deferred.push({ episodeId: episode.id, reason });
-          continue;
-        }
+      const budget = dailyEpisodeBudgetFor(spendUser, deploymentDailyEpisodeBudget);
+      const today = utcDayKey(new Date(nowMs));
+      const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
+      if (spentToday >= budget.limit) {
+        const reason = budgetDeferReason(budget, spentToday);
+        if (budget.source === "default") warnDefaultCeiling(episode.userId, budget.limit);
+        result.deferred.push({ episodeId: episode.id, reason });
+        continue;
       }
     } catch (err) {
       // Fail closed: if budget verification fails, defer rather than spending blindly

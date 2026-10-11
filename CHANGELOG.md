@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **Unbounded paid synthesis when no per-subscriber budget was configured (audio-feed-khk3)**: the
+  daily episode ceiling was enforced only when a subscriber had a `dailyEpisodeBudget` of their own,
+  so a subscriber without one — including the ones nobody had configured yet and any budget that the
+  admin form failed to parse into a number — could be synthesised without limit for as long as
+  episodes were queued. The ceiling now falls back to `DEFAULT_DAILY_EPISODE_BUDGET` (50 per
+  subscriber per UTC day, settable; `0` means an unconfigured subscriber gets nothing), and there is
+  no longer any value of the user record, the worker option or the environment that leaves a
+  subscriber uncapped. Exceeding the ceiling still DEFERS rather than fails, so the episodes are
+  served the next day. `GET /api/admin/stats` reports each subscriber's effective ceiling, its
+  source, and `usersWithoutBudget`, and a subscriber held by the default logs one line per run.
 - **Host-injection hardening (audio-feed-fp4r)**: new `ALLOWED_HOSTS` environment variable
   (comma-separated). When set, the advertised origin — feed `selfUrl`, enclosure URLs, redirects,
   and the WebAuthn RP ID derived from it — can only ever be a listed host; requests arriving on any

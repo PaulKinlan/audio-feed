@@ -93,7 +93,23 @@ STORAGE_REGION=auto
 
 # Optional: system default narration voice
 # DEFAULT_VOICE=Aoede
+
+# Optional: daily episodes synthesised per subscriber who has no budget of their own.
+# Unset means 50. 0 means an unconfigured subscriber synthesises nothing.
+# DEFAULT_DAILY_EPISODE_BUDGET=50
 ```
+
+### Daily spend ceiling
+
+Paid synthesis is capped per subscriber per UTC day. A subscriber can be given their own
+`dailyEpisodeBudget` in the admin console; a subscriber without one is held to
+`DEFAULT_DAILY_EPISODE_BUDGET` (50 by default) rather than being left uncapped. Episodes over the
+ceiling are **deferred, not failed** — nothing is spent, and they are picked up the next day when
+the counter resets. Deferrals are visible three ways: the run history records a reason naming the
+ceiling and whether it was the subscriber's own budget or the deployment default, a subscriber held
+by the default logs one line per run, and `GET /api/admin/stats` reports each subscriber's effective
+ceiling plus a count of subscribers running on the default (`usersWithoutBudget`). There is no
+setting that removes the ceiling: "effectively unlimited" is chosen by naming a large number.
 
 ### Default narration voice
 

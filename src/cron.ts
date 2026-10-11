@@ -143,6 +143,9 @@ export function registerCronJobs(
             ctx,
             "synthesis",
             "cron",
+            // The deployment's daily ceiling is resolved inside runSynthesisBatch from ctx.config
+            // (audio-feed-v2ym), so no call site — cron, the manual route, the poll loop — can
+            // thread a different one.
             () => runSynthesisBatch(ctx, synthesizer),
             (r) => ({
               ready: r.ready.length,
