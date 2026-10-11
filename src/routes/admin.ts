@@ -99,6 +99,9 @@ export function renderAdminPage(
     produce audio until they are approved — that gate is what keeps synthesis
     spend to people you have accepted.
   </p>
+  <!-- audio-feed-n6uu: the failures and job state Paul asked to see without copying
+       anything out of the UI. Read-only, behind the same admin gate. -->
+  <p><a href="/admin/observability">Observability — recent failures and queue state</a></p>
 
   ${
     adminConfigured || signedIn ? "" : `<div class="card" role="alert">

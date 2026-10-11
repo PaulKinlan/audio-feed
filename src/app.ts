@@ -34,6 +34,7 @@ import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { sessionUser } from "./auth/sessions.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
+import { handleAdminObservability } from "./routes/admin_observability.ts";
 import { handleLogin } from "./routes/login.ts";
 import { handleAccount } from "./routes/account.ts";
 import {
@@ -127,6 +128,9 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // every byte of that data comes from the token-gated /api/admin/users routes
   // (audio-feed-z2s).
   router.get("/admin", handleAdmin);
+  // audio-feed-n6uu: the observability page. Same session + isActiveAdmin gate as /admin (the
+  // handler applies it); registered as its own route so the console shell stays data-free.
+  router.get("/admin/observability", handleAdminObservability);
   // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.
   router.get("/login", handleLogin);
   router.get("/account", handleAccount);

@@ -275,7 +275,16 @@ export function createEpisodesRepository(
       });
       state.episodes.set(key, claimed);
       return host()
-        .appendLog(claimLifecycleEvent(claimed, { phase: CLAIM_START_PHASE, attempt: attempts }))
+        .appendLog(claimLifecycleEvent(claimed, {
+          phase: CLAIM_START_PHASE,
+          attempt: attempts,
+          // Same fields the KV adapter writes, for the same reason (audio-feed-n6uu): the owner of
+          // a past attempt and the lease it ran under are otherwise not durable anywhere.
+          context: { owner: claim.owner, leaseMs: claim.leaseMs, maxClaims: claim.maxClaims },
+          // Same instant the episode records as claimedAt, so the lease the page computes and the
+          // lease the store enforces cannot disagree (audio-feed-n6uu).
+          time: claim.now,
+        }))
         .then(() => structuredClone(claimed));
     },
     touchEpisodeClaim(
