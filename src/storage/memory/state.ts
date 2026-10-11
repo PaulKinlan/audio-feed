@@ -19,7 +19,7 @@ import type {
   SynthesisSegmentRecord,
   User,
 } from "../../types.ts";
-import { type RunRecord } from "../mod.ts";
+import { type LogRecord, type RunRecord } from "../mod.ts";
 
 export interface MemoryState {
   users: Map<string, User>;
@@ -47,6 +47,14 @@ export interface MemoryState {
   synthesisByDay: Map<string, number>;
   outbox: OutboxNotification[];
   runs: RunRecord[];
+  /**
+   * Structured log records, oldest first (audio-feed-wzv9). Single-threaded here, so a plain
+   * counter is already the atomic sequence the KV adapter needs a compare-and-swap for.
+   */
+  logs: LogRecord[];
+  logSeq: number;
+  /** The newest seq pruned, contiguously from the start. What `bounds()` reports from. */
+  logWatermark: number;
   // Accounts (audio-feed-8fc).
   sessions: Map<string, Session>;
   credentials: Map<string, PasskeyCredential>;
@@ -76,6 +84,9 @@ export function createMemoryState(): MemoryState {
     synthesisByDay: new Map<string, number>(),
     outbox: [],
     runs: [],
+    logs: [],
+    logSeq: 0,
+    logWatermark: 0,
     sessions: new Map<string, Session>(),
     credentials: new Map<string, PasskeyCredential>(),
     setupLinks: new Map<string, SetupLink>(),

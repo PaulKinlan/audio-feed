@@ -23,6 +23,10 @@ import {
   type DownloadCounts,
   type EpisodeClaim,
   type EpisodeQuery,
+  type LogBounds,
+  type LogQuery,
+  type LogRecord,
+  type LogSummary,
   type MetadataRepositories,
   type MetadataStore,
   resolveRange,
@@ -40,6 +44,7 @@ import { createOrphanBlobsRepository } from "./memory/orphan-blobs.ts";
 import { createUsageRepository } from "./memory/usage.ts";
 import { createNotificationsRepository } from "./memory/notifications.ts";
 import { createRunsRepository } from "./memory/runs.ts";
+import { createLogsRepository } from "./memory/logs.ts";
 import { createAuthRepository } from "./memory/auth.ts";
 
 // The collections and the sort helpers moved to ./memory/state.ts (audio-feed-8r1e); they
@@ -145,6 +150,7 @@ export class MemoryMetadataStore implements MetadataStore {
       orphanBlobs: createOrphanBlobsRepository(this.#state, () => this),
       usage: createUsageRepository(this.#state, () => this),
       notifications: createNotificationsRepository(this.#state, () => this),
+      logs: createLogsRepository(this.#state, () => this),
       runs: createRunsRepository(this.#state, () => this),
       auth: createAuthRepository(this.#state, () => this),
     };
@@ -369,6 +375,22 @@ export class MemoryMetadataStore implements MetadataStore {
   }
   listRuns(limit?: number): Promise<RunRecord[]> {
     return this.repositories.runs.listRuns(limit);
+  }
+  // -- logs (audio-feed-wzv9) --
+  appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
+    return this.repositories.logs.appendLog(record);
+  }
+  listLogs(query?: LogQuery): Promise<LogRecord[]> {
+    return this.repositories.logs.listLogs(query);
+  }
+  logBounds(): Promise<LogBounds> {
+    return this.repositories.logs.logBounds();
+  }
+  summarizeLogs(query?: LogQuery): Promise<LogSummary> {
+    return this.repositories.logs.summarizeLogs(query);
+  }
+  pruneLogs(before: Date): Promise<number> {
+    return this.repositories.logs.pruneLogs(before);
   }
   // -- auth --
   putSession(session: Session): Promise<void> {
