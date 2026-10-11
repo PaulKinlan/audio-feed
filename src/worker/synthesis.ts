@@ -1369,6 +1369,8 @@ export async function runSynthesisBatch(
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
     let currentEpisode = claimed;
+    const hadScriptTurnsInitially = Boolean(claimed.scriptTurns?.length);
+
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
         audio = await synthesize({
@@ -1393,13 +1395,31 @@ export async function runSynthesisBatch(
             : new InvocationBudgetAbortError(0, 0, "Invocation budget reached");
           lastError = yieldErr;
 
-          // audio-feed-vqu4, audio-feed-q7zy, audio-feed-zni7: clean yield to respect invocation budget
+          // FOUR-PROPERTY SYNTHESIS INVOCATION INVARIANT (audio-feed-fsr3):
+          // 1. Bound: Per-invocation work is bounded by maxDurationMs and maxSegments.
+          // 2. Preflight: Work is verified to fit before initiation, yielding if margin is insufficient.
+          // 3. Provenance: Only our explicit InvocationBudgetAbortError sentinel yields; provider/lease aborts take retry/failure.
+          // 4. Progress: Every yield must either make durable progress (turns completed or scriptTurns checkpointed) resetting attempts to 0,
+          //    or count against opts.maxAttempts. Zero-progress budget yields advance attempts and fail once maxAttempts is exhausted,
+          //    preventing infinite livelocks across cron ticks.
+          const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
+          const madeProgress = yieldErr.completedTurns > 0 ||
+            (Boolean(refreshed?.scriptTurns?.length) && !hadScriptTurnsInitially) ||
+            (refreshed?.phase === "script_generated" && claimed.phase !== "script_generated");
+
+          if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
+            // Refuse infinite livelock: zero progress across maxAttempts must fail the episode.
+            break;
+          }
+
+          // Clean yield to respect invocation budget: resets attempts to 0 on progress, or advances attempts on zero progress.
           const yielded = await metadata.yieldEpisodeClaim(
             currentEpisode.userId,
             currentEpisode.id,
             opts.owner,
             {
               phase: `synthesized_${yieldErr.completedTurns}_of_${yieldErr.totalTurns}`,
+              advanceAttempts: !madeProgress,
             },
           );
           if (yielded) {

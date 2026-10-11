@@ -296,7 +296,7 @@ export function createEpisodesRepository(
         claimedBy: undefined,
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
-        attempts: update?.advanceAttempts ? (current.attempts ?? 0) + 1 : 0,
+        attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
       };
       writeEpisode(state, yielded);
       return Promise.resolve(true);

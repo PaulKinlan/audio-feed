@@ -856,7 +856,7 @@ Deno.test("audio-feed-vvwb: a stage that would take longer than the budget is ab
     assert(simulatedMs <= 45, `elapsed (${simulatedMs}) must be <= budget (45)`);
     const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort");
     assertEquals(ep?.status, "pending", "episode must be pending for next tick");
-    assertEquals(ep?.attempts, 0, "attempts must be 0 (not incremented on yield)");
+    assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
   } finally {
     performance.now = originalNow;
   }
@@ -1066,7 +1066,7 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
 
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-script",
-    maxAttempts: 1,
+    maxAttempts: 2,
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 1,
@@ -1078,7 +1078,7 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
 
   const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-script");
   assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
-  assertEquals(ep?.attempts, 0, "attempts must be reset to 0");
+  assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
 });
 
 Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecycle and fails episode (no livelock)", async () => {
@@ -1174,4 +1174,74 @@ Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle and do
 
   const ep = await stores.metadata.getEpisode("user-1", "ep-lease-abort");
   assertEquals(ep?.status, "failed");
+});
+
+Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts and fail episode without livelocking", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-fsr3-stall",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  let scriptCalls = 0;
+  const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
+    scriptCalls++;
+    return new Promise<{
+      turns: { speaker: "Alex" | "Sam"; text: string }[];
+      sources: [];
+      counterarguments: [];
+      researchSummary: "";
+    }>((_resolve, reject) => {
+      options?.signal?.addEventListener(
+        "abort",
+        () => reject(options.signal?.reason ?? new Error("aborted")),
+        { once: true },
+      );
+    });
+  };
+
+  const client = new GeminiTtsClient({ apiKey: "dummy" });
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: slowScriptGenerator,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+  });
+
+  // Tick 1 with maxAttempts: 2 -> yields, advances attempts to 1
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-fsr3-1",
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    maxAttempts: 2,
+  });
+  assertEquals(r1.yielded.length, 1);
+  assertEquals(r1.failed.length, 0);
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.attempts, 1, "zero-progress yield must preserve attempt count");
+
+  // Tick 2 with maxAttempts: 2 -> attempts exhausted without progress, must FAIL
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-fsr3-2",
+    maxInvocationDurationMs: 100,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    maxAttempts: 2,
+  });
+  assertEquals(r2.yielded.length, 0, "must not yield indefinitely");
+  assertEquals(r2.failed.length, 1, "must fail after maxAttempts zero-progress yields");
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
+  assertEquals(ep2?.status, "failed", "episode must terminate as failed");
+  assertStringIncludes(ep2?.error ?? "", "exceeded");
+  assertEquals(scriptCalls, 2, "script was called on each attempt");
 });
