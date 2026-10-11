@@ -277,13 +277,17 @@ export interface MigrationLockRecord {
 /**
  * Single-writer migration lock guard across isolates and processes.
  * Returns true if acquired, false if actively held by a live holder with fresh heartbeat (audio-feed-hrfn).
+ * `nowMs` lets tests drive the expiry logic with fixed timestamps instead of sleeping real
+ * milliseconds against a real lease — a test that sleeps measures the machine, not the
+ * lock (audio-feed-y2ex).
  */
 export async function acquireMigrationLock(
   metadata: MetadataStore,
   holder: string,
   leaseMs = 600_000,
+  nowMs?: number,
 ): Promise<boolean> {
-  const now = Date.now();
+  const now = nowMs ?? Date.now();
   const res = await metadata.atomicUpdate<MigrationLockRecord>(
     "migration_lock:legacy_audio_keys",
     (current) => {
@@ -304,13 +308,15 @@ export async function acquireMigrationLock(
 /**
  * Renews the migration lock heartbeat. Must be called periodically while the holder is active.
  * Returns true if renewed, false if lock was lost or taken over (audio-feed-hrfn).
+ * `nowMs` for the same reason as acquireMigrationLock: fixed-time tests, not sleeps.
  */
 export async function renewMigrationLock(
   metadata: MetadataStore,
   holder: string,
   leaseMs = 600_000,
+  nowMs?: number,
 ): Promise<boolean> {
-  const now = Date.now();
+  const now = nowMs ?? Date.now();
   const res = await metadata.atomicUpdate<MigrationLockRecord>(
     "migration_lock:legacy_audio_keys",
     (current) => {

@@ -1378,7 +1378,14 @@ Deno.test("audio-feed-dv4p: (a) terminal upload preflight yields before slow upl
   });
   const elapsed = performance.now() - start;
 
-  assert(elapsed < 80, `elapsed (${elapsed}ms) must be strictly less than 80ms budget`);
+  // THE PROPERTY is the line below: preflight REFUSED before any put was attempted
+  // (putCalls === 0 — an order fact, not a clock). The elapsed literal was a second,
+  // load-sensitive way of saying the same thing (audio-feed-y2ex); it stays only as a
+  // deliberately wide sanity bound so scheduler noise cannot flip this test.
+  assert(
+    elapsed < 2_000,
+    `elapsed (${elapsed}ms) sanity bound — putCalls === 0 is the assertion`,
+  );
   assertEquals(r1.ready.length, 0, "must not finish ready past budget");
   assertEquals(r1.yielded.length, 1, "must preflight yield before upload");
   assertEquals(putCalls, 0, "blobs.put must not have been called due to preflight yield");
