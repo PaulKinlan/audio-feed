@@ -999,6 +999,72 @@ export function buildSegmentResume(
  * Exported separately from the loop so a test (and an operator with a CLI) can
  * drain the queue once without starting a timer.
  */
+interface PendingAccountingItem {
+  id: string;
+  userId: string;
+  byteLength: number;
+  at: number;
+}
+
+interface PendingAccountingQueue {
+  pending: PendingAccountingItem[];
+}
+
+async function queuePendingAccounting(
+  metadata: MetadataStore,
+  userId: string,
+  byteLength: number,
+  at: number,
+): Promise<void> {
+  const item: PendingAccountingItem = {
+    id: crypto.randomUUID(),
+    userId,
+    byteLength,
+    at,
+  };
+  // Retry atomicUpdate until committed so it is never dropped (audio-feed-uecw)
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await metadata.atomicUpdate<PendingAccountingQueue>(
+      "pending_synthesis_accounting",
+      (current) => ({
+        pending: [...(current?.pending ?? []), item],
+      }),
+    );
+    if (res.committed) return;
+  }
+  throw new Error(`Failed to persist durable pending accounting for user ${userId}`);
+}
+
+async function drainPendingAccounting(metadata: MetadataStore): Promise<void> {
+  // Acknowledge only what was settled: pop one entry per atomic update after settling it (audio-feed-uecw)
+  while (true) {
+    let nextItem: PendingAccountingItem | undefined;
+    // Peek the first unsettled item
+    const read = await metadata.atomicUpdate<PendingAccountingQueue>(
+      "pending_synthesis_accounting",
+      (current) => {
+        nextItem = current?.pending?.[0];
+        return current; // Do not mutate yet!
+      },
+    );
+    if (!read.committed || !nextItem) {
+      break;
+    }
+
+    // Settle it with the store
+    await metadata.recordSynthesis(nextItem.userId, nextItem.byteLength, new Date(nextItem.at));
+
+    // Settle succeeded! Now atomically pop this exact item by ID
+    const targetId = nextItem.id;
+    await metadata.atomicUpdate<PendingAccountingQueue>(
+      "pending_synthesis_accounting",
+      (current) => ({
+        pending: (current?.pending ?? []).filter((p) => p.id !== targetId),
+      }),
+    );
+  }
+}
+
 export async function runSynthesisBatch(
   ctx: AppContext,
   synthesize: Synthesizer,
@@ -1194,21 +1260,9 @@ export async function runSynthesisBatch(
   let claimedAny = false;
   // Settle any durable pending accounting from previous ticks (audio-feed-uecw)
   try {
-    const pendingRec = await metadata.atomicUpdate<{
-      pending: Array<{ userId: string; byteLength: number; at: number }>;
-    }>(
-      "pending_synthesis_accounting",
-      (current) => (current?.pending?.length ? { pending: [] } : current),
-    );
-    if (pendingRec.committed && pendingRec.value?.pending) {
-      for (const item of pendingRec.value.pending) {
-        await metadata.recordSynthesis(item.userId, item.byteLength, new Date(item.at)).catch(
-          () => {},
-        );
-      }
-    }
-  } catch {
-    // Settle attempt next tick if KV temporarily unavailable
+    await drainPendingAccounting(metadata);
+  } catch (err) {
+    console.error("[audio-feed] failed to drain pending synthesis accounting:", err);
   }
 
   const inFlightUploadKeys = new Set<string>();
@@ -1529,12 +1583,22 @@ export async function runSynthesisBatch(
       completedTurns: 1,
       totalTurns: 1,
       cleanupOnAbort: async () => {
-        // Consult durable state: if completeEpisode won and already marked this episode ready
-        // with this stagingKey, REFUSE to delete the committed blob (audio-feed-y0da).
-        const current = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
-        if (current?.status === "ready" && current?.audioKey === stagingKey) {
+        // Atomic decision on durable state (audio-feed-y0da):
+        // Reverting the claim to pending via atomic CAS decides whether abort won or commit won.
+        // If yieldEpisodeClaim returns false, completeEpisode already committed 'ready'
+        // (or another worker superseded). We MUST NOT delete the blob or mark it orphan!
+        const yielded = await metadata.yieldEpisodeClaim(
+          currentEpisode.userId,
+          currentEpisode.id,
+          opts.owner,
+          { phase: "audio_synthesized", now: new Date(nowMs).toISOString() },
+        );
+        if (!yielded) {
+          // Commit won the atomic CAS; refuse to delete committed audio!
           return;
         }
+
+        // We won the atomic transition: episode is safely back in 'pending' and completeEpisode cannot commit.
         // Idempotent settlement cleanup (audio-feed-fsbk):
         // 1. Immediately (and on background put settlement) delete stagingKey
         await blobs.delete(stagingKey).catch(() => {});
@@ -1578,14 +1642,6 @@ export async function runSynthesisBatch(
           throw signal.reason;
         }
 
-        // Mutual exclusivity: if cleanupOnAbort ran first and recorded an orphan, refuse to commit (audio-feed-y0da)
-        const currentOrphans = await metadata.listOrphanBlobs(10);
-        if (currentOrphans.includes(stagingKey)) {
-          throw new Error(
-            `Cannot complete episode: staging key ${stagingKey} was orphaned by budget abort`,
-          );
-        }
-
         const byteLength = stored.size ?? bytes.length;
         const wrote = await metadata.completeEpisode({
           ...currentEpisode,
@@ -1614,18 +1670,7 @@ export async function runSynthesisBatch(
               `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
               err,
             );
-            // Settle failure durably via atomicUpdate so subsequent tick commits it
-            await metadata.atomicUpdate<{
-              pending: Array<{ userId: string; byteLength: number; at: number }>;
-            }>(
-              "pending_synthesis_accounting",
-              (current) => ({
-                pending: [
-                  ...(current?.pending ?? []),
-                  { userId: currentEpisode.userId, byteLength, at: nowMs },
-                ],
-              }),
-            ).catch(() => {});
+            await queuePendingAccounting(metadata, currentEpisode.userId, byteLength, nowMs);
           }
         }
 
@@ -1644,7 +1689,14 @@ export async function runSynthesisBatch(
             current.byteLength ?? bytes.length,
             new Date(nowMs),
           );
-        } catch { /* ignored */ }
+        } catch {
+          await queuePendingAccounting(
+            metadata,
+            currentEpisode.userId,
+            current.byteLength ?? bytes.length,
+            nowMs,
+          );
+        }
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,

@@ -1609,6 +1609,36 @@ Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode d
   assertEquals(result.ready.length, 1, "batch must report episode as ready when commit won");
 });
 
+Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically before delayed commit can win (never ready with deleted audio)", async () => {
+  const { ctx, stores } = await setupEnv();
+  const complete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    // Simulate delay BEFORE completeEpisode commits
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    return await complete(...args);
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-terminal-race-pre-commit",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 190));
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  // The abort won the atomic transition: episode must be pending, not ready!
+  assertEquals(
+    episode?.status,
+    "pending",
+    "episode must not become ready when abort won atomic transition",
+  );
+  assertEquals(result.ready.length, 0, "batch must not report episode as ready when abort won");
+  if (episode?.audioKey) {
+    const blob = await stores.blobs.get(episode.audioKey);
+    assertEquals(blob, null, "aborted staging blob must be cleaned up");
+  }
+});
+
 Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal completion", async () => {
   const { ctx, stores } = await setupEnv();
   const put = stores.blobs.put.bind(stores.blobs);
@@ -1627,4 +1657,65 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
   const today = new Date().toISOString().slice(0, 10);
   const count = await stores.metadata.getDailySynthesisCount(today);
   assertEquals(count, 1, "daily synthesis count must be recorded as part of terminal path");
+});
+
+Deno.test("audio-feed-uecw: pending accounting queue settles and drains atomically on subsequent ticks", async () => {
+  const { ctx, stores } = await setupEnv();
+  // Simulate transient failure in recordSynthesis during batch
+  const origRecord = stores.metadata.recordSynthesis.bind(stores.metadata);
+  let failRecord = true;
+  stores.metadata.recordSynthesis = async (...args) => {
+    if (failRecord) {
+      throw new Error("transient accounting store failure");
+    }
+    return await origRecord(...args);
+  };
+
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-accounting-drain",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1, "episode completed ready");
+
+  // Verify pending accounting queue in durable store holds the pending record
+  const queue = await stores.metadata.atomicUpdate<
+    { pending: Array<{ id: string; userId: string; byteLength: number }> }
+  >(
+    "pending_synthesis_accounting",
+    (c) => c,
+  );
+  assertEquals(
+    queue.value?.pending.length,
+    1,
+    "pending accounting record must be queued in durable store",
+  );
+
+  // On next tick with store healthy, drainPendingAccounting drains and acknowledges the item
+  failRecord = false;
+  await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-accounting-drain-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 1, "daily synthesis count must be credited after durable queue drain");
+
+  const queueAfter = await stores.metadata.atomicUpdate<
+    { pending: Array<{ id: string; userId: string }> }
+  >(
+    "pending_synthesis_accounting",
+    (c) => c,
+  );
+  assertEquals(
+    queueAfter.value?.pending.length,
+    0,
+    "drained item must be atomically popped from queue",
+  );
 });
