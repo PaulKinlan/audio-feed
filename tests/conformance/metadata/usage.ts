@@ -72,6 +72,31 @@ export function registerUsageCases(suite: MetadataHarness) {
     assertEquals(await store.getUserDailySynthesisCount("user-a", "2026-09-27"), 0);
   });
 
+  test("recordSynthesis validates bytes as a non-negative integer (audio-feed-do6b)", async (store) => {
+    const invalidBytes = [
+      Number.NaN,
+      -100,
+      -1,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      5.5,
+    ];
+    for (const invalid of invalidBytes) {
+      let threw = false;
+      try {
+        await store.recordSynthesis("user-x", invalid);
+      } catch (err) {
+        threw = true;
+        assert(err instanceof TypeError, `bytes ${invalid} must throw TypeError`);
+      }
+      assertEquals(threw, true, `bytes ${invalid} must be rejected`);
+    }
+
+    const s = await store.getSynthesisCounts();
+    assertEquals(s.total, 0);
+    assertEquals(s.totalBytes, 0);
+  });
+
   test("recordSynthesis counts per user, total, and daily window (audio-feed-9mp)", async (store) => {
     const day = "2026-09-27";
     const date = new Date("2026-09-27T12:00:00.000Z");

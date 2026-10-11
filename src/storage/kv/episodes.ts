@@ -518,10 +518,14 @@ export function createEpisodesRepository(
       if (
         episode.status === "ready" &&
         !episode.error &&
-        (!billing || typeof billing.byteLength !== "number")
+        (!billing ||
+          typeof billing.byteLength !== "number" ||
+          !Number.isFinite(billing.byteLength) ||
+          !Number.isInteger(billing.byteLength) ||
+          billing.byteLength < 0)
       ) {
         throw new TypeError(
-          `completeEpisode requires a valid billing payload ({ byteLength: number }) when completing with status "ready" (audio-feed-9gqs)`,
+          `completeEpisode requires a valid billing payload ({ byteLength: non-negative integer }) when completing with status "ready" (audio-feed-9gqs, audio-feed-do6b)`,
         );
       }
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
