@@ -67,7 +67,7 @@ export function boundedBlobStore(
       }
     });
 
-  const check = (key: string, caller: string) => {
+  const admission = (key: string, caller: string): UnsignedPutError | null => {
     const entry = admit(key);
     if (entry) {
       if (warn && !warned.has(key)) {
@@ -76,36 +76,43 @@ export function boundedBlobStore(
           `[audio-feed] unsigned ${caller} allowed for "${key}": ${entry.reason} (audio-feed-y9kk)`,
         );
       }
-      return;
+      return null;
     }
-    throw new UnsignedPutError(
+    return new UnsignedPutError(
       key,
-      entry ??
-        `no allowlist entry admits it (${allowlist.length} entr${
-          allowlist.length === 1 ? "y" : "ies"
-        })`,
+      `no allowlist entry admits it (${allowlist.length} entr${
+        allowlist.length === 1 ? "y" : "ies"
+      })`,
     );
   };
 
   const wrapped: BlobStore = {
-    async put(key, body, opts) {
-      if (!opts?.signal) check(key, "put");
+    // Refusals surface as REJECTIONS, not sync throws, so await-based call sites see one
+    // failure mode — the same shape an aborted transfer produces.
+    put(key, body, opts) {
+      if (!opts?.signal) {
+        const refusal = admission(key, "put");
+        if (refusal) return Promise.reject(refusal);
+      }
       return store.put(key, body, opts);
     },
-    async putIfAbsent(key, body, opts) {
-      if (!opts?.signal) check(key, "putIfAbsent");
+    putIfAbsent(key, body, opts) {
+      if (!opts?.signal) {
+        const refusal = admission(key, "putIfAbsent");
+        if (refusal) return Promise.reject(refusal);
+      }
       return store.putIfAbsent(key, body, opts);
     },
-    async get(key, opts) {
+    get(key, opts) {
       return store.get(key, opts);
     },
-    async head(key) {
+    head(key) {
       return store.head(key);
     },
-    async delete(key) {
+    delete(key) {
       return store.delete(key);
     },
-    async url(key, opts) {
+    url(key, opts) {
       return store.url(key, opts);
     },
   };

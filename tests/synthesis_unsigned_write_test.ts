@@ -53,7 +53,7 @@ function guardingStore(
   const unsigned: string[] = [];
   const signals: AbortSignal[] = [];
   const store: BlobStore = {
-    async put(key, body, opts) {
+    put(key, body, opts) {
       if (opts?.signal) {
         signed.push(key);
         signals.push(opts.signal);
@@ -62,7 +62,7 @@ function guardingStore(
       }
       return inner.put(key, body, opts);
     },
-    async putIfAbsent(key, body, opts) {
+    putIfAbsent(key, body, opts) {
       if (opts?.signal) {
         signed.push(key);
         signals.push(opts.signal);
@@ -71,16 +71,16 @@ function guardingStore(
       }
       return inner.putIfAbsent(key, body, opts);
     },
-    async get(key, opts) {
+    get(key, opts) {
       return inner.get(key, opts);
     },
-    async head(key) {
+    head(key) {
       return inner.head(key);
     },
-    async delete(key) {
+    delete(key) {
       return inner.delete(key);
     },
-    async url(key, opts) {
+    url(key, opts) {
       return inner.url(key, opts);
     },
   };
@@ -236,19 +236,21 @@ Deno.test("audio-feed-y9kk: the TTS client hands the stage signal to the resume 
   const commitSignals: Array<AbortSignal | undefined> = [];
   const client = new GeminiTtsClient({
     apiKey: "test-key",
-    fetchFn: (async () => {
+    fetchFn: (() => {
       const pcm = new Uint8Array(96).map((_, i) => (i * 7) & 0x7f);
       const b64 = btoa(String.fromCharCode(...pcm));
-      return new Response(
-        JSON.stringify({
-          candidates: [{
-            content: {
-              parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: b64 } }],
-            },
-            finishReason: "STOP",
-          }],
-        }),
-        { headers: { "Content-Type": "application/json" } },
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [{
+              content: {
+                parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: b64 } }],
+              },
+              finishReason: "STOP",
+            }],
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
       );
     }) as typeof fetch,
   });
