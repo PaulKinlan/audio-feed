@@ -1569,10 +1569,62 @@ Deno.test("audio-feed-fsbk: timed-out upload cleanup cleans blob when put settle
     flushMarginMs: 5,
   });
   assertEquals(r.yielded.length, 1);
+  // Verify orphan record is retained in KV immediately at yield while put is in flight
+  const orphanAtYield = await stores.metadata.listOrphanBlobs(10);
+  assert(
+    orphanAtYield.includes(startedKey),
+    "orphan record must be retained in KV while put is in flight",
+  );
+
   // Wait for background delayed put to finish (135ms) + hook execution
   await new Promise((r) => setTimeout(r, 160));
   const staleBlob = await stores.blobs.get(startedKey);
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(staleBlob, null, "timed-out put must be cleaned up on settlement without lingering");
   assertEquals(episode?.status, "pending");
+});
+
+Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode does not delete committed blob", async () => {
+  const { ctx, stores } = await setupEnv();
+  const complete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    const result = await complete(...args);
+    // Simulate delay during completeEpisode return exceeding remaining budget
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    return result;
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-terminal-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 190));
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "ready", "committed episode must remain ready");
+  assert(episode?.audioKey, "ready episode must have audioKey");
+  const blob = await stores.blobs.get(episode.audioKey!);
+  assert(blob !== null, "committed blob must never be deleted by timeout abort");
+  assertEquals(result.ready.length, 1, "batch must report episode as ready when commit won");
+});
+
+Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal completion", async () => {
+  const { ctx, stores } = await setupEnv();
+  const put = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    return put(...args);
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-tail-skip",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(result.ready.length, 1, "episode must be completed ready");
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 1, "daily synthesis count must be recorded as part of terminal path");
 });

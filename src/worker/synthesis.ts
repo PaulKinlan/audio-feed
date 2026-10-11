@@ -1191,6 +1191,7 @@ export async function runSynthesisBatch(
   }
 
   let claimedAny = false;
+  const inFlightUploadKeys = new Set<string>();
   for (const { episode } of pending) {
     // Two approval checks, each for a different job:
     //  - the gather-time filter above decides fairly who gets the batch budget, so a
@@ -1489,7 +1490,10 @@ export async function runSynthesisBatch(
     const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
+    const inFlightStagingKey = stagingKey;
+    inFlightUploadKeys.add(inFlightStagingKey);
 
+    const terminalEstimate = uploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
     // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
     const terminalOutcome = await withInvocationBudget({
       name: "terminal_persistence",
@@ -1498,10 +1502,16 @@ export async function runSynthesisBatch(
         startTimeMonotonicMs: invocationStartMonotonicMs,
       },
       flushMarginMs: flushMargin,
-      worstCaseEstimateMs: uploadEstimate,
+      worstCaseEstimateMs: terminalEstimate,
       completedTurns: 1,
       totalTurns: 1,
       cleanupOnAbort: async () => {
+        // Consult durable state: if completeEpisode won and already marked this episode ready
+        // with this stagingKey, REFUSE to delete the committed blob (audio-feed-y0da).
+        const current = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
+        if (current?.status === "ready" && current?.audioKey === stagingKey) {
+          return;
+        }
         // Idempotent settlement cleanup (audio-feed-fsbk):
         // 1. Immediately (and on background put settlement) delete stagingKey
         await blobs.delete(stagingKey).catch(() => {});
@@ -1526,8 +1536,15 @@ export async function runSynthesisBatch(
         const putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
         putPromise
           .finally(async () => {
-            if (signal?.aborted) {
-              await blobs.delete(stagingKey).catch(() => {});
+            try {
+              if (signal?.aborted) {
+                // Delete materialized blob when delayed put settles
+                await blobs.delete(stagingKey).catch(() => {});
+                // Only forget orphan record once blob is confirmed deleted
+                await metadata.forgetOrphanBlob(stagingKey).catch(() => {});
+              }
+            } finally {
+              inFlightUploadKeys.delete(inFlightStagingKey);
             }
           })
           .catch(() => {});
@@ -1556,11 +1573,43 @@ export async function runSynthesisBatch(
           lastHeartbeat: new Date().toISOString(),
           scriptTurns: undefined,
         }, opts.owner);
+
+        if (wrote) {
+          // Accounting is part of the terminal path (audio-feed-uecw)
+          try {
+            await metadata.recordSynthesis(currentEpisode.userId, byteLength, new Date(nowMs));
+          } catch (err) {
+            console.error(
+              `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
+              err,
+            );
+          }
+        }
+
         return { stored, byteLength, wrote };
       },
     });
 
     if (terminalOutcome.kind === "budget-yield") {
+      // Check if completeEpisode actually committed ready before yielding claim (audio-feed-y0da):
+      const current = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
+      if (current?.status === "ready" && current?.audioKey === stagingKey) {
+        // Commit won! Ensure synthesis accounting was performed and mark episode ready.
+        try {
+          await metadata.recordSynthesis(
+            currentEpisode.userId,
+            current.byteLength ?? bytes.length,
+            new Date(nowMs),
+          );
+        } catch { /* ignored */ }
+        result.ready.push({
+          episodeId: currentEpisode.id,
+          audioKey: stagingKey,
+          byteLength: current.byteLength ?? bytes.length,
+        });
+        break;
+      }
+
       await metadata.yieldEpisodeClaim(
         currentEpisode.userId,
         currentEpisode.id,
@@ -1639,26 +1688,6 @@ export async function runSynthesisBatch(
         fn: () => notifyOnDemand(currentEpisode, "ready"),
       });
 
-      await withInvocationBudget({
-        name: "record_synthesis",
-        budget: {
-          maxDurationMs: maxInvocationDurationMs,
-          startTimeMonotonicMs: invocationStartMonotonicMs,
-        },
-        flushMarginMs: flushMargin,
-        worstCaseEstimateMs: 100,
-        fn: async () => {
-          try {
-            await metadata.recordSynthesis(currentEpisode.userId, byteLength, new Date(nowMs));
-          } catch (err) {
-            console.error(
-              `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
-              err,
-            );
-          }
-        },
-      });
-
       if (previousKey && previousKey !== audioKey) {
         await withInvocationBudget({
           name: "delete_previous_audio",
@@ -1712,6 +1741,12 @@ export async function runSynthesisBatch(
   // deleted: deleting it would leave the feed pointing at a missing file.
   if (claimedAny) {
     for (const key of await metadata.listOrphanBlobs(opts.batchSize)) {
+      if (inFlightUploadKeys.has(key)) {
+        // Upload is still in-flight in this isolate (audio-feed-fsbk).
+        // Retain the durable orphan record in KV until the put has settled, so if this isolate
+        // dies before settlement, a subsequent worker can clean up the orphan blob.
+        continue;
+      }
       const parsed = parseAudioBlobKey(key);
       if (!parsed) continue; // unparseable: left recorded for a human
       try {
