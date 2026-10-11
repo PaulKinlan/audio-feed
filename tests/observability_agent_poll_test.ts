@@ -1046,6 +1046,103 @@ Deno.test("a failed bd create HOLDS the cursor instead of advancing past the eve
   });
 });
 
+Deno.test("two concurrent reclaims of one stale lock: exactly ONE wins, every round (audio-feed-131z)", async () => {
+  // The defect: the reclaim path wrote the lock file (a plain overwrite) instead of using the exclusive
+  // create the normal path uses, so two invocations both stat'd the same stale mtime, both overwrote, and
+  // BOTH believed they held the lock - the reviewer measured 199/200 rounds. Each then loaded state before
+  // the other's reservation was durable, so both reserved and both called the model, which is how Paul's
+  // 24/day ceiling gets exceeded by the mechanism meant to enforce it.
+  //
+  // This asserts the PROPERTY, not a lucky run: over many rounds, the number of winners is exactly one,
+  // every time. A single round cannot distinguish "fixed" from "raced and got away with it".
+  await withTempDir(async (dir) => {
+    const { acquireLock, releaseLock, LOCK_FILE, STALE_LOCK_MS } = await import(
+      "../scripts/observability-agent-poll.ts"
+    );
+    const rounds = 40;
+    const winners: number[] = [];
+    for (let i = 0; i < rounds; i++) {
+      // A stale lock as a killed run leaves it, aged on the FILESYSTEM clock because that is what the
+      // reclaim judges.
+      const old = new Date(Date.now() - STALE_LOCK_MS - 60_000);
+      await Deno.writeTextFile(`${dir}/${LOCK_FILE}`, `stale from a killed run, round ${i}`);
+      await Deno.utime(`${dir}/${LOCK_FILE}`, old, old);
+
+      const now = new Date();
+      const results = await Promise.all([acquireLock(dir, now), acquireLock(dir, now)]);
+      winners.push(results.filter(Boolean).length);
+      await releaseLock(dir); // unconditional cleanup between rounds, no token
+    }
+    assertEquals(
+      winners.filter((w) => w !== 1).length,
+      0,
+      `every round must have exactly one winner; got ${JSON.stringify(winners)}`,
+    );
+  });
+});
+
+Deno.test("release refuses to delete a lock whose token is not this run's (audio-feed-131z)", async () => {
+  // If a stale reclaim moved our lock aside and another run took over, releasing by name would delete a
+  // LIVE lock and let a third run in. Ownership is the token, so it is checkable rather than assumed.
+  await withTempDir(async (dir) => {
+    const { acquireLock, releaseLock, LOCK_FILE, lockToken } = await import(
+      "../scripts/observability-agent-poll.ts"
+    );
+    const mine = lockToken(new Date());
+    assertEquals(await acquireLock(dir, new Date(), mine), true);
+    await releaseLock(dir, "some-other-run's-token");
+    const survived = await Deno.stat(`${dir}/${LOCK_FILE}`).then(() => true).catch(() => false);
+    assert(survived, "a release with the wrong token must leave the lock alone");
+    await releaseLock(dir, mine);
+    const gone = await Deno.stat(`${dir}/${LOCK_FILE}`).then(() => true).catch(() => false);
+    assert(!gone, "a release with the right token must remove it");
+  });
+});
+
+Deno.test("the backlog is newest minus the cursor advanced to, with no second term (audio-feed-95jc)", async () => {
+  // The defect: backlog = beyondPage + remainingInPage, but (window.newest - advanceTo) ALREADY contains
+  // the events left unsent in the page, so the in-page remainder was counted twice - the digest and the
+  // backlog bead overstated how far behind the poll was (measured 1100 against a true 800). Asserted as a
+  // PROPERTY against the cursor the run actually advanced to, so a reintroduced extra term fails it.
+  await withTempDir(async (dir) => {
+    const old = new Date(Date.parse("2026-10-11T12:00:00.000Z") - 8 * 3_600_000).toISOString();
+    const many = Array.from({ length: 300 }, (_, i) => event({ seq: i + 1, time: old }));
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 300, window: { oldestRetained: 1, newest: 300 } }),
+        }),
+      fetchErrors: () =>
+        Promise.resolve({ ok: true as const, body: page(many, { hasMore: true }) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      callModel: () =>
+        Promise.resolve({ ok: true, text: "[]", inputTokens: 10, outputTokens: 5, error: null }),
+      fileBead: (_b, s) => Promise.resolve(`audio-feed-fake-${s.title.length}`),
+    });
+    const { artifact } = await runOnce(config(dir), d);
+
+    // The run is genuinely capped, so there IS an in-page remainder - without that the extra term could
+    // never have been visible and this test would pass against the broken version.
+    assertEquals(artifact.truncated, true);
+    assert(
+      artifact.eventsSent < 300,
+      `the prompt must have been capped for this to be a real test; sent ${artifact.eventsSent}`,
+    );
+    assertEquals(
+      artifact.backlog,
+      300 - artifact.cursorAfter,
+      `backlog must be newest - cursorAfter; got ${artifact.backlog} for cursorAfter ` +
+        `${artifact.cursorAfter}, which double-counts if it equals ` +
+        `${300 - artifact.cursorAfter + (300 - artifact.eventsSent)}`,
+    );
+    assertEquals(
+      artifact.pagesRemaining,
+      Math.max(1, Math.ceil(artifact.backlog / MAX_EVENTS_PER_RUN)),
+    );
+  });
+});
+
 Deno.test("the runner propagates a cap refusal instead of reporting success (audio-feed-9l6v)", async () => {
   // Ending the runner with `exit 0` made a capped run look like a success to whatever scheduled it,
   // which is the opposite of fail-closed. The stamp is touched BEFORE the run, so a non-zero status

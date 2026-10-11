@@ -267,35 +267,107 @@ export async function loadState(dir: string): Promise<PollState> {
 export const LOCK_FILE = "run.lock";
 export const STALE_LOCK_MS = 30 * 60 * 1000;
 
-export async function acquireLock(dir: string, now: Date): Promise<boolean> {
+/**
+ * A unique owner token. The lock file holds one, so a release or a reclaim can tell WHOSE lock it is
+ * looking at - which is what makes "release only what you own" checkable rather than a convention.
+ */
+export function lockToken(now: Date): string {
+  return `${now.toISOString()} pid=${Deno.pid} nonce=${crypto.randomUUID()}`;
+}
+
+/** The lock's token and age, or null when there is no lock. */
+async function readLock(path: string): Promise<{ token: string; mtimeMs: number } | null> {
+  try {
+    const token = (await Deno.readTextFile(path)).trim();
+    const stat = await Deno.stat(path);
+    return { token, mtimeMs: stat.mtime?.getTime() ?? 0 };
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
+export async function acquireLock(
+  dir: string,
+  now: Date,
+  token: string = lockToken(now),
+): Promise<boolean> {
   await Deno.mkdir(dir, { recursive: true });
   const path = `${dir}/${LOCK_FILE}`;
   try {
+    // THE ATOMIC PRIMITIVE: createNew either creates the file or fails, with nothing in between.
     const f = await Deno.open(path, { createNew: true, write: true });
-    await f.write(new TextEncoder().encode(now.toISOString()));
+    await f.write(new TextEncoder().encode(token));
     f.close();
     return true;
   } catch (err) {
     if (!(err instanceof Deno.errors.AlreadyExists)) throw err;
+  }
+
+  const held = await readLock(path);
+  if (held === null) {
+    // It vanished between the create and the read, so the holder finished rather than contended: retry
+    // once. Contention returns false below instead - a lock that is genuinely held is not a retry.
+    return await acquireLock(dir, now, token);
+  }
+  if (now.getTime() - held.mtimeMs <= STALE_LOCK_MS) return false;
+
+  // STALE, SO RECLAIM IT ATOMICALLY (audio-feed-131z). The previous version wrote the file here, which is a
+  // plain overwrite: two invocations both stat the same stale mtime, both overwrite, and BOTH believe they
+  // hold the lock (measured by the reviewer at 199/200 rounds). Each then loaded state before the other's
+  // reservation was durable, so both reserved, both called the model, and the daily ceiling Paul set was
+  // exceeded by the mechanism meant to enforce it.
+  //
+  // RENAME is the atomic primitive for this: exactly one reclaimer can move the file aside, and the loser
+  // gets NotFound. The winner then takes the lock through the SAME exclusive create as everyone else, so a
+  // third invocation racing us is serialised by createNew rather than by luck.
+  const graveyard = `${path}.stale.${Deno.pid}.${crypto.randomUUID()}`;
+  try {
+    await Deno.rename(path, graveyard);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      // Someone else reclaimed or released it while we were deciding, so the name is free: go through the
+      // normal path and let createNew decide who owns it, rather than assuming it is us.
+      return await acquireLock(dir, now, token);
+    }
+    throw err;
+  }
+
+  // NARROW RACE, CLOSED ON PURPOSE: between our stat and our rename, the holder may have released and a
+  // different run acquired a FRESH lock. We would then be holding someone else's live lock. The token says
+  // whose it is, so if this is not the one we judged stale, put it back and stand down.
+  const moved = await readLock(graveyard);
+  if (moved !== null && moved.token !== held.token) {
     try {
-      const stat = await Deno.stat(path);
-      const ageMs = now.getTime() - (stat.mtime?.getTime() ?? 0);
-      if (ageMs > STALE_LOCK_MS) {
-        // Reclaim rather than wedge: a run killed by the reaper must not stop the poll forever.
-        await Deno.writeTextFile(path, now.toISOString());
-        return true;
-      }
+      await Deno.rename(graveyard, path);
     } catch {
-      // The lock vanished between the open and the stat, which means the holder finished: try once more.
-      return await acquireLock(dir, now);
+      // The path was retaken in the meantime: either way this lock is not ours.
     }
     return false;
   }
+  try {
+    await Deno.remove(graveyard);
+  } catch {
+    // Best effort: a leftover graveyard file is inert - nothing reads it, and nothing locks on it.
+  }
+  return await acquireLock(dir, now, token);
 }
 
-export async function releaseLock(dir: string): Promise<void> {
+/**
+ * Releases the lock, and only the lock this run owns when a token is given.
+ *
+ * Ownership matters for the same reason the reclaim does: if a stale reclaim moved our lock aside and
+ * another run took over, removing the file by name would delete a LIVE lock and let a third run in
+ * (audio-feed-jmkm, then audio-feed-131z).
+ */
+export async function releaseLock(dir: string, token?: string): Promise<void> {
+  const path = `${dir}/${LOCK_FILE}`;
+  if (token !== undefined) {
+    const held = await readLock(path);
+    if (held !== null && held.token !== token) return;
+  }
   try {
-    await Deno.remove(`${dir}/${LOCK_FILE}`);
+    await Deno.remove(path);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
@@ -810,20 +882,20 @@ export async function runOnce(
     modelCalls: 0,
     note: null,
   };
-  // Ownership, tracked explicitly: a DISABLED or refused invocation also returns through finish(), and
-  // releasing a lock this run never acquired deletes a live run's lock and lets a second run in - the
-  // exact race the lock exists to prevent (audio-feed-jmkm).
-  let holdsLock = false;
+  // Ownership, tracked explicitly and BY TOKEN: a DISABLED or refused invocation also returns through
+  // finish(), and releasing a lock this run never acquired (or no longer owns) deletes a live run's lock
+  // and lets a second run in - the exact race the lock exists to prevent (audio-feed-jmkm, audio-feed-131z).
+  let heldToken: string | null = null;
   const finish = async (state_: "idle" | "ranked" | "skipped" | "failed"): Promise<RunArtifact> => {
     artifact.state = state_;
     artifact.finishedAt = deps.now().toISOString();
     state = { ...state, lastRun: artifact.finishedAt, artifact };
     await saveState(config.stateDir, state);
     await Deno.writeTextFile(`${config.stateDir}/digest.md`, renderDigest(artifact));
-    // Released on every path that returns through here, but ONLY if this run took it.
-    if (holdsLock) {
-      await releaseLock(config.stateDir);
-      holdsLock = false;
+    // Released on every path that returns through here, but ONLY if this run still owns it.
+    if (heldToken !== null) {
+      await releaseLock(config.stateDir, heldToken);
+      heldToken = null;
     }
     return artifact;
   };
@@ -839,8 +911,10 @@ export async function runOnce(
 
   // (2) The lock, BEFORE the caps and BEFORE anything else that costs or writes. A ceiling that two
   // concurrent runs can each pass is not a ceiling, so the exclusion is not an optimisation.
-  const acquired = await acquireLock(config.stateDir, deps.now());
-  holdsLock = acquired;
+  const lockNow = deps.now();
+  const token = lockToken(lockNow);
+  const acquired = await acquireLock(config.stateDir, lockNow, token);
+  heldToken = acquired ? token : null;
   if (!acquired) {
     artifact.reason = "locked";
     artifact.note =
@@ -1097,11 +1171,14 @@ export async function runOnce(
 
   // How far behind are we, and is anything we have not reached already old? hasMore matters as much as
   // the page contents: without it a full page reports a backlog of zero while hundreds remain.
-  const remainingInPage = Math.max(0, withPrints.length - prompt.eventsSent);
   const unsent = withPrints.slice(prompt.eventsSent);
   const newestUnsent = unsent.at(-1)?.event ?? null;
-  const beyondPage = page.body.hasMore ? Math.max(0, page.body.window.newest - advanceTo) : 0;
-  artifact.backlog = beyondPage + remainingInPage;
+  // ONE TERM, and it is the whole backlog (audio-feed-95jc). This was `beyondPage + remainingInPage`, but
+  // `newest - advanceTo` ALREADY includes the events left unsent in the page, so the in-page remainder was
+  // counted twice - the digest and the backlog bead overstated how far behind the poll was (measured 1100
+  // against a true 800). An overstated backlog is the mirror of the understated one this file already
+  // fixed: both are the poll lying about its own coverage, and only one term can be true.
+  artifact.backlog = Math.max(0, page.body.window.newest - advanceTo);
   artifact.pagesRemaining = artifact.backlog === 0
     ? 0
     : Math.max(1, Math.ceil(artifact.backlog / MAX_EVENTS_PER_RUN));
