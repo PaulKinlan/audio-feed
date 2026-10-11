@@ -863,3 +863,64 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
   const ep = await stores.metadata.getEpisode("user-abort", "ep-abort-1");
   assertEquals(ep?.audioKey, "track-1.mp3", "must not mutate when lock is lost");
 });
+
+Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before metadata CAS (audio-feed-84q9)", async () => {
+  for (const kind of ["memory", "kv"] as const) {
+    const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
+    try {
+      await stores.metadata.putUser(makeUser({ id: "user-84q9", status: "approved" }));
+      await stores.metadata.putEpisode(
+        makeEpisode({ id: "ep-84q9", userId: "user-84q9", audioKey: "old-84q9.mp3" }),
+      );
+      await stores.blobs.put("audio/old-84q9.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
+
+      const blobs = new Proxy(stores.blobs, {
+        get(target, prop, receiver) {
+          if (prop !== "putIfAbsent") {
+            const val = Reflect.get(target, prop, receiver);
+            return typeof val === "function" ? val.bind(target) : val;
+          }
+          return async (key: string, body: Uint8Array, opts?: { contentType?: string }) => {
+            // Steal lock while putIfAbsent is executing
+            await stores.metadata.atomicUpdate(
+              "migration_lock:legacy_audio_keys",
+              () => ({
+                active: true,
+                lockedAt: Date.now(),
+                lastHeartbeat: Date.now(),
+                leaseMs: 600_000,
+                holder: "other-holder",
+              }),
+            );
+            // Delay to allow heartbeat renewal to fail and set lockLost = true
+            await new Promise((r) => setTimeout(r, 50));
+            return stores.blobs.putIfAbsent(key, body, opts);
+          };
+        },
+      });
+
+      let threw = false;
+      try {
+        await migrateLegacyAudioKeys(stores.metadata, {
+          blobs,
+          apply: true,
+          leaseMs: 90,
+          heartbeatIntervalMs: 10,
+        });
+      } catch (err) {
+        threw = true;
+        assert(String(err).includes("Migration aborted") || String(err).includes("lock lost"));
+      }
+
+      assert(threw, "must throw and abort when lock lost during putIfAbsent");
+      const ep = await stores.metadata.getEpisode("user-84q9", "ep-84q9");
+      assertEquals(
+        ep?.audioKey,
+        "old-84q9.mp3",
+        "metadata audioKey must NOT be updated when lock lost during copy",
+      );
+    } finally {
+      await stores.metadata.close?.();
+    }
+  }
+});

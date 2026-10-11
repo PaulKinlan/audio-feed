@@ -368,6 +368,14 @@ export async function migrateLegacyAudioKeys(
   let lockLost = false;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined = undefined;
 
+  const assertLockHeld = () => {
+    if (apply && lockLost) {
+      throw new Error(
+        `Migration aborted: lock lost or renewal failed mid-run for holder ${lockHolder}`,
+      );
+    }
+  };
+
   if (apply) {
     const locked = await acquireMigrationLock(metadata, lockHolder, leaseMs);
     if (!locked) {
@@ -414,11 +422,7 @@ export async function migrateLegacyAudioKeys(
           limit: 100,
         });
         for (const episode of page.episodes) {
-          if (apply && lockLost) {
-            throw new Error(
-              `Migration aborted: lock lost or renewal failed mid-run for holder ${lockHolder}`,
-            );
-          }
+          assertLockHeld();
           episodesScanned++;
           if (!episode.audioKey) continue;
 
@@ -474,6 +478,8 @@ export async function migrateLegacyAudioKeys(
               });
               continue;
             }
+
+            assertLockHeld();
 
             if (!sourceBytes && !opts?.allowMissingBlobs) {
               refusedMissingSource++;
@@ -566,11 +572,7 @@ export async function migrateLegacyAudioKeys(
           // 3. Apply mode: Atomic conditional write (putIfAbsent) to prevent TOCTOU overwrites (qm7b)
           let blobWasCopied = false;
 
-          if (apply && lockLost) {
-            throw new Error(
-              `Migration aborted: lock lost or renewal failed mid-run for holder ${lockHolder}`,
-            );
-          }
+          assertLockHeld();
 
           if (opts?.blobs && sourceBytes) {
             let createdInfo = null;
@@ -594,6 +596,9 @@ export async function migrateLegacyAudioKeys(
               });
               continue;
             }
+
+            // Immediately check lock after putIfAbsent before proceeding to collision check or metadata CAS (audio-feed-84q9)
+            assertLockHeld();
 
             if (createdInfo !== null) {
               // We successfully created the canonical blob without race!
@@ -662,6 +667,7 @@ export async function migrateLegacyAudioKeys(
               // Bytes match identically: safe to repoint without duplicate blob copy.
               log?.(`Existing destination ${newKey} has identical bytes; repointing metadata`);
             }
+            assertLockHeld();
           }
 
           const planItem: MigrationPlanItem = {
@@ -672,6 +678,9 @@ export async function migrateLegacyAudioKeys(
             status: "applied",
             blobCopied: blobWasCopied,
           };
+
+          // Guard immediately before CAS commit: must not commit metadata if lock was lost (audio-feed-84q9)
+          assertLockHeld();
 
           try {
             const casOk = await metadata.updateEpisodeAudioKeyIfCurrent(
