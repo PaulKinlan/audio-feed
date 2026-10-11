@@ -1073,6 +1073,7 @@ export async function runSynthesisBatch(
   const maxInvocationDurationMs = options.maxInvocationDurationMs ??
     ctx.config.maxInvocationDurationMs ??
     DEFAULT_MAX_INVOCATION_DURATION_MS;
+  const flushMargin = opts.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
   const notifyEnabled = ctx.config.notifyOutboxEnabled ?? false;
 
   const notifyOnDemand = async (episode: Episode, status: "ready" | "failed", error?: string) => {
@@ -1470,7 +1471,11 @@ export async function runSynthesisBatch(
           opts.owner,
         );
         if (wrote) {
-          result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+          result.failed.push({
+            episodeId: currentEpisode.id,
+            error,
+            title: currentEpisode.title,
+          });
           await notifyOnDemand(currentEpisode, "failed", error);
         } else {
           result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
@@ -1486,7 +1491,6 @@ export async function runSynthesisBatch(
     // 2. Preflight: Verify remaining budget fits upload + flush margin; yield before starting if it cannot.
     // 3. Provenance: Upload timeout uses explicit InvocationBudgetAbortError sentinel; real blob store errors fail.
     // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
-    const flushMargin = opts.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
     const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
@@ -1641,7 +1645,11 @@ export async function runSynthesisBatch(
           opts.owner,
         );
         if (wrote) {
-          result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+          result.failed.push({
+            episodeId: currentEpisode.id,
+            error,
+            title: currentEpisode.title,
+          });
           await notifyOnDemand(currentEpisode, "failed", error);
         } else {
           result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
