@@ -298,6 +298,18 @@ export interface EpisodeRepository {
    * Resolves `false` if the episode does not exist (prevents resurrection, audio-feed-hvn).
    */
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean>;
+
+  /**
+   * Atomically updates an episode's audioKey only if the stored audioKey matches expectedKey.
+   * If the record does not exist or stored audioKey !== expectedKey, returns false without mutating.
+   * Concurrent writers updating other fields (or changing audioKey) win (audio-feed-9731).
+   */
+  updateEpisodeAudioKeyIfCurrent(
+    userId: string,
+    id: string,
+    expectedKey: string,
+    newKey: string,
+  ): Promise<boolean>;
   /**
    * Newest first. Backs both the per-source and master feeds.
    *
@@ -755,6 +767,16 @@ export interface BlobStore {
     body: Uint8Array | ReadableStream<Uint8Array>,
     opts?: { contentType?: string },
   ): Promise<BlobInfo>;
+  /**
+   * Atomic conditional create.
+   * If the key already exists, returns `null` without modifying the existing object.
+   * Backed by S3 `If-None-Match: *` (HTTP 412 -> null).
+   */
+  putIfAbsent(
+    key: string,
+    body: Uint8Array | ReadableStream<Uint8Array>,
+    opts?: { contentType?: string },
+  ): Promise<BlobInfo | null>;
   /**
    * Range requests are not optional: podcast clients (Apple Podcasts, Pocket
    * Casts, Overcast) seek with `Range`, and a store that ignores it breaks

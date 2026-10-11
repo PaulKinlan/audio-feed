@@ -86,6 +86,41 @@ export class S3BlobStore implements BlobStore {
     };
   }
 
+  async putIfAbsent(
+    key: string,
+    body: Uint8Array | ReadableStream<Uint8Array>,
+    opts?: { contentType?: string },
+  ): Promise<BlobInfo | null> {
+    const contentType = opts?.contentType ?? "application/octet-stream";
+    const headers: Record<string, string> = {
+      "content-type": contentType,
+      "if-none-match": "*",
+    };
+
+    const bytes = toBodyBytes(body instanceof Uint8Array ? body : await collectStream(body));
+    headers["content-length"] = String(bytes.byteLength);
+
+    const res = await this.#client.fetch(this.#objectUrl(key), {
+      method: "PUT",
+      body: bytes,
+      headers,
+    });
+    if (res.status === 412 || res.status === 409) {
+      await res.body?.cancel();
+      return null;
+    }
+    if (!res.ok) {
+      throw new Error(`S3 putIfAbsent failed (${res.status}): ${await safeText(res)}`);
+    }
+    await res.body?.cancel();
+    return {
+      key,
+      size: bytes.byteLength,
+      contentType,
+      etag: res.headers.get("etag") ?? undefined,
+    };
+  }
+
   async get(key: string, opts?: { range?: ByteRange }): Promise<BlobObject | null> {
     const headers: Record<string, string> = {};
     if (opts?.range) headers["range"] = toRangeHeader(opts.range);

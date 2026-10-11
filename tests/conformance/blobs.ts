@@ -126,6 +126,28 @@ export function runBlobConformance({ name, create }: BlobSuiteOptions) {
     assertEquals((await store.head("k"))?.size, 20);
   });
 
+  test("putIfAbsent: creates when absent, returns null when present without overwriting", async (store) => {
+    const initial = bytes(32);
+    const created = await store.putIfAbsent("conditional", initial, { contentType: "audio/mpeg" });
+    assert(created !== null);
+    assertEquals(created.size, 32);
+    assertEquals(created.contentType, "audio/mpeg");
+
+    // Second call with different bytes must return null
+    const duplicate = await store.putIfAbsent("conditional", bytes(64), {
+      contentType: "audio/wav",
+    });
+    assertEquals(duplicate, null);
+
+    // Existing object must remain untouched with original size and bytes
+    const head = await store.head("conditional");
+    assertEquals(head?.size, 32);
+    assertEquals(head?.contentType, "audio/mpeg");
+    const got = await store.get("conditional");
+    assert(got);
+    assertEquals(await collect(got.body), initial);
+  });
+
   test("deletes, and delete of a missing key is not an error", async (store) => {
     await store.put("k", bytes(10));
     await store.delete("k");

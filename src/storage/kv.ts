@@ -235,6 +235,20 @@ export class KvMetadataStore implements MetadataStore {
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean> {
     return this.repositories.episodes.backfillEpisodeSourceTitle(userId, id, sourceTitle);
   }
+
+  updateEpisodeAudioKeyIfCurrent(
+    userId: string,
+    id: string,
+    expectedKey: string,
+    newKey: string,
+  ): Promise<boolean> {
+    return this.repositories.episodes.updateEpisodeAudioKeyIfCurrent(
+      userId,
+      id,
+      expectedKey,
+      newKey,
+    );
+  }
   listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
     return this.repositories.episodes.listEpisodes(query);
   }

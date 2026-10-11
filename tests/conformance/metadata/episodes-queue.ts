@@ -266,6 +266,51 @@ export function registerEpisodesQueueCases(suite: MetadataHarness) {
     assertEquals((await store.getEpisode("user-1", "e-backfill"))?.sourceTitle, "Backfilled Title");
   });
 
+  test("updateEpisodeAudioKeyIfCurrent updates audioKey only if expectedKey matches (audio-feed-9731)", async (store) => {
+    // 1. Absent episode returns false and does not resurrect
+    const absentResult = await store.updateEpisodeAudioKeyIfCurrent(
+      "user-1",
+      "non-existent",
+      "old.mp3",
+      "audio/user-1/direct/new.mp3",
+    );
+    assertEquals(absentResult, false);
+    assertEquals(await store.getEpisode("user-1", "non-existent"), null);
+
+    // 2. Existing episode with matching expectedKey updates successfully
+    const ep = makeEpisode({
+      id: "e-cas",
+      userId: "user-1",
+      audioKey: "old.mp3",
+      title: "Concurrent Title",
+    });
+    await store.putEpisode(ep);
+
+    const ok = await store.updateEpisodeAudioKeyIfCurrent(
+      "user-1",
+      "e-cas",
+      "old.mp3",
+      "audio/user-1/direct/new.mp3",
+    );
+    assertEquals(ok, true);
+    const updated = await store.getEpisode("user-1", "e-cas");
+    assertEquals(updated?.audioKey, "audio/user-1/direct/new.mp3");
+    assertEquals(updated?.title, "Concurrent Title", "other fields must be preserved");
+
+    // 3. Mismatched expectedKey returns false and preserves current audioKey
+    const mismatch = await store.updateEpisodeAudioKeyIfCurrent(
+      "user-1",
+      "e-cas",
+      "old.mp3", // Already updated to audio/user-1/direct/new.mp3
+      "audio/user-1/direct/newer.mp3",
+    );
+    assertEquals(mismatch, false);
+    assertEquals(
+      (await store.getEpisode("user-1", "e-cas"))?.audioKey,
+      "audio/user-1/direct/new.mp3",
+    );
+  });
+
   test("returns copies, not live references", async (store) => {
     const episode = makeEpisode({ id: "e1", title: "Original" });
     await store.putEpisode(episode);
