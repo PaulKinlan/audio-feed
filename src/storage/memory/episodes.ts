@@ -306,36 +306,50 @@ export function createEpisodesRepository(
       writeEpisode(state, yielded);
       return Promise.resolve(true);
     },
-    completeEpisode(
+    async completeEpisode(
       episode: Episode,
       owner: string,
       billing?: EpisodeBilling,
     ): Promise<boolean> {
+      // Invariant enforcement (audio-feed-9gqs):
+      // A transition to "ready" requires a billing payload at the storage boundary.
+      // Unsynthesized/failed transitions (which carry episode.error) may omit billing.
+      if (
+        episode.status === "ready" &&
+        !episode.error &&
+        (!billing || typeof billing.byteLength !== "number")
+      ) {
+        throw new TypeError(
+          `completeEpisode requires a valid billing payload ({ byteLength: number }) when completing with status "ready" (audio-feed-9gqs)`,
+        );
+      }
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
-      if (!current) return Promise.resolve(false);
+      if (!current) return false;
       // Idempotent completion: only if already marked ready with this exact audioKey by THIS owner
       if (
         current.status === "ready" && current.audioKey === episode.audioKey &&
         current.claimedBy === owner
       ) {
-        return Promise.resolve(true);
+        return true;
       }
       // Superseded: another worker reclaimed the expired lease and finished first.
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
-        return Promise.resolve(false);
+        return false;
       }
+
+      // Atomic terminal billing (audio-feed-thrs, audio-feed-a7i9):
+      // Must record synthesis before or atomically with episode state.
+      // If billing fails, the completion fails, rethrows, and nothing is marked ready.
+      if (billing && episode.status === "ready") {
+        await host().recordSynthesis(episode.userId, billing.byteLength, billing.at);
+      }
+
       const sortKey = `${current.createdAt}\u0000${current.id}`;
       removeSortedIndex(state.synthesizingIndex, sortKey);
       removePendingPointer(state, current);
       state.episodes.set(key, structuredClone({ ...episode, claimedBy: owner }));
-
-      // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
-      if (billing && episode.status === "ready") {
-        host().recordSynthesis(episode.userId, billing.byteLength, billing.at).catch(() => {});
-      }
-
-      return Promise.resolve(true);
+      return true;
     },
     retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const key = scoped(userId, id);

@@ -900,6 +900,7 @@ Deno.test("a superseded worker discards its result instead of overwriting the wi
         byteLength: 999,
       },
       episode!.claimedBy!,
+      { byteLength: 999 },
     );
     // Now the original claim is gone; this worker's own write must be refused.
     await stores.metadata.putEpisode({
@@ -1149,6 +1150,7 @@ Deno.test("a superseded FIRST synthesis deletes only its own blob — the winner
         byteLength: 999,
       },
       current!.claimedBy!,
+      { byteLength: 999 },
     );
     // The winner's commit took the claim; this worker's own write must be refused.
     await stores.metadata.putEpisode({

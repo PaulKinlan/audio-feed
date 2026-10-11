@@ -451,6 +451,18 @@ export function createEpisodesRepository(
       owner: string,
       billing?: EpisodeBilling,
     ): Promise<boolean> {
+      // Invariant enforcement (audio-feed-9gqs):
+      // A transition to "ready" requires a billing payload at the storage boundary.
+      // Unsynthesized/failed transitions (which carry episode.error) may omit billing.
+      if (
+        episode.status === "ready" &&
+        !episode.error &&
+        (!billing || typeof billing.byteLength !== "number")
+      ) {
+        throw new TypeError(
+          `completeEpisode requires a valid billing payload ({ byteLength: number }) when completing with status "ready" (audio-feed-9gqs)`,
+        );
+      }
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;

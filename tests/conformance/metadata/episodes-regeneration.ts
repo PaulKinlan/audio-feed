@@ -249,6 +249,7 @@ export function registerEpisodesRegenerationCases(suite: MetadataHarness) {
     const late = await store.completeEpisode(
       { ...claimed, status: "ready", audioKey: "audio/user-1/direct/e1-new.wav" },
       "worker-a",
+      { byteLength: 500 },
     );
     assertEquals(late, false);
     assertEquals((await store.getEpisode("user-1", "e1"))?.audioKey, "audio/user-1/direct/e1.wav");

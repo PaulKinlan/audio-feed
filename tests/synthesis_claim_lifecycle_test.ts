@@ -383,11 +383,19 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
     contentType: "audio/wav",
   };
 
-  const write1 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
+  const write1 = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-idempotent",
+    { byteLength: 1234 },
+  );
   assertEquals(write1, true);
 
   // Second identical call by the SAME worker
-  const write2 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
+  const write2 = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-idempotent",
+    { byteLength: 1234 },
+  );
   assertEquals(
     write2,
     true,
@@ -395,13 +403,18 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
   );
 
   // Another worker attempting completion must be refused
-  const writeOther = await stores.metadata.completeEpisode(readyEpisode, "worker-other");
+  const writeOther = await stores.metadata.completeEpisode(
+    readyEpisode,
+    "worker-other",
+    { byteLength: 1234 },
+  );
   assertEquals(writeOther, false, "completion by another worker must return false (superseded)");
 
   // Different audio key by original worker must be refused
   const write3 = await stores.metadata.completeEpisode(
     { ...readyEpisode, audioKey: "audio/user-1/direct/episode-different.wav" },
     "worker-idempotent",
+    { byteLength: 1234 },
   );
   assertEquals(write3, false, "completion with different audio key must return false");
 });

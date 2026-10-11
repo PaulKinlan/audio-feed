@@ -390,10 +390,15 @@ export interface EpisodeRepository {
    * The refusal is a signal worth reporting, not an error to swallow: it means
    * "you were superseded", and the caller should discard its result.
    */
-  completeEpisode(
-    episode: Episode,
+  /**
+   * Transition an episode from synthesizing to completed (audio-feed-thrs, audio-feed-9gqs).
+   * Status "ready" requires a billing payload (byteLength) in the type and runtime.
+   * Status "failed" or unsynthesized error transitions may omit billing.
+   */
+  completeEpisode<E extends Episode>(
+    episode: E,
     owner: string,
-    billing?: EpisodeBilling,
+    ...args: E extends { status: "ready" } ? [billing: EpisodeBilling] : [billing?: EpisodeBilling]
   ): Promise<boolean>;
 
   /**

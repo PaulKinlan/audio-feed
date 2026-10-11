@@ -260,12 +260,16 @@ export class MemoryMetadataStore implements MetadataStore {
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
     return this.repositories.episodes.claimEpisode(userId, episodeId, claim);
   }
-  completeEpisode(
-    episode: Episode,
+  completeEpisode<E extends Episode>(
+    episode: E,
     owner: string,
-    billing?: EpisodeBilling,
+    ...args: E extends { status: "ready" } ? [billing: EpisodeBilling] : [billing?: EpisodeBilling]
   ): Promise<boolean> {
-    return this.repositories.episodes.completeEpisode(episode, owner, billing);
+    return (this.repositories.episodes.completeEpisode as (
+      ep: Episode,
+      ow: string,
+      b?: EpisodeBilling,
+    ) => Promise<boolean>)(episode, owner, args[0]);
   }
   touchEpisodeClaim(
     userId: string,
