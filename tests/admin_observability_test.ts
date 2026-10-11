@@ -719,6 +719,43 @@ Deno.test("audio-feed-ciuw: failed log and run reads are reported as unreadable,
     false,
     "a run read failure must not render as 'it never ran'",
   );
+  // audio-feed-m11b: the two log-DERIVED counts must not render as zeros either. They are the same
+  // lie as an empty queue for a failed queue read, in a cell nobody had checked yet.
+  assertEquals(report.queue.liveClaims, null, "an unreadable log store makes this count UNKNOWN");
+  assertEquals(report.queue.abandoned, null);
+  assertStringIncludes(body, 'so this is not "no live claims"');
+  assertStringIncludes(body, 'so this is not "no abandoned attempts"');
+});
+
+Deno.test("audio-feed-ru0z: a failed RUN history read is not 'no history retained'", async () => {
+  // The drain STATE ('unknown') was already honest; the explanatory sentence was not, and it sat
+  // directly beside a lastRun cell that said the read had failed. Two adjacent statements about the
+  // same read cannot disagree.
+  const { stores } = await setup();
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "episode-q", userId: "user-1", sourceId: "stratechery", status: "pending" }),
+  );
+  const broken = breakStore(stores, {
+    listRuns: () => Promise.reject(new Error("run store down")),
+  });
+
+  const report = await buildObservabilityReport(broken, Date.parse("2026-10-11T10:00:00.000Z"));
+  assertEquals(report.queue.claimable, 1, "the queue read itself succeeded");
+  assertEquals(report.queue.drain, "unknown");
+
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const body = await (await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  )).text();
+  assertStringIncludes(body, "the run history could not be read, so progress cannot be judged");
+  assertEquals(
+    body.includes("no synthesis run history is retained"),
+    false,
+    "retention is unknown when the read failed; it is not a fact about what is retained",
+  );
 });
 
 // ---------------------------------------------------------------------------

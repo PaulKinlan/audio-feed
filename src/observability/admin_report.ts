@@ -162,10 +162,18 @@ export interface QueueSnapshot {
   readError?: string;
   /** The oldest claimable episode's createdAt, so "how long has this been waiting" is answerable. */
   oldestClaimableAt?: string;
-  /** Live claims seen in the window: an attempt with no end record and an unexpired lease. */
-  liveClaims: number;
-  /** Abandonments seen in the window: a lease that expired with no terminal write. */
-  abandoned: number;
+  /**
+   * Live claims seen in the window: an attempt with no end record and an unexpired lease.
+   *
+   * `null` when the LOG READ failed (audio-feed-m11b). This count is derived from log records, so
+   * an unreadable store is not an absence of live claims — and rendering 0 here was the same lie as
+   * rendering an empty queue for a failed queue read (audio-feed-ciuw), just in a cell nobody had
+   * checked yet.
+   */
+  liveClaims: number | null;
+  /** Abandonments seen in the window: a lease that expired with no terminal write. `null` when the
+   * log read failed, for the same reason as `liveClaims` (audio-feed-m11b). */
+  abandoned: number | null;
   /** The most recent synthesis run, which is how "is it draining" is answered. */
   lastSynthesisRun?: RunRecord;
   /** The run-history read's failure; `lastSynthesisRun` being absent is then NOT "it never ran". */
@@ -443,10 +451,14 @@ export async function buildObservabilityReport(
     readErrors.push({ store: "runs", message: runsReadError });
   }
 
-  const liveClaims = Object.values(attempts)
+  // Both counts are derived from the log records read above, so a failed log read makes them
+  // UNKNOWN rather than zero (audio-feed-m11b). `attempts` is empty in that case, which is exactly
+  // why the flag is explicit: an empty map is an absence of evidence, not evidence of absence.
+  const logsReadFailed = readErrors.some((failure) => failure.store === "logs");
+  const liveClaims = logsReadFailed ? null : Object.values(attempts)
     .flat()
     .filter((attempt) => attempt.outcome === "in-flight").length;
-  const abandoned = Object.values(attempts)
+  const abandoned = logsReadFailed ? null : Object.values(attempts)
     .flat()
     .filter((attempt) => attempt.outcome === "abandoned").length;
 

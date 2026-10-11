@@ -190,13 +190,25 @@ export async function handleAdminObservability(
   const report = await buildObservabilityReport(ctx.stores);
   const { queue, window: readWindow } = report;
   const lastRun = queue.lastSynthesisRun;
-  const drainNote = {
-    empty: "nothing queued",
-    draining: "queued work is being processed (the last synthesis run made progress)",
-    stalled: "queued work is NOT being processed (the last synthesis run made no progress)",
-    unknown: "no synthesis run history is retained, so progress cannot be judged",
-    unreadable: "the queue could not be read, so nothing about it can be claimed",
-  }[queue.drain];
+  const drainNote = queue.drain === "unknown" && queue.runsReadError
+    ? "the run history could not be read, so progress cannot be judged"
+    : {
+      empty: "nothing queued",
+      draining: "queued work is being processed (the last synthesis run made progress)",
+      stalled: "queued work is NOT being processed (the last synthesis run made no progress)",
+      unknown: "no synthesis run history is retained, so progress cannot be judged",
+      unreadable: "the queue could not be read, so nothing about it can be claimed",
+    }[queue.drain];
+
+  // A count derived from the log records is UNKNOWN when the log read failed, not zero
+  // (audio-feed-m11b): an operator reading only the Queue card must not conclude there were no live
+  // claims during the incident that stopped us from seeing them.
+  const countCell = (value: number | null, absence: string) =>
+    value === null
+      ? `<strong>Unavailable — the log store could not be read</strong> <span class="muted">so this is not "${
+        esc(absence)
+      }".</span>`
+      : String(value);
 
   // A read that failed is stated BEFORE the sections it affects (audio-feed-ciuw). The operator must
   // never have to infer "unreadable" from a zero, because a zero is what a healthy empty deployment
@@ -248,8 +260,12 @@ export async function handleAdminObservability(
     <dl>
       <dt>Claimable now</dt><dd>${queueCell}</dd>
       <dt>Draining</dt><dd>${esc(drainNote)}</dd>
-      <dt>Live claims (retained window)</dt><dd>${queue.liveClaims}</dd>
-      <dt>Abandoned attempts (retained window)</dt><dd>${queue.abandoned}</dd>
+      <dt>Live claims (retained window)</dt><dd>${
+    countCell(queue.liveClaims, "no live claims")
+  }</dd>
+      <dt>Abandoned attempts (retained window)</dt><dd>${
+    countCell(queue.abandoned, "no abandoned attempts")
+  }</dd>
       <dt>Last synthesis run</dt><dd>${lastRunCell}</dd>
     </dl>
   </section>
