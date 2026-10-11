@@ -85,12 +85,16 @@ a separate id would be a second identity that could disagree with the cursor.
 of a page of events. It applies the same cursor rules, including the `410` when retention has moved
 past the cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
 
-The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A count is
-bounded, so a window larger than the bound is counted in part: `truncated: true` says so, `cursor`
-names the last counted sequence, and the next poll continues from there. Reporting the newest
-sequence in the window instead counts part of a window while claiming all of it, so a poller moves
-past events it was never told about — a real bug (`audio-feed-8d6r`), and the same rule as the
+The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A scan is
+bounded, so a window larger than the bound is examined in part: `truncated: true` says so, `cursor`
+names the last sequence the scan **reached**, and the next poll continues from there. Reporting the
+newest sequence in the window instead counts part of a window while claiming all of it, so a poller
+moves past events it was never told about — a real bug (`audio-feed-8d6r`), and the same rule as the
 errors feed's cursor advancing over what was scanned rather than what was returned.
+
+Because that cursor may sit past records the summary's filter excluded, it is a safe way to ask "what
+changed?" but not a safe durable cursor: a poller drains the errors endpoint from the cursor it last
+consumed and only then moves its own (`audio-feed-2af8`, and the recipe below).
 
 ## What a poller does
 
