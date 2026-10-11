@@ -97,11 +97,24 @@ advancing over what was scanned rather than what was returned.
 ```
 cursor = "0"
 loop:
-  r = GET /api/observability/summary?since=<cursor>     # cheap: total == 0 means nothing to do
-  if r.total > 0:
-      GET /api/observability/errors?since=<cursor>      # fetch and act
-  cursor = r.cursor                                     # never moves backwards
+  s = GET /api/observability/summary?since=<cursor>     # cheap: total == 0 means nothing to do
+  if s.total > 0:
+      # DRAIN the pages before moving the durable cursor. A summary cursor can be far ahead of one
+      # page (the summary's bound and the errors feed's `limit` are different, and a summary counts a
+      # whole window while a page returns part of one), so advancing straight to `s.cursor` after a
+      # single page skips every event between them — a real bug (audio-feed-c0kx).
+      page = GET /api/observability/errors?since=<cursor>
+      while true:
+          act on page.events
+          cursor = page.cursor                          # safe: it advances over what was SCANNED
+          if not page.hasMore: break
+          page = GET /api/observability/errors?since=<cursor>
+  # Only now is the durable cursor advanced, past everything that was actually consumed.
 ```
+
+The rule for the consumer is the same one the API holds itself to: **a cursor may only advance over
+what has been consumed.** The summary answers "is there anything new" cheaply; the errors pages are
+what you actually read, and the durable cursor belongs to the reading, not to the check.
 
 On `410 cursor_too_old`, the cursor cannot be resumed: re-baseline from `window.oldestRetained - 1`
 (accepting the gap, and saying so in whatever consumes the events) or from the current cursor, and

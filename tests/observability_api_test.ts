@@ -326,7 +326,7 @@ Deno.test("a summary cursor never skips what it did not count (audio-feed-8d6r)"
   // bound, so a poller advancing to it never saw the error — a silent skip, the one thing this API
   // is not allowed to do.
   const { fetch, stores } = app();
-  await seed(stores, 500, "debug", "http.request");
+  await seed(stores, 500, "warn", "http.request");
   const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
 
   const first = await (await fetch(authed("/api/observability/summary?since=0"))).json();
@@ -363,4 +363,73 @@ Deno.test("a summary that counted the whole window is not marked truncated", asy
   assertEquals(body.total, 3);
   assertEquals(body.truncated, false);
   assertEquals(body.cursor, "3");
+});
+
+Deno.test("the summary honours severity instead of answering a different question (audio-feed-ijuc)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 100, "debug", "http.request");
+  const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
+
+  const asAll = await (await fetch(authed("/api/observability/summary?since=0&severity=all")))
+    .json();
+  const asError = await (await fetch(authed("/api/observability/summary?since=0&severity=error")))
+    .json();
+
+  // Before this fix `severity` was parsed and dropped, so both answers were identical and the
+  // filtered one silently described a different window than the caller asked about.
+  assertEquals(asAll.total, 101, "all counts every severity, including debug");
+  assertEquals(asAll.truncated, false);
+  assertEquals(asError.total, 1, "a severity=error summary counts errors");
+  assertEquals(asError.bySeverity.error, 1);
+  assertEquals(
+    asError.bySeverity.debug,
+    undefined,
+    "and does not report the severities it excluded",
+  );
+  assert(asAll.total !== asError.total, "the filter has to change the answer");
+
+  // The cursor is still the SCANNED boundary, so the filter cannot hide the error from a later poll.
+  assert(Number(asError.cursor) >= errorSeq, "the filtered summary still reaches the error");
+  const events = await (await fetch(authed("/api/observability/errors?since=0&severity=error")))
+    .json();
+  assertEquals(events.events.map((e: { seq: number }) => e.seq), [errorSeq]);
+});
+
+Deno.test("the documented poller drains pages before advancing its cursor (audio-feed-c0kx)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 300, "error", "synthesis.failed");
+
+  let cursor = "0";
+  const seen: number[] = [];
+  const summary =
+    await (await fetch(authed(`/api/observability/summary?since=${cursor}&severity=error`)))
+      .json();
+  assertEquals(summary.total, 300);
+
+  // The recipe the docs describe, run for real: drain until hasMore is false, THEN advance.
+  let page = await (await fetch(authed(`/api/observability/errors?since=${cursor}&severity=error`)))
+    .json();
+  const pages = [page.returned];
+  while (true) {
+    seen.push(...page.events.map((e: { seq: number }) => e.seq));
+    cursor = page.cursor;
+    if (!page.hasMore) break;
+    page = await (await fetch(authed(`/api/observability/errors?since=${cursor}&severity=error`)))
+      .json();
+    pages.push(page.returned);
+  }
+
+  // 300 errors, a default page of 200: a single page would have lost 100 of them, which is what the
+  // old recipe did by advancing straight to the summary cursor.
+  assertEquals(pages, [200, 100], "the pages are drained, not sampled");
+  assertEquals(seen.length, 300, "every event is returned");
+  assertEquals(seen[0], 1);
+  assertEquals(seen[299], 300);
+
+  // And after the drain the cheap check reports nothing new, so the poller is idle rather than
+  // re-reading or losing anything.
+  const after =
+    await (await fetch(authed(`/api/observability/summary?since=${cursor}&severity=error`)))
+      .json();
+  assertEquals(after.total, 0);
 });

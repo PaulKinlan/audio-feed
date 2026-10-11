@@ -48,6 +48,7 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import type { LogBounds, LogRecord, LogSeverity } from "../storage/mod.ts";
+import { LOG_READ_LIMIT, summarizeRecords } from "../storage/log_shape.ts";
 import { json, problem } from "../http.ts";
 import { timingSafeEqual } from "../ids.ts";
 
@@ -297,25 +298,37 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const bounds = await ctx.stores.metadata.logBounds();
     if (cursorExpired(parsed.since, bounds)) return tooOld(parsed.since, bounds);
 
-    // The whole point of this endpoint: `total: 0` is the cheap answer to "anything new since my
-    // cursor", and it costs one bounded scan rather than a page of events.
-    const summary = await ctx.stores.metadata.summarizeLogs({
+    // The point of this endpoint: `total: 0` is the cheap answer to "anything new since my cursor",
+    // one bounded scan instead of a page of events.
+    //
+    // The scan is done HERE rather than through the store's `summarizeLogs`, because the severity
+    // filter has to apply to what is COUNTED (audio-feed-ijuc). The store aggregates everything in
+    // the window, so answering a `severity=error` request from it reported the unfiltered counts and
+    // was indistinguishable from `severity=all` — the caller asked a question and got a different
+    // one's answer. Scanning here also gives both endpoints one rule: the cursor advances over what
+    // was SCANNED, so a record the filter excluded can never be skipped later.
+    const scanned = await ctx.stores.metadata.listLogs({
       sinceSeq: parsed.since,
       ...(parsed.until !== undefined ? { untilSeq: parsed.until } : {}),
+      limit: LOG_READ_LIMIT,
     });
+    const summary = summarizeRecords(
+      scanned.filter((record) => parsed.severities.includes(record.severity)),
+    );
+    // The boundary is the last sequence SCANNED, not the last one counted, and not the window's
+    // newest: a cursor that steps over what was not examined skips events silently
+    // (audio-feed-8d6r).
+    const lastScanned = scanned.length > 0 ? scanned[scanned.length - 1]!.seq : parsed.since;
 
-    // THE CURSOR ADVANCES ONLY OVER WHAT WAS COUNTED (audio-feed-8d6r). Reporting the window's
-    // newest sequence instead was a silent skip: the count is bounded, so a window with more records
-    // than the bound was counted only in part while the cursor claimed all of it, and a poller
-    // advancing to that cursor never saw the rest. The count and its boundary have to be reported
-    // together for the answer to be usable.
     return json({
-      cursor: String(summary.countedThroughSeq),
+      cursor: String(lastScanned),
       since: String(parsed.since),
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,
-      truncated: summary.truncated,
+      // Records exist after the boundary, so the window is larger than what was counted and the
+      // caller has to come back for the rest.
+      truncated: scanned.length > 0 && lastScanned < bounds.newestSeq,
       window: window(bounds),
     });
   };
