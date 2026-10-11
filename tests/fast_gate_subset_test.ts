@@ -33,6 +33,7 @@ import {
   NEVER_WALKED,
   proveDiscoveryMatchesDeno,
   ROOT,
+  universeDrift,
   UNREAD_DECLARATIONS,
 } from "../scripts/test-selection.ts";
 
@@ -191,8 +192,30 @@ Deno.test("a `.test.ts` module the fast gate cannot select is a NAMED failure, n
   assert(audit.message.includes("SELECTION GAP"), audit.message);
   assert(audit.message.includes("tests/future.test.ts"), audit.message);
   assert(audit.message.includes("src/inline_test.mts"), audit.message);
+  // The FILE-LEVEL fix comes first, because that is usually the whole fix: a lane under time pressure
+  // should rename a module rather than edit the gate's own predicate.
+  assert(audit.message.includes("tests/*_test.ts"), audit.message);
+  assert(
+    audit.message.indexOf("tests/*_test.ts") < audit.message.indexOf("isFastGateSelectable"),
+    "the file-level fix must be named before the gate-level one",
+  );
   assert(audit.message.includes("isFastGateSelectable"), audit.message);
   assert(audit.message.includes("FAST_GATE_EXCLUSIONS"), audit.message);
+});
+
+Deno.test("the audit cannot be defeated by the builder drifting from the run (es8y condition 1/2)", () => {
+  // The audit and the run consume ONE walk; this is the check that keeps the exported builder honest.
+  assertEquals(universeDrift(["tests/a_test.ts"], ["tests/a_test.ts"]), null);
+  assertEquals(universeDrift(["tests/a_test.ts", "tests/a_test.ts"], ["tests/a_test.ts"]), null);
+
+  const narrower = universeDrift(["tests/a_test.ts", "tests/b_test.ts"], ["tests/a_test.ts"]);
+  assert(narrower !== null, "a builder that lost a module must be a named failure");
+  assert(narrower.includes("SELECTION DRIFT"), narrower);
+  assert(narrower.includes("only in the run's universe: 1: tests/b_test.ts"), narrower);
+
+  const wider = universeDrift(["tests/a_test.ts"], ["tests/a_test.ts", "tests/c_test.ts"]);
+  assert(wider !== null, "a builder that gained a module must be a named failure too");
+  assert(wider.includes("only in allTestFiles(): 1: tests/c_test.ts"), wider);
 });
 
 Deno.test("an exclusion justifies itself or it is reported (a reason, and a module that exists)", () => {

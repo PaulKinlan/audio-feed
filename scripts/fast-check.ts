@@ -56,6 +56,7 @@ import {
   discoverFullGateTestFiles,
   isFastGateSelectable,
   isProvablyInert,
+  universeDrift,
   UNREAD_DECLARATIONS,
 } from "./test-selection.ts";
 
@@ -617,16 +618,22 @@ if (import.meta.main) {
   // start of the run rather than a suite that quietly never runs again. The full gate runs this audit too
   // (first step of `deno task gate`), so drift cannot survive in either direction.
   const fullGateTestFiles = await discoverFullGateTestFiles(ROOT);
+  // ONE walk, and everything below derives from this value: the audit, the read relation, the selection and
+  // the full-suite fallback all describe the same universe. The cross-check against allTestFiles() is what
+  // keeps that true if the exported builder is ever changed to walk differently (audio-feed-es8y).
+  const fastUniverse = fullGateTestFiles.filter(isFastGateSelectable);
   const selectionAudit = auditSelection(fullGateTestFiles);
   if (!selectionAudit.ok) {
     console.error(selectionAudit.message);
     Deno.exit(1);
   }
+  const drift = universeDrift(fastUniverse, await allTestFiles());
+  if (drift) {
+    console.error(drift);
+    Deno.exit(1);
+  }
   // The read relation is derived once per run: which data files the suites read or execute.
-  const readRelations = await deriveDataReadRelations(
-    ROOT,
-    fullGateTestFiles.filter(isFastGateSelectable),
-  );
+  const readRelations = await deriveDataReadRelations(ROOT, fastUniverse);
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
@@ -634,7 +641,7 @@ if (import.meta.main) {
     ROOT,
     UNREAD_DECLARATIONS,
     readRelations,
-    fullGateTestFiles.filter(isFastGateSelectable),
+    fastUniverse,
   );
   if (ledgerProblems.length) {
     console.error(
@@ -672,7 +679,7 @@ if (import.meta.main) {
 
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
-    const wholeSuite = await allTestFiles();
+    const wholeSuite = fastUniverse;
     const res = await run(["deno", "test", ...TEST_FLAGS]);
     if (res.code !== 0) {
       console.log(suiteMarker("ran", wholeSuite));
@@ -688,9 +695,7 @@ if (import.meta.main) {
     // `unmapped:` marker the reporter already parses (it turns a non-empty list into a COVERAGE WARNING).
     // Only reachable when every changed file is declared inert - anything else fell back to the full suite.
     console.log(
-      `fast-check: NO SUITES SELECTED — 0 of ${
-        (await allTestFiles()).length
-      } test module(s) ran. ${reason}`,
+      `fast-check: NO SUITES SELECTED — 0 of ${fastUniverse.length} test module(s) ran. ${reason}`,
     );
     console.log(
       "  This is a statement about the changed files, NOT a test result: no suite in this repo observes",

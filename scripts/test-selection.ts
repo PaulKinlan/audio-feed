@@ -124,6 +124,34 @@ export interface SelectionAudit {
 }
 
 /**
+ * The gate-time audit must not be defeatable by the thing it audits: the universe the RUN selects from and
+ * the universe the exported builder produces have to be the same set. They were two walks of the same rule
+ * - equal, but equal by agreement rather than by construction, and a builder reverted to a narrower walk
+ * would have been invisible. This turns that into a NAMED failure.
+ */
+export function universeDrift(run: readonly string[], built: readonly string[]): string | null {
+  const sort = (paths: readonly string[]) => [...new Set(paths)].sort();
+  const left = sort(run);
+  const right = sort(built);
+  if (left.join("\n") === right.join("\n")) return null;
+  const inRun = new Set(left);
+  const inBuilt = new Set(right);
+  const onlyRun = left.filter((f) => !inBuilt.has(f));
+  const onlyBuilt = right.filter((f) => !inRun.has(f));
+  const show = (paths: string[]) =>
+    paths.length === 0
+      ? "none"
+      : `${paths.length}: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", ..." : ""}`;
+  return [
+    "fast-gate: SELECTION DRIFT (audio-feed-es8y): the universe this run selects from is NOT the universe",
+    "allTestFiles() produces, so the audit would be describing a different selection than the one that runs.",
+    `  only in the run's universe: ${show(onlyRun)}`,
+    `  only in allTestFiles(): ${show(onlyBuilt)}`,
+    "Both must come from the same walk (scripts/test-selection.ts); fix the builder rather than the message.",
+  ].join("\n");
+}
+
+/**
  * Property 2 of audio-feed-es8y: the fast gate's selection is a subset, and anything it cannot select is
  * accounted for. Pure over its inputs so a test can prove it bites (a `.test.ts` module must come back as a
  * named failure, not a pass).
@@ -159,10 +187,12 @@ export function auditSelection(
       );
       for (const file of unaccounted) lines.push(`  ${file}`);
       lines.push(
-        "The fast gate's selection must be a SUBSET of the full gate's, and these modules fall outside it,",
-        "so a fast-gate PASS would say nothing about them. Fix it in scripts/test-selection.ts, one of two ways:",
-        "  (a) widen isFastGateSelectable() so the fast gate can select them, or",
-        "  (b) add each one to FAST_GATE_EXCLUSIONS with a reason saying where it IS run instead.",
+        "A fast-gate PASS would say nothing about them, so the gate refuses to run rather than report on part",
+        "of the suite. Usually the module is simply NAMED or PLACED outside the convention the fast gate",
+        "selects (`tests/*_test.ts`; a `src/*_test.ts` module belongs under tests/) and fixing that is the",
+        "whole fix. If it must stay where it is, change scripts/test-selection.ts instead, one of two ways:",
+        "  (a) widen isFastGateSelectable() so the fast gate can select a module shaped like it, or",
+        "  (b) add it to FAST_GATE_EXCLUSIONS with a reason saying where it IS run instead.",
       );
     }
     if (badExclusions.length) {
@@ -778,7 +808,7 @@ if (import.meta.main) {
     console.error(
       `fast-gate: UNREAD DECLARATION contradiction(s) (audio-feed-es8y):\n  ${
         declarationProblems.join("\n  ")
-      }\nA declaration must either be corrected or replaced by the read relation the suites now express.`,
+      }\nThe relation is DERIVED from the suites, so a declaration a suite contradicts is simply wrong: delete it\n(the derived relation already selects that suite) or fix the read that made it wrong - and do not answer it\nby adding the path to a second list.`,
     );
     Deno.exit(1);
   }
