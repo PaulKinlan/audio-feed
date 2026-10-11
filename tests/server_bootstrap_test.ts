@@ -189,6 +189,61 @@ Deno.test("a usable origin with unusable ALLOWED_HOSTS still says what it accept
   }
 });
 
+Deno.test("a usable origin plus usable extras names the count it actually serves (audio-feed-bcwi)", async () => {
+  // Branch 4 was the only boot-log branch whose arithmetic was unpinned: mutating `usableHostCount - 1`
+  // to `usableHostCount` left the whole suite green (audio-feed-bcwi), so the state an operator is most
+  // likely to be in - a public origin plus extra allowed hosts - had a count nobody checked. It is pinned
+  // by asserting the WHOLE line with the exact number, because `extra host` as a substring passes for any
+  // count. The service assertions then check the printed number against what is actually served: a count
+  // that is merely printed right and served wrong would still be a lie to the operator.
+  const logged: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logged.push(args.map((a) => String(a)).join(" "));
+  };
+  const stores = await openStores({ kvPath: ":memory:" });
+  let booted: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    booted = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      config: {
+        publicBaseUrl: "https://audio.example.com",
+        // Three usable hosts in total: the pinned origin plus two extras. The junk entries contribute
+        // none, so the correct line says TWO extras - not three, and not the raw list length of four.
+        allowedHosts: ["extra1.example.com", "extra2.example.com", "not a host", ""],
+      },
+    });
+    assert(
+      logged.some((line) =>
+        line.includes(
+          "Host gate: accepting audio.example.com (from PUBLIC_BASE_URL) plus 2 extra host(s) from ALLOWED_HOSTS.",
+        )
+      ),
+      `boot must name the pinned origin and the exact extras count; logged: ${
+        JSON.stringify(logged)
+      }`,
+    );
+    for (const host of ["audio.example.com", "extra1.example.com", "extra2.example.com"]) {
+      const res = await booted.fetch(
+        new Request(`https://${host}/health`, { headers: { host } }),
+      );
+      await res.body?.cancel();
+      assert(res.status !== 421, `${host} is usable and must be served; got ${res.status}`);
+    }
+    const foreign = await booted.fetch(
+      new Request("https://evil.example/health", { headers: { host: "evil.example" } }),
+    );
+    await foreign.body?.cancel();
+    assertEquals(foreign.status, 421, "an unlisted host must still be refused");
+  } finally {
+    console.log = original;
+    if (booted) await booted.shutdown();
+  }
+});
+
 Deno.test("ALLOWED_HOSTS alone activates the gate and says so (audio-feed-4x4t)", async () => {
   // The third state that used to log nothing: no usable PUBLIC_BASE_URL, but usable ALLOWED_HOSTS. The
   // gate is active, the listed host is served, a foreign host is refused, and the operator is told.
