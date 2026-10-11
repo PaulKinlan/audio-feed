@@ -25,8 +25,8 @@ export function newCspNonce(): string {
  * not covered by a nonce (CSP hashes/nonces do not apply to attributes), so the app has no
  * inline style attributes — page CSS lives in the shared stylesheet or a nonced `<style>`.
  */
-export function htmlContentSecurityPolicy(nonce: string): string {
-  return [
+export function htmlContentSecurityPolicy(nonce: string, reportUrl?: string): string {
+  const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
     `style-src 'self' 'nonce-${nonce}'`,
@@ -36,7 +36,12 @@ export function htmlContentSecurityPolicy(nonce: string): string {
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-  ].join("; ");
+  ];
+  if (reportUrl) {
+    directives.push("report-to csp-endpoint");
+    directives.push(`report-uri ${reportUrl}`);
+  }
+  return directives.join("; ");
 }
 
 /**
@@ -46,10 +51,10 @@ export function htmlContentSecurityPolicy(nonce: string): string {
 export function htmlResponse(
   html: string,
   nonce: string,
-  init: { status?: number; headers?: HeadersInit } = {},
+  init: { status?: number; headers?: HeadersInit; reportUrl?: string } = {},
 ): Response {
   const headers = new Headers(init.headers);
   if (!headers.has("content-type")) headers.set("content-type", "text/html; charset=utf-8");
-  headers.set("content-security-policy", htmlContentSecurityPolicy(nonce));
+  headers.set("content-security-policy", htmlContentSecurityPolicy(nonce, init.reportUrl));
   return new Response(html, { status: init.status ?? 200, headers });
 }
