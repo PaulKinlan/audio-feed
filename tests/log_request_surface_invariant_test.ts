@@ -29,6 +29,12 @@ interface Surface {
   name: string;
   /** Build a request carrying the canary on this surface, for a matched and an unmatched path. */
   build(path: string): Request;
+  /**
+   * Socket-level input, which arrives BESIDE the request rather than inside it and is therefore its
+   * own surface: the client address a runtime hands the handler. Not inside `Request`, so a fuzz
+   * over requests alone would never reach it.
+   */
+  info?: { remoteAddr?: { hostname?: string } };
 }
 
 const SURFACES: Surface[] = [
@@ -83,6 +89,11 @@ const SURFACES: Surface[] = [
       new Request(`${BASE}${path}`, { headers: { "content-type": `text/${CANARY}` } }),
   },
   {
+    name: "client address (socket-level, arrives beside the request)",
+    build: (path) => new Request(`${BASE}${path}`),
+    info: { remoteAddr: { hostname: CANARY } },
+  },
+  {
     name: "body",
     build: (path) =>
       new Request(`${BASE}${path}`, {
@@ -105,7 +116,10 @@ const PATHS = ["/account", "/no/such/route"];
  * cannot fail is worse than no test, because it is counted as coverage.
  */
 async function app(): Promise<{
-  fetch: (r: Request) => Promise<Response>;
+  fetch: (
+    r: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ) => Promise<Response>;
   stores: Stores;
   close: () => Promise<void>;
 }> {
@@ -117,7 +131,11 @@ async function app(): Promise<{
     synthesizer: null,
     inventory: false,
   });
-  return { fetch: async (r) => await server.fetch(r), stores, close: () => server.shutdown() };
+  return {
+    fetch: async (r, info) => await server.fetch(r, info),
+    stores,
+    close: () => server.shutdown(),
+  };
 }
 
 for (const surface of SURFACES) {
@@ -125,7 +143,7 @@ for (const surface of SURFACES) {
     Deno.test(`no canary reaches the store from ${surface.name} (${path})`, async () => {
       const { fetch, stores, close } = await app();
       try {
-        const res = await fetch(surface.build(path));
+        const res = await fetch(surface.build(path), surface.info);
         // Nothing may hang: a request is answered, not left open.
         assert(res.status >= 200 && res.status < 600, `answered with ${res.status}`);
         // Handlers may append without the request waiting; give those appends a bounded moment.
