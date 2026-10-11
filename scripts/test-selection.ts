@@ -486,8 +486,9 @@ function readCallAt(source: string, index: number): boolean {
  * a suite that reads one fixture selects every change under the directory it is built from. Over-selecting
  * costs seconds; under-selecting is the bug this bead is about.
  *
- * What it cannot see is a path assembled at runtime from variables — that residual is why an undeclared file
- * OUTSIDE src/ and tests/ still falls back to the full suite, and it is stated rather than papered over.
+ * What it cannot see is a path assembled at runtime from variables — that residual is why an undeclared
+ * non-TS file still falls back to the full suite, and it is stated rather than papered over (audio-feed-40ch
+ * extended the relation to assets and fixtures inside src/ and tests/; the fallback covers them unchanged).
  */
 /**
  * The relation PLUS what the detector could not resolve (audio-feed-q0ky, coord's decision (b)).
@@ -529,15 +530,17 @@ export async function deriveReadRelationReport(
 
   const relations: DataReadRelations = new Map();
   const add = (path: string, suite: string) => {
-    // TypeScript is covered by the import graph, and non-.ts files under src/ and tests/ keep the
-    // conservative full-suite fallback - so a relation to either is recorded nowhere: it would never be
-    // consulted and it would bury the data paths that matter (audio-feed-es8y scope note).
+    // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
+    // never be consulted, and it would bury the non-TS paths that matter.
     if (path.endsWith(".ts")) return;
-    if (
-      path === "src" || path === "tests" || path.startsWith("src/") || path.startsWith("tests/")
-    ) {
-      return;
-    }
+    // audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are now in the relation too. They used to
+    // be excluded here (audio-feed-es8y's scope note) on the argument that they keep the conservative
+    // full-suite fallback - which was true, and cost every one of them the whole gate: a one-line change to
+    // src/assets/home.css could not select the suite that reads it. Measured before this change, that file
+    // and four others like it were UNCLASSIFIED and ran all 108 suites. The fallback is still what protects
+    // them when the relation names no reader (classifyNonTsChanges pushes them to `unclassified`, never to
+    // `inert` - only markdown is inert), so extending the relation cannot make such a change silent: it can
+    // only turn "everything" into "the suites that read it".
     const list = relations.get(path) ?? [];
     if (!list.includes(suite)) list.push(suite);
     relations.set(path, list);

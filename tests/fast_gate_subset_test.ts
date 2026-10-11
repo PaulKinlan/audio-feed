@@ -516,6 +516,36 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
   }
 });
 
+Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in the relation, and no-reader ones still widen", async () => {
+  // The property this bead adds, asserted against the REAL tree because that is where the two halves meet:
+  // the detector must produce a relation for a non-TS file under src/ or tests/ that a suite reads, and the
+  // OLD scope note (recorded nowhere) must be gone. MEASURED BEFORE: four relations, and every one of these
+  // paths was UNCLASSIFIED, i.e. all 108 suites ran for a one-line CSS change. MEASURED AFTER: fifteen.
+  const { relations } = await deriveReadRelationReport(ROOT);
+  assert(
+    relations.has("src/assets/admin.css"),
+    "an asset inside src/ that a suite reads must be in the relation (audio-feed-40ch)",
+  );
+  const derived = classifyNonTsChanges(["src/assets/admin.css"], relations);
+  assertEquals(
+    derived.unclassified,
+    [],
+    "a src/ asset with a derived reader must not fall to the full-suite class",
+  );
+  assertEquals(
+    derived.suites,
+    relations.get("src/assets/admin.css"),
+    "the suites named by the relation are the suites selected",
+  );
+
+  // Anti-vacuity for the FALLBACK, which is the thing that makes this change safe to make: a non-TS file
+  // under src/ that NOTHING is derived to read must still widen to the full suite, and must never be inert.
+  const unread = classifyNonTsChanges(["src/assets/home.css"], relations);
+  assertEquals(unread.inert, [], "an unread asset is not documentation - it may not be inert");
+  assertEquals(unread.suites, [], "nothing is derived to read it");
+  assertEquals(unread.unclassified, ["src/assets/home.css"], "so it keeps the full-suite fallback");
+});
+
 Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {
   const unresolved = ["data/table.csv", "fixtures.html"];
   const widened = planTests(
