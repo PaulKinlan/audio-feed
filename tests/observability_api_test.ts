@@ -429,3 +429,62 @@ Deno.test("the documented poller drains pages before advancing its cursor (audio
       .json();
   assertEquals(after.total, 0);
 });
+
+Deno.test("a truncated summary is an instruction, not a quiet answer (audio-feed-36qa)", async () => {
+  const { fetch, stores } = app();
+  // The reviewer's trap: the scan bound fills with records the DEFAULT filter excludes, and the one
+  // record the caller wants sits immediately behind them.
+  await seed(stores, 500, "debug", "http.request");
+  const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
+
+  const first = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(first.total, 0, "nothing matched the filter in the scanned window");
+  assertEquals(first.truncated, true, "and the caller is told the scan was bounded");
+  assertEquals(
+    first.scanned,
+    500,
+    "`scanned` shows the bound filled, so this is not an empty store",
+  );
+  assertEquals(
+    first.cursor,
+    "500",
+    "the cursor advances over what was SCANNED, not what was counted",
+  );
+
+  // Polling again from the returned cursor reaches the record, which is the property a caller that
+  // treats total==0 as quiet would lose.
+  const second = await (await fetch(authed(`/api/observability/summary?since=${first.cursor}`)))
+    .json();
+  assertEquals(second.total, 1);
+  assertEquals(second.bySeverity.error, 1);
+  assertEquals(second.cursor, String(errorSeq));
+  assertEquals(second.truncated, false);
+});
+
+Deno.test("the documented recipe terminates and finds the record behind a full scan bound (audio-feed-36qa)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 500, "debug", "http.request");
+  await seed(stores, 1, "error", "synthesis.failed");
+
+  // The recipe as the docs describe it, with the `truncated` branch that this finding was about.
+  const summary = async (since: string) =>
+    await (await fetch(authed(`/api/observability/summary?since=${since}`))).json();
+  let probe = "0";
+  let counted = 0;
+  let polls = 0;
+  while (polls < 10) {
+    polls++;
+    const s = await summary(probe);
+    if (s.truncated) {
+      probe = s.cursor;
+      continue;
+    }
+    if (s.total > 0) {
+      counted += s.total;
+      break;
+    }
+    break;
+  }
+  assertEquals(polls <= 2, true, `terminated in ${polls} polls`);
+  assertEquals(counted, 1, "and reached the record behind the full bound");
+});

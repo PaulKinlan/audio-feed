@@ -327,8 +327,14 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       bySeverity: summary.bySeverity,
       byType: summary.byType,
       // Records exist after the boundary, so the window is larger than what was counted and the
-      // caller has to come back for the rest.
+      // caller has to come back for the rest. `truncated: true` is an INSTRUCTION — advance to
+      // `cursor` and poll again — never a quiet answer, and never "nothing to see": a scan bound
+      // full of filtered-out records reports total 0 with truncated true, and a caller that stops
+      // there never reaches the records behind them (audio-feed-36qa).
       truncated: scanned.length > 0 && lastScanned < bounds.newestSeq,
+      // How many records the scan examined, regardless of the filter. Reported because it is what
+      // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
+      scanned: scanned.length,
       window: window(bounds),
     });
   };

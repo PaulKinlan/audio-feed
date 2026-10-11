@@ -80,10 +80,10 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
 a separate id would be a second identity that could disagree with the cursor.
 
-`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, window }`. `total: 0` is
-the cheap answer to "has anything happened since my cursor" — one bounded scan instead of a page of
-events. It applies the same cursor rules, including the `410` when retention has moved past the
-cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
+`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, scanned, window }`.
+`total: 0` is the cheap answer to "has anything happened since my cursor" — one bounded scan instead
+of a page of events. It applies the same cursor rules, including the `410` when retention has moved
+past the cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
 
 The summary's `cursor` advances only over events that were **counted**. A count is bounded, so a
 window larger than the bound is counted in part: `truncated: true` says so, `cursor` names the last
@@ -97,7 +97,10 @@ advancing over what was scanned rather than what was returned.
 ```
 cursor = "0"
 loop:
-  s = GET /api/observability/summary?since=<cursor>     # cheap: total == 0 means nothing to do
+  s = GET /api/observability/summary?since=<cursor>     # cheap: is there anything new
+  if s.truncated:                                       # the scan bound filled: keep looking, this is
+      cursor = s.cursor                                 # NOT "nothing to see"
+      continue
   if s.total > 0:
       # DRAIN the pages before moving the durable cursor. A summary cursor can be far ahead of one
       # page (the summary's bound and the errors feed's `limit` are different, and a summary counts a
@@ -115,6 +118,15 @@ loop:
 The rule for the consumer is the same one the API holds itself to: **a cursor may only advance over
 what has been consumed.** The summary answers "is there anything new" cheaply; the errors pages are
 what you actually read, and the durable cursor belongs to the reading, not to the check.
+
+**`truncated: true` means "advance to `cursor` and poll again", never "nothing to see".** The
+summary counts only the records its filter matched, but its cursor advances over everything the scan
+EXAMINED, so a scan whose bound fills with filtered-out records answers `total: 0, truncated: true`
+and the next poll continues from there. A caller that treats `total: 0` as "quiet" stops forever in
+exactly that case: the bound fills with events it did not ask for and the ones it wanted sit behind
+them (`audio-feed-36qa`). That is why the recipe below advances the PROBE on `truncated` and only
+moves the durable cursor after a drain, and why `/summary` also reports `scanned` — zero examined
+means genuinely empty, a full bound means there is more.
 
 On `410 cursor_too_old`, the cursor cannot be resumed: re-baseline from `window.oldestRetained - 1`
 (accepting the gap, and saying so in whatever consumes the events) or from the current cursor, and
