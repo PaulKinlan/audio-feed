@@ -69,7 +69,7 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
-import { type BlobStore, collect, type MetadataStore } from "../storage/mod.ts";
+import { type BlobInfo, type BlobStore, collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
   DEFAULT_DAILY_EPISODE_BUDGET,
@@ -77,10 +77,14 @@ import {
   DEFAULT_MAX_INVOCATION_DURATION_MS,
 } from "../config.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../observability/spans.ts";
+import { claimLifecycleEvent } from "../storage/episode_events.ts";
 import {
+  ASSUMED_UPLOAD_BYTES_PER_MS,
+  type BudgetedOutcome,
   ESTIMATED_SCRIPT_STAGE_DURATION_MS,
   ESTIMATED_TTS_TURN_DURATION_MS,
   ESTIMATED_UPLOAD_DURATION_MS,
+  estimateUploadDurationMs,
   INVOCATION_FLUSH_MARGIN_MS,
   InvocationBudgetAbortError,
   isInvocationBudgetAbort,
@@ -424,6 +428,48 @@ export async function checkpointEpisodeClaim(
       true, // permanent: claim lost / superseded, abort immediately
     );
   }
+}
+
+/**
+ * Timer heartbeat for a long awaited stage (audio-feed-aqms).
+ *
+ * `checkpointEpisodeClaim` fires only at stage BOUNDARIES, so while a stage is
+ * awaited (the terminal upload being the one that motivated this) the claim's
+ * `lastHeartbeat` freezes at the stage's entry checkpoint. From the outside - and
+ * from the abandonment record written at lease expiry - "still uploading" is then
+ * indistinguishable from "died at the checkpoint". This helper touches the claim on
+ * a timer while the caller awaits its stage, with NO phase change: the record shows
+ * the worker was alive N seconds into the stage, which is what makes the NEXT
+ * incident diagnosable.
+ *
+ * The touch is phase-less on purpose: both metadata adapters log a lifecycle event
+ * only when the phase CHANGES, so a heartbeat cannot bury the real transitions in
+ * noise. It is best-effort: a failed touch (store hiccup, superseded claim) is
+ * swallowed - the stage's own checkpoint/yield writes remain the durable truth.
+ *
+ * Returns a stop function; callers MUST call it when the stage ends. The timer is
+ * unref'd so that even a missed stop cannot keep the isolate alive on its own.
+ */
+export function startClaimHeartbeat(
+  metadata: MetadataStore,
+  userId: string,
+  episodeId: string,
+  owner: string,
+  opts: { leaseMs?: number; intervalMs?: number; now?: () => string } = {},
+): () => void {
+  const intervalMs = opts.intervalMs ??
+    Math.min(30_000, Math.max(1_000, Math.floor((opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS) / 4)));
+  const timer = setInterval(() => {
+    void metadata.touchEpisodeClaim(userId, episodeId, owner, { now: opts.now?.() }).catch(
+      () => {},
+    );
+  }, intervalMs);
+  try {
+    Deno.unrefTimer(timer);
+  } catch {
+    // Not a Deno timer handle in this runtime; the stop function still clears it.
+  }
+  return () => clearInterval(timer);
 }
 
 /**
@@ -1021,12 +1067,16 @@ async function settleTerminalPersistence(
     return { committed: true, episode: current };
   }
 
-  // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit
+  // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit.
+  // audio-feed-aqms: the phase names WHAT WILL HAPPEN NEXT, not what finished: an
+  // episode requeued here is RETRYING its upload on a later tick, and "upload_retry"
+  // is legible as retrying on the admin page and in the claim history where
+  // "audio_synthesized" read as a finished state with no reason attached.
   await metadata.yieldEpisodeClaim(
     userId,
     episodeId,
     owner,
-    { phase: "audio_synthesized", now: new Date(nowMs).toISOString() },
+    { phase: "upload_retry", now: new Date(nowMs).toISOString() },
   ).catch(() => {});
 
   // Re-check durable state: did completeEpisode commit concurrently during the yield?
@@ -1467,16 +1517,33 @@ export async function runSynthesisBatch(
           }
 
           // Clean yield to respect invocation budget: resets attempts to 0 on progress, or advances attempts on zero progress.
+          const yieldPhase = `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`;
           const yielded = await metadata.yieldEpisodeClaim(
             currentEpisode.userId,
             currentEpisode.id,
             opts.owner,
             {
-              phase: `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`,
+              phase: yieldPhase,
               advanceAttempts: !madeProgress,
             },
           );
           if (yielded) {
+            // Same structured verdict as the terminal-upload yield (audio-feed-2sec): the
+            // claim was released to resume later; no terminal write happened. Best-effort -
+            // the durable truth is the yield itself and the episode's phase.
+            try {
+              await metadata.appendLog(
+                claimLifecycleEvent(currentEpisode, {
+                  phase: yieldPhase,
+                  attempt: currentEpisode.attempts ?? 1,
+                  claimOutcome: "yielded",
+                  reason:
+                    `invocation budget reached with ${finalSegments} of ${yieldErr.totalTurns} segments committed; resuming on a later tick`,
+                }),
+              );
+            } catch {
+              // the yield itself is durable; the history record is not load-bearing
+            }
             result.yielded.push({
               episodeId: currentEpisode.id,
               completedTurns: finalSegments,
@@ -1542,110 +1609,190 @@ export async function runSynthesisBatch(
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
 
+    // audio-feed-aqms: the upload estimate must be honest about PAYLOAD SIZE. The flat
+    // 5s floor is fine for a small blob and a lie for an episode WAV: a preflight bound
+    // enforced by an estimate that ignores bytes STARTS a put that cannot finish inside
+    // the remaining budget, and a put that outlives the invocation dies without a
+    // terminal write (the phase is checkpointed BEFORE the put starts). Scale by bytes
+    // so the preflight refuses to start what cannot fit, and the claim is yielded
+    // resumably instead: the next 2-minute tick retries with a fresh budget and the
+    // durable segment cache, converting a lost episode into lost minutes.
+    const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
+    const sizeScaledUploadEstimate = estimateUploadDurationMs(bytes.length, uploadEstimate);
+
     // FOUR-PROPERTY INVARIANT COVERS TERMINAL PERSISTENCE (audio-feed-dv4p):
     // 1. Bound: Invocation bound covers terminal audio blob write and metadata completion.
     // 2. Preflight: Verify remaining budget fits upload + flush margin; yield before starting if it cannot.
     // 3. Provenance: Upload timeout uses explicit InvocationBudgetAbortError sentinel; real blob store errors fail.
     // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
-    const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
     const inFlightStagingKey = stagingKey;
-    inFlightUploadKeys.add(inFlightStagingKey);
 
     // audio-feed-i7vi: the synthesis phase ends where the terminal persistence block begins; the
     // blob upload and the commit that follow are the write phase, measured from here.
     const synthesisEndedAt = performance.now();
 
-    const terminalEstimate = uploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
-    // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
-    const terminalOutcome = await withInvocationBudget({
-      name: "terminal_persistence",
-      budget: {
-        maxDurationMs: maxInvocationDurationMs,
-        startTimeMonotonicMs: invocationStartMonotonicMs,
-      },
-      flushMarginMs: flushMargin,
-      worstCaseEstimateMs: terminalEstimate,
-      completedTurns: 1,
-      totalTurns: 1,
-      cleanupOnAbort: async () => {
-        // Shared terminal settlement helper owns commit/settle/delete decision (audio-feed-g5bi)
-        await settleTerminalPersistence(
-          metadata,
-          blobs,
-          currentEpisode.userId,
-          currentEpisode.id,
-          opts.owner,
-          stagingKey,
-          nowMs,
-        );
-      },
-      fn: async (signal) => {
-        await checkpointEpisodeClaim(
-          metadata,
-          currentEpisode.userId,
-          currentEpisode.id,
-          opts.owner,
-          {
-            phase: "uploading_audio",
-          },
-        );
-        if (signal?.aborted) {
-          throw signal.reason;
-        }
+    // audio-feed-aqms: NEVER start an upload whose BYTE-SCALED duration alone cannot
+    // fit even a FRESH invocation. A payload too large for the whole budget is not
+    // deferrable - every tick would refuse it and yield forever with attempts reset
+    // to zero (an unbounded livelock that the four-property invariant forbids). Fail
+    // TERMINALLY with a legible reason instead: the operator learns the payload cannot
+    // be uploaded under the current budget and what to change, instead of the episode
+    // stalling for 15-minute leases and being abandoned with a reason that names no
+    // cause.
+    //
+    // The gate deliberately ignores the conservative small-payload FLOOR: a floor that
+    // exceeds a small budget (a test fixture, or a deliberately tiny deployment
+    // budget) still yields resumably - a later invocation with a workable budget can
+    // upload a small payload, exactly as the dv4p(a) test pins. Only the size-driven
+    // term is a verdict about THIS payload: no invocation at this budget can ever
+    // upload it.
+    const byteScaledUploadEstimateMs = Math.ceil(bytes.length / ASSUMED_UPLOAD_BYTES_PER_MS);
+    if (
+      maxInvocationDurationMs !== undefined && maxInvocationDurationMs > 0 &&
+      byteScaledUploadEstimateMs + flushMargin > maxInvocationDurationMs
+    ) {
+      const error =
+        `terminal audio upload cannot fit the invocation budget: ${bytes.length} bytes at the assumed ` +
+        `${ASSUMED_UPLOAD_BYTES_PER_MS} bytes/ms (~${
+          Math.round(byteScaledUploadEstimateMs / 1000)
+        }s plus ` +
+        `${flushMargin}ms margin) exceeds MAX_INVOCATION_DURATION_MS (${maxInvocationDurationMs}ms); ` +
+        `shorten the article or raise the budget (audio-feed-aqms)`;
+      console.error(
+        `[audio-feed] terminal upload refused for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
+      );
+      const wrote = await metadata.completeEpisode(
+        unsynthesized(currentEpisode, error),
+        opts.owner,
+      );
+      if (wrote) {
+        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+        await notifyOnDemand(currentEpisode, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      }
+      continue;
+    }
 
-        // Abort-aware put with settlement cleanup token (audio-feed-fsbk):
-        const putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
-        putPromise
-          .finally(async () => {
-            try {
-              if (signal?.aborted) {
-                // Delete materialized blob when delayed put settles
-                await blobs.delete(stagingKey).catch(() => {});
-                // Only forget orphan record once blob is confirmed deleted
-                await metadata.forgetOrphanBlob(stagingKey).catch(() => {});
-              }
-            } finally {
-              inFlightUploadKeys.delete(inFlightStagingKey);
-            }
-          })
-          .catch(() => {});
+    // Only mark the key in-flight on paths that actually attempt the upload: the
+    // never-fits gate above continues without starting a put, and a phantom entry
+    // would make the orphan sweep skip a key nothing will ever settle (review P3).
+    inFlightUploadKeys.add(inFlightStagingKey);
 
-        const stored = await putPromise;
-        if (signal?.aborted) {
-          await blobs.delete(stagingKey).catch(() => {});
-          throw signal.reason;
-        }
+    const terminalEstimate = sizeScaledUploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
+    // audio-feed-aqms: timer heartbeat while the terminal stage is awaited. The phase
+    // is checkpointed BEFORE the put starts, so without this the claim's heartbeat
+    // freezes at "uploading_audio" entry and a lease that expires mid-upload cannot
+    // distinguish "still uploading" from "died at the checkpoint".
+    const stopTerminalHeartbeat = startClaimHeartbeat(
+      metadata,
+      currentEpisode.userId,
+      currentEpisode.id,
+      opts.owner,
+      { leaseMs: opts.leaseMs },
+    );
+    let terminalOutcome: BudgetedOutcome<{ stored: BlobInfo; byteLength: number; wrote: boolean }>;
+    try {
+      // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
+      terminalOutcome = await withInvocationBudget({
+        name: "terminal_persistence",
+        budget: {
+          maxDurationMs: maxInvocationDurationMs,
+          startTimeMonotonicMs: invocationStartMonotonicMs,
+        },
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: terminalEstimate,
+        completedTurns: 1,
+        totalTurns: 1,
+        cleanupOnAbort: async () => {
+          // Shared terminal settlement helper owns commit/settle/delete decision (audio-feed-g5bi)
+          await settleTerminalPersistence(
+            metadata,
+            blobs,
+            currentEpisode.userId,
+            currentEpisode.id,
+            opts.owner,
+            stagingKey,
+            nowMs,
+          );
+        },
+        fn: async (signal) => {
+          await checkpointEpisodeClaim(
+            metadata,
+            currentEpisode.userId,
+            currentEpisode.id,
+            opts.owner,
+            {
+              phase: "uploading_audio",
+            },
+          );
+          if (signal?.aborted) {
+            throw signal.reason;
+          }
 
-        const byteLength = stored.size ?? bytes.length;
-        // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
-        // Billing mutations are appended to the exact same atomic transaction as episode completion.
-        const wrote = await metadata.completeEpisode(
-          {
-            ...currentEpisode,
-            status: "ready",
-            audioKey: stagingKey,
-            byteLength,
+          // Abort-aware put with settlement cleanup token (audio-feed-fsbk), and
+          // genuinely abortable since audio-feed-aqms: the wrapper's signal is
+          // threaded into blobs.put, so the invocation-budget deadline closes the
+          // socket (S3 adapter) / rejects (memory adapter) instead of leaving the
+          // isolate awaiting an uninterruptible upload past its own bound.
+          const putPromise = blobs.put(stagingKey, bytes, {
             contentType: "audio/wav",
-            durationSeconds: audio.durationSeconds,
-            readyAt: previousKey && currentEpisode.readyAt
-              ? currentEpisode.readyAt
-              : new Date().toISOString(),
-            promptVersion: PROMPT_VERSION,
-            regenerating: undefined,
-            error: undefined,
-            phase: "ready",
-            lastHeartbeat: new Date().toISOString(),
-            scriptTurns: undefined,
-          },
-          opts.owner,
-          { byteLength, at: new Date(nowMs) },
-        );
+            signal,
+          });
+          putPromise
+            .finally(async () => {
+              try {
+                if (signal?.aborted) {
+                  // Delete materialized blob when delayed put settles
+                  await blobs.delete(stagingKey).catch(() => {});
+                  // Only forget orphan record once blob is confirmed deleted
+                  await metadata.forgetOrphanBlob(stagingKey).catch(() => {});
+                }
+              } finally {
+                inFlightUploadKeys.delete(inFlightStagingKey);
+              }
+            })
+            .catch(() => {});
 
-        return { stored, byteLength, wrote };
-      },
-    });
+          const stored = await putPromise;
+          if (signal?.aborted) {
+            await blobs.delete(stagingKey).catch(() => {});
+            throw signal.reason;
+          }
+
+          const byteLength = stored.size ?? bytes.length;
+          // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
+          // Billing mutations are appended to the exact same atomic transaction as episode completion.
+          const wrote = await metadata.completeEpisode(
+            {
+              ...currentEpisode,
+              status: "ready",
+              audioKey: stagingKey,
+              byteLength,
+              contentType: "audio/wav",
+              durationSeconds: audio.durationSeconds,
+              readyAt: previousKey && currentEpisode.readyAt
+                ? currentEpisode.readyAt
+                : new Date().toISOString(),
+              promptVersion: PROMPT_VERSION,
+              regenerating: undefined,
+              error: undefined,
+              phase: "ready",
+              lastHeartbeat: new Date().toISOString(),
+              scriptTurns: undefined,
+            },
+            opts.owner,
+            { byteLength, at: new Date(nowMs) },
+          );
+
+          return { stored, byteLength, wrote };
+        },
+      });
+    } finally {
+      stopTerminalHeartbeat();
+    }
 
     if (terminalOutcome.kind === "budget-yield") {
       const settle = await settleTerminalPersistence(
@@ -1672,6 +1819,29 @@ export async function runSynthesisBatch(
         completedTurns: 1,
         totalTurns: 1,
       });
+      // audio-feed-aqms: the retry churn must be OPERATOR-VISIBLE, not a pending
+      // episode with no reason. The claim history gets one record per interrupted
+      // upload naming the cause, so an episode stuck retrying reads as retrying
+      // (coord condition on landing). Best-effort: a logging failure must never
+      // disturb the yield that already happened.
+      try {
+        await metadata.appendLog(
+          claimLifecycleEvent(currentEpisode, {
+            phase: "upload_retry",
+            attempt: currentEpisode.attempts ?? 1,
+            // Structured verdict (audio-feed-2sec): this claim was DELIBERATELY released;
+            // the reason below is explanation. Without the marker, a reader that treats
+            // "has a reason" as "ended terminally" reports this yielded claim as a
+            // failure with a terminal write.
+            claimOutcome: "yielded",
+            reason: `terminal upload interrupted by invocation budget (${
+              Math.round(bytes.length / 1024)
+            } KB); retrying on a later tick`,
+          }),
+        );
+      } catch {
+        // nothing left to record it with; the yield itself is durable
+      }
       break;
     }
 

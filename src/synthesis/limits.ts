@@ -111,6 +111,46 @@ export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
 export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
 /** Worst-case estimated duration for terminal audio blob upload in ms (audio-feed-dv4p). */
 export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
+/**
+ * Assumed upload throughput in bytes per ms (audio-feed-aqms): 10_000 = 10 MB/s.
+ *
+ * THE ARITHMETIC THIS CONSTANT HAS TO SURVIVE (measured from the repo, 2026-10-13):
+ * Gemini TTS emits 24 kHz 16-bit mono PCM = 48_000 B/s of audio. Input is capped
+ * at MAX_TTS_INPUT_BYTES (6 KB) x MAX_TTS_SEGMENTS (12) = 72 KB of text ~= 80
+ * minutes of narration at typical speaking rates, so the WAV ceiling is
+ * 80 min x 48 KB/s ~= 230 MB; a typical 2_000-4_000 word article narrates to
+ * 13-27 min = 37-77 MB. To fit the default upload window (45 s budget - 5 s
+ * margin = 40 s) those payloads need 1-2 MB/s sustained to R2 from a Deploy
+ * isolate; the 230 MB absolute cap needs ~6 MB/s. R2-class object stores
+ * sustain an order of magnitude more than that, so 10 MB/s is the planning
+ * floor, not the ceiling.
+ *
+ * NOT MEASURED ON PRODUCTION from this VM (no deploy token): if reality is
+ * slower than assumed, the preflight defers more often than it should - and
+ * since audio-feed-aqms the put is GENUINELY ABORTABLE (the budget signal is
+ * threaded to the underlying fetch), a too-optimistic estimate degrades to an
+ * interrupt-and-retry at the deadline, not an uninterruptible await running
+ * past the isolate's lifetime. The estimate is advisory; the deadline is the
+ * bound. A first version of this constant was 10 (bytes/ms = 10 KB/s) - a
+ * units error of 1000x that would have refused every real episode; caught in
+ * review before landing.
+ */
+export const ASSUMED_UPLOAD_BYTES_PER_MS = 10_000;
+
+/**
+ * Honest worst-case duration for uploading `byteLength` bytes (audio-feed-aqms).
+ *
+ * `floorMs` seeds the estimate for small payloads (connection setup, signing, the
+ * first write); the byte-scaled term dominates for real episode audio.
+ */
+export function estimateUploadDurationMs(
+  byteLength: number,
+  floorMs: number = ESTIMATED_UPLOAD_DURATION_MS,
+  bytesPerMs: number = ASSUMED_UPLOAD_BYTES_PER_MS,
+): number {
+  if (byteLength <= 0 || bytesPerMs <= 0) return Math.max(0, floorMs);
+  return Math.max(floorMs, Math.ceil(byteLength / bytesPerMs));
+}
 /** Safety margin reserved for flushing checkpoints, commits, and claim yields in ms (audio-feed-9wqt). */
 export const INVOCATION_FLUSH_MARGIN_MS = 5_000;
 
