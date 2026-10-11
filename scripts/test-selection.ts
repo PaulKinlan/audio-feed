@@ -31,10 +31,14 @@
  *      FAST_GATE_EXCLUSIONS with a reason. A new `.test.ts` file is a NAMED gate failure that says exactly
  *      what to do, not a suite that quietly never runs again.
  *
- * The same drift exists for non-TypeScript files a suite READS (the docs/evidence case above), so
- * DATA_LEDGER declares them: a changed non-.ts file is either documentation (no suite reads `.md`), a
- * declared data file naming the suites that observe it, or an "unclassified" full-suite fallback that names
- * the file. Silence is not an option in any of the three.
+ * The same drift exists for non-TypeScript files a suite READS (the docs/evidence case above), so the read
+ * relation is DERIVED from the suites' own code and a `.md` a suite reads is a real input like any other.
+ * A changed non-.ts file is then either documentation (no suite is derived to read it), a data file whose
+ * observers are selected, or "unclassified" - which runs the FULL suite and names the file. NOTHING is
+ * DECLARED: a hand-written "nothing reads this" is a standing assertion that a later suite can contradict
+ * silently, and the measured cost of not having one is a full suite on the rare change to tooling config
+ * (those paths change 15 times in 652 commits, which is why audio-feed-r9fe deleted the list). Silence is
+ * not an option in any of the three outcomes.
  */
 
 /** `<repo>/scripts/` by definition; the tests pass an explicit root for fixture trees. */
@@ -208,62 +212,73 @@ export function auditSelection(
   return { fullGateTestFiles, fastGateUniverse, unaccounted, badExclusions, ok, message };
 }
 
-/**
- * A path DECLARED to be read by no suite. This is the only part of the data story that cannot be derived:
- * "no read detected" is checkable, not derivable, and a declaration is what keeps a beads commit or an
- * `.md` edit from running the whole suite. Every declaration is reconciled against the DERIVED read relation
- * (see deriveDataReadRelations): a detectable read that contradicts one is a NAMED gate failure.
- */
-export interface UnreadDeclaration {
-  /** Repo-relative prefix (directory, ending in `/`) or exact path. */
-  pattern: string;
-  reason: string;
-}
-
-/**
- * Declarations for non-TypeScript paths OUTSIDE src/ and tests/ that nothing observes.
- *
- * Why this list exists at all: the alternative for an undeclared path is the FULL suite (safe, slow), and a
- * beads export or an agent-config tweak is not a reason to run 103 modules. What is deliberately NOT here is
- * any statement about who READS a file — that relation is derived from the suites themselves
- * (deriveDataReadRelations), so a suite that starts reading a new data file is covered without anyone
- * editing this list, which was the flaw in the first version of this fix (audio-feed-es8y condition 1: the
- * relation must come from the suites, not from a list maintained beside them).
- */
-export const UNREAD_DECLARATIONS: UnreadDeclaration[] = [
-  {
-    pattern: ".beads/",
-    reason:
-      "beads export and hooks: task state, not test input, so a beads-only commit stays a fast no-test change rather than a full-suite run on every lane. Reconciled: no derived read relation names this path, and no suite source contains a read/exec call mentioning it.",
-  },
-  {
-    pattern: ".github/",
-    reason: "CI workflow config; no suite reads it (reconciled against the derived relation).",
-  },
-  {
-    pattern: ".gitignore",
-    reason: "VCS ignore list; no suite reads it (reconciled).",
-  },
-  {
-    pattern: ".codex/",
-    reason: "agent tool config committed to the repo; no suite reads it (reconciled).",
-  },
-  {
-    pattern: ".agents/",
-    reason: "agent skills/instructions committed to the repo; no suite reads it (reconciled).",
-  },
-  {
-    pattern: ".claude/",
-    reason: "agent tool config committed to the repo; no suite reads it (reconciled).",
-  },
-];
-
 /** `.md` anywhere: prose, so a markdown change is inert - UNLESS a suite is DERIVED to read it, which is
  * checked first in classifyNonTsChanges (audio-feed-38sn: an earlier version asked this function before the
  * relation, so a test asserting README contents would have been an empty pass). The hand-check that used to
  * stand here ("no suite reads markdown, checked 2026-10-11") is now a derived fact that can only over-select. */
 export function isDocumentation(relPath: string): boolean {
   return relPath.endsWith(".md");
+}
+
+/**
+ * Files whose change can move what EVERY suite resolves. A NET, not the safety mechanism: the protection is
+ * the unclassified default in classifyNonTsChanges()/planTests(), where any file that is not documentation
+ * and has no derived reader runs the FULL suite. auditResolverConfigs() keeps this list honest against the
+ * config files Deno's resolver ACTUALLY reads, so it is a claim that is checked rather than a guess.
+ */
+export const GRAPH_CONFIG_FILES =
+  /^(deno\.json|deno\.jsonc|deno\.lock|import_map\.json|tsconfig\.json)$/;
+
+/**
+ * The config files Deno's module resolver actually reads for this repo, DERIVED from the config rather than
+ * enumerated: the config present in the tree, anything it `extends` (recursively, bounded), and the lockfile
+ * it names - or the default `deno.lock` when one exists. A config shape nobody thought of is still found,
+ * which is the point: the family list above is reviewed against THIS, not against memory.
+ */
+export async function resolverConfigInputs(root: string = ROOT): Promise<string[]> {
+  const inputs = new Set<string>();
+  const readConfig = async (rel: string, depth: number): Promise<void> => {
+    if (depth > 4 || inputs.has(rel)) return;
+    const text = await Deno.readTextFile(`${root}${rel}`).catch(() => null);
+    if (text === null) return;
+    inputs.add(rel);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null) return;
+    const config = parsed as Record<string, unknown>;
+    const lock = config.lock;
+    if (lock === true) inputs.add("deno.lock");
+    else if (typeof lock === "string") await readConfig(lock.replace(/^\.\//, ""), depth + 1);
+    const extended = config.extends;
+    for (
+      const entry of Array.isArray(extended)
+        ? extended
+        : typeof extended === "string"
+        ? [extended]
+        : []
+    ) {
+      if (typeof entry === "string") await readConfig(entry.replace(/^\.\//, ""), depth + 1);
+    }
+  };
+  await readConfig("deno.json", 0);
+  await readConfig("deno.jsonc", 0);
+  if (await Deno.stat(`${root}deno.lock`).then(() => true).catch(() => false)) {
+    inputs.add("deno.lock");
+  }
+  return [...inputs].sort();
+}
+
+/** A config the resolver reads that the family does not match is a NAMED failure: either widen the family or
+ * accept that the unclassified default covers it, but do not leave a list quietly failing to describe the
+ * config graph it claims to describe. */
+export function auditResolverConfigs(inputs: readonly string[]): string[] {
+  return inputs.filter((path) => !GRAPH_CONFIG_FILES.test(path)).map((path) =>
+    `${path} is read by the module resolver but does not match GRAPH_CONFIG_FILES - widen the family (the unclassified default already sends it to the full suite, so this is about the list telling the truth)`
+  );
 }
 
 /**
@@ -554,23 +569,11 @@ export function suitesObserving(
   return [...suites].sort();
 }
 
-/** The unread declaration a repo-relative path matches, if any. */
-export function declarationFor(
-  relPath: string,
-  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
-): UnreadDeclaration | undefined {
-  return declarations.find((entry) =>
-    entry.pattern.endsWith("/") ? relPath.startsWith(entry.pattern) : relPath === entry.pattern
-  );
-}
-
 export interface NonTsClassification {
   /** Markdown: no suite reads it, so no selection consequence. */
   documentation: string[];
   /** Suites that must run because the DERIVED relation says they read the changed data. */
   suites: string[];
-  /** Declared unread: inert, with a stated reason, reconciled against the derived relation. */
-  inert: string[];
   /** Not .ts, not markdown, not read by anything detectable and not declared: full suite, by name. */
   unclassified: string[];
 }
@@ -583,12 +586,10 @@ export interface NonTsClassification {
 export function classifyNonTsChanges(
   changed: readonly string[],
   relations: DataReadRelations,
-  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
 ): NonTsClassification {
   const classification: NonTsClassification = {
     documentation: [],
     suites: [],
-    inert: [],
     unclassified: [],
   };
   const suites = new Set<string>();
@@ -609,10 +610,6 @@ export function classifyNonTsChanges(
       classification.documentation.push(file);
       continue;
     }
-    if (declarationFor(file, declarations)) {
-      classification.inert.push(file);
-      continue;
-    }
     classification.unclassified.push(file);
   }
 
@@ -623,74 +620,18 @@ export function classifyNonTsChanges(
 /**
  * Can an EMPTY selection be trusted for this change set?
  *
- * Only when every changed file is declared inert — markdown documentation, or an UNREAD_DECLARATIONS entry
- * with a reason. This is audio-feed-es8y condition 2: a gate that ran no suite must never read like a gate
- * that ran suites and passed. Anything not proven inert (a standalone script nothing imports, an undeclared
- * file) gets the FULL suite instead.
+ * Only when every changed file is documentation that NO suite is derived to read (audio-feed-r9fe: the
+ * declarations are gone, so markdown is the only inert class left). This is audio-feed-es8y condition 2: a
+ * gate that ran no suite must never read like a gate that ran suites and passed. Anything else - a standalone
+ * script nothing imports, a config path, a file with no derived reader - gets the FULL suite instead.
  */
 export function isProvablyInert(
   changed: readonly string[],
   classification: NonTsClassification,
 ): boolean {
   if (!changed.length) return false;
-  const inert = new Set([...classification.documentation, ...classification.inert]);
+  const inert = new Set(classification.documentation);
   return changed.every((file) => inert.has(file));
-}
-
-/**
- * Reconciliation for the only hand-written part of the data story: a declaration that nothing reads a path is
- * a CLAIM, so it is checked against the derived relation and against any read/exec call in a suite that names
- * the path. A contradiction is a NAMED failure — the declaration is either wrong or the read is a new input
- * relation the selection must know about (audio-feed-es8y conditions 1 and 2).
- */
-export async function auditUnreadDeclarations(
-  root: string = ROOT,
-  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
-  relations?: DataReadRelations,
-  suiteFiles?: readonly string[],
-): Promise<string[]> {
-  const problems: string[] = [];
-  const derived = relations ?? await deriveDataReadRelations(root, suiteFiles);
-  const suites = suiteFiles ?? (await discoverFullGateTestFiles(root)).filter(isFastGateSelectable);
-
-  for (const declaration of declarations) {
-    if (!declaration.pattern.trim()) problems.push("an UNREAD_DECLARATIONS entry has no pattern");
-    if (!declaration.reason.trim()) problems.push(`${declaration.pattern} has no reason`);
-
-    for (const [path, observers] of derived) {
-      const overlaps = declaration.pattern.endsWith("/")
-        ? path.startsWith(declaration.pattern) || declaration.pattern.startsWith(`${path}/`)
-        : path === declaration.pattern || path.startsWith(`${declaration.pattern}/`);
-      if (overlaps) {
-        problems.push(
-          `${declaration.pattern} is declared read by nobody, but the derived relation says ${
-            observers.join(", ")
-          } reads ${path}`,
-        );
-      }
-    }
-
-    const bare = declaration.pattern.replace(/\/$/, "");
-    for (const suite of suites) {
-      const source = stripComments(await Deno.readTextFile(`${root}${suite}`).catch(() => ""));
-      for (const call of READ_CALLS) {
-        const lines = source.split("\n").filter((line) => line.includes(call));
-        if (lines.some((line) => line.includes(bare))) {
-          problems.push(
-            `${declaration.pattern} is declared read by nobody, but ${suite} has a ${call} call mentioning it`,
-          );
-          break;
-        }
-      }
-    }
-
-    const path = declaration.pattern.endsWith("/")
-      ? declaration.pattern.slice(0, -1)
-      : declaration.pattern;
-    const stat = await Deno.stat(`${root}${path}`).catch(() => null);
-    if (stat === null) problems.push(`${declaration.pattern} does not exist in the tree`);
-  }
-  return problems;
 }
 
 /**
@@ -788,18 +729,12 @@ if (import.meta.main) {
   const audit = auditSelection(full);
   const fastUniverse = full.filter(isFastGateSelectable);
   const relations = await deriveDataReadRelations(ROOT, fastUniverse);
-  const declarationProblems = await auditUnreadDeclarations(
-    ROOT,
-    UNREAD_DECLARATIONS,
-    relations,
-    fastUniverse,
-  );
 
   console.log(
     `test-selection: the full gate runs ${full.length} test module(s); the fast gate can select ${audit.fastGateUniverse.length}.`,
   );
   console.log(
-    `test-selection: the derived read relation covers ${relations.size} data path(s) across ${UNREAD_DECLARATIONS.length} unread declaration(s).`,
+    `test-selection: the derived read relation covers ${relations.size} data path(s); nothing is declared unread, so an unread path runs the FULL suite and names itself.`,
   );
   if (Deno.args.includes("--list-relations")) {
     for (const [path, observers] of [...relations].sort()) {
@@ -810,15 +745,6 @@ if (import.meta.main) {
     console.error(audit.message);
     Deno.exit(1);
   }
-  if (declarationProblems.length) {
-    console.error(
-      `fast-gate: UNREAD DECLARATION contradiction(s) (audio-feed-es8y):\n  ${
-        declarationProblems.join("\n  ")
-      }\nThe relation is DERIVED from the suites, so a declaration a suite contradicts is simply wrong: delete it\n(the derived relation already selects that suite) or fix the read that made it wrong - and do not answer it\nby adding the path to a second list.`,
-    );
-    Deno.exit(1);
-  }
-
   if (Deno.args.includes("--prove-discovery")) {
     const proof = await proveDiscoveryMatchesDeno().catch((error) => ({
       ok: false,

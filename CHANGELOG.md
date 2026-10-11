@@ -28,12 +28,16 @@ All notable changes to this project will be documented in this file.
   `${import.meta.dirname}`. A `docs/evidence/*.png` therefore selects `tests/evidence_size_test.ts`
   (found through `evidencePngs()` -> `EVIDENCE_DIR`) and `scripts/observability-agent-run.sh`
   selects `tests/observability_agent_poll_test.ts`, which executes it — no mapping table to keep in
-  sync. The only hand-written part is `UNREAD_DECLARATIONS`: the paths nothing reads, each with a
-  reason, reconciled against the derived relation at gate time, so a declaration that a detectable
-  read contradicts is a NAMED failure. Anything the derivation cannot see and that is not declared
-  unread runs the full suite and names itself. Before this, a 200KB screenshot selected ZERO suites:
+  sync. There is nothing hand-written: `UNREAD_DECLARATIONS` and its reconciliation audit are DELETED
+  (audio-feed-r9fe) - a standing "nothing reads this" claim is one a later suite can contradict
+  silently, and the measured cost of removing it is a full suite on the rare tooling-config change
+  (15 changes in 652 commits). Anything the derivation cannot see runs the full suite and names
+  itself. The module-graph config list is a net audited against the config files the resolver
+  actually reads (derived from `deno.json(c)`), not the safety mechanism. Before this, a 200KB
+  screenshot selected ZERO suites:
   the fast gate passed while the full gate failed on the same tree. An EMPTY selection is never a
-  silent pass either: it is allowed only when every changed file is declared inert, and then the run
+  silent pass either: it is allowed only when every changed file is markdown no suite is derived to
+  read, and then the run
   says `NO SUITES SELECTED — 0 of N test module(s) ran` and emits `fast-gate: unmapped: <files>`,
   which the fleet's coverage reporter turns into a COVERAGE WARNING, so a gate that ran nothing is
   visibly not a gate that ran suites and passed. Anything not provably inert runs the full suite —

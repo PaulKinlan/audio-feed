@@ -28,8 +28,8 @@ import {
   suiteMarker,
 } from "../scripts/fast-check.ts";
 import {
+  auditResolverConfigs,
   auditSelection,
-  auditUnreadDeclarations,
   classifyNonTsChanges,
   deriveDataReadRelations,
   discoverFullGateTestFiles,
@@ -38,9 +38,9 @@ import {
   isTestModule,
   NEVER_WALKED,
   proveDiscoveryMatchesDeno,
+  resolverConfigInputs,
   ROOT,
   universeDrift,
-  UNREAD_DECLARATIONS,
 } from "../scripts/test-selection.ts";
 
 const NO_NAMED = new Map<string, string[]>();
@@ -341,12 +341,14 @@ Deno.test("a derivation that cannot run WIDENS to the full suite and says why (e
     "a data file must not be silently dropped when no relation is known",
   );
   assert(plan.reason.includes("docs/evidence/x.png"), plan.reason);
-  assert(plan.reason.includes("not read by any suite (derived)"), plan.reason);
+  assert(plan.reason.includes("no derived reader"), plan.reason);
 
-  // And the inert exception stays exactly as narrow as it was: markdown is documentation (loud, empty run),
-  // a declared-unread path is inert, and NOTHING else is.
+  // The inert exception is now markdown ONLY (audio-feed-r9fe removed the declarations): a tooling path
+  // that used to be declared unread is unclassified, which runs the FULL suite and names the file.
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, noRelation).testFiles, []);
-  assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED, noRelation).testFiles, []);
+  const former = planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED, noRelation);
+  assertEquals(former.testFiles, null, "a formerly-declared path must run the full suite now");
+  assert(former.reason.includes(".beads/issues.jsonl"), former.reason);
 });
 
 Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8y)", () => {
@@ -380,8 +382,7 @@ Deno.test("an undeclared non-TypeScript file runs the FULL suite and names itsel
   const plan = planTests(["mystery/payload.bin"], NO_GRAPH, NO_NAMED, RELATIONS);
   assertEquals(plan.testFiles, null);
   assert(plan.reason.includes("mystery/payload.bin"), plan.reason);
-  assert(plan.reason.includes("not read by any suite (derived)"), plan.reason);
-  assert(plan.reason.includes("UNREAD_DECLARATIONS"), plan.reason);
+  assert(plan.reason.includes("no derived reader"), plan.reason);
 });
 
 Deno.test("a markdown file a suite READS selects that suite, not an inert empty pass (38sn)", () => {
@@ -396,10 +397,20 @@ Deno.test("a markdown file a suite READS selects that suite, not an inert empty 
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
 });
 
-Deno.test("documentation and declared-not-read files still run nothing", () => {
+Deno.test("documentation still runs nothing, and a formerly-declared path runs EVERYTHING (r9fe)", () => {
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED).testFiles, []);
   assertEquals(planTests(["docs/observability-api.md"], NO_GRAPH, NO_NAMED).testFiles, []);
-  assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED).testFiles, []);
+  // The six paths that used to carry an UNREAD_DECLARATIONS entry (audio-feed-r9fe measured them at 15
+  // changes in 652 commits and deleted the list): unclassified now, so the full suite and a named reason.
+  for (const formerlyDeclared of [".beads/issues.jsonl", ".github/workflows/x.yml", ".gitignore"]) {
+    const plan = planTests([formerlyDeclared], NO_GRAPH, NO_NAMED, RELATIONS);
+    assertEquals(
+      plan.testFiles,
+      null,
+      `${formerlyDeclared} must run the full suite: ${plan.reason}`,
+    );
+    assert(plan.reason.includes(formerlyDeclared), plan.reason);
+  }
 });
 
 Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the buckets", () => {
@@ -412,8 +423,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   ], RELATIONS);
   assertEquals(classified.documentation, ["README.md"]);
   assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
-  assertEquals(classified.inert, [".beads/issues.jsonl"]);
-  assertEquals(classified.unclassified, ["mystery/payload.bin"]);
+  assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -421,19 +431,20 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
 // ---------------------------------------------------------------------------
 
 Deno.test("an empty selection is allowed only for provably inert changes (es8y condition 2)", () => {
-  // Declared inert: markdown documentation and the UNREAD_DECLARATIONS entries.
+  // Inert means markdown documentation and nothing else (audio-feed-r9fe: the declarations are gone).
   for (
     const inert of [
       ["README.md"],
       ["CHANGELOG.md"],
       ["docs/observability-api.md"],
-      [".beads/issues.jsonl"],
     ]
   ) {
     const plan = planTests(inert, NO_GRAPH, NO_NAMED);
     assertEquals(plan.testFiles, [], `${inert} should select nothing: ${plan.reason}`);
-    assert(plan.reason.includes("declared inert"), plan.reason);
+    assert(plan.reason.includes("documentation only"), plan.reason);
   }
+  // A tooling path is NOT inert any more: it runs the full suite and names itself.
+  assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED).testFiles, null);
   assertEquals(
     planTests([], NO_GRAPH, NO_NAMED).testFiles,
     null,
@@ -539,44 +550,31 @@ Deno.test("every selection in the adversarial corpus is inside the full gate's u
   assertEquals(mirror.testFiles, null, mirror.reason);
 });
 
-Deno.test("the unread declarations hold against the derived relation (es8y condition 1/2)", async () => {
-  const full = await discoverFullGateTestFiles(ROOT);
-  const fastUniverse = full.filter(isFastGateSelectable);
-  assertEquals(
-    await auditUnreadDeclarations(ROOT, UNREAD_DECLARATIONS, RELATIONS, fastUniverse),
-    [],
-  );
+Deno.test("the module-graph config family is audited against what the resolver ACTUALLY reads (es8y)", async () => {
+  // The family list is a net; this is the check that keeps it honest. Derived from deno.json(c) (`extends`
+  // recursively, its `lock` field, the default lockfile) rather than enumerated, so a config shape nobody
+  // thought of is still found - and a resolver input the family does not name is a NAMED failure.
+  const inputs = await resolverConfigInputs(ROOT);
+  assert(inputs.includes("deno.json"), inputs.join(", "));
+  assertEquals(auditResolverConfigs(inputs), []);
 
-  // Bites: a declaration contradicted by a derived read, one naming nothing in the tree, and an empty reason.
-  const contradicted = await auditUnreadDeclarations(
-    ROOT,
-    [{ pattern: "docs/evidence/", reason: "says nothing read this, but a suite does" }],
-    RELATIONS,
-    fastUniverse,
-  );
-  assert(
-    contradicted.some((p) =>
-      p.includes("declared read by nobody") && p.includes("tests/evidence_size_test.ts")
-    ),
-    contradicted.join("; "),
-  );
-  const missing = await auditUnreadDeclarations(
-    ROOT,
-    [
-      { pattern: "no/such/dir/", reason: "made up" },
-      { pattern: ".gitignore", reason: "   " },
-    ],
-    RELATIONS,
-    fastUniverse,
-  );
-  assert(
-    missing.some((p) => p.includes("no/such/dir/") && p.includes("does not exist")),
-    missing.join("; "),
-  );
-  assert(
-    missing.some((p) => p.includes(".gitignore") && p.includes("no reason")),
-    missing.join("; "),
-  );
+  // Bites: an `extends` target the family does not know, and a fixture config that extends another file.
+  const problems = auditResolverConfigs(["deno.json", "base.json"]);
+  assertEquals(problems.length, 1);
+  assert(problems[0]!.includes("base.json"), problems[0]);
+
+  const dir = await Deno.makeTempDir({ prefix: "af-configs-" });
+  try {
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({ extends: "./base.json", lock: true }),
+    );
+    await Deno.writeTextFile(`${dir}/base.json`, "{}");
+    await Deno.writeTextFile(`${dir}/deno.lock`, "{}");
+    assertEquals(await resolverConfigInputs(`${dir}/`), ["base.json", "deno.json", "deno.lock"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 Deno.test("the detector reads a fixture suite that reads a fixture data file (es8y)", async () => {

@@ -48,16 +48,17 @@
  */
 
 import {
+  auditResolverConfigs,
   auditSelection,
-  auditUnreadDeclarations,
   classifyNonTsChanges,
   type DataReadRelations,
   deriveDataReadRelations,
   discoverFullGateTestFiles,
+  GRAPH_CONFIG_FILES,
   isFastGateSelectable,
   isProvablyInert,
+  resolverConfigInputs,
   universeDrift,
-  UNREAD_DECLARATIONS,
 } from "./test-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
@@ -77,15 +78,6 @@ const CORE = new Set([
   "src/server.ts",
   "src/origin.ts",
 ]);
-
-/**
- * Files whose change can move what EVERY suite resolves: Deno's own config surface for the module
- * resolver. A list, not a derivation - the resolver's inputs are not statically knowable from the repo -
- * but it is safe by construction, because anything else that is not derived by the read relation, not
- * documentation and not declared unread already falls back to the FULL suite (audio-feed-es8y: the same
- * allowlist-versus-property shape as the CORE set, found while answering a review question).
- */
-const GRAPH_CONFIG_FILES = /^(deno\.json|deno\.jsonc|deno\.lock|import_map\.json|tsconfig\.json)$/;
 
 const TEST_FLAGS = [
   "--allow-net",
@@ -512,8 +504,11 @@ export function planTests(
   reverse: Map<string, string[]>,
   named: Map<string, string[]>,
   readRelations: DataReadRelations = new Map(),
+  configPaths: readonly string[] = [],
 ): { testFiles: string[] | null; reason: string } {
-  const graphConfig = changed.filter((f) => GRAPH_CONFIG_FILES.test(f));
+  // The family list is a NET; the DERIVED set of config files the resolver actually reads (configPaths) is
+  // what keeps it honest - a resolver input the family does not name still forces the full suite.
+  const graphConfig = changed.filter((f) => configPaths.includes(f) || GRAPH_CONFIG_FILES.test(f));
   if (graphConfig.length) {
     return {
       testFiles: null,
@@ -547,7 +542,7 @@ export function planTests(
     return {
       testFiles: null,
       reason:
-        `non-TypeScript file(s) not read by any suite (derived) and not declared unread in scripts/test-selection.ts UNREAD_DECLARATIONS: ${
+        `non-TypeScript file(s) with no derived reader (nothing is declared unread, so an unread path always runs the FULL suite): ${
           data.unclassified.join(", ")
         }`,
     };
@@ -572,21 +567,20 @@ export function planTests(
         reason: `data file(s) observed by: ${data.suites.join(", ")}`,
       };
     }
-    // audio-feed-es8y condition 2: an empty selection must never read like a pass. It is only allowed
-    // when EVERY changed file is declared inert (markdown documentation, or a ledger entry whose reason
-    // says nothing observes it). Anything else gets the full suite and names itself.
+    // audio-feed-es8y condition 2: an empty selection must never read like a pass. It is only allowed when
+    // EVERY changed file is documentation that NO suite is derived to read (audio-feed-r9fe removed the
+    // declarations, so markdown is the only inert class left). Anything else gets the full suite and names
+    // itself.
     if (isProvablyInert(changed, data)) {
       return {
         testFiles: [],
-        reason: `no test-observable change (declared inert: ${
-          [...data.documentation, ...data.inert].join(", ")
-        })`,
+        reason: `no test-observable change (documentation only: ${data.documentation.join(", ")})`,
       };
     }
     return {
       testFiles: null,
       reason:
-        `nothing selected and the change is not declared inert, so nothing can be claimed about it: ${
+        `nothing selected and the change is not inert documentation, so nothing can be claimed about it: ${
           changed.join(", ")
         }`,
     };
@@ -685,21 +679,6 @@ ${auditUniverseDrift}`);
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
-  const ledgerProblems = await auditUnreadDeclarations(
-    ROOT,
-    UNREAD_DECLARATIONS,
-    readRelations,
-    fastUniverse,
-  );
-  if (ledgerProblems.length) {
-    console.error(
-      `fast-gate: UNREAD DECLARATION contradiction(s) (audio-feed-es8y):\n  ${
-        ledgerProblems.join("\n  ")
-      }\nA declaration must either be corrected or replaced by the read relation the suites now express.`,
-    );
-    Deno.exit(1);
-  }
-
   // The cheap whole-repo steps always run: together ~10s, and a type error in
   // an UNTOUCHED importer of a changed file is exactly what skipping them
   // would miss.
@@ -709,6 +688,20 @@ ${auditUniverseDrift}`);
       console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
       Deno.exit(1);
     }
+  }
+
+  // The config files the resolver actually reads, DERIVED from the config itself: the family list above is a
+  // net, and this is the check that keeps it honest - a resolver input the family does not name is a NAMED
+  // failure rather than a list that quietly stopped describing the config graph (audio-feed-es8y).
+  const resolverInputs = await resolverConfigInputs(ROOT);
+  const configProblems = auditResolverConfigs(resolverInputs);
+  if (configProblems.length) {
+    console.error(
+      `fast-gate: MODULE-GRAPH CONFIG NOT COVERED (audio-feed-es8y):\n  ${
+        configProblems.join("\n  ")
+      }`,
+    );
+    Deno.exit(1);
   }
 
   const changed = await changedFiles();
@@ -724,7 +717,7 @@ ${auditUniverseDrift}`);
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named, readRelations);
+    plan = planTests(changed, reverse, named, readRelations, resolverInputs);
   }
   const { testFiles, reason } = plan;
 
