@@ -53,6 +53,23 @@ export function assertTextSeams(source: string, turns: readonly string[]): void 
   }
 }
 
+/**
+ * Thrown when an ongoing multi-turn synthesis intentionally yields execution
+ * back to the queue because an invocation budget (time or segment limit) was reached (audio-feed-vqu4).
+ * Completed segments have already been committed to the resume cache.
+ */
+export class SynthesisYieldError extends Error {
+  constructor(
+    public readonly completedTurns: number,
+    public readonly totalTurns: number,
+    message =
+      `Synthesis yielded after ${completedTurns}/${totalTurns} turns to respect invocation budget`,
+  ) {
+    super(message);
+    this.name = "SynthesisYieldError";
+  }
+}
+
 /** Limit total paid turns, including a refused output and its smaller replacements.
  * Failed turns are never silently added to the stitched result. */
 export async function runManagedTurns<T, R, S = R>(options: {
@@ -72,6 +89,8 @@ export async function runManagedTurns<T, R, S = R>(options: {
   stitch: (results: R[]) => S;
   /** Optional callback invoked as each turn begins (1-indexed turn, total turns). */
   onProgress?: (turn: number, total: number) => Promise<void> | void;
+  /** Check after a turn completes whether the invocation should yield (audio-feed-vqu4). */
+  shouldYield?: (completedCount: number, totalCount: number) => boolean;
 }): Promise<S> {
   const {
     segments,
@@ -81,6 +100,7 @@ export async function runManagedTurns<T, R, S = R>(options: {
     continueOnOutputLimit,
     stitch,
     onProgress,
+    shouldYield,
   } = options;
   if (segments.length === 0 || segments.length > maxTurns) {
     throw new Error(`Synthesis needs ${segments.length} turns (limit ${maxTurns})`);
@@ -105,6 +125,15 @@ export async function runManagedTurns<T, R, S = R>(options: {
       if (continuation?.partial !== undefined) results.push(continuation.partial);
       segments.splice(index, 1, ...replacement);
       index--;
+      continue;
+    }
+    // Check if the invocation has reached its budget and should yield before starting the next turn
+    if (index + 1 < segments.length && shouldYield?.(results.length, segments.length)) {
+      throw new SynthesisYieldError(
+        results.length,
+        segments.length,
+        `Synthesis yielded after ${results.length}/${segments.length} segments to respect invocation budget`,
+      );
     }
   }
   return stitch(results);

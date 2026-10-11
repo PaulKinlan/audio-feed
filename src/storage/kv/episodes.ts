@@ -404,6 +404,32 @@ export function createEpisodesRepository(
       };
       return await atomicPutEpisode(core, updated, entry);
     },
+    async yieldEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update?: {
+        phase?: string;
+        now?: string;
+      },
+    ): Promise<boolean> {
+      const key: Deno.KvKey = ["episode", userId, episodeId];
+      const entry = await core.kv.get<Episode>(key);
+      const current = entry.value;
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return false;
+      }
+      const yielded: Episode = {
+        ...current,
+        status: "pending",
+        claimedAt: undefined,
+        claimedBy: undefined,
+        phase: update?.phase ?? current.phase,
+        lastHeartbeat: update?.now ?? new Date().toISOString(),
+        attempts: 0,
+      };
+      return await atomicPutEpisode(core, yielded, entry);
+    },
     async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);

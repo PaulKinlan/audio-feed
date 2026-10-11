@@ -412,6 +412,26 @@ export interface EpisodeRepository {
   ): Promise<boolean>;
 
   /**
+   * Voluntarily yield an in-flight synthesis claim back to the queue (audio-feed-vqu4), atomically.
+   *
+   * Validates that the episode is currently `synthesizing` and owned by `owner`.
+   * Transitions `status` back to `pending`, clears `claimedAt` and `claimedBy`, updates `phase`
+   * and `lastHeartbeat`, and resets `attempts` to 0 because forward progress was made cleanly
+   * within an invocation budget.
+   *
+   * Returns `false` if the claim was lost or superseded.
+   */
+  yieldEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update?: {
+      phase?: string;
+      now?: string;
+    },
+  ): Promise<boolean>;
+
+  /**
    * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
    *
    * This is the subscriber's "try again", and it is deliberately a different method from

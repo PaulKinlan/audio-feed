@@ -1,6 +1,11 @@
 import type { CodeHandling } from "../types.ts";
 import { attemptDeadline } from "./deadline.ts";
-import { assertTextSeams, runManagedTurns, splitTextUnderByteBudget } from "../synthesis/limits.ts";
+import {
+  assertTextSeams,
+  runManagedTurns,
+  splitTextUnderByteBudget,
+  SynthesisYieldError,
+} from "../synthesis/limits.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 
 /** Code-block explanations in flight at once (audio-feed-8acp): each one is a model
@@ -324,6 +329,12 @@ export interface SynthesisOptions {
    * and heartbeats to survive worker isolate evictions.
    */
   onProgress?: (turn: number, total: number) => Promise<void> | void;
+  /**
+   * Optional check invoked after a segment completes (audio-feed-vqu4).
+   * If it returns true, runManagedTurns throws SynthesisYieldError so the worker
+   * can yield its claim back to the queue and let the next cron tick continue.
+   */
+  shouldYield?: (completedCount: number, totalCount: number) => boolean;
 }
 
 export type RetryPolicy = "none" | "transient" | "all";
@@ -1553,9 +1564,10 @@ export class GeminiTtsClient {
           return joinTtsAudio(audio, options.allowTruncated);
         },
         onProgress: options.onProgress,
+        shouldYield: options.shouldYield,
       });
     } catch (error) {
-      if (options.signal?.aborted) throw error;
+      if (options.signal?.aborted || error instanceof SynthesisYieldError) throw error;
       throw wrapTurnFailure(error);
     }
   }
@@ -1641,9 +1653,10 @@ export class GeminiTtsClient {
           return joinTtsAudio(audio, options.allowTruncated);
         },
         onProgress: options.onProgress,
+        shouldYield: options.shouldYield,
       });
     } catch (error) {
-      if (options.signal?.aborted) throw error;
+      if (options.signal?.aborted || error instanceof SynthesisYieldError) throw error;
       throw wrapTurnFailure(error);
     }
   }

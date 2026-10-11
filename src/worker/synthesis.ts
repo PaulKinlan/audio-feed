@@ -70,7 +70,12 @@ import {
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
 import { collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
-import { DEFAULT_DAILY_EPISODE_BUDGET, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET } from "../config.ts";
+import {
+  DEFAULT_DAILY_EPISODE_BUDGET,
+  DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
+  DEFAULT_MAX_INVOCATION_DURATION_MS,
+} from "../config.ts";
+import { SynthesisYieldError } from "../synthesis/limits.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -91,6 +96,15 @@ export type Synthesizer = (job: {
    * exactly like leaseMs — the episode then simply re-bills on resume, as before wr1u.
    */
   resume?: SegmentResume;
+  /**
+   * Invocation budget constraints (audio-feed-vqu4).
+   * When limits are reached, synthesis yields cleanly with SynthesisYieldError.
+   */
+  invocationBudget?: {
+    maxSegments?: number;
+    maxDurationMs?: number;
+    startTimeMonotonicMs?: number;
+  };
 }) => Promise<DecodedAudioResult>;
 
 /** The prepare/commit pair the TTS client drives; see SynthesisOptions.resume. */
@@ -147,6 +161,18 @@ export interface SynthesisWorkerOptions {
   maxClaims?: number;
   /** Worker identity recorded on the claim. Defaults to a per-process id. */
   owner?: string;
+  /**
+   * Maximum newly synthesized segments to produce in a single invocation before
+   * checkpointing and yielding the claim back to the queue (audio-feed-vqu4).
+   * Default: undefined (unbounded by segment count).
+   */
+  maxSegmentsPerInvocation?: number;
+  /**
+   * Maximum duration in ms a single invocation may spend synthesizing before
+   * checkpointing and yielding back to the queue (audio-feed-vqu4).
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (45_000ms), safely inside Deno Deploy's cron isolate lifetime.
+   */
+  maxInvocationDurationMs?: number;
   /** Revision for a regenerated audio key. Injectable so a test can force a repeat. */
   revision?: () => string;
   /** Current time in ms since epoch; injectable so tests can advance time deterministically. */
@@ -160,7 +186,14 @@ export interface SynthesisWorkerOptions {
 const WORKER_ID = `worker-${crypto.randomUUID()}`;
 
 const DEFAULTS: Required<
-  Omit<SynthesisWorkerOptions, "nowMs" | "defaultDailyEpisodeBudget" | "globalDailyEpisodeBudget">
+  Omit<
+    SynthesisWorkerOptions,
+    | "nowMs"
+    | "defaultDailyEpisodeBudget"
+    | "globalDailyEpisodeBudget"
+    | "maxSegmentsPerInvocation"
+    | "maxInvocationDurationMs"
+  >
 > = {
   batchSize: 5,
   intervalMs: 15_000,
@@ -284,6 +317,11 @@ export interface SynthesisBatchResult {
    * number, the next tuning round is another guess.
    */
   superseded: Array<{ episodeId: string; heldMs: number; leaseMs: number }>;
+  /**
+   * Episodes that made forward progress and yielded back to pending to respect
+   * the invocation budget (audio-feed-vqu4).
+   */
+  yielded: Array<{ episodeId: string; completedTurns: number; totalTurns: number }>;
   /** Pending episodes considered. */
   considered: number;
 }
@@ -483,7 +521,15 @@ export function createGeminiSynthesizer(
     (ctx.config.geminiApiKey
       ? createGroundedScriptGenerator({ apiKey: ctx.config.geminiApiKey })
       : null);
-  return async ({ article, source, episode, mode, leaseMs, resume }) => {
+  return async ({
+    article,
+    source,
+    episode,
+    mode,
+    leaseMs,
+    resume,
+    invocationBudget,
+  }) => {
     // Stop paid work before the claim expires; reserve one minute for persisting its outcome.
     // A terminal TTS error prevents the worker retrying already-paid segments from turn one.
     const claimedAt = Date.parse(episode.claimedAt ?? "");
@@ -502,10 +548,44 @@ export function createGeminiSynthesizer(
         });
       }
     };
+
+    let newlySynthesizedCount = 0;
+    const wrappedResume = resume
+      ? {
+        prepare: async (segmentText: string, voice: string) => {
+          const res = await resume.prepare(segmentText, voice);
+          if (res === "synthesize") {
+            newlySynthesizedCount++;
+          }
+          return res;
+        },
+        commit: resume.commit,
+      }
+      : undefined;
+
+    const shouldYield = (_completed: number, _total: number) => {
+      if (
+        invocationBudget?.maxSegments &&
+        newlySynthesizedCount >= invocationBudget.maxSegments
+      ) {
+        return true;
+      }
+      if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+        if (
+          performance.now() - invocationBudget.startTimeMonotonicMs >=
+            invocationBudget.maxDurationMs
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     const ttsOptions = {
       ...(leaseSignal ? { signal: leaseSignal } : {}),
-      ...(resume ? { resume } : {}),
+      ...(wrappedResume ? { resume: wrappedResume } : (resume ? { resume } : {})),
       onProgress,
+      shouldYield,
     };
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
@@ -562,6 +642,23 @@ export function createGeminiSynthesizer(
           }
           // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
           episode.scriptTurns = turns;
+
+          // audio-feed-vqu4: if time budget was consumed by script generation, yield now
+          if (
+            invocationBudget?.maxDurationMs &&
+            invocationBudget?.startTimeMonotonicMs
+          ) {
+            if (
+              performance.now() - invocationBudget.startTimeMonotonicMs >=
+                invocationBudget.maxDurationMs
+            ) {
+              throw new SynthesisYieldError(
+                0,
+                turns.length,
+                "Script generated; yielding stage to respect invocation budget",
+              );
+            }
+          }
         }
       }
       try {
@@ -843,10 +940,17 @@ export async function runSynthesisBatch(
     deferred: [],
     skipped: [],
     superseded: [],
+    yielded: [],
     considered: 0,
   };
   const { metadata, blobs } = ctx.stores;
   const nowMs = options.nowMs ?? Date.now();
+  const invocationStartMonotonicMs = performance.now();
+  const maxSegmentsPerInvocation = options.maxSegmentsPerInvocation ??
+    ctx.config.maxSegmentsPerInvocation;
+  const maxInvocationDurationMs = options.maxInvocationDurationMs ??
+    ctx.config.maxInvocationDurationMs ??
+    DEFAULT_MAX_INVOCATION_DURATION_MS;
   const notifyEnabled = ctx.config.notifyOutboxEnabled ?? false;
 
   const notifyOnDemand = async (episode: Episode, status: "ready" | "failed", error?: string) => {
@@ -1129,10 +1233,36 @@ export async function runSynthesisBatch(
           mode: currentEpisode.mode,
           leaseMs: opts.leaseMs,
           resume: segmentResume.resume,
+          invocationBudget: {
+            maxSegments: maxSegmentsPerInvocation,
+            maxDurationMs: maxInvocationDurationMs,
+            startTimeMonotonicMs: invocationStartMonotonicMs,
+          },
         });
         break;
       } catch (error) {
         lastError = error;
+        if (error instanceof SynthesisYieldError) {
+          // audio-feed-vqu4: clean yield to respect invocation budget
+          const yielded = await metadata.yieldEpisodeClaim(
+            currentEpisode.userId,
+            currentEpisode.id,
+            opts.owner,
+            {
+              phase: `synthesized_${error.completedTurns}_of_${error.totalTurns}`,
+            },
+          );
+          if (yielded) {
+            result.yielded.push({
+              episodeId: currentEpisode.id,
+              completedTurns: error.completedTurns,
+              totalTurns: error.totalTurns,
+            });
+          } else {
+            result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+          }
+          break;
+        }
         if (isPermanent(error) || attempt === opts.maxAttempts) break;
         // Re-read current episode from store so any turns or phase touched during attempt 1
         // are available to subsequent retry attempts within this same claim (audio-feed-siv1)!
@@ -1147,6 +1277,17 @@ export async function runSynthesisBatch(
     }
 
     if (!audio) {
+      if (lastError instanceof SynthesisYieldError) {
+        // audio-feed-vqu4: clean yield to respect invocation budget.
+        // Check if whole batch time budget is spent before picking up another episode.
+        if (
+          maxInvocationDurationMs &&
+          performance.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
+        ) {
+          break;
+        }
+        continue;
+      }
       const error = describeSynthesisFailure(lastError, currentEpisode, opts.maxClaims);
       console.error(
         `[audio-feed] synthesis failed for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
@@ -1257,6 +1398,13 @@ export async function runSynthesisBatch(
           // Recorded, so a later batch retries it instead of orphaning it for good.
           await metadata.recordOrphanBlob(previousKey).catch(() => {});
         }
+      }
+      // audio-feed-vqu4: stop batch if invocation time budget has expired
+      if (
+        maxInvocationDurationMs &&
+        performance.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
+      ) {
+        break;
       }
     } else {
       // Superseded / deleted: clean up the orphaned audio blob written above (audio-feed-8kk).

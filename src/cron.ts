@@ -159,15 +159,17 @@ export function registerCronJobs(
                 )
                 : undefined,
             }),
-            // Nothing finished and nothing failed: an idle tick (audio-feed-0ob). A
-            // tick that only deferred is idle too; the kept row carries the latest
-            // deferred count.
-            (r) => r.ready.length === 0 && r.failed.length === 0,
+            // Nothing finished, failed, or yielded: an idle tick (audio-feed-0ob, audio-feed-vqu4). A
+            // tick that made progress by yielding segments is NOT idle.
+            (r) => r.ready.length === 0 && r.failed.length === 0 && r.yielded.length === 0,
           );
-          if (result.ready.length || result.failed.length || result.deferred.length) {
+          if (
+            result.ready.length || result.failed.length || result.deferred.length ||
+            result.yielded.length
+          ) {
             console.log(
               `[audio-feed] cron synthesis: ${result.ready.length} ready, ${result.failed.length} failed, ` +
-                `${result.deferred.length} deferred (of ${result.considered})`,
+                `${result.deferred.length} deferred, ${result.yielded.length} yielded (of ${result.considered})`,
             );
           }
           for (const { episodeId, heldMs, leaseMs } of result.superseded) {

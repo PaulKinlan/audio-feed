@@ -48,6 +48,8 @@ export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
  * nobody is watching. Set GLOBAL_DAILY_EPISODE_BUDGET for the real number.
  */
 export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
+/** Default maximum execution duration per synthesis invocation before yielding (audio-feed-vqu4). */
+export const DEFAULT_MAX_INVOCATION_DURATION_MS = 45_000;
 
 export interface AppConfig {
   port: number;
@@ -116,6 +118,18 @@ export interface AppConfig {
    * synthesis happens at all.
    */
   globalDailyEpisodeBudget?: number;
+  /**
+   * Maximum newly synthesized segments to produce in a single invocation before
+   * checkpointing and yielding the claim back to the queue (audio-feed-vqu4).
+   * Optional; defaults to undefined (unbounded by segment count).
+   */
+  maxSegmentsPerInvocation?: number;
+  /**
+   * Maximum duration in ms a single invocation may spend synthesizing before
+   * checkpointing and yielding back to the queue (audio-feed-vqu4).
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (45_000ms).
+   */
+  maxInvocationDurationMs?: number;
   adminToken?: string;
   /**
    * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
@@ -218,6 +232,29 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  // audio-feed-vqu4: per-invocation work bounds to fit inside Deno Deploy cron isolate lifetime
+  const maxSegmentsRaw = env("MAX_SEGMENTS_PER_INVOCATION");
+  let maxSegmentsPerInvocation: number | undefined;
+  if (maxSegmentsRaw !== undefined) {
+    maxSegmentsPerInvocation = Number(maxSegmentsRaw);
+    if (!Number.isInteger(maxSegmentsPerInvocation) || maxSegmentsPerInvocation <= 0) {
+      throw new Error(
+        `Invalid MAX_SEGMENTS_PER_INVOCATION: "${maxSegmentsRaw}". Expected a positive integer.`,
+      );
+    }
+  }
+
+  const maxDurationRaw = env("MAX_INVOCATION_DURATION_MS");
+  let maxInvocationDurationMs: number | undefined;
+  if (maxDurationRaw !== undefined) {
+    maxInvocationDurationMs = Number(maxDurationRaw);
+    if (!Number.isInteger(maxInvocationDurationMs) || maxInvocationDurationMs <= 0) {
+      throw new Error(
+        `Invalid MAX_INVOCATION_DURATION_MS: "${maxDurationRaw}". Expected a positive integer number of milliseconds.`,
+      );
+    }
+  }
+
   return {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
@@ -236,6 +273,8 @@ export function loadConfig(): AppConfig {
     // Resolved to a number here so the worker and the admin console read the same value; the worker
     // still treats an unusable value as absent rather than as unlimited.
     globalDailyEpisodeBudget: globalDailyEpisodeBudget ?? DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
+    maxSegmentsPerInvocation,
+    maxInvocationDurationMs: maxInvocationDurationMs ?? DEFAULT_MAX_INVOCATION_DURATION_MS,
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
     webAuthnRpId: env("WEBAUTHN_RP_ID"),

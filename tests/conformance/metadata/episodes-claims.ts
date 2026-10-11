@@ -336,6 +336,57 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     );
   });
 
+  test("yieldEpisodeClaim transitions synthesizing claim back to pending with attempts 0 (audio-feed-vqu4)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Non-synthesizing / non-owner rejects yield
+    assertEquals(
+      await store.yieldEpisodeClaim("user-1", "e1", "worker-a"),
+      false,
+    );
+
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+    assertEquals(claimed.attempts, 1);
+
+    // Another worker cannot yield
+    assertEquals(
+      await store.yieldEpisodeClaim("user-1", "e1", "worker-impostor"),
+      false,
+    );
+
+    // Owner yields cleanly with updated phase
+    const ok = await store.yieldEpisodeClaim("user-1", "e1", CLAIM.owner, {
+      phase: "synthesized_2_of_6",
+      now: "2026-10-11T16:00:00.000Z",
+    });
+    assertEquals(ok, true);
+
+    const yielded = await store.getEpisode("user-1", "e1");
+    assert(yielded);
+    assertEquals(yielded.status, "pending");
+    assertEquals(yielded.claimedAt, undefined);
+    assertEquals(yielded.claimedBy, undefined);
+    assertEquals(yielded.phase, "synthesized_2_of_6");
+    assertEquals(yielded.lastHeartbeat, "2026-10-11T16:00:00.000Z");
+    assertEquals(
+      yielded.attempts,
+      0,
+      "clean yield resets attempts so multi-tick progression never trips poison limit",
+    );
+
+    // Can be immediately re-claimed by the next tick/worker
+    const reclaimed = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-next-tick",
+      now: "2026-10-11T16:02:00.000Z",
+    });
+    assert(reclaimed);
+    assertEquals(reclaimed.status, "synthesizing");
+    assertEquals(reclaimed.claimedBy, "worker-next-tick");
+    assertEquals(reclaimed.attempts, 1);
+  });
+
   // -- completeEpisode ----------------------------------------------------
 
   test("the claim owner may write the terminal state", async (store) => {

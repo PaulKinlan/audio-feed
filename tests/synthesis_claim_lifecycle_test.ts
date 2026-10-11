@@ -594,3 +594,118 @@ Deno.test("audio-feed-2m5z: (c) good checkpoint at script_generated still procee
   assertEquals(dialogueCalls, 1, "TTS was called after successful checkpoint");
   assertEquals(batch.ready.length, 1, "batch completed successfully");
 });
+
+Deno.test("audio-feed-vqu4: long synthesis completes across multiple bounded ticks with no lost stage or duplicate spend", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  let scriptCalls = 0;
+  const textChunk = (id: number) => `Segment ${id} `.repeat(500);
+  const mockScriptGenerator = () => {
+    scriptCalls++;
+    return Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: textChunk(1) },
+        { speaker: "Sam", text: textChunk(2) },
+        { speaker: "Alex", text: textChunk(3) },
+        { speaker: "Sam", text: textChunk(4) },
+        { speaker: "Alex", text: textChunk(5) },
+        { speaker: "Sam", text: textChunk(6) },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+  };
+
+  let dialogueCalls = 0;
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  // Mock sendRequest so real synthesizeDialogue runs through batching and runManagedTurns
+  mockClient.sendRequest = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-multi-tick",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  // --- TICK 1: budget of 2 segments per invocation ---
+  const batch1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-1",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch1.ready.length, 0, "tick 1 should not complete episode");
+  assertEquals(batch1.yielded.length, 1, "tick 1 should yield");
+  assertEquals(batch1.yielded[0]?.episodeId, "ep-multi-tick");
+  assertEquals(batch1.yielded[0]?.completedTurns, 2);
+  assertEquals(batch1.yielded[0]?.totalTurns, 6);
+  assertEquals(scriptCalls, 1, "script generated in tick 1");
+  assertEquals(dialogueCalls, 2, "2 segments synthesized in tick 1");
+
+  const epAfterTick1 = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epAfterTick1);
+  assertEquals(epAfterTick1.status, "pending", "status returned to pending for next tick");
+  assertEquals(epAfterTick1.phase, "synthesized_2_of_6");
+  assertEquals(epAfterTick1.attempts, 0, "attempts reset to 0 after clean yield");
+  assert(epAfterTick1.scriptTurns, "scriptTurns preserved across ticks");
+
+  // --- TICK 2: next cron tick resumes, does 2 more segments ---
+  const batch2 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-2",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch2.ready.length, 0, "tick 2 should not complete episode");
+  assertEquals(batch2.yielded.length, 1, "tick 2 should yield");
+  assertEquals(batch2.yielded[0]?.completedTurns, 4);
+  assertEquals(scriptCalls, 1, "script was NOT re-generated in tick 2 (reused!)");
+  assertEquals(dialogueCalls, 4, "total 4 segments synthesized across ticks 1 & 2");
+
+  const epAfterTick2 = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epAfterTick2);
+  assertEquals(epAfterTick2.status, "pending");
+  assertEquals(epAfterTick2.phase, "synthesized_4_of_6");
+  assertEquals(epAfterTick2.attempts, 0);
+
+  // --- TICK 3: final tick completes remaining 2 segments and commits ready ---
+  const batch3 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-tick-3",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 2,
+  });
+
+  assertEquals(batch3.ready.length, 1, "tick 3 should finish episode");
+  assertEquals(batch3.yielded.length, 0, "tick 3 should not yield");
+  assertEquals(scriptCalls, 1, "script was NEVER re-generated");
+  assertEquals(dialogueCalls, 6, "all 6 segments synthesized exactly once (no duplicates!)");
+
+  const epFinal = await stores.metadata.getEpisode("user-1", "ep-multi-tick");
+  assert(epFinal);
+  assertEquals(epFinal.status, "ready");
+  assertEquals(epFinal.phase, "ready");
+  assert(epFinal.audioKey, "ready episode has audioKey");
+  assert(epFinal.byteLength && epFinal.byteLength > 0);
+  assertEquals(epFinal.error, undefined);
+
+  // Assert blob store holds the final assembled audio
+  const finalBlob = await stores.blobs.get(epFinal.audioKey);
+  assert(finalBlob, "final audio blob exists in blob store");
+});

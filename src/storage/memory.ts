@@ -274,6 +274,17 @@ export class MemoryMetadataStore implements MetadataStore {
   ): Promise<boolean> {
     return this.repositories.episodes.touchEpisodeClaim(userId, episodeId, owner, update);
   }
+  yieldEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update?: {
+      phase?: string;
+      now?: string;
+    },
+  ): Promise<boolean> {
+    return this.repositories.episodes.yieldEpisodeClaim(userId, episodeId, owner, update);
+  }
   retryEpisode(userId: string, id: string): Promise<Episode | null> {
     return this.repositories.episodes.retryEpisode(userId, id);
   }

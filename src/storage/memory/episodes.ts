@@ -272,6 +272,34 @@ export function createEpisodesRepository(
       if (update.scriptTurns) current.scriptTurns = update.scriptTurns;
       return Promise.resolve(true);
     },
+    yieldEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update?: {
+        phase?: string;
+        now?: string;
+      },
+    ): Promise<boolean> {
+      const key = scoped(userId, episodeId);
+      const current = state.episodes.get(key);
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return Promise.resolve(false);
+      }
+      const oldSortKey = `${current.createdAt}\u0000${current.id}`;
+      removeSortedIndex(state.synthesizingIndex, oldSortKey);
+      const yielded: Episode = {
+        ...current,
+        status: "pending",
+        claimedAt: undefined,
+        claimedBy: undefined,
+        phase: update?.phase ?? current.phase,
+        lastHeartbeat: update?.now ?? new Date().toISOString(),
+        attempts: 0,
+      };
+      writeEpisode(state, yielded);
+      return Promise.resolve(true);
+    },
     completeEpisode(episode: Episode, owner: string): Promise<boolean> {
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
