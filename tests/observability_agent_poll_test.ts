@@ -1234,6 +1234,71 @@ Deno.test("a run that lost its lease stands down without spending (audio-feed-13
   });
 });
 
+Deno.test("the daily cap is read under the lock, not from a snapshot taken outside it (audio-feed-131z)", async () => {
+  // The ordering defect: runOnce loaded the cursor and counters and THEN acquired the lock, so the cap was
+  // checked against a snapshot taken outside the exclusion. A prior holder could finish its 24th call after
+  // our load and before our acquire, and this run would then make a 25th PAID call and write the counter
+  // back to 24 - exceeding the ceiling AND advancing the counter to a value lower than the truth, which is
+  // worse than either alone because the regression hides the overspend from every later cap check.
+  //
+  // The interleaving is INJECTED rather than timed: the completion is written from the now() hook, which
+  // runs before any state is read. It writes on every call AFTER the first, because the first now() is the
+  // run's own timestamp - a hook that only fired there would finish before the state was read and would
+  // pass against the broken order too, which is exactly the kind of vacuous test this branch has been bitten
+  // by. Do not "simplify" it to the first call.
+  await withTempDir(async (dir) => {
+    const { loadState, saveState } = await import("../scripts/observability-agent-poll.ts");
+    const at = new Date("2026-10-11T12:00:00.000Z");
+    // 23 calls on disk: the 24th is allowed, the 25th is not.
+    await saveState(dir, {
+      day: utcDay(at),
+      callsToday: 23,
+      inputTokensToday: 0,
+      outputTokensToday: 0,
+      cursor: 0,
+      lastRun: null,
+      artifact: null,
+    });
+    let calls = 0;
+    const d = deps({
+      now: () => {
+        calls += 1;
+        if (calls > 1) {
+          // The prior holder's 24th call lands here: after a run following the broken order has already
+          // read 23, but before a run following the correct order reads anything at all.
+          Deno.writeTextFileSync(
+            `${dir}/state.json`,
+            JSON.stringify({
+              day: utcDay(at),
+              callsToday: 24,
+              inputTokensToday: 0,
+              outputTokensToday: 0,
+              cursor: 0,
+              lastRun: null,
+              artifact: null,
+            }),
+          );
+        }
+        return at;
+      },
+    });
+    const { artifact } = await runOnce(config(dir), d);
+
+    assertEquals(artifact.reason, "cap-daily-calls");
+    assertEquals(
+      artifact.modelCalls,
+      0,
+      "the ceiling was already reached, so no model call may be made",
+    );
+    assertEquals(d.calls.callModel ?? 0, 0, "and the stubbed model must not have been reached");
+    assertEquals(
+      (await loadState(dir)).callsToday,
+      24,
+      "the counter on disk must still say what the prior holder wrote",
+    );
+  });
+});
+
 Deno.test("the runner propagates a cap refusal instead of reporting success (audio-feed-9l6v)", async () => {
   // Ending the runner with `exit 0` made a capped run look like a success to whatever scheduled it,
   // which is the opposite of fail-closed. The stamp is touched BEFORE the run, so a non-zero status

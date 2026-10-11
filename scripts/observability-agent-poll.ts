@@ -943,6 +943,26 @@ export async function runOnce(
   deps: RunDeps,
 ): Promise<{ artifact: RunArtifact; state: PollState }> {
   const startedAt = deps.now().toISOString();
+
+  // Ownership, tracked explicitly and BY TOKEN: a DISABLED or refused invocation also returns through
+  // finish(), and releasing a lock this run never acquired (or no longer owns) deletes a live run's lock
+  // and lets a second run in - the exact race the lock exists to prevent (audio-feed-jmkm, audio-feed-131z).
+  let heldToken: string | null = null;
+
+  // (0) THE LOCK COMES FIRST, BEFORE ANY STATE IS READ (audio-feed-131z, review). The previous order loaded
+  // the cursor and counters and THEN acquired the lock, so the caps were checked against a snapshot taken
+  // outside the exclusion: a prior holder could complete its 24th call after our load and before our
+  // acquire, and this run would then make a 25th PAID call and write the counter back to 24 - exceeding
+  // Paul's ceiling AND regressing the counter, which is worse than either alone because the regression
+  // hides the overspend from every later run's cap check. A lock taken after the state it protects is not
+  // protecting anything, so nothing below this point reads state until the lock is ours.
+  const lockNow = deps.now();
+  const token = lockToken(lockNow);
+  const acquired = await acquireLock(config.stateDir, lockNow, token);
+  heldToken = acquired ? token : null;
+
+  // NOW the state, and only now: this snapshot is taken under the lock, so a cap decision made from it
+  // cannot be invalidated by a holder that finished while we were starting up.
   let state = rollDay(await loadState(config.stateDir), deps.now());
   const cursorBefore = state.cursor;
 
@@ -969,15 +989,20 @@ export async function runOnce(
     modelCalls: 0,
     note: null,
   };
-  // Ownership, tracked explicitly and BY TOKEN: a DISABLED or refused invocation also returns through
-  // finish(), and releasing a lock this run never acquired (or no longer owns) deletes a live run's lock
-  // and lets a second run in - the exact race the lock exists to prevent (audio-feed-jmkm, audio-feed-131z).
-  let heldToken: string | null = null;
+  // STATE IS ONLY EVER PERSISTED WHILE THIS RUN HOLDS THE LOCK. A run that does not hold it can still be
+  // carrying a cursor and counters read from outside it, and writing that snapshot back would regress
+  // values another run has since advanced - which is how an overspend hides itself (audio-feed-131z).
+  // Every writer goes through here so there is one place to get that right.
+  const persist = async (): Promise<void> => {
+    if (heldToken === null) return;
+    await saveState(config.stateDir, state);
+  };
+
   const finish = async (state_: "idle" | "ranked" | "skipped" | "failed"): Promise<RunArtifact> => {
     artifact.state = state_;
     artifact.finishedAt = deps.now().toISOString();
     state = { ...state, lastRun: artifact.finishedAt, artifact };
-    await saveState(config.stateDir, state);
+    await persist();
     await Deno.writeTextFile(`${config.stateDir}/digest.md`, renderDigest(artifact));
     // Released on every path that returns through here, but ONLY if this run still owns it.
     if (heldToken !== null) {
@@ -987,8 +1012,12 @@ export async function runOnce(
     return artifact;
   };
 
-  // (1) OFF unless enabled: nothing below this line runs for a disabled poll, and that is what the test
-  // asserts - not that it exits quietly, but that it makes zero network calls.
+  // (1) OFF unless enabled. This sits BEFORE THE CAPS and before any state is used for a decision, and it
+  // reports through finish() without persisting: persist() is gated on holding the lock, so the snapshot
+  // this reports cannot travel anywhere, and a disabled run that lost the lock still leaves the holder's
+  // state untouched. What it does write is the digest, which is a report rather than state. It makes zero
+  // network calls, which is what the test pins. It is checked before the "locked" return on purpose, so a
+  // disabled poll reports "disabled" rather than "locked" when another run happens to hold the lock.
   if (!config.enabled) {
     artifact.reason = "disabled";
     artifact.note =
@@ -996,17 +1025,13 @@ export async function runOnce(
     return { artifact: await finish("skipped"), state };
   }
 
-  // (2) The lock, BEFORE the caps and BEFORE anything else that costs or writes. A ceiling that two
-  // concurrent runs can each pass is not a ceiling, so the exclusion is not an optimisation.
-  const lockNow = deps.now();
-  const token = lockToken(lockNow);
-  const acquired = await acquireLock(config.stateDir, lockNow, token);
-  heldToken = acquired ? token : null;
   if (!acquired) {
     artifact.reason = "locked";
     artifact.note =
       `Another run holds ${LOCK_FILE} in ${config.stateDir}. This run did nothing and wrote no state, ` +
       `because the holder owns the cursor and the counters - writing here would clobber them.`;
+    // No finish(): finish persists, and this run has no right to. The state above is a read-only snapshot
+    // taken for the artifact (main uses nothing else), so it cannot travel anywhere.
     return { artifact, state };
   }
 
@@ -1191,7 +1216,7 @@ export async function runOnce(
     inputTokensToday: state.inputTokensToday + reservedInputTokens,
     outputTokensToday: state.outputTokensToday + reservedOutputTokens,
   };
-  await saveState(config.stateDir, state);
+  await persist();
   const model = await deps.callModel(config, prompt.text);
   artifact.modelCalls = 1;
   // Settle: swap the reservation for what the call actually reported. A failed call keeps the
