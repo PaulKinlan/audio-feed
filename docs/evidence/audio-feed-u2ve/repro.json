@@ -73,6 +73,11 @@
     "allowedThrough": 5,
     "evaded": false
   },
+  "rotatingDottedTailCfOnly": {
+    "tooManyRequests": 15,
+    "allowedThrough": 5,
+    "evaded": false
+  },
   "wellFormedCfClient": {
     "tooManyRequests": 1,
     "first429AtAttempt": 6

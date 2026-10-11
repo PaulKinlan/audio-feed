@@ -97,14 +97,19 @@ Deno.test("a key cannot be made unbounded by forging a long or prose value (audi
   assertEquals(extractClientIp(request(undefined, v6), true), v6);
 });
 
-Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2ve)", () => {
+Deno.test("the address corpus: every finding's malformed family falls back to the socket (audio-feed-u2ve, 5vvw, hzg1, jqmd)", () => {
+  // One table, every family that has been found to rotate the key, each with the finding that found
+  // it. This is the test the rule needed from the start: three hand-rolled versions of the check
+  // each passed the cases their author thought of, and a corpus of the failures is what makes the
+  // fourth attempt verifiable rather than merely plausible.
   const usable = [
-    "203.0.113.7",
-    "203.0.113.7:8443",
-    "::1",
+    "203.0.113.7", // IPv4
+    "203.0.113.7:8443", // IPv4 with a port (v4:port is unambiguous)
+    "::1", // IPv6
     "2001:db8::1",
-    "[2001:db8::1]:443",
-    "::ffff:192.0.2.1",
+    "[2001:db8::1]:443", // IPv6 with a port (bracketed, the only unambiguous form)
+    "::ffff:192.0.2.1", // IPv6 with a dotted-quad tail
+    "1:2:3:4:5:6:7:8", // full eight groups
   ];
   for (const value of usable) {
     assertEquals(
@@ -113,32 +118,45 @@ Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2
       `${value} must be usable`,
     );
   }
-  // audio-feed-hzg1: these passed the first version of this check, because it counted hex groups
-  // without requiring the structure of an address — one group plus a trailing colon was enough. A
-  // caller rotated `0:` .. `13:` through the fallback header and got a bucket per request, which is
-  // the bypass the check exists to close, so the forms are asserted individually.
+
   const unusable = [
+    // A key is a store row, so an unbounded value is an unbounded row count (5vvw).
+    "x".repeat(200),
+    "not-an-address ".repeat(20),
+    // Not an address at all.
+    "unknown",
+    "",
+    "direct",
+    // Numerically not addresses.
     "999.0.113.7",
     "203.0.113",
     "203.0.113.7.9",
     "1.2.3.4,",
-    "unknown",
-    "",
-    "2001:db8::1::2",
-    // Not hex at all: rejected by the alphabet, where the forms above are rejected by the
-    // structure. Both have to hold, and coord asked for this family by name.
-    "zz::1",
+    "1:2:3:4:5:6:7:8:9",
+    "1:2:3:4:5:6:7:8:9:10",
     "0g:1:2:3:4:5:6:7",
+    "12345::1",
+    // audio-feed-hzg1: one hex group with a trailing colon, which the alphabet-only check read as an
+    // address. A caller rotated `0:` .. `13:` for a bucket each.
     "0:",
-    "2001:db8::zzzz",
     "13:",
     "abc:",
-    ":::",
     "2001:db8:",
     ":1:2:3:4:5:6:7",
     "1:2:3",
-    "1:2:3:4:5:6:7:8:9",
-    "12345::1",
+    "2001:db8::1::2",
+    ":::",
+    "zz::1",
+    "2001:db8::zzzz",
+    // audio-feed-jqmd: a dotted-quad tail represents TWO groups, so seven written groups plus a quad
+    // is nine, not eight. The structure check counted the quad as one and let this through.
+    "1:2:3:4:5:6:7::192.0.2.1",
+    "1:2:3:4:5:6:7:8::192.0.2.1",
+    "::192.0.2.1:80",
+    // A bare IPv6 whose last group could be read as a port: treating it as one let nine groups
+    // through as eight-with-a-port, which is the same rotation by another route.
+    "1:2:3:4:5:6:7:8:999",
+    "999.0.113.7:80",
   ];
   for (const value of unusable) {
     assertEquals(
@@ -149,43 +167,52 @@ Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2
   }
 });
 
-Deno.test("a rotating forged cf-connecting-ip cannot change the bucket (audio-feed-5vvw)", async () => {
-  // The reviewer's reproducer: with no forwarded chain, a rotated fallback header bought a bucket
-  // per request. The limiter is real; only the client identity is under test.
-  const { fetch } = app();
-  const statuses: number[] = [];
-  for (let i = 0; i < MAX_REQUESTS * 3; i++) {
-    const response = await fetch(
-      new Request("http://localhost/api/request-access", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "cf-connecting-ip": `forged-${String(i).padStart(3, "0")}-${"x".repeat(200)}`,
-        },
-        body: JSON.stringify({ email: `cf-${i}@example.com`, reason: "probe" }),
-      }),
+Deno.test("a rotating malformed value in either header cannot change the bucket (audio-feed-5vvw, hzg1, jqmd)", async () => {
+  // The bucket-level version of the corpus: every family that rotates in practice, driven through
+  // the real limiter. A key that changes per request is a fresh allowance per request, whatever the
+  // value looks like, so each family is rotated the way the finding rotated it.
+  const families = [
+    (i: number) => `forged-${String(i).padStart(3, "0")}-${"x".repeat(200)}`,
+    (i: number) => `${i.toString(16)}:`,
+    (i: number) => `1:2:3:4:5:6:${i.toString(16)}::192.0.2.1`,
+    (i: number) => `1:2:3:4:5:6:7:8:${i}`,
+  ];
+  for (const [index, forge] of families.entries()) {
+    const { fetch } = app();
+    const statuses: number[] = [];
+    for (let i = 0; i < MAX_REQUESTS * 3; i++) {
+      const response = await fetch(
+        new Request("http://localhost/api/request-access", {
+          method: "POST",
+          headers: { "content-type": "application/json", "cf-connecting-ip": forge(i) },
+          body: JSON.stringify({ email: `family-${index}-${i}@example.com`, reason: "probe" }),
+        }),
+      );
+      statuses.push(response.status);
+    }
+    assertEquals(
+      statuses.filter((s) => s === 429).length,
+      MAX_REQUESTS * 3 - MAX_REQUESTS,
+      `family ${index} rotated the key: ${statuses.filter((s) => s === 429).length} of ${
+        MAX_REQUESTS * 3
+      } were limited`,
     );
-    statuses.push(response.status);
   }
-  assertEquals(
-    statuses.filter((s) => s === 429).length,
-    MAX_REQUESTS * 3 - MAX_REQUESTS,
-    "a rotating fallback header must not buy a second bucket",
-  );
 
-  // And a well-formed one is still honoured, so a deployment whose proxy manages it is unchanged.
+  // And a well-formed address still gets its own allowance, locked out at the bound.
+  const { fetch } = app();
   const honest: number[] = [];
   for (let i = 0; i < MAX_REQUESTS + 1; i++) {
     const response = await fetch(
       new Request("http://localhost/api/request-access", {
         method: "POST",
         headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.9" },
-        body: JSON.stringify({ email: `honest-${i}@example.com`, reason: "probe" }),
+        body: JSON.stringify({ email: `wellformed-${i}@example.com`, reason: "probe" }),
       }),
     );
     honest.push(response.status);
   }
-  assertEquals(honest[MAX_REQUESTS], 429, "a real cf-connecting-ip still creates one bucket");
+  assertEquals(honest[MAX_REQUESTS], 429, "a real address still creates one bucket and locks out");
 });
 
 // -- 2. the bucket ----------------------------------------------------------

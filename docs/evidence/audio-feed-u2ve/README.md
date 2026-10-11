@@ -94,3 +94,49 @@ Worth stating plainly, because it is the second hole in the same guard: the firs
 the _length_ of a forwarded value, the second bounded its _alphabet_, and this finding is what a
 third round of "does this actually look like an address" had to add. Counting characters and
 characters that happen to be legal is not the same as requiring a shape.
+
+## audio-feed-jqmd — the class, not the example: the hand-rolled validator is gone
+
+The fourth finding in this guard was the one that named the pattern. A dotted-quad tail represents
+**two** IPv6 groups, so `1:2:3:4:5:6:7::192.0.2.1` writes seven groups plus a quad — nine, not eight
+— and my structure check counted the quad as one. Twenty rotating dotted-tail values bought twenty
+buckets, exactly as `0:` had before them.
+
+Three hand-rolled versions had now each been wrong in a different way: the first bounded the length
+of a forwarded value, the second its alphabet, the third its structure — and each looked sufficient
+from the inside. The fix is to stop writing the validator. `isIP` from `node:net` is the platform's,
+it returns 4, 6 or 0, and it was checked against every form that has ever mattered here before it
+was adopted:
+
+| value                                                                            | isIP      |                                         |
+| -------------------------------------------------------------------------------- | --------- | --------------------------------------- |
+| `203.0.113.7`, `2001:db8::1`, `::ffff:192.0.2.1`                                 | 4 / 6 / 6 | accepted                                |
+| `1:2:3:4:5:6:7::192.0.2.1`, `0:`, `abc:`, `1:2:3`, `999.0.113.7`, `:::`, `zz::1` | 0         | fall back to the socket                 |
+| `203.0.113.7:8443`, `[2001:db8::1]:443`                                          | **0**     | ports are not addresses — handled below |
+
+That last row is why the change is not a one-liner. `isIP` is strict, and a proxy that appends an
+address with a port appends both, so the port is stripped first — but only in the two forms where it
+is unambiguous (`v4:port` and `[v6]:port`). A **bare** IPv6 ending in `:digits` is readable two
+ways, nine groups or an address with a port, and reading it as the latter let `1:2:3:4:5:6:7:8:9`
+through as `1:2:3:4:5:6:7:8` with port 9 — a fifth rotated key, caught by the corpus written for
+this finding before it reached review. Rejecting host-with-port outright was the other option and it
+is the wrong one: it collapses distinct clients onto one socket-address bucket, which is the failure
+audio-feed-hn4 was a P2 about.
+
+| 20 rotated values, bound 5/60s, no forwarded chain | before                   | after                    |
+| -------------------------------------------------- | ------------------------ | ------------------------ |
+| dotted-quad tail (`1:2:3:4:5:6:X::192.0.2.1`)      | **0 x 429 / 20 allowed** | **15 x 429 / 5 allowed** |
+| single hex group + colon (`0:` .. `13:`)           | 15 x 429 / 5 allowed     | 15 x 429 / 5 allowed     |
+| over-long forged value                             | 15 x 429 / 5 allowed     | 15 x 429 / 5 allowed     |
+| a well-formed `cf-connecting-ip`                   | locks out at attempt 6   | locks out at attempt 6   |
+
+`tests/rate_limit_key_test.ts` now carries the corpus this needed from the start: one table of every
+family that has ever rotated a key (`0:`, `abc:`, over-long, nine and ten groups, both dotted-tail
+forms, a bare-IPv6-last-group-as-port, `999.0.113.7:80`), each with the finding that found it, and a
+bucket-level test that rotates all four families through the real limiter and asserts the bound
+holds for each while a well-formed address still locks out at 6.
+
+**The lesson, stated for the next person:** three rounds of "does this look like an address?"
+produced three different holes, and the fourth round is only safe because it stopped asking me to be
+the authority on IPv6. When a guard has to be right about a standard format, the standard format
+belongs in the platform.

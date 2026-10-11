@@ -12,6 +12,7 @@
  * tests) makes one bound hold for the deployment.
  */
 
+import { isIP } from "node:net";
 import type { AtomicWrite } from "../storage/mod.ts";
 
 /** The one store capability the limiter needs — see `MetadataStore.atomicUpdate`. */
@@ -227,69 +228,39 @@ function lastForwardedEntry(header: string | null): string | null {
  *
  * The length bound is not cosmetic: a key is a store row, and a caller who can make the key
  * arbitrarily long can make arbitrarily many of them (the row-exhaustion concern behind
- * audio-feed-2zvc). The shape check is what stops a caller rotating prose — or anything else that is
- * not an address — through a header their proxy does not manage, which is how the unbounded
- * fallback survived the first fix (audio-feed-5vvw). A proxy that appends a client address appends
- * an address, so rejecting the rest costs a real deployment nothing: the value falls through to the
- * platform's own socket address, which is a small, real, bounded key.
+ * audio-feed-2zvc). The address check is what stops a caller rotating anything that is not an
+ * address through a header their proxy does not manage, which is how the unbounded fallback survived
+ * the first fix (audio-feed-5vvw). A proxy that appends a client address appends an address, so
+ * rejecting the rest costs a real deployment nothing: the value falls through to the platform's own
+ * socket address, a small, real, bounded key.
+ *
+ * The check is Node's `isIP` (node:net), NOT a hand-rolled one. This was hand-rolled twice and both
+ * versions had holes that let a caller rotate the key: the first bounded the value's LENGTH only, so
+ * any string was a key; the second bounded its ALPHABET, so `0:` — one hex group and a colon — read
+ * as an address (audio-feed-hzg1); the third required the structure of eight groups, and still
+ * counted a dotted-quad tail as one group, so `1:2:3:4:5:6:7::192.0.2.1` passed (audio-feed-jqmd).
+ * Each version looked sufficient from the inside. A validator that has to be right about IPv6
+ * belongs in the platform, and `isIP` returns 4, 6 or 0.
  */
 function clientAddressCandidate(value: string): string | null {
   const candidate = value.trim();
   if (candidate === "" || candidate.length > MAX_CLIENT_KEY_LENGTH) return null;
-  return isIpLiteral(candidate) ? candidate : null;
+  // `isIP` is strict: `1.2.3.4:80` and `[::1]:443` are not addresses, they are addresses with ports,
+  // and a proxy that appends one appends both. Only the two forms where a port is unambiguous are
+  // stripped: `[v6]:port` and `v4:port`. A BARE IPv6 with a trailing `:digits` is read two ways —
+  // nine groups, or an address with a port — and treating it as the latter let
+  // `1:2:3:4:5:6:7:8:9` through as `1:2:3:4:5:6:7:8` with port 9, which is another rotated key.
+  // Real proxies bracket an IPv6 port, and an ambiguous value falls back to the socket address.
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(candidate)?.[1];
+  const hostPort = /^([\d.]+):\d{1,5}$/.exec(candidate)?.[1];
+  const usable = isIP(candidate) !== 0 ||
+    (bracketed !== undefined && isIP(bracketed) !== 0) ||
+    (hostPort !== undefined && isIP(hostPort) === 4);
+  return usable ? candidate : null;
 }
 
 /** A full IPv6 address plus a port is 51 characters; 64 leaves room without admitting prose. */
 const MAX_CLIENT_KEY_LENGTH = 64;
-
-/** IPv4 (with an optional port) or IPv6 (bracketed with an optional port, or bare). */
-function isIpLiteral(value: string): boolean {
-  const bracketed = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(value);
-  if (bracketed) return isIpv6(bracketed[1]!);
-
-  // A port is only expressible after a bare IPv4; IPv6 must be bracketed to carry one.
-  const hostPort = /^([\d.]+):\d{1,5}$/.exec(value);
-  if (hostPort) return isIpv4(hostPort[1]!);
-
-  return isIpv4(value) || isIpv6(value);
-}
-
-function isIpv4(value: string): boolean {
-  const parts = value.split(".");
-  return parts.length === 4 &&
-    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
-}
-
-/**
- * Structural IPv6, including the dotted-quad tail form (`::ffff:192.0.2.1`) that proxies do emit.
- *
- * The rules are the ones that separate an address from prose without re-implementing RFC 4291: hex
- * groups and colons only, at most eight groups, each at most four digits, at most one `::`, and a
- * trailing dotted quad that is itself a valid IPv4.
- */
-function isIpv6(value: string): boolean {
-  if (!value.includes(":")) return false;
-  if (value.includes(":::")) return false;
-  const elisions = (value.match(/::/g) ?? []).length;
-  if (elisions > 1) return false;
-  const elided = elisions === 1;
-  // A single colon may only sit at an edge as part of `::`. `0:` and `2001:db8:` are not addresses.
-  if (!elided && (value.startsWith(":") || value.endsWith(":"))) return false;
-
-  const quad = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(value);
-  if (quad && !isIpv4(quad[1]!)) return false;
-  const hexPart = quad ? value.slice(0, value.length - quad[0].length) : value;
-
-  if (!/^[0-9A-Fa-f:]*$/.test(hexPart)) return false;
-  const groups = hexPart.split(":").filter((group) => group !== "");
-  if (groups.some((group) => group.length > 4)) return false;
-  // What makes this an address rather than a word with colons in it: without `::` an IPv6 address
-  // has exactly eight groups, and with it `::` stands for at least one elided group, so at most
-  // seven may be written. Accepting one group with a trailing colon (`0:`) was enough to rotate the
-  // key again — the check has to constrain the STRUCTURE, not just the alphabet (audio-feed-hzg1,
-  // found by review of the shape check itself).
-  return elided ? groups.length <= 7 : groups.length === 8;
-}
 
 /**
  * Shared throttle for failed admin authentication attempts (audio-feed-bns).
