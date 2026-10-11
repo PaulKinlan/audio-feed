@@ -78,7 +78,9 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   let synthCalls = 0;
   const synth = () => {
     synthCalls++;
-    if (synthCalls === 1) return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 600));
+    if (synthCalls === 1) {
+      return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 600));
+    }
     return Promise.resolve(audio);
   };
 
@@ -137,7 +139,10 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
   assertEquals(r1.failed.length, 1, "must fail terminally, not yield or stall");
   assertEquals(r1.yielded.length, 0);
   const reason = r1.failed[0]?.error ?? "";
-  assert(reason.includes("cannot fit the invocation budget"), `reason must name the cause: ${reason}`);
+  assert(
+    reason.includes("cannot fit the invocation budget"),
+    `reason must name the cause: ${reason}`,
+  );
   assert(reason.includes("2"), `reason must name the payload size: ${reason}`);
   assert(reason.includes("MAX_INVOCATION_DURATION_MS"), `reason must name the knob: ${reason}`);
 
@@ -191,7 +196,9 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
   const midUpload = heartbeatTimes.filter((t) => t > putStartedAt + 50 && t < putSettledAt);
   assert(
     midUpload.length >= 1,
-    `expected >=1 heartbeat during the upload, got ${JSON.stringify(heartbeatTimes)} (put ${putStartedAt}..${putSettledAt})`,
+    `expected >=1 heartbeat during the upload, got ${
+      JSON.stringify(heartbeatTimes)
+    } (put ${putStartedAt}..${putSettledAt})`,
   );
 
   // Phase-less touches must not produce claim-lifecycle log events (noise guard):
@@ -203,6 +210,8 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
   assertEquals(
     phases.filter((p) => p === "uploading_audio").length,
     1,
-    `uploading_audio must be logged once (phase transition), not per heartbeat: ${JSON.stringify(phases)}`,
+    `uploading_audio must be logged once (phase transition), not per heartbeat: ${
+      JSON.stringify(phases)
+    }`,
   );
 });
