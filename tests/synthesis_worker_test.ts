@@ -1182,25 +1182,21 @@ Deno.test("a superseded worker whose cleanup delete fails records the orphan (au
   // remove its blob, and the failure must be recorded, not swallowed.
   stores.blobs.delete = (_key: string) => Promise.reject(new Error("delete exploded"));
 
-  const run = await runSynthesisBatch(ctx, async () => {
-    const current = await stores.metadata.getEpisode("user-1", "ep-0");
-    await stores.metadata.completeEpisode(
-      {
-        ...current!,
-        status: "ready",
-        audioKey: canonical,
-        contentType: "audio/wav",
-        byteLength: 999,
-      },
-      current!.claimedBy!,
-    );
+  // The takeover happens while uploading the blob, after the uploading_audio checkpoint
+  const origPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (key, bytes, opts) => {
+    const res = await origPut(key, bytes, opts);
     await stores.metadata.putEpisode({
       ...(await stores.metadata.getEpisode("user-1", "ep-0"))!,
       status: "synthesizing",
       claimedBy: "someone-else",
       claimedAt: new Date().toISOString(),
     });
-    return fakeAudio();
+    return res;
+  };
+
+  const run = await runSynthesisBatch(ctx, () => {
+    return Promise.resolve(fakeAudio());
   }, { owner: "slow-worker" });
 
   assertEquals(run.superseded.length, 1);

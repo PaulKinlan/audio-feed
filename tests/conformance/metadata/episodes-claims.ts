@@ -194,8 +194,146 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const stored = await store.getEpisode("user-1", "e1");
     assertEquals(stored?.status, "failed");
     assert(stored?.error?.includes("abandoned after 3 attempts"), stored?.error);
-    assert(stored?.error?.includes("no claim recorded a cause"), stored?.error);
-    assert(stored?.error?.includes("last claim by worker-a at"), stored?.error);
+    assert(stored?.error?.includes("lease expired without terminal write"), stored?.error);
+    assert(!stored?.error?.includes("died"), "must not assert death when only lease expired");
+    assert(stored?.error?.includes("worker-a"), stored?.error);
+  });
+
+  test("abandonment records worker execution phase and last heartbeat (audio-feed-siv1)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Attempt 1: gets as far as synthesizing segment 1 before dying
+    const c1 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      now: "2026-09-20T12:00:00.000Z",
+    });
+    assert(c1);
+    await store.touchEpisodeClaim("user-1", "e1", "worker-a", {
+      phase: "synthesizing_segment_1_of_4",
+      now: "2026-09-20T12:00:15.000Z",
+    });
+
+    // Attempt 2: lease expires, second worker advances to segment 2 before dying
+    const c2 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-b",
+      now: "2026-09-20T12:15:00.000Z",
+    });
+    assert(c2);
+    await store.touchEpisodeClaim("user-1", "e1", "worker-b", {
+      phase: "synthesizing_segment_2_of_4",
+      now: "2026-09-20T12:15:30.000Z",
+    });
+
+    // Attempt 3: lease expires, third worker gets to uploading_audio before dying
+    const c3 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-c",
+      now: "2026-09-20T12:30:00.000Z",
+    });
+    assert(c3);
+    await store.touchEpisodeClaim("user-1", "e1", "worker-c", {
+      phase: "uploading_audio",
+      now: "2026-09-20T12:30:45.000Z",
+    });
+
+    // 4th claim: out of attempts, abandoned
+    const c4 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      now: "2026-09-20T12:45:00.000Z",
+    });
+    assertEquals(c4, null);
+
+    const stored = await store.getEpisode("user-1", "e1");
+    assertEquals(stored?.status, "failed");
+    assertEquals(stored?.phase, "uploading_audio");
+    assert(stored?.error?.includes("abandoned after 3 attempts"), stored?.error);
+    assert(stored?.error?.includes('in phase "uploading_audio"'), stored?.error);
+    assert(stored?.error?.includes("synthesizing_segment_1_of_4"), stored?.error);
+    assert(stored?.error?.includes("synthesizing_segment_2_of_4"), stored?.error);
+    assert(stored?.error?.includes("lease expired without terminal write"), stored?.error);
+    assert(!stored?.error?.includes("died"), "must not assert death when only lease expired");
+    assert(stored?.error?.includes("worker-a"), stored?.error);
+    assert(stored?.error?.includes("worker-b"), stored?.error);
+    assert(stored?.error?.includes("worker-c"), stored?.error);
+  });
+
+  test("live heartbeat near lease expiry is reported as lease expiry, not worker death (audio-feed-kd5r)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Claim at 14:00:00Z with 15-minute lease (900000ms)
+    const claim1 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-live",
+      now: "2026-10-11T14:00:00.000Z",
+    });
+    assert(claim1);
+
+    // Active heartbeat 1 second before lease expiry at 14:14:59Z
+    const touched = await store.touchEpisodeClaim("user-1", "e1", "worker-live", {
+      phase: "synthesizing_segment_2_of_4",
+      now: "2026-10-11T14:14:59.000Z",
+    });
+    assertEquals(touched, true, "live worker successfully heartbeats before expiry");
+
+    // At 14:15:00Z, lease expires and another worker claims
+    const claim2 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-other",
+      now: "2026-10-11T14:15:00.000Z",
+    });
+    assert(claim2);
+    assertEquals(claim2.attempts, 2);
+
+    // Assert recorded cause reports observed facts: lease expiry, last heartbeat, last phase
+    // MUST NOT assert death
+    const err = claim2.error ?? "";
+    assert(err.includes("lease expired without terminal write"), err);
+    assert(err.includes('phase "synthesizing_segment_2_of_4"'), err);
+    assert(err.includes("last heartbeat 2026-10-11T14:14:59.000Z"), err);
+    assert(err.includes("worker state unknown"), err);
+    assert(!err.includes("died"), "must not assert worker death for active heartbeat");
+  });
+
+  test("touchEpisodeClaim rejects non-owner or non-synthesizing caller (audio-feed-siv1)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Pending: cannot touch
+    assertEquals(
+      await store.touchEpisodeClaim("user-1", "e1", "worker-a", { phase: "reading" }),
+      false,
+    );
+
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    // Wrong owner
+    assertEquals(
+      await store.touchEpisodeClaim("user-1", "e1", "worker-other", { phase: "reading" }),
+      false,
+    );
+
+    // Right owner
+    assertEquals(
+      await store.touchEpisodeClaim("user-1", "e1", "worker-a", {
+        phase: "reading",
+        now: "2026-09-20T12:00:05.000Z",
+      }),
+      true,
+    );
+    const updated = await store.getEpisode("user-1", "e1");
+    assertEquals(updated?.phase, "reading");
+    assertEquals(updated?.lastHeartbeat, "2026-09-20T12:00:05.000Z");
+
+    // Complete it: now terminal, cannot touch
+    await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+    );
+    assertEquals(
+      await store.touchEpisodeClaim("user-1", "e1", "worker-a", { phase: "post-finish" }),
+      false,
+    );
   });
 
   // -- completeEpisode ----------------------------------------------------
@@ -211,6 +349,13 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     );
     assertEquals(wrote, true);
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+
+    // Idempotent retry with same audioKey succeeds (audio-feed-siv1)
+    const idempotent = await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+    );
+    assertEquals(idempotent, true);
   });
 
   test("a superseded worker cannot overwrite the winner's result", async (store) => {
