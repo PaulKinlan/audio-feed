@@ -52,6 +52,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The Deno Deploy entrypoint is pinned in the repo (audio-feed-w55i)**: the live project failed a
+  build with `Entrypoint at '/tmp/build/src/src/server.ts' not found` (`src/` applied twice) because
+  the entrypoint existed only in the Deploy dashboard, out of sight of the repo. `deno.json` now
+  carries `deploy.runtime {type: dynamic, entrypoint: main.ts}` — the root deno-serve entrypoint
+  Paul added in bc47dd4 — and Deno Deploy reads runtime configuration from source, which takes
+  precedence over the dashboard. `tests/deploy_config_test.ts` fails the repo's own gate if the
+  block is removed or the entrypoint path stops naming a real file, so the next typo costs
+  milliseconds here instead of a failed build on the platform.
+
 - **An unconfigured deployment blamed every visitor for its own missing configuration
   (audio-feed-3k2d)**: with neither `PUBLIC_BASE_URL` nor a usable `ALLOWED_HOSTS` entry set, the
   host gate answered the same `421 misdirected_request` it uses for a forged `Host`, so the live
