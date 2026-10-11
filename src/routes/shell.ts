@@ -347,7 +347,18 @@ export const SHELL_KIT_CSS = `
   }
 
 
-  .choices { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; }
+  /* A fieldset, not a div: a radio group is a group of related controls, and WebMCP attaches a
+     parameter description to a group through its nearest parent fieldset (audio-feed-dc2y). The
+     reset keeps the flex layout the class already had. */
+  .choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-inline-size: 0;
+  }
   .choices label { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 500; }
   .shell input[type="radio"], .shell input[type="checkbox"] { accent-color: var(--accent); inline-size: 1.05rem; block-size: 1.05rem; }
   .btn {
@@ -668,6 +679,14 @@ ${o.current !== "admin" ? speculationRules(o.nonce) : ""}${o.head ?? ""}
     o.css ?? ""
   }</style>
 ${(o.stylesheets ?? []).map((href) => `<link rel="stylesheet" href="${href}">`).join("\n")}
+<!--
+  audio-feed-dc2y: every page here opts into cross-document view transitions, so the incoming
+  document must be parsed to the point where its above-the-fold content exists before the browser
+  captures it — otherwise the transition animates to a half-rendered page. #main is the end of the
+  visible shell. Deliberately the ONLY expectation: blocking on more than the initial viewport
+  delays the transition instead of steadying it, and browsers without support ignore the attribute.
+-->
+<link rel="expect" href="#main" blocking="render">
 <style nonce="${nonce}">${UTILITY_CSS}</style>
 </head>
 <body class="shell">

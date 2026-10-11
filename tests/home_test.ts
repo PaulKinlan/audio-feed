@@ -337,10 +337,16 @@ Deno.test("the homepage renders the request access form with accessible labels, 
   });
 
   assertStringIncludes(html, 'id="request-access"');
-  assertStringIncludes(
-    html,
-    '<form id="request-access-form" action="/api/request-access" method="post">',
-  );
+  // The tag itself is asserted in pieces rather than as one string: adding attributes to a form is
+  // not a change to its identity (audio-feed-dc2y added three), and an exact match would have made
+  // every future attribute a test failure instead of a decision.
+  assertStringIncludes(html, 'id="request-access-form"');
+  assertStringIncludes(html, 'action="/api/request-access"');
+  assertStringIncludes(html, 'method="post"');
+  // …and the agent annotations are pinned, so they cannot silently disappear.
+  assertStringIncludes(html, 'toolname="request_access"');
+  assertStringIncludes(html, 'tooldescription="Submit an email address');
+  assertStringIncludes(html, 'toolparamdescription="Email address that should be invited');
   assertStringIncludes(html, 'id="request-email"');
   assertStringIncludes(html, 'name="email"');
   assertStringIncludes(html, 'type="email"');

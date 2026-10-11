@@ -156,7 +156,10 @@ export function renderHomePage({
     before audio is synthesised, keeping resource spend within budget. Request access below
     and an administrator will review your account.
   </p>
-  <form id="request-access-form" action="/api/request-access" method="post">
+  <!-- audio-feed-dc2y: WebMCP annotations. Additive and ignored by browsers without support. -->
+  <form id="request-access-form" action="/api/request-access" method="post"
+        toolname="request_access"
+        tooldescription="Submit an email address and an optional display name to request an Audio Feed account for administrator approval.">
     <div class="field">
       <label for="request-email">Email address</label>
       <span class="hint" id="request-email-hint">Where you'll receive your approval notification.</span>
@@ -165,6 +168,7 @@ export function renderHomePage({
         id="request-email"
         name="email"
         required
+        toolparamdescription="Email address that should be invited to Audio Feed"
         placeholder="you@example.com"
         aria-describedby="request-email-hint"
         aria-errormessage="request-email-error"

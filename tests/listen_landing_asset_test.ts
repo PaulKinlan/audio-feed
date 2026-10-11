@@ -54,6 +54,14 @@ Deno.test("listen landing links its assets and carries no inline style or script
   // The no-JS reading contract survives: the copy that explains the page is markup.
   assertStringIncludes(html, "Open my player");
   assertStringIncludes(html, "remembers it on this device");
+
+  // The restore form is also an agent tool (audio-feed-dc2y). Inert without WebMCP support, pinned
+  // here so the annotations cannot be dropped without a test noticing.
+  assertStringIncludes(html, 'toolname="open_audio_feed_player"');
+  assertStringIncludes(html, 'toolparamdescription="Personal feed URL');
+  // The render expectation that steadies the cross-document transition, and the container it names.
+  assertStringIncludes(html, '<link rel="expect" href="#main" blocking="render">');
+  assertStringIncludes(html, '<main id="main">');
 });
 
 Deno.test("listen-landing.css is composed with the design tokens in front of the page rules", () => {

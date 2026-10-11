@@ -240,6 +240,9 @@ export function renderListenPage(
 <link rel="icon" href="/icon.svg">
 <link rel="alternate" type="application/rss+xml" title="${esc(title)}" href="${esc(feedUrl)}">
 <link rel="stylesheet" href="${assetUrl("listen.css")}">
+<!-- audio-feed-dc2y: the player's own render expectation; see the note in shell.ts. #main is the
+     player's container, so the transition is captured once the player shell exists. -->
+<link rel="expect" href="#main" blocking="render">
 ${speculationRules(nonce)}
 </head>
 <body>
@@ -270,7 +273,7 @@ ${ICON_SPRITE}
 </header>
 </div>
 
-<main>
+<main id="main">
   <!--
     audio-feed-7s2: work the subscriber could not previously see at all. Above the list, because
     it is what is happening NOW; the list below is what is finished. Rendered empty and filled
@@ -837,9 +840,11 @@ export function renderListenLanding(publicBaseUrl: string, nonce: string): strin
 <link rel="icon" href="/icon.svg">
 ${speculationRules(nonce)}
 <link rel="stylesheet" href="${assetUrl("listen-landing.css")}">
+<!-- audio-feed-dc2y: the landing page transitions too, so it declares the same expectation. -->
+<link rel="expect" href="#main" blocking="render">
 </head>
 <body>
-<main>
+<main id="main">
   <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="Audio Feed">
     <rect width="512" height="512" rx="112" fill="#1c1c22"/>
     <circle cx="256" cy="256" r="58" fill="#a78bfa"/>
@@ -855,9 +860,13 @@ ${speculationRules(nonce)}
     Open your personal feed URL — the one containing your feed token — and this
     player remembers it on this device. Nothing to sign in to.
   </p>
-  <form id="restore">
+  <!-- audio-feed-dc2y: WebMCP annotations; opening the player is a local navigation and safe to
+       expose. Inert without WebMCP support. -->
+  <form id="restore" toolname="open_audio_feed_player"
+        tooldescription="Open the user's personal Audio Feed web player from a feed URL or feed token.">
     <label for="feedUrl">Your feed URL or token</label>
     <input id="feedUrl" name="feedUrl" type="text" autocomplete="off" spellcheck="false"
+           toolparamdescription="Personal feed URL (ending in /feed/<token>/master.xml), or just the feed token"
            placeholder="${esc(publicBaseUrl)}/feed/&lt;token&gt;/master.xml">
     <button type="submit">Open my player</button>
     <p class="status" id="status" role="status" aria-live="polite"></p>
