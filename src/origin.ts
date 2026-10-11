@@ -50,15 +50,21 @@ export interface OriginConfig {
   /**
    * The hosts this deployment is willing to advertise (audio-feed-fp4r).
    *
-   * Without it, the advertised origin — and with it feed `selfUrl`, enclosure
-   * `audioUrl`, redirects and the WebAuthn RP ID — is derived from the request
-   * host, which on any platform that does not validate Host is whatever the
-   * client sent. With it, a request arriving on an unlisted host never becomes
-   * the advertised origin: the pinned origin is used instead, and the app
-   * boundary answers the request `421 Misdirected Request`.
+   * Advertising an origin derived from the request host is the exposure this
+   * closes: on any platform that does not validate Host, the request host is
+   * whatever the client sent, and it would become feed `selfUrl`, enclosure
+   * `audioUrl`, redirects and the WebAuthn RP ID.
    *
-   * The `publicBaseUrl` host is always implicitly allowed. Loopback hosts are
-   * always allowed so local development keeps working when the list is set.
+   * The `publicBaseUrl` host is always in the set, so `publicBaseUrl` alone
+   * activates the gate; this variable only ADDS hosts (audio-feed-7lsy). A
+   * request arriving on a host that is not in the set is answered `421
+   * Misdirected Request` at the app boundary, and generated links keep using
+   * the pinned origin. With neither value set the set is empty, and an empty
+   * set refuses every non-loopback host rather than deriving one from the
+   * request: the app never falls back to trusting the client's Host.
+   *
+   * Loopback hosts are always allowed so local development keeps working when
+   * the list is set.
    */
   allowedHosts?: string[];
 }
@@ -113,10 +119,11 @@ function isLoopbackHost(host: string): boolean {
     host === "0.0.0.0";
 }
 
-/**
- * The hosts a request may arrive on and still be advertised, or `null` when no
- * allow-list is configured (the request host is then the only source of truth
- * and is used as-is).
+/** The hosts a request may arrive on and still be advertised.
+ *
+ * Never `null`: with nothing configured this is an EMPTY set, which refuses
+ * every non-loopback host, so a deployment that cannot name its own host fails
+ * closed instead of advertising whichever host a client sent (audio-feed-7lsy).
  *
  * The gate is ACTIVE whenever the deployment knows its own host, which
  * `PUBLIC_BASE_URL` is: that host is the accepted one, and ALLOWED_HOSTS adds

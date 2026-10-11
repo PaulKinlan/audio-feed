@@ -109,12 +109,13 @@ export interface AppConfig {
    * EXTRA hosts to accept, from `ALLOWED_HOSTS` (comma-separated), on top of
    * the host of `publicBaseUrl` — which is accepted on its own, without this
    * variable being set (audio-feed-7lsy). An override for staging or a custom
-   * domain, never a prerequisite for the protection to exist. When set, a
-   * request arriving on an
-   * unlisted host is answered `421 Misdirected Request` at the app boundary and
-   * never becomes the advertised origin — which also pins the WebAuthn RP ID,
-   * since that derives from the advertised origin's hostname. Unset keeps the
-   * request-derived origin behaviour that fixed audio-feed-0k3. The
+   * domain, never a prerequisite for the protection to exist. A request
+   * arriving on an unlisted host is answered `421 Misdirected Request` at the
+   * app boundary and never becomes the advertised origin — which also pins the
+   * WebAuthn RP ID, since that derives from the advertised origin's hostname.
+   * Unset, the gate still runs from `publicBaseUrl` alone; with neither value
+   * set the set is empty and every non-loopback host is refused, so the app no
+   * longer keeps the request-derived origin behaviour of audio-feed-0k3. The
    * `publicBaseUrl` host is implicitly allowed; loopback always is.
    */
   allowedHosts?: string[];

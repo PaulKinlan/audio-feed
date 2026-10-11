@@ -8,8 +8,11 @@
  * Security design:
  * Built strictly from operator CONFIGURATION (publicBaseUrl + webAuthnRelatedOrigins),
  * never from untrusted client Host headers, preventing cache-poisoning of authorized origins.
- * When completely unconfigured, returns { "origins": [] } with Cache-Control: no-store.
- * When configured, returns the pinned origins with Cache-Control: public, max-age=3600.
+ * Always uncacheable (Cache-Control: no-store): the origins come from deployment
+ * configuration, so a cached answer could outlive a reconfiguration. Returns
+ * { "origins": [] } when unconfigured. The header is defence in depth rather
+ * than the poisoning protection - an unrecognised Host is refused with 421
+ * before this handler runs (src/app.ts).
  */
 
 import type { AppContext } from "../app.ts";
