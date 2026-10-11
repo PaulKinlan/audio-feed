@@ -44,16 +44,14 @@ interface Surface {
   info?: { remoteAddr?: { hostname?: string } };
 }
 
-// audio-feed-sw1r: the surface that reaches the UNHANDLED-ERROR record. The route only exists when this is
-// set, and it has to be set before the app is bootstrapped because the route table is built then.
-Deno.env.set("AUDIO_FEED_TEST_THROW", "1");
-// audio-feed-sw1r FOUND THIS WHILE ADDING THE THROWING SURFACE: without a configured host this whole file
-// was driving the HOST-GATE REFUSAL, not the app. `isDeploy: true` with no PUBLIC_BASE_URL/ALLOWED_HOSTS makes
-// every request answer 500 `server_misconfigured` before any route runs (audio-feed-3k2d), so each surface
-// asserted the canary's absence from a refusal record that contains no request text at all - and the
-// anti-vacuity check passed, because a refusal IS a record. The canary test only means something when the
-// request reaches a handler, so the host is configured here.
-Deno.env.set("PUBLIC_BASE_URL", BASE);
+// audio-feed-sw1r: the throwing surface below needs AUDIO_FEED_TEST_THROW=1, and the file needs a configured
+// host: `isDeploy: true` with no PUBLIC_BASE_URL makes every request answer 500 `server_misconfigured` before
+// any route runs (audio-feed-3k2d), so without it every surface here asserted the canary's absence from a
+// REFUSAL record that contains no request text - and the anti-vacuity check passed, because a refusal IS a
+// record. Both are set around the bootstrap call INSIDE app(), never at module scope: a module-scope
+// `Deno.env.set` leaks into every other test file that shares this worker, and it did - server_bootstrap_test's
+// ALLOWED_HOSTS tests failed in a full-suite gate because PUBLIC_BASE_URL was set for them too, so boot took
+// the PUBLIC_BASE_URL path and never logged the ALLOWED_HOSTS line they assert.
 
 const SURFACES: Surface[] = [
   {
@@ -150,13 +148,29 @@ async function app(): Promise<{
   close: () => Promise<void>;
 }> {
   const stores = await openStores({ kvPath: ":memory:" });
-  const server = await bootstrap({
-    port: 0,
-    stores,
-    isDeploy: true,
-    synthesizer: null,
-    inventory: false,
-  });
+  // Set for the DURATION OF BOOTSTRAP (the route table and the config are both built there) and restored
+  // immediately, so no other file in this worker can observe them (audio-feed-sw1r).
+  const restore = (name: string, prior: string | undefined) => {
+    if (prior === undefined) Deno.env.delete(name);
+    else Deno.env.set(name, prior);
+  };
+  const priorThrow = Deno.env.get("AUDIO_FEED_TEST_THROW");
+  const priorBase = Deno.env.get("PUBLIC_BASE_URL");
+  Deno.env.set("AUDIO_FEED_TEST_THROW", "1");
+  Deno.env.set("PUBLIC_BASE_URL", BASE);
+  let server: Awaited<ReturnType<typeof bootstrap>>;
+  try {
+    server = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      inventory: false,
+    });
+  } finally {
+    restore("AUDIO_FEED_TEST_THROW", priorThrow);
+    restore("PUBLIC_BASE_URL", priorBase);
+  }
   return {
     fetch: async (r, info) => await server.fetch(r, info),
     stores,
