@@ -77,7 +77,10 @@ Deno.test("only numbers in a plausible range are accepted; everything else is re
     [{ metric: "lcp" }, "value must be a non-negative finite number"],
     [{ metric: "lcp", value: "2500" }, "value must be a non-negative finite number"],
     [{ metric: "lcp", value: Number.NaN }, "value must be a non-negative finite number"],
-    [{ metric: "lcp", value: Number.POSITIVE_INFINITY }, "value must be a non-negative finite number"],
+    [
+      { metric: "lcp", value: Number.POSITIVE_INFINITY },
+      "value must be a non-negative finite number",
+    ],
     [{ metric: "lcp", value: -1 }, "value must be a non-negative finite number"],
     [{ metric: "lcp", value: 3_600_001 }, "beyond the plausible range"],
     [{ metric: "cls", value: 11 }, "beyond the plausible range"],
@@ -109,11 +112,13 @@ Deno.test("the beacon rejects what it cannot use, without echoing it", async () 
   assertEquals(body.error, "invalid_report");
   assert(!JSON.stringify(body).includes("not-a-number"), "the refused value is not echoed");
 
-  const notJson = await fetch(new Request(`${BASE}/api/cwv`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: `{"metric":"lcp","value":${CANARY}}`,
-  }));
+  const notJson = await fetch(
+    new Request(`${BASE}/api/cwv`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: `{"metric":"lcp","value":${CANARY}}`,
+    }),
+  );
   assertEquals(notJson.status, 400);
   assert(!JSON.stringify(await notJson.json()).includes(CANARY));
 
@@ -124,7 +129,9 @@ Deno.test("the beacon rejects what it cannot use, without echoing it", async () 
     }))).status,
     415,
   );
-  const huge = await fetch(beacon({ metric: "lcp", value: 1, pad: "x".repeat(MAX_CWV_BODY_BYTES) }));
+  const huge = await fetch(
+    beacon({ metric: "lcp", value: 1, pad: "x".repeat(MAX_CWV_BODY_BYTES) }),
+  );
   assert(huge.status === 413 || huge.status === 400, `oversized body: ${huge.status}`);
 
   // A refused beacon is a request worth recording; an accepted one is not.

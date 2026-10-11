@@ -160,6 +160,10 @@ const HIGH_VOLUME_ROUTES = new Set([
   // (audio-feed-i7vi). Its failures are recorded like any other, so a flood of rejected beacons is
   // still visible.
   "/api/cwv",
+  // The enclosure, which is the original reason this set exists: podcast clients fetch it constantly
+  // and a record per 200 is cost with no diagnosis. (A review test caught this line going missing
+  // when the beacon was added — which is why the set is asserted by behaviour and not by size.)
+  "/audio/:key+",
   "/assets/:name",
   "/assets/voices/:voice",
   "/icon.svg",
