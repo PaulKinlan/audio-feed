@@ -42,7 +42,7 @@ interface ChildOutcome {
   };
 }
 
-function spawnChild(kvPath: string, mode: "hang" | "drain", round: number) {
+function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: number) {
   return new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -58,8 +58,10 @@ function spawnChild(kvPath: string, mode: "hang" | "drain", round: number) {
   }).spawn();
 }
 
-/** Read stdout until the child prints the marker, then SIGKILL it mid-put. */
-async function killDuringUpload(kvPath: string, round: number) {
+/** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
+  kvPath: string,
+  round: number,
+) {
   const child = spawnChild(kvPath, "hang", round);
   const decoder = new TextDecoder();
   let out = "";
@@ -84,6 +86,43 @@ async function killDuringUpload(kvPath: string, round: number) {
   const status = await child.status;
   assertEquals(status.signal, "SIGKILL", `round ${round} child must have been SIGKILLed`);
 }
+
+Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget mid-await when the isolate SURVIVES", async () => {
+  const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-survive-", suffix: ".kv" });
+  try {
+    const child = spawnChild(kvPath, "survive", 1);
+    const out = new TextDecoder().decode((await child.output()).stdout);
+    const status = await child.status;
+    assertEquals(status.success, true, `survive child failed: ${out}`);
+
+    const line = out.split("\n").find((l) => l.startsWith("SURVIVE:"));
+    assert(line, `survive child printed no SURVIVE line: ${out}`);
+    const r = JSON.parse(line.slice("SURVIVE:".length)) as {
+      yielded: unknown[];
+      failed: string[];
+      putStarted: number;
+      putSettled: number;
+      awaitedMs: number;
+      episode?: { status: string; phase?: string; attempts?: number };
+    };
+
+    // The invocation awaited the put past its own budget-derived deadline: the
+    // wrapper cannot yield before maxInvocationDurationMs (4000) minus flushMargin
+    // (500) = 3500ms after batch start, and the put had already started by then.
+    assertEquals(r.putStarted, 1, "the put must have been started");
+    assertEquals(r.putSettled, 0, "the put must still be pending: it outlasted the budget");
+    assertEquals(r.yielded.length, 1, "surviving invocation converts it to a clean yield");
+    assertEquals(r.failed.length, 0);
+    assert(
+      r.awaitedMs >= 3_000,
+      `batch must have awaited the put to its deadline before yielding (awaited ${r.awaitedMs}ms)`,
+    );
+    assertEquals(r.episode?.status, "pending", "claim released non-terminally");
+    assertEquals(r.episode?.phase, "audio_synthesized", "phase records resumable progress");
+  } finally {
+    await Deno.remove(kvPath).catch(() => {});
+  }
+});
 
 Deno.test("audio-feed-aqms: invocation killed mid-upload leaves claim non-terminal, then abandonment after 3 leases", async () => {
   const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-", suffix: ".kv" });

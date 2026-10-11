@@ -28,8 +28,21 @@ import { makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
 
 /** A blob store whose terminal upload never settles: `blobs.put` hangs forever. */
 class HangingPutBlobStore implements BlobStore {
+  started = 0;
+  settled = 0;
+  /** Monotonic ms of each put start and settlement, for the budget assertions. */
+  putStartedAt: number[] = [];
+  putSettledAt: number[] = [];
   put(): Promise<BlobInfo> {
-    return new Promise<BlobInfo>(() => {});
+    this.started++;
+    this.putStartedAt.push(performance.now());
+    return new Promise<BlobInfo>(() => {
+      // Never settles by construction: an upload that outlasts everything.
+    }).then(() => {
+      this.settled++;
+      this.putSettledAt.push(performance.now());
+      return null as unknown as BlobInfo;
+    });
   }
   putIfAbsent(): Promise<BlobInfo | null> {
     return new Promise<BlobInfo | null>(() => {});
@@ -49,8 +62,8 @@ class HangingPutBlobStore implements BlobStore {
 }
 
 const [kvPath, mode, roundArg] = Deno.args;
-if (!kvPath || (mode !== "hang" && mode !== "drain") || !roundArg) {
-  console.error("usage: invocation_death_child.ts <kvPath> <hang|drain> <round>");
+if (!kvPath || (mode !== "hang" && mode !== "drain" && mode !== "survive") || !roundArg) {
+  console.error("usage: invocation_death_child.ts <kvPath> <hang|survive|drain> <round>");
   Deno.exit(2);
 }
 const round = Number(roundArg);
@@ -109,15 +122,19 @@ const batchPromise = runSynthesisBatch(ctx, synth, {
   estimatedUploadDurationMs: 5,
 });
 
+const hangingBlobs = stores.blobs as HangingPutBlobStore;
+
 if (mode === "hang") {
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
     const episode = await metadata.getEpisode("user-1", "episode-1");
     // Tie the marker to THIS invocation's claim: a leftover uploading_audio phase
-    // from the previous dead claim must not satisfy it.
+    // from the previous dead claim must not satisfy it. Require the put to have
+    // STARTED as well, so the parent's kill is provably mid-put rather than in the
+    // gap between the phase checkpoint and the upload.
     if (
       episode?.status === "synthesizing" && episode?.phase === "uploading_audio" &&
-      episode?.claimedBy === `invocation-death-${round}`
+      episode?.claimedBy === `invocation-death-${round}` && hangingBlobs.started >= 1
     ) {
       console.log("MARKER:uploading");
       // Stay alive inside the hung put. The parent kills us here.
@@ -127,6 +144,37 @@ if (mode === "hang") {
   }
   console.error("child: never reached uploading_audio before timeout");
   Deno.exit(3);
+}
+
+if (mode === "survive") {
+  // The CONTROL: same hanging put, but this invocation is NOT killed. The wrapper's
+  // own deadline timer must fire while the put is still pending - the invocation
+  // awaits the put past its budget-derived deadline - and converts it to a clean
+  // budget-yield: the claim is released non-terminally and resumably. This is the
+  // second assertion of the repro: it separates "the put outlasted the budget
+  // mid-await" (what happens here) from "the test harness merely interrupted
+  // something" (what the hang rounds do on purpose).
+  const startedAt = performance.now();
+  const result = await batchPromise;
+  const yieldedAt = performance.now();
+  const episode = await metadata.getEpisode("user-1", "episode-1");
+  console.log(
+    "SURVIVE:" + JSON.stringify({
+      yielded: result.yielded,
+      failed: result.failed.map((f) => f.error),
+      putStarted: hangingBlobs.started,
+      putSettled: hangingBlobs.settled,
+      putStartedAt: hangingBlobs.putStartedAt[0] ?? null,
+      awaitedMs: Math.round(yieldedAt - startedAt),
+      episode: episode && {
+        status: episode.status,
+        phase: episode.phase,
+        attempts: episode.attempts,
+      },
+    }),
+  );
+  await metadata.close();
+  Deno.exit(0);
 }
 
 // drain: let the batch finish and report the final episode record.
