@@ -346,6 +346,9 @@ export function createEpisodesRepository(
         regenerating: undefined,
         claimedAt: undefined,
         claimedBy: undefined,
+        phase: "ready",
+        lastHeartbeat: undefined,
+        scriptTurns: undefined,
       });
       return Promise.resolve(true);
     },

@@ -402,7 +402,14 @@ export function isPublishable(
  */
 export function unsynthesized(episode: Episode, error: string): Episode {
   if (episode.regenerating && episode.audioKey && episode.contentType) {
-    return { ...episode, status: "ready", regenerating: undefined, error };
+    return {
+      ...episode,
+      status: "ready",
+      regenerating: undefined,
+      scriptTurns: undefined,
+      phase: "ready",
+      error,
+    };
   }
   return { ...episode, status: "failed", error };
 }

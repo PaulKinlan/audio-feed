@@ -305,6 +305,15 @@ Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume
   const requeued = await stores.metadata.requeueEpisode("user-1", "ep-deepdive-retry");
   assertEquals(requeued?.status, "pending");
   assertEquals(requeued?.scriptTurns, undefined, "requeued episode has no stale scriptTurns");
+
+  // Cancelling regeneration or failing back to ready also clears scriptTurns
+  await stores.metadata.touchEpisodeClaim("user-1", "ep-deepdive-retry", "worker-batch-retry", {
+    scriptTurns: [{ speaker: "Alex", text: "temp" }],
+  });
+  await stores.metadata.cancelRegeneration("user-1", "ep-deepdive-retry");
+  const cancelled = await stores.metadata.getEpisode("user-1", "ep-deepdive-retry");
+  assertEquals(cancelled?.status, "ready");
+  assertEquals(cancelled?.scriptTurns, undefined, "cancelled regeneration clears scriptTurns");
 });
 
 Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and audio key, but rejects other callers", async () => {
