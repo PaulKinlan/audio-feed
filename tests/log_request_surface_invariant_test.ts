@@ -20,6 +20,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { openStores, type Stores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
+import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 
 const BASE = "https://audio.example";
 /** Long, mixed case, and containing a must-not-appear marker: nothing in the app resembles it. */
@@ -30,6 +31,12 @@ interface Surface {
   /** Build a request carrying the canary on this surface, for a matched and an unmatched path. */
   build(path: string): Request;
   /**
+   * True when the surface reaches the UNHANDLED-ERROR record. The router catches a handler throw and answers
+   * 500, so this surface is answered rather than throwing out of the server - asserting a throw would assert
+   * the wrong thing about this app (audio-feed-sw1r).
+   */
+  expectUnhandledError?: boolean;
+  /**
    * Socket-level input, which arrives BESIDE the request rather than inside it and is therefore its
    * own surface: the client address a runtime hands the handler. Not inside `Request`, so a fuzz
    * over requests alone would never reach it.
@@ -37,7 +44,24 @@ interface Surface {
   info?: { remoteAddr?: { hostname?: string } };
 }
 
+// audio-feed-sw1r: the throwing surface below needs AUDIO_FEED_TEST_THROW=1, and the file needs a configured
+// host: `isDeploy: true` with no PUBLIC_BASE_URL makes every request answer 500 `server_misconfigured` before
+// any route runs (audio-feed-3k2d), so without it every surface here asserted the canary's absence from a
+// REFUSAL record that contains no request text - and the anti-vacuity check passed, because a refusal IS a
+// record. Both are set around the bootstrap call INSIDE app(), never at module scope: a module-scope
+// `Deno.env.set` leaks into every other test file that shares this worker, and it did - server_bootstrap_test's
+// ALLOWED_HOSTS tests failed in a full-suite gate because PUBLIC_BASE_URL was set for them too, so boot took
+// the PUBLIC_BASE_URL path and never logged the ALLOWED_HOSTS line they assert.
+
 const SURFACES: Surface[] = [
+  {
+    // A query string echoed into an unhandled error's message. Every other surface here is answered by a
+    // handler; this one is thrown OUT of one, which is the only path that reaches the record the screen in
+    // src/observability/error_screen.ts guards (audio-feed-sw1r).
+    name: "query string inside an UNHANDLED error's message (/__test/throw)",
+    build: () => new Request(`${BASE}/__test/throw?m=${CANARY}`),
+    expectUnhandledError: true,
+  },
   {
     name: "method",
     build: (path) => new Request(`${BASE}${path}`, { method: CANARY }),
@@ -124,13 +148,29 @@ async function app(): Promise<{
   close: () => Promise<void>;
 }> {
   const stores = await openStores({ kvPath: ":memory:" });
-  const server = await bootstrap({
-    port: 0,
-    stores,
-    isDeploy: true,
-    synthesizer: null,
-    inventory: false,
-  });
+  // Set for the DURATION OF BOOTSTRAP (the route table and the config are both built there) and restored
+  // immediately, so no other file in this worker can observe them (audio-feed-sw1r).
+  const restore = (name: string, prior: string | undefined) => {
+    if (prior === undefined) Deno.env.delete(name);
+    else Deno.env.set(name, prior);
+  };
+  const priorThrow = Deno.env.get("AUDIO_FEED_TEST_THROW");
+  const priorBase = Deno.env.get("PUBLIC_BASE_URL");
+  Deno.env.set("AUDIO_FEED_TEST_THROW", "1");
+  Deno.env.set("PUBLIC_BASE_URL", BASE);
+  let server: Awaited<ReturnType<typeof bootstrap>>;
+  try {
+    server = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      inventory: false,
+    });
+  } finally {
+    restore("AUDIO_FEED_TEST_THROW", priorThrow);
+    restore("PUBLIC_BASE_URL", priorBase);
+  }
   return {
     fetch: async (r, info) => await server.fetch(r, info),
     stores,
@@ -146,6 +186,11 @@ for (const surface of SURFACES) {
         const res = await fetch(surface.build(path), surface.info);
         // Nothing may hang: a request is answered, not left open.
         assert(res.status >= 200 && res.status < 600, `answered with ${res.status}`);
+        if (surface.expectUnhandledError) {
+          // The throw is caught by the ROUTER and answered 500, so about this surface the response says only
+          // that the failure was answered - the record assertions below carry the weight.
+          assertEquals(res.status, 500);
+        }
         // Handlers may append without the request waiting; give those appends a bounded moment.
         await new Promise((resolve) => setTimeout(resolve, 25));
         const records = await stores.metadata.listLogs();
@@ -170,6 +215,27 @@ for (const surface of SURFACES) {
           !serialised.includes(encodeURIComponent(CANARY)),
           `the encoded canary reached the store from ${surface.name}`,
         );
+        if (surface.expectUnhandledError) {
+          // ANTI-VACUITY FOR THE FIELD ITSELF (audio-feed-sw1r): the canary's absence above is worth nothing
+          // if the unhandled-error record was never written. This asserts the record EXISTS and that the
+          // message field it carries is the screen's own output - so removing the screen fails THIS test
+          // rather than quietly widening what is stored.
+          const unhandled = records.find((r) => JSON.stringify(r).includes("unhandled "));
+          assert(
+            unhandled,
+            `the unhandled-error record must be written for this surface (got ${
+              records.map((r) => r.type).join(", ") || "no records"
+            })`,
+          );
+          const recorded = JSON.parse(JSON.stringify(unhandled)) as {
+            context?: { error?: string; errorMessage?: string };
+          };
+          assertEquals(
+            recorded.context?.errorMessage,
+            SUPPRESSED_MESSAGE,
+            "the stored message must be the SCREENED value, not the thrown text",
+          );
+        }
       } finally {
         await close();
       }

@@ -344,6 +344,13 @@ export class Router<Ctx> {
    */
   fetchHandler(
     ctx: Ctx,
+    /**
+     * audio-feed-sw1r: called with the error on the path where an unhandled throw is ACTUALLY caught - this
+     * one, not the server wrapper's. The wrapper's own catch is unreachable for a handler throw because this
+     * method catches first and answers 500, so a screen applied only there would guard a record that no
+     * request produces; the canary invariant test drives a route that throws and it must reach the store.
+     */
+    onUnhandledError?: (error: unknown, req: Request) => void | Promise<void>,
   ): (
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },
@@ -358,6 +365,7 @@ export class Router<Ctx> {
       try {
         return await this.handle(req, ctx, info);
       } catch (error) {
+        await onUnhandledError?.(error, req);
         console.error(
           `[audio-feed] unhandled error for ${req.method} ${sanitizeRequestUrl(req.url)}:`,
           error,
