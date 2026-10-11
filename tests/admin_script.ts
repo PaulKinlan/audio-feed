@@ -285,6 +285,12 @@ export interface HarnessOptions {
   /** Render the page for a signed-in admin session (audio-feed-8fc). */
   signedIn?: boolean;
   /**
+   * The deployment's daily episode ceiling to render (audio-feed-umac). Left unset the page
+   * carries the shipped default, which is what lets a test prove the console prints the number
+   * it was given rather than a number written into the markup.
+   */
+  defaultDailyEpisodeBudget?: number;
+  /**
    * Admin token pre-seeded into localStorage — the "remembered on this device"
    * case (audio-feed-ndc). Separate from `storedToken` so a test can seed one,
    * the other, or both and see which the page prefers.
@@ -309,12 +315,19 @@ export interface AdminClient {
 export function adminClient(
   publicBaseUrl = "https://audio.example.com",
   signedIn = true,
+  defaultDailyEpisodeBudget?: number,
 ): AdminClient {
   const viewer = signedIn
     ? { displayName: "Admin", email: "admin@example.com", isAdmin: true }
     : null;
   return adminClientFromHtml(
-    renderAdminPage({ nonce: "test-nonce", publicBaseUrl, adminConfigured: true, viewer }),
+    renderAdminPage({
+      nonce: "test-nonce",
+      publicBaseUrl,
+      adminConfigured: true,
+      viewer,
+      defaultDailyEpisodeBudget,
+    }),
   );
 }
 
@@ -388,7 +401,7 @@ export function adminClientFromHtml(html: string): AdminClient {
 export async function runAdminScript(options: HarnessOptions): Promise<AdminHarness> {
   const publicBaseUrl = options.publicBaseUrl ?? "https://audio.example.com";
   const signedIn = options.signedIn ?? true;
-  const client = adminClient(publicBaseUrl, signedIn);
+  const client = adminClient(publicBaseUrl, signedIn, options.defaultDailyEpisodeBudget);
   const elements = new Map<string, StubElement>();
   for (const id of PAGE_IDS) {
     elements.set(

@@ -40,6 +40,9 @@ const confirmWith =
  * @typedef {object} AdminData
  * @property {string} origin
  * @property {boolean} signedIn
+ * @property {number} [defaultDailyEpisodeBudget] The ceiling a subscriber with no budget of
+ *   their own is held to (audio-feed-khk3/umac). This panel said "Unlimited" until the
+ *   deployment default existed, which is exactly the kind of claim a console must not make.
  */
 const dataElement = document.getElementById("admin-data");
 /** @type {AdminData} */
@@ -48,6 +51,17 @@ const DATA = dataElement
   : { origin: "", signedIn: false };
 
 const ORIGIN = DATA.origin;
+/** The deployment's daily ceiling as the page reported it, or null when it carried none. */
+const DEFAULT_DAILY_BUDGET = typeof DATA.defaultDailyEpisodeBudget === "number"
+  ? DATA.defaultDailyEpisodeBudget
+  : null;
+
+/** How a subscriber's ceiling reads when it is the deployment default rather than their own. */
+function defaultBudgetLabel() {
+  return DEFAULT_DAILY_BUDGET === null
+    ? "Deployment default"
+    : "Default (" + DEFAULT_DAILY_BUDGET + " episodes/day)";
+}
 // audio-feed-8fc: a signed-in admin's requests carry the session cookie.
 const SIGNED_IN = DATA.signedIn;
 
@@ -547,13 +561,35 @@ async function loadStats() {
         tr.appendChild(cell(String(u.count)));
         tr.appendChild(cell(fmtBytes(u.bytes)));
         tr.appendChild(cell(String(u.todayCount)));
+        // The ceiling actually in force for this subscriber, and whether it is theirs
+        // (audio-feed-khk3/umac): "which subscribers are running on the default" is the
+        // operator signal that makes the default a decision rather than a surprise.
+        tr.appendChild(
+          cell(
+            typeof u.dailyBudget === "number"
+              ? String(u.dailyBudget) + (u.budgetSource === "default" ? " (default)" : "")
+              : "—",
+          ),
+        );
         synthesisBody.appendChild(tr);
       }
       if (synthesisCaption) {
-        synthesisCaption.textContent = s.synthesis.perUser.length === 0
+        const onDefault = typeof s.synthesis.usersWithoutBudget === "number"
+          ? s.synthesis.usersWithoutBudget
+          : null;
+        const defaultNote = onDefault === null || onDefault === 0
+          ? ""
+          : " " + onDefault + " subscriber" + (onDefault === 1 ? " has" : "s have") +
+            " no budget of their own and " + (onDefault === 1 ? "is" : "are") +
+            " held to the default ceiling" +
+            (typeof s.synthesis.defaultDailyEpisodeBudget === "number"
+              ? " of " + s.synthesis.defaultDailyEpisodeBudget
+              : "") +
+            ".";
+        synthesisCaption.textContent = (s.synthesis.perUser.length === 0
           ? "No synthesis recorded yet."
           : s.synthesis.perUser.length + " subscriber" +
-            (s.synthesis.perUser.length === 1 ? "" : "s") + " with synthesis.";
+            (s.synthesis.perUser.length === 1 ? "" : "s") + " with synthesis.") + defaultNote;
       }
     }
 
@@ -805,7 +841,7 @@ function renderManageDetails(user) {
       "Daily budget",
       user.dailyEpisodeBudget !== undefined
         ? String(user.dailyEpisodeBudget) + " episodes/day"
-        : "Unlimited",
+        : defaultBudgetLabel(),
     ],
     ["User ID", user.id, "mono"],
     ["Feed token", user.feedToken || "—", "mono"],

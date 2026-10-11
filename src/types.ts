@@ -86,7 +86,11 @@ export interface User {
   reason?: string;
   /**
    * Optional daily ceiling on synthesised episodes (audio-feed-9mp).
-   * Unset/undefined means unlimited.
+   *
+   * Unset/undefined means the DEPLOYMENT's default ceiling, `DEFAULT_DAILY_EPISODE_BUDGET`
+   * (audio-feed-khk3) — never unlimited, which is what this comment promised and what the admin
+   * form told operators until audio-feed-umac. Set 0 to allow a subscriber nothing until a budget
+   * is given.
    */
   dailyEpisodeBudget?: number;
 }
