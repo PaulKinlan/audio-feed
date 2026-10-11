@@ -381,11 +381,7 @@ Deno.test("the summary honours severity instead of answering a different questio
   assertEquals(asAll.truncated, false);
   assertEquals(asError.total, 1, "a severity=error summary counts errors");
   assertEquals(asError.bySeverity.error, 1);
-  assertEquals(
-    asError.bySeverity.debug,
-    undefined,
-    "and does not report the severities it excluded",
-  );
+  assertEquals(asError.bySeverity.debug, 0, "excluded severities count zero, not absent");
   assert(asAll.total !== asError.total, "the filter has to change the answer");
 
   // The cursor is still the SCANNED boundary, so the filter cannot hide the error from a later poll.
