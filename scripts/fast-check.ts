@@ -52,7 +52,8 @@ import {
   auditSelection,
   classifyNonTsChanges,
   type DataReadRelations,
-  deriveDataReadRelations,
+  type ReadRelationReport,
+  deriveReadRelationReport,
   discoverFullGateTestFiles,
   GRAPH_CONFIG_FILES,
   inertContradictions,
@@ -495,6 +496,20 @@ export async function deriveOrWiden(
   }
 }
 
+/** The same fail-safe for the REPORTING derivation, which carries the incompleteness signal with it. */
+export async function deriveOrWidenReport(
+  derive: () => Promise<ReadRelationReport>,
+): Promise<{ report: ReadRelationReport; failure: string | null }> {
+  try {
+    return { report: await derive(), failure: null };
+  } catch (error) {
+    return {
+      report: { relations: new Map(), unresolved: [] },
+      failure: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 /** The plan a failed derivation forces: everything, with the failure itself as the reason. */
 export function planForFailedRelation(failure: string): { testFiles: null; reason: string } {
   return { testFiles: null, reason: `the data read relation could not be derived (${failure})` };
@@ -506,6 +521,7 @@ export function planTests(
   named: Map<string, string[]>,
   readRelations: DataReadRelations = new Map(),
   configPaths: readonly string[] = [],
+  unresolvedReads: readonly string[] = [],
 ): { testFiles: string[] | null; reason: string } {
   // The family list is a NET; the DERIVED set of config files the resolver actually reads (configPaths) is
   // what keeps it honest - a resolver input the family does not name still forces the full suite.
@@ -587,6 +603,25 @@ export function planTests(
           `ORDERING BUG: path(s) treated as inert documentation while the derived relation names a reader: ${
             inertWithReaders.join(", ")
           } (the derived relation outranks the documentation heuristic)`,
+      };
+    }
+    // THE INERT CLASS IS UNREACHABLE WHILE THE RELATION IS INCOMPLETE (audio-feed-q0ky, coord's decision
+    // (b)). The rule this branch applied - "markdown that no suite is DERIVED to read selects nothing" -
+    // treats an INCOMPLETENESS as a NEGATIVE: it cannot tell "nothing reads this file" from "some suite reads
+    // something here and I could not confirm what", and it published the second as the first. That is the same
+    // defect as the reporter printing `unmapped` for a run that executed every suite, and the same as the
+    // blank admin cell: a report must not render an inability to know as a fact. So while the detector has
+    // unresolved hints, NO file may be classified inert and the run widens to the full suite - NAMED, so a
+    // slower gate is explainable rather than mysterious.
+    if (unresolvedReads.length && data.inert.length && !data.unclassified.length) {
+      return {
+        testFiles: null,
+        reason:
+          `the read relation is INCOMPLETE (${unresolvedReads.length} unresolved read path hint(s): ${
+            unresolvedReads.slice(0, 3).join(", ")
+          }${unresolvedReads.length > 3 ? ", ..." : ""}), so no file may be called inert: ${
+            changed.join(", ")
+          }`,
       };
     }
     if (isProvablyInert(changed, data)) {
@@ -693,9 +728,20 @@ ${auditUniverseDrift}`);
   }
   // The read relation is derived once per run: which data files the suites read or execute. A detector that
   // cannot run widens (see deriveOrWiden) rather than answering "no read found".
-  const { relations: readRelations, failure: relationFailure } = await deriveOrWiden(() =>
-    deriveDataReadRelations(ROOT, fastUniverse)
+  const { report: relationReport, failure: relationFailure } = await deriveOrWidenReport(() =>
+    deriveReadRelationReport(ROOT, fastUniverse)
   );
+  const readRelations = relationReport.relations;
+  const unresolvedReads = relationReport.unresolved;
+  if (unresolvedReads.length) {
+    // SAID OUT LOUD, because this is what disables the inert class for this run: a reader who sees a FULL
+    // suite on a docs-only change must be able to see WHY rather than infer it (audio-feed-q0ky).
+    console.log(
+      `fast-gate: read relation INCOMPLETE: ${unresolvedReads.length} read path hint(s) do not name anything in the tree (${unresolvedReads.slice(0, 3).join(", ")}${
+        unresolvedReads.length > 3 ? ", ..." : ""
+      }) - no file may be classified inert, so a change otherwise treated as inert widens to the FULL suite`,
+    );
+  }
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
@@ -737,7 +783,7 @@ ${auditUniverseDrift}`);
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named, readRelations, resolverInputs);
+    plan = planTests(changed, reverse, named, readRelations, resolverInputs, unresolvedReads);
   }
   const { testFiles, reason } = plan;
 
