@@ -52,13 +52,13 @@ import {
   auditSelection,
   classifyNonTsChanges,
   type DataReadRelations,
-  type ReadRelationReport,
   deriveReadRelationReport,
   discoverFullGateTestFiles,
   GRAPH_CONFIG_FILES,
   inertContradictions,
   isFastGateSelectable,
   isProvablyInert,
+  type ReadRelationReport,
   resolverConfigInputs,
   universeDrift,
 } from "./test-selection.ts";
@@ -737,7 +737,9 @@ ${auditUniverseDrift}`);
     // SAID OUT LOUD, because this is what disables the inert class for this run: a reader who sees a FULL
     // suite on a docs-only change must be able to see WHY rather than infer it (audio-feed-q0ky).
     console.log(
-      `fast-gate: read relation INCOMPLETE: ${unresolvedReads.length} read path hint(s) do not name anything in the tree (${unresolvedReads.slice(0, 3).join(", ")}${
+      `fast-gate: read relation INCOMPLETE: ${unresolvedReads.length} read path hint(s) do not name anything in the tree (${
+        unresolvedReads.slice(0, 3).join(", ")
+      }${
         unresolvedReads.length > 3 ? ", ..." : ""
       }) - no file may be classified inert, so a change otherwise treated as inert widens to the FULL suite`,
     );
