@@ -488,3 +488,73 @@ Deno.test("the documented recipe terminates and finds the record behind a full s
   assertEquals(polls <= 2, true, `terminated in ${polls} polls`);
   assertEquals(counted, 1, "and reached the record behind the full bound");
 });
+
+Deno.test("every matched event is delivered exactly once, whatever the poll shape (audio-feed-2af8)", async () => {
+  // The assertion is the invariant rather than a count, so the next variant of this bug cannot slip
+  // through as a different number: 501 events is deliberately one more than the summary's scan bound,
+  // and the old recipe advanced the DURABLE cursor to the probe's boundary before draining the events
+  // below it — reading seq 501 and silently losing the other 500.
+  const { fetch, stores } = app();
+  const seeded = await seed(stores, 501, "error", "synthesis.failed");
+  assertEquals(seeded.length, 501);
+
+  // The documented recipe, executable, with the correction that matters: drain from the durable
+  // cursor first, advance it only past what was read.
+  const seen: number[] = [];
+  let durable = "0";
+  for (let poll = 0; poll < 20; poll++) {
+    const summary =
+      await (await fetch(authed(`/api/observability/summary?since=${durable}&severity=error`)))
+        .json();
+    if (summary.total === 0 && !summary.truncated) break;
+    let cursor = durable;
+    while (true) {
+      const page =
+        await (await fetch(authed(`/api/observability/errors?since=${cursor}&severity=error`)))
+          .json();
+      seen.push(...page.events.map((e: { seq: number }) => e.seq));
+      cursor = page.cursor;
+      if (!page.hasMore) break;
+    }
+    durable = cursor;
+  }
+
+  // THE INVARIANT, in three parts: nothing missing, nothing duplicated, nothing invented.
+  assertEquals(new Set(seen).size, seen.length, "no event was delivered twice");
+  assertEquals(
+    seen.slice().sort((a, b) => a - b),
+    seeded,
+    "every seeded event was delivered, in order",
+  );
+});
+
+Deno.test("the filtered truncated case still terminates and still delivers its event (audio-feed-2af8)", async () => {
+  // The 36qa shape, now under the corrected recipe: the probe reports total 0 with a full scan bound,
+  // and the matching event sits behind records the filter excluded.
+  const { fetch, stores } = app();
+  await seed(stores, 500, "debug", "http.request");
+  const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
+
+  const seen: number[] = [];
+  let durable = "0";
+  let polls = 0;
+  for (; polls < 10; polls++) {
+    const summary =
+      await (await fetch(authed(`/api/observability/summary?since=${durable}&severity=error`)))
+        .json();
+    if (summary.total === 0 && !summary.truncated) break;
+    let cursor = durable;
+    while (true) {
+      const page =
+        await (await fetch(authed(`/api/observability/errors?since=${cursor}&severity=error`)))
+          .json();
+      seen.push(...page.events.map((e: { seq: number }) => e.seq));
+      cursor = page.cursor;
+      if (!page.hasMore) break;
+    }
+    durable = cursor;
+  }
+
+  assert(polls < 10, "the recipe terminates rather than looping on a truncated probe");
+  assertEquals(seen, [errorSeq], "exactly the matched event, delivered once");
+});

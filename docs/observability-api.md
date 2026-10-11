@@ -95,29 +95,31 @@ advancing over what was scanned rather than what was returned.
 ## What a poller does
 
 ```
-cursor = "0"
+durable = "0"
 loop:
-  s = GET /api/observability/summary?since=<cursor>     # cheap: is there anything new
-  if s.truncated:                                       # the scan bound filled: keep looking, this is
-      cursor = s.cursor                                 # NOT "nothing to see"
-      continue
-  if s.total > 0:
-      # DRAIN the pages before moving the durable cursor. A summary cursor can be far ahead of one
-      # page (the summary's bound and the errors feed's `limit` are different, and a summary counts a
-      # whole window while a page returns part of one), so advancing straight to `s.cursor` after a
-      # single page skips every event between them — a real bug (audio-feed-c0kx).
+  s = GET /api/observability/summary?since=<durable>    # PROBE: is there anything?
+  if s.total == 0 and not s.truncated:
+      continue                                          # genuinely nothing new
+  # DRAIN FIRST, from the cursor you last consumed, and only then move it. A probe may look past
+  # records its filter excluded; the durable cursor may not (audio-feed-2af8).
+  cursor = durable
+  while true:
       page = GET /api/observability/errors?since=<cursor>
-      while true:
-          act on page.events
-          cursor = page.cursor                          # safe: it advances over what was SCANNED
-          if not page.hasMore: break
-          page = GET /api/observability/errors?since=<cursor>
-  # Only now is the durable cursor advanced, past everything that was actually consumed.
+      act on page.events                                # this is where events are actually consumed
+      cursor = page.cursor                              # safe: it advances over what was SCANNED
+      if not page.hasMore: break
+  durable = cursor                                      # past everything READ, never past a count
 ```
 
+A truncated probe is a reason to drain even when `total` is 0: the scan bound filled with records
+the filter excluded and the ones you asked for sit behind it (`audio-feed-36qa`).
+
 The rule for the consumer is the same one the API holds itself to: **a cursor may only advance over
-what has been consumed.** The summary answers "is there anything new" cheaply; the errors pages are
-what you actually read, and the durable cursor belongs to the reading, not to the check.
+what has been consumed.** A PROBE may look past records its filter excluded; a DURABLE cursor may
+not. So the summary's boundary is a limit to drain UP TO, never a value to jump to: advancing to it
+while matched events below it are unread loses them (`audio-feed-2af8`, after `audio-feed-c0kx`).
+The summary answers "is there anything new" cheaply; the errors pages are what you actually read,
+and the durable cursor belongs to the reading, not to the check.
 
 **`truncated: true` means "advance to `cursor` and poll again", never "nothing to see".** The
 summary counts only the records its filter matched, but its cursor advances over everything the scan
