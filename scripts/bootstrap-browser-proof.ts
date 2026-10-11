@@ -13,11 +13,7 @@
  *   deno run --allow-all --unstable-kv scripts/bootstrap-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-bootstrap-");
 const harness = await spawnHarness("scripts/account-harness.ts");
@@ -148,7 +144,9 @@ try {
   );
   check(
     "invalid admin token shows error feedback",
-    (await js(`document.getElementById("bootstrapFeedback").textContent`)).includes("Invalid admin token"),
+    (await js(`document.getElementById("bootstrapFeedback").textContent`)).includes(
+      "Invalid admin token",
+    ),
     await js(`document.getElementById("bootstrapFeedback").textContent`),
   );
 
@@ -168,7 +166,10 @@ try {
   );
 
   // 5. Verify /admin console loaded on session
-  await until(`document.getElementById("usersBody")?.children?.length > 0`, "console subscribers loaded");
+  await until(
+    `document.getElementById("usersBody")?.children?.length > 0`,
+    "console subscribers loaded",
+  );
   const adminEmail = await js(`document.querySelector(".signin-card strong")?.textContent || ""`);
   check(
     "admin console is signed in as new bootstrap admin",
@@ -178,7 +179,10 @@ try {
 
   // Capture evidence screenshot
   const shot = await cdp("Page.captureScreenshot", { format: "png" });
-  await Deno.writeFile(`${OUT}01-admin-bootstrap-success.png`, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
+  await Deno.writeFile(
+    `${OUT}01-admin-bootstrap-success.png`,
+    Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
+  );
   console.log(`Saved screenshot to ${OUT}01-admin-bootstrap-success.png`);
 
   await cdp("WebAuthn.disable");
@@ -186,7 +190,9 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }

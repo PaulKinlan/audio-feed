@@ -204,12 +204,19 @@ export async function createListenHarness(port = 8131) {
   // A harness that cannot show a single row must fail loudly rather than serving an empty page.
   const testRes = await fetch(new Request(`${base}/listen/${TOKEN}`));
   if (!testRes.ok) {
-    throw new Error(`listen harness startup failure: GET /listen/${TOKEN} returned ${testRes.status}`);
+    throw new Error(
+      `listen harness startup failure: GET /listen/${TOKEN} returned ${testRes.status}`,
+    );
   }
   const html = await testRes.text();
-  const match = /<script\b[^>]*type="application\/json"[^>]*id="player-data"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+  const match =
+    /<script\b[^>]*type="application\/json"[^>]*id="player-data"[^>]*>([\s\S]*?)<\/script>/.exec(
+      html,
+    );
   if (!match) {
-    throw new Error("listen harness startup failure: #player-data script tag not found in served page");
+    throw new Error(
+      "listen harness startup failure: #player-data script tag not found in served page",
+    );
   }
   const data = JSON.parse(match[1]!);
   const playableCount = Array.isArray(data?.episodes) ? data.episodes.length : 0;

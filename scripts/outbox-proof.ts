@@ -114,7 +114,11 @@ check("POST /api/ingest returns 202", ingestRes.status === 202, `status: ${inges
 
 // 3. Run worker batch
 const run1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
-check("synthesis batch completes 1 episode", run1.ready.length === 1, `ready: ${run1.ready.length}`);
+check(
+  "synthesis batch completes 1 episode",
+  run1.ready.length === 1,
+  `ready: ${run1.ready.length}`,
+);
 
 // 4. Check outbox
 const outboxRes = await fetch(
@@ -132,7 +136,8 @@ check(
 const n1 = outboxData.notifications[0];
 check(
   "notification names episode title and player URL",
-  n1.title === "On-Demand Read Article" && n1.playerUrl === `${BASE}/listen/${TOKEN}` && n1.status === "ready",
+  n1.title === "On-Demand Read Article" && n1.playerUrl === `${BASE}/listen/${TOKEN}` &&
+    n1.status === "ready",
   `title='${n1.title}', playerUrl='http://localhost:<ephemeral>/listen/${TOKEN}', status='${n1.status}'`,
 );
 
@@ -164,7 +169,11 @@ for (let i = 1; i <= 3; i++) {
 }
 
 const runFeed = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
-check("synthesis batch completes 3 feed episodes", runFeed.ready.length === 3, `ready: ${runFeed.ready.length}`);
+check(
+  "synthesis batch completes 3 feed episodes",
+  runFeed.ready.length === 3,
+  `ready: ${runFeed.ready.length}`,
+);
 
 const outboxAfterFeed = await (await fetch(
   new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
@@ -184,11 +193,19 @@ await fetch(
   }),
 );
 
-const runFail = await runSynthesisBatch(ctx, () => Promise.reject(new Error("Gemini quota exhausted")), {
-  batchSize: 5,
-  maxAttempts: 2,
-});
-check("failing episode marked failed", runFail.failed.length === 1, `failed: ${runFail.failed.length}`);
+const runFail = await runSynthesisBatch(
+  ctx,
+  () => Promise.reject(new Error("Gemini quota exhausted")),
+  {
+    batchSize: 5,
+    maxAttempts: 2,
+  },
+);
+check(
+  "failing episode marked failed",
+  runFail.failed.length === 1,
+  `failed: ${runFail.failed.length}`,
+);
 
 const outboxAfterFail = await (await fetch(
   new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
@@ -198,7 +215,9 @@ check(
   outboxAfterFail.notifications.length === 2,
   `entries: ${outboxAfterFail.notifications.length}`,
 );
-const failNotification = outboxAfterFail.notifications.find((n: { status: string }) => n.status === "failed");
+const failNotification = outboxAfterFail.notifications.find((n: { status: string }) =>
+  n.status === "failed"
+);
 check(
   "failed notification contains failure reason",
   failNotification && failNotification.error?.includes("Gemini quota exhausted"),

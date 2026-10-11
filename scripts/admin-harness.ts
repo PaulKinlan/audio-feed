@@ -76,7 +76,9 @@ Deno.serve(
       const scenario = stopped
         ? "poll cron stopped 1 h in, synthesis still ticking"
         : "both crons healthy";
-      console.log(`admin harness: http://localhost:${assignedPort}/admin  token: harness-admin  (${scenario})`);
+      console.log(
+        `admin harness: http://localhost:${assignedPort}/admin  token: harness-admin  (${scenario})`,
+      );
     },
   },
   fetch,

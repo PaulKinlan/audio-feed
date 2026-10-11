@@ -12,11 +12,7 @@
  *   deno run --allow-all --unstable-kv scripts/listen-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-listen-");
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -122,13 +118,20 @@ try {
   // Navigate to player
   await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
   await until(`document.readyState === "complete"`, "load page");
-  await until(`document.querySelectorAll("#episodes .episode").length === 5`, "5 episode rows rendered");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length === 5`,
+    "5 episode rows rendered",
+  );
 
   const rowCount = await js(`document.querySelectorAll("#episodes .episode").length`);
   check("rendered episode row count is 5", rowCount === 5, `found ${rowCount} rows`);
 
   const countText = await js(`document.getElementById("episodeCount")?.textContent`);
-  check("header count text displays '5 episodes'", countText === "5 episodes", `got '${countText}'`);
+  check(
+    "header count text displays '5 episodes'",
+    countText === "5 episodes",
+    `got '${countText}'`,
+  );
 
   const emptyHidden = await js(`document.getElementById("empty")?.classList.contains("hidden")`);
   check("empty state is hidden", emptyHidden === true, `empty hidden: ${emptyHidden}`);
@@ -163,7 +166,9 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }

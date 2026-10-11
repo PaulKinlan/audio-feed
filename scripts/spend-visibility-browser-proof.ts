@@ -15,11 +15,7 @@
  *   deno run --allow-all --unstable-kv scripts/spend-visibility-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-spend-");
 const harness = await spawnHarness("scripts/account-harness.ts");
@@ -144,10 +140,18 @@ try {
   check("synthesis table exists in admin console", tableExists === true, "#synthesisBody present");
 
   const statSynthesisExists = await js(`!!document.getElementById("statSynthesis")`);
-  check("statSynthesis exists in operations grid", statSynthesisExists === true, "#statSynthesis present");
+  check(
+    "statSynthesis exists in operations grid",
+    statSynthesisExists === true,
+    "#statSynthesis present",
+  );
 
   const budgetFieldExists = await js(`!!document.getElementById("newDailyBudget")`);
-  check("daily budget input exists in create form", budgetFieldExists === true, "#newDailyBudget present");
+  check(
+    "daily budget input exists in create form",
+    budgetFieldExists === true,
+    "#newDailyBudget present",
+  );
 
   // 4. Capture evidence screenshot
   const shot = await cdp("Page.captureScreenshot", { format: "png" });
@@ -160,7 +164,9 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }

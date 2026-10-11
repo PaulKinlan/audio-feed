@@ -19,11 +19,7 @@
  *   deno run --allow-all --unstable-kv scripts/listen-filter-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-listen-filter-");
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -136,7 +132,10 @@ try {
     sel.value = "The Verge";
     sel.dispatchEvent(new Event("change"));
   })()`);
-  await until(`document.querySelectorAll("#episodes .episode").length === 2`, "filtered to 2 Verge rows");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length === 2`,
+    "filtered to 2 Verge rows",
+  );
 
   const vergeCount = await js(`document.getElementById("episodeCount")?.textContent`);
   check(
@@ -160,7 +159,10 @@ try {
     inp.value = "Marco";
     inp.dispatchEvent(new Event("input"));
   })()`);
-  await until(`document.querySelectorAll("#episodes .episode").length === 1`, "filtered to 1 Marco row");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length === 1`,
+    "filtered to 1 Marco row",
+  );
 
   const marcoCount = await js(`document.getElementById("episodeCount")?.textContent`);
   check(
@@ -175,16 +177,22 @@ try {
     inp.value = "NonExistentTerm";
     inp.dispatchEvent(new Event("input"));
   })()`);
-  await until(`!document.getElementById("filterEmpty")?.classList.contains("hidden")`, "filterEmpty shown");
+  await until(
+    `!document.getElementById("filterEmpty")?.classList.contains("hidden")`,
+    "filterEmpty shown",
+  );
 
   const filterEmptyMsg = await js(`document.getElementById("filterEmptyMessage")?.textContent`);
   check(
     "empty state names the active filters honestly",
-    typeof filterEmptyMsg === "string" && filterEmptyMsg.includes("NonExistentTerm") && filterEmptyMsg.includes("The Verge"),
+    typeof filterEmptyMsg === "string" && filterEmptyMsg.includes("NonExistentTerm") &&
+      filterEmptyMsg.includes("The Verge"),
     `message: '${filterEmptyMsg}'`,
   );
 
-  const genericEmptyHidden = await js(`document.getElementById("empty")?.classList.contains("hidden")`);
+  const genericEmptyHidden = await js(
+    `document.getElementById("empty")?.classList.contains("hidden")`,
+  );
   check(
     "generic 'No episodes yet' empty state is hidden while filter is active",
     genericEmptyHidden === true,
@@ -208,11 +216,17 @@ try {
     sel.value = "Stratechery";
     sel.dispatchEvent(new Event("change"));
   })()`);
-  await until(`document.querySelectorAll("#episodes .episode").length === 3`, "filtered to 3 Stratechery rows");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length === 3`,
+    "filtered to 3 Stratechery rows",
+  );
 
   // Reload page
   await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-  await until(`document.querySelectorAll("#episodes .episode").length === 3`, "reload restores 3 rows");
+  await until(
+    `document.querySelectorAll("#episodes .episode").length === 3`,
+    "reload restores 3 rows",
+  );
 
   const reloadedSource = await js(`document.getElementById("filterSource")?.value`);
   const reloadedCount = await js(`document.getElementById("episodeCount")?.textContent`);
@@ -240,7 +254,9 @@ try {
   console.log(`Saved screenshot to ${OUT}01-listen-filter-desktop.png`);
 
   const axNodes = await cdp("Accessibility.getFullAXTree");
-  const searchSection = axNodes.nodes?.find((n: { role?: { value: string } }) => n.role?.value === "search");
+  const searchSection = axNodes.nodes?.find((n: { role?: { value: string } }) =>
+    n.role?.value === "search"
+  );
   check(
     "a11y tree includes search role landmark",
     Boolean(searchSection),
@@ -258,8 +274,14 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
   await until(`document.querySelectorAll("#episodes .episode").length === 3`, "mobile load");
 
-  const overflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
-  check("mobile layout has zero horizontal overflow at 390px", overflow === false, "no horizontal scroll");
+  const overflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
+  check(
+    "mobile layout has zero horizontal overflow at 390px",
+    overflow === false,
+    "no horizontal scroll",
+  );
 
   const shotMobile = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -271,7 +293,9 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }

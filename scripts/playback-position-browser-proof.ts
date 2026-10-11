@@ -17,11 +17,7 @@
  *   deno run --allow-all --unstable-kv scripts/playback-position-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -150,7 +146,11 @@ try {
   check("play button action is 'resume'", playAction === "resume", `action: '${playAction}'`);
 
   const restartBtn = await js(`!!${row1}?.querySelector("button.ep-restart")`);
-  check("distinct 'Play from start' button is present", restartBtn === true, "restart button exists");
+  check(
+    "distinct 'Play from start' button is present",
+    restartBtn === true,
+    "restart button exists",
+  );
 
   // 4. Capture screenshot showing resume badge and play-from-start button
   const shot = await cdp("Page.captureScreenshot", { format: "png" });
@@ -162,17 +162,27 @@ try {
 
   // 5. Click resume -> verify audio seeks to 45s
   await js(`${row1}?.querySelector("button.ep-play")?.click()`);
-  await until(`Math.round(document.getElementById("audio")?.currentTime || 0) === 45`, "audio seeked to 45s");
+  await until(
+    `Math.round(document.getElementById("audio")?.currentTime || 0) === 45`,
+    "audio seeked to 45s",
+  );
   const currentPos = await js(`Math.round(document.getElementById("audio")?.currentTime || 0)`);
   check("clicking resume seeks audio to 45s", currentPos === 45, `currentTime is ${currentPos}`);
 
   // 6. Click 'Play from start' -> verify audio seeks to 0 and position cleared
   await js(`${row1}?.querySelector("button.ep-restart")?.click()`);
-  await until(`Math.round(document.getElementById("audio")?.currentTime || 0) === 0`, "audio restarted to 0s");
+  await until(
+    `Math.round(document.getElementById("audio")?.currentTime || 0) === 0`,
+    "audio restarted to 0s",
+  );
   const clearedStored = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
   `);
-  check("clicking 'Play from start' clears stored position", clearedStored === undefined, "cleared from storage");
+  check(
+    "clicking 'Play from start' clears stored position",
+    clearedStored === undefined,
+    "cleared from storage",
+  );
 
   // 7. Finish episode (ended event) -> position cleared
   await js(`(() => {
@@ -181,9 +191,13 @@ try {
     audio.dispatchEvent(new Event("pause"));
   })()`);
   await sleep(100);
-  check("re-saved position 50s", (await js(`
+  check(
+    "re-saved position 50s",
+    (await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]?.position
-  `)) === 50, "re-saved at 50s");
+  `)) === 50,
+    "re-saved at 50s",
+  );
 
   await js(`(() => {
     const audio = document.getElementById("audio");
@@ -193,18 +207,28 @@ try {
   const endedStored = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
   `);
-  check("ended event clears stored position", endedStored === undefined, "position removed after ended");
+  check(
+    "ended event clears stored position",
+    endedStored === undefined,
+    "position removed after ended",
+  );
 
   // 8. Per-token isolation: a different token does not see these positions
   const otherTokenStorage = await js(`
     localStorage.getItem("audio-feed-positions:other-token")
   `);
-  check("other token has no stored positions (per-token isolation)", otherTokenStorage === null, "isolated key");
+  check(
+    "other token has no stored positions (per-token isolation)",
+    otherTokenStorage === null,
+    "isolated key",
+  );
 } catch (error) {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }
