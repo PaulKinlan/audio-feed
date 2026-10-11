@@ -18,6 +18,7 @@ import {
   MAX_PROMPT_BYTES,
   normaliseRoute,
   oldestRetainedFromProblem,
+  OVERSIZED_FINGERPRINT,
   parseSuggestions,
   type PollConfig,
   type PollState,
@@ -57,6 +58,7 @@ function config(dir: string, over: Partial<PollConfig> = {}): PollConfig {
     bdBin: "bd-that-must-not-run",
     dryRun: false,
     json: false,
+    maxPromptBytes: MAX_PROMPT_BYTES,
     ...over,
   };
 }
@@ -788,6 +790,69 @@ Deno.test("one event always fits the prompt, so the oversized branch is a safety
   const built = buildPrompt([giant]);
   assertEquals(built.eventsSent, 1, "a single event must always fit the prompt on its own");
   assert(built.bytes <= MAX_PROMPT_BYTES, `rendered ${built.bytes} bytes exceeds the cap`);
+});
+
+Deno.test("a dropped event is recorded with its fingerprint and reported ONCE (audio-feed-w0b5)", async () => {
+  // The drop path is unreachable at the default cap, because one rendered event always fits (pinned by
+  // the test above), so it is made reachable here by injecting a tiny cap. TWO RUNS, because the first
+  // version of the backlog test taught the lesson that a single-run test cannot observe a dedupe: the
+  // second run must file no second bead, which is why the identity is a stable constant and not the
+  // record's own fingerprint.
+  await withTempDir(async (dir) => {
+    const filed: RankedSuggestion[] = [];
+    const backend = (open: Set<string>) =>
+      deps({
+        fetchSummary: () =>
+          Promise.resolve({
+            ok: true as const,
+            body: summary({ total: 1, window: { oldestRetained: 1, newest: 7 } }),
+          }),
+        fetchErrors: () =>
+          Promise.resolve({
+            ok: true as const,
+            body: page([event({ seq: 7, message: "x".repeat(5_000) })]),
+          }),
+        openFingerprints: () => Promise.resolve(open),
+        fileBead: (_bin, suggestion) => {
+          filed.push(suggestion);
+          return Promise.resolve(`audio-feed-fake${filed.length}`);
+        },
+      });
+    const cfg = { ...config(dir), maxPromptBytes: 200 };
+
+    const { artifact, state } = await runOnce(cfg, backend(new Set<string>()));
+    assertEquals(artifact.reason, "oversized");
+    assertEquals(
+      artifact.skippedOversized?.seq,
+      7,
+      "the dropped record must be identifiable by seq",
+    );
+    assertEquals(
+      typeof artifact.skippedOversized?.fingerprint,
+      "string",
+      "and by its own fingerprint, so an operator can find what was lost",
+    );
+    assertEquals(
+      state.cursor,
+      7,
+      "the cursor MUST advance past it, or every run refetches it and the poll wedges forever",
+    );
+    assertEquals(artifact.modelCalls, 0, "a dropped event must not cost a call");
+    assert(
+      artifact.note !== null && artifact.note.includes("NOT analysed"),
+      "the drop must be recorded in the artifact, not silent",
+    );
+    const drops = () => filed.filter((s) => s.fingerprints.includes(OVERSIZED_FINGERPRINT)).length;
+    assertEquals(drops(), 1, "a drop must surface, so a loss of coverage is not a quiet success");
+
+    // Second run: still dropping, with the stable fingerprint now open. It must NOT report again.
+    await runOnce(cfg, backend(new Set([OVERSIZED_FINGERPRINT])));
+    assertEquals(
+      drops(),
+      1,
+      "a persistently unsendable record must keep ONE bead, not file one every hour",
+    );
+  });
 });
 
 Deno.test("the runner propagates a cap refusal instead of reporting success (audio-feed-9l6v)", async () => {

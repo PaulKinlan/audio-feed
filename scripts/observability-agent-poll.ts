@@ -62,6 +62,14 @@ export const BACKLOG_ALERT_HOURS = 6;
  * which is exactly why it must not be built like an event fingerprint.
  */
 export const BACKLOG_FINGERPRINT = "backlog0structural";
+/**
+ * The stable fingerprint for "the poll dropped a record it could not send". A drop is a real loss of
+ * coverage, so it is surfaced once as a bead - and stable, so a record that keeps being unsendable keeps
+ * ONE open bead rather than filing one every hour (the audio-feed-zxhv lesson, applied here from the
+ * start). The record's own fingerprint is recorded in the artifact, but it must not be the bead's identity:
+ * it changes per record, which is what would produce the spam.
+ */
+export const OVERSIZED_FINGERPRINT = "oversized0drop";
 
 export const API_PATH_ERRORS = "/api/observability/errors";
 export const API_PATH_SUMMARY = "/api/observability/summary";
@@ -87,6 +95,9 @@ export interface PollConfig {
   bdBin: string;
   dryRun: boolean;
   json: boolean;
+  /** The prompt byte cap. An override exists so tests can reach the drop path, which is unreachable at
+   * the default because one rendered event always fits (pinned by a test). */
+  maxPromptBytes: number;
 }
 
 /** Resolves configuration WITHOUT making any decision about doing work. */
@@ -97,6 +108,15 @@ export function resolveConfig(args: string[]): PollConfig {
     const value = args[i + 1];
     return value === undefined ? null : value;
   };
+  const maxPromptRaw = flag("--max-prompt-bytes") ??
+    Deno.env.get("AUDIOFEED_AGENT_MAX_PROMPT_BYTES");
+  const maxPromptOverride = maxPromptRaw === null ? Number.NaN : Number(maxPromptRaw);
+  // A non-positive or unparseable override falls back to the default: a cap of nothing would drop every
+  // event, which is worse than ignoring a typo in what is meant to be a test knob.
+  const maxPromptBytes = Number.isFinite(maxPromptOverride) && maxPromptOverride > 0
+    ? maxPromptOverride
+    : MAX_PROMPT_BYTES;
+
   const key = Deno.env.get("AUDIOFEED_OBSERVABILITY_KEY") ?? null;
   const enabledFlag = (Deno.env.get("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED") ?? "").toLowerCase();
   return {
@@ -112,6 +132,7 @@ export function resolveConfig(args: string[]): PollConfig {
     bdBin: flag("--bd-bin") ?? "bd",
     dryRun: args.includes("--dry-run"),
     json: args.includes("--json"),
+    maxPromptBytes,
   };
 }
 
@@ -176,8 +197,8 @@ export interface RunArtifact {
   gapReported: { from: number; resumedAt: number } | null;
   fingerprintsSeen: string[];
   fingerprintsFiled: string[];
-  /** The seq of an event that could not fit the prompt even alone and was skipped. A recorded loss. */
-  skippedOversized: number | null;
+  /** An event that could not fit the prompt even alone and was dropped. A recorded loss, never silent. */
+  skippedOversized: { seq: number; fingerprint: string; reason: string } | null;
   fingerprintsSkipped: string[];
   beadIds: string[];
   modelCalls: number;
@@ -295,7 +316,7 @@ export function renderDigest(a: RunArtifact): string {
     `- fingerprints skipped as already open: ${a.fingerprintsSkipped.length}`,
     a.skippedOversized === null
       ? `- oversized events skipped (not analysed): none`
-      : `- oversized events skipped (NOT analysed): seq ${a.skippedOversized}`,
+      : `- DROPPED (NOT analysed): seq ${a.skippedOversized.seq}, fingerprint ${a.skippedOversized.fingerprint} - ${a.skippedOversized.reason}`,
   ];
   if (a.gapReported) {
     lines.push(
@@ -559,7 +580,7 @@ export interface PromptBuild {
  * is not a bound: a burst of large errors would already have produced the oversized request.
  * Oldest-first, so the cursor can advance past exactly what was sent and nothing is skipped.
  */
-export function buildPrompt(events: LogEvent[]): PromptBuild {
+export function buildPrompt(events: LogEvent[], maxBytes: number = MAX_PROMPT_BYTES): PromptBuild {
   const header = [
     "You are reviewing stored application errors for a podcast-synthesis web service.",
     "Group the events below by root cause and rank the groups by impact.",
@@ -584,7 +605,7 @@ export function buildPrompt(events: LogEvent[]): PromptBuild {
     }) + "\n";
     const next = text + line;
     const nextBytes = new TextEncoder().encode(next).length;
-    if (nextBytes > MAX_PROMPT_BYTES || sent >= MAX_EVENTS_PER_RUN) {
+    if (nextBytes > maxBytes || sent >= MAX_EVENTS_PER_RUN) {
       backlog = events.length - sent;
       return {
         text,
@@ -877,7 +898,7 @@ export async function runOnce(
     return { artifact: await finish("skipped"), state };
   }
 
-  const prompt = buildPrompt(withPrints.map((w) => w.event));
+  const prompt = buildPrompt(withPrints.map((w) => w.event), config.maxPromptBytes);
   artifact.eventsSent = prompt.eventsSent;
   artifact.promptBytes = prompt.bytes;
   artifact.truncated = prompt.truncated;
@@ -895,14 +916,41 @@ export async function runOnce(
     const oldest = withPrints[0];
     if (oldest !== undefined) {
       const past = oldest.event.seq;
+      const why =
+        `the oldest queued event (seq ${past}) does not fit the ${config.maxPromptBytes}-byte prompt ` +
+        `even alone`;
       artifact.reason = "oversized";
-      artifact.skippedOversized = past;
+      // The record is identified by BOTH its own fingerprint and its sequence, so an operator can find
+      // exactly what was lost rather than knowing only that something was.
+      artifact.skippedOversized = { seq: past, fingerprint: oldest.print, reason: why };
       artifact.cursorAfter = past;
       state = { ...state, cursor: past };
+      // A drop is a real loss of coverage, so it is surfaced - once, under a STABLE fingerprint, and with
+      // the open-set check applied from the start (a per-record identity here would file a bead an hour).
+      if (!alreadyOpen.has(OVERSIZED_FINGERPRINT)) {
+        const id = await deps.fileBead(
+          config.bdBin,
+          {
+            title: `Observability poll dropped an event it cannot send (seq ${past})`,
+            impact: `One record could not be ranked at all: its rendered form exceeds the ` +
+              `${config.maxPromptBytes}-byte prompt cap, so it was dropped and the cursor advanced past ` +
+              `it. Coverage is incomplete until the cap or the projection changes.`,
+            fix:
+              "Either raise the prompt cap, or shrink the projection in buildPrompt so every record fits. " +
+              "The drop is deliberate and recorded, so it is never mistaken for a quiet success.",
+            events: 1,
+            fingerprints: [OVERSIZED_FINGERPRINT],
+          },
+          { startedAt, cursorBefore, cursorAfter: past },
+          config.dryRun,
+        );
+        if (id !== null) artifact.beadIds.push(id);
+      }
       artifact.note =
-        `The oldest queued event (seq ${past}) does not fit the ${MAX_PROMPT_BYTES}-byte prompt even ` +
-        `alone, so it was SKIPPED and the cursor advanced past it. Without that advance every run ` +
-        `would refetch it and the poll would never move again. This event was NOT analysed.`;
+        `The poll dropped ${why} and advanced the cursor past it, because a record that can never be ` +
+        `sent would otherwise wedge the poll forever - the whole window would stop being processed. ` +
+        `This event was NOT analysed, and the drop is recorded here and reported as a bead so it stays ` +
+        `visible rather than becoming a quiet success.`;
       return { artifact: await finish("skipped"), state };
     }
     artifact.reason = prompt.bytes > 0 ? "cap-prompt-bytes" : "cap-events";
