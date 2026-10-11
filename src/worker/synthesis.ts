@@ -506,11 +506,14 @@ export function createGeminiSynthesizer(
           ),
         );
         turns = script?.turns;
-        if (turns && turns.length > 0 && claimedBy) {
-          await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
-            phase: "script_generated",
-            scriptTurns: turns,
-          }).catch(() => {});
+        if (turns && turns.length > 0) {
+          episode.scriptTurns = turns;
+          if (claimedBy) {
+            await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+              phase: "script_generated",
+              scriptTurns: turns,
+            }).catch(() => {});
+          }
         }
       }
       try {
@@ -1049,13 +1052,14 @@ export async function runSynthesisBatch(
 
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
+    let currentEpisode = claimed;
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
         audio = await synthesize({
           article,
           source,
-          episode: claimed,
-          mode: claimed.mode,
+          episode: currentEpisode,
+          mode: currentEpisode.mode,
           leaseMs: opts.leaseMs,
           resume: segmentResume.resume,
         });
@@ -1063,6 +1067,12 @@ export async function runSynthesisBatch(
       } catch (error) {
         lastError = error;
         if (isPermanent(error) || attempt === opts.maxAttempts) break;
+        // Re-read current episode from store so any turns or phase touched during attempt 1
+        // are available to subsequent retry attempts within this same claim (audio-feed-siv1)!
+        const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
+        if (refreshed && refreshed.claimedBy === opts.owner) {
+          currentEpisode = refreshed;
+        }
         // Exponential backoff; the client already honours Retry-After for its own
         // 429/503 retries, so this covers what is left.
         await sleep(opts.retryBaseDelayMs * 2 ** (attempt - 1));
@@ -1070,22 +1080,25 @@ export async function runSynthesisBatch(
     }
 
     if (!audio) {
-      const error = describeSynthesisFailure(lastError, claimed, opts.maxClaims);
+      const error = describeSynthesisFailure(lastError, currentEpisode, opts.maxClaims);
       console.error(
-        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
+        `[audio-feed] synthesis failed for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
       );
-      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+      const wrote = await metadata.completeEpisode(
+        unsynthesized(currentEpisode, error),
+        opts.owner,
+      );
       if (wrote) {
-        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
-        await notifyOnDemand(claimed, "failed", error);
+        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+        await notifyOnDemand(currentEpisode, "failed", error);
       } else {
-        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
       }
       continue;
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    await metadata.touchEpisodeClaim(claimed.userId, claimed.id, opts.owner, {
+    await metadata.touchEpisodeClaim(currentEpisode.userId, currentEpisode.id, opts.owner, {
       phase: "uploading_audio",
     }).catch(() => {});
     // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
@@ -1093,8 +1106,8 @@ export async function runSynthesisBatch(
     // key — so a superseded worker and the winner shared one key and the loser's cleanup below
     // deleted the winner's live audio. With a per-attempt revision the cleanup can only ever
     // delete this attempt's own blob. A regeneration additionally deletes the old key.
-    const previousKey = claimed.regenerating ? claimed.audioKey : undefined;
-    const audioKey = audioBlobKey(claimed, "wav", opts.revision());
+    const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
+    const audioKey = audioBlobKey(currentEpisode, "wav", opts.revision());
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
     const byteLength = stored.size ?? bytes.length;
@@ -1102,7 +1115,7 @@ export async function runSynthesisBatch(
     // finished the episode, writing here would overwrite the winner's audio
     // with ours and leave no trace that it happened.
     const wrote = await metadata.completeEpisode({
-      ...claimed,
+      ...currentEpisode,
       status: "ready",
       audioKey,
       // The enclosure is built from these, so they must describe the stored bytes.
@@ -1110,33 +1123,36 @@ export async function runSynthesisBatch(
       contentType: "audio/wav",
       durationSeconds: audio.durationSeconds,
       // A regenerated episode keeps its pubDate, so clients do not re-surface it as new.
-      readyAt: previousKey && claimed.readyAt ? claimed.readyAt : new Date().toISOString(),
+      readyAt: previousKey && currentEpisode.readyAt
+        ? currentEpisode.readyAt
+        : new Date().toISOString(),
       promptVersion: PROMPT_VERSION,
       regenerating: undefined,
       error: undefined,
       phase: "ready",
       lastHeartbeat: new Date().toISOString(),
+      scriptTurns: undefined,
     }, opts.owner);
 
     if (wrote) {
-      result.ready.push({ episodeId: claimed.id, audioKey, byteLength });
+      result.ready.push({ episodeId: currentEpisode.id, audioKey, byteLength });
       // The stitched audio is committed; the per-segment blobs have done their job.
       try {
         await segmentResume.sweep();
       } catch (err) {
         console.error(
-          `[audio-feed] segment sweep failed for episode ${claimed.id}; orphans recorded where possible:`,
+          `[audio-feed] segment sweep failed for episode ${currentEpisode.id}; orphans recorded where possible:`,
           err,
         );
       }
-      await notifyOnDemand(claimed, "ready");
+      await notifyOnDemand(currentEpisode, "ready");
       // Record synthesis stats for spend visibility and daily budget (audio-feed-9mp, audio-feed-akm).
       // A failure here is logged as an operational alert so counter anomalies are visible.
       try {
-        await metadata.recordSynthesis(claimed.userId, byteLength, new Date(nowMs));
+        await metadata.recordSynthesis(currentEpisode.userId, byteLength, new Date(nowMs));
       } catch (err) {
         console.error(
-          `[audio-feed] failed to record synthesis for episode ${claimed.id} (user ${claimed.userId}):`,
+          `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
           err,
         );
       }

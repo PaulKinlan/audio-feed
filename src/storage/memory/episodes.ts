@@ -275,8 +275,11 @@ export function createEpisodesRepository(
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
       if (!current) return Promise.resolve(false);
-      // Idempotent completion: if already marked ready with this exact audioKey by this worker:
-      if (current.status === "ready" && current.audioKey === episode.audioKey) {
+      // Idempotent completion: only if already marked ready with this exact audioKey by THIS owner
+      if (
+        current.status === "ready" && current.audioKey === episode.audioKey &&
+        current.claimedBy === owner
+      ) {
         return Promise.resolve(true);
       }
       // Superseded: another worker reclaimed the expired lease and finished first.
@@ -286,7 +289,7 @@ export function createEpisodesRepository(
       const sortKey = `${current.createdAt}\u0000${current.id}`;
       removeSortedIndex(state.synthesizingIndex, sortKey);
       removePendingPointer(state, current);
-      state.episodes.set(key, structuredClone(episode));
+      state.episodes.set(key, structuredClone({ ...episode, claimedBy: owner }));
       return Promise.resolve(true);
     },
     retryEpisode(userId: string, id: string): Promise<Episode | null> {
@@ -300,6 +303,9 @@ export function createEpisodesRepository(
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
+        phase: undefined,
+        lastHeartbeat: undefined,
+        scriptTurns: undefined,
         regenerating: undefined,
       };
       // No await between the read and the write, so this is as single-stepped as the KV
@@ -320,6 +326,9 @@ export function createEpisodesRepository(
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
+        phase: undefined,
+        lastHeartbeat: undefined,
+        scriptTurns: undefined,
       };
       writeEpisode(state, queued);
       return Promise.resolve(structuredClone(queued));

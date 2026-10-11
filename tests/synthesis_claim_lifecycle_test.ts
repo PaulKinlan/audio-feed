@@ -2,12 +2,14 @@
  * Tests for audio-feed-siv1:
  * - A claim dying before its terminal write leaves a recorded cause with phase, heartbeat, and attempt history.
  * - Abandonment after maxClaims persists why (reason + phase + attempt count) rather than "no claim recorded a cause".
- * - Resumption in deepdive mode preserves script turns so segment hashes match and retry resumes rather than restarts.
- * - completeEpisode is idempotent.
+ * - Resumption in deepdive mode preserves script turns so segment hashes match and retry resumes rather than restarts
+ *   (both across separate claims and within the same claim's retry loop).
+ * - completeEpisode is idempotent for the same owner and audio key, but rejects other callers.
+ * - Cached script turns are cleared when an episode completes or is requeued for regeneration.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
-import { createGeminiSynthesizer } from "../src/worker/synthesis.ts";
+import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
@@ -139,7 +141,7 @@ Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, re
   );
 });
 
-Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume without regenerating script", async () => {
+Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume without regenerating script (across claims and within claim)", async () => {
   const { ctx, stores } = await setupEnv();
 
   // Create deepdive episode
@@ -213,8 +215,7 @@ Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume
   assertEquals(stored1.scriptTurns.length, 2);
   assertEquals(stored1.scriptTurns[0]?.speaker, "Alex");
 
-  // Simulate isolate crash: Worker 1 died without calling completeEpisode.
-  // Lease expires:
+  // Simulate lease expiry so episode can be retried by Worker 2
   await stores.metadata.putEpisode({
     ...stored1,
     claimedAt: new Date(Date.now() - 60 * 60_000).toISOString(),
@@ -247,12 +248,66 @@ Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume
   assertEquals(
     scriptCalls,
     1,
-    "script generator must NOT be called again — script turns were reused",
+    "script generator must NOT be called again — script turns were reused across claims",
   );
   assertEquals(clientDialogueCalls, 2);
+
+  // Now test retry within the SAME claim:
+  let inClaimTtsCalls = 0;
+  mockClient.synthesizeDialogue = () => {
+    inClaimTtsCalls++;
+    if (inClaimTtsCalls === 1) {
+      // First attempt fails transiently
+      throw new Error("transient network blip");
+    }
+    return Promise.resolve(fakeAudio());
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-deepdive-retry",
+      userId: "user-1",
+      sourceId: "inbox",
+      articleId: "article-1",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  const retrySynth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  const res = await runSynthesisBatch(ctx, retrySynth, {
+    owner: "worker-batch-retry",
+    maxAttempts: 2,
+    retryBaseDelayMs: 1,
+  });
+
+  // ep-deepdive-retry should succeed on attempt 2
+  const readyBatchEp = res.ready.find((r) => r.episodeId === "ep-deepdive-retry");
+  assert(readyBatchEp, "episode should be ready after in-claim retry");
+  // scriptCalls was 1 from before, now 2 from first attempt of ep-deepdive-retry, and NOT 3 on attempt 2!
+  assertEquals(
+    scriptCalls,
+    2,
+    "script generator was called once for ep-deepdive-retry and reused on in-claim retry",
+  );
+  assertEquals(inClaimTtsCalls, 2, "TTS was called twice (initial blip + successful retry)");
+
+  // Verify ready record clears scriptTurns so it does not leak into future regenerations
+  const completed = await stores.metadata.getEpisode("user-1", "ep-deepdive-retry");
+  assertEquals(completed?.status, "ready");
+  assertEquals(completed?.scriptTurns, undefined, "completed episode clears scriptTurns");
+
+  // Requeueing for regeneration also keeps scriptTurns undefined
+  const requeued = await stores.metadata.requeueEpisode("user-1", "ep-deepdive-retry");
+  assertEquals(requeued?.status, "pending");
+  assertEquals(requeued?.scriptTurns, undefined, "requeued episode has no stale scriptTurns");
 });
 
-Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and audio key", async () => {
+Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and audio key, but rejects other callers", async () => {
   const { stores } = await setupEnv();
 
   const claimed = await stores.metadata.claimEpisode("user-1", "episode-1", {
@@ -274,11 +329,19 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
   const write1 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
   assertEquals(write1, true);
 
-  // Second identical call
+  // Second identical call by the SAME worker
   const write2 = await stores.metadata.completeEpisode(readyEpisode, "worker-idempotent");
-  assertEquals(write2, true, "second identical completion must return true (idempotent)");
+  assertEquals(
+    write2,
+    true,
+    "second identical completion by same owner must return true (idempotent)",
+  );
 
-  // Different audio key
+  // Another worker attempting completion must be refused
+  const writeOther = await stores.metadata.completeEpisode(readyEpisode, "worker-other");
+  assertEquals(writeOther, false, "completion by another worker must return false (superseded)");
+
+  // Different audio key by original worker must be refused
   const write3 = await stores.metadata.completeEpisode(
     { ...readyEpisode, audioKey: "audio/user-1/direct/episode-different.wav" },
     "worker-idempotent",

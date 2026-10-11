@@ -408,8 +408,11 @@ export function createEpisodesRepository(
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;
       if (!current) return false;
-      // Idempotent completion: if already marked ready with this exact audioKey by this worker:
-      if (current.status === "ready" && current.audioKey === episode.audioKey) {
+      // Idempotent completion: only if already marked ready with this exact audioKey by THIS owner
+      if (
+        current.status === "ready" && current.audioKey === episode.audioKey &&
+        current.claimedBy === owner
+      ) {
         return true;
       }
       // Superseded: the lease expired and another worker already finished this.
@@ -417,7 +420,7 @@ export function createEpisodesRepository(
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
-      return await atomicPutEpisode(core, episode, entry);
+      return await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry);
     },
     async retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const entry = await core.kv.get<Episode>(["episode", userId, id]);
@@ -432,6 +435,9 @@ export function createEpisodesRepository(
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
+        phase: undefined,
+        lastHeartbeat: undefined,
+        scriptTurns: undefined,
         // regenerating is NOT set: a failed render has no audio worth playing while it retries,
         // and setting it would put those bytes back into the subscriber's feed.
         regenerating: undefined,
@@ -451,6 +457,9 @@ export function createEpisodesRepository(
         claimedAt: undefined,
         claimedBy: undefined,
         error: undefined,
+        phase: undefined,
+        lastHeartbeat: undefined,
+        scriptTurns: undefined,
       };
       return (await atomicPutEpisode(core, queued, entry)) ? queued : null;
     },
