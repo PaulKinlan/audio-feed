@@ -26,11 +26,9 @@
   })();
 
   let lcp = 0;
-  let cls = 0;
-  let clsObserved = false;
-  // Interaction latencies, kept so INP can be the 98th percentile rather than the worst one
-  // (audio-feed-dzgj): INP is defined over the distribution of interactions, and reporting the
-  // single worst event makes every page look as bad as its unluckiest click.
+  // Both metrics are collected as ENTRIES and reduced by the tested arithmetic in cwv-stats.js,
+  // inlined before this file: the collector's job is observation, and the maths is not its own.
+  const shifts = [];
   const interactions = [];
   let sent = false;
 
@@ -43,28 +41,11 @@
     }).observe({ type: "largest-contentful-paint", buffered: true });
   } catch (_) { /* not supported: the metric is simply never reported */ }
 
-  // CLS: the LARGEST SESSION WINDOW, not a running total (audio-feed-d55l). A session window ends
-  // after a 1s gap in shifts or once it has lasted 5s, and the metric is the biggest window's score.
-  // Summing every shift instead lets a page that jitters all session accumulate a score no window
-  // ever had, and it grows without bound the longer a visitor stays.
-  let clsWindowValue = 0;
-  let clsWindowStart = 0;
-  let clsWindowLast = 0;
+  // CLS: shifts are collected and reduced by largestSessionWindow (see cwv-stats.js).
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
-        if (entry.hadRecentInput) return;
-        clsObserved = true;
-        const start = entry.startTime;
-        const joined = clsWindowValue !== 0 && start - clsWindowLast < 1000 &&
-          start - clsWindowStart < 5000;
-        if (!joined) {
-          clsWindowStart = start;
-          clsWindowValue = 0;
-        }
-        clsWindowValue += entry.value;
-        clsWindowLast = start;
-        if (clsWindowValue > cls) cls = clsWindowValue;
+        shifts.push(entry);
       });
     }).observe({ type: "layout-shift", buffered: true });
   } catch (_) { /* as above */ }
@@ -77,14 +58,6 @@
       });
     }).observe({ type: "event", buffered: true, durationThreshold: 40 });
   } catch (_) { /* as above */ }
-
-  /** The 98th percentile, the way the metric is defined. Nearest-rank: no interpolation, so the
-   * value reported is always one a real interaction actually had. */
-  const p98 = (values) => {
-    const sorted = values.slice().sort((a, b) => a - b);
-    const rank = Math.ceil(0.98 * sorted.length);
-    return sorted[Math.max(0, Math.min(sorted.length - 1, rank - 1))];
-  };
 
   const send = (metric, value) => {
     try {
@@ -101,11 +74,11 @@
     sent = true;
     if (lcp > 0) send("lcp", Math.round(lcp));
     if (interactions.length > 0) send("inp", Math.round(p98(interactions)));
-    // CLS is sent whenever the page had ANY layout shift, including a score of exactly zero
-    // (audio-feed-d55l): zero is a real, good measurement, and the previous `if (cls > 0)` meant a
-    // well-built page reported nothing at all. Three decimals, because CLS is a small ratio and
-    // rounding to an integer would report every score as zero.
-    if (clsObserved) send("cls", Math.round(cls * 1000) / 1000);
+    // Sent whenever the page shifted at all, including a score of exactly zero (audio-feed-d55l):
+    // zero is a real, good measurement. Three decimals, because CLS is a small ratio and rounding to
+    // an integer would report every score as zero.
+    const cls = largestSessionWindow(shifts);
+    if (cls.observed) send("cls", Math.round(cls.value * 1000) / 1000);
   };
 
   // Both, because neither is reliable alone: `pagehide` is the documented place for this and fires
