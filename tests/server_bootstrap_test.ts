@@ -145,6 +145,88 @@ Deno.test("an ALLOWED_HOSTS list with no usable entry warns at boot and fails cl
   }
 });
 
+Deno.test("a usable origin with unusable ALLOWED_HOSTS still says what it accepts (audio-feed-4x4t)", async () => {
+  // The residual half of the same defect: the positive branch keyed on the raw array length too, so
+  // PUBLIC_BASE_URL good + ALLOWED_HOSTS=["not a host",""] printed NOTHING - the gate worked and nobody
+  // was told. Both halves are asserted: a positive line IS emitted, and a foreign host is still refused.
+  const logged: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logged.push(args.map((a) => String(a)).join(" "));
+  };
+  const stores = await openStores({ kvPath: ":memory:" });
+  let booted: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    booted = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      config: { publicBaseUrl: "https://audio.example.com", allowedHosts: ["not a host", ""] },
+    });
+    // Exact, not a substring that another branch could also satisfy: the log must name the pinned host and
+    // must NOT claim extra hosts, because the junk entries contribute none. Asserting only the host name
+    // passed even when the code fell through to the "plus N extra hosts" branch, which is how a test can
+    // look like a guard while pinning nothing.
+    assert(
+      logged.some((line) =>
+        line.includes("Host gate: accepting audio.example.com (from PUBLIC_BASE_URL).")
+      ),
+      `boot must name the pinned host; logged: ${JSON.stringify(logged)}`,
+    );
+    assert(
+      !logged.some((line) => line.includes("extra host")),
+      `and must not claim extras that no usable entry provides; logged: ${JSON.stringify(logged)}`,
+    );
+    const foreign = await booted.fetch(
+      new Request("https://evil.example/health", { headers: { host: "evil.example" } }),
+    );
+    await foreign.body?.cancel();
+    assertEquals(foreign.status, 421, "and it must still refuse a host it does not know");
+  } finally {
+    console.log = original;
+    if (booted) await booted.shutdown();
+  }
+});
+
+Deno.test("ALLOWED_HOSTS alone activates the gate and says so (audio-feed-4x4t)", async () => {
+  // The third state that used to log nothing: no usable PUBLIC_BASE_URL, but usable ALLOWED_HOSTS. The
+  // gate is active, the listed host is served, a foreign host is refused, and the operator is told.
+  const logged: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logged.push(args.map((a) => String(a)).join(" "));
+  };
+  const stores = await openStores({ kvPath: ":memory:" });
+  let booted: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    booted = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      config: { allowedHosts: ["audio.example.com"] },
+    });
+    assert(
+      logged.some((line) => line.includes("Host gate: accepting 1 host(s) from ALLOWED_HOSTS")),
+      `boot must name the ALLOWED_HOSTS-only case; logged: ${JSON.stringify(logged)}`,
+    );
+    const listed = await booted.fetch(
+      new Request("https://audio.example.com/health", { headers: { host: "audio.example.com" } }),
+    );
+    await listed.body?.cancel();
+    assert(listed.status !== 421, "a listed host must be served when it is the only configuration");
+    const foreign = await booted.fetch(
+      new Request("https://evil.example/health", { headers: { host: "evil.example" } }),
+    );
+    await foreign.body?.cancel();
+    assertEquals(foreign.status, 421, "an unlisted host must still be refused");
+  } finally {
+    console.log = original;
+    if (booted) await booted.shutdown();
+  }
+});
+
 Deno.test("a malformed ALLOWED_HOSTS entry is ignored, not fatal (audio-feed-ft74)", async () => {
   const stores = await openStores({ kvPath: ":memory:" });
   const booted = await bootstrap({
