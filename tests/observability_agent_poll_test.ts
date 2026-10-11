@@ -13,11 +13,13 @@ import {
   BACKLOG_FINGERPRINT,
   buildPrompt,
   type ErrorsPage,
+  fileBead as realFileBead,
   type LogEvent,
   MAX_EVENTS_PER_RUN,
   MAX_PROMPT_BYTES,
   normaliseRoute,
   oldestRetainedFromProblem,
+  openFingerprints as realOpenFingerprints,
   OVERSIZED_FINGERPRINT,
   parseSuggestions,
   type PollConfig,
@@ -852,6 +854,195 @@ Deno.test("a dropped event is recorded with its fingerprint and reported ONCE (a
       1,
       "a persistently unsendable record must keep ONE bead, not file one every hour",
     );
+  });
+});
+
+Deno.test("both stable fingerprints obey the shape the parser accepts (audio-feed-zxhv)", async () => {
+  // The invariant behind the finding: a stable constant is only a dedupe if the PARSER can read it back,
+  // and openFingerprints accepts exactly 16 hex. Both constants were non-hex, so both dedupes were dead
+  // code that looked alive - which is precisely why this needs its own guard rather than one big test.
+  const { FINGERPRINT_MARKER } = await import("../scripts/observability-agent-poll.ts");
+  const shape = /^[0-9a-f]{16}$/;
+  for (
+    const [name, value] of [
+      ["BACKLOG_FINGERPRINT", BACKLOG_FINGERPRINT],
+      ["OVERSIZED_FINGERPRINT", OVERSIZED_FINGERPRINT],
+    ] as const
+  ) {
+    assert(shape.test(value), `${name} is not 16 hex, so nothing can read it back: ${value}`);
+    const parsed = new Set<string>();
+    const sample =
+      `Fingerprints: ${FINGERPRINT_MARKER}${value}, ${FINGERPRINT_MARKER}aaaa1111bbbb2222`;
+    for (const m of sample.matchAll(new RegExp(`${FINGERPRINT_MARKER}([0-9a-f]{16})`, "g"))) {
+      const hex = m[1];
+      if (hex !== undefined) parsed.add(hex);
+    }
+    assert(parsed.has(value), `${name} does not round-trip through the parser's marker`);
+  }
+});
+
+Deno.test("the backlog dedupe ROUND-TRIPS through real bd output (audio-feed-zxhv)", async () => {
+  // THE BUG THIS PINS: the first fix checked alreadyOpen.has(BACKLOG_FINGERPRINT), but the constant was
+  // "backlog0structural" while openFingerprints accepts only 16 hex, so that check could never be true and
+  // a poll behind for a week still filed a bead an hour. The earlier test passed because it HANDED
+  // alreadyOpen a Set already containing the constant: it stubbed the exact boundary that was broken.
+  //
+  // So this goes through the real fileBead and the real openFingerprints over a fake bd that STORES the
+  // description it was given and REPLAYS it on list, which is the only way to see a broken round trip.
+  await withTempDir(async (dir) => {
+    const store = `${dir}/beads`;
+    const bin = `${dir}/fake-bd`;
+    await Deno.writeTextFile(
+      bin,
+      `#!/bin/sh
+store="${store}"
+mkdir -p "$store"
+if [ "$1" = "list" ]; then
+  printf '['
+  first=1
+  for f in "$store"/*.txt; do
+    [ -e "$f" ] || continue
+    [ "$first" -eq 0 ] && printf ','
+    first=0
+    desc=$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' "$f")
+    printf '{"id":"%s","title":"t","description":"%s","status":"open"}' "$(basename "$f" .txt)" "$desc"
+  done
+  printf ']\\n'
+  exit 0
+fi
+if [ "$1" = "create" ]; then
+  desc=""
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--description" ] && desc="$a"
+    prev="$a"
+  done
+  id="audio-feed-fake$(ls "$store" | wc -l)"
+  printf '%s' "$desc" > "$store/$id.txt"
+  printf '{"id":"%s"}\\n' "$id"
+  exit 0
+fi
+echo unexpected >&2
+exit 1
+`,
+    );
+    await Deno.chmod(bin, 0o755);
+
+    const old = new Date(Date.parse("2026-10-11T12:00:00.000Z") - 8 * 3_600_000).toISOString();
+    const many = Array.from({ length: 300 }, (_, i) => event({ seq: i + 1, time: old }));
+    // The event TYPE differs per run on purpose. With one type, run two's events are all already open
+    // (run one filed a catch-all bead carrying their fingerprints), so the dedupe skips every event and
+    // the run returns through the drop branch WITHOUT ever reaching the backlog logic - which is how the
+    // first version of this test passed against a constant that could not be read back at all.
+    const backend = (type: string) =>
+      deps({
+        fetchSummary: () =>
+          Promise.resolve({
+            ok: true as const,
+            body: summary({ total: 300, window: { oldestRetained: 1, newest: 300 } }),
+          }),
+        fetchErrors: () =>
+          Promise.resolve({
+            ok: true as const,
+            body: page(many.map((e) => ({ ...e, type })), { hasMore: true }),
+          }),
+        openFingerprints: () => realOpenFingerprints(bin),
+        fileBead: (b, suggestion, run, dryRun) => realFileBead(b, suggestion, run, dryRun),
+        callModel: () =>
+          Promise.resolve({ ok: true, text: "[]", inputTokens: 10, outputTokens: 5, error: null }),
+      });
+    const cfg = { ...config(dir), bdBin: bin };
+    await runOnce(cfg, backend("synthesis.claim"));
+    await runOnce(cfg, backend("synthesis.publish"));
+
+    let backlogBeads = 0;
+    for await (const entry of Deno.readDir(store)) {
+      const text = await Deno.readTextFile(`${store}/${entry.name}`);
+      if (text.includes(`fingerprint:${BACKLOG_FINGERPRINT}`)) backlogBeads++;
+    }
+    assertEquals(
+      backlogBeads,
+      1,
+      `two runs of a still-behind poll must leave ONE backlog bead; found ${backlogBeads}. ` +
+        `Zero means the constant is not 16 hex and openFingerprints cannot read it back.`,
+    );
+  });
+});
+
+Deno.test("a disabled run does not release a lock it does not own (audio-feed-jmkm)", async () => {
+  // finish() released unconditionally, so a DISABLED invocation deleted a live run's lock and let a
+  // second run in - the exact race the lock exists to prevent.
+  await withTempDir(async (dir) => {
+    const { acquireLock, LOCK_FILE } = await import("../scripts/observability-agent-poll.ts");
+    assertEquals(await acquireLock(dir, new Date()), true, "another run holds the lock");
+    const d = deps();
+    const { artifact } = await runOnce({ ...config(dir), enabled: false, key: null }, d);
+    assertEquals(artifact.reason, "disabled");
+    const still = await Deno.stat(`${dir}/${LOCK_FILE}`).then(() => true).catch(() => false);
+    assert(still, "a disabled run must NOT delete another run's lock");
+  });
+});
+
+Deno.test("the call is reserved durably BEFORE the model is invoked (audio-feed-nvog)", async () => {
+  // An in-memory increment is not a bound: kill the process inside the call and the spend happened while
+  // the durable counter still read zero, so a 24/day ceiling is exceeded across timer runs.
+  await withTempDir(async (dir) => {
+    let durableAtSpend: PollState | null = null;
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 1, window: { oldestRetained: 1, newest: 1 } }),
+        }),
+      fetchErrors: () => Promise.resolve({ ok: true as const, body: page([event({ seq: 1 })]) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      callModel: async () => {
+        // Read the DURABLE state at the moment of spend: the process could die right here.
+        durableAtSpend = JSON.parse(await Deno.readTextFile(`${dir}/state.json`)) as PollState;
+        return { ok: true, text: "[]", inputTokens: 10, outputTokens: 5, error: null };
+      },
+      fileBead: () => Promise.resolve("audio-feed-fake1"),
+    });
+    await runOnce(config(dir), d);
+    assert(durableAtSpend !== null, "the model must have been called");
+    const atSpend = durableAtSpend as PollState;
+    assert(
+      atSpend.callsToday >= 1,
+      `the call must be persisted BEFORE it is made; durable state said ${atSpend.callsToday}`,
+    );
+    assert(
+      atSpend.inputTokensToday > 0 && atSpend.outputTokensToday > 0,
+      "and the worst-case tokens must be reserved, not only counted afterwards",
+    );
+  });
+});
+
+Deno.test("a failed bd create HOLDS the cursor instead of advancing past the event (audio-feed-hoow)", async () => {
+  // fileBead returns null when bd exits non-zero or returns unreadable output. Advancing anyway lost
+  // those events for good while the artifact claimed they were filed.
+  await withTempDir(async (dir) => {
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 1, window: { oldestRetained: 1, newest: 1 } }),
+        }),
+      fetchErrors: () => Promise.resolve({ ok: true as const, body: page([event({ seq: 1 })]) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      callModel: () =>
+        Promise.resolve({ ok: true, text: "[]", inputTokens: 10, outputTokens: 5, error: null }),
+      fileBead: () => Promise.resolve(null), // bd refused it
+    });
+    const { artifact, state } = await runOnce(config(dir), d);
+    assertEquals(artifact.reason, "bead-failed");
+    assertEquals(state.cursor, 0, "the cursor MUST hold, or the event is never seen again");
+    assertEquals(artifact.cursorAfter, 0, "and the artifact must not claim it advanced");
+    assertEquals(
+      artifact.fingerprintsFiled.length,
+      0,
+      "nothing may be reported as filed when bd refused it",
+    );
+    assertEquals(artifact.state, "failed", "and the run must not report success");
   });
 });
 

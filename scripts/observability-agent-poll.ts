@@ -60,16 +60,23 @@ export const BACKLOG_ALERT_HOURS = 6;
  * A STABLE fingerprint for the backlog signal: deliberately a constant, so a backlog that persists for
  * days keeps one open bead instead of filing a fresh one every hour. It is not derived from any event,
  * which is exactly why it must not be built like an event fingerprint.
+ *
+ * IT MUST BE 16 HEX. The first version read "backlog0structural", which is not, and so could never be
+ * read back by openFingerprints - the dedupe this constant exists for was silently dead (audio-feed-zxhv).
+ * The value is sha256("observability-agent:backlog:structural:v1") truncated to 16 hex, inlined so it is
+ * visibly fixed rather than computed at run time.
  */
-export const BACKLOG_FINGERPRINT = "backlog0structural";
+export const BACKLOG_FINGERPRINT = "3cdca0cf12ee17bd";
 /**
  * The stable fingerprint for "the poll dropped a record it could not send". A drop is a real loss of
  * coverage, so it is surfaced once as a bead - and stable, so a record that keeps being unsendable keeps
  * ONE open bead rather than filing one every hour (the audio-feed-zxhv lesson, applied here from the
  * start). The record's own fingerprint is recorded in the artifact, but it must not be the bead's identity:
  * it changes per record, which is what would produce the spam.
+ *
+ * 16 hex, for the same reason as the backlog constant: sha256("observability-agent:oversized-drop:v1").
  */
-export const OVERSIZED_FINGERPRINT = "oversized0drop";
+export const OVERSIZED_FINGERPRINT = "ece23e86b4bc43c4";
 
 export const API_PATH_ERRORS = "/api/observability/errors";
 export const API_PATH_SUMMARY = "/api/observability/summary";
@@ -171,7 +178,12 @@ export type SkipReason =
   /** Another run holds the lock. The daily ceiling is a construction only if two runs cannot race it. */
   | "locked"
   /** The oldest queued event cannot fit the prompt even alone. It is SKIPPED, and recorded (audio-feed-w0b5). */
-  | "oversized";
+  | "oversized"
+  /**
+   * bd refused a bead, so the events behind it were neither filed nor already open. The cursor is HELD
+   * rather than advanced past them (audio-feed-hoow) - a failure to file must not look like coverage.
+   */
+  | "bead-failed";
 
 export interface RunArtifact {
   startedAt: string;
@@ -506,10 +518,27 @@ export async function openFingerprints(bin: string): Promise<Set<string>> {
   const res = await runBd(bin, ["list", "--status", "open", "--json"]);
   const found = new Set<string>();
   if (!res.ok) return found;
-  const ids = [...res.stdout.matchAll(new RegExp(`${FINGERPRINT_MARKER}([0-9a-f]{16})`, "g"))];
-  for (const m of ids) {
-    const hex = m[1];
-    if (hex !== undefined) found.add(hex);
+  // The RAW output is scanned as well as the parsed fields. Parsing is what makes the round trip
+  // checkable against real `bd list --json` (which carries title and description), and the raw scan is
+  // what survives a shape change - a regression here silently disables every dedupe in this file, which
+  // is exactly how audio-feed-zxhv hid (audio-feed-hoow depends on this set too).
+  const haystack: string[] = [res.stdout];
+  try {
+    const parsed = JSON.parse(res.stdout) as Array<{ title?: string; description?: string }>;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (typeof item?.title === "string") haystack.push(item.title);
+        if (typeof item?.description === "string") haystack.push(item.description);
+      }
+    }
+  } catch {
+    // Not JSON: the raw scan above still applies, so this is not an error path.
+  }
+  for (const text of haystack) {
+    for (const m of text.matchAll(new RegExp(`${FINGERPRINT_MARKER}([0-9a-f]{16})`, "g"))) {
+      const hex = m[1];
+      if (hex !== undefined) found.add(hex);
+    }
   }
   return found;
 }
@@ -781,15 +810,21 @@ export async function runOnce(
     modelCalls: 0,
     note: null,
   };
+  // Ownership, tracked explicitly: a DISABLED or refused invocation also returns through finish(), and
+  // releasing a lock this run never acquired deletes a live run's lock and lets a second run in - the
+  // exact race the lock exists to prevent (audio-feed-jmkm).
+  let holdsLock = false;
   const finish = async (state_: "idle" | "ranked" | "skipped" | "failed"): Promise<RunArtifact> => {
     artifact.state = state_;
     artifact.finishedAt = deps.now().toISOString();
     state = { ...state, lastRun: artifact.finishedAt, artifact };
     await saveState(config.stateDir, state);
     await Deno.writeTextFile(`${config.stateDir}/digest.md`, renderDigest(artifact));
-    // Released on EVERY path that returns through here, which is all of them, so a failure cannot leave
-    // the poll locked out until the stale timeout.
-    await releaseLock(config.stateDir);
+    // Released on every path that returns through here, but ONLY if this run took it.
+    if (holdsLock) {
+      await releaseLock(config.stateDir);
+      holdsLock = false;
+    }
     return artifact;
   };
 
@@ -804,7 +839,9 @@ export async function runOnce(
 
   // (2) The lock, BEFORE the caps and BEFORE anything else that costs or writes. A ceiling that two
   // concurrent runs can each pass is not a ceiling, so the exclusion is not an optimisation.
-  if (!(await acquireLock(config.stateDir, deps.now()))) {
+  const acquired = await acquireLock(config.stateDir, deps.now());
+  holdsLock = acquired;
+  if (!acquired) {
     artifact.reason = "locked";
     artifact.note =
       `Another run holds ${LOCK_FILE} in ${config.stateDir}. This run did nothing and wrote no state, ` +
@@ -966,14 +1003,32 @@ export async function runOnce(
     return { artifact: await finish("skipped"), state };
   }
 
-  // (6) Count the call BEFORE making it: a run killed mid-call must not have spent unrecorded.
-  state = { ...state, callsToday: state.callsToday + 1 };
-  const model = await deps.callModel(config, prompt.text);
-  artifact.modelCalls = 1;
+  // (6) RESERVE the call durably BEFORE making it, and reserve the WORST case it could consume. An
+  // in-memory increment is not a bound: kill the process inside the call and the spend happened while the
+  // durable counter still read zero, so across timer runs a 24/day ceiling is exceeded by the mechanism
+  // meant to enforce it (audio-feed-nvog). The reservation is settled against the actuals below.
+  const reservedInputTokens = Math.ceil(
+    new TextEncoder().encode(prompt.text).length / BYTES_PER_TOKEN,
+  );
+  const reservedOutputTokens = MAX_OUTPUT_TOKENS;
   state = {
     ...state,
-    inputTokensToday: state.inputTokensToday + model.inputTokens,
-    outputTokensToday: state.outputTokensToday + model.outputTokens,
+    callsToday: state.callsToday + 1,
+    inputTokensToday: state.inputTokensToday + reservedInputTokens,
+    outputTokensToday: state.outputTokensToday + reservedOutputTokens,
+  };
+  await saveState(config.stateDir, state);
+  const model = await deps.callModel(config, prompt.text);
+  artifact.modelCalls = 1;
+  // Settle: swap the reservation for what the call actually reported. A failed call keeps the
+  // reservation, which is the correct direction - it may still have been billed.
+  state = {
+    ...state,
+    inputTokensToday: Math.max(0, state.inputTokensToday - reservedInputTokens + model.inputTokens),
+    outputTokensToday: Math.max(
+      0,
+      state.outputTokensToday - reservedOutputTokens + model.outputTokens,
+    ),
   };
   if (!model.ok) {
     artifact.reason = "model-failed";
@@ -988,6 +1043,10 @@ export async function runOnce(
   const sentSeqs = withPrints.slice(0, prompt.eventsSent).map((w) => w.event.seq);
   const sentPrints = withPrints.slice(0, prompt.eventsSent).map((w) => w.print);
   const claimed = new Set<string>();
+  // A fingerprint may be advanced past only if it was FILED, or was already open (nothing to file), or
+  // this is a dry run (filing nothing is the point). Anything else is an event that would be lost by
+  // advancing, so it is collected and the cursor is held below (audio-feed-hoow).
+  const unfiled: string[] = [];
   for (const s of suggestions.slice(0, 5)) {
     const prints = s.fingerprints.length > 0 ? s.fingerprints : sentPrints.slice(0, 1);
     for (const p of prints) claimed.add(p);
@@ -996,8 +1055,14 @@ export async function runOnce(
       cursorBefore,
       cursorAfter: sentSeqs.length > 0 ? Math.max(...sentSeqs) : cursorBefore,
     }, config.dryRun);
-    if (id !== null) artifact.beadIds.push(id);
-    artifact.fingerprintsFiled.push(...prints);
+    if (id !== null) {
+      artifact.beadIds.push(id);
+      artifact.fingerprintsFiled.push(...prints);
+    } else if (config.dryRun || prints.every((p) => alreadyOpen.has(p))) {
+      artifact.fingerprintsFiled.push(...prints);
+    } else {
+      unfiled.push(...prints);
+    }
   }
   // Events the model did not group are still covered: one catch-all bead keeps them from vanishing.
   const unclaimed = sentPrints.filter((p) => !claimed.has(p));
@@ -1013,15 +1078,22 @@ export async function runOnce(
       cursorBefore,
       cursorAfter: sentSeqs.length > 0 ? Math.max(...sentSeqs) : cursorBefore,
     }, config.dryRun);
-    if (id !== null) artifact.beadIds.push(id);
-    artifact.fingerprintsFiled.push(...unclaimed);
+    if (id !== null) {
+      artifact.beadIds.push(id);
+      artifact.fingerprintsFiled.push(...unclaimed);
+    } else if (config.dryRun || unclaimed.every((p) => alreadyOpen.has(p))) {
+      artifact.fingerprintsFiled.push(...unclaimed);
+    } else {
+      unfiled.push(...unclaimed);
+    }
   }
 
+  // Where the cursor WOULD go. It is not committed until the events behind it are filed or already
+  // covered: advancing past an event that was neither is the silent skip the whole retention rule exists
+  // to prevent (audio-feed-hoow).
   const advanceTo = prompt.truncated
     ? Math.max(...sentSeqs)
     : Math.max(Number(page.body.cursor), ...sentSeqs);
-  artifact.cursorAfter = advanceTo;
-  state = { ...state, cursor: advanceTo };
 
   // How far behind are we, and is anything we have not reached already old? hasMore matters as much as
   // the page contents: without it a full page reports a backlog of zero while hundreds remain.
@@ -1070,6 +1142,23 @@ export async function runOnce(
     );
     if (id !== null) artifact.beadIds.push(id);
   }
+  if (unfiled.length > 0) {
+    // FILED OR ALREADY OPEN, OR THE CURSOR DOES NOT MOVE. The real fileBead returns null when bd exits
+    // non-zero or returns unreadable output, and advancing anyway would drop those events permanently
+    // while the artifact claimed they were filed (audio-feed-hoow). Retrying them next hour is cheap; a
+    // silent skip is not recoverable.
+    artifact.reason = "bead-failed";
+    artifact.note =
+      `bd did not accept ${unfiled.length} bead(s) (${unfiled.slice(0, 3).join(", ")}` +
+      `${
+        unfiled.length > 3 ? ", ..." : ""
+      }), so the cursor is HELD at ${cursorBefore} rather than ` +
+      `advanced past events that were neither filed nor already open. The same window is retried next ` +
+      `hour, and nothing is claimed as filed that was not.`;
+    return { artifact: await finish("failed"), state };
+  }
+  artifact.cursorAfter = advanceTo;
+  state = { ...state, cursor: advanceTo };
   if (prompt.truncated) {
     artifact.note =
       `Capped at ${prompt.eventsSent} event(s); ${prompt.backlog} remain and will be ` +
