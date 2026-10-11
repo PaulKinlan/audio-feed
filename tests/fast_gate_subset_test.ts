@@ -384,6 +384,18 @@ Deno.test("an undeclared non-TypeScript file runs the FULL suite and names itsel
   assert(plan.reason.includes("UNREAD_DECLARATIONS"), plan.reason);
 });
 
+Deno.test("a markdown file a suite READS selects that suite, not an inert empty pass (38sn)", () => {
+  // Found in review of this delta (audio-feed-38sn): isDocumentation() outranked the derived relation, so a
+  // test asserting README contents could be silently unselected while the relation named it in the same run.
+  const relations = new Map([["README.md", ["tests/readme_docs_test.ts"]]]);
+  assertEquals(
+    planTests(["README.md"], NO_GRAPH, NO_NAMED, relations).testFiles,
+    ["tests/readme_docs_test.ts"],
+  );
+  // Not read by anything -> documentation, and the loud inert state still applies.
+  assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
+});
+
 Deno.test("documentation and declared-not-read files still run nothing", () => {
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED).testFiles, []);
   assertEquals(planTests(["docs/observability-api.md"], NO_GRAPH, NO_NAMED).testFiles, []);

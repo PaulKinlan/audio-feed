@@ -258,9 +258,10 @@ export const UNREAD_DECLARATIONS: UnreadDeclaration[] = [
   },
 ];
 
-/** `.md` anywhere: prose. No suite in this repo reads markdown content (checked 2026-10-11: every test's
- * readTextFile/readDir/stat target is code, JSON, HTML or a picture; the docs paths that appear in tests
- * are inside failure MESSAGES telling a human where to look). */
+/** `.md` anywhere: prose, so a markdown change is inert - UNLESS a suite is DERIVED to read it, which is
+ * checked first in classifyNonTsChanges (audio-feed-38sn: an earlier version asked this function before the
+ * relation, so a test asserting README contents would have been an empty pass). The hand-check that used to
+ * stand here ("no suite reads markdown, checked 2026-10-11") is now a derived fact that can only over-select. */
 export function isDocumentation(relPath: string): boolean {
   return relPath.endsWith(".md");
 }
@@ -594,13 +595,18 @@ export function classifyNonTsChanges(
 
   for (const file of changed) {
     if (file.endsWith(".ts")) continue;
-    if (isDocumentation(file)) {
-      classification.documentation.push(file);
-      continue;
-    }
+    // THE DERIVED RELATION IS CHECKED FIRST (audio-feed-38sn, found in review of this delta): a markdown
+    // file a suite READS is a real input, so classifying it as inert documentation before looking at the
+    // relation turned a real input into an empty pass - the exact hole this bead exists to close, and the
+    // one place where a hand-checked "no suite reads .md" claim still outranked the derived fact. Read by a
+    // suite -> select it; not read by anything -> documentation (loud inert state).
     const observers = suitesObserving(file, relations);
     if (observers.length) {
       for (const suite of observers) suites.add(suite);
+      continue;
+    }
+    if (isDocumentation(file)) {
+      classification.documentation.push(file);
       continue;
     }
     if (declarationFor(file, declarations)) {
