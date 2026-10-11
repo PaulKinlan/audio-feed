@@ -20,7 +20,9 @@ const BASE = "https://audio.example.com";
 
 function landingApp() {
   const stores: Stores = memoryStores();
-  const config: AppConfig = { port: 0 };
+  // The request below is on https://audio.example.com, and the gate (audio-feed-7lsy) accepts only
+  // the host the app knows - so configure it.
+  const config: AppConfig = { port: 0, publicBaseUrl: "https://audio.example.com" };
   const ctx = { config, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx));
   return fetch;

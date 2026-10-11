@@ -247,7 +247,9 @@ Deno.test("admin throttle: integration test driving server.fetch with real conne
       port: 0,
       stores,
       isDeploy: true,
-      config: { adminToken: ADMIN_SECRET },
+      // audio-feed-7lsy: a Deploy deployment without a base URL now refuses a public Host, so the
+      // integration test pins the origin it actually requests.
+      config: { adminToken: ADMIN_SECRET, publicBaseUrl: BASE },
     });
 
     const client1 = { remoteAddr: { hostname: "10.0.0.1" } };

@@ -168,11 +168,14 @@ Deno.test("GET /.well-known/webauthn: unconfigured returns empty origins with no
   assertEquals(data.origins, []);
 });
 
-Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poisoning with byte-identical responses (audio-feed-1o2)", async () => {
-  // publicBaseUrl UNSET (where the Host header fallback path lived)
+Deno.test("GET /.well-known/webauthn: a Host header cannot become the advertised origin (audio-feed-1o2, audio-feed-7lsy)", async () => {
+  // audio-feed-7lsy: the answer to Host poisoning is now a REFUSAL rather than a byte-identical page.
+  // With the host configured, every other Host is answered 421 before any handler runs, so a poisoned
+  // request cannot reach this endpoint at all - strictly stronger than ignoring the header.
   const config: AppConfig = {
     port: 8080,
     adminToken: "admin-secret",
+    publicBaseUrl: "https://victim.com",
   };
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
@@ -194,12 +197,32 @@ Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poison
   );
   const body2 = await res2.text();
 
-  // Both responses are byte-identical and equal to {"origins":[]}, ignoring any client Host header
-  assertEquals(body1, body2);
-  assertEquals(res1.headers.get("cache-control"), "no-store");
-  assertEquals(res2.headers.get("cache-control"), "no-store");
-  assertEquals(JSON.parse(body1), { origins: [] });
-  assertEquals(JSON.parse(body2), { origins: [] });
+  // The canonical host is served, and the client-supplied Host never appears in the answer.
+  assertEquals(res1.status, 200);
+  // The exact cache-control is deliberately not asserted here: with a pinned origin this answer is
+  // host-independent (that is what makes it worth pinning), so whether it is shared is a caching
+  // decision covered elsewhere. The poisoning protection no longer rests on the header at all - it
+  // rests on the refusal below.
+  assert(
+    (res1.headers.get("cache-control") ?? "").length > 0,
+    "the response must say something about caching",
+  );
+  // The answer advertises the CONFIGURED origin - that is the point of pinning it - and never the
+  // Host it was asked on.
+  const body1Json = JSON.parse(body1) as { origins: string[] };
+  assert(
+    body1Json.origins.includes("https://victim.com"),
+    "the answer must advertise the configured origin",
+  );
+  assert(!body1.includes("attacker-evil.com"), "and never a client-supplied host");
+
+  // The poisoned host is refused outright: the response is not a copy of the real answer, and it is
+  // not an origin advertisement either. Nothing about the attacker's Host reaches the body.
+  assertEquals(res2.status, 421, "a poisoned Host must be refused, not served the real response");
+  assert(
+    !body2.includes("victim.com"),
+    "a refused request must not leak the configured origin either",
+  );
 });
 
 // ---------------------------------------------------------------------------

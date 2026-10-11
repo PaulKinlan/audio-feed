@@ -70,7 +70,12 @@ Deno.test("the feed URLs shown are the routes the router actually serves", async
 });
 
 Deno.test("the page is built from the configured origin, not a hardcoded host", async () => {
-  const html = await (await app({ publicBaseUrl: "https://elsewhere.test" })(get("/"))).text();
+  // audio-feed-7lsy: the gate now accepts the configured host and refuses others, so a test that
+  // configures a different origin must request it. Previously any host was served, which is the
+  // inert behaviour Paul rejected.
+  const html = await (await app({ publicBaseUrl: "https://elsewhere.test" })(
+    new Request("https://elsewhere.test/"),
+  )).text();
 
   assertStringIncludes(html, "https://elsewhere.test/feed/");
   assert(!html.includes(BASE), "no other origin may leak into the page");
