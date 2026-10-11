@@ -42,9 +42,11 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
    difference is visible. `hasMore` is true when the page limit was hit with more behind it.
 3. **Retention.** Events before `window.oldestRetained` no longer exist, so a cursor below it is
    refused with `410 cursor_too_old`, naming the oldest retained sequence. The API never silently
-   skips: an event that cannot be served has to be reported as lost. A store that has pruned
-   everything is reported as empty (`oldestRetained > newest`) rather than "too old", so a cursor
-   from before it is still valid and simply returns nothing.
+   skips: an event that cannot be served has to be reported as lost. This applies **even when
+   retention has removed everything and the store looks empty** — `oldestRetained > newest` is what
+   a fully-pruned store reports as well as a store that has never held an event, so the cursor is
+   refused either way rather than answered with an empty feed. (A store that has never held an event
+   reports `oldestRetained` of 1, so a poller that is simply early is not refused.)
 4. **Validation.** `400 invalid_cursor` for a non-integer or negative `since`/`until` (and for
    `until` preceding `since`), `400 invalid_limit` outside `1..500`, `400 invalid_severity` for a
    filter this endpoint does not serve.
@@ -78,10 +80,17 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
 a separate id would be a second identity that could disagree with the cursor.
 
-`/summary` returns `{ cursor, since, total, bySeverity, byType, window }`. `total: 0` is the cheap
-answer to "has anything happened since my cursor" — one bounded scan instead of a page of events. It
-applies the same cursor rules, including the `410` when retention has moved past the cursor, so a
-poller cannot be told "nothing new" when it has in fact missed events.
+`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, window }`. `total: 0` is
+the cheap answer to "has anything happened since my cursor" — one bounded scan instead of a page of
+events. It applies the same cursor rules, including the `410` when retention has moved past the
+cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
+
+The summary's `cursor` advances only over events that were **counted**. A count is bounded, so a
+window larger than the bound is counted in part: `truncated: true` says so, `cursor` names the last
+counted sequence, and the next poll continues from there. Reporting the newest sequence in the
+window instead counts part of a window while claiming all of it, so a poller moves past events it
+was never told about — a real bug (`audio-feed-8d6r`), and the same rule as the errors feed's cursor
+advancing over what was scanned rather than what was returned.
 
 ## What a poller does
 

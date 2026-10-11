@@ -55,9 +55,18 @@ export function createLogsRepository(
     },
 
     async summarizeLogs(query: LogQuery = {}): Promise<LogSummary> {
-      return summarizeRecords(
-        await this.listLogs({ ...query, limit: query.limit ?? LOG_READ_LIMIT }),
-      );
+      const records = await this.listLogs({ ...query, limit: query.limit ?? LOG_READ_LIMIT });
+      const bounds = await this.logBounds();
+      const countedThroughSeq = records.length > 0
+        ? records[records.length - 1]!.seq
+        : (query.sinceSeq ?? 0);
+      return {
+        ...summarizeRecords(records),
+        countedThroughSeq,
+        // Records exist after the boundary, so the scan is partial and the caller must come back
+        // rather than treat this count as the whole window (audio-feed-8d6r).
+        truncated: records.length > 0 && countedThroughSeq < bounds.newestSeq,
+      };
     },
 
     pruneLogs(before: Date): Promise<number> {

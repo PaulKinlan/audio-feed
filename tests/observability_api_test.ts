@@ -319,3 +319,48 @@ Deno.test("the key never reaches the store (audio-feed-s2pi, ao4s invariant)", a
   const serialised = JSON.stringify(await stores.metadata.listLogs());
   assert(!serialised.includes(KEY), "the shared key is never logged, echoed or stored");
 });
+
+Deno.test("a summary cursor never skips what it did not count (audio-feed-8d6r)", async () => {
+  // The reviewer's reproduction: 500 records fill the store's read bound, and the 501st is an error.
+  // The old summary reported the window's NEWEST sequence as the cursor while having counted only the
+  // bound, so a poller advancing to it never saw the error — a silent skip, the one thing this API
+  // is not allowed to do.
+  const { fetch, stores } = app();
+  await seed(stores, 500, "debug", "http.request");
+  const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
+
+  const first = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(first.total, 500, "the count covers exactly what the scan could read");
+  assertEquals(first.truncated, true, "and says the window is larger than that");
+  assertEquals(
+    first.cursor,
+    "500",
+    "the cursor is the last COUNTED sequence, not the window's newest",
+  );
+  assert(Number(first.cursor) < errorSeq, "and so it cannot step over the uncounted error");
+
+  // Continuing from the reported cursor finds it. This is the property the bug destroyed.
+  const second = await (await fetch(authed(`/api/observability/summary?since=${first.cursor}`)))
+    .json();
+  assertEquals(second.total, 1, "the next poll sees the record the first one did not count");
+  assertEquals(second.bySeverity.error, 1);
+  assertEquals(second.truncated, false);
+  assertEquals(second.cursor, String(errorSeq));
+
+  // And the events themselves are reachable from the same cursor, so a poller that trusts the
+  // summary cursor still receives the event.
+  const events =
+    await (await fetch(authed(`/api/observability/errors?since=${first.cursor}&severity=error`)))
+      .json();
+  assertEquals(events.events.map((e: { seq: number }) => e.seq), [errorSeq]);
+});
+
+Deno.test("a summary that counted the whole window is not marked truncated", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 3, "error", "synthesis.failed");
+  const body = await (await fetch(authed("/api/observability/summary?since=0&severity=all")))
+    .json();
+  assertEquals(body.total, 3);
+  assertEquals(body.truncated, false);
+  assertEquals(body.cursor, "3");
+});

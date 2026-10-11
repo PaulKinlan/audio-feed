@@ -304,12 +304,18 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       ...(parsed.until !== undefined ? { untilSeq: parsed.until } : {}),
     });
 
+    // THE CURSOR ADVANCES ONLY OVER WHAT WAS COUNTED (audio-feed-8d6r). Reporting the window's
+    // newest sequence instead was a silent skip: the count is bounded, so a window with more records
+    // than the bound was counted only in part while the cursor claimed all of it, and a poller
+    // advancing to that cursor never saw the rest. The count and its boundary have to be reported
+    // together for the answer to be usable.
     return json({
-      cursor: String(bounds.newestSeq > parsed.since ? bounds.newestSeq : parsed.since),
+      cursor: String(summary.countedThroughSeq),
       since: String(parsed.since),
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,
+      truncated: summary.truncated,
       window: window(bounds),
     });
   };
