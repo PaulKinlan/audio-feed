@@ -51,7 +51,10 @@ export function createUsageRepository(core: KvCore, _host: () => MetadataStore):
             .sum(["synthesis_total_bytes"], BigInt(bytes))
             .sum(["synthesis_by_user", userId], 1n)
             .sum(["synthesis_bytes_by_user", userId], BigInt(bytes))
-            .sum(["synthesis_daily", userId, day], 1n);
+            .sum(["synthesis_daily", userId, day], 1n)
+            // audio-feed-m182: the same increment records the fleet-wide day counter, in the same
+            // transaction as the per-user one, so the global total is always the sum of the parts.
+            .sum(["synthesis_daily_all", day], 1n);
           const res = await tx.commit();
           if (res.ok) return;
           lastError = new Error(`atomic commit failed (attempt ${attempt + 1}/3)`);
@@ -91,6 +94,10 @@ export function createUsageRepository(core: KvCore, _host: () => MetadataStore):
         totalBytes: Number(bytesEntry.value?.value ?? 0n),
         perUser,
       };
+    },
+    async getDailySynthesisCount(day: string): Promise<number> {
+      const entry = await core.kv.get<Deno.KvU64>(["synthesis_daily_all", day]);
+      return Number(entry.value?.value ?? 0n);
     },
     async getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
       const entry = await core.kv.get<Deno.KvU64>(["synthesis_daily", userId, day]);

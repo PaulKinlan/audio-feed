@@ -43,6 +43,8 @@ export interface MemoryState {
   synthesisTotalBytes: number;
   synthesisByUser: Map<string, { count: number; bytes: number }>;
   synthesisByUserAndDay: Map<string, number>;
+  /** Paid episodes per UTC day across all subscribers (audio-feed-m182). */
+  synthesisByDay: Map<string, number>;
   outbox: OutboxNotification[];
   runs: RunRecord[];
   // Accounts (audio-feed-8fc).
@@ -71,6 +73,7 @@ export function createMemoryState(): MemoryState {
     synthesisTotalBytes: 0,
     synthesisByUser: new Map<string, { count: number; bytes: number }>(),
     synthesisByUserAndDay: new Map<string, number>(),
+    synthesisByDay: new Map<string, number>(),
     outbox: [],
     runs: [],
     sessions: new Map<string, Session>(),

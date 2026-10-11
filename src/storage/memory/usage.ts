@@ -43,6 +43,9 @@ export function createUsageRepository(
       });
       const dayKey = `${userId}:${day}`;
       state.synthesisByUserAndDay.set(dayKey, (state.synthesisByUserAndDay.get(dayKey) ?? 0) + 1);
+      // audio-feed-m182: the fleet-wide counter is incremented here, beside the per-user one, so the
+      // invariant the conformance suite asserts cannot be broken by a caller.
+      state.synthesisByDay.set(day, (state.synthesisByDay.get(day) ?? 0) + 1);
       return Promise.resolve();
     },
     getSynthesisCounts(today = utcDayKey()): Promise<SynthesisCounts> {
@@ -59,6 +62,9 @@ export function createUsageRepository(
         totalBytes: state.synthesisTotalBytes,
         perUser,
       });
+    },
+    getDailySynthesisCount(day: string): Promise<number> {
+      return Promise.resolve(state.synthesisByDay.get(day) ?? 0);
     },
     getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
       return Promise.resolve(state.synthesisByUserAndDay.get(`${userId}:${day}`) ?? 0);

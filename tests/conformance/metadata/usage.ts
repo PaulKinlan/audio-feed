@@ -99,6 +99,16 @@ export function registerUsageCases(suite: MetadataHarness) {
 
     assertEquals(await store.getUserDailySynthesisCount("user-a", day), 2);
     assertEquals(await store.getUserDailySynthesisCount("user-b", day), 1);
+
+    // audio-feed-m182: the fleet-wide day counter is written with the per-user one. The invariant
+    // that matters is that it stays the SUM of the parts — a global ceiling counted from a counter
+    // that can drift from the per-subscriber counters is a ceiling on the wrong number.
+    assertEquals(
+      await store.getDailySynthesisCount(day),
+      3,
+      "global total is the sum of the users",
+    );
+    assertEquals(await store.getDailySynthesisCount("2026-09-26"), 0, "another day is untouched");
   });
 
   test("daily synthesis count boundary resets cleanly across UTC midnight (audio-feed-9mp)", async (store) => {

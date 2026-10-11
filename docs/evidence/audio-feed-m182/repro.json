@@ -1,0 +1,16 @@
+{
+  "bead": "audio-feed-m182",
+  "measuredAt": "2026-10-11T00:45:57.388Z",
+  "mode": "global ceiling in force",
+  "subscribers": 3,
+  "episodesQueued": 9,
+  "configuredGlobalCeiling": 4,
+  "paidCalls": 4,
+  "readyEpisodes": 4,
+  "stillPending": 5,
+  "globalCountForToday": 4,
+  "deferredReasons": [
+    "daily spend ceiling reached across all subscribers (limit: 4, used: 4)"
+  ],
+  "warnedAboutTheDefaultCeiling": []
+}

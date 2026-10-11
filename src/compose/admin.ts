@@ -10,6 +10,7 @@ import { runFeedPollBatch, subscribeToFeed } from "../ingest/feed.ts";
 import {
   createGeminiSynthesizer,
   dailyEpisodeBudgetFor,
+  globalDailyEpisodeBudgetFor,
   runSynthesisBatch,
 } from "../worker/synthesis.ts";
 import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
@@ -29,7 +30,7 @@ import {
   extractClientIp,
   type FailedAuthLimiter,
 } from "../auth/rate_limit.ts";
-import { isAudioMode } from "../types.ts";
+import { isAudioMode, utcDayKey } from "../types.ts";
 import { isActiveAdmin, issueSetupLink, sameOrigin, sessionUser } from "../auth/sessions.ts";
 import { isOutdated, PROMPT_VERSION } from "../tts/prompt_version.ts";
 import { resolveOrigin } from "../origin.ts";
@@ -715,6 +716,10 @@ export function createAdminStatsHandler(
     );
     // Synthesis history can outlive a user record; report the ceiling the worker would apply.
     const orphanBudget = dailyEpisodeBudgetFor(null, ctx.config.defaultDailyEpisodeBudget);
+    const globalBudget = globalDailyEpisodeBudgetFor(
+      undefined,
+      ctx.config.globalDailyEpisodeBudget,
+    );
 
     // Feed processing times come from the poll runs we recorded, not from a
     // separate timer: one source of truth means the dashboard cannot disagree
@@ -747,6 +752,13 @@ export function createAdminStatsHandler(
           // against, so the dashboard cannot disagree with the gate that is actually charging money.
           defaultDailyEpisodeBudget: ctx.config.defaultDailyEpisodeBudget ??
             DEFAULT_DAILY_EPISODE_BUDGET,
+          // The fleet-wide ceiling, reported from the same resolver the worker enforces
+          // (audio-feed-m182), so the dashboard cannot disagree with the gate that charges money.
+          // `globalEpisodesToday` is the spend the ceiling is measured against, and
+          // `globalBudgetSource` says whether an operator set the number or it is the built-in one.
+          globalDailyEpisodeBudget: globalBudget.limit,
+          globalBudgetSource: globalBudget.source,
+          globalEpisodesToday: await ctx.stores.metadata.getDailySynthesisCount(utcDayKey()),
           usersWithoutBudget:
             users.filter((u) => budgetById.get(u.id)!.source === "default").length,
           perUser: synthesis.perUser.map((s) => ({

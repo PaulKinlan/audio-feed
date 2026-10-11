@@ -299,6 +299,9 @@ export class MemoryMetadataStore implements MetadataStore {
   getSynthesisCounts(today?: string): Promise<SynthesisCounts> {
     return this.repositories.usage.getSynthesisCounts(today);
   }
+  getDailySynthesisCount(day: string): Promise<number> {
+    return this.repositories.usage.getDailySynthesisCount(day);
+  }
   getUserDailySynthesisCount(userId: string, day: string): Promise<number> {
     return this.repositories.usage.getUserDailySynthesisCount(userId, day);
   }

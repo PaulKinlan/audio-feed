@@ -36,6 +36,19 @@ import { DEFAULT_TIMEOUT_MS, GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tt
  */
 export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
 
+/**
+ * The ceiling on paid episodes per UTC day across ALL subscribers (audio-feed-m182).
+ *
+ * The per-subscriber ceiling above bounds one subscriber, which leaves total spend linear in the
+ * number of approved subscribers: fifty each is unbounded as an operator approves more of them, and
+ * approval is the one action that multiplies it. This is the bound on the sum.
+ *
+ * The default is ten subscribers' worth at the default above, deliberately: it is high enough that
+ * a small deployment never meets it by accident, and finite so that the sum cannot run away while
+ * nobody is watching. Set GLOBAL_DAILY_EPISODE_BUDGET for the real number.
+ */
+export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
+
 export interface AppConfig {
   port: number;
   /**
@@ -89,6 +102,14 @@ export interface AppConfig {
    * means an unconfigured subscriber synthesises nothing.
    */
   defaultDailyEpisodeBudget?: number;
+  /**
+   * The ceiling on paid episodes per UTC day across every subscriber (audio-feed-m182).
+   *
+   * Resolved the same way as the per-subscriber ceiling — explicit, then this, then the constant —
+   * and enforced in the worker, so every entry point that synthesises is bounded by it. 0 means no
+   * synthesis happens at all.
+   */
+  globalDailyEpisodeBudget?: number;
   adminToken?: string;
   /**
    * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
@@ -176,6 +197,21 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  // audio-feed-m182: same fail-closed reasoning as the per-subscriber ceiling above. A typo that
+  // fell back to the constant would silently replace the operator's number with 500 and look
+  // healthy, and a non-integer or negative ceiling is not a ceiling.
+  const globalBudgetRaw = env("GLOBAL_DAILY_EPISODE_BUDGET");
+  let globalDailyEpisodeBudget: number | undefined;
+  if (globalBudgetRaw !== undefined) {
+    globalDailyEpisodeBudget = Number(globalBudgetRaw);
+    if (!Number.isInteger(globalDailyEpisodeBudget) || globalDailyEpisodeBudget < 0) {
+      throw new Error(
+        `Invalid GLOBAL_DAILY_EPISODE_BUDGET: "${globalBudgetRaw}". ` +
+          `Expected a non-negative integer number of episodes per day across all subscribers.`,
+      );
+    }
+  }
+
   return {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
@@ -191,6 +227,9 @@ export function loadConfig(): AppConfig {
     geminiApiKey: env("GEMINI_API_KEY"),
     ttsTimeoutMs: ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
     defaultDailyEpisodeBudget: defaultDailyEpisodeBudget ?? DEFAULT_DAILY_EPISODE_BUDGET,
+    // Resolved to a number here so the worker and the admin console read the same value; the worker
+    // still treats an unusable value as absent rather than as unlimited.
+    globalDailyEpisodeBudget: globalDailyEpisodeBudget ?? DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
     webAuthnRpId: env("WEBAUTHN_RP_ID"),

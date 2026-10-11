@@ -103,6 +103,10 @@ STORAGE_REGION=auto
 # Optional: daily episodes synthesised per subscriber who has no budget of their own.
 # Unset means 50. 0 means an unconfigured subscriber synthesises nothing.
 # DEFAULT_DAILY_EPISODE_BUDGET=50
+
+# Optional: daily paid episodes across ALL subscribers, together (audio-feed-m182).
+# Unset means 500 — ten subscribers' worth of the default above. 0 means nothing is synthesised.
+# GLOBAL_DAILY_EPISODE_BUDGET=500
 ```
 
 ### Daily spend ceiling
@@ -116,6 +120,23 @@ ceiling and whether it was the subscriber's own budget or the deployment default
 by the default logs one line per run, and `GET /api/admin/stats` reports each subscriber's effective
 ceiling plus a count of subscribers running on the default (`usersWithoutBudget`). There is no
 setting that removes the ceiling: "effectively unlimited" is chosen by naming a large number.
+
+### Fleet-wide spend ceiling
+
+The per-subscriber ceiling bounds one subscriber, so total spend is still that number times the
+number of approved subscribers — and approving one is a single action. `GLOBAL_DAILY_EPISODE_BUDGET`
+(500 by default) caps paid episodes per UTC day across **all** subscribers together. It is resolved
+the same way as the per-subscriber ceiling (an explicit value, then the deployment's config, then
+the constant) and enforced at both the point where the worker decides who gets the batch and the
+point where it spends, so no path that synthesises can miss it. Exceeding it defers work exactly as
+the per-subscriber ceiling does: episodes stay pending and are served the next day.
+`GET /api/admin/stats` reports `globalDailyEpisodeBudget`, `globalBudgetSource` (whether an operator
+set it or it is the built-in number) and `globalEpisodesToday`, the usage the ceiling is measured
+against.
+
+Note the two interact by design: a subscriber on the default per-subscriber ceiling stops at 50, so
+reaching a 500 fleet ceiling takes about ten of them. Raise the fleet number when you approve more
+subscribers than that, or set per-subscriber budgets so the fleet ceiling is the one that bites.
 
 ### Default narration voice
 
