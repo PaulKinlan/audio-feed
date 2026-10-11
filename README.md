@@ -92,6 +92,9 @@ STORAGE_REGION=auto
 # Optional Origin Overrides
 # PUBLIC_BASE_URL=https://audio-feed.paulkinlan-ea.deno.net
 # TRUST_PROXY_HEADERS=1
+# Enable only behind a proxy that APPENDS the client address it saw. The rate limiter keys on the
+# last x-forwarded-for entry for that reason: a caller that prepends a forged address is ignored
+# rather than handed a fresh allowance.
 # Pin the advertised origin (feed URLs, redirects, WebAuthn RP ID) to a fixed
 # set of hosts; requests arriving on any other host are answered 421.
 # Comma-separated; the PUBLIC_BASE_URL host and loopback are always allowed.

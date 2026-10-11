@@ -27,6 +27,18 @@ All notable changes to this project will be documented in this file.
   subscriber uncapped. Exceeding the ceiling still DEFERS rather than fails, so the episodes are
   served the next day. `GET /api/admin/stats` reports each subscriber's effective ceiling, its
   source, and `usersWithoutBudget`, and a subscriber held by the default logs one line per run.
+- **Rate limits keyed on a header the caller controls (audio-feed-u2ve)**: with
+  `TRUST_PROXY_HEADERS=1`, the client address used to key every rate limit came from the FIRST entry
+  of `x-forwarded-for` — the entry a client supplies, since each hop appends to that header — so a
+  caller could rotate the header, land in a fresh bucket every request, and never meet the bound.
+  `cf-connecting-ip` was consulted before the chain as well, so a forged single-value header won
+  even when the trusted hop had appended the real address. The key is now the LAST entry of the
+  forwarded chain (the address the nearest hop appended, and the safe choice whether a proxy appends
+  or replaces), with `cf-connecting-ip` only as a fallback when there is no chain, and any value too
+  long to be an address falls back to the socket address rather than becoming an unbounded store
+  key. Measured against a bound of 5: 20 requests with a rotating forged prefix were all allowed
+  before, and exactly 5 are allowed now.
+
 - **Host-injection hardening (audio-feed-fp4r)**: new `ALLOWED_HOSTS` environment variable
   (comma-separated). When set, the advertised origin — feed `selfUrl`, enclosure URLs, redirects,
   and the WebAuthn RP ID derived from it — can only ever be a listed host; requests arriving on any
