@@ -564,6 +564,41 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "synthesizing");
   });
 
+  test("completeEpisode with status ready validates billing byteLength as a non-negative integer (audio-feed-do6b)", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    const invalidByteLengths = [
+      Number.NaN,
+      -5000,
+      -1,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      12.5,
+    ];
+    for (const invalid of invalidByteLengths) {
+      let threw = false;
+      try {
+        await store.completeEpisode(
+          { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+          "worker-a",
+          { byteLength: invalid },
+        );
+      } catch (err) {
+        threw = true;
+        assert(err instanceof TypeError, `byteLength ${invalid} must throw TypeError`);
+      }
+      assertEquals(threw, true, `byteLength ${invalid} must be rejected`);
+      assertEquals((await store.getEpisode("user-1", "e1"))?.status, "synthesizing");
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const counts = await store.getSynthesisCounts(today);
+    assertEquals(counts.total, 0, "rejected completions must not increment synthesis count");
+    assertEquals(counts.totalBytes, 0, "rejected completions must not corrupt total bytes");
+  });
+
   test("completeEpisode with status ready atomically updates spend and replay does not double charge (audio-feed-thrs, audio-feed-a7i9)", async (store) => {
     await store.putEpisode(queued());
     const claimed = await store.claimEpisode("user-1", "e1", CLAIM);

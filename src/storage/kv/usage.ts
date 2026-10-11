@@ -42,6 +42,11 @@ export function createUsageRepository(core: KvCore, _host: () => MetadataStore):
     },
     // Synthesis stats & budget tracking (audio-feed-9mp, audio-feed-akm)
     async recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
+      if (!Number.isFinite(bytes) || !Number.isInteger(bytes) || bytes < 0) {
+        throw new TypeError(
+          `recordSynthesis requires a non-negative integer byte count (got ${bytes}) (audio-feed-do6b)`,
+        );
+      }
       const day = utcDayKey(at);
       let lastError: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {

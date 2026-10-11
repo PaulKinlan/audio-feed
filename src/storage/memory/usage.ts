@@ -33,6 +33,11 @@ export function createUsageRepository(
     },
     // Synthesis stats & budget tracking (audio-feed-9mp)
     recordSynthesis(userId: string, bytes: number, at = new Date()): Promise<void> {
+      if (!Number.isFinite(bytes) || !Number.isInteger(bytes) || bytes < 0) {
+        throw new TypeError(
+          `recordSynthesis requires a non-negative integer byte count (got ${bytes}) (audio-feed-do6b)`,
+        );
+      }
       const day = utcDayKey(at);
       state.synthesisTotal++;
       state.synthesisTotalBytes += bytes;
