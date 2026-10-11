@@ -113,22 +113,84 @@ try {
   await cdp("Page.navigate", { url: pageUrl });
   // Let it paint and settle: LCP is only final once the page stops producing candidates.
   await wait(4000);
-  // A trusted click, because an untrusted one produces no interaction entry.
-  await cdp("Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    x: 40,
-    y: 40,
-    button: "left",
-    clickCount: 1,
-  });
-  await cdp("Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: 40,
-    y: 40,
-    button: "left",
-    clickCount: 1,
-  });
+  // KNOWN INTERACTIONS, so the count can be compared against what this run actually dispatched
+  // (audio-feed-dzgj). A mouse press and release is ONE interaction that emits several events
+  // (pointerdown, mousedown, pointerup, mouseup, click), which is exactly the case a naive counter
+  // gets wrong by counting events instead of interactions.
+  const press = (x: number, y: number) =>
+    cdp("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+  const release = (x: number, y: number) =>
+    cdp("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+  const MOUSE_INTERACTIONS = 3;
+  for (let i = 0; i < MOUSE_INTERACTIONS; i++) {
+    await press(40 + i * 20, 40);
+    await release(40 + i * 20, 40);
+    await wait(150);
+  }
+  // Keys after the mouse, because the click focuses the page and an unfocused page receives no
+  // keydown at all.
+  const KEY_INTERACTIONS = 2;
+  for (let i = 0; i < KEY_INTERACTIONS; i++) {
+    await cdp("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+    });
+    await cdp("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+    });
+    await wait(150);
+  }
   await wait(1500);
+
+  // What the PAGE counted, read out of it rather than assumed.
+  const state = await cdp("Runtime.evaluate", {
+    expression:
+      "JSON.stringify(globalThis.cwvState ? { starts: cwvState.starts(), observed: cwvState.observed() } : null)",
+    returnByValue: true,
+  }) as { result?: { value?: string } };
+  const counted = JSON.parse(state.result?.value ?? "null") as
+    | { starts: number; observed: number[] }
+    | null;
+  const dispatched = MOUSE_INTERACTIONS + KEY_INTERACTIONS;
+  console.log(
+    `  OBSERVED: dispatched ${dispatched} interactions (${MOUSE_INTERACTIONS} mouse press/release, each also emitting a click, plus ${KEY_INTERACTIONS} key presses)`,
+  );
+  console.log(`  OBSERVED: the page counted ${counted ? counted.starts : "nothing (no cwvState)"}`);
+  console.log(
+    `  OBSERVED: interaction durations the observer reported: ${
+      counted ? JSON.stringify(counted.observed) : "none"
+    }`,
+  );
+  check("the collector exposes its count for checking", counted !== null);
+  // The invariant that matters: an OVERCOUNT understates INP, which is the dangerous direction. An
+  // undercount only degrades the value to the upper bound the interaction count exists to remove.
+  check(
+    "the page counted no more interactions than were dispatched (an overcount would understate INP)",
+    (counted?.starts ?? 0) <= dispatched,
+    `counted ${counted?.starts} of ${dispatched} dispatched`,
+  );
+  if (counted && counted.starts < dispatched) {
+    console.log(
+      `  NOTE: counted ${counted.starts} of ${dispatched} - an undercount, which is a known degradation to the upper bound rather than a wrong value in the dangerous direction. Key events reaching a headless page is the usual reason.`,
+    );
+  }
 
   // The beacon fires on pagehide/visibilitychange, so navigating away IS the flush.
   await cdp("Page.navigate", { url: "about:blank" });
