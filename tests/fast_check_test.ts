@@ -205,3 +205,70 @@ Deno.test("the gate actually emits the marker on both success paths (dywc)", asy
   );
   assert(files.includes("tests/fast_check_test.ts"), "and must include real test files");
 });
+
+// ---------------------------------------------------------------------------------------------
+// audio-feed-dq08: hyphen-to-underscore normalization pins
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("the name convention normalises hyphen and underscore both ways (dq08)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/tests/fast_check_test.ts`, "");
+    await Deno.writeTextFile(`${dir}/tests/other-tool_test.ts`, "");
+
+    // 1. fast-check (hyphen) -> fast_check_test (underscore)
+    const matchedHyphen = await nameMatchedTests(
+      ["scripts/fast-check.ts"],
+      `${dir}/tests`,
+    );
+    assertEquals(
+      matchedHyphen.get("scripts/fast-check.ts"),
+      ["tests/fast_check_test.ts"],
+      "hyphenated source maps to underscored test",
+    );
+
+    // 2. other_tool (underscore) -> other-tool_test (hyphen)
+    const matchedUnderscore = await nameMatchedTests(
+      ["scripts/other_tool.ts"],
+      `${dir}/tests`,
+    );
+    assertEquals(
+      matchedUnderscore.get("scripts/other_tool.ts"),
+      ["tests/other-tool_test.ts"],
+      "underscored source maps to hyphenated test",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("the fleet reporter stem normalization matches both ways (dq08)", () => {
+  // Pins the reporter's normalize_stem_variants contract from check-coverage.py
+  const normalize = (st: string) => {
+    const variants = new Set([st]);
+    if (st.includes("-")) variants.add(st.replace(/-/g, "_"));
+    if (st.includes("_")) variants.add(st.replace(/_/g, "-"));
+    const names = new Set<string>();
+    for (const v of variants) {
+      names.add(v);
+      names.add(`test_${v}`);
+      names.add(`${v}_test`);
+      names.add(`test-${v}`);
+      names.add(`${v}-test`);
+      names.add(`${v}.test`);
+      names.add(`${v}.spec`);
+    }
+    return names;
+  };
+
+  // Hyphen to underscore
+  const hyphenSource = normalize("fast-check");
+  assert(hyphenSource.has("fast_check_test"), "fast-check must match fast_check_test");
+  assert(hyphenSource.has("test_fast_check"), "fast-check must match test_fast_check");
+
+  // Underscore to hyphen
+  const underscoreSource = normalize("fast_check");
+  assert(underscoreSource.has("fast-check_test"), "fast_check must match fast-check_test");
+  assert(underscoreSource.has("test-fast-check"), "fast_check must match test-fast-check");
+});

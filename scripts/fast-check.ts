@@ -228,23 +228,26 @@ export async function nameMatchedTests(
   const matched = new Map<string, string[]>();
   const stems: { file: string; stem: string; subdir: string | null }[] = [];
   for (const file of changed) {
-    if (!/^src\//.test(file) || !file.endsWith(".ts")) continue;
+    if (!/^(src|scripts)\//.test(file) || !file.endsWith(".ts")) continue;
     const parts = file.split("/");
     stems.push({
       file,
       stem: parts[parts.length - 1]!.replace(/\.ts$/, ""),
-      subdir: parts.length > 2 ? parts.slice(1, -1).join("/") : null,
+      subdir: parts.length > 2 && parts[0] === "src" ? parts.slice(1, -1).join("/") : null,
     });
   }
   if (!stems.length) return matched;
 
   for await (const f of tsFiles(testsDir)) {
     const rel = f.slice(testsDir.length - "tests".length); // tests/...
-    if (!rel.endsWith("_test.ts")) continue;
+    if (!rel.endsWith("_test.ts") && !rel.endsWith("-test.ts")) continue;
     const base = rel.split("/").pop()!;
+    const testStem = base.replace(/(_test|\.test|\.spec|-test)\.ts$/, "");
     for (const { file, stem, subdir } of stems) {
-      const hit = base === `${stem}_test.ts` ||
-        (base.startsWith(`${stem}_`) && base.endsWith("_test.ts")) ||
+      const normStem = stem.replace(/[-_]/g, "_");
+      const normTestStem = testStem.replace(/[-_]/g, "_");
+      const hit = normTestStem === normStem ||
+        normTestStem.startsWith(`${normStem}_`) ||
         (subdir !== null && rel.startsWith(`tests/${subdir}/`));
       if (hit) matched.set(file, [...matched.get(file) ?? [], rel]);
     }
