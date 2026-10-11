@@ -43,6 +43,10 @@
 
 /** Hard ceilings. These are caps, not defaults: see FAIL CLOSED in the header. */
 export const MAX_EVENTS_PER_RUN = 200;
+/** The API's own maximum page (MAX_LIMIT in src/routes/observability.ts). Fetching the largest page the
+ * API allows costs nothing extra and makes the backlog estimate truer, while the SEND cap above still
+ * bounds what reaches the model. */
+export const FETCH_LIMIT = 500;
 export const MAX_PROMPT_BYTES = 64 * 1024;
 export const MAX_OUTPUT_TOKENS = 2048;
 export const MAX_CALLS_PER_DAY = 24;
@@ -66,7 +70,9 @@ const DEFAULT_STATE_DIR = `${
   Deno.env.get("HOME") ?? "."
 }/.local/state/audio-feed-observability-agent`;
 const DEFAULT_BASE_URL = "http://localhost:8000";
-const DEFAULT_MODEL = "gemini-2.5-flash";
+/** The app's own text model (DEFAULT_SCRIPT_MODEL in src/worker/script.ts), so the poll does not
+ * introduce a second, unmanaged model choice. */
+const DEFAULT_MODEL = "gemini-3.8-flash";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MODEL_TIMEOUT_MS = 120_000;
@@ -140,7 +146,9 @@ export type SkipReason =
   | "cap-daily-output-tokens"
   | "missing-gemini-key"
   | "model-failed"
-  | "api-failed";
+  | "api-failed"
+  /** Another run holds the lock. The daily ceiling is a construction only if two runs cannot race it. */
+  | "locked";
 
 export interface RunArtifact {
   startedAt: string;
@@ -208,6 +216,54 @@ export async function loadState(dir: string): Promise<PollState> {
   }
 }
 
+/**
+ * An EXCLUSIVE lock, taken before any work and held for the whole run.
+ *
+ * Without it the daily ceiling is policing rather than construction: two runs - a timer firing while a
+ * person runs the poll by hand, or two long runs overlapping - would each read callsToday = 23 and each
+ * make a call, and the ceiling Paul set would be exceeded by exactly the mechanism meant to enforce it.
+ * `createNew` is an atomic exclusive create, so the second caller fails rather than racing.
+ *
+ * A stale lock (from a run killed hard) is reclaimed after STALE_LOCK_MS so one crash cannot wedge the
+ * poll permanently; the age is the whole reason the file records a timestamp.
+ */
+export const LOCK_FILE = "run.lock";
+export const STALE_LOCK_MS = 30 * 60 * 1000;
+
+export async function acquireLock(dir: string, now: Date): Promise<boolean> {
+  await Deno.mkdir(dir, { recursive: true });
+  const path = `${dir}/${LOCK_FILE}`;
+  try {
+    const f = await Deno.open(path, { createNew: true, write: true });
+    await f.write(new TextEncoder().encode(now.toISOString()));
+    f.close();
+    return true;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.AlreadyExists)) throw err;
+    try {
+      const stat = await Deno.stat(path);
+      const ageMs = now.getTime() - (stat.mtime?.getTime() ?? 0);
+      if (ageMs > STALE_LOCK_MS) {
+        // Reclaim rather than wedge: a run killed by the reaper must not stop the poll forever.
+        await Deno.writeTextFile(path, now.toISOString());
+        return true;
+      }
+    } catch {
+      // The lock vanished between the open and the stat, which means the holder finished: try once more.
+      return await acquireLock(dir, now);
+    }
+    return false;
+  }
+}
+
+export async function releaseLock(dir: string): Promise<void> {
+  try {
+    await Deno.remove(`${dir}/${LOCK_FILE}`);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
 /** Writes atomically: a crash mid-write must not leave a corrupt cursor, which would lose coverage. */
 export async function saveState(dir: string, state: PollState): Promise<void> {
   await Deno.mkdir(dir, { recursive: true });
@@ -263,19 +319,29 @@ export interface LogEvent {
   correlationId?: string;
 }
 
+/**
+ * Both endpoints speak the store's contract, verified against src/routes/observability.ts rather than
+ * assumed: cursor and `since` are decimal STRINGS (the sequence of the last record SCANNED), `byType` is
+ * a list of {type, count}, and the summary's `truncated` means UNSCANNED records lie inside the window -
+ * a `total: 0, truncated: true` answer means "more behind a filter", not "nothing".
+ */
 export interface ErrorsPage {
   events: LogEvent[];
-  cursor: number;
+  cursor: string;
   hasMore: boolean;
+  scanned: number;
+  returned: number;
   window: { oldestRetained: number; newest: number };
 }
 
 export interface SummaryBody {
-  since: number;
-  newest: number;
+  cursor: string;
+  since: string;
   total: number;
   bySeverity: Record<string, number>;
-  byType: Record<string, number>;
+  byType: Array<{ type: string; count: number }>;
+  truncated: boolean;
+  scanned: number;
   window: { oldestRetained: number; newest: number };
 }
 
@@ -692,6 +758,9 @@ export async function runOnce(
     state = { ...state, lastRun: artifact.finishedAt, artifact };
     await saveState(config.stateDir, state);
     await Deno.writeTextFile(`${config.stateDir}/digest.md`, renderDigest(artifact));
+    // Released on EVERY path that returns through here, which is all of them, so a failure cannot leave
+    // the poll locked out until the stale timeout.
+    await releaseLock(config.stateDir);
     return artifact;
   };
 
@@ -704,7 +773,17 @@ export async function runOnce(
     return { artifact: await finish("skipped"), state };
   }
 
-  // (2) Daily caps are consulted BEFORE anything is fetched, and the day rolls first.
+  // (2) The lock, BEFORE the caps and BEFORE anything else that costs or writes. A ceiling that two
+  // concurrent runs can each pass is not a ceiling, so the exclusion is not an optimisation.
+  if (!(await acquireLock(config.stateDir, deps.now()))) {
+    artifact.reason = "locked";
+    artifact.note =
+      `Another run holds ${LOCK_FILE} in ${config.stateDir}. This run did nothing and wrote no state, ` +
+      `because the holder owns the cursor and the counters - writing here would clobber them.`;
+    return { artifact, state };
+  }
+
+  // (3) Daily caps are consulted BEFORE anything is fetched, and the day rolls first.
   if (state.callsToday >= MAX_CALLS_PER_DAY) {
     artifact.reason = "cap-daily-calls";
     artifact.note =
@@ -742,16 +821,22 @@ export async function runOnce(
       return { artifact: await finish("failed"), state };
     }
   }
-  if (summary.ok && summary.body.newest <= state.cursor) {
+  // THE idle test, and it has to be both terms. `total` alone is not enough: the API documents
+  // that a bound full of FILTERED-OUT records reports total 0 with truncated true, and a caller
+  // that stops there never reaches the records behind them. So nothing new means no matching
+  // records AND nothing unscanned. An earlier version compared a `newest` field that does not
+  // exist on this response at all, so the gate never fired and every run would have spent a call -
+  // the tests missed it because their stubs were built from the same wrong type.
+  if (summary.ok && summary.body.total === 0 && !summary.body.truncated) {
     artifact.reason = "idle";
     artifact.note =
-      `No new events since cursor ${state.cursor} (newest retained ${summary.body.newest}). ` +
-      `This run made no model call and filed nothing.`;
+      `Nothing new since cursor ${state.cursor}: 0 matching record(s) and nothing unscanned ` +
+      `in the window (scanned ${summary.body.scanned}). This run made no model call.`;
     return { artifact: await finish("idle"), state };
   }
 
   // (4) Fetch the OLDEST events that fit; the cursor will advance only past what is actually sent.
-  const page = await deps.fetchErrors(config, state.cursor, MAX_EVENTS_PER_RUN);
+  const page = await deps.fetchErrors(config, state.cursor, FETCH_LIMIT);
   if (!page.ok) {
     artifact.reason = "api-failed";
     artifact.note = `errors request failed with status ${page.status}.`;
@@ -778,8 +863,9 @@ export async function runOnce(
       ? `Cursor moved to ${page.body.window.newest} but no rankable events were returned.`
       : "Every new event already has an open bead carrying its fingerprint, so no model call was made.";
     // Advancing here is safe: every event was either non-rankable or already represented by a bead.
-    artifact.cursorAfter = page.body.cursor;
-    state = { ...state, cursor: page.body.cursor };
+    // The response cursor is a decimal STRING; the poll keeps numbers internally.
+    artifact.cursorAfter = Number(page.body.cursor);
+    state = { ...state, cursor: Number(page.body.cursor) };
     return { artifact: await finish("skipped"), state };
   }
 
@@ -855,7 +941,7 @@ export async function runOnce(
 
   const advanceTo = prompt.truncated
     ? Math.max(...sentSeqs)
-    : Math.max(page.body.cursor, ...sentSeqs);
+    : Math.max(Number(page.body.cursor), ...sentSeqs);
   artifact.cursorAfter = advanceTo;
   state = { ...state, cursor: advanceTo };
 

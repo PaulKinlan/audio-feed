@@ -7,7 +7,7 @@
  * THROW when they are called in a test that asserts they are not - so the assertion is that the call
  * did not happen, not merely that nothing visibly failed.
  */
-import { assert, assertEquals, assertMatch } from "@std/assert";
+import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import {
   BACKLOG_ALERT_HOURS,
   BACKLOG_FINGERPRINT,
@@ -62,23 +62,31 @@ function config(dir: string, over: Partial<PollConfig> = {}): PollConfig {
 }
 
 function summary(over: Partial<SummaryBody> = {}): SummaryBody {
+  // Mirrors the REAL response (src/routes/observability.ts): decimal-string cursors, byType as a list,
+  // and the idle signal expressed as total + truncated. The first version of this stub invented a
+  // top-level `newest`, which is how a broken idle gate passed the tests.
   return {
-    since: 0,
-    newest: 10,
+    cursor: "10",
+    since: "0",
     total: 1,
     bySeverity: {},
-    byType: {},
+    byType: [],
+    truncated: false,
+    scanned: 1,
     window: { oldestRetained: 1, newest: 10 },
     ...over,
   };
 }
 
 function page(events: LogEvent[], over: Partial<ErrorsPage> = {}): ErrorsPage {
+  const last = events.at(-1)?.seq ?? 0;
   return {
     events,
-    cursor: events.at(-1)?.seq ?? 0,
+    cursor: String(last),
     hasMore: false,
-    window: { oldestRetained: 1, newest: events.at(-1)?.seq ?? 0 },
+    scanned: events.length,
+    returned: events.length,
+    window: { oldestRetained: 1, newest: last },
     ...over,
   };
 }
@@ -104,7 +112,22 @@ function deps(
     fileBead: forbidden("fileBead"),
     callModel: forbidden("callModel"),
   } as unknown as RunDeps;
-  return Object.assign(base, over, { calls, beadArgs });
+  // OVERRIDES MUST BE COUNTED TOO. The first version of this helper only counted the forbidden stubs, so
+  // an assertion like `calls.fetchErrors === 1` read `undefined` and failed for the wrong reason - and,
+  // worse, it made a bite check vacuous, because the test failed whether or not the code was broken.
+  const wrapped: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(over)) {
+    if (typeof v === "function") {
+      const fn = v as (...a: unknown[]) => unknown;
+      wrapped[k] = (...args: unknown[]) => {
+        bump(k);
+        return fn(...args);
+      };
+    } else {
+      wrapped[k] = v;
+    }
+  }
+  return Object.assign(base, wrapped, { calls, beadArgs });
 }
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -154,6 +177,72 @@ Deno.test("enablement requires BOTH the flag and a key (audio-feed-yl6b)", () =>
       else Deno.env.set(k, v);
     }
   }
+});
+
+Deno.test("a concurrent run is refused, does no work, and writes NOTHING (audio-feed-yl6b)", async () => {
+  // The daily ceiling is a construction only if two runs cannot both read the same counter and both
+  // spend. This pins the exclusion, and pins that the loser of the race leaves the winner's state alone -
+  // clobbering the cursor or the counters would be worse than making the extra call.
+  await withTempDir(async (dir) => {
+    const { acquireLock, LOCK_FILE } = await import("../scripts/observability-agent-poll.ts");
+    const held = await acquireLock(dir, new Date("2026-10-11T12:00:00.000Z"));
+    assertEquals(held, true, "the first run must get the lock");
+    const d = deps();
+    const { artifact } = await runOnce(config(dir), d);
+    assertEquals(artifact.reason, "locked");
+    assertEquals(d.calls, {}, "a locked run must not reach any boundary");
+    await assertRejects(() => Deno.stat(`${dir}/state.json`), Deno.errors.NotFound);
+    await assertRejects(() => Deno.stat(`${dir}/digest.md`), Deno.errors.NotFound);
+    assert((await Deno.stat(`${dir}/${LOCK_FILE}`)).isFile, "and it must not steal the lock");
+  });
+});
+
+Deno.test("the lock is released at the end of a run, so the next one proceeds (audio-feed-yl6b)", async () => {
+  await withTempDir(async (dir) => {
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, truncated: false, scanned: 0 }),
+        }),
+    });
+    await runOnce(config(dir), d);
+    const second = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, truncated: false, scanned: 0 }),
+        }),
+    });
+    const { artifact } = await runOnce(config(dir), second);
+    assertEquals(
+      artifact.reason,
+      "idle",
+      "the second run must not be refused by a lock left behind",
+    );
+  });
+});
+
+Deno.test("a stale lock from a killed run is reclaimed rather than wedging the poll (audio-feed-yl6b)", async () => {
+  await withTempDir(async (dir) => {
+    const { acquireLock, LOCK_FILE, STALE_LOCK_MS } = await import(
+      "../scripts/observability-agent-poll.ts"
+    );
+    // The lock's age is judged by the FILESYSTEM clock, deliberately: a run killed hard leaves a real
+    // mtime, and an injected clock let the first version of this test pass while the real code would
+    // have wedged. So age the FILE, not the clock.
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000);
+    await Deno.writeTextFile(`${dir}/${LOCK_FILE}`, "stale");
+    await Deno.utime(`${dir}/${LOCK_FILE}`, old, old);
+    assertEquals(
+      await acquireLock(dir, new Date()),
+      true,
+      "a lock older than the stale window must be reclaimable, or one hard kill wedges the poll",
+    );
+    // A fresh lock must still exclude, or the exclusion is not an exclusion.
+    await Deno.writeTextFile(`${dir}/${LOCK_FILE}`, "fresh");
+    assertEquals(await acquireLock(dir, new Date()), false, "but a fresh lock must still exclude");
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -210,7 +299,11 @@ Deno.test("a daily token ceiling also stops the run before any fetch (audio-feed
 Deno.test("when the summary shows no movement the run makes NO model call (audio-feed-yl6b)", async () => {
   await withTempDir(async (dir) => {
     const d = deps({
-      fetchSummary: () => Promise.resolve({ ok: true as const, body: summary({ newest: 0 }) }),
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, truncated: false, scanned: 0 }),
+        }),
     });
     const { artifact } = await runOnce(config(dir), d);
     assertEquals(artifact.state, "idle");
@@ -223,7 +316,11 @@ Deno.test("when the summary shows no movement the run makes NO model call (audio
 Deno.test("every run writes an artifact, including the ones that did nothing (audio-feed-yl6b)", async () => {
   await withTempDir(async (dir) => {
     const d = deps({
-      fetchSummary: () => Promise.resolve({ ok: true as const, body: summary({ newest: 0 }) }),
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, truncated: false, scanned: 0 }),
+        }),
     });
     await runOnce(config(dir), d);
     const state = JSON.parse(await Deno.readTextFile(`${dir}/state.json`)) as PollState;
@@ -231,6 +328,29 @@ Deno.test("every run writes an artifact, including the ones that did nothing (au
     const digest = await Deno.readTextFile(`${dir}/digest.md`);
     assertMatch(digest, /state: idle \(idle\)/);
     assertMatch(digest, /BEHIND: no/);
+  });
+});
+
+Deno.test("a summary with total 0 but truncated true is NOT idle: it must fetch (audio-feed-yl6b)", async () => {
+  // The API documents that a bound full of FILTERED-OUT records reports total 0 WITH truncated true, and
+  // that a caller which stops there never reaches the records behind them. So idleness needs BOTH terms,
+  // and this test pins the second: a gate that looked at total alone would skip a page of real errors.
+  await withTempDir(async (dir) => {
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, truncated: true, scanned: 500 }),
+        }),
+      fetchErrors: () => Promise.resolve({ ok: true as const, body: page([event()]) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      callModel: () =>
+        Promise.resolve({ ok: true, text: "[]", inputTokens: 5, outputTokens: 2, error: null }),
+      fileBead: () => Promise.resolve("audio-feed-fake1"),
+    });
+    const { artifact } = await runOnce(config(dir), d);
+    assertEquals(d.calls.fetchErrors, 1, "a truncated summary must not be read as nothing new");
+    assert(artifact.reason !== "idle", `this run is not idle; got ${artifact.reason}`);
   });
 });
 
@@ -323,7 +443,11 @@ Deno.test("a truncated run advances the cursor only past what it SENT (audio-fee
   await withTempDir(async (dir) => {
     const many = Array.from({ length: 300 }, (_, i) => event({ seq: i + 1 }));
     const d = deps({
-      fetchSummary: () => Promise.resolve({ ok: true as const, body: summary({ newest: 300 }) }),
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 300, window: { oldestRetained: 1, newest: 300 } }),
+        }),
       fetchErrors: () =>
         Promise.resolve({ ok: true as const, body: page(many, { hasMore: true }) }),
       openFingerprints: () => Promise.resolve(new Set<string>()),
@@ -359,7 +483,11 @@ Deno.test("the newest unsent event age is recorded, and a stale backlog files ON
     );
     const filed: RankedSuggestion[] = [];
     const d = deps({
-      fetchSummary: () => Promise.resolve({ ok: true as const, body: summary({ newest: 300 }) }),
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 300, window: { oldestRetained: 1, newest: 300 } }),
+        }),
       fetchErrors: () =>
         Promise.resolve({ ok: true as const, body: page(many, { hasMore: true }) }),
       openFingerprints: () => Promise.resolve(new Set<string>()),
@@ -489,7 +617,7 @@ Deno.test("the observability key is sent as an Authorization header and never in
   const seen: Array<{ url: string; auth: string | null }> = [];
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, (req) => {
     seen.push({ url: req.url, auth: req.headers.get("authorization") });
-    return Response.json(summary({ newest: 0 }));
+    return Response.json(summary({ total: 0, truncated: false, scanned: 0 }));
   });
   try {
     const { fetchSummary } = await import("../scripts/observability-agent-poll.ts");
