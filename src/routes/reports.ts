@@ -367,12 +367,13 @@ export function createCspReportsHandler(
       return new Response(null, { status: 204 });
     }
 
-    // Per-window write budget check (audio-feed-jbpz): cap total reports stored per client window
+    // Per-window write budget check (audio-feed-jbpz, audio-feed-r49r): cap total reports stored per client window.
+    // Must fail closed if the CAS does not commit (writeResult.committed === false).
     const now = Date.now();
     const windowStart = now -
       (deps.rateLimitConfig?.windowMs ?? DEFAULT_REPORTS_RATE_LIMIT.windowMs);
     let budgetAdmitted = false;
-    await ctx.stores.metadata.atomicUpdate<number[]>(
+    const writeResult = await ctx.stores.metadata.atomicUpdate<number[]>(
       `reports:budget:${clientKey}`,
       (current) => {
         const active = (current ?? []).filter((t) => t > windowStart);
@@ -389,7 +390,7 @@ export function createCspReportsHandler(
       (deps.rateLimitConfig?.windowMs ?? DEFAULT_REPORTS_RATE_LIMIT.windowMs) * 2,
     );
 
-    if (!budgetAdmitted) {
+    if (!budgetAdmitted || !writeResult.committed) {
       return new Response(null, {
         status: 429,
         headers: { "retry-after": "60" },

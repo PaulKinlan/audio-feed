@@ -427,3 +427,46 @@ Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited a
     `log store must be protected from unbounded flood (stored: ${logs.length})`,
   );
 });
+
+Deno.test("audio-feed-r49r: uncommitted budget CAS write fails closed with 429 and stores NO rows", async () => {
+  const { app, stores } = await setupApp();
+
+  const originalAtomicUpdate = stores.metadata.atomicUpdate.bind(stores.metadata);
+  // Inject CAS failure on reports:budget:*
+  stores.metadata.atomicUpdate = async <T>(
+    key: string,
+    mutate: (current: T | null) => T | null,
+    ttlMs?: number,
+  ) => {
+    if (key.startsWith("reports:budget:")) {
+      // Simulate CAS failure / retry exhaustion: mutation was evaluated but write did not commit
+      mutate(null);
+      return { value: null, committed: false };
+    }
+    return await originalAtomicUpdate(key, mutate, ttlMs);
+  };
+
+  const payload = Array.from({ length: 5 }, (_, n) => ({
+    type: "crash",
+    body: { reason: `cas-fail-${n}` },
+  }));
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: { "content-type": "application/reports+json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+
+  assertEquals(res.status, 429, "uncommitted CAS must fail closed with 429");
+  assertEquals(res.headers.get("retry-after"), "60");
+
+  const logs = await stores.metadata.listLogs();
+  const reportLogs = logs.filter((l) => l.type.startsWith("report."));
+  assertEquals(
+    reportLogs.length,
+    0,
+    "no report logs must be stored when budget write did not commit",
+  );
+});
