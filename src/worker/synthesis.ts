@@ -1192,6 +1192,25 @@ export async function runSynthesisBatch(
   }
 
   let claimedAny = false;
+  // Settle any durable pending accounting from previous ticks (audio-feed-uecw)
+  try {
+    const pendingRec = await metadata.atomicUpdate<{
+      pending: Array<{ userId: string; byteLength: number; at: number }>;
+    }>(
+      "pending_synthesis_accounting",
+      (current) => (current?.pending?.length ? { pending: [] } : current),
+    );
+    if (pendingRec.committed && pendingRec.value?.pending) {
+      for (const item of pendingRec.value.pending) {
+        await metadata.recordSynthesis(item.userId, item.byteLength, new Date(item.at)).catch(
+          () => {},
+        );
+      }
+    }
+  } catch {
+    // Settle attempt next tick if KV temporarily unavailable
+  }
+
   const inFlightUploadKeys = new Set<string>();
   for (const { episode } of pending) {
     // Two approval checks, each for a different job:
@@ -1559,6 +1578,14 @@ export async function runSynthesisBatch(
           throw signal.reason;
         }
 
+        // Mutual exclusivity: if cleanupOnAbort ran first and recorded an orphan, refuse to commit (audio-feed-y0da)
+        const currentOrphans = await metadata.listOrphanBlobs(10);
+        if (currentOrphans.includes(stagingKey)) {
+          throw new Error(
+            `Cannot complete episode: staging key ${stagingKey} was orphaned by budget abort`,
+          );
+        }
+
         const byteLength = stored.size ?? bytes.length;
         const wrote = await metadata.completeEpisode({
           ...currentEpisode,
@@ -1587,6 +1614,18 @@ export async function runSynthesisBatch(
               `[audio-feed] failed to record synthesis for episode ${currentEpisode.id} (user ${currentEpisode.userId}):`,
               err,
             );
+            // Settle failure durably via atomicUpdate so subsequent tick commits it
+            await metadata.atomicUpdate<{
+              pending: Array<{ userId: string; byteLength: number; at: number }>;
+            }>(
+              "pending_synthesis_accounting",
+              (current) => ({
+                pending: [
+                  ...(current?.pending ?? []),
+                  { userId: currentEpisode.userId, byteLength, at: nowMs },
+                ],
+              }),
+            ).catch(() => {});
           }
         }
 
