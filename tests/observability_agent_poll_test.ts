@@ -21,6 +21,7 @@ import {
   oldestRetainedFromProblem,
   openFingerprints as realOpenFingerprints,
   OVERSIZED_FINGERPRINT,
+  ownsLock as realOwnsLock,
   parseSuggestions,
   type PollConfig,
   type PollState,
@@ -115,6 +116,9 @@ function deps(
     openFingerprints: forbidden("openFingerprints"),
     fileBead: forbidden("fileBead"),
     callModel: forbidden("callModel"),
+    // NOT a spend boundary, so the REAL one is the honest default: it reads the lock this run actually
+    // holds in the temp dir and says yes. Tests that exercise the guard override it with a `false`.
+    ownsLock: realOwnsLock,
   } as unknown as RunDeps;
   // OVERRIDES MUST BE COUNTED TOO. The first version of this helper only counted the forbidden stubs, so
   // an assertion like `calls.fetchErrors === 1` read `undefined` and failed for the wrong reason - and,
@@ -1140,6 +1144,93 @@ Deno.test("the backlog is newest minus the cursor advanced to, with no second te
       artifact.pagesRemaining,
       Math.max(1, Math.ceil(artifact.backlog / MAX_EVENTS_PER_RUN)),
     );
+  });
+});
+
+Deno.test("restoring a displaced lock never replaces a live one (audio-feed-131z)", async () => {
+  // Finding 2: the restore wrote unconditionally, so a run putting its own lock back could delete a lock a
+  // third run had acquired in the meantime. The property is that the restore either puts the file back and
+  // says so, or loses the race and leaves the live lock untouched - never replaces it. Deterministic,
+  // because the hazard is in this one step rather than in the timing.
+  await withTempDir(async (dir) => {
+    const { restoreIfFree, LOCK_FILE } = await import("../scripts/observability-agent-poll.ts");
+    const path = `${dir}/${LOCK_FILE}`;
+    const clobbered: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      const displaced = `${dir}/displaced-${i}`;
+      await Deno.writeTextFile(displaced, `holder B, round ${i}`);
+      await Deno.writeTextFile(path, `holder C LIVE, round ${i}`);
+      const restored = await restoreIfFree(displaced, path);
+      const after = await Deno.readTextFile(path).catch(() => "<ABSENT>");
+      if (restored || !after.startsWith("holder C LIVE")) clobbered.push(i);
+    }
+    assertEquals(
+      clobbered,
+      [],
+      `the live lock was replaced (or reported as restored) in rounds ${clobbered.join(",")}`,
+    );
+  });
+});
+
+Deno.test("a release racing an acquire never leaves the winner holding nothing (audio-feed-131z)", async () => {
+  // Finding 1: release checked the token and THEN removed, two separate moments. A run whose lease had
+  // been reclaimed could pass the check, another run could take the lock, and the remove would then delete
+  // the NEW holder's lock - leaving it running with the path free for a third. Forty rounds of real
+  // concurrency, because the failure is a window rather than a step.
+  await withTempDir(async (dir) => {
+    const { acquireLock, releaseLock, lockToken, LOCK_FILE, STALE_LOCK_MS } = await import(
+      "../scripts/observability-agent-poll.ts"
+    );
+    const path = `${dir}/${LOCK_FILE}`;
+    const broken: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const old = new Date(Date.now() - STALE_LOCK_MS - 60_000);
+      const aToken = lockToken(new Date());
+      await Deno.writeTextFile(path, aToken);
+      await Deno.utime(path, old, old);
+      const now = new Date();
+      const bToken = lockToken(now);
+      const [, bAcquired] = await Promise.all([
+        releaseLock(dir, aToken),
+        acquireLock(dir, now, bToken),
+      ]);
+      if (!bAcquired) continue; // B stood down: nothing to protect this round
+      const after = await Deno.readTextFile(path).catch(() => "<ABSENT>");
+      if (after !== bToken) broken.push(`${i}:${after === "<ABSENT>" ? "ABSENT" : "wrong-token"}`);
+      await releaseLock(dir, bToken);
+    }
+    assertEquals(
+      broken,
+      [],
+      `B acquired the lock but the path did not hold B's token in rounds ${broken.join(",")}`,
+    );
+  });
+});
+
+Deno.test("a run that lost its lease stands down without spending (audio-feed-131z)", async () => {
+  // The guard on the spend itself: every lock transition is atomic now, but a run reclaimed as stale can
+  // still be alive and about to call the model. One ownership read before the call turns that into an
+  // idle hour instead of a second call against a ceiling another run is also counting.
+  await withTempDir(async (dir) => {
+    const old = new Date(Date.parse("2026-10-11T12:00:00.000Z") - 8 * 3_600_000).toISOString();
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 2, window: { oldestRetained: 1, newest: 2 } }),
+        }),
+      fetchErrors: () =>
+        Promise.resolve({ ok: true as const, body: page([event({ seq: 1, time: old })]) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      // The lease was reclaimed under us.
+      ownsLock: () => Promise.resolve(false),
+    });
+    const { artifact } = await runOnce(config(dir), d);
+    assertEquals(artifact.reason, "lock-lost");
+    assertEquals(artifact.modelCalls, 0);
+    assertEquals(d.calls.callModel ?? 0, 0, "the model must not be called once the lease is gone");
+    assertEquals(artifact.cursorAfter, artifact.cursorBefore, "the cursor must not move");
+    assertEquals(d.calls.fileBead ?? 0, 0, "and no bead may be filed on someone else's turn");
   });
 });
 

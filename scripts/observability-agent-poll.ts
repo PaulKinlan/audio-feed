@@ -183,7 +183,13 @@ export type SkipReason =
    * bd refused a bead, so the events behind it were neither filed nor already open. The cursor is HELD
    * rather than advanced past them (audio-feed-hoow) - a failure to file must not look like coverage.
    */
-  | "bead-failed";
+  | "bead-failed"
+  /**
+   * The lease was reclaimed as stale while this run was still alive, so the lock is no longer ours.
+   * Standing down costs an idle hour; spending would put a second call against a ceiling another run is
+   * also counting (audio-feed-131z).
+   */
+  | "lock-lost";
 
 export interface RunArtifact {
   startedAt: string;
@@ -275,6 +281,62 @@ export function lockToken(now: Date): string {
   return `${now.toISOString()} pid=${Deno.pid} nonce=${crypto.randomUUID()}`;
 }
 
+/**
+ * Claims whatever file is at `path` by moving it to a unique name. RENAME is the atomic primitive: the
+ * caller that wins gets the path, everyone else gets NotFound, and there is no window in between where
+ * two callers can both believe they hold it.
+ *
+ * Every lock transition goes through this or through createNew. The rule it enforces is the one the
+ * review asked for: no check-then-act on the lock path, because the check and the act are separate
+ * moments and the lock can change hands between them (audio-feed-131z).
+ */
+async function claimByRename(path: string, suffix: string): Promise<string | null> {
+  const claimed = `${path}.${suffix}.${Deno.pid}.${crypto.randomUUID()}`;
+  try {
+    await Deno.rename(path, claimed);
+    return claimed;
+  } catch (err) {
+    // NotFound is the loser's signal, and losing is a normal outcome here: stand down, do not retry.
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Puts a displaced file back ONLY if the name is still free, and reports whether it did.
+ *
+ * The obvious version of this - Deno.rename onto the original path - is what the review found broken:
+ * rename REPLACES the destination unconditionally, so a run putting its lock back could delete a live
+ * lock that a third run acquired in the meantime (measured: rename onto an occupied path clobbers it).
+ * Deno.link instead fails with AlreadyExists and leaves the destination untouched, which makes this ONE
+ * atomic step whose failure mode is "lost the race and stand down" rather than "overwrote a live lock".
+ *
+ * A restore that cannot be proven safe is not attempted: if the name is taken, the caller logs the
+ * displacement and leaves the file aside. A displaced lock is recoverable by the stale sweep; a
+ * clobbered one is not.
+ */
+/**
+ * Exported so the no-clobber property can be pinned directly: this is the function BOTH lock transitions
+ * use to put a displaced file back, and the finding was that its predecessor silently replaced a live lock.
+ */
+export async function restoreIfFree(from: string, to: string): Promise<boolean> {
+  try {
+    await Deno.link(from, to);
+  } catch (err) {
+    if (err instanceof Deno.errors.AlreadyExists || err instanceof Deno.errors.NotFound) {
+      return false;
+    }
+    throw err;
+  }
+  try {
+    // The path now refers to the same file, so this extra name is inert - remove it best-effort.
+    await Deno.remove(from);
+  } catch {
+    // Nothing reads these names, so a leftover costs a directory entry and nothing else.
+  }
+  return true;
+}
+
 /** The lock's token and age, or null when there is no lock. */
 async function readLock(path: string): Promise<{ token: string; mtimeMs: number } | null> {
   try {
@@ -321,16 +383,11 @@ export async function acquireLock(
   // RENAME is the atomic primitive for this: exactly one reclaimer can move the file aside, and the loser
   // gets NotFound. The winner then takes the lock through the SAME exclusive create as everyone else, so a
   // third invocation racing us is serialised by createNew rather than by luck.
-  const graveyard = `${path}.stale.${Deno.pid}.${crypto.randomUUID()}`;
-  try {
-    await Deno.rename(path, graveyard);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) {
-      // Someone else reclaimed or released it while we were deciding, so the name is free: go through the
-      // normal path and let createNew decide who owns it, rather than assuming it is us.
-      return await acquireLock(dir, now, token);
-    }
-    throw err;
+  const graveyard = await claimByRename(path, "stale");
+  if (graveyard === null) {
+    // Someone else reclaimed or released it while we were deciding, so the name is free: go through the
+    // normal path and let createNew decide who owns it, rather than assuming it is us.
+    return await acquireLock(dir, now, token);
   }
 
   // NARROW RACE, CLOSED ON PURPOSE: between our stat and our rename, the holder may have released and a
@@ -338,11 +395,13 @@ export async function acquireLock(
   // whose it is, so if this is not the one we judged stale, put it back and stand down.
   const moved = await readLock(graveyard);
   if (moved !== null && moved.token !== held.token) {
-    try {
-      await Deno.rename(graveyard, path);
-    } catch {
-      // The path was retaken in the meantime: either way this lock is not ours.
-    }
+    const restored = await restoreIfFree(graveyard, path);
+    console.error(
+      `[observability-agent] displaced a lock we did not judge stale ` +
+        `(holder ${moved.token.slice(0, 32)}...); ${
+          restored ? "restored it" : "left it aside because the name was taken"
+        }. This is the stat-before-rename window, and it fails closed: this run stands down.`,
+    );
     return false;
   }
   try {
@@ -362,15 +421,41 @@ export async function acquireLock(
  */
 export async function releaseLock(dir: string, token?: string): Promise<void> {
   const path = `${dir}/${LOCK_FILE}`;
-  if (token !== undefined) {
-    const held = await readLock(path);
-    if (held !== null && held.token !== token) return;
+  // CLAIM THE REMOVAL ATOMICALLY, then look at what we claimed. The previous version checked the token
+  // and THEN removed, which are two separate moments: another run could take the lock in between, and the
+  // remove would then delete ITS lock, letting a third run start alongside it (audio-feed-131z).
+  const claimed = await claimByRename(path, "released");
+  if (claimed === null) return; // nothing to release: already gone, or someone else claimed it first
+  if (token === undefined) {
+    // The tokenless form is used by tests and callers that just want the lock gone; the claim already
+    // decided who removes it, so removing the file we claimed is safe.
+    try {
+      await Deno.remove(claimed);
+    } catch { /* already gone */ }
+    return;
   }
-  try {
-    await Deno.remove(path);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  const moved = await readLock(claimed);
+  if (moved === null || moved.token === token) {
+    try {
+      await Deno.remove(claimed);
+    } catch { /* already gone */ }
+    return;
   }
+  // NOT OUR LOCK. Something reclaimed ours as stale and took over while we were still running. Do not
+  // write it back over whatever holds the name now - that write is exactly what loses a third run's lock.
+  const restored = await restoreIfFree(claimed, path);
+  console.error(
+    `[observability-agent] release found a lock this run does not own ` +
+      `(holder ${moved.token.slice(0, 32)}...); ${
+        restored ? "returned it to the lock path" : "left it aside because the name was taken"
+      }. Our lease was reclaimed as stale while we were alive; no model call is made for this run.`,
+  );
+}
+
+/** Whether the lock still carries this run's token - the check that guards the spend itself. */
+export async function ownsLock(dir: string, token: string): Promise<boolean> {
+  const held = await readLock(`${dir}/${LOCK_FILE}`);
+  return held !== null && held.token === token;
 }
 
 /** Writes atomically: a crash mid-write must not leave a corrupt cursor, which would lose coverage. */
@@ -832,6 +917,7 @@ export interface RunDeps {
   openFingerprints: typeof openFingerprints;
   fileBead: typeof fileBead;
   callModel: typeof callModel;
+  ownsLock: typeof ownsLock;
 }
 
 export function defaultDeps(): RunDeps {
@@ -842,6 +928,7 @@ export function defaultDeps(): RunDeps {
     openFingerprints,
     fileBead,
     callModel,
+    ownsLock,
   };
 }
 
@@ -1081,6 +1168,19 @@ export async function runOnce(
   // in-memory increment is not a bound: kill the process inside the call and the spend happened while the
   // durable counter still read zero, so across timer runs a 24/day ceiling is exceeded by the mechanism
   // meant to enforce it (audio-feed-nvog). The reservation is settled against the actuals below.
+  // THE GUARD ON THE SPEND ITSELF (audio-feed-131z). Every lock TRANSITION is now a single atomic step,
+  // but a run whose lease was reclaimed as stale can still be alive and about to spend. Re-reading our own
+  // ownership here costs one filesystem read and makes the failure mode "stand down without spending"
+  // rather than "spend against a ceiling another run is also counting". It is a read whose only possible
+  // action is to stand down, which is the same direction every other transition fails in.
+  if (heldToken !== null && !(await deps.ownsLock(config.stateDir, heldToken))) {
+    artifact.reason = "lock-lost";
+    artifact.note =
+      `Another run reclaimed this run's lock as stale, so this run stands down without calling the ` +
+      `model: the lock moved on while we were preparing. Nothing is spent and the cursor is unchanged, ` +
+      `so the same window is retried by whichever run now holds the lock.`;
+    return { artifact: await finish("skipped"), state };
+  }
   const reservedInputTokens = Math.ceil(
     new TextEncoder().encode(prompt.text).length / BYTES_PER_TOKEN,
   );
