@@ -125,16 +125,20 @@ while matched events below it are unread loses them (`audio-feed-2af8`, after `a
 The summary answers "is there anything new" cheaply; the errors pages are what you actually read,
 and the durable cursor belongs to the reading, not to the check.
 
-**`truncated: true` means "keep polling from `cursor`", never "nothing to see".** It is a statement
-about the PROBE, and the durable cursor still moves only after a drain — the two cursors are
-separate things and the recipe below is the only place the durable one moves. The summary counts
-only the records its filter matched, but its cursor advances over everything the scan EXAMINED, so a
-scan whose bound fills with filtered-out records answers `total: 0, truncated: true` and the next
-poll continues from there. A caller that treats `total: 0` as "quiet" stops forever in exactly that
-case: the bound fills with events it did not ask for and the ones it wanted sit behind them
-(`audio-feed-36qa`). That is why the recipe below advances the PROBE on `truncated` and only moves
-the durable cursor after a drain, and why `/summary` also reports `scanned` — zero examined means
-genuinely empty, a full bound means there is more.
+**`truncated: true` means "ask again", never "nothing to see".** It is a statement about the PROBE:
+`cursor` on a summary response is where the next SUMMARY call continues from, and it may sit past
+records that filter excluded. The summary counts only the records its filter matched, but its cursor
+advances over everything the scan EXAMINED, so a scan whose bound fills with filtered-out records
+answers `total: 0, truncated: true`. A caller that treats `total: 0` as "quiet" stops forever in
+exactly that case: the bound fills with events it did not ask for and the ones it wanted sit behind
+them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means genuinely empty, and
+a full bound means there is more.
+
+The DURABLE cursor is a different thing, and it moves only after a drain. The recipe above reads
+`/errors` from the cursor it last consumed, page by page, and assigns its own cursor only once a page
+reports `hasMore: false`; it re-polls the SUMMARY from that same durable cursor each iteration and
+never advances the probe cursor on its behalf. Following the recipe literally therefore cannot move
+the wrong cursor, and the two rules above are the reason it is written that way.
 
 On `410 cursor_too_old`, the cursor cannot be resumed: re-baseline from `window.oldestRetained - 1`
 (accepting the gap, and saying so in whatever consumes the events) or from the current cursor, and
