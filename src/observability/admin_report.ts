@@ -89,6 +89,8 @@ export interface ClaimAttempt {
   reason?: string;
   /** Lease-to-terminal duration, when the terminal record carries it. */
   durationMs?: number;
+  /** Terminal-upload retry count recorded by the worker when yielding (audio-feed-lqd6). */
+  uploadRetry?: number;
 }
 
 /** One failure row, newest first. */
@@ -139,6 +141,8 @@ export interface RetryingRow {
   /** The phase the yield preserved, verbatim (e.g. `upload_retry`, `synthesized_3_of_12`). */
   phase: string;
   attempts?: number;
+  /** Terminal upload retry count recorded on the episode record (audio-feed-lqd6). */
+  uploadRetry?: number;
   /** The episode's own heartbeat at yield time — how long the retry has been waiting. */
   lastHeartbeat?: string;
   /** `nowMs - (lastHeartbeat ?? createdAt)`, precomputed for the page. */
@@ -256,6 +260,7 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     if (typeof context.owner === "string") row.owner = context.owner;
     if (typeof context.leaseMs === "number") row.leaseMs = context.leaseMs;
     if (typeof context.lastHeartbeat === "string") row.lastHeartbeat = context.lastHeartbeat;
+    if (typeof context.uploadRetry === "number") row.uploadRetry = context.uploadRetry;
 
     if (record.reason) row.reason = record.reason;
     if (context.workerState === "unknown") {
@@ -428,6 +433,7 @@ export async function buildObservabilityReport(
         title: episode.title,
         phase: episode.phase,
         attempts: episode.attempts,
+        uploadRetry: episode.uploadRetry,
         lastHeartbeat: episode.lastHeartbeat,
         waitingMs: Number.isFinite(anchor) ? Math.max(0, nowMs - anchor) : 0,
         ...(yieldedReasons.length > 0

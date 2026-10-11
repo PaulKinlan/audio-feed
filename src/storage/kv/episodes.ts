@@ -481,6 +481,8 @@ export function createEpisodesRepository(
         phase?: string;
         now?: string;
         advanceAttempts?: boolean;
+        uploadRetry?: number;
+        incrementUploadRetry?: boolean;
       },
     ): Promise<boolean> {
       const key: Deno.KvKey = ["episode", userId, episodeId];
@@ -497,6 +499,11 @@ export function createEpisodesRepository(
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
         attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
+        uploadRetry: update?.uploadRetry !== undefined
+          ? update.uploadRetry
+          : update?.incrementUploadRetry
+          ? (current.uploadRetry ?? 0) + 1
+          : current.uploadRetry,
       };
       return await atomicPutEpisode(core, yielded, entry);
     },
@@ -569,6 +576,7 @@ export function createEpisodesRepository(
         phase: undefined,
         lastHeartbeat: undefined,
         scriptTurns: undefined,
+        uploadRetry: undefined,
         // regenerating is NOT set: a failed render has no audio worth playing while it retries,
         // and setting it would put those bytes back into the subscriber's feed.
         regenerating: undefined,
@@ -591,6 +599,7 @@ export function createEpisodesRepository(
         phase: undefined,
         lastHeartbeat: undefined,
         scriptTurns: undefined,
+        uploadRetry: undefined,
       };
       return (await atomicPutEpisode(core, queued, entry)) ? queued : null;
     },

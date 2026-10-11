@@ -327,6 +327,8 @@ export function createEpisodesRepository(
         phase?: string;
         now?: string;
         advanceAttempts?: boolean;
+        uploadRetry?: number;
+        incrementUploadRetry?: boolean;
       },
     ): Promise<boolean> {
       const key = scoped(userId, episodeId);
@@ -344,6 +346,11 @@ export function createEpisodesRepository(
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
         attempts: update?.advanceAttempts ? (current.attempts ?? 0) : 0,
+        uploadRetry: update?.uploadRetry !== undefined
+          ? update.uploadRetry
+          : update?.incrementUploadRetry
+          ? (current.uploadRetry ?? 0) + 1
+          : current.uploadRetry,
       };
       writeEpisode(state, yielded);
       return Promise.resolve(true);
@@ -424,6 +431,7 @@ export function createEpisodesRepository(
         lastHeartbeat: undefined,
         scriptTurns: undefined,
         regenerating: undefined,
+        uploadRetry: undefined,
       };
       // No await between the read and the write, so this is as single-stepped as the KV
       // versionstamp check it is matching (see the note above #writeEpisode).
@@ -446,6 +454,7 @@ export function createEpisodesRepository(
         phase: undefined,
         lastHeartbeat: undefined,
         scriptTurns: undefined,
+        uploadRetry: undefined,
       };
       writeEpisode(state, queued);
       return Promise.resolve(structuredClone(queued));

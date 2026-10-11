@@ -61,6 +61,7 @@ import {
   DEFAULT_CLAIM_LEASE_MS,
   DEFAULT_CODE_HANDLING,
   DEFAULT_MAX_CLAIMS,
+  DEFAULT_MAX_UPLOAD_RETRIES,
   DEFAULT_VOICES,
   INBOX_SOURCE_ID,
   segmentBlobKey,
@@ -184,6 +185,8 @@ export interface SynthesisWorkerOptions {
   leaseMs?: number;
   /** Claims per episode before it is abandoned as unprocessable. */
   maxClaims?: number;
+  /** Terminal upload retries allowed before failing terminally (audio-feed-lqd6). */
+  maxUploadRetries?: number;
   /** Worker identity recorded on the claim. Defaults to a per-process id. */
   owner?: string;
   /**
@@ -238,6 +241,7 @@ const DEFAULTS: Required<
   maxInputBytes: MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS,
   leaseMs: DEFAULT_CLAIM_LEASE_MS,
   maxClaims: DEFAULT_MAX_CLAIMS,
+  maxUploadRetries: DEFAULT_MAX_UPLOAD_RETRIES,
   owner: WORKER_ID,
   // A full UUID: 8 hex digits could repeat a key still on the orphan list (audio-feed-8oz).
   revision: () => crypto.randomUUID(),
@@ -1088,12 +1092,29 @@ async function settleTerminalPersistence(
   owner: string,
   stagingKey: string,
   nowMs: number,
-): Promise<{ committed: boolean; episode?: Episode }> {
+  options?: {
+    terminalError?: string;
+    uploadRetry?: number;
+  },
+): Promise<{ committed: boolean; episode?: Episode; failed?: boolean }> {
   // Direct durable check: did completeEpisode commit ready with this stagingKey?
   const current = await metadata.getEpisode(userId, episodeId);
   if (current?.status === "ready" && current?.audioKey === stagingKey) {
     // Commit won! Refuse to delete blob and refuse to record orphan.
     return { committed: true, episode: current };
+  }
+
+  if (options?.terminalError) {
+    // Exceeded upload retry cap: fail terminally rather than yielding back to pending (audio-feed-lqd6).
+    const wrote = current && current.status === "synthesizing" && current.claimedBy === owner
+      ? await metadata.completeEpisode(
+        unsynthesized(current, options.terminalError),
+        owner,
+      ).catch(() => false)
+      : false;
+    await blobs.delete(stagingKey).catch(() => {});
+    await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+    return { committed: false, failed: wrote };
   }
 
   // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit.
@@ -1105,7 +1126,11 @@ async function settleTerminalPersistence(
     userId,
     episodeId,
     owner,
-    { phase: "upload_retry", now: new Date(nowMs).toISOString() },
+    {
+      phase: "upload_retry",
+      now: new Date(nowMs).toISOString(),
+      uploadRetry: options?.uploadRetry,
+    },
   ).catch(() => {});
 
   // Re-check durable state: did completeEpisode commit concurrently during the yield?
@@ -1117,7 +1142,7 @@ async function settleTerminalPersistence(
   // Confirmed uncommitted: delete blob and record orphan in KV (audio-feed-fsbk)
   await blobs.delete(stagingKey).catch(() => {});
   await metadata.recordOrphanBlob(stagingKey).catch(() => {});
-  return { committed: false };
+  return { committed: false, failed: false };
 }
 
 export async function runSynthesisBatch(
@@ -1717,6 +1742,18 @@ export async function runSynthesisBatch(
     // would make the orphan sweep skip a key nothing will ever settle (review P3).
     inFlightUploadKeys.add(inFlightStagingKey);
 
+    const currentUploadRetry = currentEpisode.uploadRetry ?? 0;
+    const nextUploadRetry = currentUploadRetry + 1;
+    const maxRetries = opts.maxUploadRetries ?? DEFAULT_MAX_UPLOAD_RETRIES;
+    const uploadRetryExceeded = nextUploadRetry > maxRetries;
+    const terminalRetryError = uploadRetryExceeded
+      ? `terminal audio upload exceeded retry cap (${maxRetries}): ${bytes.length} bytes repeatedly ` +
+        `interrupted by invocation budget (assumed ${ASSUMED_UPLOAD_BYTES_PER_MS} bytes/ms, ~${
+          Math.round(byteScaledUploadEstimateMs / 1000)
+        }s estimated duration vs ${maxInvocationDurationMs}ms budget); ` +
+        `raise MAX_INVOCATION_DURATION_MS or MAX_UPLOAD_RETRIES (audio-feed-lqd6)`
+      : undefined;
+
     const terminalEstimate = sizeScaledUploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
     // audio-feed-aqms: timer heartbeat while the terminal stage is awaited. The phase
     // is checkpointed BEFORE the put starts, so without this the claim's heartbeat
@@ -1752,6 +1789,10 @@ export async function runSynthesisBatch(
             opts.owner,
             stagingKey,
             nowMs,
+            {
+              terminalError: terminalRetryError,
+              uploadRetry: nextUploadRetry,
+            },
           );
         },
         fn: async (signal) => {
@@ -1818,6 +1859,7 @@ export async function runSynthesisBatch(
               phase: "ready",
               lastHeartbeat: new Date().toISOString(),
               scriptTurns: undefined,
+              uploadRetry: undefined,
             },
             opts.owner,
             { byteLength, at: new Date(nowMs) },
@@ -1839,6 +1881,10 @@ export async function runSynthesisBatch(
         opts.owner,
         stagingKey,
         nowMs,
+        {
+          terminalError: terminalRetryError,
+          uploadRetry: nextUploadRetry,
+        },
       );
       if (settle.committed && settle.episode) {
         // Complete won! Atomic billing was committed with completeEpisode (audio-feed-thrs).
@@ -1847,6 +1893,20 @@ export async function runSynthesisBatch(
           audioKey: stagingKey,
           byteLength: settle.episode.byteLength ?? bytes.length,
         });
+        break;
+      }
+
+      if (settle.failed || uploadRetryExceeded) {
+        const error = terminalRetryError!;
+        console.error(
+          `[audio-feed] terminal upload retries exceeded for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
+        );
+        result.failed.push({
+          episodeId: currentEpisode.id,
+          error,
+          title: currentEpisode.title,
+        });
+        await notifyOnDemand(currentEpisode, "failed", error);
         break;
       }
 
@@ -1870,9 +1930,10 @@ export async function runSynthesisBatch(
             // "has a reason" as "ended terminally" reports this yielded claim as a
             // failure with a terminal write.
             claimOutcome: "yielded",
+            uploadRetry: nextUploadRetry,
             reason: `terminal upload interrupted by invocation budget (${
               Math.round(bytes.length / 1024)
-            } KB); retrying on a later tick`,
+            } KB); retrying on a later tick (retry ${nextUploadRetry}/${maxRetries})`,
           }),
         );
       } catch {

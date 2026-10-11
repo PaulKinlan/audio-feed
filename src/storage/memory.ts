@@ -307,6 +307,8 @@ export class MemoryMetadataStore implements MetadataStore {
       phase?: string;
       now?: string;
       advanceAttempts?: boolean;
+      uploadRetry?: number;
+      incrementUploadRetry?: boolean;
     },
   ): Promise<boolean> {
     return this.repositories.episodes.yieldEpisodeClaim(userId, episodeId, owner, update);

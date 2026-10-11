@@ -580,9 +580,129 @@ Deno.test("audio-feed-2sec: a pending upload_retry episode is VISIBLE as retryin
   const body = await response.text();
   assertEquals(response.status, 200);
   assertStringIncludes(body, "Retrying (yielded claims)");
+  assertStringIncludes(body, "<th>Upload retries</th>");
   assertStringIncludes(body, "upload_retry");
   assertStringIncludes(body, "terminal upload interrupted by invocation budget");
   assertStringIncludes(body, "An episode waiting out an upload retry");
+});
+
+Deno.test("audio-feed-lqd6: upload retries counter and reason are surfaced in claim history and on the admin page", async () => {
+  const { stores, page } = await setup();
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-lqd6",
+      userId: "user-1",
+      sourceId: "stratechery",
+      content: "Content for lqd6 retry visibility test.",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-lqd6",
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-lqd6",
+      status: "pending",
+      mode: "direct",
+      title: "Episode with multiple upload retries",
+    }),
+  );
+
+  const leaseMs = 15 * 60_000;
+  // Attempt 1: claimed, uploaded, budget abort -> retry 1
+  const claimed1 = await stores.metadata.claimEpisode("user-1", "episode-lqd6", {
+    owner: "worker-1",
+    now: "2026-10-11T16:00:00.000Z",
+    leaseMs,
+    maxClaims: 3,
+  });
+  assert(claimed1);
+  await stores.metadata.yieldEpisodeClaim("user-1", "episode-lqd6", "worker-1", {
+    phase: "upload_retry",
+    uploadRetry: 1,
+    now: "2026-10-11T16:00:10.000Z",
+  });
+  await stores.metadata.appendLog(
+    claimLifecycleEvent(claimed1, {
+      phase: "upload_retry",
+      attempt: 1,
+      claimOutcome: "yielded",
+      uploadRetry: 1,
+      reason:
+        "terminal upload interrupted by invocation budget (45 MB); retrying on a later tick (retry 1/3)",
+    }),
+  );
+
+  // Attempt 2: claimed, uploaded, budget abort -> retry 2
+  const claimed2 = await stores.metadata.claimEpisode("user-1", "episode-lqd6", {
+    owner: "worker-2",
+    now: "2026-10-11T16:02:00.000Z",
+    leaseMs,
+    maxClaims: 3,
+  });
+  assert(claimed2);
+  await stores.metadata.yieldEpisodeClaim("user-1", "episode-lqd6", "worker-2", {
+    phase: "upload_retry",
+    uploadRetry: 2,
+    now: "2026-10-11T16:02:10.000Z",
+  });
+  await stores.metadata.appendLog(
+    claimLifecycleEvent(claimed2, {
+      phase: "upload_retry",
+      attempt: 1,
+      claimOutcome: "yielded",
+      uploadRetry: 2,
+      reason:
+        "terminal upload interrupted by invocation budget (45 MB); retrying on a later tick (retry 2/3)",
+    }),
+  );
+
+  const nowMs = Date.parse("2026-10-11T16:05:00.000Z");
+  const report = await buildObservabilityReport(stores, nowMs);
+
+  assertEquals(report.retries.length, 1);
+  assertEquals(report.retries[0]?.uploadRetry, 2);
+  assertEquals(report.retries[0]?.phase, "upload_retry");
+  assertStringIncludes(report.retries[0]?.lastRetryReason ?? "", "retry 2/3");
+
+  const response = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, "<th>Upload retries</th>");
+  assertStringIncludes(body, "<td>2</td>");
+  assertStringIncludes(body, "retry 2/3");
+
+  // Verify claim attempts folding and outcome labels:
+  // Both attempts are folded into attempt 1 with outcome "retrying" and uploadRetry
+  const attempts = report.attempts["episode-lqd6"] ?? [];
+  assertEquals(attempts.length, 1);
+  assertEquals(attempts[0]?.outcome, "retrying");
+  assertEquals(attempts[0]?.uploadRetry, 2);
+
+  // Now simulate terminal failure when retry cap is reached
+  const claimed3 = await stores.metadata.claimEpisode("user-1", "episode-lqd6", {
+    owner: "worker-3",
+    now: "2026-10-11T16:06:00.000Z",
+    leaseMs,
+    maxClaims: 3,
+  });
+  assert(claimed3);
+  const failureReason =
+    "terminal audio upload exceeded retry cap (2): 45000000 bytes repeatedly interrupted by invocation budget (assumed 10000 bytes/ms, ~5s estimated duration vs 45000ms budget); raise MAX_INVOCATION_DURATION_MS or MAX_UPLOAD_RETRIES (audio-feed-lqd6)";
+  await stores.metadata.completeEpisode(
+    { ...claimed3, status: "failed", error: failureReason },
+    "worker-3",
+  );
+
+  const failReport = await buildObservabilityReport(stores, Date.parse("2026-10-11T16:07:00.000Z"));
+  assertEquals(failReport.retries.length, 0, "failed episode is no longer in retries");
+  assertEquals(failReport.failures.length >= 1, true, "appears in recent failures");
+
+  const failResponse = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const failBody = await failResponse.text();
+  assertStringIncludes(failBody, "Recent failures");
+  assertStringIncludes(failBody, "terminal audio upload exceeded retry cap (2)");
+  assertStringIncludes(failBody, "failed (terminal write)");
 });
 
 Deno.test("audio-feed-506m: newer unrelated feed polls cannot hide the synthesis run the drain verdict needs", async () => {

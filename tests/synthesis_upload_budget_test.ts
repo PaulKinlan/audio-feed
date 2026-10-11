@@ -99,6 +99,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   const ep1 = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep1?.status, "pending");
   assertEquals(ep1?.phase, "upload_retry");
+  assertEquals(ep1?.uploadRetry, 1, "uploadRetry counter is incremented to 1 (audio-feed-lqd6)");
 
   // The retry churn is operator-visible in the claim history: one lifecycle
   // record per interrupted upload, naming the cause (coord landing condition).
@@ -109,6 +110,10 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   assertStringIncludes(
     (retryEvents[0] as unknown as { message?: string }).message ?? "",
     "terminal upload interrupted by invocation budget",
+  );
+  assertStringIncludes(
+    (retryEvents[0] as unknown as { message?: string }).message ?? "",
+    "retry 1/3",
   );
 
   // Next tick: fresh budget, synthesis served from the resume cache, put fits.
@@ -123,6 +128,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   assertEquals(r2.ready.length, 1, "episode completes on the retry tick");
   const ep2 = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep2?.status, "ready");
+  assertEquals(ep2?.uploadRetry, undefined, "uploadRetry cleared on completion");
 });
 
 Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budget fails terminally with a legible reason", async () => {
@@ -227,4 +233,92 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
       JSON.stringify(phases)
     }`,
   );
+});
+
+Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploadRetry counter and fail terminally upon exceeding maxUploadRetries", async () => {
+  const episodeId = "ep-lqd6-retry-cap";
+  const { ctx, stores } = await setupEnv(episodeId);
+
+  // 15 MB audio. Fresh window is 2500ms - 100ms flush = 2400ms.
+  // Slow put takes 2200ms of an 1800ms budget, so every upload attempt is aborted at the deadline.
+  const audio = fakeAudio(15_000_000);
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    // Hang until aborted by the signal
+    const signal = args[2]?.signal;
+    if (signal?.aborted) throw signal.reason;
+    await new Promise<void>((_, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    return oldPut(...args);
+  };
+  const synth = () => Promise.resolve(audio);
+
+  // Configure maxUploadRetries = 2.
+  // Tick 1: upload 1 interrupted -> retry 1 recorded (uploadRetry = 1)
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "lqd6-worker-1",
+    maxUploadRetries: 2,
+    maxInvocationDurationMs: 1_800,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 100,
+    flushMarginMs: 100,
+  });
+  assertEquals(r1.yielded.length, 1, "tick 1 yields resumably");
+  assertEquals(r1.failed.length, 0);
+  const ep1 = await stores.metadata.getEpisode("user-1", episodeId);
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, "upload_retry");
+  assertEquals(ep1?.uploadRetry, 1);
+  assertEquals(ep1?.attempts, 0, "attempts reset to 0 on progress yield");
+
+  // Tick 2: upload 2 (1st retry) interrupted -> retry 2 recorded (uploadRetry = 2)
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "lqd6-worker-2",
+    maxUploadRetries: 2,
+    maxInvocationDurationMs: 1_800,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 100,
+    flushMarginMs: 100,
+  });
+  assertEquals(r2.yielded.length, 1, "tick 2 yields resumably");
+  assertEquals(r2.failed.length, 0);
+  const ep2 = await stores.metadata.getEpisode("user-1", episodeId);
+  assertEquals(ep2?.status, "pending");
+  assertEquals(ep2?.phase, "upload_retry");
+  assertEquals(ep2?.uploadRetry, 2);
+  assertEquals(ep2?.attempts, 0);
+
+  // Tick 3: upload 3 (2nd retry) interrupted -> next retry would be 3 > 2 (exceeds cap)!
+  // Must fail TERMINALLY with legible error naming bytes, duration, and the knob.
+  const r3 = await runSynthesisBatch(ctx, synth, {
+    owner: "lqd6-worker-3",
+    maxUploadRetries: 2,
+    maxInvocationDurationMs: 1_800,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 100,
+    flushMarginMs: 100,
+  });
+  assertEquals(r3.yielded.length, 0, "tick 3 must NOT yield again");
+  assertEquals(r3.failed.length, 1, "tick 3 fails terminally upon exceeding retry cap");
+  const failedError = r3.failed[0]?.error ?? "";
+  assertStringIncludes(failedError, "terminal audio upload exceeded retry cap (2)");
+  assertStringIncludes(failedError, "bytes repeatedly interrupted by invocation budget");
+  assertStringIncludes(failedError, "assumed 10000 bytes/ms");
+  assertStringIncludes(failedError, "raise MAX_INVOCATION_DURATION_MS or MAX_UPLOAD_RETRIES");
+  assertStringIncludes(failedError, "(audio-feed-lqd6)");
+
+  const ep3 = await stores.metadata.getEpisode("user-1", episodeId);
+  assertEquals(ep3?.status, "failed");
+  assertEquals(ep3?.error, failedError);
+
+  // Tick 4: queue is now empty because episode is failed; no infinite churn!
+  const r4 = await runSynthesisBatch(ctx, synth, {
+    owner: "lqd6-worker-4",
+    maxUploadRetries: 2,
+    maxInvocationDurationMs: 1_800,
+  });
+  assertEquals(r4.ready.length, 0);
+  assertEquals(r4.yielded.length, 0);
+  assertEquals(r4.failed.length, 0, "no more churn; episode stays failed");
 });

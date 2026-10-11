@@ -388,6 +388,79 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     assertEquals(reclaimed.attempts, 1);
   });
 
+  test("yieldEpisodeClaim persists uploadRetry counter and preserves across claims (audio-feed-lqd6)", async (store) => {
+    await store.putEpisode(queued());
+
+    const claimed1 = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed1);
+    assertEquals(claimed1.uploadRetry, undefined);
+
+    // Yield with explicit uploadRetry: 1
+    const ok1 = await store.yieldEpisodeClaim("user-1", "e1", CLAIM.owner, {
+      phase: "upload_retry",
+      uploadRetry: 1,
+      now: "2026-10-11T16:00:00.000Z",
+    });
+    assertEquals(ok1, true);
+
+    const ep1 = await store.getEpisode("user-1", "e1");
+    assert(ep1);
+    assertEquals(ep1.status, "pending");
+    assertEquals(ep1.uploadRetry, 1);
+    assertEquals(ep1.attempts, 0, "upload_retry resets attempts to 0");
+
+    // Reclaim preserves uploadRetry counter
+    const claimed2 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-tick-2",
+      now: "2026-10-11T16:02:00.000Z",
+    });
+    assert(claimed2);
+    assertEquals(claimed2.status, "synthesizing");
+    assertEquals(claimed2.uploadRetry, 1);
+    assertEquals(claimed2.attempts, 1);
+
+    // Yield with incrementUploadRetry: true
+    const ok2 = await store.yieldEpisodeClaim("user-1", "e1", "worker-tick-2", {
+      phase: "upload_retry",
+      incrementUploadRetry: true,
+      now: "2026-10-11T16:04:00.000Z",
+    });
+    assertEquals(ok2, true);
+
+    const ep2 = await store.getEpisode("user-1", "e1");
+    assert(ep2);
+    assertEquals(ep2.uploadRetry, 2);
+
+    // Reclaim again, complete as failed
+    const claimed3 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-tick-3",
+      now: "2026-10-11T16:06:00.000Z",
+    });
+    assert(claimed3);
+    assertEquals(claimed3.uploadRetry, 2);
+
+    await store.completeEpisode(
+      { ...claimed3, status: "failed", error: "terminal failure test" },
+      "worker-tick-3",
+    );
+    const failedEp = await store.getEpisode("user-1", "e1");
+    assert(failedEp);
+    assertEquals(failedEp.status, "failed");
+    assertEquals(failedEp.uploadRetry, 2);
+
+    // retryEpisode clears uploadRetry for a fresh start
+    const retried = await store.retryEpisode("user-1", "e1");
+    assert(retried);
+    assertEquals(retried.status, "pending");
+    assertEquals(retried.uploadRetry, undefined);
+
+    const epAfterRetry = await store.getEpisode("user-1", "e1");
+    assert(epAfterRetry);
+    assertEquals(epAfterRetry.uploadRetry, undefined);
+  });
+
   // -- completeEpisode ----------------------------------------------------
 
   test("the claim owner may write the terminal state", async (store) => {
