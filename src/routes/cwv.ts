@@ -57,7 +57,8 @@ export function createCwvHandler(ctx: AppContext, deps: CwvDeps = {}): Handler<A
       return refused;
     }
 
-    // Size is checked before anything is read, so an oversized body is never parsed.
+    // A declared size is a cheap fast path, nothing more: a chunked body declares none, and a
+    // declared one can be a lie (audio-feed-6q9g). The real bound is on the READ, below.
     const declared = Number(req.headers.get("content-length") ?? "0");
     if (Number.isFinite(declared) && declared > MAX_CWV_BODY_BYTES) {
       return problem({ status: 413, title: "payload_too_large", detail: "CWV beacons are small." });
@@ -73,15 +74,43 @@ export function createCwvHandler(ctx: AppContext, deps: CwvDeps = {}): Handler<A
 
     let parsed: unknown;
     try {
-      const text = await req.text();
-      if (text.length > MAX_CWV_BODY_BYTES) {
+      // STOP READING at `cap + 1` BYTES (audio-feed-6q9g). Two earlier mistakes are both avoided
+      // here: a character count is not a byte count (a multibyte body passes a length check while
+      // being several times the size), and reading the whole body before measuring it means the cap
+      // is enforced after the process has already paid for the memory. Nothing past the cap is read,
+      // so an oversized body costs one byte more, and refusing it is the only outcome.
+      const reader = req.body?.getReader();
+      if (!reader) {
         return problem({
-          status: 413,
-          title: "payload_too_large",
-          detail: "CWV beacons are small.",
+          status: 400,
+          title: "invalid_report",
+          detail: "A CWV beacon must have a JSON body.",
         });
       }
-      parsed = JSON.parse(text);
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value?.byteLength) continue;
+        total += value.byteLength;
+        if (total > MAX_CWV_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          return problem({
+            status: 413,
+            title: "payload_too_large",
+            detail: "CWV beacons are small.",
+          });
+        }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      parsed = JSON.parse(new TextDecoder().decode(bytes));
     } catch {
       return problem({ status: 400, title: "invalid_body", detail: "Body must be JSON." });
     }

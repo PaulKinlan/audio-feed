@@ -71,7 +71,7 @@ import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from
 import { collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { DEFAULT_DAILY_EPISODE_BUDGET, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET } from "../config.ts";
-import { spanSeverity, synthesisSpan } from "../observability/spans.ts";
+import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../observability/spans.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -1254,11 +1254,31 @@ export async function runSynthesisBatch(
         synthesisMs: synthesisEndedAt - spanStartedAt,
         writeMs: performance.now() - synthesisEndedAt,
       };
-      // Never blocks correctness: appendLog resolves null rather than rejecting, so a span that
-      // cannot be stored cannot fail a synthesis that succeeded.
-      await metadata.appendLog(
-        synthesisSpan(currentEpisode, spanPhases, spanSeverity(spanPhases)),
-      );
+      // TRACING MUST NEVER FAIL A SYNTHESIS THAT SUCCEEDED (audio-feed-77j9). The ready commit above
+      // is already durable, so a rejected append here would report a completed episode as failed —
+      // the reverse of what this span is for. appendLog is expected to resolve null rather than
+      // reject, and this guard does not assume it: a throw is caught, the episode stays ready, and
+      // the failure is recorded as its own event so a broken trace path is visible instead of silent.
+      const spanRecord = synthesisSpan(currentEpisode, spanPhases, spanSeverity(spanPhases));
+      try {
+        await metadata.appendLog(spanRecord);
+      } catch (err) {
+        console.error(
+          `[audio-feed] span append failed for episode ${currentEpisode.id}; synthesis is unaffected:`,
+          err,
+        );
+        try {
+          await metadata.appendLog({
+            ...spanRecord,
+            type: `${SYNTHESIS_SPAN_EVENT}_failed`,
+            severity: "warn",
+            message: `could not store the span for episode ${currentEpisode.id}`,
+            reason: err instanceof Error ? err.name : "unknown",
+          });
+        } catch {
+          // Nothing left to record it in. The synthesis result is what matters and it is intact.
+        }
+      }
       result.ready.push({ episodeId: currentEpisode.id, audioKey, byteLength });
       // The stitched audio is committed; the per-segment blobs have done their job.
       try {

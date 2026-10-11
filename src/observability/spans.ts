@@ -75,10 +75,43 @@ export function synthesisSpan(
  * plus two model calls, so a minute is not alarming and five is; a write is blob storage and one
  * episode write, so a second is generous.
  */
-export const SPAN_THRESHOLDS = { synthesisMs: 300_000, writeMs: 5_000 } as const;
+export const SPAN_THRESHOLDS = {
+  queueWaitMs: 300_000,
+  synthesisMs: 300_000,
+  writeMs: 5_000,
+} as const;
+
+/**
+ * A queue wait that has stopped being a queue.
+ *
+ * Separate from the warn band because an episode that waited an HOUR was not slow, it was stuck, and
+ * the difference matters: this is the diagnosis the span exists to make, and a pathological wait
+ * reported as `info` is invisible to a poller whose default filter is warn+error (audio-feed-cbzg).
+ */
+export const PATHOLOGICAL_QUEUE_WAIT_MS = 3_600_000;
 
 /** The severity a completed span deserves, and why — or nothing when it is unremarkable. */
-export function spanSeverity(phases: SpanPhases): { severity: "info" | "warn"; reason?: string } {
+export function spanSeverity(
+  phases: SpanPhases,
+): { severity: "info" | "warn" | "error"; reason?: string } {
+  // Checked FIRST and at its own severity: a long queue wait explains a long everything-else, and
+  // reporting it as a slow synthesis would point the reader at the wrong component.
+  if (phases.queueWaitMs >= PATHOLOGICAL_QUEUE_WAIT_MS) {
+    return {
+      severity: "error",
+      reason: `waited ${
+        ms(phases.queueWaitMs)
+      }ms for a worker, over the ${PATHOLOGICAL_QUEUE_WAIT_MS}ms pathological threshold`,
+    };
+  }
+  if (phases.queueWaitMs >= SPAN_THRESHOLDS.queueWaitMs) {
+    return {
+      severity: "warn",
+      reason: `waited ${
+        ms(phases.queueWaitMs)
+      }ms for a worker, over the ${SPAN_THRESHOLDS.queueWaitMs}ms threshold`,
+    };
+  }
   if (phases.synthesisMs >= SPAN_THRESHOLDS.synthesisMs) {
     return {
       severity: "warn",

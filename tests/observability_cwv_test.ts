@@ -205,3 +205,58 @@ Deno.test("negative or absurd timings cannot produce an absurd span", () => {
   assertEquals(record.context, { queueWaitMs: 0, synthesisMs: 0, writeMs: 2 });
   assertEquals(record.durationMs, 2);
 });
+
+Deno.test("the byte cap bounds the READ, not the decoded string (audio-feed-6q9g)", async () => {
+  const { fetch, stores } = app();
+  // Multibyte: the character count stays under the cap while the bytes are several times it, which
+  // is exactly the body a `text.length` check waves through.
+  const multibyte = "é".repeat(MAX_CWV_BODY_BYTES);
+  assert(multibyte.length <= MAX_CWV_BODY_BYTES, "the fixture is under the cap by characters");
+  assert(
+    new TextEncoder().encode(multibyte).byteLength > MAX_CWV_BODY_BYTES,
+    "and over it by bytes",
+  );
+  const big = await fetch(beacon({ metric: "lcp", value: 1, pad: multibyte }));
+  assertEquals(big.status, 413);
+  assertEquals((await big.json()).error, "payload_too_large");
+
+  // Streamed: a chunked body declares no content-length, so the declared check has nothing to see.
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"metric":"lcp","value":1,"pad":"'));
+      controller.enqueue(new TextEncoder().encode("x".repeat(MAX_CWV_BODY_BYTES * 2)));
+      controller.enqueue(new TextEncoder().encode('"}'));
+      controller.close();
+    },
+  });
+  const chunked = await fetch(
+    new Request(`${BASE}/api/cwv`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit),
+  );
+  assertEquals(chunked.status, 413, "a streamed body with no declared size is still bounded");
+
+  // And neither of them was stored.
+  assertEquals((await stores.metadata.listLogs()).filter((r) => r.type === "cwv.report").length, 0);
+});
+
+Deno.test("a pathological queue wait is an error, not invisible info (audio-feed-cbzg)", () => {
+  // An hour of waiting is the diagnosis this span exists to provide, and `info` is filtered out of
+  // the default poller's view.
+  const stuck = spanSeverity({ queueWaitMs: 3_600_000, synthesisMs: 1_000, writeMs: 10 });
+  assertEquals(stuck.severity, "error");
+  assertStringIncludes(stuck.reason ?? "", "waited");
+  assertStringIncludes(stuck.reason ?? "", "worker");
+
+  const slow = spanSeverity({ queueWaitMs: 600_000, synthesisMs: 1_000, writeMs: 10 });
+  assertEquals(slow.severity, "warn");
+
+  // And the queue is checked before the phases it explains, so a long wait does not get reported as
+  // a slow synthesis and point the reader at the wrong component.
+  const both = spanSeverity({ queueWaitMs: 3_600_000, synthesisMs: 400_000, writeMs: 10 });
+  assertEquals(both.severity, "error");
+  assertStringIncludes(both.reason ?? "", "worker");
+});

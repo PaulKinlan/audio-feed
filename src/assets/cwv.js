@@ -26,8 +26,12 @@
   })();
 
   let lcp = 0;
-  let inp = 0;
   let cls = 0;
+  let clsObserved = false;
+  // Interaction latencies, kept so INP can be the 98th percentile rather than the worst one
+  // (audio-feed-dzgj): INP is defined over the distribution of interactions, and reporting the
+  // single worst event makes every page look as bad as its unluckiest click.
+  const interactions = [];
   let sent = false;
 
   // LCP: keep the latest candidate; the final one is only known at unload.
@@ -39,24 +43,48 @@
     }).observe({ type: "largest-contentful-paint", buffered: true });
   } catch (_) { /* not supported: the metric is simply never reported */ }
 
-  // CLS: sum of layout shifts that were not caused by user input, which is what the metric means.
+  // CLS: the LARGEST SESSION WINDOW, not a running total (audio-feed-d55l). A session window ends
+  // after a 1s gap in shifts or once it has lasted 5s, and the metric is the biggest window's score.
+  // Summing every shift instead lets a page that jitters all session accumulate a score no window
+  // ever had, and it grows without bound the longer a visitor stays.
+  let clsWindowValue = 0;
+  let clsWindowStart = 0;
+  let clsWindowLast = 0;
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
-        if (!entry.hadRecentInput) cls += entry.value;
+        if (entry.hadRecentInput) return;
+        clsObserved = true;
+        const start = entry.startTime;
+        const joined = clsWindowValue !== 0 && start - clsWindowLast < 1000 &&
+          start - clsWindowStart < 5000;
+        if (!joined) {
+          clsWindowStart = start;
+          clsWindowValue = 0;
+        }
+        clsWindowValue += entry.value;
+        clsWindowLast = start;
+        if (clsWindowValue > cls) cls = clsWindowValue;
       });
     }).observe({ type: "layout-shift", buffered: true });
   } catch (_) { /* as above */ }
 
-  // INP: the worst interaction latency observed. The entry type is `event`; the duration threshold
-  // keeps the observer from reporting every trivial event.
+  // INP: interaction latencies are collected, and the 98th percentile is sent below.
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (entry) {
-        if (entry.duration > inp) inp = entry.duration;
+        interactions.push(entry.duration);
       });
     }).observe({ type: "event", buffered: true, durationThreshold: 40 });
   } catch (_) { /* as above */ }
+
+  /** The 98th percentile, the way the metric is defined. Nearest-rank: no interpolation, so the
+   * value reported is always one a real interaction actually had. */
+  const p98 = (values) => {
+    const sorted = values.slice().sort((a, b) => a - b);
+    const rank = Math.ceil(0.98 * sorted.length);
+    return sorted[Math.max(0, Math.min(sorted.length - 1, rank - 1))];
+  };
 
   const send = (metric, value) => {
     try {
@@ -72,10 +100,12 @@
     if (sent) return;
     sent = true;
     if (lcp > 0) send("lcp", Math.round(lcp));
-    if (inp > 0) send("inp", Math.round(inp));
-    // Three decimals: CLS is a small ratio and rounding it to an integer would report every score
-    // as zero.
-    if (cls > 0) send("cls", Math.round(cls * 1000) / 1000);
+    if (interactions.length > 0) send("inp", Math.round(p98(interactions)));
+    // CLS is sent whenever the page had ANY layout shift, including a score of exactly zero
+    // (audio-feed-d55l): zero is a real, good measurement, and the previous `if (cls > 0)` meant a
+    // well-built page reported nothing at all. Three decimals, because CLS is a small ratio and
+    // rounding to an integer would report every score as zero.
+    if (clsObserved) send("cls", Math.round(cls * 1000) / 1000);
   };
 
   // Both, because neither is reliable alone: `pagehide` is the documented place for this and fires
