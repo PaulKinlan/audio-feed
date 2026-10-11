@@ -109,20 +109,9 @@ const say = (kind, message, detail, playerUrl) => {
   }
 };
 
-const returningBox = /** @type {HTMLElement | null} */ (
-  document.getElementById("returningSubscriber")
-);
-const storedToken = (() => {
-  try {
-    return localStorage.getItem("audio-feed-token");
-  } catch {
-    return null;
-  }
-})();
-if (storedToken && returningBox) {
-  returningBox.hidden = false;
-  if (!token.value) token.value = storedToken;
-}
+// audio-feed-b6nr: the returning-subscriber box is rendered visible by the server when the request
+// carries a session, so this client neither reads nor prefills from localStorage. Nothing in this
+// file has to know the capability.
 
 const queryParams = new URLSearchParams(location.search);
 const addQuery = queryParams.get("add") || queryParams.get("url");

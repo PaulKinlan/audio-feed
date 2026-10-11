@@ -1,0 +1,12 @@
+{
+  "bead": "audio-feed-b6nr",
+  "measuredAt": "2026-10-11T00:32:20.562Z",
+  "note": "the tree WITHOUT the fix, nothing pre-seeded: the old client writes the capability itself",
+  "entriesAfterUsingPlayer": {
+    "audio-feed-token": "v4n35xvoqx22oko0c09vmu7zmfpfjz54"
+  },
+  "keysNamingTheToken": [
+    "audio-feed-token"
+  ],
+  "legacyKeysRemoved": true
+}

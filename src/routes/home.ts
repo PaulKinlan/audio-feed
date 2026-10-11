@@ -142,8 +142,11 @@ export function renderHomePage({
     accepts an RSS URL. Episodes appear once synthesis finishes.
   </p>
 
-  <div id="returningSubscriber" class="note u-my-4" hidden>
-    <p><strong>Welcome back!</strong> A saved player was found on this device:
+  <!-- audio-feed-b6nr: this box used to be revealed by a script reading a remembered capability out
+       of localStorage. It is rendered from the session instead, so nothing has to be stored and the
+       link needs no token in it: the bare /listen path resolves the subscriber server-side. -->
+  <div id="returningSubscriber" class="note u-my-4"${viewer ? "" : " hidden"}>
+    <p><strong>Welcome back!</strong>
     <a href="/listen" id="openPlayerLink" class="u-strong-link">Open your Web Player &rarr;</a></p>
   </div>
 

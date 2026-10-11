@@ -25,18 +25,10 @@ function $(id) {
 const status = $("status");
 const input = /** @type {HTMLInputElement} */ ($("feedUrl"));
 
-const stored = (() => {
-  try {
-    return localStorage.getItem("audio-feed-token");
-  } catch {
-    return null;
-  }
-})();
-
-if (stored) {
-  // Reopening from the home screen: straight to the player.
-  location.replace("/listen/" + encodeURIComponent(stored));
-} else {
+// audio-feed-b6nr: a home-screen launch used to be redirected from a capability kept in
+// localStorage. The server does it now — the bare /listen path resolves the session and redirects
+// before this page is served — so this client holds no credential and has nothing to restore.
+{
   /** Accepts a full feed URL or a bare token, because both are what people have. */
   const tokenFrom = (/** @type {string} */ value) => {
     const trimmed = value.trim();

@@ -18,6 +18,7 @@ import { OFFLINE_CACHE } from "../src/routes/pwa.ts";
 import { createServiceWorkerHarness } from "./service_worker_harness.ts";
 import type { BackgroundFetchRecordStub } from "./service_worker_harness.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { playerClient, playerData } from "./listen_client.ts";
 import { assetBody, assetUrl } from "../src/routes/assets.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -141,24 +142,88 @@ Deno.test("the player renders the subscriber's ready episodes (audio-feed-4xb)",
   assertStringIncludes(client, "mediaSession");
 });
 
-Deno.test("the player remembers the token so a home-screen launch needs no typing", async () => {
+Deno.test("a home-screen launch still needs no typing, and stores no capability (audio-feed-b6nr)", async () => {
+  // This test used to assert the opposite: that the client wrote the feed token into
+  // localStorage so a home-screen launch could restore it (see the git history — the test was
+  // named "the player remembers the token so a home-screen launch needs no typing"). The
+  // user-visible property is unchanged, and it is what this asserts. What changed is where it
+  // comes from: the bare /listen path now resolves the session on the server and redirects, so
+  // the capability never has to be at rest in storage a script can read.
   const { fetch } = await seeded();
   const html = await (await fetch(get(`/listen/${TOKEN}`))).text();
   const client = await playerClient(fetch, BASE, html);
-  assertStringIncludes(client, 'localStorage.setItem("audio-feed-token"');
-  // …and /listen restores it client-side, since a server cannot read localStorage.
-  // audio-feed-3xq part 4c: the restore client is src/assets/listen-landing.js now; the page
-  // keeps the markup and links the module. The property under test is unchanged: the landing
-  // ships the same-storage-key restore and the redirect, and its form is the one it drives.
+
+  const player = assetBody("listen.js")!;
+  assertEquals(
+    player.includes('setItem("audio-feed-token"') || player.includes('getItem("audio-feed-token"'),
+    false,
+    "the player must neither store nor read the capability",
+  );
+  assertStringIncludes(
+    player,
+    'removeItem("audio-feed-token")',
+    "it must also clear the entry that older versions left behind",
+  );
+  assertEquals(
+    assetBody("listen-landing.js")!.includes("audio-feed-token"),
+    false,
+    "the landing client must not read the capability",
+  );
+  assertEquals(
+    assetBody("home.js")!.includes("audio-feed-token"),
+    false,
+    "the front door must not read the capability",
+  );
+
+  // It still scopes its storage per subscriber — by the id the server hands it, which is a
+  // namespace rather than a credential (a key name is as readable as a value, which is why
+  // naming the capability in four keys was the same exposure as storing it once).
+  assertStringIncludes(client, "function scopedKey");
+  assertStringIncludes(client, "audio-feed-${kind}:${SCOPE}");
+  assertStringIncludes(client, "adoptScopedKey");
+  assertEquals(playerData(html).userId, "user-1");
+
   const landing = await (await fetch(get("/listen"))).text();
-  const landingClient = assetBody("listen-landing.js") ?? "";
-  assertStringIncludes(landingClient, 'localStorage.getItem("audio-feed-token")');
-  assertStringIncludes(landingClient, 'location.replace("/listen/"');
   assertStringIncludes(landing, "Open my player");
   assertStringIncludes(
     landing,
     assetUrl("listen-landing.js"),
     "landing must link the client it relies on",
+  );
+});
+
+Deno.test("the bare /listen launch resolves the session server-side (audio-feed-b6nr)", async () => {
+  const { fetch, stores } = await seeded();
+
+  // No session: the landing page, exactly as before.
+  const anon = await fetch(get("/listen"));
+  assertEquals(anon.status, 200);
+
+  // With a session: straight to the player, which is what the home screen used to get from
+  // localStorage — minus the stored credential.
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-1")}`;
+  const launch = await fetch(new Request(`${BASE}/listen`, { headers: { cookie } }));
+  assertEquals(launch.status, 302);
+  assertEquals(launch.headers.get("location"), `/listen/${TOKEN}`);
+  assertEquals(
+    launch.headers.get("cache-control"),
+    "no-store",
+    "a redirect that depends on a session must not be cached",
+  );
+
+  // A session whose subscriber is not approved is not a way past the approval gate.
+  await stores.metadata.putUser(
+    makeUser({ id: "user-pending", status: "pending", feedToken: "token-pending" }),
+  );
+  const pendingCookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "user-pending")}`;
+  const pending = await fetch(
+    new Request(`${BASE}/listen`, { headers: { cookie: pendingCookie } }),
+  );
+  assertEquals(pending.status, 200);
+  assertStringIncludes(
+    await pending.text(),
+    "Open my player",
+    "an unapproved subscriber must still see the landing page",
   );
 });
 

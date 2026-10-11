@@ -15,6 +15,7 @@ import { renderListenPage } from "../src/routes/listen.ts";
 Deno.test("renderListenPage: includes i-share symbol in icon sprite (audio-feed-zcw)", () => {
   const html = renderListenPage({
     nonce: "test-nonce",
+    userId: "user-1",
     token: "tok-test",
     subscriber: "Alice",
     feedUrl: "https://audio.example.com/feed/tok-test/master.xml",

@@ -34,6 +34,8 @@ export async function playerClient(
  */
 export function playerData(html: string): {
   token?: string;
+  /** The subscriber's id: the client's storage namespace, not a credential (audio-feed-b6nr). */
+  userId?: string;
   origin?: string;
   episodes?: { id: string; title: string; audioUrl: string }[];
   activity?: {

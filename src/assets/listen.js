@@ -57,6 +57,7 @@
 /**
  * @typedef {object} PlayerData
  * @property {string} [token]
+ * @property {string} [userId]
  * @property {string} [origin]
  * @property {string} [offlineCache]
  * @property {PlayerEpisode[]} [episodes]
@@ -112,12 +113,6 @@ const ACTIVITY = DATA.activity ?? { inProgress: [], failed: [], playable: EPISOD
 const OFFLINE_ENABLED = DATA.offlineEnabled ?? true;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-// Remember the capability so a home-screen launch (start_url /listen) can restore
-// the player without the subscriber pasting anything again.
-try {
-  localStorage.setItem("audio-feed-token", TOKEN);
-} catch { /* private mode */ }
-
 /**
  * @typedef {object} SavedPosition
  * @property {number} position
@@ -126,7 +121,44 @@ try {
 
 // audio-feed-kzi: local-first playback position persistence.
 // Scoped per-token so a shared device with multiple subscribers keeps positions isolated.
-const POSITIONS_KEY = TOKEN ? `audio-feed-positions:${TOKEN}` : "audio-feed-positions";
+// audio-feed-b6nr: local storage is namespaced by the SUBSCRIBER, not by the capability. It used to
+// be the token, so the credential was readable at rest in every key name — storing it in one entry
+// and embedding it in four keys is the same exposure with more places to look. The subscriber's id
+// scopes exactly as well and is not a credential. Entries written under the old scheme are moved
+// here on first load, which also deletes the leaked key from devices that already have it.
+const SCOPE = DATA.userId ?? "";
+const LEGACY_SCOPE = TOKEN;
+
+/** @param {string} kind */
+function scopedKey(kind) {
+  return SCOPE ? `audio-feed-${kind}:${SCOPE}` : `audio-feed-${kind}`;
+}
+
+/** @param {string} kind */
+function adoptScopedKey(kind) {
+  if (!SCOPE || !LEGACY_SCOPE || SCOPE === LEGACY_SCOPE) return;
+  try {
+    const legacy = `audio-feed-${kind}:${LEGACY_SCOPE}`;
+    const raw = localStorage.getItem(legacy);
+    if (raw === null) return;
+    const current = scopedKey(kind);
+    if (localStorage.getItem(current) === null) localStorage.setItem(current, raw);
+    localStorage.removeItem(legacy);
+  } catch { /* private mode */ }
+}
+
+for (const kind of ["positions", "played", "dismissed", "filter"]) adoptScopedKey(kind);
+
+// The capability entry itself is residue on any device that used a version which stored it. Nothing
+// reads it any more, so it is deleted rather than left for whoever inspects the browser next. The
+// browser proof found this: adopting the four derived keys and removing their old names still left
+// `audio-feed-token` behind on an existing device, because a writer that no longer runs cannot
+// clean up after itself.
+try {
+  localStorage.removeItem("audio-feed-token");
+} catch { /* private mode */ }
+
+const POSITIONS_KEY = scopedKey("positions");
 
 // audio-feed-n07: PWA App Badging API for unread / ready episodes.
 // Per Modern Web Guidance:
@@ -135,7 +167,7 @@ const POSITIONS_KEY = TOKEN ? `audio-feed-positions:${TOKEN}` : "audio-feed-posi
 // - Clears the badge (navigator.clearAppBadge) when count is 0
 // - Suppresses errors on unsupported or denied permission contexts
 // TODO(baseline/badging): keep setAppBadge/clearAppBadge; silently ignored on unsupported browsers.
-const PLAYED_KEY = TOKEN ? `audio-feed-played:${TOKEN}` : "audio-feed-played";
+const PLAYED_KEY = scopedKey("played");
 
 /** @returns {Set<string>} */
 function loadPlayed() {
@@ -846,7 +878,7 @@ const activityList = $("activityList");
 const activityHint = $("activityHint");
 
 // audio-feed-cls: user dismissal for activity failure notifications
-const DISMISSED_ACTIVITY_KEY = TOKEN ? `audio-feed-dismissed:${TOKEN}` : "audio-feed-dismissed";
+const DISMISSED_ACTIVITY_KEY = scopedKey("dismissed");
 
 /** @returns {Set<string>} */
 function loadDismissedActivity() {
@@ -1053,7 +1085,7 @@ async function refreshActivity() {
 }
 
 // ── filtering (audio-feed-3h1) ──────────────────────────────────────────
-const FILTER_KEY = TOKEN ? `audio-feed-filter:${TOKEN}` : "audio-feed-filter";
+const FILTER_KEY = scopedKey("filter");
 
 function loadFilterState() {
   try {

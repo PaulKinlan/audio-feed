@@ -168,6 +168,11 @@ export interface ListenEpisode {
 
 export interface ListenPageOptions {
   token: string;
+  /**
+   * The subscriber's own id, handed to the client so it can namespace its local storage without
+   * naming the capability (audio-feed-b6nr).
+   */
+  userId: string;
   subscriber: string;
   feedUrl: string;
   episodes: ListenEpisode[];
@@ -205,7 +210,8 @@ const ICON_SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
 </svg>`;
 
 export function renderListenPage(
-  { token, subscriber, feedUrl, episodes, offlineEnabled, activity, nonce }: ListenPageOptions,
+  { token, userId, subscriber, feedUrl, episodes, offlineEnabled, activity, nonce }:
+    ListenPageOptions,
 ): string {
   const title = `${subscriber} — Audio Feed`;
   // Everything the client used to receive as six injected constants, in one JSON document. The
@@ -213,6 +219,9 @@ export function renderListenPage(
   // JSDoc and this object are the two ends of one contract.
   const playerData = {
     token,
+    // The subscriber's own id, used by the client to namespace its local storage (audio-feed-b6nr).
+    // A namespace, not a credential: the capability above authorises requests, this does not.
+    userId,
     origin: new URL(feedUrl).origin,
     offlineCache: OFFLINE_CACHE,
     episodes,
@@ -698,6 +707,7 @@ export async function handleListen(
   const nonce = newCspNonce();
   const html = renderListenPage({
     token,
+    userId: user.id,
     subscriber: user.displayName || user.email,
     feedUrl: `${origin.baseUrl}/feed/${encodeURIComponent(token)}/master.xml`,
     episodes: rows,
