@@ -329,6 +329,33 @@ Deno.test('a detector that THROWS widens instead of answering "no read found" (e
   assertEquals(ok.relations.get("docs/evidence/"), ["tests/evidence_size_test.ts"]);
 });
 
+Deno.test("audio-feed-he7z: the empty relation the deriver RETURNS widens the plan, in one chain", async () => {
+  // The two halves are asserted separately at the tip: deriveOrWiden reports a failure for a THROWING
+  // deriver, and planTests widens when it is handed an empty relation. This is the INTEGRATION assertion -
+  // the relation the deriver actually RETURNS is fed straight into the planner - because "the deriver
+  // returned an empty relation" is exactly what a detector that found nothing produces, and a chain that
+  // silently selected nothing there would be the same empty pass this bead exists to remove (audio-feed-38sn
+  // was precisely a real input becoming an empty selection).
+  const { relations, failure } = await deriveOrWiden(() => Promise.resolve(new Map()));
+  assertEquals(failure, null, "an empty relation is NOT a failure - the deriver ran fine");
+  assertEquals(relations.size, 0);
+
+  const plan = planTests(["docs/evidence/probe.png"], NO_GRAPH, NO_NAMED, relations);
+  assertEquals(plan.testFiles, null, "an empty relation must WIDEN, never select nothing");
+  assert(plan.reason.includes("docs/evidence/probe.png"), plan.reason);
+  assert(plan.reason.includes("no derived reader"), plan.reason);
+
+  // And the flip side of the chain, so this cannot pass by widening unconditionally: a relation that DOES
+  // name a reader selects that suite through the same call.
+  const withReader = await deriveOrWiden(() =>
+    Promise.resolve(new Map([["docs/evidence/probe.png", ["tests/evidence_size_test.ts"]]]))
+  );
+  assertEquals(
+    planTests(["docs/evidence/probe.png"], NO_GRAPH, NO_NAMED, withReader.relations).testFiles,
+    ["tests/evidence_size_test.ts"],
+  );
+});
+
 Deno.test("a derivation that cannot run WIDENS to the full suite and says why (es8y, detector fail-safe)", () => {
   // The rule coord set for the detector: if it cannot understand, it must not answer "no read found". A
   // data file with no relation available is therefore UNCLASSIFIED, which runs the full suite - never a
