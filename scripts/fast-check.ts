@@ -578,7 +578,8 @@ export function planTests(
     // Defence in depth for the ordering rule (audio-feed-38sn): classifyNonTsChanges() asks the relation
     // first, so this cannot be reached today - and if a future change inverts that order, the answer must
     // still not be an empty pass. It becomes the FULL suite, with the contradiction named.
-    const inertWithReaders = inertContradictions(changed, readRelations);
+    // The guard reads the CLASSIFIER'S INERT BUCKET, not a predicate of its own (audio-feed-t0sp).
+    const inertWithReaders = inertContradictions(data.inert, readRelations);
     if (inertWithReaders.length) {
       return {
         testFiles: null,
@@ -591,7 +592,9 @@ export function planTests(
     if (isProvablyInert(changed, data)) {
       return {
         testFiles: [],
-        reason: `no test-observable change (documentation only: ${data.documentation.join(", ")})`,
+        reason: `no test-observable change (inert, no suite is derived to read it: ${
+          data.inert.join(", ")
+        })`,
       };
     }
     return {
