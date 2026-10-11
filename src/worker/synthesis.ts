@@ -1087,41 +1087,39 @@ async function queuePendingAccounting(
 }
 
 async function drainPendingAccounting(metadata: MetadataStore): Promise<void> {
-  // Invariant 3: Pop-then-record with re-queue on failure (audio-feed-uecw).
-  // Mutate queue in one atomic block, then settle with idempotent accounting.
+  // At-least-once delivery + idempotent sink deduplication = exactly-once (audio-feed-uecw).
+  // Read/peek head without mutating, settle with idempotent accounting, and only then pop by ID.
+  // Any crash or failure leaves the item safely queued for a harmless idempotent retry.
   while (true) {
-    let popped: PendingAccountingItem | undefined;
-    const popRes = await metadata.atomicUpdate<PendingAccountingQueue>(
+    let nextItem: PendingAccountingItem | undefined;
+    const readRes = await metadata.atomicUpdate<PendingAccountingQueue>(
       "pending_synthesis_accounting",
       (current) => {
-        if (!current?.pending?.length) return current;
-        popped = current.pending[0];
-        return { pending: current.pending.slice(1) };
+        nextItem = current?.pending?.[0];
+        return current; // Peek without mutating
       },
     );
-    if (!popRes.committed || !popped) {
+    if (!readRes.committed || !nextItem) {
       break;
     }
 
-    try {
-      await recordSynthesisIdempotent(
-        metadata,
-        popped.userId,
-        popped.byteLength,
-        popped.accountingKey,
-        new Date(popped.at),
-      );
-    } catch (err) {
-      // Record failed! Re-queue item atomically and propagate failure
-      const failedItem = popped;
-      await metadata.atomicUpdate<PendingAccountingQueue>(
-        "pending_synthesis_accounting",
-        (current) => ({
-          pending: [failedItem, ...(current?.pending ?? [])],
-        }),
-      ).catch(() => {});
-      throw err;
-    }
+    // 1. Settle with idempotent sink
+    await recordSynthesisIdempotent(
+      metadata,
+      nextItem.userId,
+      nextItem.byteLength,
+      nextItem.accountingKey,
+      new Date(nextItem.at),
+    );
+
+    // 2. Pop this specific item by ID only after recordSynthesisIdempotent succeeded
+    const targetId = nextItem.id;
+    await metadata.atomicUpdate<PendingAccountingQueue>(
+      "pending_synthesis_accounting",
+      (current) => ({
+        pending: (current?.pending ?? []).filter((p) => p.id !== targetId),
+      }),
+    );
   }
 }
 
