@@ -631,8 +631,15 @@ export interface RunRepository {
   /**
    * Newest first across every job, ties broken by `compareRunsNewestFirst`. The
    * default limit returns everything retained.
+   *
+   * `kind` scopes the read to ONE job (audio-feed-506m). Without it, a caller
+   * asking for the newest `n` runs gets a page merged across jobs and then cut, so
+   * a job that records often — the synthesis cron ticks every two minutes even when
+   * idle — can push another job's only recent run out of the page entirely. The
+   * admin observability page asked whether the synthesis queue was draining that
+   * way and concluded "no run recorded" from a page full of feed polls.
    */
-  listRuns(limit?: number): Promise<RunRecord[]>;
+  listRuns(limit?: number, kind?: RunKind): Promise<RunRecord[]>;
 }
 
 /**

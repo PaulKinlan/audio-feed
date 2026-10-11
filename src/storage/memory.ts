@@ -394,8 +394,8 @@ export class MemoryMetadataStore implements MetadataStore {
   recordRun(record: RunRecord): Promise<void> {
     return this.repositories.runs.recordRun(record);
   }
-  listRuns(limit?: number): Promise<RunRecord[]> {
-    return this.repositories.runs.listRuns(limit);
+  listRuns(limit?: number, kind?: RunRecord["kind"]): Promise<RunRecord[]> {
+    return this.repositories.runs.listRuns(limit, kind);
   }
   // -- logs (audio-feed-wzv9) --
   appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null> {

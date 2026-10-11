@@ -137,6 +137,35 @@ export function registerNotificationsCases(suite: MetadataHarness) {
     assertEquals((await store.listRuns(2)).map((r) => r.id), ["r4", "r3"]);
   });
 
+  test("listRuns can be scoped to one job kind (audio-feed-506m)", async (store) => {
+    // The defect: a global newest-first page, cut to `limit`, let a job that records often crowd
+    // out the job being asked about. The observability page asked this way about the SYNTHESIS run
+    // and concluded "no run recorded" from a page full of feed polls.
+    await store.recordRun(
+      run({ id: "syn", kind: "synthesis", startedAt: "2026-09-25T09:00:00.000Z" }),
+    );
+    for (let i = 0; i < 20; i++) {
+      await store.recordRun(
+        run({
+          id: `poll${i}`,
+          kind: "feed-poll",
+          startedAt: `2026-09-25T10:${String(i).padStart(2, "0")}:00.000Z`,
+        }),
+      );
+    }
+
+    // The unscoped page no longer contains the synthesis run at all - that is the bug.
+    assertEquals(
+      (await store.listRuns(20)).some((r) => r.kind === "synthesis"),
+      false,
+      "an unscoped page is what hid the run",
+    );
+    // Scoping finds it, whatever else the history holds.
+    assertEquals((await store.listRuns(20, "synthesis")).map((r) => r.id), ["syn"]);
+    assertEquals((await store.listRuns(5, "feed-poll")).length, 5);
+    assertEquals(await store.listRuns(20, "synthesis"), await store.listRuns(20, "synthesis"));
+  });
+
   test("history is bounded ON WRITE, and keeps the newest", async (store) => {
     // Bounded on write rather than on read is the audio-feed-att lesson: an
     // unbounded history reads cheaply today and is a multi-megabyte scan a year

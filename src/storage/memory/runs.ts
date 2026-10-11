@@ -40,8 +40,14 @@ export function createRunsRepository(
       }
       return Promise.resolve();
     },
-    listRuns(limit = RUN_HISTORY_LIMIT * RUN_KINDS.length): Promise<RunRecord[]> {
-      return Promise.resolve(state.runs.slice(0, limit).map((r) => structuredClone(r)));
+    listRuns(
+      limit = RUN_HISTORY_LIMIT * RUN_KINDS.length,
+      kind?: RunRecord["kind"],
+    ): Promise<RunRecord[]> {
+      // Scope BEFORE slicing: filtering after a slice is how a job that records often crowds out
+      // the job being asked about (audio-feed-506m).
+      const all = kind ? state.runs.filter((run) => run.kind === kind) : state.runs;
+      return Promise.resolve(all.slice(0, limit).map((r) => structuredClone(r)));
     },
   };
 }

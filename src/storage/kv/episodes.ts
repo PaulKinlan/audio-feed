@@ -420,7 +420,20 @@ export function createEpisodesRepository(
         // behind, and its lack of a terminal partner is what says the work died rather than never
         // started (audio-feed-siv1).
         await host().appendLog(
-          claimLifecycleEvent(claimed, { phase: CLAIM_START_PHASE, attempt: attempts }),
+          claimLifecycleEvent(claimed, {
+            phase: CLAIM_START_PHASE,
+            attempt: attempts,
+            // The owner and the lease are what make an attempt's story readable: who held it, and
+            // when the lease expired if no terminal record ever followed (audio-feed-n6uu). The
+            // episode only persists the CURRENT claim's owner, so a past attempt's owner was
+            // otherwise unrecoverable. An opaque worker id and two numbers: no request content.
+            context: { owner: claim.owner, leaseMs: claim.leaseMs, maxClaims: claim.maxClaims },
+            // The claim instant, not the append instant: the lease the page computes is
+            // claim.now + leaseMs, and the episode persists exactly this value as claimedAt
+            // (audio-feed-n6uu). Two clocks one write apart would report a lease expiry that
+            // disagrees with the episode it describes.
+            time: claim.now,
+          }),
         );
       }
       return ok ? claimed : null;

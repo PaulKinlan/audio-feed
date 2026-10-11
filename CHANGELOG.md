@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **An admin observability page: failures and job state without copying anything out
+  (audio-feed-n6uu)**: `GET /admin/observability`, behind the existing admin gate (session plus
+  `isActiveAdmin` — `ADMIN_TOKEN` unchanged as the passkey bootstrap token), rendering recent
+  failures from the obs-2 log store with the PER-ATTEMPT claim history Paul needed: each attempt's
+  worker id, start, last heartbeat, the phase chain it reached, the lease expiry, and whether the
+  attempt ended with a TERMINAL WRITE or the lease simply expired with nobody writing — the siv1
+  distinction that a bare "failed" cannot express. Also the queue's live state (claimable depth,
+  oldest waiting episode, live claims, abandonments, and a draining/stalled verdict with its rule
+  stated), the episode record's accumulated error, and the correlation id per failure. Read-only in
+  v1 and every read is durable and in-process (log store, episode records, queue, run history), so
+  the page renders while the thing it reports on is broken. Claim-start records now also carry the
+  owner, lease and max-claims in their context — the episode only persists the CURRENT claim's
+  owner, so a past attempt's owner was otherwise unrecoverable.
+
 ### Security
 
 - **Total TTS spend is bounded now, not just per-subscriber spend (audio-feed-m182)**: the daily
