@@ -55,8 +55,26 @@ function largestSessionWindow(entries) {
     if (entry.hadRecentInput) continue;
     observed = true;
     const start = entry.startTime;
-    // Positive accumulated score, then the two timing rules - the same shape as web-vitals. The short
-    // circuit keeps windowStart a number whenever the subtraction happens.
+    // The continuation test is web-vitals', and the FIRST term is the accumulated session score:
+    //
+    //   if (sessionValue && firstSessionEntry && lastSessionEntry &&
+    //       entry.startTime - lastSessionEntry.startTime < 1000 &&
+    //       entry.startTime - firstSessionEntry.startTime < 5000) {
+    //     sessionValue += entry.value;
+    //   } else {
+    //     sessionValue = entry.value;
+    //   }
+    //
+    //   -- GoogleChrome/web-vitals, src/onCLS.ts, verbatim.
+    //
+    // JavaScript 0 is falsy, so `sessionValue` being the first term means a zero-valued shift neither
+    // continues nor opens a window: the next positive shift RESTARTS the window with its own startTime
+    // as the origin, which moves the 5s cap later. This is a deliberate quirk, not an oversight. An
+    // earlier change here used `windowStart !== null` - the more obvious "is a window open?" test - and
+    // it reported 0.5 from an origin of 0 for a zero shift followed by six 0.1 shifts, where web-vitals,
+    // CrUX and every other RUM tool report 0.6 from an origin of 900 (six shifts of 0.1, 900ms gaps,
+    // 4500ms span). Our CLS must agree with what operators see in CrUX, so do NOT "fix" this back to a
+    // null check (audio-feed-d55l, reviewer ruling, quoted source above).
     const joins = windowValue !== 0 && start - windowLast < 1000 && start - windowStart < 5000;
     if (!joins) {
       windowStart = start;
