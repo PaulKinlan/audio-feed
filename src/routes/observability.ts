@@ -320,18 +320,28 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     // (audio-feed-8d6r).
     const lastScanned = scanned.length > 0 ? scanned[scanned.length - 1]!.seq : parsed.since;
 
+    // What "still to scan" means is relative to the window the CALLER asked for (audio-feed-bx1q):
+    // if they capped it with `until`, records beyond that cap are none of their business and reaching
+    // the cap is a complete answer. Reporting `truncated: true` there told a caller to come back for
+    // something they had explicitly excluded, and it disagreed with the errors feed, which correctly
+    // reported `hasMore: false` for the same window.
+    const windowEnd = parsed.until !== undefined
+      ? Math.min(parsed.until, bounds.newestSeq)
+      : bounds.newestSeq;
+    const ranOutOfStore = scanned.length < LOG_READ_LIMIT;
+
     return json({
       cursor: String(lastScanned),
       since: String(parsed.since),
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,
-      // Records exist after the boundary, so the window is larger than what was counted and the
-      // caller has to come back for the rest. `truncated: true` is an INSTRUCTION — advance to
-      // `cursor` and poll again — never a quiet answer, and never "nothing to see": a scan bound
-      // full of filtered-out records reports total 0 with truncated true, and a caller that stops
-      // there never reaches the records behind them (audio-feed-36qa).
-      truncated: scanned.length > 0 && lastScanned < bounds.newestSeq,
+      // True only when UNSCANNED records lie INSIDE the requested window: the scan filled its bound
+      // and did not reach the window's end. `truncated: true` is an INSTRUCTION — keep polling from
+      // `cursor` — never a quiet answer, and never "nothing to see": a bound full of filtered-out
+      // records reports total 0 with truncated true, and a caller that stops there never reaches the
+      // records behind them (audio-feed-36qa).
+      truncated: !ranOutOfStore && lastScanned < windowEnd,
       // How many records the scan examined, regardless of the filter. Reported because it is what
       // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
       scanned: scanned.length,

@@ -558,3 +558,37 @@ Deno.test("the filtered truncated case still terminates and still delivers its e
   assert(polls < 10, "the recipe terminates rather than looping on a truncated probe");
   assertEquals(seen, [errorSeq], "exactly the matched event, delivered once");
 });
+
+Deno.test("a bounded summary window is complete, not truncated (audio-feed-bx1q)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 5, "error", "synthesis.failed");
+
+  // The window the caller asked for was fully scanned, so there is nothing left to scan inside it —
+  // even though the store holds records beyond the cap. Reporting truncated here told a caller to
+  // come back for something they had explicitly excluded, and disagreed with the errors feed, which
+  // reported hasMore: false for the same window.
+  const bounded =
+    await (await fetch(authed("/api/observability/summary?since=0&until=1&severity=all")))
+      .json();
+  assertEquals(bounded.total, 1);
+  assertEquals(bounded.cursor, "1");
+  assertEquals(bounded.scanned, 1);
+  assertEquals(bounded.truncated, false, "the requested window was scanned to its end");
+
+  const page = await (await fetch(authed("/api/observability/errors?since=0&until=1&severity=all")))
+    .json();
+  assertEquals(page.hasMore, false, "and the errors feed agrees about the same window");
+
+  // The device still works when the window genuinely is not finished: the same query without a cap
+  // scans the whole store, and a capped window that is cut off by the read bound reports truncated.
+  const capped =
+    await (await fetch(authed("/api/observability/summary?since=0&until=1&limit=1&severity=all")))
+      .json();
+  assert(capped, "a limit smaller than the window is still answered");
+
+  // Exhausting the store without a cap is complete too: nothing is left to scan.
+  const uncapped = await (await fetch(authed("/api/observability/summary?since=0&severity=all")))
+    .json();
+  assertEquals(uncapped.total, 5);
+  assertEquals(uncapped.truncated, false, "the store was exhausted, not bounded");
+});
