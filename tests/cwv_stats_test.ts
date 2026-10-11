@@ -165,3 +165,51 @@ Deno.test("INP is reported as an upper bound, because the interaction count cann
   );
   assertEquals(interactionLatencies([event(0, 900)]).length, 0, "a scroll is not an interaction");
 });
+
+Deno.test("the reviewer's 49-interaction repro: a poor interaction is not reported as good (audio-feed-dzgj)", () => {
+  const event = (interactionId: number, duration: number) => ({ interactionId, duration });
+
+  // The reproduction from dzgj round 5, verbatim: 49 REAL interactions with ids 1..49 - 48 at 80ms and
+  // one at 1000ms, so the page's true p98 IS the slow one - plus a pointerdown on a scroll whose Event
+  // Timing interactionId is 0.
+  const entries = [
+    ...Array.from({ length: 48 }, (_, i) => event(i + 1, 80)),
+    event(49, 1000),
+    event(0, 500),
+  ];
+
+  const observed = interactionLatencies(entries);
+  assertEquals(observed.length, 49, "the scroll must not add a latency");
+  assertEquals(interactionP98(entries), 1000, "the page's p98 is its slow interaction");
+
+  // THE PROPERTY, which is what round 5 was about: the reported value must be the slow interaction and
+  // must never be one of the fast ones.
+  assert(interactionP98(entries) > 80, "a poor interaction must not be reported as good");
+
+  // And the arithmetic of the failure, so a reintroduced count fails on the mechanism: an inflated count
+  // of 50 gives rank ceil(0.98 * 50) = 49; one imagined unobserved interaction moves it to the 48th
+  // smallest, and that value is an 80ms interaction. This is why no count is used in this path.
+  const rankWithInflatedCount = Math.ceil(0.98 * 50);
+  const shiftedRank = rankWithInflatedCount - (50 - observed.length);
+  assert(
+    shiftedRank < observed.length,
+    "an inflated count moves the rank off the slow interaction",
+  );
+  assertEquals(observed[shiftedRank - 1], 80, "and the value it lands on is a FAST interaction");
+});
+
+Deno.test("a page whose fast interactions were suppressed is reported as the slow one it did report (audio-feed-dzgj)", () => {
+  const event = (interactionId: number, duration: number) => ({ interactionId, duration });
+
+  // 59 interactions at 8ms, below the observer's 16ms clamp so never reported, plus one at 1000ms that
+  // is. Without a count this is an UPPER BOUND: the reported percentile is the one observed value, so the
+  // page looks worse than it is. Deliberate - overstating INP is recoverable, reporting a poor
+  // interaction as good is not - and it is what the standard web-vitals library reports.
+  const entries = [
+    ...Array.from({ length: 59 }, (_, i) => event(i + 1, 8)),
+    event(60, 1000),
+  ];
+  const observed = interactionLatencies(entries.filter((e) => e.duration >= 16));
+  assertEquals(observed, [1000], "the fast interactions were suppressed by the observer");
+  assertEquals(p98(observed), 1000, "an upper bound, and it errs by overstating");
+});
