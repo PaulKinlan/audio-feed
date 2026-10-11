@@ -1517,16 +1517,33 @@ export async function runSynthesisBatch(
           }
 
           // Clean yield to respect invocation budget: resets attempts to 0 on progress, or advances attempts on zero progress.
+          const yieldPhase = `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`;
           const yielded = await metadata.yieldEpisodeClaim(
             currentEpisode.userId,
             currentEpisode.id,
             opts.owner,
             {
-              phase: `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`,
+              phase: yieldPhase,
               advanceAttempts: !madeProgress,
             },
           );
           if (yielded) {
+            // Same structured verdict as the terminal-upload yield (audio-feed-2sec): the
+            // claim was released to resume later; no terminal write happened. Best-effort -
+            // the durable truth is the yield itself and the episode's phase.
+            try {
+              await metadata.appendLog(
+                claimLifecycleEvent(currentEpisode, {
+                  phase: yieldPhase,
+                  attempt: currentEpisode.attempts ?? 1,
+                  claimOutcome: "yielded",
+                  reason:
+                    `invocation budget reached with ${finalSegments} of ${yieldErr.totalTurns} segments committed; resuming on a later tick`,
+                }),
+              );
+            } catch {
+              // the yield itself is durable; the history record is not load-bearing
+            }
             result.yielded.push({
               episodeId: currentEpisode.id,
               completedTurns: finalSegments,
@@ -1812,6 +1829,11 @@ export async function runSynthesisBatch(
           claimLifecycleEvent(currentEpisode, {
             phase: "upload_retry",
             attempt: currentEpisode.attempts ?? 1,
+            // Structured verdict (audio-feed-2sec): this claim was DELIBERATELY released;
+            // the reason below is explanation. Without the marker, a reader that treats
+            // "has a reason" as "ended terminally" reports this yielded claim as a
+            // failure with a terminal write.
+            claimOutcome: "yielded",
             reason: `terminal upload interrupted by invocation budget (${
               Math.round(bytes.length / 1024)
             } KB); retrying on a later tick`,

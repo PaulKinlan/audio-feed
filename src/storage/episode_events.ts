@@ -95,6 +95,16 @@ export interface ClaimLifecycleFields {
   phase: string;
   /** Present only when the attempt ended. The observable cause. */
   reason?: string;
+  /**
+   * Structured verdict for how a claim ENDED, when the writer knows (audio-feed-2sec).
+   *
+   * `"yielded"` says the claim was DELIBERATELY released so a later invocation can resume the
+   * episode: no terminal write happened, and any `reason` on the same record is explanation,
+   * not verdict. Without this field the record's prose is the only signal, and a reader that
+   * treats "has a reason" as "ended terminally" reports a yielded claim as a failure with a
+   * terminal write - a false statement about the episode's durable state.
+   */
+  claimOutcome?: "yielded";
   /** Which attempt this record is about, when the caller knows better than the episode does. */
   attempt?: number;
   severity?: "info" | "warn" | "error";
@@ -122,6 +132,12 @@ export function claimLifecycleEvent(
     : fields.durationMs !== undefined
     ? `${subject}: synthesis finished in ${fields.durationMs}ms`
     : subject;
+  // The structured verdict merges into `context`, which survives the log sanitiser's
+  // key passthrough (only key NAMES matching the redaction pattern are stripped).
+  const context = {
+    ...fields.context,
+    ...(fields.claimOutcome ? { claimOutcome: fields.claimOutcome } : {}),
+  };
   return {
     ...identity(episode),
     ...(fields.time ? { time: fields.time } : {}),
@@ -132,7 +148,7 @@ export function claimLifecycleEvent(
     attempt,
     ...(fields.reason ? { reason: fields.reason } : {}),
     ...(fields.durationMs !== undefined ? { durationMs: fields.durationMs } : {}),
-    ...(fields.context ? { context: fields.context } : {}),
+    ...(Object.keys(context).length > 0 ? { context } : {}),
   };
 }
 

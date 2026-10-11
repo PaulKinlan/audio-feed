@@ -76,10 +76,13 @@ export interface ClaimAttempt {
   /**
    * `"finished"` — a terminal write succeeded.
    * `"failed"`   — a terminal write recorded a failure.
+   * `"retrying"` — the claim was DELIBERATELY yielded so a later invocation resumes the episode;
+   *                no terminal write happened (audio-feed-2sec). Not "failed": the episode's
+   *                durable state is still pending, and calling it terminal would be a lie.
    * `"abandoned"` — the lease expired and the STORE took the episode over; nobody wrote a result.
    * `"in-flight"` — no end record yet and the lease is still live.
    */
-  outcome: "finished" | "failed" | "abandoned" | "in-flight";
+  outcome: "finished" | "failed" | "retrying" | "abandoned" | "in-flight";
   /** Did a terminal write happen at all? The question "it failed" cannot answer. */
   endedWithTerminalWrite: boolean;
   /** The recorded reason, verbatim (bounded by the store's own caps). */
@@ -118,6 +121,30 @@ export interface EpisodeContext {
   phase?: string;
   /** The episode's own recorded error — for an abandoned claim this is the accumulated history. */
   error?: string;
+}
+
+/**
+ * A pending episode the worker DELIBERATELY requeued, so a later invocation resumes it
+ * (audio-feed-2sec, coord landing condition 2 on audio-feed-aqms).
+ *
+ * The row is driven by the DURABLE episode state — `status === "pending"` with a phase is
+ * only ever the residue of a yielded claim; a fresh pending episode has no phase, and a
+ * completed one is not pending — not by scanning the log for prose. The last recorded
+ * reason comes from the claim history and is labelled as such on the page.
+ */
+export interface RetryingRow {
+  episodeId: string;
+  userId: string;
+  title?: string;
+  /** The phase the yield preserved, verbatim (e.g. `upload_retry`, `synthesized_3_of_12`). */
+  phase: string;
+  attempts?: number;
+  /** The episode's own heartbeat at yield time — how long the retry has been waiting. */
+  lastHeartbeat?: string;
+  /** `nowMs - (lastHeartbeat ?? createdAt)`, precomputed for the page. */
+  waitingMs: number;
+  /** The most recent recorded yield reason from the claim history, verbatim and bounded. */
+  lastRetryReason?: string;
 }
 
 export interface QueueSnapshot {
@@ -169,8 +196,10 @@ export interface ObservabilityReport {
     recordsRead: number;
   };
   queue: QueueSnapshot;
+  /** Pending episodes deliberately requeued by a yielded claim — retrying, not failed (audio-feed-2sec). */
+  retries: RetryingRow[];
   failures: FailureRow[];
-  /** Attempt histories keyed by episode id, for the failures shown. */
+  /** Attempt histories keyed by episode id, for the failures and retries shown. */
   attempts: Record<string, ClaimAttempt[]>;
   episodes: Record<string, EpisodeContext>;
 }
@@ -224,6 +253,14 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     if (context.workerState === "unknown") {
       // The store took the episode over. Not a terminal write, whoever wrote it.
       row.outcome = "abandoned";
+      row.endedWithTerminalWrite = false;
+    } else if (context.claimOutcome === "yielded") {
+      // audio-feed-2sec: the worker DELIBERATELY released this claim so a later invocation
+      // resumes the episode. The structured verdict is the fact; the reason string on the
+      // same record is explanation, and must never imply a terminal write - reporting a
+      // yielded claim as "failed with a terminal write" contradicts the episode's own
+      // durable state (still pending, phase preserved for resume).
+      row.outcome = "retrying";
       row.endedWithTerminalWrite = false;
     } else if (record.reason || typeof record.durationMs === "number") {
       row.endedWithTerminalWrite = true;
@@ -362,6 +399,37 @@ export async function buildObservabilityReport(
     readErrors.push({ store: "queue", message: queueReadError });
   }
 
+  // audio-feed-2sec, coord landing condition 2 on aqms: a pending episode with a PHASE is the
+  // durable residue of a yielded claim (a fresh pending episode has no phase; a completed one is
+  // not pending), so the retrying state is derived from EPISODE STATE, not from scanning log
+  // prose. Titles and the last recorded yield reason decorate the row; the verdict stays durable.
+  const retries: RetryingRow[] = [];
+  if (queueEpisodes) {
+    for (const episode of queueEpisodes) {
+      if (episode.status !== "pending" || !episode.phase) continue;
+      const yieldedReasons = (claimRecords[episode.id] ?? [])
+        .filter((record) =>
+          ((record.context ?? {}) as Record<string, unknown>).claimOutcome === "yielded" &&
+          record.reason
+        )
+        .map((record) => record.reason as string);
+      const anchor = Date.parse(episode.lastHeartbeat ?? episode.createdAt);
+      retries.push({
+        episodeId: episode.id,
+        userId: episode.userId,
+        title: episode.title,
+        phase: episode.phase,
+        attempts: episode.attempts,
+        lastHeartbeat: episode.lastHeartbeat,
+        waitingMs: Number.isFinite(anchor) ? Math.max(0, nowMs - anchor) : 0,
+        ...(yieldedReasons.length > 0
+          ? { lastRetryReason: yieldedReasons[yieldedReasons.length - 1]!.slice(0, 300) }
+          : {}),
+      });
+      if (retries.length >= REPORT_QUEUE_CAP) break;
+    }
+  }
+
   // Scoped to THIS job kind. A global newest-first page let twenty feed-poll runs crowd out the
   // synthesis run the drain verdict depends on, so the page read "no run recorded" from a page full
   // of unrelated jobs (audio-feed-506m).
@@ -426,6 +494,7 @@ export async function buildObservabilityReport(
       runsReadError,
       drain,
     },
+    retries,
     failures,
     attempts,
     episodes,

@@ -254,6 +254,30 @@ export async function handleAdminObservability(
     </dl>
   </section>
 
+  <section aria-labelledby="retries-h">
+    <h2 id="retries-h">Retrying (yielded claims)</h2>
+    <p class="muted">Pending episodes the worker deliberately requeued so a later invocation
+    resumes them — retrying, not failed and not abandoned. The verdict comes from the episode's own
+    durable state; the reason quoted is the worker's last recorded one.</p>
+    ${
+    queue.readError
+      ? `<p>The queue could not be read, so this list means nothing — see the notice above.</p>`
+      : report.retries.length === 0
+      ? `<p>No yielded claims in the pending queue.</p>`
+      : `<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
+        report.retries.map((retry) => {
+          const age = retry.waitingMs >= 60_000
+            ? `${Math.round(retry.waitingMs / 60_000)} min`
+            : `${Math.round(retry.waitingMs / 1000)} s`;
+          const title = report.episodes[retry.episodeId]?.title ?? retry.title ?? retry.episodeId;
+          return `<tr><td>${esc(title)}</td><td>${esc(retry.phase)}</td><td>${
+            esc(String(retry.attempts ?? "?"))
+          }</td><td>${esc(age)}</td><td>${esc(retry.lastRetryReason ?? "")}</td></tr>`;
+        }).join("")
+      }</tbody></table>`
+  }
+  </section>
+
   <section aria-labelledby="failures-h">
     <h2 id="failures-h">Recent failures</h2>
     <p class="muted">${
@@ -279,6 +303,9 @@ export async function handleAdminObservability(
     <ul>
       <li><strong>Counts are over the retained log window</strong>, not all time — the window above
       names the sequence range it read.</li>
+      <li><strong>"Retrying" rows come from the pending queue snapshot</strong>, capped like the
+      queue card, and name the episode's durable phase — a yielded attempt is never a terminal
+      write. The reason quoted there is the worker's recorded prose; the verdict is the state.</li>
       <li><strong>Unhandled request errors record their class, not their message.</strong> A thrown
       message can quote the request that caused it, which is how a client-chosen string would reach
       the store, so the message is deliberately not stored. For those, take the correlation id and

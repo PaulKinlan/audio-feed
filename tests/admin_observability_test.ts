@@ -27,6 +27,7 @@ import {
   REPORT_QUEUE_CAP,
 } from "../src/observability/admin_report.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { claimLifecycleEvent } from "../src/storage/episode_events.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { LogRecord } from "../src/storage/mod.ts";
 
@@ -426,6 +427,163 @@ Deno.test("audio-feed-n6uu: the claimable count is capped and says so rather tha
 // ---------------------------------------------------------------------------
 // Review findings from the first round (audio-feed-506m, audio-feed-ciuw)
 // ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-2sec: a yielded attempt reads as retrying and NEVER as a terminal write", () => {
+  // The read model, exercised directly. The mutant this kills is treating a reason string as a
+  // terminal verdict: the yield record carries BOTH a reason (explanation) and the structured
+  // claimOutcome (fact), and folding must key on the fact — otherwise this yielded claim
+  // reports as "failed with a terminal write", contradicting the episode's durable state
+  // (still pending, preserved for resume).
+  const base = {
+    type: "claim.lifecycle",
+    process: "worker" as const,
+    correlationId: "episode-y",
+    episodeId: "episode-y",
+    userId: "user-1",
+  };
+  const records: LogRecord[] = [
+    {
+      ...base,
+      seq: 1,
+      time: "2026-10-11T16:00:00.000Z",
+      severity: "info",
+      message: "",
+      phase: "claimed",
+      attempt: 1,
+      context: { owner: "worker-a", leaseMs: 60_000 },
+    },
+    {
+      ...base,
+      seq: 2,
+      time: "2026-10-11T16:00:10.000Z",
+      severity: "info",
+      message: "",
+      phase: "uploading_audio",
+      attempt: 1,
+    },
+    {
+      ...base,
+      seq: 3,
+      time: "2026-10-11T16:00:12.000Z",
+      severity: "info",
+      message: "",
+      phase: "upload_retry",
+      attempt: 1,
+      reason: "terminal upload interrupted by invocation budget; retrying on a later tick",
+      context: { claimOutcome: "yielded" },
+    },
+    // A later invocation picks the episode up and finishes it: the yielded attempt must stay
+    // non-terminal even when a LATER attempt on the same episode is terminal.
+    {
+      ...base,
+      seq: 4,
+      time: "2026-10-11T16:02:00.000Z",
+      severity: "info",
+      message: "",
+      phase: "claimed",
+      attempt: 2,
+      context: { owner: "worker-b", leaseMs: 60_000 },
+    },
+    {
+      ...base,
+      seq: 5,
+      time: "2026-10-11T16:02:08.000Z",
+      severity: "info",
+      message: "",
+      phase: "ready",
+      attempt: 2,
+      durationMs: 8_000,
+    },
+  ];
+  const attempts = claimAttemptsFrom(records, Date.parse("2026-10-11T16:05:00.000Z"));
+  assertEquals(attempts.length, 2);
+  assertEquals(attempts[0]?.outcome, "retrying");
+  assertEquals(
+    attempts[0]?.endedWithTerminalWrite,
+    false,
+    "THE PROPERTY: a yielded attempt is never reported as ended with a terminal write",
+  );
+  assertEquals(attempts[1]?.outcome, "finished");
+  assertEquals(attempts[1]?.endedWithTerminalWrite, true);
+});
+
+Deno.test("audio-feed-2sec: a pending upload_retry episode is VISIBLE as retrying, in the report and on the page", async () => {
+  const { stores, page } = await setup();
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-r",
+      userId: "user-1",
+      sourceId: "stratechery",
+      content: "One paragraph of content.",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-r",
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-r",
+      status: "pending",
+      mode: "direct",
+      title: "An episode waiting out an upload retry",
+    }),
+  );
+  const leaseMs = 15 * 60_000;
+  const claimed = await stores.metadata.claimEpisode("user-1", "episode-r", {
+    owner: "worker-r",
+    now: "2026-10-11T16:00:00.000Z",
+    leaseMs,
+    maxClaims: 3,
+  });
+  assert(claimed, "claim must succeed");
+  await stores.metadata.touchEpisodeClaim("user-1", "episode-r", "worker-r", {
+    phase: "uploading_audio",
+    now: "2026-10-11T16:00:02.000Z",
+  });
+  // The yield: claim released deliberately, phase preserved, one lifecycle record with the
+  // structured verdict — exactly what the worker writes on a budget-interrupted upload.
+  const yielded = await stores.metadata.yieldEpisodeClaim(
+    "user-1",
+    "episode-r",
+    "worker-r",
+    { phase: "upload_retry", now: "2026-10-11T16:00:04.000Z" },
+  );
+  assert(yielded, "yield must succeed");
+  await stores.metadata.appendLog(
+    claimLifecycleEvent(claimed!, {
+      phase: "upload_retry",
+      attempt: 1,
+      claimOutcome: "yielded",
+      reason: "terminal upload interrupted by invocation budget (143 MB); retrying on a later tick",
+    }),
+  );
+
+  const nowMs = Date.parse("2026-10-11T16:06:00.000Z");
+  const report = await buildObservabilityReport(stores, nowMs);
+
+  // The report: the episode is retrying, from DURABLE state, with the recorded reason.
+  assertEquals(report.retries.length, 1, "the yielded claim must be visible as retrying");
+  assertEquals(report.retries[0]?.episodeId, "episode-r");
+  assertEquals(report.retries[0]?.phase, "upload_retry");
+  assertEquals(report.retries[0]?.attempts, 0, "progress yield resets attempts");
+  assertStringIncludes(report.retries[0]?.lastRetryReason ?? "", "terminal upload interrupted");
+  assertEquals(report.retries[0]?.waitingMs, 6 * 60_000 - 4_000);
+
+  // And the folding for the same episode: retrying, never terminal.
+  const attempts = report.attempts["episode-r"] ?? [];
+  assertEquals(attempts[0]?.outcome, "retrying");
+  assertEquals(attempts[0]?.endedWithTerminalWrite, false);
+
+  // The page: the section exists, names the phase and the recorded reason, and does NOT
+  // present the episode as failed.
+  const response = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, "Retrying (yielded claims)");
+  assertStringIncludes(body, "upload_retry");
+  assertStringIncludes(body, "terminal upload interrupted by invocation budget");
+  assertStringIncludes(body, "An episode waiting out an upload retry");
+});
 
 Deno.test("audio-feed-506m: newer unrelated feed polls cannot hide the synthesis run the drain verdict needs", async () => {
   // The finding: listRuns(20) is a GLOBAL newest-first page, cut to 20, so twenty feed-poll runs
