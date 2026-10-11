@@ -50,6 +50,14 @@ export const MAX_INPUT_TOKENS_PER_DAY = 400_000;
 export const MAX_OUTPUT_TOKENS_PER_DAY = 50_000;
 /** A rough bytes-per-token divisor, used only to attribute daily spend to the counters. */
 const BYTES_PER_TOKEN = 4;
+/** How old the newest unprocessed event may be before the poll reports itself as structurally behind. */
+export const BACKLOG_ALERT_HOURS = 6;
+/**
+ * A STABLE fingerprint for the backlog signal: deliberately a constant, so a backlog that persists for
+ * days keeps one open bead instead of filing a fresh one every hour. It is not derived from any event,
+ * which is exactly why it must not be built like an event fingerprint.
+ */
+export const BACKLOG_FINGERPRINT = "backlog0structural";
 
 export const API_PATH_ERRORS = "/api/observability/errors";
 export const API_PATH_SUMMARY = "/api/observability/summary";
@@ -147,7 +155,13 @@ export interface RunArtifact {
   promptBytes: number;
   /** True when the window held more than the caps allowed; `backlog` says how much was left behind. */
   truncated: boolean;
+  /** Events left unprocessed by this run - the depth of the backlog, in the artifact so "behind and by
+   * how much" is unmissable rather than inferred from a flag (coord, after ruling oldest-first). */
   backlog: number;
+  /** Pages still to drain at the current page size, and the age of the newest unsent event. A poll that
+   * is structurally behind is an operational signal, not a silent condition. */
+  pagesRemaining: number;
+  newestUnsentAgeHours: number | null;
   /** Any cursor gap forced by retention, so a 410 is visible in the audit trail rather than implied. */
   gapReported: { from: number; resumedAt: number } | null;
   fingerprintsSeen: string[];
@@ -209,7 +223,13 @@ export function renderDigest(a: RunArtifact): string {
     `- state: ${a.state}${a.reason ? ` (${a.reason})` : ""}`,
     `- cursor: ${a.cursorBefore} -> ${a.cursorAfter}`,
     `- events: saw ${a.eventsSeen}, sent ${a.eventsSent}, prompt ${a.promptBytes} bytes`,
-    `- capped: ${a.truncated}${a.truncated ? `, backlog ${a.backlog}` : ""}`,
+    `- capped: ${a.truncated}`,
+    a.truncated || a.backlog > 0
+      ? `- BEHIND: ${a.backlog} event(s) still queued, about ${a.pagesRemaining} page(s) remaining` +
+        (a.newestUnsentAgeHours !== null
+          ? `; the newest unprocessed event is ${a.newestUnsentAgeHours.toFixed(1)}h old`
+          : "")
+      : "- BEHIND: no, this run drained the window it fetched",
     `- model calls: ${a.modelCalls}`,
     `- beads filed: ${a.beadIds.length ? a.beadIds.join(", ") : "none"}`,
     `- fingerprints skipped as already open: ${a.fingerprintsSkipped.length}`,
@@ -656,6 +676,8 @@ export async function runOnce(
     promptBytes: 0,
     truncated: false,
     backlog: 0,
+    pagesRemaining: 0,
+    newestUnsentAgeHours: null,
     gapReported: null,
     fingerprintsSeen: [],
     fingerprintsFiled: [],
@@ -836,6 +858,49 @@ export async function runOnce(
     : Math.max(page.body.cursor, ...sentSeqs);
   artifact.cursorAfter = advanceTo;
   state = { ...state, cursor: advanceTo };
+
+  // How far behind are we, and is anything we have not reached already old? hasMore matters as much as
+  // the page contents: without it a full page reports a backlog of zero while hundreds remain.
+  const remainingInPage = Math.max(0, withPrints.length - prompt.eventsSent);
+  const unsent = withPrints.slice(prompt.eventsSent);
+  const newestUnsent = unsent.at(-1)?.event ?? null;
+  const beyondPage = page.body.hasMore ? Math.max(0, page.body.window.newest - advanceTo) : 0;
+  artifact.backlog = beyondPage + remainingInPage;
+  artifact.pagesRemaining = artifact.backlog === 0
+    ? 0
+    : Math.max(1, Math.ceil(artifact.backlog / MAX_EVENTS_PER_RUN));
+  if (newestUnsent !== null) {
+    const ageMs = Date.parse(startedAt) - Date.parse(newestUnsent.time);
+    artifact.newestUnsentAgeHours = Number.isFinite(ageMs) ? ageMs / 3_600_000 : null;
+  }
+
+  // A structurally behind poll is an operational signal, so it is surfaced as a bead - and because it
+  // reuses the fingerprint mechanism with a STABLE fingerprint, a backlog that persists for days keeps
+  // one open bead rather than filing a new one every hour.
+  if (
+    artifact.newestUnsentAgeHours !== null && artifact.newestUnsentAgeHours >= BACKLOG_ALERT_HOURS
+  ) {
+    const id = await deps.fileBead(
+      config.bdBin,
+      {
+        title: `Observability poll is behind: ${artifact.backlog} event(s) unprocessed`,
+        impact:
+          `The newest unprocessed event is about ${
+            artifact.newestUnsentAgeHours.toFixed(1)
+          }h old, so ` +
+          `findings are being reported late. A poll that is structurally behind is a signal about the ` +
+          `poll, not about the application.`,
+        fix:
+          "Check whether the error rate has outgrown one page per hour, and raise the per-run caps or the " +
+          "cadence rather than letting the backlog grow. The backlog drains oldest-first, so nothing is lost.",
+        events: artifact.backlog,
+        fingerprints: [BACKLOG_FINGERPRINT],
+      },
+      { startedAt, cursorBefore, cursorAfter: advanceTo },
+      config.dryRun,
+    );
+    if (id !== null) artifact.beadIds.push(id);
+  }
   if (prompt.truncated) {
     artifact.note =
       `Capped at ${prompt.eventsSent} event(s); ${prompt.backlog} remain and will be ` +
