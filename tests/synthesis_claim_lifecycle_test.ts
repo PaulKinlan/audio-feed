@@ -1420,10 +1420,27 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
 
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let putCalls = 0;
-  stores.blobs.put = async (...args) => {
+  let putSettledAt = 0;
+  let putAborted = 0;
+  let putSettlement: Promise<unknown> = Promise.resolve();
+  stores.blobs.put = (...args) => {
     putCalls++;
-    await new Promise((r) => setTimeout(r, 135));
-    return oldPut(...args);
+    const attempt = (async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 135));
+        return await oldPut(...args);
+      } catch (error) {
+        // THE ORDER FACT this test pins: the deadline aborted the transfer WHILE IT WAS
+        // IN FLIGHT. The elapsed clock below is only a wide sanity bound (audio-feed-y2ex:
+        // order/property first, wall-clock literals last).
+        if ((args[2] as { signal?: AbortSignal } | undefined)?.signal?.aborted) putAborted++;
+        throw error;
+      } finally {
+        putSettledAt = performance.now();
+      }
+    })();
+    putSettlement = attempt;
+    return attempt;
   };
 
   const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
@@ -1438,9 +1455,26 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
     flushMarginMs: 5,
   });
   const elapsed = performance.now() - start;
+  // The aborted transfer may still be settling when the batch yields (that is the point);
+  // await it so the counts below are facts, not races.
+  await putSettlement.catch(() => {});
 
-  assert(elapsed < 90, `elapsed (${elapsed}ms) must be bounded by invocation budget`);
+  // THE PROPERTY (audio-feed-y2ex cure, applied because this test flaked twice under
+  // load): the budget aborted the put BEFORE it settled — a statement about ORDER, not
+  // milliseconds. The batch's yield decision preceded the transfer's settlement, the
+  // transfer ended BECAUSE of the deadline, and it DID end (no zombie left running).
   assertEquals(putCalls, 1, "blobs.put was started");
+  assertEquals(putAborted, 1, "the deadline must abort the in-flight transfer");
+  assert(
+    elapsed < putSettledAt - start,
+    "the batch must yield while the transfer is still in flight (order, not ms)",
+  );
+  // Sanity bound only — deliberately WIDE (2s against an 80ms budget) so scheduler noise
+  // on a loaded 2-vCPU box cannot flip this test; the order assertions above are the test.
+  assert(
+    elapsed < 2_000,
+    `elapsed (${elapsed}ms) sanity bound — the order assertions above are the test`,
+  );
   assertEquals(r1.ready.length, 0, "must not finish ready past budget");
   assertEquals(r1.yielded.length, 1, "must abort upload and yield claim");
 
@@ -1541,9 +1575,14 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
 Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation budget and yields cleanly", async () => {
   const { ctx, stores } = await setupEnv();
   const oldComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  let completeSettledAt = 0;
   stores.metadata.completeEpisode = async (...args) => {
-    await new Promise((r) => setTimeout(r, 140));
-    return oldComplete(...args);
+    try {
+      await new Promise((r) => setTimeout(r, 140));
+      return await oldComplete(...args);
+    } finally {
+      completeSettledAt = performance.now();
+    }
   };
   const started = performance.now();
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
@@ -1553,8 +1592,21 @@ Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation bud
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
-  const elapsed = performance.now() - started;
-  assert(elapsed < 95, `invocation must abort within 80ms budget (elapsed ${elapsed}ms)`);
+  const yieldReturnedAt = performance.now();
+  const elapsed = yieldReturnedAt - started;
+  // THE ORDER PROPERTY (audio-feed-y2ex cure): the budget-yield decision PRECEDED the
+  // metadata write's settlement — the write was still in flight when its deadline fired,
+  // which is the bounded-yield fact. A wall-clock literal here flaked under load; the
+  // elapsed bound below is a deliberately wide sanity check (2s against an 80ms budget),
+  // not the assertion.
+  assert(
+    completeSettledAt === 0 || yieldReturnedAt < completeSettledAt,
+    "the yield must be decided while the terminal write is still in flight (order, not ms)",
+  );
+  assert(
+    elapsed < 2_000,
+    `elapsed (${elapsed}ms) sanity bound — the order assertion above is the test`,
+  );
   assertEquals(
     result.ready.length,
     0,

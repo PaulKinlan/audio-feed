@@ -78,6 +78,7 @@ import {
 } from "../config.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../observability/spans.ts";
 import { claimLifecycleEvent } from "../storage/episode_events.ts";
+import { boundedBlobStore } from "../storage/bounded.ts";
 import {
   ASSUMED_UPLOAD_BYTES_PER_MS,
   type BudgetedOutcome,
@@ -131,7 +132,13 @@ export interface SegmentResume {
     segmentText: string,
     voice: string,
   ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
-  commit: (segmentText: string, decoded: DecodedAudioResult, voice: string) => Promise<void>;
+  commit: (
+    segmentText: string,
+    decoded: DecodedAudioResult,
+    voice: string,
+    /** The stage's abort signal: the segment put must be interruptible (audio-feed-y9kk). */
+    signal?: AbortSignal,
+  ) => Promise<void>;
 }
 
 export interface SynthesisWorkerOptions {
@@ -983,13 +990,35 @@ export function buildSegmentResume(
     return "synthesize";
   };
 
-  const commit = async (segmentText: string, decoded: DecodedAudioResult, voice: string) => {
+  const commit = async (
+    segmentText: string,
+    decoded: DecodedAudioResult,
+    voice: string,
+    signal?: AbortSignal,
+  ) => {
     const textHash = segmentTextHash(segmentText);
     const wav = decoded.format === "wav" ? decoded.rawBytes : decoded.toWav();
     const audioKey = segmentBlobKey(episode, textHash, options.revision());
     let byteLength = wav.length;
+    // The put is signed with the stage's signal when the caller provides one; otherwise it
+    // is bound to the CLAIM'S REMAINING LEASE — a segment put may not outlive its claim
+    // (audio-feed-y9kk). A caller that passes neither gets refused by the bounded store.
+    const claimedAtMs = Date.parse(episode.claimedAt ?? "");
+    const leaseDeadlineMs = Number.isFinite(claimedAtMs) && options.leaseMs
+      ? claimedAtMs + options.leaseMs
+      : undefined;
+    const remainingLeaseMs = leaseDeadlineMs === undefined ? undefined : leaseDeadlineMs - now();
+    const effectiveSignal = signal ??
+      (remainingLeaseMs === undefined
+        ? undefined
+        : remainingLeaseMs > 0
+        ? AbortSignal.timeout(remainingLeaseMs)
+        : AbortSignal.abort());
     try {
-      const stored = await blobs.put(audioKey, wav, { contentType: "audio/wav" });
+      const stored = await blobs.put(audioKey, wav, {
+        contentType: "audio/wav",
+        signal: effectiveSignal,
+      });
       byteLength = stored.size ?? wav.length;
     } catch (error) {
       // The segment audio exists only in this run's memory; stitching still succeeds, but
@@ -1157,7 +1186,14 @@ export async function runSynthesisBatch(
     yielded: [],
     considered: 0,
   };
-  const { metadata, blobs } = ctx.stores;
+  // audio-feed-y9kk: the worker path's blob store is BOUNDED by construction — every
+  // payload-carrying put through `blobs` (terminal upload, orphan sweep deletes are bodyless)
+  // must carry an abort signal or the wrapper throws. The synthesizer's segment-commit puts
+  // reach the same bound via the bounded ctx handed to buildSegmentResume below. An EMPTY
+  // allowlist: no worker-path write is admitted unsigned.
+  const { metadata } = ctx.stores;
+  const blobs = boundedBlobStore(ctx.stores.blobs);
+  const boundedCtx: AppContext = { ...ctx, stores: { ...ctx.stores, blobs } };
   const nowMs = options.nowMs ?? Date.now();
   const invocationStartMonotonicMs = performance.now();
   const maxSegmentsPerInvocation = options.maxSegmentsPerInvocation ??
@@ -1456,7 +1492,7 @@ export async function runSynthesisBatch(
 
     // Durable resumable chunking (audio-feed-wr1u): hooks are bound to THIS claim, so every
     // reserve/finalize inside them is claim-conditional.
-    const segmentResume = buildSegmentResume(ctx, claimed, {
+    const segmentResume = buildSegmentResume(boundedCtx, claimed, {
       owner: opts.owner,
       leaseMs: opts.leaseMs,
       revision: opts.revision,
