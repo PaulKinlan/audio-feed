@@ -44,13 +44,19 @@ gate's selection is a proven SUBSET of the full gate's: both derive from
 fast gate could never select (a `tests/x.test.ts`, a `src/x_test.ts`) is a NAMED gate failure that
 says what to do rather than a suite that quietly never runs on a lane. A module genuinely run
 elsewhere belongs in `FAST_GATE_EXCLUSIONS` with the reason. Second, a non-TypeScript change OUTSIDE
-`src/` and `tests/` is no longer assumed unobservable: markdown is documentation, and everything
-else must be declared in the `DATA_LEDGER` of that same file — naming the suites that read it (a
-screenshot under `docs/evidence/` selects `tests/evidence_size_test.ts`, which asserts the PNG
-budgets; the observability agent runner script selects the suite that executes it) or declaring
-`readBy: []` with the reason that nothing does. An undeclared file runs the FULL suite and names
-itself, because the old rule ("not a .ts file, so no test can care") gave a fast-gate PASS on a tree
-where the full gate failed.
+`src/` and `tests/` is no longer assumed unobservable, and the relation is not a list kept beside
+the suites: `scripts/test-selection.ts` DERIVES who reads what by scanning the suites' own code
+(and, one hop out, the modules they import) for read/execute call sites with statically resolvable
+paths - string literals, `new URL("<literal>", import.meta.url)`, and templates or path constants
+built from `${import.meta.dirname}` (that last one is how `docs/evidence/` is found: the suite calls
+`evidencePngs()`, whose `dir = EVIDENCE_DIR` default points at `../docs/evidence`). A screenshot
+under `docs/evidence/` therefore selects `tests/evidence_size_test.ts`, and
+`scripts/observability-agent-run.sh` selects the suite that executes it, without anyone maintaining
+that mapping. The only hand-written part is `UNREAD_DECLARATIONS`: the paths nothing reads at all,
+each with a reason, and each reconciled against the derived relation at gate time - a declaration a
+detectable read contradicts is a NAMED gate failure. Anything the derivation cannot see and that is
+not declared unread runs the FULL suite and names itself, because the old rule ("not a .ts file, so
+no test can care") gave a fast-gate PASS on a tree where the full gate failed.
 
 An EMPTY selection is never a silent pass (audio-feed-es8y condition 2). It is only allowed when
 every changed file is declared inert — markdown, or a `readBy: []` ledger entry — and even then the

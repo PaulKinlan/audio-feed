@@ -179,72 +179,52 @@ export function auditSelection(
 }
 
 /**
- * A non-TypeScript path whose change can change a suite's result, and the suites that observe it.
- * `readBy: []` is a POSITIVE claim that nothing reads it — which is why every entry carries a reason.
+ * A path DECLARED to be read by no suite. This is the only part of the data story that cannot be derived:
+ * "no read detected" is checkable, not derivable, and a declaration is what keeps a beads commit or an
+ * `.md` edit from running the whole suite. Every declaration is reconciled against the DERIVED read relation
+ * (see deriveDataReadRelations): a detectable read that contradicts one is a NAMED gate failure.
  */
-export interface DataLedgerEntry {
+export interface UnreadDeclaration {
   /** Repo-relative prefix (directory, ending in `/`) or exact path. */
   pattern: string;
-  /** Suites the full gate runs that observe this path. Empty means "verified nobody does". */
-  readBy: string[];
   reason: string;
 }
 
 /**
- * The ledger for non-TypeScript changes OUTSIDE src/ and tests/.
+ * Declarations for non-TypeScript paths OUTSIDE src/ and tests/ that nothing observes.
  *
- * The rule this replaces was "not a .ts file, so no test can care" — which is how a 200KB
- * docs/evidence/*.png came to select ZERO suites while tests/evidence_size_test.ts asserts the PNG byte
- * budgets, so the fast gate passed and the full gate failed on the same tree (reproduced 2026-10-11).
- * Anything not covered here and not documentation is now an UNCLASSIFIED full-suite fallback that names the
- * file, so the ledger is what keeps a lane fast without letting a suite fall out of the selection.
- *
- * Every `readBy` entry is checked twice by tests/fast_gate_subset_test.ts: it must name a suite that exists
- * and that the fast gate can select, and (for the evidence tree) the suite must really read the pattern.
+ * Why this list exists at all: the alternative for an undeclared path is the FULL suite (safe, slow), and a
+ * beads export or an agent-config tweak is not a reason to run 103 modules. What is deliberately NOT here is
+ * any statement about who READS a file — that relation is derived from the suites themselves
+ * (deriveDataReadRelations), so a suite that starts reading a new data file is covered without anyone
+ * editing this list, which was the flaw in the first version of this fix (audio-feed-es8y condition 1: the
+ * relation must come from the suites, not from a list maintained beside them).
  */
-export const DATA_LEDGER: DataLedgerEntry[] = [
-  {
-    pattern: "docs/evidence/",
-    readBy: ["tests/evidence_size_test.ts"],
-    reason:
-      "evidencePngs() walks this tree and the suite asserts the per-file (150KB) and aggregate (8MB) PNG byte budgets (audio-feed-39k1), so a changed screenshot changes its result. Selecting that one suite beats both the old behaviour (nothing ran, so a fast PASS hid a full FAIL) and a blanket full-suite fallback for every screenshot a lane adds.",
-  },
-  {
-    pattern: "scripts/observability-agent-run.sh",
-    readBy: ["tests/observability_agent_poll_test.ts"],
-    reason:
-      "the suite EXECUTES this runner (`sh scripts/observability-agent-run.sh --interval-seconds 0`) and asserts its exit code and stderr text, so the runner is test-observable content that happens not to be TypeScript. Before audio-feed-es8y a change to it selected zero suites.",
-  },
+export const UNREAD_DECLARATIONS: UnreadDeclaration[] = [
   {
     pattern: ".beads/",
-    readBy: [],
     reason:
-      "beads export and hooks: task state, not test input. Verified no suite reads it (no readTextFile/readDir/stat under tests/ names .beads), so a beads-only commit correctly stays a fast no-test change rather than a full-suite run on every lane.",
+      "beads export and hooks: task state, not test input, so a beads-only commit stays a fast no-test change rather than a full-suite run on every lane. Reconciled: no derived read relation names this path, and no suite source contains a read/exec call mentioning it.",
   },
   {
     pattern: ".github/",
-    readBy: [],
-    reason: "CI workflow config; no suite reads it (checked).",
+    reason: "CI workflow config; no suite reads it (reconciled against the derived relation).",
   },
   {
     pattern: ".gitignore",
-    readBy: [],
-    reason: "VCS ignore list; no suite reads it (checked).",
+    reason: "VCS ignore list; no suite reads it (reconciled).",
   },
   {
     pattern: ".codex/",
-    readBy: [],
-    reason: "agent tool config committed to the repo; no suite reads it (checked).",
+    reason: "agent tool config committed to the repo; no suite reads it (reconciled).",
   },
   {
     pattern: ".agents/",
-    readBy: [],
-    reason: "agent skills/instructions committed to the repo; no suite reads it (checked).",
+    reason: "agent skills/instructions committed to the repo; no suite reads it (reconciled).",
   },
   {
     pattern: ".claude/",
-    readBy: [],
-    reason: "agent tool config committed to the repo; no suite reads it (checked).",
+    reason: "agent tool config committed to the repo; no suite reads it (reconciled).",
   },
 ];
 
@@ -255,12 +235,300 @@ export function isDocumentation(relPath: string): boolean {
   return relPath.endsWith(".md");
 }
 
-/** The ledger entry a repo-relative path belongs to: exact match, or directory prefix. */
-export function ledgerEntryFor(
+/**
+ * The DERIVED read relation: which non-TypeScript paths a suite can read or execute, and by which suite.
+ * Keys are repo-relative exact paths or directory prefixes ending in `/`.
+ */
+export type DataReadRelations = Map<string, string[]>;
+
+/** Call sites whose arguments are filesystem/process paths a suite depends on. */
+const READ_CALLS = [
+  "readTextFile",
+  "readTextFileSync",
+  "readFile",
+  "readFileSync",
+  "readDir",
+  "readDirSync",
+  "stat",
+  "statSync",
+  "lstat",
+  "lstatSync",
+  "realPath",
+  "open",
+  "openSync",
+  "Deno.Command",
+  "Command",
+];
+
+/**
+ * Strip comments before scanning: the detector reads raw text, and this file's own documentation contains
+ * example lines like `const EVIDENCE_DIR = ...docs/evidence` which would otherwise be read as a real path
+ * constant (found by exactly that false positive on the first run). The line-comment rule leaves `https://`
+ * alone because a colon or quote precedes the slashes there.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
+}
+
+/** Static path hints found inside one call expression. */
+function staticPathHints(call: string, moduleDir: string, root: string): string[] {
+  const hints: string[] = [];
+  const literals = [...call.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)];
+  for (const match of literals) {
+    let text = match[1] ?? match[2] ?? match[3] ?? "";
+    if (!text) continue;
+    const templated = match[3] !== undefined;
+    if (templated) {
+      // `${import.meta.dirname}` and `${import.meta.url}` are the repo-idiomatic ways to reach a file, and
+      // both resolve statically. Anything else interpolated stays useful: the text is split on whitespace
+      // and path-shaped tokens are kept, with a token that is cut by another interpolation kept as its
+      // directory prefix (a suite reading `./fixtures/${name}.html` observes the whole fixtures directory).
+      const dir = `${root}${moduleDir}`.replace(/\/$/, "");
+      text = text
+        .replace(/\$\{import\.meta\.dirname\}/g, dir)
+        .replace(/\$\{import\.meta\.url\}/g, `${dir}/index.ts`);
+      for (const token of text.split(/[\s"']+/).filter(Boolean)) {
+        const wildcard = token.search(/\$\{/);
+        if (wildcard < 0) {
+          hints.push(token);
+          continue;
+        }
+        const head = token.slice(0, wildcard);
+        if (head.includes("/")) hints.push(head.slice(0, head.lastIndexOf("/") + 1));
+      }
+      continue;
+    }
+    hints.push(text);
+  }
+  return hints;
+}
+
+/**
+ * Path constants defined in a module (`const EVIDENCE_DIR = `${import.meta.dirname}/../docs/evidence``),
+ * so a read call that passes an IDENTIFIER (`Deno.readDir(dir)` with `dir = EVIDENCE_DIR`) still resolves.
+ * That indirection is how docs/evidence is read: the suite calls evidencePngs(), which walks EVIDENCE_DIR.
+ * A resolved constant with no file extension is recorded as a directory prefix, which over-selects rather
+ * than under-selects - the trade this whole bead is about.
+ */
+function pathConstants(source: string, moduleDir: string, root: string): Map<string, string> {
+  const constants = new Map<string, string>();
+  const declare = (name: string, resolved: string) => {
+    const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
+    constants.set(name, isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved);
+  };
+  const resolve = (expr: string): string | null => {
+    const hints = staticPathHints(expr, moduleDir, root);
+    if (hints.length !== 1) return null;
+    return toRepoPath(hints[0]!, moduleDir, root);
+  };
+
+  const lines = source.split("\n").map((line) => line.trim());
+  for (const line of lines) {
+    const match = /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
+    if (!match?.[1] || !match[2]) continue;
+    const resolved = resolve(match[2]) ?? constants.get(match[2].replace(/;$/, "").trim());
+    if (resolved) declare(match[1], resolved);
+  }
+  // Default parameter values: `evidencePngs(dir = EVIDENCE_DIR)` reads through `dir`, so the name that
+  // appears at the read call site is the PARAMETER, not the constant.
+  for (const line of lines) {
+    for (
+      const match of line.matchAll(
+        /[([,]\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^=,)]+)?=\s*([A-Za-z_$][\w$]*)\s*[,)]/g,
+      )
+    ) {
+      const [, name, referenced] = match;
+      if (!name || !referenced) continue;
+      const resolved = constants.get(referenced);
+      if (resolved) declare(name, resolved);
+    }
+  }
+  return constants;
+}
+
+/** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
+function toRepoPath(hint: string, moduleDir: string, root: string): string | null {
+  let path = hint.trim();
+  if (!path) return null;
+  // Only path-shaped hints count. A `Deno.Command` call is full of literals that are not files: CLI flags
+  // (`--allow-all`, `-c`), numbers, and punctuation from an args array. Keeping them out is what makes the
+  // relation readable and keeps a change from matching junk.
+  if (!/^[\w@./-]+$/.test(path)) return null;
+  if (path.startsWith("-")) return null;
+  if (!path.includes("/") && !/\.[A-Za-z0-9]{1,5}$/.test(path)) return null;
+  if (/^[a-z]+:/i.test(path) && !/^file:/i.test(path)) return null; // http(s):, jsr:, node:, data:
+  path = path.replace(/^file:\/\//, "/");
+  if (path.startsWith(root)) return normalisePath(path.slice(root.length));
+  if (path.startsWith("./") || path.startsWith("../")) {
+    return normalisePath(`${moduleDir ? `${moduleDir}/` : ""}${path}`);
+  }
+  if (path.startsWith("/")) return null; // absolute outside the repo
+  // A bare relative path is resolved by Deno against the PROCESS CWD, which is the repo root for both gates
+  // (`sh scripts/x.sh` in a Command call, `Deno.readTextFile("deno.json")`), so it stays repo-relative.
+  return normalisePath(path);
+}
+
+/** Collapse `.` and `..` segments; null when the path escapes the repo root. */
+function normalisePath(path: string): string | null {
+  const parts: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  return parts.length ? parts.join("/") : null;
+}
+
+/** True when the call text at `index` is a read/exec call site we care about. */
+function readCallAt(source: string, index: number): boolean {
+  const before = source.slice(Math.max(0, index - 12), index);
+  return !/(?:import|export|from|require)\s*$/.test(before);
+}
+
+/**
+ * audio-feed-es8y condition 1: DERIVE "who reads this" from the suites, instead of maintaining it beside them.
+ *
+ * For each suite the walk collects the suite's own source plus the repo modules it imports (a small number of
+ * hops, because the path literal often lives in the module that does the reading — `evidencePngs()` is called
+ * by the suite and points EVIDENCE_DIR at docs/evidence inside scripts/evidence-compress.ts), then scans read
+ * and exec call sites for statically resolvable paths: string literals, `new URL("<literal>", import.meta.url)`,
+ * and templates built from `${import.meta.dirname}`.
+ *
+ * It is deliberately an OVER-approximation: a hint that resolves to a directory becomes that whole prefix, so
+ * a suite that reads one fixture selects every change under the directory it is built from. Over-selecting
+ * costs seconds; under-selecting is the bug this bead is about.
+ *
+ * What it cannot see is a path assembled at runtime from variables — that residual is why an undeclared file
+ * OUTSIDE src/ and tests/ still falls back to the full suite, and it is stated rather than papered over.
+ */
+export async function deriveDataReadRelations(
+  root: string = ROOT,
+  suiteFiles?: readonly string[],
+): Promise<DataReadRelations> {
+  const suites = suiteFiles ?? (await discoverFullGateTestFiles(root)).filter(isFastGateSelectable);
+  const sources = new Map<string, string>();
+  const read = async (relPath: string): Promise<string | null> => {
+    const cached = sources.get(relPath);
+    if (cached !== undefined) return cached;
+    const text = await Deno.readTextFile(`${root}${relPath}`).catch(() => null);
+    sources.set(relPath, text ?? "");
+    return text;
+  };
+
+  const relations: DataReadRelations = new Map();
+  const add = (path: string, suite: string) => {
+    // TypeScript is covered by the import graph, and non-.ts files under src/ and tests/ keep the
+    // conservative full-suite fallback - so a relation to either is recorded nowhere: it would never be
+    // consulted and it would bury the data paths that matter (audio-feed-es8y scope note).
+    if (path.endsWith(".ts")) return;
+    if (
+      path === "src" || path === "tests" || path.startsWith("src/") || path.startsWith("tests/")
+    ) {
+      return;
+    }
+    const list = relations.get(path) ?? [];
+    if (!list.includes(suite)) list.push(suite);
+    relations.set(path, list);
+  };
+
+  for (const suite of suites) {
+    const moduleDir = suite.split("/").slice(0, -1).join("/");
+    const queue: { relPath: string; dir: string; depth: number }[] = [
+      { relPath: suite, dir: moduleDir, depth: 0 },
+    ];
+    const seen = new Set<string>();
+    const constants = new Map<string, string>();
+    while (queue.length) {
+      const { relPath, dir, depth } = queue.pop()!;
+      if (seen.has(relPath)) continue;
+      seen.add(relPath);
+      const source = stripComments(await read(relPath) ?? "");
+      if (source === null) continue;
+
+      for (const [name, path] of pathConstants(source, dir, root)) {
+        if (!constants.has(name)) constants.set(name, path);
+      }
+
+      for (const call of READ_CALLS) {
+        for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
+          const at = match.index ?? 0;
+          if (!readCallAt(source, at)) continue;
+          // Scan to the matching close paren so the literals belong to this call.
+          let depthParen = 0;
+          let end = at + match[0].length - 1;
+          for (let i = end; i < source.length; i++) {
+            const ch = source[i];
+            if (ch === "(") depthParen++;
+            else if (ch === ")") {
+              depthParen--;
+              if (depthParen === 0) {
+                end = i;
+                break;
+              }
+            }
+          }
+          const callText = source.slice(at, end + 1);
+          for (const hint of staticPathHints(callText, dir, root)) {
+            const path = toRepoPath(hint, dir, root);
+            if (path) add(path, suite);
+          }
+          // An argument passed by NAME still resolves through the constants collected above.
+          for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
+            const path = constants.get(identifier[1]!);
+            if (path) add(path, suite);
+          }
+        }
+      }
+
+      // One hop (two levels) into the modules this file imports, for path constants like EVIDENCE_DIR.
+      if (depth < 2) {
+        for (const spec of source.matchAll(/from\s*["'](\.[^"']+)["']/g)) {
+          const imported = normalisePath(`${dir}/${spec[1]}`);
+          if (!imported || seen.has(imported)) continue;
+          const importedDir = imported.split("/").slice(0, -1).join("/");
+          queue.push({ relPath: imported, dir: importedDir, depth: depth + 1 });
+        }
+      }
+    }
+  }
+
+  for (const list of relations.values()) list.sort();
+  // Keep only paths that exist in the tree: a key derived from a mis-parsed template can never match a
+  // changed file, and dropping it keeps the audit output readable.
+  const existing: DataReadRelations = new Map();
+  for (const [path, observers] of relations) {
+    const stat = await Deno.stat(`${root}${path.replace(/\/$/, "")}`).catch(() => null);
+    if (stat) existing.set(path, observers);
+  }
+  return existing;
+}
+
+/** The suites the derived relation says observe a changed path (exact match or directory prefix). */
+export function suitesObserving(
   relPath: string,
-  ledger: readonly DataLedgerEntry[] = DATA_LEDGER,
-): DataLedgerEntry | undefined {
-  return ledger.find((entry) =>
+  relations: DataReadRelations,
+): string[] {
+  const suites = new Set<string>();
+  for (const [pattern, observed] of relations) {
+    if (pattern.endsWith("/") ? relPath.startsWith(pattern) : relPath === pattern) {
+      for (const suite of observed) suites.add(suite);
+    }
+  }
+  return [...suites].sort();
+}
+
+/** The unread declaration a repo-relative path matches, if any. */
+export function declarationFor(
+  relPath: string,
+  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
+): UnreadDeclaration | undefined {
+  return declarations.find((entry) =>
     entry.pattern.endsWith("/") ? relPath.startsWith(entry.pattern) : relPath === entry.pattern
   );
 }
@@ -268,21 +536,23 @@ export function ledgerEntryFor(
 export interface NonTsClassification {
   /** Markdown: no suite reads it, so no selection consequence. */
   documentation: string[];
-  /** Suites that must run because a change touches data they observe. */
+  /** Suites that must run because the DERIVED relation says they read the changed data. */
   suites: string[];
-  /** Declared in the ledger as observed by NOBODY (`readBy: []`): inert, with a stated reason. */
+  /** Declared unread: inert, with a stated reason, reconciled against the derived relation. */
   inert: string[];
-  /** Not .ts, not markdown, not in the ledger: the caller must fall back to the FULL suite and say so. */
+  /** Not .ts, not markdown, not read by anything detectable and not declared: full suite, by name. */
   unclassified: string[];
 }
 
 /**
- * Classify the non-TypeScript half of a change set. Callers handle non-.ts files under src/ and tests/
- * themselves (those are already a full-suite fallback: assets, fixtures) and reach this for everything else.
+ * Classify the non-TypeScript half of a change set against the DERIVED read relation. Callers handle non-.ts
+ * files under src/ and tests/ themselves (those keep the conservative full-suite fallback: assets, fixtures)
+ * and reach this for everything else.
  */
 export function classifyNonTsChanges(
   changed: readonly string[],
-  ledger: readonly DataLedgerEntry[] = DATA_LEDGER,
+  relations: DataReadRelations,
+  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
 ): NonTsClassification {
   const classification: NonTsClassification = {
     documentation: [],
@@ -298,16 +568,16 @@ export function classifyNonTsChanges(
       classification.documentation.push(file);
       continue;
     }
-    const entry = ledgerEntryFor(file, ledger);
-    if (!entry) {
-      classification.unclassified.push(file);
+    const observers = suitesObserving(file, relations);
+    if (observers.length) {
+      for (const suite of observers) suites.add(suite);
       continue;
     }
-    if (entry.readBy.length === 0) {
+    if (declarationFor(file, declarations)) {
       classification.inert.push(file);
       continue;
     }
-    for (const suite of entry.readBy) suites.add(suite);
+    classification.unclassified.push(file);
   }
 
   classification.suites = [...suites].sort();
@@ -317,10 +587,10 @@ export function classifyNonTsChanges(
 /**
  * Can an EMPTY selection be trusted for this change set?
  *
- * Only when every changed file is declared inert — markdown documentation, or a ledger entry whose
- * `readBy` is empty and whose reason says nothing observes it. This is audio-feed-es8y condition 2: a gate
- * that ran no suite must never read like a gate that ran suites and passed. Anything not proven inert (a
- * standalone script nothing imports, an undeclared file) gets the FULL suite instead.
+ * Only when every changed file is declared inert — markdown documentation, or an UNREAD_DECLARATIONS entry
+ * with a reason. This is audio-feed-es8y condition 2: a gate that ran no suite must never read like a gate
+ * that ran suites and passed. Anything not proven inert (a standalone script nothing imports, an undeclared
+ * file) gets the FULL suite instead.
  */
 export function isProvablyInert(
   changed: readonly string[],
@@ -332,30 +602,57 @@ export function isProvablyInert(
 }
 
 /**
- * Ledger self-checks that do not need the fast gate's graph: every suite named by the ledger exists and is
- * selectable, every entry explains itself, and every pattern is a path that exists in the tree (so a typo
- * like `docs/evidence` without its slash cannot silently stop matching).
+ * Reconciliation for the only hand-written part of the data story: a declaration that nothing reads a path is
+ * a CLAIM, so it is checked against the derived relation and against any read/exec call in a suite that names
+ * the path. A contradiction is a NAMED failure — the declaration is either wrong or the read is a new input
+ * relation the selection must know about (audio-feed-es8y conditions 1 and 2).
  */
-export async function auditDataLedger(
+export async function auditUnreadDeclarations(
   root: string = ROOT,
-  ledger: readonly DataLedgerEntry[] = DATA_LEDGER,
-  fullGateTestFiles: string[] = [],
+  declarations: readonly UnreadDeclaration[] = UNREAD_DECLARATIONS,
+  relations?: DataReadRelations,
+  suiteFiles?: readonly string[],
 ): Promise<string[]> {
   const problems: string[] = [];
-  const known = new Set(fullGateTestFiles);
-  for (const entry of ledger) {
-    if (!entry.pattern.trim()) problems.push("a DATA_LEDGER entry has no pattern");
-    if (!entry.reason.trim()) problems.push(`${entry.pattern} has no reason`);
-    for (const suite of entry.readBy) {
-      if (!known.has(suite)) {
-        problems.push(`${entry.pattern} names ${suite}, which is not a full-gate module`);
-      } else if (!isFastGateSelectable(suite)) {
-        problems.push(`${entry.pattern} names ${suite}, which the fast gate cannot select`);
+  const derived = relations ?? await deriveDataReadRelations(root, suiteFiles);
+  const suites = suiteFiles ?? (await discoverFullGateTestFiles(root)).filter(isFastGateSelectable);
+
+  for (const declaration of declarations) {
+    if (!declaration.pattern.trim()) problems.push("an UNREAD_DECLARATIONS entry has no pattern");
+    if (!declaration.reason.trim()) problems.push(`${declaration.pattern} has no reason`);
+
+    for (const [path, observers] of derived) {
+      const overlaps = declaration.pattern.endsWith("/")
+        ? path.startsWith(declaration.pattern) || declaration.pattern.startsWith(`${path}/`)
+        : path === declaration.pattern || path.startsWith(`${declaration.pattern}/`);
+      if (overlaps) {
+        problems.push(
+          `${declaration.pattern} is declared read by nobody, but the derived relation says ${
+            observers.join(", ")
+          } reads ${path}`,
+        );
       }
     }
-    const path = entry.pattern.endsWith("/") ? entry.pattern.slice(0, -1) : entry.pattern;
+
+    const bare = declaration.pattern.replace(/\/$/, "");
+    for (const suite of suites) {
+      const source = stripComments(await Deno.readTextFile(`${root}${suite}`).catch(() => ""));
+      for (const call of READ_CALLS) {
+        const lines = source.split("\n").filter((line) => line.includes(call));
+        if (lines.some((line) => line.includes(bare))) {
+          problems.push(
+            `${declaration.pattern} is declared read by nobody, but ${suite} has a ${call} call mentioning it`,
+          );
+          break;
+        }
+      }
+    }
+
+    const path = declaration.pattern.endsWith("/")
+      ? declaration.pattern.slice(0, -1)
+      : declaration.pattern;
     const stat = await Deno.stat(`${root}${path}`).catch(() => null);
-    if (stat === null) problems.push(`${entry.pattern} does not exist in the tree`);
+    if (stat === null) problems.push(`${declaration.pattern} does not exist in the tree`);
   }
   return problems;
 }
@@ -453,18 +750,35 @@ export async function proveDiscoveryMatchesDeno(): Promise<DiscoveryProof> {
 if (import.meta.main) {
   const full = await discoverFullGateTestFiles();
   const audit = auditSelection(full);
-  const ledgerProblems = await auditDataLedger(ROOT, DATA_LEDGER, full);
+  const fastUniverse = full.filter(isFastGateSelectable);
+  const relations = await deriveDataReadRelations(ROOT, fastUniverse);
+  const declarationProblems = await auditUnreadDeclarations(
+    ROOT,
+    UNREAD_DECLARATIONS,
+    relations,
+    fastUniverse,
+  );
 
   console.log(
     `test-selection: the full gate runs ${full.length} test module(s); the fast gate can select ${audit.fastGateUniverse.length}.`,
   );
+  console.log(
+    `test-selection: the derived read relation covers ${relations.size} data path(s) across ${UNREAD_DECLARATIONS.length} unread declaration(s).`,
+  );
+  if (Deno.args.includes("--list-relations")) {
+    for (const [path, observers] of [...relations].sort()) {
+      console.log(`  ${path} <- ${observers.join(", ")}`);
+    }
+  }
   if (!audit.ok) {
     console.error(audit.message);
     Deno.exit(1);
   }
-  if (ledgerProblems.length) {
+  if (declarationProblems.length) {
     console.error(
-      `fast-gate: DATA_LEDGER problem(s) (audio-feed-es8y):\n  ${ledgerProblems.join("\n  ")}`,
+      `fast-gate: UNREAD DECLARATION contradiction(s) (audio-feed-es8y):\n  ${
+        declarationProblems.join("\n  ")
+      }\nA declaration must either be corrected or replaced by the read relation the suites now express.`,
     );
     Deno.exit(1);
   }

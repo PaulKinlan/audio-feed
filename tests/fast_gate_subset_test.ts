@@ -22,10 +22,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { allTestFiles, planTests, suiteMarker } from "../scripts/fast-check.ts";
 import {
-  auditDataLedger,
   auditSelection,
+  auditUnreadDeclarations,
   classifyNonTsChanges,
-  DATA_LEDGER,
+  deriveDataReadRelations,
   discoverFullGateTestFiles,
   FAST_GATE_EXCLUSIONS,
   isFastGateSelectable,
@@ -33,6 +33,7 @@ import {
   NEVER_WALKED,
   proveDiscoveryMatchesDeno,
   ROOT,
+  UNREAD_DECLARATIONS,
 } from "../scripts/test-selection.ts";
 
 const NO_NAMED = new Map<string, string[]>();
@@ -222,15 +223,55 @@ Deno.test("an exclusion justifies itself or it is reported (a reason, and a modu
 // The data ledger: non-TypeScript changes that a suite can see
 // ---------------------------------------------------------------------------
 
+// The DERIVED read relation: non-TypeScript changes a suite can see
+// ---------------------------------------------------------------------------
+
+// Derived once from this repo, exactly as the gate derives it.
+const RELATIONS = await deriveDataReadRelations(ROOT);
+
+Deno.test("**DERIVATION**: the relation is read out of the suites, not listed beside them", async () => {
+  // The two live instances of the gap this bead is about, derived rather than declared:
+  assertEquals(RELATIONS.get("docs/evidence/"), ["tests/evidence_size_test.ts"]);
+  assertEquals(RELATIONS.get("scripts/observability-agent-run.sh"), [
+    "tests/observability_agent_poll_test.ts",
+  ]);
+  // A suite reading one file by name is found too, and every key is a real path.
+  assert(RELATIONS.has("deno.json"), "deno.json is read by the suites that parse the task list");
+  for (const path of RELATIONS.keys()) {
+    const stat = await Deno.stat(`${ROOT}${path.replace(/\/$/, "")}`).catch(() => null);
+    assert(stat !== null, `${path} should be a real path in the tree`);
+  }
+});
+
+Deno.test("the relation is derived through a path CONSTANT and a default parameter (es8y)", async () => {
+  // docs/evidence is read by evidencePngs(), whose directory comes from `EVIDENCE_DIR` in
+  // scripts/evidence-compress.ts and reaches the read call through the `dir = EVIDENCE_DIR` default.
+  // Break that chain and the derivation test above fails, which is the point: the relation must come
+  // from the code rather than from a list that agrees today.
+  const suite = await Deno.readTextFile(`${ROOT}tests/evidence_size_test.ts`);
+  assert(suite.includes("evidencePngs"), "the suite must call evidencePngs()");
+  const compress = await Deno.readTextFile(`${ROOT}scripts/evidence-compress.ts`);
+  assert(
+    /EVIDENCE_DIR\s*=\s*`\$\{import\.meta\.dirname\}\/\.\.\/docs\/evidence`/.test(compress),
+    "EVIDENCE_DIR must still point at ../docs/evidence",
+  );
+  assert(/dir: string = EVIDENCE_DIR/.test(compress), "the read call must take it by default");
+});
+
 Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8y)", () => {
   // Before this: planTests(["docs/evidence/x.png"]) returned [] and the gate said
   // "no tests to run" - a fast PASS on a tree where evidence_size_test.ts fails.
-  const plan = planTests(["docs/evidence/audio-feed-0jp/edit-1280-light.png"], NO_GRAPH, NO_NAMED);
+  const plan = planTests(
+    ["docs/evidence/audio-feed-0jp/edit-1280-light.png"],
+    NO_GRAPH,
+    NO_NAMED,
+    RELATIONS,
+  );
   assertEquals(plan.testFiles, ["tests/evidence_size_test.ts"], plan.reason);
 });
 
 Deno.test("a changed shell runner selects the suite that executes it (es8y)", () => {
-  const plan = planTests(["scripts/observability-agent-run.sh"], NO_GRAPH, NO_NAMED);
+  const plan = planTests(["scripts/observability-agent-run.sh"], NO_GRAPH, NO_NAMED, RELATIONS);
   assertEquals(plan.testFiles, ["tests/observability_agent_poll_test.ts"], plan.reason);
 });
 
@@ -239,15 +280,17 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     ["src/routes/widgets.ts", "docs/evidence/x.png"],
     new Map(),
     new Map([["src/routes/widgets.ts", ["tests/widgets_test.ts"]]]),
+    RELATIONS,
   );
   assertEquals(plan.testFiles, ["tests/evidence_size_test.ts", "tests/widgets_test.ts"]);
 });
 
 Deno.test("an undeclared non-TypeScript file runs the FULL suite and names itself", () => {
-  const plan = planTests(["mystery/payload.bin"], NO_GRAPH, NO_NAMED);
+  const plan = planTests(["mystery/payload.bin"], NO_GRAPH, NO_NAMED, RELATIONS);
   assertEquals(plan.testFiles, null);
   assert(plan.reason.includes("mystery/payload.bin"), plan.reason);
-  assert(plan.reason.includes("DATA_LEDGER"), plan.reason);
+  assert(plan.reason.includes("not read by any suite (derived)"), plan.reason);
+  assert(plan.reason.includes("UNREAD_DECLARATIONS"), plan.reason);
 });
 
 Deno.test("documentation and declared-not-read files still run nothing", () => {
@@ -263,7 +306,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
     "docs/evidence/x.png",
     ".beads/issues.jsonl",
     "mystery/payload.bin",
-  ]);
+  ], RELATIONS);
   assertEquals(classified.documentation, ["README.md"]);
   assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
   assertEquals(classified.inert, [".beads/issues.jsonl"]);
@@ -275,7 +318,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
 // ---------------------------------------------------------------------------
 
 Deno.test("an empty selection is allowed only for provably inert changes (es8y condition 2)", () => {
-  // Declared inert: markdown documentation and the ledger's `readBy: []` entries.
+  // Declared inert: markdown documentation and the UNREAD_DECLARATIONS entries.
   for (
     const inert of [
       ["README.md"],
@@ -377,7 +420,7 @@ Deno.test("every selection in the adversarial corpus is inside the full gate's u
     [],
   ];
   for (const changed of corpus) {
-    const plan = planTests(changed, new Map(), NO_NAMED);
+    const plan = planTests(changed, new Map(), NO_NAMED, RELATIONS);
     if (plan.testFiles === null) continue; // the full suite is trivially inside itself
     const outside = plan.testFiles.filter((f) => !universe.has(f));
     assertEquals(outside, [], `${changed.join(", ")} selected modules outside the universe`);
@@ -393,31 +436,79 @@ Deno.test("every selection in the adversarial corpus is inside the full gate's u
   assertEquals(mirror.testFiles, null, mirror.reason);
 });
 
-Deno.test("the data ledger's own claims hold on this repo", async () => {
+Deno.test("the unread declarations hold against the derived relation (es8y condition 1/2)", async () => {
   const full = await discoverFullGateTestFiles(ROOT);
-  assertEquals(await auditDataLedger(ROOT, DATA_LEDGER, full), []);
+  const fastUniverse = full.filter(isFastGateSelectable);
+  assertEquals(
+    await auditUnreadDeclarations(ROOT, UNREAD_DECLARATIONS, RELATIONS, fastUniverse),
+    [],
+  );
 
-  // Bites: a suite that does not exist, and a pattern that names nothing in the tree.
-  const problems = await auditDataLedger(
+  // Bites: a declaration contradicted by a derived read, one naming nothing in the tree, and an empty reason.
+  const contradicted = await auditUnreadDeclarations(
+    ROOT,
+    [{ pattern: "docs/evidence/", reason: "says nothing read this, but a suite does" }],
+    RELATIONS,
+    fastUniverse,
+  );
+  assert(
+    contradicted.some((p) =>
+      p.includes("declared read by nobody") && p.includes("tests/evidence_size_test.ts")
+    ),
+    contradicted.join("; "),
+  );
+  const missing = await auditUnreadDeclarations(
     ROOT,
     [
-      { pattern: "docs/evidence/", readBy: ["tests/ghost_test.ts"], reason: "made up" },
-      { pattern: "no/such/dir/", readBy: [], reason: "made up" },
+      { pattern: "no/such/dir/", reason: "made up" },
+      { pattern: ".gitignore", reason: "   " },
     ],
-    full,
+    RELATIONS,
+    fastUniverse,
   );
-  assert(problems.some((p) => p.includes("tests/ghost_test.ts")), problems.join("; "));
-  assert(problems.some((p) => p.includes("no/such/dir/")), problems.join("; "));
+  assert(
+    missing.some((p) => p.includes("no/such/dir/") && p.includes("does not exist")),
+    missing.join("; "),
+  );
+  assert(
+    missing.some((p) => p.includes(".gitignore") && p.includes("no reason")),
+    missing.join("; "),
+  );
 });
 
-Deno.test("the evidence-ledger entry is anchored in the suite's own code, not in prose", async () => {
-  // The ledger says the evidence tree is read by tests/evidence_size_test.ts. If that suite
-  // stops reading it, the entry must be revisited - so the anchor is asserted here.
-  const suite = await Deno.readTextFile(`${ROOT}tests/evidence_size_test.ts`);
-  assert(suite.includes("evidencePngs"), "evidence_size_test.ts must still use evidencePngs()");
-  const compress = await Deno.readTextFile(`${ROOT}scripts/evidence-compress.ts`);
-  assert(
-    /EVIDENCE_DIR\s*=\s*`\$\{import\.meta\.dirname\}\/\.\.\/docs\/evidence`/.test(compress),
-    "evidence-compress.ts must still point EVIDENCE_DIR at docs/evidence",
-  );
+Deno.test("the detector reads a fixture suite that reads a fixture data file (es8y)", async () => {
+  // The detector is exercised on its own fixture tree, so the rules it claims to implement are visible here
+  // rather than only in the live relation: a string literal, `new URL("<literal>", import.meta.url)`, and a
+  // constant built from `${import.meta.dirname}` (the docs/evidence shape).
+  const dir = await Deno.makeTempDir({ prefix: "af-relations-" });
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    await Deno.mkdir(`${dir}/scripts`, { recursive: true });
+    await Deno.mkdir(`${dir}/data`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/data/table.csv`, "a,b\n");
+    await Deno.writeTextFile(`${dir}/fixtures.html`, "<p>fixture</p>");
+    await Deno.writeTextFile(
+      `${dir}/scripts/paths.ts`,
+      "export const DATA_DIR = `${import.meta.dirname}/../data`;\n",
+    );
+    await Deno.writeTextFile(
+      `${dir}/tests/fixture_read_test.ts`,
+      `import { DATA_DIR } from "../scripts/paths.ts";
+import { assertEquals } from "jsr:@std/assert";
+
+Deno.test("reads", async () => {
+  await Deno.readTextFile(\`\${DATA_DIR}/table.csv\`);
+  await Deno.readTextFile(new URL("../fixtures.html", import.meta.url));
+  await Deno.readTextFile("data/table.csv");
+  assertEquals(1, 1);
+});
+`,
+    );
+
+    const relations = await deriveDataReadRelations(`${dir}/`);
+    assertEquals(relations.get("data/table.csv"), ["tests/fixture_read_test.ts"]);
+    assertEquals(relations.get("fixtures.html"), ["tests/fixture_read_test.ts"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

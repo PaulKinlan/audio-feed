@@ -20,19 +20,25 @@ All notable changes to this project will be documented in this file.
   PROVES the universe rather than asserting it: it plants a corpus of `*_test.{ts,js,mts}` /
   `*.test.*` files (plus look-alikes that must NOT be discovered, and files under the excluded
   trees) and compares its walk with `deno test --no-run`'s own scan under this repo's exclude list.
-  Non-TypeScript changes outside `src/` and `tests/` are no longer assumed unobservable: markdown is
-  documentation, and everything else must be declared in the same file's `DATA_LEDGER`, naming the
-  suites that read it (a `docs/evidence/*.png` selects `tests/evidence_size_test.ts`, which asserts
-  the PNG budgets; `scripts/observability-agent-run.sh` selects
-  `tests/observability_agent_poll_test.ts`, which executes it) or declaring `readBy: []` with the
-  reason nothing does. An undeclared file runs the full suite and names itself. Before this, a 200KB
-  screenshot selected ZERO suites: the fast gate passed while the full gate failed on the same tree.
-  An EMPTY selection is never a silent pass either: it is allowed only when every changed file is
-  declared inert, and then the run says `NO SUITES SELECTED — 0 of N test module(s) ran` and emits
-  `fast-gate: unmapped: <files>`, which the fleet's coverage reporter turns into a COVERAGE WARNING,
-  so a gate that ran nothing is visibly not a gate that ran suites and passed. Anything not provably
-  inert runs the full suite — including a standalone `scripts/` module nothing imports, whose old
-  silent zero ("the type-check is its gate") is gone.
+  Non-TypeScript changes outside `src/` and `tests/` are no longer assumed unobservable, and their
+  read relation is NOT a list maintained beside the suites: `scripts/test-selection.ts` DERIVES who
+  reads what by scanning the suites' own code (and the repo modules they import) for read/execute
+  call sites with statically resolvable paths — string literals,
+  `new URL("<literal>", import.meta.url)`, and path constants or templates built from
+  `${import.meta.dirname}`. A `docs/evidence/*.png` therefore selects `tests/evidence_size_test.ts`
+  (found through `evidencePngs()` -> `EVIDENCE_DIR`) and `scripts/observability-agent-run.sh`
+  selects `tests/observability_agent_poll_test.ts`, which executes it — no mapping table to keep in
+  sync. The only hand-written part is `UNREAD_DECLARATIONS`: the paths nothing reads, each with a
+  reason, reconciled against the derived relation at gate time, so a declaration that a detectable
+  read contradicts is a NAMED failure. Anything the derivation cannot see and that is not declared
+  unread runs the full suite and names itself. Before this, a 200KB screenshot selected ZERO suites:
+  the fast gate passed while the full gate failed on the same tree. An EMPTY selection is never a
+  silent pass either: it is allowed only when every changed file is declared inert, and then the run
+  says `NO SUITES SELECTED — 0 of N test module(s) ran` and emits `fast-gate: unmapped: <files>`,
+  which the fleet's coverage reporter turns into a COVERAGE WARNING, so a gate that ran nothing is
+  visibly not a gate that ran suites and passed. Anything not provably inert runs the full suite —
+  including a standalone `scripts/` module nothing imports, whose old silent zero ("the type-check
+  is its gate") is gone.
 
 - **An admin observability page: failures and job state without copying anything out
   (audio-feed-n6uu)**: `GET /admin/observability`, behind the existing admin gate (session plus

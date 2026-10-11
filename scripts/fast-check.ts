@@ -20,9 +20,11 @@
  *   - a changed HUB or cross-cutting file (app/compose/router/http/config/
  *     server/origin) runs the FULL suite — every test exercises it;
  *   - a non-TypeScript file outside src/ and tests/ (a docs/evidence PNG, a shell runner) selects the
- *     suites the DATA_LEDGER in scripts/test-selection.ts declares observe it; an undeclared one runs
- *     the FULL suite and names itself (audio-feed-es8y: "not a .ts file" used to mean "no test can
- *     care", which gave a fast PASS on a tree where the full gate failed);
+ *     suites the DERIVED read relation says read or execute it - the relation is scanned out of the
+ *     suites' own code in scripts/test-selection.ts, not listed beside them - and anything the derivation
+ *     cannot see, that is not declared unread, runs the FULL suite and names itself (audio-feed-es8y: "not
+ *     a .ts file" used to mean "no test can care", which gave a fast PASS on a tree where the full gate
+ *     failed);
  *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
  *     the FULL suite. Safe beats fast.
  *
@@ -46,13 +48,15 @@
  */
 
 import {
-  auditDataLedger,
   auditSelection,
+  auditUnreadDeclarations,
   classifyNonTsChanges,
-  DATA_LEDGER,
+  type DataReadRelations,
+  deriveDataReadRelations,
   discoverFullGateTestFiles,
   isFastGateSelectable,
   isProvablyInert,
+  UNREAD_DECLARATIONS,
 } from "./test-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
@@ -470,6 +474,7 @@ export function planTests(
   changed: string[],
   reverse: Map<string, string[]>,
   named: Map<string, string[]>,
+  readRelations: DataReadRelations = new Map(),
 ): { testFiles: string[] | null; reason: string } {
   if (changed.some((f) => f === "deno.json" || f === "deno.lock")) {
     return { testFiles: null, reason: "deno.json/deno.lock changed — import graph may have moved" };
@@ -491,14 +496,15 @@ export function planTests(
   // Non-TypeScript OUTSIDE src/ and tests/ (docs, evidence, tooling, generated exports) is the case that
   // produced a fast-gate PASS with a full-gate FAIL on the same tree (audio-feed-es8y): a 200KB
   // docs/evidence/*.png selected ZERO suites while tests/evidence_size_test.ts asserted its byte budget.
-  // The DATA_LEDGER in scripts/test-selection.ts says which suites observe each declared kind of file, or
-  // that nothing does; anything undeclared is a full-suite fallback that NAMES itself rather than silence.
-  const data = classifyNonTsChanges(changed, DATA_LEDGER);
+  // The relation is DERIVED from the suites (scripts/test-selection.ts) rather than listed here, so a suite
+  // that starts reading a new data file is covered without anyone editing a selection table. Anything the
+  // derivation cannot see and that is not declared unread runs the FULL suite and names itself.
+  const data = classifyNonTsChanges(changed, readRelations);
   if (data.unclassified.length) {
     return {
       testFiles: null,
       reason:
-        `non-TypeScript file(s) that are neither documentation nor declared in scripts/test-selection.ts DATA_LEDGER: ${
+        `non-TypeScript file(s) not read by any suite (derived) and not declared unread in scripts/test-selection.ts UNREAD_DECLARATIONS: ${
           data.unclassified.join(", ")
         }`,
     };
@@ -601,10 +607,22 @@ if (import.meta.main) {
     console.error(selectionAudit.message);
     Deno.exit(1);
   }
-  const ledgerProblems = await auditDataLedger(ROOT, DATA_LEDGER, fullGateTestFiles);
+  // The read relation is derived once per run: which data files the suites read or execute.
+  const readRelations = await deriveDataReadRelations(
+    ROOT,
+    fullGateTestFiles.filter(isFastGateSelectable),
+  );
+  const ledgerProblems = await auditUnreadDeclarations(
+    ROOT,
+    UNREAD_DECLARATIONS,
+    readRelations,
+    fullGateTestFiles.filter(isFastGateSelectable),
+  );
   if (ledgerProblems.length) {
     console.error(
-      `fast-gate: DATA_LEDGER problem(s) (audio-feed-es8y):\n  ${ledgerProblems.join("\n  ")}`,
+      `fast-gate: UNREAD DECLARATION contradiction(s) (audio-feed-es8y):\n  ${
+        ledgerProblems.join("\n  ")
+      }\nA declaration must either be corrected or replaced by the read relation the suites now express.`,
     );
     Deno.exit(1);
   }
@@ -630,7 +648,7 @@ if (import.meta.main) {
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named);
+    plan = planTests(changed, reverse, named, readRelations);
   }
   const { testFiles, reason } = plan;
 
