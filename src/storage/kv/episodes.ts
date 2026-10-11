@@ -318,37 +318,47 @@ export function createEpisodesRepository(
       if (!found) return null;
 
       const nowMs = Date.parse(claim.now);
-      const claimable = found.status === "pending" ||
-        (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
+      const isExpired = found.status === "synthesizing" &&
+        isClaimExpired(found, nowMs, claim.leaseMs);
+      const claimable = found.status === "pending" || isExpired;
       if (!claimable) return null;
 
       const attempts = (found.attempts ?? 0) + 1;
+      const prior = typeof found.error === "string" && found.error.length > 0 ? found.error : null;
+
+      // audio-feed-siv1: If previous claim expired before its terminal write,
+      // record its failure reason, phase, attempt count, and last heartbeat.
+      const expiredPhase = found.phase ?? "claimed";
+      const expiredHeartbeat = found.lastHeartbeat ?? found.claimedAt ?? "unknown";
+      const expiredAttempt = found.attempts ?? 1;
+      const expiredProvenance = found.claimedAt
+        ? `by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
+        : "no claim details";
+      const expiredMsg =
+        `claim ${expiredAttempt} (${expiredProvenance}) died before terminal write in phase "${expiredPhase}" (last heartbeat ${expiredHeartbeat})`;
+      const accumulatedError = isExpired
+        ? (prior && prior.includes(expiredMsg)
+          ? prior
+          : (prior ? `${prior}; ${expiredMsg}` : expiredMsg))
+        : prior;
+
       if (attempts > claim.maxClaims) {
         // Abandon rather than re-bill. Still checked, so this cannot clobber a
         // worker that legitimately claimed between our read and this write.
         // A regeneration goes back to ready on its old audio instead (audio-feed-8oz).
         //
-        // audio-feed-bp6r: preserve the last recorded cause. Nine live episodes
-        // showed only "abandoned after 3 attempts" because this write overwrote
-        // whatever the last failing claim had recorded. When nothing was ever
-        // recorded, say so plainly — that itself is the diagnostic (every claim
-        // died before its terminal write).
-        const prior = typeof found.error === "string" && found.error.length > 0
-          ? found.error
-          : null;
-        const provenance = found.claimedAt
-          ? `last claim by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
-          : "no claim details";
+        // audio-feed-siv1 / audio-feed-bp6r: persist WHY the episode failed:
+        // reason + phase + attempt count + provenance + attempt history.
+        const abandonedReason = accumulatedError
+          ? `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}"; history: [${accumulatedError}]`
+          : `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}" (${expiredProvenance})`;
+
         const abandoned: Episode = {
-          ...unsynthesized(
-            found,
-            prior
-              ? `abandoned after ${claim.maxClaims} attempts; last recorded error: ${prior}`
-              : `abandoned after ${claim.maxClaims} attempts; no claim recorded a cause (${provenance}) — ` +
-                "each claim ended before its terminal write, so the worker died or its isolate was stopped mid-synthesis",
-          ),
+          ...unsynthesized(found, abandonedReason),
           claimedAt: undefined,
           claimedBy: undefined,
+          phase: found.phase,
+          lastHeartbeat: found.lastHeartbeat,
         };
         await atomicPutEpisode(core, abandoned, entry);
         return null;
@@ -359,20 +369,52 @@ export function createEpisodesRepository(
         status: "synthesizing",
         claimedAt: claim.now,
         claimedBy: claim.owner,
+        lastHeartbeat: claim.now,
+        phase: "claimed",
         attempts,
+        error: accumulatedError ?? undefined,
       };
       const ok = await atomicPutEpisode(core, claimed, entry);
       // A failed check means another worker won the race — the normal answer, not
       // an error. The caller moves on to the next job.
       return ok ? claimed : null;
     },
+    async touchEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update: {
+        phase?: string;
+        now?: string;
+        scriptTurns?: Array<{ speaker: string; text: string }>;
+      },
+    ): Promise<boolean> {
+      const key: Deno.KvKey = ["episode", userId, episodeId];
+      const entry = await core.kv.get<Episode>(key);
+      const current = entry.value;
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return false;
+      }
+      const updated: Episode = {
+        ...current,
+        lastHeartbeat: update.now ?? new Date().toISOString(),
+        phase: update.phase ?? current.phase,
+        scriptTurns: update.scriptTurns ?? current.scriptTurns,
+      };
+      return await atomicPutEpisode(core, updated, entry);
+    },
     async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;
+      if (!current) return false;
+      // Idempotent completion: if already marked ready with this exact audioKey by this worker:
+      if (current.status === "ready" && current.audioKey === episode.audioKey) {
+        return true;
+      }
       // Superseded: the lease expired and another worker already finished this.
       // Writing anyway would overwrite the winner's audio with ours, silently.
-      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+      if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
       return await atomicPutEpisode(core, episode, entry);

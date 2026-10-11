@@ -70,9 +70,18 @@ export async function runManagedTurns<T, R, S = R>(options: {
     completed: readonly R[],
   ) => { partial?: R; next: T[] } | null;
   stitch: (results: R[]) => S;
+  /** Optional callback invoked as each turn begins (1-indexed turn, total turns). */
+  onProgress?: (turn: number, total: number) => Promise<void> | void;
 }): Promise<S> {
-  const { segments, maxTurns, request, splitOnOutputLimit, continueOnOutputLimit, stitch } =
-    options;
+  const {
+    segments,
+    maxTurns,
+    request,
+    splitOnOutputLimit,
+    continueOnOutputLimit,
+    stitch,
+    onProgress,
+  } = options;
   if (segments.length === 0 || segments.length > maxTurns) {
     throw new Error(`Synthesis needs ${segments.length} turns (limit ${maxTurns})`);
   }
@@ -80,6 +89,9 @@ export async function runManagedTurns<T, R, S = R>(options: {
   let calls = 0;
   for (let index = 0; index < segments.length; index++) {
     const segment = segments[index]!;
+    if (onProgress) {
+      await onProgress(index + 1, segments.length);
+    }
     try {
       calls++;
       results.push(await request(segment, results));

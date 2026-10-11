@@ -318,6 +318,12 @@ export interface SynthesisOptions {
    * and silently publishing one is the failure mode this flag exists to prevent.
    */
   allowTruncated?: boolean;
+  /**
+   * Optional progress callback (audio-feed-siv1), invoked as each turn/segment begins.
+   * Reports turn (1-indexed) and total turns, allowing callers to persist execution phase
+   * and heartbeats to survive worker isolate evictions.
+   */
+  onProgress?: (turn: number, total: number) => Promise<void> | void;
 }
 
 export type RetryPolicy = "none" | "transient" | "all";
@@ -1546,6 +1552,7 @@ export class GeminiTtsClient {
           assertTextSeams(prompt, segments);
           return joinTtsAudio(audio, options.allowTruncated);
         },
+        onProgress: options.onProgress,
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;
@@ -1633,6 +1640,7 @@ export class GeminiTtsClient {
           assertTextSeams(sourceText, batchText());
           return joinTtsAudio(audio, options.allowTruncated);
         },
+        onProgress: options.onProgress,
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;

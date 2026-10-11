@@ -325,6 +325,19 @@ export interface Episode {
    * poison job that crashes its host would otherwise be re-billed forever.
    */
   attempts?: number;
+  /**
+   * Last execution phase recorded by the worker (audio-feed-siv1).
+   * e.g. "claimed", "reading_article", "generating_script", "synthesizing_segment_1_of_4", "uploading_audio", "completing".
+   */
+  phase?: string;
+  /** Last recorded heartbeat ISO timestamp (audio-feed-siv1). */
+  lastHeartbeat?: string;
+  /**
+   * Cached dialogue script turns for deepdive mode (audio-feed-siv1).
+   * Persisted when script generation finishes so retried claims resume
+   * with the exact same turn text, matching segment hashes for audio reuse.
+   */
+  scriptTurns?: Array<{ speaker: string; text: string }>;
 }
 
 /**

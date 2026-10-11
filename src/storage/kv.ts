@@ -264,6 +264,18 @@ export class KvMetadataStore implements MetadataStore {
   completeEpisode(episode: Episode, owner: string): Promise<boolean> {
     return this.repositories.episodes.completeEpisode(episode, owner);
   }
+  touchEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update: {
+      phase?: string;
+      now?: string;
+      scriptTurns?: Array<{ speaker: string; text: string }>;
+    },
+  ): Promise<boolean> {
+    return this.repositories.episodes.touchEpisodeClaim(userId, episodeId, owner, update);
+  }
   retryEpisode(userId: string, id: string): Promise<Episode | null> {
     return this.repositories.episodes.retryEpisode(userId, id);
   }

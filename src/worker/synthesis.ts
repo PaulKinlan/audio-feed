@@ -453,9 +453,18 @@ export function createGeminiSynthesizer(
       throw new GeminiTtsError("synthesis claim has insufficient lease time", 400);
     }
     const leaseSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);
+    const claimedBy = episode.claimedBy ?? "";
+    const onProgress = async (turn: number, total: number) => {
+      if (claimedBy) {
+        await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+          phase: `synthesizing_segment_${turn}_of_${total}`,
+        }).catch(() => {});
+      }
+    };
     const ttsOptions = {
       ...(leaseSignal ? { signal: leaseSignal } : {}),
       ...(resume ? { resume } : {}),
+      onProgress,
     };
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
     if (mode === "deepdive") {
@@ -471,21 +480,39 @@ export function createGeminiSynthesizer(
         { name: "Alex", role: "expert", voice: expert },
         { name: "Sam", role: "curious_foil", voice: foil },
       ];
-      // Research and write the script first (audio-feed-yaz5). `turns` is the same field a
-      // hand-written script uses, so the TTS layer renders either identically.
-      const script = await runScriptStage(
-        scriptGenerator,
-        {
-          article: {
-            title: article.title,
-            author: article.author,
-            body: article.content,
-            summary: article.excerpt,
+      // Research and write the script first (audio-feed-yaz5).
+      // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
+      let turns = episode.scriptTurns;
+      if (!turns || turns.length === 0) {
+        if (claimedBy) {
+          await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+            phase: "generating_script",
+          }).catch(() => {});
+        }
+        const script = await runScriptStage(
+          scriptGenerator,
+          {
+            article: {
+              title: article.title,
+              author: article.author,
+              body: article.content,
+              summary: article.excerpt,
+            },
+            speakers,
           },
-          speakers,
-        },
-        Math.min(deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS, remainingMs ?? Infinity),
-      );
+          Math.min(
+            deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
+            remainingMs ?? Infinity,
+          ),
+        );
+        turns = script?.turns;
+        if (turns && turns.length > 0 && claimedBy) {
+          await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+            phase: "script_generated",
+            scriptTurns: turns,
+          }).catch(() => {});
+        }
+      }
       try {
         return await client.synthesizeDialogue({
           title: article.title,
@@ -496,7 +523,7 @@ export function createGeminiSynthesizer(
             summary: article.excerpt,
           },
           speakers,
-          turns: script?.turns,
+          turns,
           codeHandling,
           codeSummarizer: deps.codeSummarizer,
         }, ttsOptions);
@@ -519,6 +546,12 @@ export function createGeminiSynthesizer(
     const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
       .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
       DEFAULT_NARRATION_VOICE;
+
+    if (claimedBy) {
+      await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+        phase: "preparing_input",
+      }).catch(() => {});
+    }
 
     try {
       return await client.synthesizeNarration({
@@ -950,6 +983,9 @@ export async function runSynthesisBatch(
       continue;
     }
     claimedAny = true;
+    await metadata.touchEpisodeClaim(claimed.userId, claimed.id, opts.owner, {
+      phase: "reading_article",
+    }).catch(() => {});
 
     const article = await metadata.getArticle(claimed.userId, claimed.articleId);
     // A regeneration that produces no new audio goes back to ready on its old audio
@@ -1049,6 +1085,9 @@ export async function runSynthesisBatch(
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
+    await metadata.touchEpisodeClaim(claimed.userId, claimed.id, opts.owner, {
+      phase: "uploading_audio",
+    }).catch(() => {});
     // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
     // /audio is served immutable, and a first attempt used to write the deterministic canonical
     // key — so a superseded worker and the winner shared one key and the loser's cleanup below
@@ -1075,6 +1114,8 @@ export async function runSynthesisBatch(
       promptVersion: PROMPT_VERSION,
       regenerating: undefined,
       error: undefined,
+      phase: "ready",
+      lastHeartbeat: new Date().toISOString(),
     }, opts.owner);
 
     if (wrote) {

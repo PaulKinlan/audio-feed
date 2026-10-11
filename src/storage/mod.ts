@@ -388,6 +388,30 @@ export interface EpisodeRepository {
   completeEpisode(episode: Episode, owner: string): Promise<boolean>;
 
   /**
+   * Update claim heartbeat and execution phase (audio-feed-siv1), atomically.
+   *
+   * Validates that the episode is currently `synthesizing` and owned by `owner`.
+   * Persists the worker's current phase and heartbeat timestamp so mid-flight
+   * isolate crashes or evictions leave a recorded progress trail for retries
+   * and abandonment diagnostics.
+   *
+   * In deepdive mode, may also persist `scriptTurns` so retries resume the same
+   * dialogue turns rather than re-rolling stochastic script text.
+   *
+   * Returns `false` if the claim was lost or superseded.
+   */
+  touchEpisodeClaim(
+    userId: string,
+    episodeId: string,
+    owner: string,
+    update: {
+      phase?: string;
+      now?: string;
+      scriptTurns?: Array<{ speaker: string; text: string }>;
+    },
+  ): Promise<boolean>;
+
+  /**
    * Put a FAILED episode back in the synthesis queue (audio-feed-7s2), atomically.
    *
    * This is the subscriber's "try again", and it is deliberately a different method from

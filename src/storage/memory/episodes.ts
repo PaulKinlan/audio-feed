@@ -183,35 +183,51 @@ export function createEpisodesRepository(
       if (!found) return Promise.resolve(null);
 
       const nowMs = Date.parse(claim.now);
-      const claimable = found.status === "pending" ||
-        (found.status === "synthesizing" && isClaimExpired(found, nowMs, claim.leaseMs));
+      const isExpired = found.status === "synthesizing" &&
+        isClaimExpired(found, nowMs, claim.leaseMs);
+      const claimable = found.status === "pending" || isExpired;
       if (!claimable) return Promise.resolve(null);
 
       const oldSortKey = `${found.createdAt}\u0000${found.id}`;
       const attempts = (found.attempts ?? 0) + 1;
+      const prior = typeof found.error === "string" && found.error.length > 0 ? found.error : null;
+
+      // audio-feed-siv1: If previous claim expired before its terminal write,
+      // record its failure reason, phase, attempt count, and last heartbeat.
+      const expiredPhase = found.phase ?? "claimed";
+      const expiredHeartbeat = found.lastHeartbeat ?? found.claimedAt ?? "unknown";
+      const expiredAttempt = found.attempts ?? 1;
+      const expiredProvenance = found.claimedAt
+        ? `by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
+        : "no claim details";
+      const expiredMsg =
+        `claim ${expiredAttempt} (${expiredProvenance}) died before terminal write in phase "${expiredPhase}" (last heartbeat ${expiredHeartbeat})`;
+      const accumulatedError = isExpired
+        ? (prior && prior.includes(expiredMsg)
+          ? prior
+          : (prior ? `${prior}; ${expiredMsg}` : expiredMsg))
+        : prior;
+
       if (attempts > claim.maxClaims) {
         // Abandon rather than re-bill: an input that keeps killing its host would
         // otherwise be re-claimed forever on lease expiry.
-        // audio-feed-bp6r: preserve the last recorded cause rather than overwriting
-        // it with the bare attempt count (see kv.ts claimEpisode for the full note).
-        const prior = typeof found.error === "string" && found.error.length > 0
-          ? found.error
-          : null;
-        const provenance = found.claimedAt
-          ? `last claim by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
-          : "no claim details";
+        // audio-feed-siv1 / audio-feed-bp6r: persist WHY the episode failed:
+        // reason + phase + attempt count + provenance + attempt history.
+        const abandonedReason = accumulatedError
+          ? `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}"; history: [${accumulatedError}]`
+          : `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}" (${expiredProvenance})`;
+
         removePendingPointer(state, found);
         removeSortedIndex(state.synthesizingIndex, oldSortKey);
         state.episodes.set(key, {
           ...unsynthesized(
             structuredClone(found),
-            prior
-              ? `abandoned after ${claim.maxClaims} attempts; last recorded error: ${prior}`
-              : `abandoned after ${claim.maxClaims} attempts; no claim recorded a cause (${provenance}) — ` +
-                "each claim ended before its terminal write, so the worker died or its isolate was stopped mid-synthesis",
+            abandonedReason,
           ),
           claimedAt: undefined,
           claimedBy: undefined,
+          phase: found.phase,
+          lastHeartbeat: found.lastHeartbeat,
         });
         return Promise.resolve(null);
       }
@@ -221,7 +237,10 @@ export function createEpisodesRepository(
         status: "synthesizing",
         claimedAt: claim.now,
         claimedBy: claim.owner,
+        lastHeartbeat: claim.now,
+        phase: "claimed",
         attempts,
+        error: accumulatedError ?? undefined,
       };
       removePendingPointer(state, found);
       insertSortedIndex(state.synthesizingIndex, {
@@ -232,11 +251,36 @@ export function createEpisodesRepository(
       state.episodes.set(key, claimed);
       return Promise.resolve(structuredClone(claimed));
     },
+    touchEpisodeClaim(
+      userId: string,
+      episodeId: string,
+      owner: string,
+      update: {
+        phase?: string;
+        now?: string;
+        scriptTurns?: Array<{ speaker: string; text: string }>;
+      },
+    ): Promise<boolean> {
+      const key = scoped(userId, episodeId);
+      const current = state.episodes.get(key);
+      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+        return Promise.resolve(false);
+      }
+      current.lastHeartbeat = update.now ?? new Date().toISOString();
+      if (update.phase) current.phase = update.phase;
+      if (update.scriptTurns) current.scriptTurns = update.scriptTurns;
+      return Promise.resolve(true);
+    },
     completeEpisode(episode: Episode, owner: string): Promise<boolean> {
       const key = scoped(episode.userId, episode.id);
       const current = state.episodes.get(key);
+      if (!current) return Promise.resolve(false);
+      // Idempotent completion: if already marked ready with this exact audioKey by this worker:
+      if (current.status === "ready" && current.audioKey === episode.audioKey) {
+        return Promise.resolve(true);
+      }
       // Superseded: another worker reclaimed the expired lease and finished first.
-      if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
+      if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return Promise.resolve(false);
       }
       const sortKey = `${current.createdAt}\u0000${current.id}`;
