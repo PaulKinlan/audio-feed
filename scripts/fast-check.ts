@@ -252,6 +252,33 @@ export async function nameMatchedTests(
   return matched;
 }
 
+/**
+ * The suite marker the fleet's coverage reporter parses.
+ *
+ * This is not decoration. remote/check-coverage.py in the fleet derives which suites EXECUTED by matching
+ * this log, and this script captures the runner's stdout, so on success the log used to say nothing about
+ * which suites ran. The reporter then reported every changed file as "unmapped" - a false positive on
+ * every lane's gate, which trains people to ignore the warning that exists to catch a genuinely uncovered
+ * change (audio-feed-dywc, same class as audio-feed-7jsl).
+ *
+ * "passed" is emitted only after a run that actually passed; a failing run emits "ran", so the log still
+ * says which suites were attempted without ever claiming a pass.
+ */
+export function suiteMarker(kind: "passed" | "ran", files: string[]): string {
+  return `fast-gate: ${kind}: ${files.join(" ")}`;
+}
+
+/** Every test file, in the rel paths the reporter expects (tests/...). */
+export async function allTestFiles(): Promise<string[]> {
+  const testsDir = `${ROOT}tests`;
+  const out: string[] = [];
+  for await (const f of tsFiles(testsDir)) {
+    const rel = f.slice(testsDir.length - "tests".length); // tests/...
+    if (rel.endsWith("_test.ts")) out.push(rel);
+  }
+  return out.sort();
+}
+
 async function run(args: string[]): Promise<number> {
   console.log(`$ ${args.join(" ")}`);
   const out = await new Deno.Command(args[0]!, { args: args.slice(1), cwd: ROOT }).output();
@@ -339,13 +366,22 @@ if (import.meta.main) {
 
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
-    if (await run(["deno", "test", ...TEST_FLAGS]) !== 0) Deno.exit(1);
+    const wholeSuite = await allTestFiles();
+    if (await run(["deno", "test", ...TEST_FLAGS]) !== 0) {
+      console.log(suiteMarker("ran", wholeSuite));
+      Deno.exit(1);
+    }
+    console.log(suiteMarker("passed", wholeSuite));
   } else if (testFiles.length === 0) {
     console.log(`fast-check: no tests to run (${reason})`);
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);
-    if (await run(["deno", "test", ...TEST_FLAGS, ...testFiles]) !== 0) Deno.exit(1);
+    if (await run(["deno", "test", ...TEST_FLAGS, ...testFiles]) !== 0) {
+      console.log(suiteMarker("ran", testFiles));
+      Deno.exit(1);
+    }
+    console.log(suiteMarker("passed", testFiles));
   }
 
   console.log(`fast-check: ok in ${((performance.now() - started) / 1000).toFixed(1)}s`);

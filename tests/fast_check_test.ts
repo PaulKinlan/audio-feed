@@ -9,8 +9,14 @@
  * the suite it can never affect.
  */
 
-import { assertEquals } from "@std/assert";
-import { nameMatchedTests, planTests, reachableTests } from "../scripts/fast-check.ts";
+import { assert, assertEquals } from "@std/assert";
+import {
+  allTestFiles,
+  nameMatchedTests,
+  planTests,
+  reachableTests,
+  suiteMarker,
+} from "../scripts/fast-check.ts";
 
 // A miniature of the repo's real shape: routes flow through the compose/app
 // hubs into whole-app tests; the listen route additionally has direct
@@ -159,4 +165,43 @@ Deno.test("planTests: the bqd4 repro — changing the selection algorithm runs i
   );
 
   assertEquals(plan.testFiles, ["tests/fast_check_test.ts"], "must NOT select zero");
+});
+
+// ---------------------------------------------------------------------------------------------
+// audio-feed-dywc: the suite marker the fleet's coverage reporter parses
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("the suite marker matches the shape the fleet reporter parses (dywc)", () => {
+  // The reporter's own pattern, copied from remote/check-coverage.py:257-258. If this stops matching,
+  // every lane's coverage report goes back to reporting false "unmapped" files.
+  const reporter = /fast-gate:.*?(?:passed|completed):\s*(.*)/;
+  const line = suiteMarker("passed", ["tests/a_test.ts", "tests/b_test.ts"]);
+  const m = reporter.exec(line);
+  assert(m !== null, `the reporter must recognise this line: ${line}`);
+  assertEquals(m![1]!.split(/\s+/), ["tests/a_test.ts", "tests/b_test.ts"]);
+});
+
+Deno.test("a failing run never claims to have passed (dywc)", () => {
+  const line = suiteMarker("ran", ["tests/a_test.ts"]);
+  assert(!/passed/.test(line), `a failed run must not claim a pass: ${line}`);
+  assert(line.startsWith("fast-gate: ran:"), line);
+});
+
+Deno.test("the gate actually emits the marker on both success paths (dywc)", async () => {
+  // A source-level assertion, deliberately: running the script from a test would recurse into the suite.
+  // It bites when the emission is deleted, which is the regression that matters - the marker being
+  // present in the helper but never called was exactly the bug being fixed.
+  const src = await Deno.readTextFile(new URL("../scripts/fast-check.ts", import.meta.url));
+  // console.log matters: matching the symbol alone also matches a call whose result is discarded, which
+  // is how the first version of this test failed to bite when the emission was deleted.
+  const passed = src.match(/console\.log\(suiteMarker\("passed"/g) ?? [];
+  const ran = src.match(/console\.log\(suiteMarker\("ran"/g) ?? [];
+  assertEquals(passed.length, 2, "both the FULL and the scoped path must emit passed");
+  assertEquals(ran.length, 2, "and both failure paths must emit ran rather than staying silent");
+  const files = await allTestFiles();
+  assert(
+    files.length > 0 && files.every((f) => f.startsWith("tests/")),
+    "paths must be repo-relative",
+  );
+  assert(files.includes("tests/fast_check_test.ts"), "and must include real test files");
 });
