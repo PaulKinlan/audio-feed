@@ -10,7 +10,7 @@
 
 import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
-import { isUnusableOrigin } from "./origin.ts";
+import { allowedHostSet, isUnusableOrigin } from "./origin.ts";
 import { type AppConfig, loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
@@ -274,19 +274,39 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   const configuredHost = config.publicBaseUrl && !isUnusableOrigin(config.publicBaseUrl)
     ? new URL(config.publicBaseUrl).hostname
     : null;
-  if (!configuredHost && !config.allowedHosts?.length) {
+  // audio-feed-4x4t: EVERY branch here keys on the USABLE host set, never on the raw ALLOWED_HOSTS array,
+  // and the four branches together cover every configuration state - so no configuration can be silent.
+  // A list whose entries are all unusable - ["not a host", ""] - is non-empty but configures nothing;
+  // keying on `.length` suppressed the warning and left the deployment refusing every non-loopback host
+  // without a word, and the same `.length` test one branch down also suppressed the positive line for a
+  // deployment that WAS working. Both are the same operator cost: an app that tells you nothing about
+  // which hosts it will serve. allowedHostSet is the gate's own notion of "usable", exported for these
+  // lines so the log and the gate cannot drift apart again.
+  const usableHostCount = allowedHostSet(config).size;
+  if (!configuredHost && usableHostCount === 0) {
     console.warn(
-      "[audio-feed] No usable PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
+      "[audio-feed] No usable PUBLIC_BASE_URL and no usable ALLOWED_HOSTS entry" +
         (deploy ? " on a Deploy deployment" : "") +
         (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
         " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
         "name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the " +
         "public origin; ALLOWED_HOSTS only adds extra hosts.",
     );
-  } else if (configuredHost && !config.allowedHosts?.length) {
+  } else if (!configuredHost) {
+    // ALLOWED_HOSTS alone still activates the gate. Previously this state logged nothing at all.
+    console.log(
+      `[audio-feed] Host gate: accepting ${usableHostCount} host(s) from ALLOWED_HOSTS. ` +
+        `Set PUBLIC_BASE_URL to the public origin so the gate also pins one advertised origin.`,
+    );
+  } else if (usableHostCount === 1) {
     console.log(
       `[audio-feed] Host gate: accepting ${configuredHost} ` +
         `(from PUBLIC_BASE_URL). ALLOWED_HOSTS overrides/extends this list.`,
+    );
+  } else {
+    console.log(
+      `[audio-feed] Host gate: accepting ${configuredHost} (from PUBLIC_BASE_URL) ` +
+        `plus ${usableHostCount - 1} extra host(s) from ALLOWED_HOSTS.`,
     );
   }
   if (!config.geminiApiKey) {
