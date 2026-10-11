@@ -658,4 +658,52 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const countAfterReplay = await store.getDailySynthesisCount(today);
     assertEquals(countAfterReplay, 1, "replay must not double charge");
   });
+
+  test("a billing write that FAILS fails the completion closed, for both stores (audio-feed-a7i9, audio-feed-o74y)", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    const today = new Date().toISOString().slice(0, 10);
+    assertEquals(await store.getDailySynthesisCount(today), 0, "nothing charged yet");
+
+    // The trigger is a payload the billing path cannot record (an invalid timestamp): a failure to bill must
+    // FAIL THE COMPLETION, because an episode marked ready without its spend recorded is work nobody paid for.
+    // WHAT THIS CASE DOES NOT PIN, measured rather than assumed: the memory store raises this error
+    // SYNCHRONOUSLY, so it still rejects when the a7i9 rethrow is replaced by `.catch(() => {})` - the swallow
+    // only catches asynchronous rejections. The case that bites that mutation (an injected REJECTING billing
+    // write) is in tests/synthesis_claim_lifecycle_test.ts, where the store under test is the memory one.
+    let threw = false;
+    try {
+      await store.completeEpisode(
+        { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+        "worker-a",
+        { byteLength: 500, at: new Date(Number.NaN) },
+      );
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true, "a completion whose billing write fails must REJECT, not return");
+    assertEquals(
+      (await store.getEpisode("user-1", "e1"))?.status,
+      "synthesizing",
+      "the episode must NOT be marked ready when its billing was not recorded",
+    );
+    assertEquals(
+      await store.getDailySynthesisCount(today),
+      0,
+      "nothing may be charged by a failed write",
+    );
+
+    // Anti-vacuity: the SAME job, the same call, a recordable payload - it completes and charges exactly
+    // once. Without this half the case above would pass against a store that simply refuses everything.
+    const wrote = await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+      { byteLength: 500 },
+    );
+    assertEquals(wrote, true, "the same completion with a recordable payload must succeed");
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+    assertEquals(await store.getDailySynthesisCount(today), 1, "exactly one charge");
+  });
 }

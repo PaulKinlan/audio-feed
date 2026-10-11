@@ -21,6 +21,70 @@ import {
   withInvocationBudget,
 } from "../src/synthesis/limits.ts";
 
+Deno.test("audio-feed-o74y/a7i9: a REJECTED billing write must not mark the episode ready", async () => {
+  // The acceptance for audio-feed-o74y: reverting the a7i9 fix (replacing the awaited billing write with
+  // `.catch(() => {})`) must FAIL this case. The trigger is an ASYNCHRONOUS rejection from the billing write,
+  // because that is the shape a swallow catches - a synchronous throw from a malformed timestamp still
+  // rejects, which is why the conformance case for that payload cannot pin this fix.
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
+  await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
+  await stores.metadata.putEpisode(makeEpisode({
+    id: "e1",
+    userId: "user-1",
+    sourceId: "inbox",
+    status: "synthesizing",
+    claimedBy: "worker-a",
+  }));
+
+  const store = stores.metadata;
+  const original = store.recordSynthesis.bind(store);
+  let calls = 0;
+  store.recordSynthesis = () => {
+    calls++;
+    return Promise.reject(new Error("billing store is down"));
+  };
+
+  const billing = { byteLength: 500 };
+  const ready = {
+    ...(await store.getEpisode("user-1", "e1"))!,
+    status: "ready" as const,
+    audioKey: "e1.wav",
+    contentType: "audio/wav",
+  };
+  try {
+    let threw = false;
+    try {
+      await store.completeEpisode(ready, "worker-a", billing);
+    } catch {
+      threw = true;
+    }
+    assertEquals(
+      calls,
+      1,
+      "the billing write must be ATTEMPTED before the episode is marked ready",
+    );
+    assertEquals(
+      threw,
+      true,
+      "a completion whose billing write rejected must reject, not return true",
+    );
+    assertEquals(
+      (await store.getEpisode("user-1", "e1"))?.status,
+      "synthesizing",
+      "an episode must NOT be marked ready when its billing was not recorded",
+    );
+  } finally {
+    store.recordSynthesis = original;
+  }
+
+  // Anti-vacuity: with the billing write working again the SAME completion succeeds - otherwise the
+  // assertions above would pass against a store that simply refuses every completion.
+  const wrote = await store.completeEpisode(ready, "worker-a", billing);
+  assertEquals(wrote, true);
+  assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
+});
+
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 
