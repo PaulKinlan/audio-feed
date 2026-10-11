@@ -19,8 +19,20 @@
  *     and saved nothing. Cut + name-matched, the same change selects ~10.
  *   - a changed HUB or cross-cutting file (app/compose/router/http/config/
  *     server/origin) runs the FULL suite — every test exercises it;
+ *   - a non-TypeScript file outside src/ and tests/ (a docs/evidence PNG, a shell runner) selects the
+ *     suites the DERIVED read relation says read or execute it - the relation is scanned out of the
+ *     suites' own code in scripts/test-selection.ts, not listed beside them - and anything the derivation
+ *     cannot see runs the FULL suite and names itself (audio-feed-es8y: "not
+ *     a .ts file" used to mean "no test can care", which gave a fast PASS on a tree where the full gate
+ *     failed);
  *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
  *     the FULL suite. Safe beats fast.
+ *
+ * The selection is a PROVEN SUBSET of the full gate's (audio-feed-es8y): the test-file list is derived
+ * from scripts/test-selection.ts, which discovers what `deno test` (no file arguments, the tail of
+ * `deno task gate`) actually runs, and every run opens with an audit that fails BY NAME when a module the
+ * full gate runs can never be selected here. `deno task gate` runs the same audit as its first step, so
+ * the drift cannot survive in either direction.
  *
  * This tier is an ITERATION aid for implementer lanes: the merger still runs
  * the full `deno task gate` on the merged union before anything lands, so a
@@ -34,6 +46,21 @@
  * ~/.fleet/check.conf on the fleet VM (VM-local; the durable copy is this
  * script plus the AGENTS.md note).
  */
+
+import {
+  auditResolverConfigs,
+  auditSelection,
+  classifyNonTsChanges,
+  type DataReadRelations,
+  deriveDataReadRelations,
+  discoverFullGateTestFiles,
+  GRAPH_CONFIG_FILES,
+  inertContradictions,
+  isFastGateSelectable,
+  isProvablyInert,
+  resolverConfigInputs,
+  universeDrift,
+} from "./test-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
 // (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
@@ -267,19 +294,22 @@ export async function nameMatchedTests(
  * "passed" is emitted only after a run that actually passed; a failing run emits "ran", so the log still
  * says which suites were attempted without ever claiming a pass.
  */
-export function suiteMarker(kind: "passed" | "ran", files: string[]): string {
+export function suiteMarker(kind: "passed" | "ran" | "unmapped", files: string[]): string {
   return `fast-gate: ${kind}: ${files.join(" ")}`;
 }
 
-/** Every test file, in the rel paths the reporter expects (tests/...). */
+/**
+ * Every test file the fast gate can run, in the rel paths the reporter expects (tests/...).
+ *
+ * DERIVED from the full gate's universe (audio-feed-es8y) by filtering it, rather than walked
+ * independently: two definitions of the same set is how a suite comes to exist that only one gate ever
+ * runs. `deno test` with no file arguments (what `deno task gate` ends in) discovers test modules by
+ * basename pattern anywhere in the tree, which is a strictly larger rule than this narrowing - so the
+ * narrowing is legal only because auditSelection() proves nothing falls outside it, and the gate refuses
+ * to start otherwise.
+ */
 export async function allTestFiles(): Promise<string[]> {
-  const testsDir = `${ROOT}tests`;
-  const out: string[] = [];
-  for await (const f of tsFiles(testsDir)) {
-    const rel = f.slice(testsDir.length - "tests".length); // tests/...
-    if (rel.endsWith("_test.ts")) out.push(rel);
-  }
-  return out.sort();
+  return (await discoverFullGateTestFiles(ROOT)).filter(isFastGateSelectable);
 }
 
 function normaliseTestPath(filePath: string): string {
@@ -443,13 +473,50 @@ export async function run(
  * The whole selection decision, pure so the tests can pin every fallback:
  * `testFiles: null` means "run the FULL suite".
  */
+/**
+ * FAIL-SAFE DIRECTION (coord's condition on the detector, audio-feed-es8y): a derivation engine inside the
+ * gate may not fail OPEN. If it cannot run - an argument it cannot resolve, a call site it does not model,
+ * an internal error - the gate must WIDEN to the full suite rather than select from a relation it could not
+ * compute, because a detector that fails open puts the silent-green hole back inside the component added to
+ * close it. So this never throws: it returns the reason, and main() turns that into the full suite. It is
+ * EXTRACTED rather than inlined so a test can pass a throwing function and pin the failure mode, which a
+ * transcript from a mutated run cannot do.
+ */
+export async function deriveOrWiden(
+  derive: () => Promise<DataReadRelations>,
+): Promise<{ relations: DataReadRelations; failure: string | null }> {
+  try {
+    return { relations: await derive(), failure: null };
+  } catch (error) {
+    return {
+      relations: new Map(),
+      failure: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** The plan a failed derivation forces: everything, with the failure itself as the reason. */
+export function planForFailedRelation(failure: string): { testFiles: null; reason: string } {
+  return { testFiles: null, reason: `the data read relation could not be derived (${failure})` };
+}
+
 export function planTests(
   changed: string[],
   reverse: Map<string, string[]>,
   named: Map<string, string[]>,
+  readRelations: DataReadRelations = new Map(),
+  configPaths: readonly string[] = [],
 ): { testFiles: string[] | null; reason: string } {
-  if (changed.some((f) => f === "deno.json" || f === "deno.lock")) {
-    return { testFiles: null, reason: "deno.json/deno.lock changed — import graph may have moved" };
+  // The family list is a NET; the DERIVED set of config files the resolver actually reads (configPaths) is
+  // what keeps it honest - a resolver input the family does not name still forces the full suite.
+  const graphConfig = changed.filter((f) => configPaths.includes(f) || GRAPH_CONFIG_FILES.test(f));
+  if (graphConfig.length) {
+    return {
+      testFiles: null,
+      reason: `module-graph config changed: ${
+        graphConfig.join(", ")
+      } (any suite's resolution may have moved)`,
+    };
   }
 
   const codeChanged = changed.filter((f) => f.endsWith(".ts"));
@@ -465,6 +532,26 @@ export function planTests(
     };
   }
 
+  // Non-TypeScript OUTSIDE src/ and tests/ (docs, evidence, tooling, generated exports) is the case that
+  // produced a fast-gate PASS with a full-gate FAIL on the same tree (audio-feed-es8y): a 200KB
+  // docs/evidence/*.png selected ZERO suites while tests/evidence_size_test.ts asserted its byte budget.
+  // The relation is DERIVED from the suites (scripts/test-selection.ts) rather than listed here, so a suite
+  // that starts reading a new data file is covered without anyone editing a selection table. Anything the
+  // derivation cannot see runs the FULL suite and names itself. THE ORDERING RULE: the derived relation is
+  // consulted FIRST and outranks every category heuristic - a path a suite is seen to read is a real input
+  // whatever it looks like (audio-feed-38sn), and inertContradictions() below makes an inversion of that
+  // order a NAMED failure instead of a silent empty selection.
+  const data = classifyNonTsChanges(changed, readRelations);
+  if (data.unclassified.length) {
+    return {
+      testFiles: null,
+      reason:
+        `non-TypeScript file(s) with no derived reader (nothing is declared unread, so an unread path always runs the FULL suite): ${
+          data.unclassified.join(", ")
+        }`,
+    };
+  }
+
   const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
   if (coreChanged.length) {
     return { testFiles: null, reason: `cross-cutting file(s) changed: ${coreChanged.join(", ")}` };
@@ -477,23 +564,138 @@ export function planTests(
     return { testFiles: null, reason: `shared test helper(s) changed: ${helpers.join(", ")}` };
   }
 
-  if (!codeChanged.length) return { testFiles: [], reason: "no testable change" };
+  if (!codeChanged.length) {
+    if (data.suites.length) {
+      return {
+        testFiles: data.suites,
+        reason: `data file(s) observed by: ${data.suites.join(", ")}`,
+      };
+    }
+    // audio-feed-es8y condition 2: an empty selection must never read like a pass. It is only allowed when
+    // EVERY changed file is documentation that NO suite is derived to read (audio-feed-r9fe removed the
+    // declarations, so markdown is the only inert class left). Anything else gets the full suite and names
+    // itself.
+    // Defence in depth for the ordering rule (audio-feed-38sn): classifyNonTsChanges() asks the relation
+    // first, so this cannot be reached today - and if a future change inverts that order, the answer must
+    // still not be an empty pass. It becomes the FULL suite, with the contradiction named.
+    const inertWithReaders = inertContradictions(changed, readRelations);
+    if (inertWithReaders.length) {
+      return {
+        testFiles: null,
+        reason:
+          `ORDERING BUG: path(s) treated as inert documentation while the derived relation names a reader: ${
+            inertWithReaders.join(", ")
+          } (the derived relation outranks the documentation heuristic)`,
+      };
+    }
+    if (isProvablyInert(changed, data)) {
+      return {
+        testFiles: [],
+        reason: `no test-observable change (documentation only: ${data.documentation.join(", ")})`,
+      };
+    }
+    return {
+      testFiles: null,
+      reason:
+        `nothing selected and the change is not inert documentation, so nothing can be claimed about it: ${
+          changed.join(", ")
+        }`,
+    };
+  }
 
   const { tests, uncovered } = reachableTests(reverse, codeChanged);
   for (const list of named.values()) for (const f of list) tests.add(f);
+  // A data change (a screenshot, a document the app serves) rides alongside the code change.
+  for (const suite of data.suites) tests.add(suite);
+
+  // Property 1 in the narrow case (audio-feed-es8y): a selected module that is NOT in the full gate's
+  // universe would make the fast gate run something the full gate never runs - `tests/foo-test.ts` is the
+  // name-matching convention but not a Deno discovery pattern, so selecting it would be the mirror image of
+  // the gap this bead is about. Unknown coverage runs everything.
+  const outsideUniverse = [...tests].filter((f) => !isFastGateSelectable(f));
+  if (outsideUniverse.length) {
+    return {
+      testFiles: null,
+      reason: `test module(s) outside the fast gate's selectable universe: ${
+        outsideUniverse.join(", ")
+      }`,
+    };
+  }
   // A file with name-matched tests is covered even when the graph cannot
   // see it (the route tests boot the app through the hub).
   const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
   }
-  return { testFiles: [...tests].sort(), reason: `affected by: ${codeChanged.join(", ")}` };
+  const dataNote = data.suites.length ? ` + data: ${data.suites.join(", ")}` : "";
+
+  // Condition 2 again, for the case that reaches here: a changed .ts file the graph cannot connect to any
+  // suite (a standalone scripts/ module nothing imports) selects nothing. The old carve-out treated that
+  // as "the type-check is its gate" and returned a silent empty pass, which is indistinguishable from
+  // "something ran and passed" (audio-feed-es8y; measured: scripts/smoke.ts -> 0 suites). A .ts change is
+  // never inert by declaration, so it gets the full suite.
+  if (!tests.size) {
+    return {
+      testFiles: null,
+      reason: `no suite is mapped to ${
+        codeChanged.join(", ")
+      } and a TypeScript change is not inert by declaration`,
+    };
+  }
+  return {
+    testFiles: [...tests].sort(),
+    reason: `affected by: ${codeChanged.join(", ")}${dataNote}`,
+  };
 }
 
 if (import.meta.main) {
   const forceAll = Deno.args.includes("--all");
   const started = performance.now();
 
+  // audio-feed-es8y property 2, checked BEFORE anything else so a selection gap is a NAMED failure at the
+  // start of the run rather than a suite that quietly never runs again. The full gate runs this audit too
+  // (first step of `deno task gate`), so drift cannot survive in either direction.
+  const fullGateTestFiles = await discoverFullGateTestFiles(ROOT);
+  // ONE walk, and everything below derives from this value: the audit, the read relation, the selection and
+  // the full-suite fallback all describe the same universe. The cross-check against allTestFiles() is what
+  // keeps that true if the exported builder is ever changed to walk differently (audio-feed-es8y).
+  const fastUniverse = fullGateTestFiles.filter(isFastGateSelectable);
+  const selectionAudit = auditSelection(fullGateTestFiles);
+  if (!selectionAudit.ok) {
+    console.error(selectionAudit.message);
+    Deno.exit(1);
+  }
+  const drift = await (async () => {
+    try {
+      return universeDrift(fastUniverse, await allTestFiles());
+    } catch (error) {
+      // The cross-check itself failing is not "unknown" - it is "we could not verify", so it stops the run.
+      return `fast-gate: SELECTION CROSS-CHECK FAILED (audio-feed-es8y): ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  })();
+  if (drift) {
+    console.error(drift);
+    Deno.exit(1);
+  }
+  // The audit line's two numbers are CHECKED, not merely printed (coord: "a printed-but-unchecked number is
+  // a comment with extra steps"). They are equal by construction today - same walk, same predicate - which is
+  // exactly the kind of promise this bead replaces with a refusal.
+  const auditUniverseDrift = universeDrift(fastUniverse, selectionAudit.fastGateUniverse);
+  if (auditUniverseDrift) {
+    console.error(`fast-gate: AUDIT/RUN UNIVERSE MISMATCH (audio-feed-es8y):
+${auditUniverseDrift}`);
+    Deno.exit(1);
+  }
+  // The read relation is derived once per run: which data files the suites read or execute. A detector that
+  // cannot run widens (see deriveOrWiden) rather than answering "no read found".
+  const { relations: readRelations, failure: relationFailure } = await deriveOrWiden(() =>
+    deriveDataReadRelations(ROOT, fastUniverse)
+  );
+  console.log(
+    `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
+  );
   // The cheap whole-repo steps always run: together ~10s, and a type error in
   // an UNTOUCHED importer of a changed file is exactly what skipping them
   // would miss.
@@ -505,23 +707,40 @@ if (import.meta.main) {
     }
   }
 
+  // The config files the resolver actually reads, DERIVED from the config itself: the family list above is a
+  // net, and this is the check that keeps it honest - a resolver input the family does not name is a NAMED
+  // failure rather than a list that quietly stopped describing the config graph (audio-feed-es8y).
+  const resolverInputs = await resolverConfigInputs(ROOT);
+  const configProblems = auditResolverConfigs(resolverInputs);
+  if (configProblems.length) {
+    console.error(
+      `fast-gate: MODULE-GRAPH CONFIG NOT COVERED (audio-feed-es8y):\n  ${
+        configProblems.join("\n  ")
+      }`,
+    );
+    Deno.exit(1);
+  }
+
   const changed = await changedFiles();
   let plan: { testFiles: string[] | null; reason: string };
   if (forceAll) {
     plan = { testFiles: null, reason: "--all given" };
+  } else if (relationFailure !== null) {
+    // The detector could not run: widen, and name the failure as the reason.
+    plan = planForFailedRelation(relationFailure);
   } else if (changed === null) {
     // Never silently green: an unknown change set gets the full suite.
     plan = { testFiles: null, reason: "git diff failed (stale or missing origin/main?)" };
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named);
+    plan = planTests(changed, reverse, named, readRelations, resolverInputs);
   }
   const { testFiles, reason } = plan;
 
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
-    const wholeSuite = await allTestFiles();
+    const wholeSuite = fastUniverse;
     const res = await run(["deno", "test", ...TEST_FLAGS]);
     if (res.code !== 0) {
       console.log(suiteMarker("ran", wholeSuite));
@@ -532,7 +751,19 @@ if (import.meta.main) {
     }
     console.log(suiteMarker("passed", wholeSuite));
   } else if (testFiles.length === 0) {
-    console.log(`fast-check: no tests to run (${reason})`);
+    // audio-feed-es8y condition 2: a gate that ran NOTHING must not read like a gate that ran suites and
+    // passed. The state is distinct and loud, and it is reflected in the fleet's coverage line by the
+    // `unmapped:` marker the reporter already parses (it turns a non-empty list into a COVERAGE WARNING).
+    // Only reachable when every changed file is inert documentation that NO suite is derived to read -
+    // anything else fell back to the full suite.
+    console.log(
+      `fast-check: NO SUITES SELECTED — 0 of ${fastUniverse.length} test module(s) ran. ${reason}`,
+    );
+    console.log(
+      "  This is a statement about the changed files, NOT a test result: no suite in this repo observes",
+    );
+    console.log("  them (documentation and declared-inert files only).");
+    console.log(suiteMarker("unmapped", changed ?? []));
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);

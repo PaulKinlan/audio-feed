@@ -29,13 +29,67 @@ it while iterating. `deno task test:fast` (scripts/fast-check.ts, audio-feed-pub
 the whole-repo type-check, then only the tests a change can affect: tests that reach a changed file
 in the static import graph without crossing the app/compose hubs, plus the name-convention tests
 (`<stem>_test.ts`, `<stem>_*_test.ts`, mirrored test subdirectories). Changed scripts/ modules
-select the tests that import them; only a script NOTHING imports selects none (the always-run
-type-check is its gate). It falls back to the FULL suite when deno.json/deno.lock changes, when a
-cross-cutting file (app/compose/router/http/config/server/origin) changes, when a changed src file
-has no covering test, when a changed script has importers but no reachable test, when a shared test
-helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file under src/ or tests/
-changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff itself
-fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
+select the tests that import them. It falls back to the FULL suite when a module-graph config file
+changes (`deno.json`, `deno.jsonc`, `deno.lock`, `import_map.json`, `tsconfig.json` — checked by
+name, because a change there can move what every suite resolves and no suite's own code can show
+that), when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a
+changed src file has no covering test, when a changed script has importers but no reachable test,
+when a shared test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file
+under src/ or tests/ changes (assets, HTML fixtures — the import graph cannot see them), or when the
+git diff itself fails (a stale/missing origin/main must never read as "no changes"). Safe beats
+fast.
+
+Two things about that selection are CHECKED rather than assumed (audio-feed-es8y). First, the fast
+gate's selection is a proven SUBSET of the full gate's: both derive from
+`scripts/test-selection.ts`, which discovers what `deno test` with no arguments would run, and
+`deno task gate` runs that audit (plus a proof over a planted corpus that the universe really equals
+`deno test --no-run`'s own scan, using this repo's exclude list) as its FIRST step, so a suite the
+fast gate could never select (a `tests/x.test.ts`, a `src/x_test.ts`) is a NAMED gate failure that
+says what to do rather than a suite that quietly never runs on a lane. A module genuinely run
+elsewhere belongs in `FAST_GATE_EXCLUSIONS` with the reason. Second, a non-TypeScript change OUTSIDE
+`src/` and `tests/` is no longer assumed unobservable, and the relation is not a list kept beside
+the suites: `scripts/test-selection.ts` DERIVES who reads what by scanning the suites' own code
+(and, one hop out, the modules they import) for read/execute call sites with statically resolvable
+paths - string literals, `new URL("<literal>", import.meta.url)`, and templates or path constants
+built from `${import.meta.dirname}` (that last one is how `docs/evidence/` is found: the suite calls
+`evidencePngs()`, whose `dir = EVIDENCE_DIR` default points at `../docs/evidence`). A screenshot
+under `docs/evidence/` therefore selects `tests/evidence_size_test.ts`, and
+`scripts/observability-agent-run.sh` selects the suite that executes it, without anyone maintaining
+that mapping. There is NOTHING hand-written: the `UNREAD_DECLARATIONS` list and the audit that
+policed it are DELETED (audio-feed-r9fe), because a standing "nothing reads this" assertion is
+exactly the kind of claim a later suite can contradict silently. The whole-life cost of removing it
+is a full suite on the rare change to tooling config - those paths change 15 times in 652 commits -
+so the optimisation was worth seconds and cost a silent hole. Anything the derivation cannot see
+runs the FULL suite and names itself, because the old rule ("not a .ts file, so no test can care")
+gave a fast-gate PASS on a tree where the full gate failed. The module-graph config list is a NET,
+not the safety mechanism: the config files the resolver actually reads are DERIVED from
+`deno.json(c)` (`extends` recursively, its `lock` field, the default `deno.lock`) and the list is
+audited against them, so a config the family does not name is a NAMED gate failure rather than a
+quiet gap - and the protection remains the unclassified default, where an unmatched path runs the
+full suite.
+
+THE ORDERING RULE, because the bug that produced this design was an ordering bug (audio-feed-38sn,
+found in review): for a non-TypeScript path the gate asks the DERIVED relation first - "is a suite
+seen to read this?" - and only a path that no suite is seen to read falls through to a category
+heuristic (documentation is inert). The derived relation therefore outranks every "what kind of file
+is this" guess, and `inertContradictions()` makes an inversion of that order a NAMED failure that
+runs the full suite rather than a silent empty selection.
+
+The audit line's two numbers are CHECKED rather than printed: the universe the audit measured is
+compared with the universe the run selects from, using the same `universeDrift()` that fails by
+name. That comparison is a GATE-LEVEL check whose call site is not covered by a unit test -
+neutering it leaves the suite green (measured) - so it is a known gap rather than an implied
+guarantee, and the same is true of the selection cross-check call site. A reviewer should read those
+two lines as checks that run, not as checks that are themselves verified.
+
+An EMPTY selection is never a silent pass (audio-feed-es8y condition 2). It is only allowed when
+every changed file is documentation that no suite is DERIVED to read — markdown is the only inert
+class left after `UNREAD_DECLARATIONS` was deleted — and even then the run says so plainly
+(`NO SUITES SELECTED — 0 of N test module(s) ran`) and emits `fast-gate: unmapped: <files>`, which
+the fleet's coverage reporter turns into a COVERAGE WARNING, so a gate that ran nothing is visibly
+not a gate that ran suites and passed. Anything not provably inert runs the FULL suite instead: the
+old "a script NOTHING imports selects none, the type-check is its gate" carve-out is GONE, so
+`scripts/smoke.ts` runs the full suite.
 
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.

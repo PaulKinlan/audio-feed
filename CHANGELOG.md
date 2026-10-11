@@ -6,6 +6,44 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **The fast gate's selection is now a proven subset of the full gate, and the gap that let a fast
+  PASS hide a full FAIL is closed (audio-feed-es8y)**: `scripts/test-selection.ts` is the one source
+  of truth for which test modules exist — it discovers what `deno test` with no arguments would run
+  (Deno's `{*_,*.,}test.<ext>` basename rule, verified empirically on Deno 2.9.7) — and the fast
+  gate's universe is DERIVED from it by filtering, rather than being a second walk of `tests/`.
+  `deno task gate` now opens with
+  `deno run --allow-read --allow-env --allow-run=deno
+  scripts/test-selection.ts --prove-discovery`,
+  which fails the gate by NAME when a module the full gate runs can never be selected by the fast
+  gate (or when a `FAST_GATE_EXCLUSIONS` entry does not name a real module and say where it runs
+  instead), so drift is loud at the start of a run instead of discovered by a merger. The same step
+  PROVES the universe rather than asserting it: it plants a corpus of `*_test.{ts,js,mts}` /
+  `*.test.*` files (plus look-alikes that must NOT be discovered, and files under the excluded
+  trees) and compares its walk with `deno test --no-run`'s own scan under this repo's exclude list.
+  Non-TypeScript changes outside `src/` and `tests/` are no longer assumed unobservable, and their
+  read relation is NOT a list maintained beside the suites: `scripts/test-selection.ts` DERIVES who
+  reads what by scanning the suites' own code (and the repo modules they import) for read/execute
+  call sites with statically resolvable paths — string literals,
+  `new URL("<literal>", import.meta.url)`, and path constants or templates built from
+  `${import.meta.dirname}`. A `docs/evidence/*.png` therefore selects `tests/evidence_size_test.ts`
+  (found through `evidencePngs()` -> `EVIDENCE_DIR`) and `scripts/observability-agent-run.sh`
+  selects `tests/observability_agent_poll_test.ts`, which executes it — no mapping table to keep in
+  sync. There is nothing hand-written: `UNREAD_DECLARATIONS` and its reconciliation audit are DELETED
+  (audio-feed-r9fe) - a standing "nothing reads this" claim is one a later suite can contradict
+  silently, and the measured cost of removing it is a full suite on the rare tooling-config change
+  (15 changes in 652 commits). Anything the derivation cannot see runs the full suite and names
+  itself. The module-graph config list is a net audited against the config files the resolver
+  actually reads (derived from `deno.json(c)`), not the safety mechanism. Before this, a 200KB
+  screenshot selected ZERO suites:
+  the fast gate passed while the full gate failed on the same tree. An EMPTY selection is never a
+  silent pass either: it is allowed only when every changed file is markdown no suite is derived to
+  read, and then the run
+  says `NO SUITES SELECTED — 0 of N test module(s) ran` and emits `fast-gate: unmapped: <files>`,
+  which the fleet's coverage reporter turns into a COVERAGE WARNING, so a gate that ran nothing is
+  visibly not a gate that ran suites and passed. Anything not provably inert runs the full suite —
+  including a standalone `scripts/` module nothing imports, whose old silent zero ("the type-check
+  is its gate") is gone.
+
 - **An admin observability page: failures and job state without copying anything out
   (audio-feed-n6uu)**: `GET /admin/observability`, behind the existing admin gate (session plus
   `isActiveAdmin` — `ADMIN_TOKEN` unchanged as the passkey bootstrap token), rendering recent
@@ -59,7 +97,8 @@ All notable changes to this project will be documented in this file.
   `PUBLIC_BASE_URL` - the same value the WebAuthn RP ID already derives from - so a deployment that
   knows its own host no longer needs an operator to type it a second time. Requests on an
   unrecognised host are answered `421` instead of being served; with no configured host the gate
-  fails closed and only loopback is accepted. `ALLOWED_HOSTS` remains as an override that adds hosts.
+  fails closed and only loopback is accepted. `ALLOWED_HOSTS` remains as an override that adds
+  hosts.
 - **Host-injection hardening (audio-feed-fp4r)**: new `ALLOWED_HOSTS` environment variable
   (comma-separated). When set, the advertised origin — feed `selfUrl`, enclosure URLs, redirects,
   and the WebAuthn RP ID derived from it — can only ever be a listed host; requests arriving on any
@@ -95,9 +134,9 @@ All notable changes to this project will be documented in this file.
   refusal now distinguishes the two states: an EMPTY allowed set (a deployment that cannot name its
   own host) answers `500 server_misconfigured` whose detail names `PUBLIC_BASE_URL`, while a
   non-empty set that does not contain the request host is still the `421` it always was. Failing
-  closed is unchanged — nothing is derived from the request. On a Deploy deployment the boot line for
-  the empty state is error-level and says what a visitor gets; tests now cover the empty-set shape
-  the incident shipped in, which the original 7lsy verification never exercised.
+  closed is unchanged — nothing is derived from the request. On a Deploy deployment the boot line
+  for the empty state is error-level and says what a visitor gets; tests now cover the empty-set
+  shape the incident shipped in, which the original 7lsy verification never exercised.
 - **TTS deadline brittleness (audio-feed-9yu8)**: The per-attempt synthesis deadline was 60s —
   inside the real 45-55s/segment distribution, and the 2026-10-09 incidents needed 59.8s for
   headers+body alone — and it was not settable. It is now 120s by default and settable with
