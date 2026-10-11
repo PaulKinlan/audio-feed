@@ -20,6 +20,7 @@ import {
 import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts";
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
+import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -88,6 +89,8 @@ export interface BootstrapOptions {
   synthesizer?: Synthesizer | null;
   /** Injected config overrides (audio-feed-bns). */
   config?: Partial<AppConfig>;
+  /** Run legacy audio key inventory at boot (audio-feed-e6xb). Defaults to true. */
+  inventory?: boolean;
 }
 
 export interface BootstrapResult {
@@ -108,6 +111,8 @@ export interface BootstrapResult {
   feedPoller: FeedPollWorkerHandle | null;
   /** The Deploy decision this process actually booted with. */
   isDeploy: boolean;
+  /** Legacy audio key inventory promise (audio-feed-e6xb). */
+  inventory?: Promise<AudioInventoryResult | null>;
   shutdown: () => Promise<void>;
 }
 
@@ -145,6 +150,35 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   console.log(
     `[audio-feed] ${stores.describe} base=${config.publicBaseUrl ?? "<derived from each request>"}`,
   );
+  // One-time boot inventory of legacy flat audio keys (audio-feed-e6xb).
+  // Informs operator of surviving legacy flat audio keys without blocking startup.
+  // Strictly aggregate counts only — never logs user IDs or key fragments (audio-feed-tyxd).
+  const inventory = options.inventory !== false
+    ? inventoryLegacyAudioKeys(stores.metadata)
+      .then((inv) => {
+        if (inv.legacyCount > 0) {
+          console.warn(
+            `[audio-feed] legacy audio key inventory: found ${inv.legacyCount} legacy flat key(s) ` +
+              `(${inv.canonicalCount} canonical, ${inv.totalEpisodesScanned} total episodes across ${inv.totalUsersScanned} user(s)). ` +
+              `Shapes: flat=${inv.byShape.flat} audioPrefixed=${inv.byShape.audioPrefixed} nested=${inv.byShape.nested}. ` +
+              `Extensions: wav=${inv.byExtension[".wav"]} mp3=${inv.byExtension[".mp3"]} other=${
+                inv.byExtension["other"]
+              }`,
+          );
+        } else {
+          console.log(
+            `[audio-feed] legacy audio key inventory: 0 legacy flat keys found ` +
+              `(${inv.canonicalCount} canonical, ${inv.totalEpisodesScanned} total episodes across ${inv.totalUsersScanned} user(s))`,
+          );
+        }
+        return inv;
+      })
+      .catch((err) => {
+        console.warn(`[audio-feed] legacy audio key inventory failed: ${err}`);
+        return null;
+      })
+    : undefined;
+
   if (config.trustProxyHeaders) {
     console.warn(
       "[audio-feed] TRUST_PROXY_HEADERS is on — x-forwarded-host/proto are honoured. " +
@@ -244,6 +278,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     worker,
     feedPoller,
     isDeploy: deploy,
+    inventory,
     shutdown,
   };
 }
