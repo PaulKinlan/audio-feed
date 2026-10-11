@@ -270,3 +270,32 @@ Deno.test("a zero-scoring shift still OPENS a session window (audio-feed-d55l)",
     0.2,
   );
 });
+
+Deno.test("seven shifts with a zero-scoring first one report 0.5 from an origin of 0 (audio-feed-d55l)", () => {
+  const shift = (startTime: number, value: number) => ({ startTime, value, hadRecentInput: false });
+
+  // The reviewer's actual reproduction: shifts at 0, 900, 1800, 2700, 3600, 4500, 5400 where the one at
+  // t=0 has value 0 and each of the other six has value 0.1.
+  //
+  // With the window opened by the t=0 shift, its 5s limit ends at t=5000, so t=5400 does NOT join and
+  // starts its own window: 0 + 0.1*5 = 0.5, and the other window is 0.1. CLS is the larger, 0.5.
+  const sequence = [0, 900, 1800, 2700, 3600, 4500, 5400].map((t, i) =>
+    shift(t, i === 0 ? 0 : 0.1)
+  );
+  const win = largestSessionWindow(sequence);
+  assert(
+    Math.abs(win.value - 0.5) < 1e-9,
+    `expected 0.5, got ${win.value}`,
+  );
+  assertEquals(win.peakWindowStart, 0, "the window opens at the zero-scoring shift at t=0");
+
+  // This is the case that refutes my earlier claim that the `windowValue !== 0` inference cannot change
+  // the reported VALUE, and it does so exactly here: with the inference, the t=900 shift restarts the
+  // window (the accumulated value is still 0), so the origin becomes 900, the 5s limit becomes 14000,
+  // t=5400 joins, and the answer is 0.6 - the value the review observed. The origin is what moves, and
+  // the VALUE moves with it, so both are asserted above.
+  assert(
+    win.value < 0.6,
+    "0.6 is what the inference produced by moving the origin to t=900, and is not the answer",
+  );
+});
