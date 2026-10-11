@@ -603,17 +603,32 @@ export async function migrateLegacyAudioKeys(
           };
 
           try {
-            const updated: Episode = {
-              ...episode,
-              audioKey: newKey,
-            };
-            await metadata.putEpisode(updated);
-            migrated++;
-            log?.(`Migrated episode ${episode.id} audioKey: ${oldKey} -> ${newKey}`);
+            const casOk = await metadata.updateEpisodeAudioKeyIfCurrent(
+              episode.userId,
+              episode.id,
+              oldKey,
+              newKey,
+            );
+            if (casOk) {
+              migrated++;
+              log?.(`Migrated episode ${episode.id} audioKey: ${oldKey} -> ${newKey}`);
+            } else {
+              // The episode was modified concurrently or its audioKey is no longer oldKey!
+              // The concurrent writer wins; do not clobber (audio-feed-9731).
+              refusedConflict++;
+              const error =
+                `Concurrent writer modified episode ${episode.id} (stored audioKey is no longer "${oldKey}"); skipped to preserve concurrent write`;
+              errors.push({ episodeId: episode.id, userId: episode.userId, error });
+              planItem.status = "refused_conflict";
+              planItem.error = error;
+              log?.(`Refusing migration for episode ${episode.id}: ${error}`);
+            }
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             errors.push({ episodeId: episode.id, userId: episode.userId, error: errorMsg });
             planItem.error = errorMsg;
+            planItem.status = "refused_conflict";
+            refusedConflict++;
             log?.(`Failed to migrate episode ${episode.id}: ${errorMsg}`);
           }
 

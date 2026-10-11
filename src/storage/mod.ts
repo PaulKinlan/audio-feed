@@ -298,6 +298,18 @@ export interface EpisodeRepository {
    * Resolves `false` if the episode does not exist (prevents resurrection, audio-feed-hvn).
    */
   backfillEpisodeSourceTitle(userId: string, id: string, sourceTitle: string): Promise<boolean>;
+
+  /**
+   * Atomically updates an episode's audioKey only if the stored audioKey matches expectedKey.
+   * If the record does not exist or stored audioKey !== expectedKey, returns false without mutating.
+   * Concurrent writers updating other fields (or changing audioKey) win (audio-feed-9731).
+   */
+  updateEpisodeAudioKeyIfCurrent(
+    userId: string,
+    id: string,
+    expectedKey: string,
+    newKey: string,
+  ): Promise<boolean>;
   /**
    * Newest first. Backs both the per-source and master feeds.
    *

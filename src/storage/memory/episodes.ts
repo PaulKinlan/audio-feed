@@ -61,6 +61,19 @@ export function createEpisodesRepository(
       if (!ep.sourceTitle) ep.sourceTitle = sourceTitle;
       return Promise.resolve(true);
     },
+    updateEpisodeAudioKeyIfCurrent(
+      userId: string,
+      id: string,
+      expectedKey: string,
+      newKey: string,
+    ): Promise<boolean> {
+      const key = scoped(userId, id);
+      const ep = state.episodes.get(key);
+      if (!ep) return Promise.resolve(false);
+      if (ep.audioKey !== expectedKey) return Promise.resolve(false);
+      ep.audioKey = newKey;
+      return Promise.resolve(true);
+    },
     listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
       return host().listEpisodePage(query).then((page) => page.episodes);
     },

@@ -707,3 +707,58 @@ Deno.test("migrateLegacyAudioKeys: single-writer lock blocks concurrent migratio
     await releaseMigrationLock(stores.metadata, "concurrent-holder");
   }
 });
+
+Deno.test("migrateLegacyAudioKeys: concurrent episode metadata update preserves concurrent writer (audio-feed-9731)", async () => {
+  for (const kind of ["memory", "kv"] as const) {
+    const stores: Stores = kind === "memory"
+      ? memoryStores()
+      : await openStores({ kvPath: ":memory:" });
+
+    try {
+      await stores.metadata.putUser(makeUser({ id: "user-race", status: "approved" }));
+      const oldEp = makeEpisode({
+        id: "ep-race",
+        userId: "user-race",
+        mode: "direct",
+        audioKey: "old-track.mp3",
+        title: "original-title",
+      });
+      await stores.metadata.putEpisode(oldEp);
+      await stores.blobs.put("old-track.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
+      const freshKey = "audio/user-race/direct/fresh.mp3";
+      await stores.blobs.put(freshKey, new Uint8Array([9, 9]));
+
+      let didConcurrentWrite = false;
+      const racingBlobs = wrapBlobs(stores.blobs, {
+        get: async (key, opts) => {
+          if (key === "old-track.mp3" && !didConcurrentWrite) {
+            didConcurrentWrite = true;
+            // Concurrent writer updates episode with fresh key and new title
+            await stores.metadata.putEpisode({
+              ...oldEp,
+              audioKey: freshKey,
+              title: "newer-concurrent-title",
+            });
+          }
+          return stores.blobs.get(key, opts);
+        },
+      });
+
+      const res = await migrateLegacyAudioKeys(stores.metadata, {
+        apply: true,
+        blobs: racingBlobs,
+      });
+
+      assertEquals(res.migrated, 0, "must not migrate when concurrent write occurred");
+      assertEquals(res.refusedConflict, 1, "must record refusal conflict");
+
+      const current = await stores.metadata.getEpisode("user-race", "ep-race");
+      assertEquals(current?.audioKey, freshKey, "concurrent writer's audioKey must win");
+      assertEquals(current?.title, "newer-concurrent-title", "concurrent writer's title must win");
+    } finally {
+      if (kind === "kv") {
+        await stores.metadata.close();
+      }
+    }
+  }
+});

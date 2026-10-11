@@ -143,6 +143,34 @@ export function createEpisodesRepository(
         .commit();
       return retryRes.ok;
     },
+    async updateEpisodeAudioKeyIfCurrent(
+      userId: string,
+      id: string,
+      expectedKey: string,
+      newKey: string,
+    ): Promise<boolean> {
+      const key: Deno.KvKey = ["episode", userId, id];
+      const entry = await core.kv.get<Episode>(key);
+      if (!entry.value) return false;
+      if (entry.value.audioKey !== expectedKey) return false;
+      const updated: Episode = { ...entry.value, audioKey: newKey };
+      const res = await core.kv.atomic()
+        .check(entry)
+        .set(key, updated)
+        .commit();
+      if (res.ok) return true;
+
+      // Retry once if atomic check collided
+      const retry = await core.kv.get<Episode>(key);
+      if (!retry.value) return false;
+      if (retry.value.audioKey !== expectedKey) return false;
+      const retryUpdated: Episode = { ...retry.value, audioKey: newKey };
+      const retryRes = await core.kv.atomic()
+        .check(retry)
+        .set(key, retryUpdated)
+        .commit();
+      return retryRes.ok;
+    },
     async listEpisodes(query: EpisodeQuery): Promise<Episode[]> {
       // `limit` bounds MATCHES here, not entries examined. A filtered query's
       // matches can sit arbitrarily deep in a newest-first index scan, so one

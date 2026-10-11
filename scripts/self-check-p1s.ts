@@ -20,7 +20,7 @@ function wrapBlobs(blobs: Stores["blobs"], overrides: Partial<Stores["blobs"]>):
 }
 
 async function runSelfCheck() {
-  console.log("=== SELF-CHECK: ALL 5 P1s + Happy Path + Idempotency + Dry-Run (Memory & KV) ===");
+  console.log("=== SELF-CHECK: ALL 6 P1s + Happy Path + Idempotency + Dry-Run (Memory & KV) ===");
 
   for (const storeType of ["memory", "kv"] as const) {
     console.log(`\n--- STORE: ${storeType.toUpperCase()} ---`);
@@ -255,6 +255,56 @@ async function runSelfCheck() {
           } (migrated=${res.migrated}, refused=${res.refusedConflict}, destPreserved=${destUntouched})`,
         );
         if (!ok) throw new Error("qm7b failed");
+      }
+
+      // 9. P1 repro 9731: concurrent episode update during migration
+      {
+        const oldEp = makeEpisode({
+          id: "ep-9731",
+          userId: "user-test",
+          mode: "direct",
+          audioKey: "legacy-9731.mp3",
+          title: "original-title",
+        });
+        await stores.metadata.putEpisode(oldEp);
+        await stores.blobs.put("legacy-9731.mp3", new Uint8Array([1]));
+        const freshKey = "audio/user-test/direct/fresh-9731.mp3";
+        await stores.blobs.put(freshKey, new Uint8Array([2]));
+
+        let didConcurrentWrite = false;
+        const raceBlobs = wrapBlobs(stores.blobs, {
+          get: async (key, opts) => {
+            if (key === "legacy-9731.mp3" && !didConcurrentWrite) {
+              didConcurrentWrite = true;
+              // Concurrent writer updates episode with freshKey and newer title
+              await stores.metadata.putEpisode({
+                ...oldEp,
+                audioKey: freshKey,
+                title: "newer-concurrent-title",
+              });
+            }
+            return stores.blobs.get(key, opts);
+          },
+        });
+
+        const res = await migrateLegacyAudioKeys(stores.metadata, {
+          apply: true,
+          blobs: raceBlobs,
+        });
+        const currentEp = await stores.metadata.getEpisode("user-test", "ep-9731");
+        const ok = didConcurrentWrite &&
+          res.migrated === 0 &&
+          res.refusedConflict >= 1 &&
+          currentEp?.audioKey === freshKey &&
+          currentEp?.title === "newer-concurrent-title";
+        console.log(
+          `[${storeType}] 9731 (concurrent metadata update via CAS): ${
+            ok ? "PASS" : "FAIL"
+          } (migrated=${res.migrated}, preservedKey=${
+            currentEp?.audioKey === freshKey
+          }, preservedTitle=${currentEp?.title === "newer-concurrent-title"})`,
+        );
+        if (!ok) throw new Error("9731 failed");
       }
     } finally {
       if (storeType === "kv") {

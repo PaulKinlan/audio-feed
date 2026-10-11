@@ -105,7 +105,7 @@ export class S3BlobStore implements BlobStore {
       body: bytes,
       headers,
     });
-    if (res.status === 412) {
+    if (res.status === 412 || res.status === 409) {
       await res.body?.cancel();
       return null;
     }
