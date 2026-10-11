@@ -32,11 +32,18 @@
   // TypeScript source only. Markdown and generated config (.claude/, .agents/,
   // .codex/) are tool-authored -- `bd setup` rewrites them -- so formatting
   // those files means a reformat-vs-regenerate fight on every bd upgrade.
+  // scripts/ IS hand-written TypeScript, and the gate already type-checks it, so it is in scope
+  // too (audio-feed-7jsl): while it was absent, `deno fmt --check` passed over 205 files with 17
+  // unformatted files under scripts/ unexamined -- a green gate reporting a property it had not
+  // checked. Two things that follow from this list: `deno fmt <path>` on anything OUTSIDE it
+  // reformats files the project deliberately leaves alone, so name files, never directories, when
+  // formatting by hand; and the include list is the only place to add a tree, because the gate,
+  // editors and CI all run bare `deno fmt --check`.
   "fmt": {
     "lineWidth": 100,
     "semiColons": true,
     "singleQuote": false,
-    "include": ["src/", "tests/", "main.ts"]
+    "include": ["src/", "tests/", "main.ts", "scripts/"]
   },
   "lint": {
     "rules": {
