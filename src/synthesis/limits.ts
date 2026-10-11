@@ -114,6 +114,110 @@ export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
 /** Safety margin reserved for flushing checkpoints, commits, and claim yields in ms (audio-feed-9wqt). */
 export const INVOCATION_FLUSH_MARGIN_MS = 5_000;
 
+export type BudgetedOutcome<T> =
+  | { kind: "completed"; value: T }
+  | { kind: "budget-yield"; error: InvocationBudgetAbortError }
+  | { kind: "error"; error: unknown };
+
+export interface InvocationBudgetSpec {
+  maxDurationMs?: number;
+  startTimeMonotonicMs?: number;
+}
+
+/**
+ * Universal wrapper for EVERY awaitable synthesis stage (audio-feed-dv4p):
+ * (a) computes the deadline from the remaining budget minus flush margin.
+ * (b) refuses to START if worst case cannot fit (preflight check).
+ * (c) passes an AbortSignal tagged with InvocationBudgetAbortError for automatic provenance.
+ * (d) returns a typed outcome (completed | budget-yield | error) so the caller cannot forget to handle it.
+ */
+export async function withInvocationBudget<T>(options: {
+  name: string;
+  budget?: InvocationBudgetSpec;
+  flushMarginMs?: number;
+  worstCaseEstimateMs: number;
+  completedTurns?: number;
+  totalTurns?: number;
+  fn: (signal?: AbortSignal) => Promise<T>;
+}): Promise<BudgetedOutcome<T>> {
+  const { budget } = options;
+  if (budget?.maxDurationMs !== undefined && budget?.maxDurationMs > 0) {
+    const startTime = budget.startTimeMonotonicMs ?? performance.now();
+    const flushMargin = options.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
+    const elapsed = performance.now() - startTime;
+    const remaining = budget.maxDurationMs - elapsed;
+    const available = remaining - flushMargin;
+
+    // (b) Preflight check: refuse to start if worst-case estimate cannot fit
+    if (available < options.worstCaseEstimateMs) {
+      const error = new InvocationBudgetAbortError(
+        options.completedTurns ?? 0,
+        options.totalTurns ?? 0,
+        `Invocation budget preflight refused stage "${options.name}": available ${
+          Math.round(Math.max(0, available))
+        }ms < worst-case estimate ${options.worstCaseEstimateMs}ms`,
+      );
+      return { kind: "budget-yield", error };
+    }
+
+    // (a) Compute deadline from remaining budget
+    const timeoutMs = Math.max(0, available);
+    const controller = new AbortController();
+    const abortErr = new InvocationBudgetAbortError(
+      options.completedTurns ?? 0,
+      options.totalTurns ?? 0,
+      `Invocation budget deadline (${
+        Math.round(timeoutMs)
+      }ms) exceeded during stage "${options.name}"`,
+    );
+
+    const timer = setTimeout(() => {
+      // (c) Passes AbortSignal tagged with InvocationBudgetAbortError (automatic provenance)
+      controller.abort(abortErr);
+    }, timeoutMs);
+
+    try {
+      const stagePromise = options.fn(controller.signal);
+      const abortPromise = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener("abort", () => {
+          reject(controller.signal.reason);
+        }, { once: true });
+      });
+      const value = await Promise.race([stagePromise, abortPromise]);
+      // (d) Typed outcome: completed
+      return { kind: "completed", value };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        const reason = controller.signal.reason;
+        const yieldErr = isInvocationBudgetAbort(reason)
+          ? (reason as InvocationBudgetAbortError)
+          : abortErr;
+        // (d) Typed outcome: budget-yield
+        return { kind: "budget-yield", error: yieldErr };
+      }
+      if (isInvocationBudgetAbort(error)) {
+        // (d) Typed outcome: budget-yield
+        return { kind: "budget-yield", error: error as InvocationBudgetAbortError };
+      }
+      // (d) Typed outcome: error
+      return { kind: "error", error };
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  // Unbounded invocation
+  try {
+    const value = await options.fn();
+    return { kind: "completed", value };
+  } catch (error) {
+    if (isInvocationBudgetAbort(error)) {
+      return { kind: "budget-yield", error: error as InvocationBudgetAbortError };
+    }
+    return { kind: "error", error };
+  }
+}
+
 /** Limit total paid turns, including a refused output and its smaller replacements.
  * Failed turns are never silently added to the stitched result. */
 export async function runManagedTurns<T, R, S = R>(options: {

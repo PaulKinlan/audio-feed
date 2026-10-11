@@ -77,12 +77,14 @@ import {
   DEFAULT_MAX_INVOCATION_DURATION_MS,
 } from "../config.ts";
 import {
+  ESTIMATED_SCRIPT_STAGE_DURATION_MS,
   ESTIMATED_TTS_TURN_DURATION_MS,
   ESTIMATED_UPLOAD_DURATION_MS,
   INVOCATION_FLUSH_MARGIN_MS,
   InvocationBudgetAbortError,
   isInvocationBudgetAbort,
   SynthesisYieldError,
+  withInvocationBudget,
 } from "../synthesis/limits.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
@@ -489,54 +491,41 @@ export const DEFAULT_SCRIPT_STAGE_TIMEOUT_MS = 360_000;
 async function runScriptStage(
   generator: ScriptGenerator | null,
   input: GroundedScriptInput,
-  timeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
-  isBudgetEnforced = false,
+  budget?: { maxDurationMs?: number; startTimeMonotonicMs?: number },
+  flushMarginMs?: number,
+  estimateMs = ESTIMATED_SCRIPT_STAGE_DURATION_MS,
+  defaultTimeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
-  // Two bounds: budgetController identifies our own timeout by provenance (audio-feed-zni7).
-  const budgetController = new AbortController();
-  const deadline = budgetController.signal;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new InvocationBudgetAbortError(
-        0,
-        0,
-        `grounded script stage exceeded ${timeoutMs}ms`,
-      );
-      budgetController.abort(err);
-      reject(err);
-    }, timeoutMs);
+  const outcome = await withInvocationBudget({
+    name: "script_generation",
+    budget: budget?.maxDurationMs
+      ? budget
+      : { maxDurationMs: defaultTimeoutMs, startTimeMonotonicMs: performance.now() },
+    flushMarginMs: budget?.maxDurationMs ? flushMarginMs : 0,
+    worstCaseEstimateMs: budget?.maxDurationMs ? estimateMs : 0,
+    fn: (signal) => generator(input, { signal }),
   });
-  const work = generator(input, { signal: deadline });
-  try {
-    return await Promise.race([work, expired]);
-  } catch (error) {
-    if (
-      isBudgetEnforced &&
-      (budgetController.signal.aborted || isInvocationBudgetAbort(error))
-    ) {
-      const yieldErr = isInvocationBudgetAbort(error) ? error : (budgetController.signal.reason ??
-        new InvocationBudgetAbortError(
-          0,
-          0,
-          `grounded script stage exceeded ${timeoutMs}ms`,
-        ));
-      throw yieldErr;
+  if (outcome.kind === "budget-yield") {
+    if (budget?.maxDurationMs) {
+      throw outcome.error;
     }
     console.warn(
       `[synthesis] grounded script stage failed for "${input.article.title}": ` +
+        `grounded script stage exceeded ${defaultTimeoutMs}ms — falling back to the static dialogue builder`,
+    );
+    return undefined;
+  }
+  if (outcome.kind === "error") {
+    console.warn(
+      `[synthesis] grounded script stage failed for "${input.article.title}": ` +
         `${
-          String((error as Error)?.message ?? error)
+          String((outcome.error as Error)?.message ?? outcome.error)
         } — falling back to the static dialogue builder`,
     );
     return undefined;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    // A generator that ignores its signal is still running; its eventual rejection must not
-    // surface as an unhandled rejection once synthesis has already fallen back.
-    work.catch(() => {});
   }
+  return outcome.value;
 }
 
 export function createGeminiSynthesizer(
@@ -613,7 +602,7 @@ export function createGeminiSynthesizer(
 
     const flushMargin = invocationBudget?.flushMarginMs ??
       deps.flushMarginMs ??
-      INVOCATION_FLUSH_MARGIN_MS;
+      (invocationBudget?.maxDurationMs ? INVOCATION_FLUSH_MARGIN_MS : 0);
 
     const shouldYield = (_completed: number, _total: number) => {
       if (
@@ -636,87 +625,65 @@ export function createGeminiSynthesizer(
       return false;
     };
 
-    const remainingTtsBudgetMs =
-      invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs
-        ? Math.max(
-          0,
-          invocationBudget.maxDurationMs -
-            (performance.now() - invocationBudget.startTimeMonotonicMs) -
-            flushMargin,
-        )
-        : undefined;
-
-    const budgetController = remainingTtsBudgetMs !== undefined ? new AbortController() : undefined;
-    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
-    if (budgetController && remainingTtsBudgetMs !== undefined) {
-      budgetTimer = setTimeout(() => {
-        budgetController.abort(
-          new InvocationBudgetAbortError(
-            committedTurnsCount,
-            MAX_TTS_SEGMENTS,
-            `Invocation budget deadline (${Math.round(remainingTtsBudgetMs)}ms) reached during TTS`,
-          ),
-        );
-      }, remainingTtsBudgetMs);
-    }
-    const budgetSignal = budgetController?.signal;
-    const combinedSignal = budgetSignal && leaseSignal
-      ? AbortSignal.any([leaseSignal, budgetSignal])
-      : (budgetSignal ?? leaseSignal);
-
-    const perTurnDeadlineMs = Math.min(
-      deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
-      remainingTtsBudgetMs ?? Infinity,
-    );
     const ttsOptions = {
-      ...(combinedSignal ? { signal: combinedSignal } : {}),
+      ...(leaseSignal ? { signal: leaseSignal } : {}),
       ...(wrappedResume ? { resume: wrappedResume } : (resume ? { resume } : {})),
-      timeoutMs: perTurnDeadlineMs,
+      timeoutMs: deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       onProgress,
       shouldYield,
     };
-    try {
-      const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
-      if (mode === "deepdive") {
-        // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
-        // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
-        // - the comment was describing an intention the line did not have, and
-        // audio-feed-4xt made this branch reachable in production for the first time,
-        // so the two could now disagree while both looked correct.
-        // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
-        // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
-        const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
-        const speakers: [DialogueSpeaker, DialogueSpeaker] = [
-          { name: "Alex", role: "expert", voice: expert },
-          { name: "Sam", role: "curious_foil", voice: foil },
-        ];
-        // Research and write the script first (audio-feed-yaz5).
-        // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
-        let turns = episode.scriptTurns;
-        if (!turns || turns.length === 0) {
-          let scriptStageTimeoutMs = deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS;
-          let isBudgetEnforced = false;
-
-          if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-            isBudgetEnforced = true;
-            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
-            const remaining = invocationBudget.maxDurationMs - elapsed;
-            const availableBudget = remaining - flushMargin;
-            if (availableBudget <= 0) {
-              throw new SynthesisYieldError(
-                0,
-                0,
-                `Preflight yield before script generation: remaining budget ${
-                  Math.round(remaining)
-                }ms < flush margin ${flushMargin}ms`,
-              );
-            }
-            scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, availableBudget);
-          }
-          if (remainingMs !== undefined) {
-            scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, remainingMs);
-          }
-
+    const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
+    if (mode === "deepdive") {
+      // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
+      // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
+      // - the comment was describing an intention the line did not have, and
+      // audio-feed-4xt made this branch reachable in production for the first time,
+      // so the two could now disagree while both looked correct.
+      // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
+      // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
+      const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
+      const speakers: [DialogueSpeaker, DialogueSpeaker] = [
+        { name: "Alex", role: "expert", voice: expert },
+        { name: "Sam", role: "curious_foil", voice: foil },
+      ];
+      // Research and write the script first (audio-feed-yaz5).
+      // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
+      let turns = episode.scriptTurns;
+      if (!turns || turns.length === 0) {
+        if (claimedBy) {
+          await checkpointEpisodeClaim(
+            ctx.stores.metadata,
+            episode.userId,
+            episode.id,
+            claimedBy,
+            {
+              phase: "generating_script",
+            },
+          );
+        }
+        const script = await runScriptStage(
+          scriptGenerator,
+          {
+            article: {
+              title: article.title,
+              author: article.author,
+              body: article.content,
+              summary: article.excerpt,
+            },
+            speakers,
+          },
+          invocationBudget,
+          flushMargin,
+          deps.scriptTimeoutMs ??
+            invocationBudget?.estimatedTurnDurationMs ??
+            deps.estimatedTurnDurationMs ??
+            ESTIMATED_SCRIPT_STAGE_DURATION_MS,
+          remainingMs !== undefined
+            ? Math.min(deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS, remainingMs)
+            : (deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS),
+        );
+        turns = script?.turns;
+        if (turns && turns.length > 0) {
           if (claimedBy) {
             await checkpointEpisodeClaim(
               ctx.stores.metadata,
@@ -724,63 +691,54 @@ export function createGeminiSynthesizer(
               episode.id,
               claimedBy,
               {
-                phase: "generating_script",
+                phase: "script_generated",
+                scriptTurns: turns,
               },
             );
           }
-          const script = await runScriptStage(
-            scriptGenerator,
-            {
-              article: {
-                title: article.title,
-                author: article.author,
-                body: article.content,
-                summary: article.excerpt,
-              },
-              speakers,
-            },
-            scriptStageTimeoutMs,
-            isBudgetEnforced,
-          );
-          turns = script?.turns;
-          if (turns && turns.length > 0) {
-            if (claimedBy) {
-              await checkpointEpisodeClaim(
-                ctx.stores.metadata,
-                episode.userId,
-                episode.id,
-                claimedBy,
-                {
-                  phase: "script_generated",
-                  scriptTurns: turns,
-                },
-              );
-            }
-            // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
-            episode.scriptTurns = turns;
+          // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
+          episode.scriptTurns = turns;
 
-            // audio-feed-9wqt, audio-feed-vvwb: preflight check before first dialogue turn:
-            // ensure remaining time fits at least one turn + flush margin
-            if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-              const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
-              const remaining = invocationBudget.maxDurationMs - elapsed;
-              const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
-                deps.estimatedTurnDurationMs ??
-                ESTIMATED_TTS_TURN_DURATION_MS;
-              if (remaining < turnEstimate + flushMargin) {
-                throw new SynthesisYieldError(
-                  0,
-                  turns.length,
-                  `Script generated; yielding before first turn: remaining budget ${
-                    Math.round(remaining)
-                  }ms < required ${turnEstimate + flushMargin}ms`,
-                );
-              }
+          // audio-feed-9wqt, audio-feed-vvwb: preflight check before first dialogue turn:
+          // ensure remaining time fits at least one turn + flush margin
+          if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+            const remaining = invocationBudget.maxDurationMs - elapsed;
+            const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+              deps.estimatedTurnDurationMs ??
+              ESTIMATED_TTS_TURN_DURATION_MS;
+            if (remaining < turnEstimate + flushMargin) {
+              throw new SynthesisYieldError(
+                0,
+                turns.length,
+                `Script generated; yielding before first turn: remaining budget ${
+                  Math.round(remaining)
+                }ms < required ${turnEstimate + flushMargin}ms`,
+              );
             }
           }
         }
-        try {
-          return await client.synthesizeDialogue({
+      }
+      if (
+        leaseSignal?.aborted ||
+        (leaseMs && Number.isFinite(claimedAt) && Date.now() >= claimedAt + leaseMs - 60_000)
+      ) {
+        throw new GeminiTtsError("synthesis stopped before claim lease expired", 400);
+      }
+      const dialogueOutcome = await withInvocationBudget({
+        name: "dialogue_tts",
+        budget: invocationBudget,
+        flushMarginMs: flushMargin,
+        worstCaseEstimateMs: invocationBudget?.estimatedTurnDurationMs ??
+          deps.estimatedTurnDurationMs ??
+          ESTIMATED_TTS_TURN_DURATION_MS,
+        completedTurns: committedTurnsCount,
+        totalTurns: turns?.length ?? MAX_TTS_SEGMENTS,
+        fn: (signal) => {
+          const combinedSignal = signal && leaseSignal
+            ? AbortSignal.any([leaseSignal, signal])
+            : (signal ?? leaseSignal);
+          return client.synthesizeDialogue({
             title: article.title,
             article: {
               title: article.title,
@@ -792,46 +750,67 @@ export function createGeminiSynthesizer(
             turns,
             codeHandling,
             codeSummarizer: deps.codeSummarizer,
-          }, ttsOptions);
-        } catch (error) {
-          if (budgetController?.signal.aborted) {
-            const reason = budgetController.signal.reason;
-            if (isInvocationBudgetAbort(reason)) {
-              throw reason;
-            }
-            throw new InvocationBudgetAbortError(
-              committedTurnsCount,
-              turns?.length ?? MAX_TTS_SEGMENTS,
-              `Invocation budget deadline reached during dialogue TTS`,
-            );
-          }
-          if (leaseSignal?.aborted) {
-            throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
-          }
-          throw error;
+          }, {
+            ...ttsOptions,
+            ...(combinedSignal ? { signal: combinedSignal } : {}),
+          });
+        },
+      });
+      if (dialogueOutcome.kind === "budget-yield") {
+        throw dialogueOutcome.error;
+      }
+      if (dialogueOutcome.kind === "error") {
+        const errMsg = String(dialogueOutcome.error);
+        if (leaseSignal?.aborted || errMsg.includes("claim cancelled before TTS spend")) {
+          throw new GeminiTtsError(
+            "synthesis stopped before claim lease expired",
+            400,
+            dialogueOutcome.error,
+          );
         }
+        throw dialogueOutcome.error;
       }
+      return dialogueOutcome.value;
+    }
 
-      // Only read the user record when nothing above it decided, so the common case
-      // (a source with an explicit voice) costs no extra store read.
-      const sourceVoice = source?.voices.direct;
-      const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
-      // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
-      // "cleared but never set" looks like in stored data, and `??` would hand it to
-      // the API as a voice name — the client's own `||` fallback would then silently
-      // pick Charon and skip both the user preference and DEFAULT_VOICE.
-      const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
-        .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
-        DEFAULT_NARRATION_VOICE;
+    // Only read the user record when nothing above it decided, so the common case
+    // (a source with an explicit voice) costs no extra store read.
+    const sourceVoice = source?.voices.direct;
+    const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
+    // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
+    // "cleared but never set" looks like in stored data, and `??` would hand it to
+    // the API as a voice name — the client's own `||` fallback would then silently
+    // pick Charon and skip both the user preference and DEFAULT_VOICE.
+    const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
+      .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
+      DEFAULT_NARRATION_VOICE;
 
-      if (claimedBy) {
-        await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
-          phase: "preparing_input",
-        });
-      }
+    if (claimedBy) {
+      await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
+        phase: "preparing_input",
+      });
+    }
 
-      try {
-        return await client.synthesizeNarration({
+    if (
+      leaseSignal?.aborted ||
+      (leaseMs && Number.isFinite(claimedAt) && Date.now() >= claimedAt + leaseMs - 60_000)
+    ) {
+      throw new GeminiTtsError("synthesis stopped before claim lease expired", 400);
+    }
+    const narrationOutcome = await withInvocationBudget({
+      name: "narration_tts",
+      budget: invocationBudget,
+      flushMarginMs: flushMargin,
+      worstCaseEstimateMs: invocationBudget?.estimatedTurnDurationMs ??
+        deps.estimatedTurnDurationMs ??
+        ESTIMATED_TTS_TURN_DURATION_MS,
+      completedTurns: committedTurnsCount,
+      totalTurns: MAX_TTS_SEGMENTS,
+      fn: (signal) => {
+        const combinedSignal = signal && leaseSignal
+          ? AbortSignal.any([leaseSignal, signal])
+          : (signal ?? leaseSignal);
+        return client.synthesizeNarration({
           title: article.title,
           author: article.author,
           publishedAt: article.publishedAt,
@@ -840,29 +819,27 @@ export function createGeminiSynthesizer(
           voice,
           codeHandling,
           codeSummarizer: deps.codeSummarizer,
-        }, ttsOptions);
-      } catch (error) {
-        if (budgetController?.signal.aborted) {
-          const reason = budgetController.signal.reason;
-          if (isInvocationBudgetAbort(reason)) {
-            throw reason;
-          }
-          throw new InvocationBudgetAbortError(
-            committedTurnsCount,
-            MAX_TTS_SEGMENTS,
-            `Invocation budget deadline reached during narration TTS`,
-          );
-        }
-        if (leaseSignal?.aborted) {
-          throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
-        }
-        throw error;
-      }
-    } finally {
-      if (budgetTimer !== undefined) {
-        clearTimeout(budgetTimer);
-      }
+        }, {
+          ...ttsOptions,
+          ...(combinedSignal ? { signal: combinedSignal } : {}),
+        });
+      },
+    });
+    if (narrationOutcome.kind === "budget-yield") {
+      throw narrationOutcome.error;
     }
+    if (narrationOutcome.kind === "error") {
+      const errMsg = String(narrationOutcome.error);
+      if (leaseSignal?.aborted || errMsg.includes("claim cancelled before TTS spend")) {
+        throw new GeminiTtsError(
+          "synthesis stopped before claim lease expired",
+          400,
+          narrationOutcome.error,
+        );
+      }
+      throw narrationOutcome.error;
+    }
+    return narrationOutcome.value;
   };
 }
 
@@ -1510,40 +1487,97 @@ export async function runSynthesisBatch(
     // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
     const flushMargin = opts.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
     const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
+    const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
+    const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
 
-    if (maxInvocationDurationMs) {
-      const elapsed = performance.now() - invocationStartMonotonicMs;
-      const remaining = maxInvocationDurationMs - elapsed;
-      if (remaining < uploadEstimate + flushMargin) {
-        // Preflight yield before terminal upload: cannot fit upload + commit within budget!
-        await metadata.yieldEpisodeClaim(
+    // Universal helper withInvocationBudget governs terminal persistence (audio-feed-dv4p, audio-feed-mv1d, audio-feed-fsbk)
+    let putPromise: Promise<{ size?: number }> | null = null;
+    const terminalOutcome = await withInvocationBudget({
+      name: "terminal_persistence",
+      budget: {
+        maxDurationMs: maxInvocationDurationMs,
+        startTimeMonotonicMs: invocationStartMonotonicMs,
+      },
+      flushMarginMs: flushMargin,
+      worstCaseEstimateMs: uploadEstimate,
+      completedTurns: 1,
+      totalTurns: 1,
+      fn: async () => {
+        await checkpointEpisodeClaim(
+          metadata,
           currentEpisode.userId,
           currentEpisode.id,
           opts.owner,
           {
-            phase: "audio_synthesized",
-            advanceAttempts: false, // Progress was made (synthesis finished), attempts reset
+            phase: "uploading_audio",
           },
         );
-        result.yielded.push({
-          episodeId: currentEpisode.id,
-          completedTurns: 1,
-          totalTurns: 1,
-        });
-        break;
+        putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
+        const stored = await putPromise;
+        const byteLength = stored.size ?? bytes.length;
+        const wrote = await metadata.completeEpisode({
+          ...currentEpisode,
+          status: "ready",
+          audioKey: stagingKey,
+          byteLength,
+          contentType: "audio/wav",
+          durationSeconds: audio.durationSeconds,
+          readyAt: previousKey && currentEpisode.readyAt
+            ? currentEpisode.readyAt
+            : new Date().toISOString(),
+          promptVersion: PROMPT_VERSION,
+          regenerating: undefined,
+          error: undefined,
+          phase: "ready",
+          lastHeartbeat: new Date().toISOString(),
+          scriptTurns: undefined,
+        }, opts.owner);
+        return { stored, byteLength, wrote };
+      },
+    });
+
+    if (terminalOutcome.kind === "budget-yield") {
+      // audio-feed-fsbk: attach settlement hook to delayed putPromise so when it resolves,
+      // it is immediately deleted, preventing untracked staging blobs from lingering.
+      if (putPromise) {
+        (putPromise as Promise<{ size?: number }>).then(
+          () => blobs.delete(stagingKey).catch(() => {}),
+          () => {},
+        );
       }
+      blobs.delete(stagingKey).catch(() => {});
+      await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+
+      await metadata.yieldEpisodeClaim(
+        currentEpisode.userId,
+        currentEpisode.id,
+        opts.owner,
+        {
+          phase: "audio_synthesized",
+          advanceAttempts: false, // Progress was made (synthesis finished), attempts reset
+        },
+      );
+      result.yielded.push({
+        episodeId: currentEpisode.id,
+        completedTurns: 1,
+        totalTurns: 1,
+      });
+      break;
     }
 
-    try {
-      await checkpointEpisodeClaim(metadata, currentEpisode.userId, currentEpisode.id, opts.owner, {
-        phase: "uploading_audio",
-      });
-    } catch (err) {
-      const error = String((err as Error)?.message ?? err);
+    if (terminalOutcome.kind === "error") {
+      if (putPromise) {
+        (putPromise as Promise<{ size?: number }>).then(
+          () => blobs.delete(stagingKey).catch(() => {}),
+          () => {},
+        );
+      }
+      blobs.delete(stagingKey).catch(() => {});
+      const error = String((terminalOutcome.error as Error)?.message ?? terminalOutcome.error);
       console.error(
-        `[audio-feed] upload checkpoint failed for episode "${currentEpisode.id}": ${error}`,
+        `[audio-feed] terminal persistence failed for episode "${currentEpisode.id}": ${error}`,
       );
-      if (err instanceof GeminiTtsError && err.status === 409) {
+      if (terminalOutcome.error instanceof GeminiTtsError && terminalOutcome.error.status === 409) {
         result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
       } else {
         const wrote = await metadata.completeEpisode(
@@ -1560,129 +1594,8 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
-    // /audio is served immutable, and a first attempt used to write the deterministic canonical
-    // key — so a superseded worker and the winner shared one key and the loser's cleanup below
-    // deleted the winner's live audio. With a per-attempt revision the cleanup can only ever
-    // delete this attempt's own blob. A regeneration additionally deletes the old key.
-    const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
-    const audioKey = audioBlobKey(currentEpisode, "wav", opts.revision());
-
-    let uploadTimeoutMs = Infinity;
-    if (maxInvocationDurationMs) {
-      const elapsed = performance.now() - invocationStartMonotonicMs;
-      const available = maxInvocationDurationMs - elapsed - flushMargin;
-      if (available <= 0) {
-        await metadata.yieldEpisodeClaim(
-          currentEpisode.userId,
-          currentEpisode.id,
-          opts.owner,
-          {
-            phase: "audio_synthesized",
-            advanceAttempts: false,
-          },
-        );
-        result.yielded.push({
-          episodeId: currentEpisode.id,
-          completedTurns: 1,
-          totalTurns: 1,
-        });
-        break;
-      }
-      uploadTimeoutMs = available;
-    }
-
-    const uploadController = Number.isFinite(uploadTimeoutMs) ? new AbortController() : undefined;
-    let uploadTimer: ReturnType<typeof setTimeout> | undefined;
-    if (uploadController && Number.isFinite(uploadTimeoutMs)) {
-      uploadTimer = setTimeout(() => {
-        uploadController.abort(
-          new InvocationBudgetAbortError(
-            1,
-            1,
-            `Upload timed out at invocation budget deadline (${Math.round(uploadTimeoutMs)}ms)`,
-          ),
-        );
-      }, uploadTimeoutMs);
-    }
-
-    let stored: { size?: number };
-    try {
-      const uploadPromise = blobs.put(audioKey, bytes, { contentType: "audio/wav" });
-      const timeoutPromise = uploadController
-        ? new Promise<never>((_, reject) => {
-          uploadController.signal.addEventListener("abort", () => {
-            reject(uploadController.signal.reason);
-          }, { once: true });
-        })
-        : null;
-
-      stored = timeoutPromise
-        ? await Promise.race([uploadPromise, timeoutPromise])
-        : await uploadPromise;
-    } catch (err) {
-      if (uploadController?.signal.aborted || isInvocationBudgetAbort(err)) {
-        // Clean up partial staging blob on budget abort
-        blobs.delete(audioKey).catch(() => {});
-        await metadata.yieldEpisodeClaim(
-          currentEpisode.userId,
-          currentEpisode.id,
-          opts.owner,
-          {
-            phase: "audio_synthesized",
-            advanceAttempts: false,
-          },
-        );
-        result.yielded.push({
-          episodeId: currentEpisode.id,
-          completedTurns: 1,
-          totalTurns: 1,
-        });
-        break;
-      }
-      // Real blob store error -> fail the episode
-      const error = String((err as Error)?.message ?? err);
-      console.error(
-        `[audio-feed] audio upload failed for episode "${currentEpisode.id}": ${error}`,
-      );
-      const wrote = await metadata.completeEpisode(
-        unsynthesized(currentEpisode, error),
-        opts.owner,
-      );
-      if (wrote) {
-        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
-        await notifyOnDemand(currentEpisode, "failed", error);
-      } else {
-        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
-      }
-      continue;
-    } finally {
-      if (uploadTimer !== undefined) clearTimeout(uploadTimer);
-    }
-
-    const byteLength = stored.size ?? bytes.length;
-    // Claim-conditional: if this worker's lease expired and another already
-    // finished the episode, writing here would overwrite the winner's audio
-    // with ours and leave no trace that it happened.
-    const wrote = await metadata.completeEpisode({
-      ...currentEpisode,
-      status: "ready",
-      audioKey,
-      // The enclosure is built from these, so they must describe the stored bytes.
-      byteLength,
-      contentType: "audio/wav",
-      durationSeconds: audio.durationSeconds,
-      // A regenerated episode keeps its pubDate, so clients do not re-surface it as new.
-      readyAt: previousKey && currentEpisode.readyAt
-        ? currentEpisode.readyAt
-        : new Date().toISOString(),
-      promptVersion: PROMPT_VERSION,
-      regenerating: undefined,
-      error: undefined,
-      phase: "ready",
-      lastHeartbeat: new Date().toISOString(),
-      scriptTurns: undefined,
-    }, opts.owner);
+    const { byteLength, wrote } = terminalOutcome.value;
+    const audioKey = stagingKey;
 
     if (wrote) {
       result.ready.push({ episodeId: currentEpisode.id, audioKey, byteLength });

@@ -14,7 +14,12 @@ import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts"
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import { runManagedTurns, SynthesisYieldError } from "../src/synthesis/limits.ts";
+import {
+  isInvocationBudgetAbort,
+  runManagedTurns,
+  SynthesisYieldError,
+  withInvocationBudget,
+} from "../src/synthesis/limits.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -1444,4 +1449,130 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
 
   const ep2 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
   assertEquals(ep2?.status, "ready");
+});
+
+Deno.test("withInvocationBudget: enforces preflight, deadline derivation, provenance, and typed outcomes across all stages", async () => {
+  const stages = ["script_generation", "dialogue_tts", "narration_tts", "upload_terminal_audio"];
+
+  for (const stageName of stages) {
+    // 1. Preflight refusal: available budget (100 - 0 - 20 = 80ms) < worstCaseEstimate (100ms)
+    const preflightOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 100, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 20,
+      worstCaseEstimateMs: 100,
+      fn: () => Promise.resolve("never called"),
+    });
+    assertEquals(preflightOutcome.kind, "budget-yield");
+    if (preflightOutcome.kind === "budget-yield") {
+      assert(isInvocationBudgetAbort(preflightOutcome.error));
+      assertStringIncludes(preflightOutcome.error.message, "preflight refused");
+      assertStringIncludes(preflightOutcome.error.message, stageName);
+    }
+
+    // 2. In-flight deadline enforcement: timeout derived from remaining budget (50 - 5 = 45ms)
+    const inFlightStart = performance.now();
+    const inFlightOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 50, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: async (_signal) => {
+        await new Promise((r) => setTimeout(r, 200));
+        return "too slow";
+      },
+    });
+    const inFlightElapsed = performance.now() - inFlightStart;
+    assert(
+      inFlightElapsed < 80,
+      `stage ${stageName} timeout must abort within budget (${inFlightElapsed}ms)`,
+    );
+    assertEquals(inFlightOutcome.kind, "budget-yield");
+    if (inFlightOutcome.kind === "budget-yield") {
+      assert(isInvocationBudgetAbort(inFlightOutcome.error));
+      assertStringIncludes(inFlightOutcome.error.message, "deadline");
+      assertStringIncludes(inFlightOutcome.error.message, stageName);
+    }
+
+    // 3. Normal fast completion: returns typed completed outcome
+    const normalOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 500, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: () => Promise.resolve(`done-${stageName}`),
+    });
+    assertEquals(normalOutcome.kind, "completed");
+    if (normalOutcome.kind === "completed") {
+      assertEquals(normalOutcome.value, `done-${stageName}`);
+    }
+
+    // 4. Genuine error: returns typed error outcome without misclassifying as budget yield
+    const errorOutcome = await withInvocationBudget({
+      name: stageName,
+      budget: { maxDurationMs: 500, startTimeMonotonicMs: performance.now() },
+      flushMarginMs: 5,
+      worstCaseEstimateMs: 10,
+      fn: () => Promise.reject(new Error(`provider_failure_in_${stageName}`)),
+    });
+    assertEquals(errorOutcome.kind, "error");
+    if (errorOutcome.kind === "error") {
+      assertStringIncludes(
+        String((errorOutcome.error as Error).message),
+        `provider_failure_in_${stageName}`,
+      );
+    }
+  }
+});
+
+Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation budget and yields cleanly", async () => {
+  const { ctx, stores } = await setupEnv();
+  const oldComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = async (...args) => {
+    await new Promise((r) => setTimeout(r, 140));
+    return oldComplete(...args);
+  };
+  const started = performance.now();
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-upload-commit",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - started;
+  assert(elapsed < 95, `invocation must abort within 80ms budget (elapsed ${elapsed}ms)`);
+  assertEquals(
+    result.ready.length,
+    0,
+    "must not return ready when terminal commit cannot complete in budget",
+  );
+  assertEquals(result.yielded.length, 1, "must cleanly yield claim");
+  const ep = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(ep?.status, "pending");
+});
+
+Deno.test("audio-feed-fsbk: timed-out upload cleanup cleans blob when put settles and records orphan", async () => {
+  const { ctx, stores } = await setupEnv();
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let startedKey = "";
+  stores.blobs.put = async (...args) => {
+    startedKey = args[0];
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+  const r = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-upload-race",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r.yielded.length, 1);
+  // Wait for background delayed put to finish (135ms) + hook execution
+  await new Promise((r) => setTimeout(r, 160));
+  const staleBlob = await stores.blobs.get(startedKey);
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(staleBlob, null, "timed-out put must be cleaned up on settlement without lingering");
+  assertEquals(episode?.status, "pending");
 });
