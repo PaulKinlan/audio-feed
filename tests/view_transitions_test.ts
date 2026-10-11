@@ -140,20 +140,56 @@ Deno.test({
       await cdp("Page.enable");
       await cdp("Runtime.enable");
 
+      // PRECONDITIONS, NOT DEADLINES (audio-feed-nmaq). This test used three fixed sleeps and read the
+      // result once; inside a full-suite gate it failed with `window.revealedTransition` === null, which can
+      // only mean page B's inline script had run while its `pagereveal` listener had NOT fired yet - the read
+      // raced the reveal, and under load the whole navigate -> response -> parse -> reveal cycle overran the
+      // 800ms of sleeps. Waiting for the transition IS the precondition; waiting 500ms only assumes it.
+      const valueOf = async (expression: string): Promise<unknown> => {
+        // deno-lint-ignore no-explicit-any
+        const r: any = await cdp("Runtime.evaluate", { expression, returnByValue: true });
+        return r.result?.result?.value;
+      };
+      const waitFor = async (
+        what: string,
+        expression: string,
+        ok: (v: unknown) => boolean,
+        budgetMs = 15_000,
+      ): Promise<unknown> => {
+        const deadline = Date.now() + budgetMs;
+        let last: unknown;
+        while (Date.now() < deadline) {
+          last = await valueOf(expression);
+          if (ok(last)) return last;
+          await sleep(50);
+        }
+        throw new Error(
+          `precondition never held within ${budgetMs}ms: ${what} (last value: ${
+            JSON.stringify(last)
+          })`,
+        );
+      };
+
       // 1. Emulate no-preference: link click must engage view transition
       await cdp("Emulation.setEmulatedMedia", {
         features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
       });
       await cdp("Page.navigate", { url: `http://localhost:${port}/a` });
-      await sleep(300);
+      await waitFor(
+        "page A has loaded and its link is present before the click",
+        `Boolean(document.getElementById("linkToB"))`,
+        (v) => v === true,
+      );
       await cdp("Runtime.evaluate", { expression: `document.getElementById("linkToB").click()` });
-      await sleep(500);
-      // deno-lint-ignore no-explicit-any
-      const resNoPref: any = await cdp("Runtime.evaluate", {
-        expression: `window.revealedTransition`,
-      });
+      // Wait for the REVEAL to have decided, not for a duration. `undefined` means the read landed on page A
+      // (the navigation has not committed yet), `null` means page B's script ran but `pagereveal` has not.
+      const engaged = await waitFor(
+        "the reveal to report whether a view transition was engaged",
+        `window.revealedTransition`,
+        (v) => v !== null && v !== undefined,
+      );
       assertEquals(
-        resNoPref.result.result.value,
+        engaged,
         true,
         "view transition must be engaged under no-preference motion",
       );
@@ -163,15 +199,19 @@ Deno.test({
         features: [{ name: "prefers-reduced-motion", value: "reduce" }],
       });
       await cdp("Page.navigate", { url: `http://localhost:${port}/a` });
-      await sleep(300);
+      await waitFor(
+        "page A has loaded and its link is present before the click (reduce case)",
+        `Boolean(document.getElementById("linkToB"))`,
+        (v) => v === true,
+      );
       await cdp("Runtime.evaluate", { expression: `document.getElementById("linkToB").click()` });
-      await sleep(500);
-      // deno-lint-ignore no-explicit-any
-      const resReduce: any = await cdp("Runtime.evaluate", {
-        expression: `window.revealedTransition`,
-      });
+      const suppressed = await waitFor(
+        "the reveal to report whether a view transition was engaged (reduce case)",
+        `window.revealedTransition`,
+        (v) => v !== null && v !== undefined,
+      );
       assertEquals(
-        resReduce.result.result.value,
+        suppressed,
         false,
         "view transition must NOT be engaged under reduced motion",
       );
