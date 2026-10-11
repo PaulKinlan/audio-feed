@@ -24,6 +24,47 @@ The key is compared in constant time, is never logged, never echoed in a respons
 that a guarantee rather than a habit. Authentication is checked before parameter parsing, so an
 unauthenticated caller learns nothing about the query language.
 
+## Reachability: these two paths are NOT behind the host gate (`audio-feed-2tbv`)
+
+**A log reader must not sit behind the switch whose position you are trying to diagnose.** During the
+live 421 incident (`audio-feed-du8w`) the deployment refused every request because its allowed-host
+set was empty, and the question "how do I read the error logs for the live deployment?" could not be
+answered by this API: the host gate refuses *before any route runs*, so `/api/observability/errors`
+answered 421 on the very host that was being diagnosed. The tool for reading the incident was itself
+refused by the incident.
+
+So these two endpoints — and only these two — are served even when the host gate is refusing:
+
+| deployment state                                        | `/` , `/listen`, `/admin` | `/api/observability/errors` |
+| ------------------------------------------------------- | ------------------------- | --------------------------- |
+| host not in the allowed set                             | `421 misdirected_request` | served, if the key is right |
+| allowed set empty (no `PUBLIC_BASE_URL`/`ALLOWED_HOSTS`) | `500 server_misconfigured` | served, if the key is right |
+
+Both refusal bodies also name this endpoint, so an operator who meets a refusal is told where the
+errors are instead of having to already know.
+
+Why this is not a hole, in the terms of the gate's own threat model:
+
+- **It is still authenticated.** Exemption from the *host* check is not exemption from
+  authentication: the shared key remains the only requirement, and it is still required. An exempt
+  path without the key is `401`; with no key configured it is `503 observability_not_configured`,
+  which names the variable to set — including on a refused host, so the operator is never left
+  reading a generic failure.
+- **It derives and emits nothing from the request.** The host gate exists so an attacker-chosen
+  `Host` never becomes the advertised origin, feed `selfUrl`/enclosure URLs, a redirect or the
+  WebAuthn RP ID (`audio-feed-fp4r`/`7lsy`/`4x4t`). These routes answer JSON built from the log
+  store: no redirect, no URL, no `Access-Control-Allow-Origin`. The one place a request host reaches
+  a response header is the CSP `report-uri`, and that branch is HTML-only. A test asserts the
+  attacker's host appears in neither the body nor any response header.
+- **It cannot be widened by accident.** Matching is exact against the same normalised pathname the
+  router dispatches on, so `/api/observability/errors/extra`, a percent-encoded lookalike or a
+  doubled slash is refused by the gate, and a test asserts every exempt path is a route the router
+  actually declares.
+- **The rest stays gated, deliberately.** The homepage, feeds, listen pages, `/admin` and the admin
+  observability *page* are all still behind the gate. Only the two JSON endpoints an operator can
+  poll without a browser session are exempt, and the test suite fails if a product route is added to
+  the list or the match is loosened.
+
 ## Cursor semantics
 
 **A cursor is a sequence number, not a time.** It is the `seq` of the last event the caller has

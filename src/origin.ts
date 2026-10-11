@@ -199,6 +199,52 @@ export function requestHostAllowed(config: OriginConfig, request: Request): bool
 }
 
 /**
+ * The read paths that are deliberately NOT behind the host gate (audio-feed-2tbv).
+ *
+ * THE LOG READER MUST NOT SIT BEHIND THE SWITCH WHOSE POSITION YOU ARE TRYING TO DIAGNOSE. During the
+ * live 421 incident (audio-feed-du8w) the operator asked how to read the deployment's errors, and the
+ * answer we gave - our own observability API - was answering 421 on the very host they were worried
+ * about, because the gate refuses before any route runs. The tool for reading the incident was itself
+ * refused by the incident. The same is true of any future case where the app is down, misrouted or
+ * refusing: "why is this deployment refusing?" must be answerable by talking to the deployment.
+ *
+ * WHY THIS IS NOT A HOLE, and the four properties that make it one to keep:
+ *
+ *  1. It is AUTH-GATED, and the gate is unchanged: both paths require the shared key in
+ *     `AUDIOFEED_OBSERVABILITY_KEY` (constant-time compare, 401 without it, 503 naming the variable
+ *     when it is unset). Exemption from the HOST check is not exemption from authentication, and the
+ *     shared key - not the caller's Host - remains the only requirement.
+ *  2. It CANNOT DERIVE OR EMIT AN ORIGIN FROM THE REQUEST. Both routes answer JSON built from the log
+ *     store: no redirect, no `selfUrl`, no feed or enclosure URL, no `access-control-allow-origin`.
+ *     The one place a request host reaches a response header is the CSP `report-uri` in
+ *     `applySecurityHeaders`, and that branch is HTML-only - JSON takes the branch that sets no
+ *     request-derived header at all. `tests/host_gate_observability_test.ts` pins both halves: the
+ *     attacker's host appears in neither the body nor ANY response header.
+ *  3. It cannot be widened by accident. Matching is EXACT against the same normalised pathname the
+ *     router dispatches on (`new URL(req.url).pathname`), so `/api/observability/errors/x`, a
+ *     percent-encoded lookalike, or a doubled slash is refused by the gate and never reaches a route.
+ *     Product routes are untouched, and a test asserts every exempt path is a route the router
+ *     actually declares, so renaming one cannot silently lose the exemption.
+ *  4. What stays behind the gate is deliberate: the homepage, feeds, listen pages, /admin and the
+ *     admin observability PAGE all remain gated. Only the two JSON read endpoints the operator can
+ *     poll without a browser session are exempt.
+ *
+ * NOT to be confused with `OBSERVABILITY_ROUTES` in src/log.ts, which excludes these same paths from
+ * being recorded as events so the API does not feed itself. They are separate lists on purpose:
+ * adding a path to the logging exclusion says "do not record this", adding one here says "serve this
+ * even when the Host is refused", and neither should ever imply the other.
+ */
+export const HOST_GATE_EXEMPT_PATHS: readonly string[] = [
+  "/api/observability/errors",
+  "/api/observability/summary",
+];
+
+/** Whether the host gate applies to this pathname. Exact match, on the router's normalised path. */
+export function isHostGateExempt(pathname: string): boolean {
+  return HOST_GATE_EXEMPT_PATHS.includes(pathname);
+}
+
+/**
  * WHY the host gate is refusing this request, or `null` when it is allowed.
  *
  * Two refusals that used to be one response, and must never be confused
