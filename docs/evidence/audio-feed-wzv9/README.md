@@ -95,3 +95,54 @@ bounds what the store holds and what a reader has to parse, so it has to be meas
 the store holds: `serialisedLogBytes()` now encodes with a shared `TextEncoder` and measures real
 bytes. The conformance case reproduces the arithmetic of the mismatch first (bytes over the ceiling
 while UTF-16 length is under it) and then asserts the refusal, on both adapters.
+
+## Review round 2: the path is no longer sanitised at all
+
+### audio-feed-pwu4 (P1, still leaking) — and why the second attempt failed
+
+The fail-closed sanitiser above still leaked: an uppercase prefix (`/AUDIO/abc`) kept the prefix
+from being recognised as a capability position, and then a SHORT lower-case segment passed for a
+route word. Both attempts shared one mistake — deciding, per segment, whether it was a secret — and
+every version of that decision is a policy for the shapes someone thought of, with the arriving
+shape chosen by the attacker.
+
+So the path is not sanitised any more. It is not recorded at all. The recorded value is the PATTERN
+the router matched, which is a constant from the route table (`/feed/:token/master.xml`), or
+`<unmatched>` for a request that matches nothing. A capability cannot reach a record because no
+user-controlled byte is stored, which is a guarantee about the code rather than a property of a
+heuristic. `redactRoutePath` and `isHighVolumeAssetPath` are gone; the high-volume exclusion is now
+`isHighVolumeRoute(pattern)`, and a route missing from that list costs one extra record rather than
+losing its diagnostics.
+
+### The bug I introduced while fixing it, and the assertion that caught it
+
+The first version of this fix recorded the pattern on the Request in a WeakMap as the router
+dispatched. It looked right and it was silently useless: the app REBUILDS the Request during
+canonical-host handling, so for every request that took that path the lookup missed and every route
+recorded as `<unmatched>`.
+
+What caught it was asserting the EXPECTED pattern per case rather than only "nothing leaked" — a
+lookup returning the marker for everything passes a no-leak assertion while making the field
+worthless. The fix is a pure lookup into the same route table the dispatcher uses
+(`Router.routePatternFor`), which has no request-identity assumption to violate. The lesson is the
+one from the review itself: assert the behaviour you want, not the absence of the thing you fear.
+
+### audio-feed-t2x3 (P2) — concurrent appends dropped records
+
+Twelve parallel appends landed five and returned `null` for seven: losing the sequence
+compare-and-swap was reported as a failure instead of being retried, and an error log that drops
+events under load loses exactly the events of an incident.
+
+Appends are now serialised per process (chained promises, so a failed append cannot poison the ones
+behind it) and retried with jittered backoff, which covers the contention other isolates cause. A
+final failure still resolves `null` — callers are lifecycle paths and none may fail because a log
+line could not be stored — but it reports itself on stderr rather than disappearing. Two conformance
+cases assert it for both adapters: twelve concurrent appends all land with `null` count zero and
+contiguous seqs, and a burst of differently sized appends loses nothing.
+
+### Also learned: URLPattern normalises percent-encodings
+
+`/feed/%6B…/master.xml` matches `/feed/:token/master.xml`, so an encoded token reaches the same
+registered pattern. Recorded because the first version of the evidence script expected the marker
+there and called the mismatch a leak — the script now labels a leak and a stale expectation
+differently, since conflating them is how a real leak gets ignored.

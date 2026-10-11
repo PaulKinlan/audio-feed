@@ -27,6 +27,7 @@ import { registerRepositoriesCases } from "./metadata/repositories.ts";
 import {
   registerLifecycleLogCases,
   registerLogCeilingCases,
+  registerLogConcurrencyCases,
   registerLogsCases,
 } from "./metadata/logs.ts";
 
@@ -48,4 +49,5 @@ export function runMetadataConformance(options: MetadataSuiteOptions) {
   registerLogsCases(suite);
   registerLifecycleLogCases(suite);
   registerLogCeilingCases(suite);
+  registerLogConcurrencyCases(suite);
 }

@@ -349,3 +349,47 @@ export function registerLogCeilingCases(suite: MetadataHarness) {
     assert(stored.message.includes("\u4e2d"), "multi-byte content survives storage");
   });
 }
+
+/**
+ * Concurrent appends (audio-feed-t2x3).
+ *
+ * The finding: twelve parallel appends landed five records and silently returned null for seven,
+ * because losing the compare-and-swap was reported as a failure instead of being retried. A log
+ * store that drops events under load is worse than none — the events it drops are exactly the ones
+ * arriving during an incident.
+ */
+export function registerLogConcurrencyCases(suite: MetadataHarness) {
+  const { test } = suite;
+
+  test("concurrent appends all land, with no nulls, no drops and no gaps", async (store) => {
+    const results = await Promise.all(
+      Array.from(
+        { length: 12 },
+        (_, i) => store.appendLog(rec({ message: `concurrent ${i}`, context: { i } })),
+      ),
+    );
+
+    assertEquals(results.filter((r) => r === null).length, 0, "no append may be dropped");
+    const seqs = results.map((r) => r!.seq).sort((a, b) => a - b);
+    assertEquals(seqs, Array.from({ length: 12 }, (_, i) => i + 1), "contiguous, no duplicates");
+
+    // The store agrees with what the callers were told, which is the property that makes the
+    // cursor safe to hand out.
+    const all = await store.listLogs();
+    assertEquals(all.length, 12);
+    assertEquals(all.map((r) => r.seq), seqs);
+    assertEquals((await store.logBounds()).newestSeq, 12);
+  });
+
+  test("a burst of appends with mixed sizes still lands every record", async (store) => {
+    // Near-simultaneous writes of different sizes: the sanitiser and the ceiling run inside the
+    // same serialised path, so a refusal here would be a dropped event too.
+    const inputs = Array.from(
+      { length: 8 },
+      (_, i) => rec({ message: `burst ${i} ${"x".repeat(i * 100)}` }),
+    );
+    const results = await Promise.all(inputs.map((input) => store.appendLog(input)));
+    assertEquals(results.filter((r) => r === null).length, 0);
+    assertEquals((await store.listLogs()).length, 8);
+  });
+}

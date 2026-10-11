@@ -41,39 +41,75 @@ const SEQ_KEY: Deno.KvKey = ["log_seq"];
  */
 const WATERMARK_KEY: Deno.KvKey = ["log_watermark"];
 
-/** How many times to re-read the counter when another writer commits first. */
-const APPEND_ATTEMPTS = 5;
+/**
+ * How many times to re-read the counter when another writer commits first.
+ *
+ * Generous with a short delay between tries: the appends that contend are usually the same
+ * process's requests arriving together, and a dropped log line is a lost event, which is the one
+ * thing a store like this must not do (audio-feed-t2x3 — twelve concurrent appends landed five and
+ * silently dropped seven).
+ */
+const APPEND_ATTEMPTS = 12;
+
+/** Bounded backoff between attempts, with jitter so two writers do not retry in lockstep. */
+function backoffMs(attempt: number): number {
+  const base = Math.min(2 ** attempt, 64);
+  return base + Math.floor(Math.random() * base);
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function createLogsRepository(core: KvCore, _host: () => MetadataStore): LogRepository {
+  /**
+   * One append at a time per process (audio-feed-t2x3).
+   *
+   * The compare-and-swap below already makes concurrent appends CORRECT — no two records share a
+   * seq — but correctness is not enough here: an append that loses the race and gives up has
+   * dropped an event. Serialising this process's appends removes the contention it causes at the
+   * source, and the backoff inside `writeOnce` covers the contention other isolates cause.
+   *
+   * Chained promises rather than a queue: a failed append must not poison the ones behind it, so
+   * the chain continues from a settled (never rejected) promise.
+   */
+  let tail: Promise<unknown> = Promise.resolve();
+
+  const writeOnce = async (input: Omit<LogRecord, "seq">): Promise<LogRecord | null> => {
+    // Bounded before it is stored, in the one place every append goes through.
+    const safe = sanitizeLogRecord(input);
+    if (!logRecordFits(safe)) return refuseLogRecord("record exceeds the store's ceiling", safe);
+    for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt++) {
+      const entry = await core.kv.get<number>(SEQ_KEY);
+      const newest = typeof entry.value === "number" ? entry.value : 0;
+      const seq = newest + 1;
+      const record: LogRecord = { ...safe, seq };
+      const res = await core.kv.atomic()
+        // The check is the point: if another writer numbered a record after we read, this
+        // commit fails and we try again with a fresh number, so no two records share a seq.
+        .check(entry)
+        .set(SEQ_KEY, seq)
+        .set(["log", seq], record)
+        .commit();
+      if (res.ok) return record;
+      await delay(backoffMs(attempt));
+    }
+    return refuseLogRecord("sequence counter did not settle", safe);
+  };
+
   return {
     /**
      * Append one record, numbering it.
      *
-     * Resolves to `null` when the write could not be made — after every retry — rather than
-     * throwing. Callers are lifecycle paths: a claim, an abandonment, a finished synthesis. A
-     * request or a job must not fail because its log line could not be written; the caller
-     * decides what a missing record means, and `docs/evidence/audio-feed-wzv9` records that
-     * decision. Never silently: the fallback is one plain line on stderr.
+     * Serialised per process, retried with backoff on contention, and bounded/redacted on the way
+     * in. Resolves to `null` only when there is genuinely nothing more to try, and says so on
+     * stderr when that happens: callers are lifecycle paths and none of them may fail because a
+     * log line could not be stored, but a lost event must never be silent either.
      */
-    async appendLog(input: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
-      // Bounded before it is stored, in the one place every append goes through.
-      const safe = sanitizeLogRecord(input);
-      if (!logRecordFits(safe)) return refuseLogRecord("record exceeds the store's ceiling", safe);
-      for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt++) {
-        const entry = await core.kv.get<number>(SEQ_KEY);
-        const newest = typeof entry.value === "number" ? entry.value : 0;
-        const seq = newest + 1;
-        const record: LogRecord = { ...safe, seq };
-        const res = await core.kv.atomic()
-          // The check is the point: if another writer numbered a record after we read, this
-          // commit fails and we try again with a fresh number, so no two records share a seq.
-          .check(entry)
-          .set(SEQ_KEY, seq)
-          .set(["log", seq], record)
-          .commit();
-        if (res.ok) return record;
-      }
-      return refuseLogRecord("sequence counter did not settle", safe);
+    appendLog(input: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
+      const run = () => writeOnce(input);
+      // Both handlers run the append: a previous failure must not cancel this one.
+      const result = tail.then(run, run);
+      tail = result.then(() => undefined, () => undefined);
+      return result;
     },
 
     /**

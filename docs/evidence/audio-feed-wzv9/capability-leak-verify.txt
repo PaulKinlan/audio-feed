@@ -3,17 +3,29 @@
 [audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — the advertised origin and WebAuthn RP ID are derived from each request's host. Set ALLOWED_HOSTS to pin them.
 [audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
 [audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
-Listening on http://0.0.0.0:36135/ (http://localhost:36135/)
-safe  404 route=/feed/:token/master.xml/:redacted  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
-safe  404 route=/feed/:token  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
-safe  404 route=/listen/:token  /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
-safe  404 route=/listen/:token/:redacted  /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/extra
+Listening on http://0.0.0.0:33231/ (http://localhost:33231/)
+safe  404 route=/feed/:token/master.xml      /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml
+safe  404 route=/listen/:token               /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
 [audio-feed] audio 404: disallowed or unsafe key "[redacted]"
-safe  404 route=/audio/:key/:redacted/:redacted  /audio/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/foo/bar
-safe  404 route=/feed/:token/master.xml  /feed//kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd//master.xml
-safe  404 route=/feed/:token/master.xml  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml
-safe  404 route=/feed/:token/:redacted  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd%2Fmore
-safe  404 route=/:redacted/anything  /kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/anything
-safe  404 route=/feed/:token/master.xml  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml?token=kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=/audio/:key+                 /audio/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/x/y
+safe  303 route=/account                     /account
+safe  200 route=/                            /
+safe  404 route=<unmatched>                  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=<unmatched>                  /listen/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/extra
+[audio-feed] audio 404: disallowed or unsafe key "[redacted]"
+safe  404 route=/audio/:key+                 /audio/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/foo/bar
+safe  404 route=<unmatched>                  /feed//kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd//master.xml
+safe  404 route=<unmatched>                  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=<unmatched>                  /AUDIO/abc
+safe  404 route=<unmatched>                  /Listen/abc/master.xml
+safe  404 route=<unmatched>                  /Feed/abc/master.xml/abc
+safe  404 route=<unmatched>                  /abc
+safe  404 route=<unmatched>                  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd%2Fmore
+safe  404 route=/feed/:token/master.xml      /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml
+safe  404 route=<unmatched>                  /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd%252Fmore
+safe  404 route=/feed/:token/master.xml      /feed/kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/master.xml?token=kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  303 route=/account                     /account?token=kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd
+safe  404 route=<unmatched>                  /no/such/route
+safe  404 route=<unmatched>                  /kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd/anything
 
-No stored record contains the capability, in any shape.
+Every recorded route is a registered pattern or the unmatched marker, and no stored record contains the capability in any shape.

@@ -5,6 +5,7 @@
  * Owned by: audio-feed-0h8.
  */
 
+import { UNMATCHED_ROUTE } from "./request_route.ts";
 import { HttpError, methodNotAllowed, notFound, problem } from "./http.ts";
 
 export type Params = Record<string, string | undefined>;
@@ -207,6 +208,24 @@ export class Router<Ctx> {
   /** Registered routes, for diagnostics and the route-collision test. */
   list(): ReadonlyArray<{ method: Method; pathname: string }> {
     return this.#routes.map(({ method, pathname }) => ({ method, pathname }));
+  }
+
+  /**
+   * The registered pattern a URL matches, or the unmatched marker (audio-feed-wzv9).
+   *
+   * A PURE LOOKUP, deliberately, rather than something recorded on the Request as it is dispatched:
+   * the app rebuilds a Request during canonical-host handling, so anything keyed by request identity
+   * silently degrades to "unmatched" for exactly those requests — a log field that quietly becomes
+   * useless. Looking the URL up in the route table has no such failure mode, and it is the same
+   * table the dispatch above uses.
+   *
+   * The recorded value is therefore always a constant: a pattern from this table, or the marker.
+   */
+  routePatternFor(url: URL): string {
+    for (const route of this.#routes) {
+      if (route.pattern.exec({ pathname: url.pathname })) return route.pathname;
+    }
+    return UNMATCHED_ROUTE;
   }
 
   async handle(

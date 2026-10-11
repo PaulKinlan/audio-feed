@@ -21,7 +21,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
-import { createLogger, isHighVolumeAssetPath, redactRoutePath } from "./log.ts";
+import { createLogger, isHighVolumeRoute } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -150,6 +150,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // The correlation id is minted per request and echoed in a response header, so an operator
   // holding a failing request can find every record about it.
   const appFetch = app.fetch;
+  // The route table the app dispatches with, so the request record can name a pattern instead of a
+  // path. Looked up per request rather than carried on the Request: the app rebuilds requests
+  // during canonical-host handling (audio-feed-wzv9, audio-feed-pwu4).
+  const router = app.router;
   const appLog = createLogger({ sink: stores.metadata, process: "app" });
   const serverFetch = async (
     req: Request,
@@ -157,16 +161,17 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   ): Promise<Response> => {
     const correlationId = crypto.randomUUID();
     const started = performance.now();
-    // Redacted before it becomes a field: a path can carry a capability with no name attached.
-    const path = new URL(req.url).pathname;
-    const route = redactRoutePath(path);
+    // The ROUTE PATTERN the URL matches, never the path: a constant from the route table, so no
+    // user-controlled byte can reach a record (audio-feed-wzv9, audio-feed-pwu4). A request that
+    // matches nothing records a fixed marker rather than any raw path content.
+    const route = router.routePatternFor(new URL(req.url));
     const durationMs = () => Math.round(performance.now() - started);
     try {
       const res = await appFetch(req, info);
       // A successful asset or enclosure fetch is deliberately not recorded — see
       // isHighVolumeAssetPath — because podcast clients hammer it and each line would cost a
       // write for nothing. Its failures still are.
-      const worthRecording = res.status >= 400 || !isHighVolumeAssetPath(path);
+      const worthRecording = res.status >= 400 || !isHighVolumeRoute(route);
       if (worthRecording) {
         const fields = {
           correlationId,
