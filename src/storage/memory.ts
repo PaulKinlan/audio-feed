@@ -81,14 +81,16 @@ export class MemoryBlobStore implements BlobStore {
     body: Uint8Array | ReadableStream<Uint8Array>,
     opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo | null> {
+    // Abort wins over the exists-check (review P3): an already-aborted caller
+    // should observe the rejection rather than a null "already exists".
+    if (opts?.signal?.aborted) {
+      throw opts.signal.reason ?? new Error("MemoryBlobStore.putIfAbsent aborted");
+    }
     if (this.#objects.has(key)) {
       return null;
     }
     const bytes = body instanceof Uint8Array ? body : await collect(body);
     const contentType = opts?.contentType ?? "application/octet-stream";
-    if (opts?.signal?.aborted) {
-      throw opts.signal.reason ?? new Error("MemoryBlobStore.putIfAbsent aborted");
-    }
     if (this.#objects.has(key)) {
       return null;
     }

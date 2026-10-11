@@ -1606,7 +1606,6 @@ export async function runSynthesisBatch(
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
     const inFlightStagingKey = stagingKey;
-    inFlightUploadKeys.add(inFlightStagingKey);
 
     // audio-feed-i7vi: the synthesis phase ends where the terminal persistence block begins; the
     // blob upload and the commit that follow are the write phase, measured from here.
@@ -1654,6 +1653,11 @@ export async function runSynthesisBatch(
       }
       continue;
     }
+
+    // Only mark the key in-flight on paths that actually attempt the upload: the
+    // never-fits gate above continues without starting a put, and a phantom entry
+    // would make the orphan sweep skip a key nothing will ever settle (review P3).
+    inFlightUploadKeys.add(inFlightStagingKey);
 
     const terminalEstimate = sizeScaledUploadEstimate + 10; // Upload + terminal commit + usage accounting (audio-feed-uecw)
     // audio-feed-aqms: timer heartbeat while the terminal stage is awaited. The phase
