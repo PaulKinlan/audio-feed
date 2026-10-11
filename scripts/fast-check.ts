@@ -19,8 +19,18 @@
  *     and saved nothing. Cut + name-matched, the same change selects ~10.
  *   - a changed HUB or cross-cutting file (app/compose/router/http/config/
  *     server/origin) runs the FULL suite — every test exercises it;
+ *   - a non-TypeScript file outside src/ and tests/ (a docs/evidence PNG, a shell runner) selects the
+ *     suites the DATA_LEDGER in scripts/test-selection.ts declares observe it; an undeclared one runs
+ *     the FULL suite and names itself (audio-feed-es8y: "not a .ts file" used to mean "no test can
+ *     care", which gave a fast PASS on a tree where the full gate failed);
  *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
  *     the FULL suite. Safe beats fast.
+ *
+ * The selection is a PROVEN SUBSET of the full gate's (audio-feed-es8y): the test-file list is derived
+ * from scripts/test-selection.ts, which discovers what `deno test` (no file arguments, the tail of
+ * `deno task gate`) actually runs, and every run opens with an audit that fails BY NAME when a module the
+ * full gate runs can never be selected here. `deno task gate` runs the same audit as its first step, so
+ * the drift cannot survive in either direction.
  *
  * This tier is an ITERATION aid for implementer lanes: the merger still runs
  * the full `deno task gate` on the merged union before anything lands, so a
@@ -34,6 +44,15 @@
  * ~/.fleet/check.conf on the fleet VM (VM-local; the durable copy is this
  * script plus the AGENTS.md note).
  */
+
+import {
+  auditDataLedger,
+  auditSelection,
+  classifyNonTsChanges,
+  DATA_LEDGER,
+  discoverFullGateTestFiles,
+  isFastGateSelectable,
+} from "./test-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
 // (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
@@ -271,15 +290,18 @@ export function suiteMarker(kind: "passed" | "ran", files: string[]): string {
   return `fast-gate: ${kind}: ${files.join(" ")}`;
 }
 
-/** Every test file, in the rel paths the reporter expects (tests/...). */
+/**
+ * Every test file the fast gate can run, in the rel paths the reporter expects (tests/...).
+ *
+ * DERIVED from the full gate's universe (audio-feed-es8y) by filtering it, rather than walked
+ * independently: two definitions of the same set is how a suite comes to exist that only one gate ever
+ * runs. `deno test` with no file arguments (what `deno task gate` ends in) discovers test modules by
+ * basename pattern anywhere in the tree, which is a strictly larger rule than this narrowing - so the
+ * narrowing is legal only because auditSelection() proves nothing falls outside it, and the gate refuses
+ * to start otherwise.
+ */
 export async function allTestFiles(): Promise<string[]> {
-  const testsDir = `${ROOT}tests`;
-  const out: string[] = [];
-  for await (const f of tsFiles(testsDir)) {
-    const rel = f.slice(testsDir.length - "tests".length); // tests/...
-    if (rel.endsWith("_test.ts")) out.push(rel);
-  }
-  return out.sort();
+  return (await discoverFullGateTestFiles(ROOT)).filter(isFastGateSelectable);
 }
 
 function normaliseTestPath(filePath: string): string {
@@ -465,6 +487,22 @@ export function planTests(
     };
   }
 
+  // Non-TypeScript OUTSIDE src/ and tests/ (docs, evidence, tooling, generated exports) is the case that
+  // produced a fast-gate PASS with a full-gate FAIL on the same tree (audio-feed-es8y): a 200KB
+  // docs/evidence/*.png selected ZERO suites while tests/evidence_size_test.ts asserted its byte budget.
+  // The DATA_LEDGER in scripts/test-selection.ts says which suites observe each declared kind of file, or
+  // that nothing does; anything undeclared is a full-suite fallback that NAMES itself rather than silence.
+  const data = classifyNonTsChanges(changed, DATA_LEDGER);
+  if (data.unclassified.length) {
+    return {
+      testFiles: null,
+      reason:
+        `non-TypeScript file(s) that are neither documentation nor declared in scripts/test-selection.ts DATA_LEDGER: ${
+          data.unclassified.join(", ")
+        }`,
+    };
+  }
+
   const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
   if (coreChanged.length) {
     return { testFiles: null, reason: `cross-cutting file(s) changed: ${coreChanged.join(", ")}` };
@@ -477,22 +515,65 @@ export function planTests(
     return { testFiles: null, reason: `shared test helper(s) changed: ${helpers.join(", ")}` };
   }
 
-  if (!codeChanged.length) return { testFiles: [], reason: "no testable change" };
+  if (!codeChanged.length) {
+    if (!data.suites.length) return { testFiles: [], reason: "no testable change" };
+    return {
+      testFiles: data.suites,
+      reason: `data file(s) observed by: ${data.suites.join(", ")}`,
+    };
+  }
 
   const { tests, uncovered } = reachableTests(reverse, codeChanged);
   for (const list of named.values()) for (const f of list) tests.add(f);
+  // A data change (a screenshot, a document the app serves) rides alongside the code change.
+  for (const suite of data.suites) tests.add(suite);
+
+  // Property 1 in the narrow case (audio-feed-es8y): a selected module that is NOT in the full gate's
+  // universe would make the fast gate run something the full gate never runs - `tests/foo-test.ts` is the
+  // name-matching convention but not a Deno discovery pattern, so selecting it would be the mirror image of
+  // the gap this bead is about. Unknown coverage runs everything.
+  const outsideUniverse = [...tests].filter((f) => !isFastGateSelectable(f));
+  if (outsideUniverse.length) {
+    return {
+      testFiles: null,
+      reason: `test module(s) outside the fast gate's selectable universe: ${
+        outsideUniverse.join(", ")
+      }`,
+    };
+  }
   // A file with name-matched tests is covered even when the graph cannot
   // see it (the route tests boot the app through the hub).
   const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
   }
-  return { testFiles: [...tests].sort(), reason: `affected by: ${codeChanged.join(", ")}` };
+  const dataNote = data.suites.length ? ` + data: ${data.suites.join(", ")}` : "";
+  return {
+    testFiles: [...tests].sort(),
+    reason: `affected by: ${codeChanged.join(", ")}${dataNote}`,
+  };
 }
 
 if (import.meta.main) {
   const forceAll = Deno.args.includes("--all");
   const started = performance.now();
+
+  // audio-feed-es8y property 2, checked BEFORE anything else so a selection gap is a NAMED failure at the
+  // start of the run rather than a suite that quietly never runs again. The full gate runs this audit too
+  // (first step of `deno task gate`), so drift cannot survive in either direction.
+  const fullGateTestFiles = await discoverFullGateTestFiles(ROOT);
+  const selectionAudit = auditSelection(fullGateTestFiles);
+  if (!selectionAudit.ok) {
+    console.error(selectionAudit.message);
+    Deno.exit(1);
+  }
+  const ledgerProblems = await auditDataLedger(ROOT, DATA_LEDGER, fullGateTestFiles);
+  if (ledgerProblems.length) {
+    console.error(
+      `fast-gate: DATA_LEDGER problem(s) (audio-feed-es8y):\n  ${ledgerProblems.join("\n  ")}`,
+    );
+    Deno.exit(1);
+  }
 
   // The cheap whole-repo steps always run: together ~10s, and a type error in
   // an UNTOUCHED importer of a changed file is exactly what skipping them

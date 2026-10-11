@@ -37,6 +37,21 @@ helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file 
 changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff itself
 fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
 
+Two things about that selection are CHECKED rather than assumed (audio-feed-es8y). First, the fast
+gate's selection is a proven SUBSET of the full gate's: both derive from
+`scripts/test-selection.ts`, which discovers what `deno test` with no arguments would run, and
+`deno task gate` runs that audit as its FIRST step, so a suite the fast gate could never select (a
+`tests/x.test.ts`, a `src/x_test.ts`) is a NAMED gate failure that says what to do rather than a
+suite that quietly never runs on a lane. A module genuinely run elsewhere belongs in
+`FAST_GATE_EXCLUSIONS` with the reason. Second, a non-TypeScript change OUTSIDE `src/` and `tests/`
+is no longer assumed unobservable: markdown is documentation, and everything else must be declared
+in the `DATA_LEDGER` of that same file — naming the suites that read it (a screenshot under
+`docs/evidence/` selects `tests/evidence_size_test.ts`, which asserts the PNG budgets; the
+observability agent runner script selects the suite that executes it) or declaring `readBy: []` with
+the reason that nothing does. An undeclared file runs the FULL suite and names itself, because the
+old rule ("not a .ts file, so no test can care") gave a fast-gate PASS on a tree where the full gate
+failed.
+
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.
 
