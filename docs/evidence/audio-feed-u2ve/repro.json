@@ -1,0 +1,66 @@
+{
+  "bead": "audio-feed-u2ve",
+  "trustProxyHeaders": true,
+  "bound": {
+    "maxRequests": 5,
+    "windowMs": 60000
+  },
+  "attempts": 20,
+  "rotatingForgedPrefix": {
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429
+    ],
+    "tooManyRequests": 15,
+    "allowedThrough": 5,
+    "evaded": false
+  },
+  "singleHonestClient": {
+    "tooManyRequests": 15,
+    "allowedThrough": 5,
+    "first429AtAttempt": 6
+  },
+  "twoDistinctTrustedValues": {
+    "first": [
+      {
+        "client": "198.51.100.1",
+        "status": 200
+      },
+      {
+        "client": "198.51.100.1",
+        "status": 200
+      },
+      {
+        "client": "198.51.100.1",
+        "status": 200
+      },
+      {
+        "client": "198.51.100.1",
+        "status": 200
+      },
+      {
+        "client": "198.51.100.1",
+        "status": 200
+      }
+    ],
+    "secondClientStatus": 200
+  }
+}

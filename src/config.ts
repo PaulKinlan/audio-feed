@@ -56,6 +56,12 @@ export interface AppConfig {
    * Off unless an operator opts in, because those headers are hop-by-hop: any
    * client can set them, and only the operator knows whether a proxy in front
    * overwrites client-supplied values.
+   *
+   * For the rate limiter's client address (audio-feed-u2ve) the requirement is narrower and is
+   * enforced in `extractClientIp`: it keys on the LAST `x-forwarded-for` entry, the one the nearest
+   * hop appended, so a caller cannot choose or rotate their bucket by prepending a forged address.
+   * Enable this only where a proxy appends to that header; with no proxy in front it is whatever the
+   * caller typed, which is why it is an operator assertion rather than a default.
    */
   trustProxyHeaders?: boolean;
   /**

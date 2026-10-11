@@ -162,9 +162,30 @@ export class SlidingWindowRateLimiter {
 /**
  * Extract client IP from request.
  *
- * Uses the platform remote address as the primary key by default.
- * When `trustProxy` (TRUST_PROXY_HEADERS) is enabled, honours cf-connecting-ip
- * and x-forwarded-for from an upstream reverse proxy.
+ * Uses the platform remote address as the primary key by default. When `trustProxy`
+ * (TRUST_PROXY_HEADERS) is enabled, honours the address a trusted hop APPENDED — the last entry of
+ * `x-forwarded-for` — and then `cf-connecting-ip`.
+ *
+ * WHY THE LAST ENTRY, AND NOT THE FIRST (audio-feed-u2ve)
+ * Forwarding headers are APPENDED to by each hop: a request through one trusted proxy arrives as
+ * `x-forwarded-for: <what the client sent>, <what the proxy saw>`. So the FIRST entry is whatever the
+ * caller chose, and taking it handed every caller a fresh rate-limit bucket per request — rotate the
+ * header, never reach the bound. The LAST entry is the value the hop closest to us added, which no
+ * caller can choose.
+ *
+ * The same rule is right when the proxy REPLACES the header rather than appending: then there is
+ * exactly one entry, first and last are the same value, and nothing changes. That is why "last" is
+ * the safe choice under both behaviours instead of needing to know which one is in front.
+ *
+ * `cf-connecting-ip` is consulted only when there is no usable `x-forwarded-for`. It is a
+ * single-value header, so if an upstream proxy does not manage it a caller can set it themselves;
+ * preferring it, as this did, meant a forged `cf-connecting-ip` won even when the trusted hop had
+ * appended the real address. It is still worth honouring behind Cloudflare, which overwrites it.
+ *
+ * With `trustProxy` on but nothing appended to either header, NOTHING here is trustworthy — which is
+ * exactly what the opt-in asserts, in the words of src/origin.ts: "only they can know that
+ * client-supplied values are stripped upstream". What this function guarantees is narrower and
+ * provable: while the hop appends, a caller cannot choose or rotate their key through the header.
  */
 export function extractClientIp(
   req: Request,
@@ -172,17 +193,33 @@ export function extractClientIp(
   remoteAddr?: string,
 ): string {
   if (trustProxy) {
-    const cf = req.headers.get("cf-connecting-ip");
-    if (cf) return cf.trim();
-    const xff = req.headers.get("x-forwarded-for");
-    if (xff) {
-      const first = xff.split(",")[0]?.trim();
-      if (first) return first;
-    }
+    const appended = lastForwardedEntry(req.headers.get("x-forwarded-for"));
+    if (appended) return appended;
+    const cf = req.headers.get("cf-connecting-ip")?.trim();
+    if (cf) return cf;
   }
   if (remoteAddr) return remoteAddr;
   return "direct";
 }
+
+/**
+ * The address the last hop appended, or null if the header is absent, empty or unusable.
+ *
+ * The length bound is not cosmetic: a key is a store row, and a caller who can make the key
+ * arbitrarily long can make arbitrarily many of them (the row-exhaustion concern behind
+ * audio-feed-2zvc). Anything longer than a full IPv6 address with a port falls through to the
+ * socket address, which is a small, real, bounded key.
+ */
+function lastForwardedEntry(header: string | null): string | null {
+  if (!header) return null;
+  const entries = header.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  const last = entries[entries.length - 1];
+  if (!last || last.length > MAX_CLIENT_KEY_LENGTH) return null;
+  return last;
+}
+
+/** A full IPv6 address plus a port is 51 characters; 64 leaves room without admitting prose. */
+const MAX_CLIENT_KEY_LENGTH = 64;
 
 /**
  * Shared throttle for failed admin authentication attempts (audio-feed-bns).
