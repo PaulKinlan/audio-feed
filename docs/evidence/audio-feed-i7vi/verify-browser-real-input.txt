@@ -1,0 +1,45 @@
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[s3uk] Server started at http://localhost:40047/
+PASS  headless Chrome started and reported debugging port  — port 35893
+PASS  page target available
+[s3uk] Found interaction target: <INPUT id="request-email"> at (108.5, 218.140625)
+[s3uk] Dispatching trusted pointer interaction (click into input)...
+[s3uk] Dispatching trusted keyboard interaction (key press)...
+[s3uk] Dispatching trusted held-key sequence (key repeat)...
+[s3uk] Dispatched DOM events: 8
+PASS  all dispatched DOM events have isTrusted === true  — 8/8
+PASS  session received both pointerdown and keydown DOM events
+PASS  globalThis.cwvState.isTrusted() confirms all counted events were trusted
+[s3uk] cwvState counts: total=3, pointer=1, key=2
+PASS  pointer interactions counted == dispatched (1 click dispatched)  — counted 1 of 1
+PASS  keyboard interactions counted == dispatched with held-key repeat suppressed (2 key interactions: 'h' + held 'e')  — counted 2 of 2 (held-key repeat suppressed)
+PASS  total interaction starts counted == dispatched  — counted 3 of 3 dispatched
+[s3uk] Event Timing entries recorded: 17
+  entry: pointerover duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: pointerenter duration=16ms interactionId=0
+  entry: mouseover duration=16ms interactionId=0
+  entry: pointerdown duration=16ms interactionId=3936
+  entry: mousedown duration=16ms interactionId=0
+  entry: keydown duration=16ms interactionId=3957
+  entry: keypress duration=16ms interactionId=3957
+  entry: beforeinput duration=16ms interactionId=0
+  entry: input duration=16ms interactionId=0
+[s3uk] Distinct non-zero interactionIds: 3936, 3957
+PASS  Event Timing assigned interactionId to interactions  — 2 distinct ID(s)
+PASS  globalThis.cwvState is exposed and returns observed latencies
+[s3uk] cwvState.observed(): [16,16]
+[s3uk] Navigating away to trigger pagehide beacon flush...
+[s3uk] cwv.report records received in KV store: 2
+  report: metric=lcp value=148 page=home
+  report: metric=inp value=16 page=home
+PASS  cwv.report records persisted to metadata store  — 2 report(s)
+
+ALL INP INTERACTION VERIFICATION CHECKS PASSED.

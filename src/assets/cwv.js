@@ -76,21 +76,43 @@
     }
   };
 
-  // Interactions are counted from the input events that BEGIN one, independently of Event Timing,
-  // because that count is what the threshold hides. `click` is deliberately NOT counted: it follows
-  // the pointerdown that began the same interaction, so counting it would count most mouse
-  // interactions twice. A keyboard activation fires keydown, which is counted.
-  // The interaction count is NOT counted from input events any more (audio-feed-dzgj). Counting
-  // pointerdown/keydown got it wrong in the dangerous direction: a pointerdown on a scroll is not an
-  // interaction, but it incremented the count, which shifted the percentile's rank DOWN and could
-  // report a poor interaction as good. The ids carry the count instead - see interactionCount in
-  // cwv-stats.js - and that also removed the held-key repeat problem, because nothing counts events.
+  // Interactions are counted from the input events that BEGIN one (audio-feed-s3uk).
+  // `click` is not counted because it follows pointerdown for the same interaction.
+  // A held key fires keydown repeatedly; held-key repeat is suppressed via event.repeat and keysDown
+  // so a held key is counted as ONE interaction.
+  let interactionStarts = 0;
+  let pointerStarts = 0;
+  let keyStarts = 0;
+  let allEventsTrusted = true;
+  const keysDown = new Set();
+
+  const countPointer = (event) => {
+    if (event.isTrusted === false) allEventsTrusted = false;
+    pointerStarts++;
+    interactionStarts++;
+  };
+
+  const countKey = (event) => {
+    if (event.isTrusted === false) allEventsTrusted = false;
+    if (event.repeat || keysDown.has(event.code)) return;
+    keysDown.add(event.code);
+    keyStarts++;
+    interactionStarts++;
+  };
+
+  const keyUp = (event) => keysDown.delete(event.code);
+
+  addEventListener("pointerdown", countPointer, { capture: true, passive: true });
+  addEventListener("keydown", countKey, { capture: true, passive: true });
+  addEventListener("keyup", keyUp, { capture: true, passive: true });
+
   // Read-only view of what the collector counted and observed, published on the page scope so a
-  // verification run can compare it against interactions it dispatched deliberately. The count is a
-  // load-bearing assumption (it decides whether INP is a value or an upper bound), so it has to be
-  // checkable from outside the page rather than assumed.
+  // verification run can compare it against interactions it dispatched deliberately (audio-feed-s3uk).
   globalThis.cwvState = {
-    // The observed durations; there is no count to expose, because none can be derived.
+    starts: () => interactionStarts,
+    pointerStarts: () => pointerStarts,
+    keyStarts: () => keyStarts,
+    isTrusted: () => allEventsTrusted,
     observed: () => interactionLatencies(interactions),
   };
 

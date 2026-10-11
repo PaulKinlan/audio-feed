@@ -94,3 +94,15 @@ expose a usable count.
 collector is in the page, real LCP values arrive, a beacon is sent and read back out of the store,
 the beacon never becomes a request-log field, and the observed interaction durations are reported —
 16ms entries now appear, which the earlier 40ms threshold had been hiding.
+
+## Real-input INP verification under trusted user events (audio-feed-s3uk)
+
+`scripts/verify_s3uk_real_browser.ts` drives a real interacted browser session against the live home page (`/`), interacting directly with form inputs using CDP trusted events (`isTrusted: true`) for both pointer and keyboard actions.
+Transcript: `verify-browser-real-input.txt`.
+
+Results:
+- **`isTrusted: true` established for all events**: all dispatched DOM events (`pointerdown`, `pointerup`, `click`, `keydown`, `keyup`) have `isTrusted === true`.
+- **Event Timing assigns distinct interactionIds**: Pointer and keyboard interactions receive valid, distinct `interactionId` values from Chromium's internal Event Timing implementation (e.g. 537, 6466, 6487).
+- **Multi-event grouping verified**: Events from a single interaction (`pointerdown`, `pointerup`, `click` or `keydown`, `keypress`) share the same `interactionId`.
+- **`cwvState.observed()` correctly groups by `interactionId`**: Excludes `interactionId: 0` (scroll/hover) and yields distinct per-interaction durations.
+- **End-to-end beacon persistence**: On page navigation (`pagehide`), the collector flushes `lcp` and `inp` metrics via `sendBeacon` to `/api/cwv`, and verified `cwv.report` records are persisted to the metadata store.
