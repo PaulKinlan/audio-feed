@@ -1,0 +1,25 @@
+[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — the advertised origin and WebAuthn RP ID are derived from each request's host. Set ALLOWED_HOSTS to pin them.
+[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
+[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
+Listening on http://0.0.0.0:35897/ (http://localhost:35897/)
+PASS  beacon {"metric":"lcp","value":1800,"page":"listen" -> 204  — got 204
+PASS  beacon {"metric":"cls","value":0.42,"page":"home"} -> 204  — got 204
+PASS  beacon {"metric":"inp","value":320,"page":"account" -> 204  — got 204
+PASS  beacon {"metric":"lcp","value":"qV7z52CapSECRETfd39 -> 400  — got 400
+PASS  three valid reports became three typed records  — 3
+  info  real-user LCP 1800ms on /listen  context={"metric":"lcp","value":1800,"page":"listen","unit":"ms"}
+  error real-user CLS 0.42 on /home  context={"metric":"cls","value":0.42,"page":"home","unit":null}
+  warn  real-user INP 320ms on /account  context={"metric":"inp","value":320,"page":"account","unit":"ms"}
+PASS  severity follows the published web-vitals bands, so a bad LCP is an error event
+PASS  only the refused beacon is recorded as a request, not the three that succeeded  — 1 request record(s)
+PASS  and that request record carries no part of the payload
+PASS  the refused value and the canary page label are nowhere in the store
+PASS  a span is stored and joins to its episode
+PASS  the phases sum to the recorded total  — 66080
+PASS  a slow synthesis is a warn with a reason, so it surfaces beside the errors
+  span: synthesis of episode epi-demo took 66080ms (queue 4200ms, synthesis 61500ms, write 380ms)
+PASS  errors, traces and vitals are all records in ONE store, so one API can serve them together  — cwv.report, http.request, synthesis.span
+
+All checks passed.
