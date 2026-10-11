@@ -351,6 +351,14 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
       // both resolve statically. Anything else interpolated stays useful: the text is split on whitespace
       // and path-shaped tokens are kept, with a token that is cut by another interpolation kept as its
       // directory prefix (a suite reading `./fixtures/${name}.html` observes the whole fixtures directory).
+      //
+      // THE DOCUMENTED BOUNDARY (audio-feed-lkvz): a template with NO statically-known path fragment at all
+      // (`Deno.readDir(`${dir}`)`) deliberately yields no hint. There is nothing to check against the tree, so
+      // it cannot become an unresolved PATH hint; treating every such read as an incompleteness signal would
+      // widen on the temp-directory reads every suite performs, and the honest statement is that this class is
+      // OUT OF SCOPE for a path-RELATION detector rather than silently handled. The next reader should see that
+      // as a decision with a reason, not as an oversight: the interpolated-TAIL case above is the one that was
+      // blindness, and it is fixed.
       const dir = `${root}${moduleDir}`.replace(/\/$/, "");
       text = text
         .replace(/\$\{import\.meta\.dirname\}/g, dir)
@@ -363,6 +371,14 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
         }
         const head = token.slice(0, wildcard);
         if (head.includes("/")) hints.push(head.slice(0, head.lastIndexOf("/") + 1));
+        // audio-feed-lkvz: an interpolation can also PRECEDE the path, and the old code threw the whole token
+        // away when it did - which made the detector BLIND to every runtime-assembled read (`${dir}/data/x.csv`
+        // produced no hint at all, measured). The tail after the last interpolation is statically known, so it
+        // is offered as a path candidate: if it names a real file, the relation over-selects that suite (the
+        // safe direction), and if it names nothing it becomes an UNRESOLVED hint, which under audio-feed-q0ky's
+        // rule makes the inert class unreachable and widens the run rather than selecting nothing.
+        const tail = token.slice(token.lastIndexOf("}") + 1);
+        if (/\/[^/]/.test(tail)) hints.push(tail.replace(/^\/+/, ""));
       }
       continue;
     }

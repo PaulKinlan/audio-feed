@@ -468,6 +468,54 @@ Deno.test("audio-feed-q0ky: the detector REPORTS the read hints it could not res
   }
 });
 
+Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spot", async () => {
+  // The blindness this closes: `${dir}/data/table.csv` produced NO hint at all, because the interpolation came
+  // FIRST in the token and every path fragment after it was discarded. A detector that answers "I saw nothing"
+  // where it in fact saw a path suffix is the silent-absence shape this whole area keeps producing, and under
+  // audio-feed-q0ky's rule the fix has a second effect: a tail that names nothing becomes an UNRESOLVED hint,
+  // so the inert class is refused and the run widens instead of selecting nothing.
+  const root = (await Deno.makeTempDir({ prefix: "lkvz-relation-" })) + "/";
+  try {
+    await Deno.mkdir(`${root}tests`, { recursive: true });
+    await Deno.mkdir(`${root}docs`, { recursive: true });
+    await Deno.writeTextFile(`${root}docs/present.md`, "hello\n");
+
+    // The tail names nothing: the hint is produced AND reported unresolved (the widening case).
+    await Deno.writeTextFile(
+      `${root}tests/absent_test.ts`,
+      "export async function readIt(dir: string) {\n" +
+        "  return await Deno.readTextFile(`${dir}/data/table.csv`);\n" +
+        "}\n",
+    );
+    const absent = await deriveReadRelationReport(root, ["tests/absent_test.ts"]);
+    assert(
+      absent.relations.size + absent.unresolved.length > 0,
+      "an interpolated path fragment must produce a hint, not silence",
+    );
+
+    // An interpolation FIRST, with a tail that DOES name a real file: the relation over-selects the suite,
+    // which is the safe direction - and the point is that the detector saw it at all.
+    await Deno.writeTextFile(
+      `${root}docs/present.md`,
+      "hello\n",
+    );
+    await Deno.writeTextFile(
+      `${root}tests/tail_test.ts`,
+      "export async function readIt(prefix: string) {\n" +
+        "  return await Deno.readTextFile(`${prefix}/docs/present.md`);\n" +
+        "}\n",
+    );
+    const tail = await deriveReadRelationReport(root, ["tests/tail_test.ts"]);
+    assertEquals(
+      tail.relations.get("docs/present.md"),
+      ["tests/tail_test.ts"],
+      "an interpolated tail that names a real file must be recorded as a relation",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {
   const unresolved = ["data/table.csv", "fixtures.html"];
   const widened = planTests(
