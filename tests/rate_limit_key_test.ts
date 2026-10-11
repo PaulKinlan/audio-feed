@@ -72,15 +72,102 @@ Deno.test("without a forwarded address the socket address wins, and 'direct' is 
   assertEquals(extractClientIp(request("ignored"), false), "direct");
 });
 
-Deno.test("a key cannot be made unbounded by forging a long value (audio-feed-u2ve)", () => {
-  // A key is a store row, so an unbounded key is an unbounded row count.
+Deno.test("a key cannot be made unbounded by forging a long or prose value (audio-feed-u2ve, audio-feed-5vvw)", () => {
+  // A key is a store row, so an unbounded key is an unbounded row count — and a rotating key is a
+  // fresh bucket per request. Both apply to whichever header is used, not just the chain: bounding
+  // only x-forwarded-for left the cf-connecting-ip fallback able to take any string (audio-feed-5vvw).
   const prose = "not-an-address ".repeat(20);
   assertEquals(extractClientIp(request(prose), true, "127.0.0.1"), "127.0.0.1");
   assertEquals(extractClientIp(request(`10.0.0.1, ${prose}`), true, "127.0.0.1"), "127.0.0.1");
-  // A full IPv6 address plus a port still fits.
+  assertEquals(extractClientIp(request(undefined, prose), true, "127.0.0.1"), "127.0.0.1");
+  assertEquals(
+    extractClientIp(request(undefined, "x".repeat(200)), true, "127.0.0.1"),
+    "127.0.0.1",
+  );
+  assertEquals(
+    extractClientIp(request(undefined, "forged-001-...."), true, "127.0.0.1"),
+    "127.0.0.1",
+  );
+
+  // A full IPv6 address plus a port still fits, in both headers: the rule must not reject real
+  // addresses, or a real deployment would collapse into the socket address.
   const v6 = "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:65535";
   assertEquals(v6.length <= 64, true, "the length bound must not reject real addresses");
   assertEquals(extractClientIp(request(`10.0.0.1, ${v6}`), true), v6);
+  assertEquals(extractClientIp(request(undefined, v6), true), v6);
+});
+
+Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2ve)", () => {
+  const usable = [
+    "203.0.113.7",
+    "203.0.113.7:8443",
+    "::1",
+    "2001:db8::1",
+    "[2001:db8::1]:443",
+    "::ffff:192.0.2.1",
+  ];
+  for (const value of usable) {
+    assertEquals(
+      extractClientIp(request(undefined, value), true),
+      value,
+      `${value} must be usable`,
+    );
+  }
+  const unusable = [
+    "999.0.113.7",
+    "203.0.113",
+    "203.0.113.7.9",
+    "unknown",
+    "",
+    "1.2.3.4,",
+    "2001:db8::1::2",
+  ];
+  for (const value of unusable) {
+    assertEquals(
+      extractClientIp(request(undefined, value), true, "127.0.0.1"),
+      "127.0.0.1",
+      `${JSON.stringify(value)} must fall through to the socket address rather than become a key`,
+    );
+  }
+});
+
+Deno.test("a rotating forged cf-connecting-ip cannot change the bucket (audio-feed-5vvw)", async () => {
+  // The reviewer's reproducer: with no forwarded chain, a rotated fallback header bought a bucket
+  // per request. The limiter is real; only the client identity is under test.
+  const { fetch } = app();
+  const statuses: number[] = [];
+  for (let i = 0; i < MAX_REQUESTS * 3; i++) {
+    const response = await fetch(
+      new Request("http://localhost/api/request-access", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": `forged-${String(i).padStart(3, "0")}-${"x".repeat(200)}`,
+        },
+        body: JSON.stringify({ email: `cf-${i}@example.com`, reason: "probe" }),
+      }),
+    );
+    statuses.push(response.status);
+  }
+  assertEquals(
+    statuses.filter((s) => s === 429).length,
+    MAX_REQUESTS * 3 - MAX_REQUESTS,
+    "a rotating fallback header must not buy a second bucket",
+  );
+
+  // And a well-formed one is still honoured, so a deployment whose proxy manages it is unchanged.
+  const honest: number[] = [];
+  for (let i = 0; i < MAX_REQUESTS + 1; i++) {
+    const response = await fetch(
+      new Request("http://localhost/api/request-access", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.9" },
+        body: JSON.stringify({ email: `honest-${i}@example.com`, reason: "probe" }),
+      }),
+    );
+    honest.push(response.status);
+  }
+  assertEquals(honest[MAX_REQUESTS], 429, "a real cf-connecting-ip still creates one bucket");
 });
 
 // -- 2. the bucket ----------------------------------------------------------

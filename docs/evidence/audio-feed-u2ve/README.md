@@ -37,3 +37,32 @@ including the second path with the same shape (`cf-connecting-ip` was consulted 
 chain, so a forged single-value header won even when the hop had appended the real address), the
 `remoteAddr` fallbacks, and that a value too long to be an address cannot become an unbounded store
 key.
+
+## audio-feed-5vvw — the fallback header had the same two failures
+
+An independent review of the first fix (rev-u2ve) reproduced the rotated-header bypass on
+`cf-connecting-ip`: with no forwarded chain, ten rotated 200-byte values produced ten `200`s and zero
+`429`s, and those values became store keys verbatim. Bounding only `x-forwarded-for` had left the path
+beside it able to take any string a caller sent — a fresh bucket per request *and* an unbounded key.
+
+The probe now covers it, so both measurements are in the same file:
+
+| 20 attempts, bound 5/60s, no forwarded chain | before 5vvw | after |
+| --- | --- | --- |
+| rotating forged `cf-connecting-ip` → `429`s | **0** | **15** |
+| rotating forged `cf-connecting-ip` → allowed through | **20 (all)** | **5** |
+| a well-formed `cf-connecting-ip` → first `429` | attempt 6 | attempt 6 |
+| rotating forged `x-forwarded-for` prefix → allowed through | 5 | 5 |
+
+Both headers are now held to one rule — the value must look like an address (or it falls through to
+the platform's socket address) and cannot be arbitrarily long. That also makes the rule statable in
+one sentence instead of "the chain is bounded, the fallback is not". The residual is unchanged and is
+the operator's assertion, not a gap in the check: behind a proxy that manages *neither* header, a
+caller can still rotate among well-formed addresses, because then no forwarded value is trustworthy
+at all — which is why the documented topology is a proxy that appends or overwrites them.
+
+`tests/rate_limit_key_test.ts` gained the reviewer's reproducer at the bucket level, the shape rules
+(accepting, among the forms proxies really emit, `[2001:db8::1]:443` and `::ffff:192.0.2.1` — the
+latter caught by the test on its first run, which is why the check now handles a dotted-quad tail),
+and a check that near-misses like `999.0.113.7`, `unknown` and a double `::` fall through rather than
+becoming keys.

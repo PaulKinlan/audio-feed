@@ -182,10 +182,18 @@ export class SlidingWindowRateLimiter {
  * preferring it, as this did, meant a forged `cf-connecting-ip` won even when the trusted hop had
  * appended the real address. It is still worth honouring behind Cloudflare, which overwrites it.
  *
- * With `trustProxy` on but nothing appended to either header, NOTHING here is trustworthy — which is
+ * BOTH headers are held to the same rule — see `clientAddressCandidate`: the value must actually look
+ * like an address (and not be arbitrarily long), or it is ignored and the next source is consulted.
+ * The first version of this bounded only the forwarded chain, which left the fallback able to take
+ * any string a caller sent: rotating garbage there was both a fresh bucket per request and an
+ * unbounded number of store rows (audio-feed-5vvw).
+ *
+ * With `trustProxy` on but nothing usable in either header, NOTHING here is trustworthy — which is
  * exactly what the opt-in asserts, in the words of src/origin.ts: "only they can know that
  * client-supplied values are stripped upstream". What this function guarantees is narrower and
- * provable: while the hop appends, a caller cannot choose or rotate their key through the header.
+ * provable: while the hop appends or manages those headers, a caller cannot choose or rotate their
+ * key through them. Against a proxy that does neither, no forwarded header can be trusted at all,
+ * which is why the documented topology is a proxy that appends the client address.
  */
 export function extractClientIp(
   req: Request,
@@ -195,31 +203,82 @@ export function extractClientIp(
   if (trustProxy) {
     const appended = lastForwardedEntry(req.headers.get("x-forwarded-for"));
     if (appended) return appended;
-    const cf = req.headers.get("cf-connecting-ip")?.trim();
-    if (cf) return cf;
+    const cf = req.headers.get("cf-connecting-ip");
+    if (cf) {
+      const candidate = clientAddressCandidate(cf);
+      if (candidate) return candidate;
+    }
   }
   if (remoteAddr) return remoteAddr;
   return "direct";
 }
 
 /**
- * The address the last hop appended, or null if the header is absent, empty or unusable.
- *
- * The length bound is not cosmetic: a key is a store row, and a caller who can make the key
- * arbitrarily long can make arbitrarily many of them (the row-exhaustion concern behind
- * audio-feed-2zvc). Anything longer than a full IPv6 address with a port falls through to the
- * socket address, which is a small, real, bounded key.
+ * The address the last hop appended, or null if the header is absent or has no usable entry.
  */
 function lastForwardedEntry(header: string | null): string | null {
   if (!header) return null;
   const entries = header.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
-  const last = entries[entries.length - 1];
-  if (!last || last.length > MAX_CLIENT_KEY_LENGTH) return null;
-  return last;
+  return clientAddressCandidate(entries[entries.length - 1] ?? "");
+}
+
+/**
+ * A forwarded value, or null when it cannot be an address.
+ *
+ * The length bound is not cosmetic: a key is a store row, and a caller who can make the key
+ * arbitrarily long can make arbitrarily many of them (the row-exhaustion concern behind
+ * audio-feed-2zvc). The shape check is what stops a caller rotating prose — or anything else that is
+ * not an address — through a header their proxy does not manage, which is how the unbounded
+ * fallback survived the first fix (audio-feed-5vvw). A proxy that appends a client address appends
+ * an address, so rejecting the rest costs a real deployment nothing: the value falls through to the
+ * platform's own socket address, which is a small, real, bounded key.
+ */
+function clientAddressCandidate(value: string): string | null {
+  const candidate = value.trim();
+  if (candidate === "" || candidate.length > MAX_CLIENT_KEY_LENGTH) return null;
+  return isIpLiteral(candidate) ? candidate : null;
 }
 
 /** A full IPv6 address plus a port is 51 characters; 64 leaves room without admitting prose. */
 const MAX_CLIENT_KEY_LENGTH = 64;
+
+/** IPv4 (with an optional port) or IPv6 (bracketed with an optional port, or bare). */
+function isIpLiteral(value: string): boolean {
+  const bracketed = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(value);
+  if (bracketed) return isIpv6(bracketed[1]!);
+
+  // A port is only expressible after a bare IPv4; IPv6 must be bracketed to carry one.
+  const hostPort = /^([\d.]+):\d{1,5}$/.exec(value);
+  if (hostPort) return isIpv4(hostPort[1]!);
+
+  return isIpv4(value) || isIpv6(value);
+}
+
+function isIpv4(value: string): boolean {
+  const parts = value.split(".");
+  return parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+/**
+ * Structural IPv6, including the dotted-quad tail form (`::ffff:192.0.2.1`) that proxies do emit.
+ *
+ * The rules are the ones that separate an address from prose without re-implementing RFC 4291: hex
+ * groups and colons only, at most eight groups, each at most four digits, at most one `::`, and a
+ * trailing dotted quad that is itself a valid IPv4.
+ */
+function isIpv6(value: string): boolean {
+  if (!value.includes(":")) return false;
+  if ((value.match(/::/g) ?? []).length > 1) return false;
+
+  const quad = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(value);
+  if (quad && !isIpv4(quad[1]!)) return false;
+  const hexPart = quad ? value.slice(0, value.length - quad[0].length) : value;
+
+  if (!/^[0-9A-Fa-f:]*$/.test(hexPart)) return false;
+  const groups = hexPart.split(":").filter((group) => group !== "");
+  return groups.length <= 8 && groups.every((group) => group.length <= 4);
+}
 
 /**
  * Shared throttle for failed admin authentication attempts (audio-feed-bns).

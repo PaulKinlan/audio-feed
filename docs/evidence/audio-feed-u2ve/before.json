@@ -13,25 +13,25 @@
       200,
       200,
       200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200,
-      200
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429,
+      429
     ],
-    "tooManyRequests": 0,
-    "allowedThrough": 20,
-    "evaded": true
+    "tooManyRequests": 15,
+    "allowedThrough": 5,
+    "evaded": false
   },
   "singleHonestClient": {
     "tooManyRequests": 15,
@@ -62,5 +62,14 @@
       }
     ],
     "secondClientStatus": 200
+  },
+  "rotatingForgedCfOnly": {
+    "tooManyRequests": 0,
+    "allowedThrough": 20,
+    "evaded": true
+  },
+  "wellFormedCfClient": {
+    "tooManyRequests": 1,
+    "first429AtAttempt": 6
   }
 }

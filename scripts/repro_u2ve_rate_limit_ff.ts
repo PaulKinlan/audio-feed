@@ -105,6 +105,46 @@ twoClientStatuses.push({
   status: await attempt(twoClients.fetch, "198.51.100.2", `198.51.100.2`, 0),
 });
 
+// -- 4. the FALLBACK header, which the first fix left unbounded (audio-feed-5vvw) ---------
+//
+// `cf-connecting-ip` is consulted when there is no usable forwarded chain. It is a single-value
+// header, so a proxy that does not manage it passes whatever the caller sent. Rotating a long value
+// there was both a fresh bucket per request and an unbounded number of store rows — the same two
+// failures the forwarded chain had, on the path beside it.
+
+const cfOnly = app();
+const cfStatuses: number[] = [];
+for (let i = 0; i < ATTEMPTS; i++) {
+  const response = await cfOnly.fetch(
+    new Request("http://localhost/api/request-access", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": `forged-${String(i).padStart(3, "0")}-${"x".repeat(200)}`,
+      },
+      body: JSON.stringify({ email: `cf-probe-${i}@example.com`, reason: "probe" }),
+    }),
+  );
+  cfStatuses.push(response.status);
+}
+
+// And a well-formed cf-connecting-ip is still honoured: a proxy that manages the header works.
+const cfHonest = app();
+const cfHonestFirst: number[] = [];
+for (let i = 0; i < MAX_REQUESTS + 1; i++) {
+  const response = await cfHonest.fetch(
+    new Request("http://localhost/api/request-access", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.9",
+      },
+      body: JSON.stringify({ email: `cf-honest-${i}@example.com`, reason: "probe" }),
+    }),
+  );
+  cfHonestFirst.push(response.status);
+}
+
 const count = (statuses: number[], code: number) => statuses.filter((s) => s === code).length;
 const report = {
   bead: "audio-feed-u2ve",
@@ -126,6 +166,15 @@ const report = {
     first: twoClientStatuses.slice(0, MAX_REQUESTS),
     secondClientStatus: twoClientStatuses[MAX_REQUESTS]!.status,
   },
+  rotatingForgedCfOnly: {
+    tooManyRequests: count(cfStatuses, 429),
+    allowedThrough: cfStatuses.filter((s) => s !== 429).length,
+    evaded: count(cfStatuses, 429) === 0,
+  },
+  wellFormedCfClient: {
+    tooManyRequests: count(cfHonestFirst, 429),
+    first429AtAttempt: cfHonestFirst.indexOf(429) + 1,
+  },
 };
 
 await Deno.mkdir(new URL("./", OUT), { recursive: true });
@@ -144,10 +193,22 @@ console.log(
   `two distinct trusted-hop values: ${JSON.stringify(report.twoDistinctTrustedValues)}`,
 );
 
+console.log(
+  `rotating forged cf-connecting-ip (no chain): ${report.rotatingForgedCfOnly.tooManyRequests} x 429, ` +
+    `${report.rotatingForgedCfOnly.allowedThrough} allowed through; ` +
+    `a well-formed one is still honoured (first 429 at attempt ${report.wellFormedCfClient.first429AtAttempt})`,
+);
+
 if (report.rotatingForgedPrefix.evaded) {
   console.error(
     `FAIL: a client that rotates a forged prefix was never limited (${ATTEMPTS} attempts, no 429)`,
   );
   Deno.exit(1);
 }
-console.log("OK: the bound held against a forged prefix");
+if (report.rotatingForgedCfOnly.evaded) {
+  console.error(
+    `FAIL: a client that rotates a forged cf-connecting-ip was never limited (${ATTEMPTS} attempts, no 429)`,
+  );
+  Deno.exit(1);
+}
+console.log("OK: the bound held against a forged prefix, and against a forged fallback header");
