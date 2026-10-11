@@ -22,7 +22,9 @@ console.log(`Legacy flat keys:        ${result.legacyCount}`);
 if (result.legacySamples.length > 0) {
   console.log("\nSample legacy keys (redacted):");
   for (const sample of result.legacySamples) {
-    console.log(`  - user=${sample.userId} episode=${sample.episodeId} key=${sample.redactedKey}`);
+    console.log(
+      `  - userHash=${sample.userHash} mode=${sample.mode} shape=${sample.shape} segs=${sample.segmentCount} ext=${sample.extension} key=${sample.maskedKey}`,
+    );
   }
 }
 console.log("==================================\n");

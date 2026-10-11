@@ -3,16 +3,18 @@
  *
  * Verifies:
  * 1. isCanonicalAudioKey classification (4-part and 3-part canonical vs legacy flat).
- * 2. Key stem redaction for safe logging.
+ * 2. Key stem and path redaction for safe logging (audio-feed-2qgb).
  * 3. Inventory scanning across Memory and KV metadata stores.
  * 4. Paging and bounding over large catalogues in KV.
- * 5. Strictly read-only behaviour (zero mutations performed).
- * 6. Integration with server bootstrap boot-time inventory.
+ * 5. Privacy guarantees: neither raw userIds nor unmasked path segments leak in boot logs or CLI output.
+ * 6. Strictly read-only behaviour (zero mutations performed).
+ * 7. Integration with server bootstrap boot-time inventory.
  */
 
 import { assert, assertEquals } from "@std/assert";
 import { memoryStores, openStores } from "../src/config.ts";
 import {
+  hashIdentifier,
   inventoryLegacyAudioKeys,
   isCanonicalAudioKey,
   redactSampleKey,
@@ -54,11 +56,24 @@ Deno.test("isCanonicalAudioKey: identifies canonical keys and rejects legacy fla
   assertEquals(isCanonicalAudioKey("voice-samples/user-1/direct/ep-1.mp3", ep), false);
 });
 
-Deno.test("redactSampleKey: masks inner tokens while preserving shape and extension", () => {
-  assertEquals(redactSampleKey("legacy.wav"), "le**cy.wav");
-  assertEquals(redactSampleKey("audio/ready.wav"), "audio/re**dy.wav");
-  assertEquals(redactSampleKey("secret-uuid-123456789.mp3"), "se******89.mp3");
-  assertEquals(redactSampleKey("a.mp3"), "*.mp3");
+Deno.test("redactSampleKey: masks all interior path components and filename tokens (audio-feed-2qgb)", () => {
+  assertEquals(redactSampleKey("legacy.wav"), "[token].wav");
+  assertEquals(redactSampleKey("audio/ready.wav"), "audio/[token].wav");
+  assertEquals(redactSampleKey("private/account/secret.mp3"), "[path]/[path]/[token].mp3");
+  assertEquals(redactSampleKey("a/b/c/d/track.wav"), "[path]/[path]/[path]/[path]/[token].wav");
+  assertEquals(redactSampleKey(""), "");
+});
+
+Deno.test("hashIdentifier: produces stable, non-reversible 8-char hex hash", async () => {
+  const h1 = await hashIdentifier("user-12345");
+  const h2 = await hashIdentifier("user-12345");
+  const h3 = await hashIdentifier("user-67890");
+
+  assertEquals(h1, h2, "same input must yield same hash");
+  assertEquals(h1.length, 8);
+  assert(/^[0-9a-f]{8}$/.test(h1));
+  assert(h1 !== h3, "different inputs must yield different hashes");
+  assert(!h1.includes("user"), "hash must not contain cleartext input");
 });
 
 // ---------------------------------------------------------------------------
@@ -118,10 +133,10 @@ Deno.test("inventoryLegacyAudioKeys: reports accurate counts on Memory store wit
 
   // Samples are redacted
   assert(
-    inv.legacySamples.some((s) => s.episodeId === "ep-legacy-1" && s.redactedKey.includes(".wav")),
+    inv.legacySamples.some((s) => s.extension === ".wav" && s.maskedKey === "[token].wav"),
   );
   assert(
-    inv.legacySamples.some((s) => s.episodeId === "ep-legacy-2" && s.redactedKey.includes(".mp3")),
+    inv.legacySamples.some((s) => s.extension === ".mp3" && s.maskedKey === "audio/[token].mp3"),
   );
 
   // Strictly read-only assertion: stored episode records must remain unchanged
@@ -132,7 +147,44 @@ Deno.test("inventoryLegacyAudioKeys: reports accurate counts on Memory store wit
 });
 
 // ---------------------------------------------------------------------------
-// 3. Inventory tests on KV store (paging across multiple batches)
+// 3. Privacy leak prevention test (audio-feed-2qgb)
+// ---------------------------------------------------------------------------
+
+Deno.test("inventory: samples redact full userId and path components completely (audio-feed-2qgb)", async () => {
+  const stores = memoryStores();
+  const SENSITIVE_USER_ID = "private-user@example.test";
+  const SENSITIVE_PATH = "private/account/secret.mp3";
+
+  await stores.metadata.putUser(makeUser({ id: SENSITIVE_USER_ID, status: "approved" }));
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-secret-123",
+      userId: SENSITIVE_USER_ID,
+      audioKey: SENSITIVE_PATH,
+    }),
+  );
+
+  const inv = await inventoryLegacyAudioKeys(stores.metadata);
+  const serialized = JSON.stringify(inv);
+
+  // Assert neither the raw userId nor any nested path component appears in the JSON output
+  assert(!serialized.includes(SENSITIVE_USER_ID), "raw userId must NOT appear in inventory output");
+  assert(!serialized.includes("private"), "'private' path segment must NOT appear in output");
+  assert(!serialized.includes("account"), "'account' path segment must NOT appear in output");
+  assert(!serialized.includes("secret"), "'secret' token must NOT appear in output");
+
+  // Verify safe structure of sample
+  assertEquals(inv.legacySamples.length, 1);
+  const sample = inv.legacySamples[0]!;
+  assertEquals(sample.shape, "nested");
+  assertEquals(sample.segmentCount, 3);
+  assertEquals(sample.extension, ".mp3");
+  assertEquals(sample.maskedKey, "[path]/[path]/[token].mp3");
+  assert(/^[0-9a-f]{8}$/.test(sample.userHash), "userHash must be 8-char hex");
+});
+
+// ---------------------------------------------------------------------------
+// 4. Inventory tests on KV store (paging across multiple batches)
 // ---------------------------------------------------------------------------
 
 Deno.test("inventoryLegacyAudioKeys: pages through large KV store catalogue without mutating records", async () => {
@@ -168,17 +220,20 @@ Deno.test("inventoryLegacyAudioKeys: pages through large KV store catalogue with
 });
 
 // ---------------------------------------------------------------------------
-// 4. Server boot integration test
+// 5. Server boot integration test
 // ---------------------------------------------------------------------------
 
-Deno.test("bootstrap: runs legacy audio key inventory at boot and exposes promise", async () => {
+Deno.test("bootstrap: runs legacy audio key inventory at boot and logs redacted samples safely (audio-feed-2qgb)", async () => {
   const stores = await openStores({ kvPath: ":memory:" });
-  await stores.metadata.putUser(makeUser({ id: "boot-user", status: "approved" }));
+  const SENSITIVE_USER_ID = "boot-private-subscriber@corp.internal";
+  const SENSITIVE_KEY = "internal/vault/secret-track.mp3";
+
+  await stores.metadata.putUser(makeUser({ id: SENSITIVE_USER_ID, status: "approved" }));
   await stores.metadata.putEpisode(
     makeEpisode({
       id: "ep-boot-legacy",
-      userId: "boot-user",
-      audioKey: "boot-legacy.mp3",
+      userId: SENSITIVE_USER_ID,
+      audioKey: SENSITIVE_KEY,
     }),
   );
 
@@ -194,7 +249,12 @@ Deno.test("bootstrap: runs legacy audio key inventory at boot and exposes promis
     assert(inv !== null);
     assertEquals(inv.totalUsersScanned, 1);
     assertEquals(inv.legacyCount, 1);
-    assertEquals(inv.legacySamples[0]?.episodeId, "ep-boot-legacy");
+
+    const serialized = JSON.stringify(inv);
+    assert(!serialized.includes(SENSITIVE_USER_ID), "boot output must NOT leak raw userId");
+    assert(!serialized.includes("internal"), "boot output must NOT leak internal path");
+    assert(!serialized.includes("vault"), "boot output must NOT leak vault path");
+    assert(!serialized.includes("secret-track"), "boot output must NOT leak secret filename");
   } finally {
     await booted.shutdown();
   }

@@ -8,8 +8,11 @@
  *
  * This module provides strictly read-only scanning and diagnostic reporting:
  * 1. Detection of canonical vs legacy audio keys (isCanonicalAudioKey).
- * 2. Key redaction for diagnostic logging (redactSampleKey).
+ * 2. Key and identifier redaction for diagnostic logging (redactSampleKey, hashIdentifier).
  * 3. Inventory scanning across MetadataStore (Memory and KV).
+ *
+ * Privacy and safety constraints (audio-feed-2qgb):
+ * Samples must NEVER reveal raw user identifiers or unmasked path components.
  *
  * Strictly no mutations or writes are performed by this module.
  *
@@ -64,31 +67,54 @@ export function isCanonicalAudioKey(
 }
 
 /**
- * Redacts sensitive tokens or identifiers from an audio key for safe logging,
- * while preserving structure, prefix, and extension.
+ * Categorizes the structure shape of a legacy audio key.
+ */
+export function categorizeAudioKeyShape(
+  rawKey: string,
+): "flat" | "audio-prefixed" | "nested" {
+  const parts = rawKey.split("/");
+  if (parts.length === 1) return "flat";
+  if (parts.length === 2 && parts[0] === "audio") return "audio-prefixed";
+  return "nested";
+}
+
+/**
+ * Generates a stable, truncated non-reversible SHA-256 hash of an identifier (e.g. userId),
+ * allowing correlation across samples without exposing subscriber identities (audio-feed-2qgb).
+ */
+export async function hashIdentifier(id: string): Promise<string> {
+  const data = new TextEncoder().encode(id);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 8);
+}
+
+/**
+ * Redacts an audio key for safe diagnostic logging (audio-feed-2qgb).
+ * Guarantees that NO path components or filename stems are exposed in cleartext.
+ * Only the public prefix ("audio", if present) and file extension (.mp3 / .wav) are preserved.
  */
 export function redactSampleKey(rawKey: string): string {
   if (!rawKey) return "";
   const parts = rawKey.split("/");
   const file = parts.pop() || "";
   const dotIndex = file.lastIndexOf(".");
-  const ext = dotIndex !== -1 ? file.slice(dotIndex) : "";
-  const stem = dotIndex !== -1 ? file.slice(0, dotIndex) : file;
+  const ext = dotIndex !== -1 ? file.slice(dotIndex).toLowerCase() : "";
 
-  const maskedStem = stem.length <= 4
-    ? "*".repeat(stem.length)
-    : `${stem.slice(0, 2)}${"*".repeat(Math.min(6, Math.max(2, stem.length - 4)))}${
-      stem.slice(-2)
-    }`;
-
-  return [...parts, `${maskedStem}${ext}`].join("/");
+  const maskedParts: string[] = parts.map((seg) => (seg === "audio" ? "audio" : "[path]"));
+  maskedParts.push(`[token]${ext}`);
+  return maskedParts.join("/");
 }
 
 export interface AudioInventorySample {
-  episodeId: string;
-  userId: string;
+  userHash: string;
   mode: AudioMode;
-  redactedKey: string;
+  shape: "flat" | "audio-prefixed" | "nested";
+  segmentCount: number;
+  extension: string;
+  maskedKey: string;
 }
 
 export interface AudioInventoryResult {
@@ -103,6 +129,7 @@ export interface AudioInventoryResult {
 /**
  * Scans the metadata store to inventory episodes with canonical vs legacy audio keys.
  * Strictly read-only: performs zero mutations against the store.
+ * Anonymizes samples with non-reversible hashes and masked path tokens (audio-feed-2qgb).
  */
 export async function inventoryLegacyAudioKeys(
   metadata: MetadataStore,
@@ -118,6 +145,7 @@ export async function inventoryLegacyAudioKeys(
 
   for (const user of users) {
     let cursor: string | undefined = undefined;
+    const userHash = await hashIdentifier(user.id);
     do {
       const page = await metadata.listEpisodePage({
         userId: user.id,
@@ -133,11 +161,18 @@ export async function inventoryLegacyAudioKeys(
         } else {
           legacyCount++;
           if (legacySamples.length < maxSamples) {
+            const parts = episode.audioKey.split("/");
+            const file = parts[parts.length - 1] || "";
+            const dotIndex = file.lastIndexOf(".");
+            const ext = dotIndex !== -1 ? file.slice(dotIndex).toLowerCase() : "";
+
             legacySamples.push({
-              episodeId: episode.id,
-              userId: episode.userId,
+              userHash,
               mode: episode.mode,
-              redactedKey: redactSampleKey(episode.audioKey),
+              shape: categorizeAudioKeyShape(episode.audioKey),
+              segmentCount: parts.length,
+              extension: ext,
+              maskedKey: redactSampleKey(episode.audioKey),
             });
           }
         }
