@@ -137,7 +137,7 @@ function isLoopbackHost(host: string): boolean {
  * sent. A deployment that does not know its own host must not advertise an
  * attacker's.
  */
-function allowedHostSet(config: OriginConfig): Set<string> {
+export function allowedHostSet(config: OriginConfig): Set<string> {
   const hosts = new Set<string>();
   for (const entry of config.allowedHosts ?? []) {
     const host = normaliseHost(entry);

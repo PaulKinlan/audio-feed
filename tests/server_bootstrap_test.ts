@@ -104,6 +104,47 @@ Deno.test("a malformed PUBLIC_BASE_URL does not crash boot, and the gate fails c
   }
 });
 
+Deno.test("an ALLOWED_HOSTS list with no usable entry warns at boot and fails closed (audio-feed-4x4t)", async () => {
+  // The bug this pins: the warning condition keyed on the raw ALLOWED_HOSTS array length, so
+  // ["not a host", ""] counted as configured, the warning was suppressed, and the deployment refused
+  // every non-loopback host with a 421 in total silence. Both halves are asserted together because
+  // either one alone is survivable - refusing while warning is defensible, and warning while serving
+  // would be fine - but refusing invisibly is what costs an operator an afternoon. This fails if the
+  // condition is reverted to `.length`, because then nothing is warned at all.
+  const warned: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warned.push(args.map((a) => String(a)).join(" "));
+  };
+  const stores = await openStores({ kvPath: ":memory:" });
+  let booted: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    booted = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      config: { allowedHosts: ["not a host", ""] },
+    });
+
+    assert(
+      warned.some((line) => line.includes("No usable PUBLIC_BASE_URL")),
+      `boot must say that nothing usable is configured; warned: ${JSON.stringify(warned)}`,
+    );
+
+    const refused = await booted.fetch(
+      new Request("https://audio-feed.paulkinlan-ea.deno.net/health", {
+        headers: { host: "audio-feed.paulkinlan-ea.deno.net" },
+      }),
+    );
+    await refused.body?.cancel();
+    assertEquals(refused.status, 421, "and it must still fail closed");
+  } finally {
+    console.warn = original;
+    if (booted) await booted.shutdown();
+  }
+});
+
 Deno.test("a malformed ALLOWED_HOSTS entry is ignored, not fatal (audio-feed-ft74)", async () => {
   const stores = await openStores({ kvPath: ":memory:" });
   const booted = await bootstrap({

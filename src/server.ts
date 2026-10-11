@@ -10,7 +10,7 @@
 
 import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
-import { isUnusableOrigin } from "./origin.ts";
+import { allowedHostSet, isUnusableOrigin } from "./origin.ts";
 import { type AppConfig, loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
@@ -274,9 +274,16 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   const configuredHost = config.publicBaseUrl && !isUnusableOrigin(config.publicBaseUrl)
     ? new URL(config.publicBaseUrl).hostname
     : null;
-  if (!configuredHost && !config.allowedHosts?.length) {
+  // audio-feed-4x4t: key the warning on the USABLE host set, not on the raw ALLOWED_HOSTS array. A list
+  // whose entries are all unusable - ["not a host", ""] - is non-empty but configures nothing, so keying
+  // on `.length` suppressed this warning and left the deployment refusing every non-loopback host in
+  // total silence: fail-closed and invisible, which is exactly the failure the warning exists to prevent.
+  // allowedHostSet is the gate's own notion of "usable", exported for this line so the two cannot drift
+  // apart again.
+  const usableHostCount = allowedHostSet(config).size;
+  if (!configuredHost && usableHostCount === 0) {
     console.warn(
-      "[audio-feed] No usable PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
+      "[audio-feed] No usable PUBLIC_BASE_URL and no usable ALLOWED_HOSTS entry" +
         (deploy ? " on a Deploy deployment" : "") +
         (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
         " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
