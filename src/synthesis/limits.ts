@@ -70,6 +70,13 @@ export class SynthesisYieldError extends Error {
   }
 }
 
+/** Worst-case estimated duration for a single TTS turn in ms (audio-feed-9wqt). */
+export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
+/** Worst-case estimated duration for grounded script generation stage in ms (audio-feed-9wqt). */
+export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
+/** Safety margin reserved for flushing checkpoints, commits, and claim yields in ms (audio-feed-9wqt). */
+export const INVOCATION_FLUSH_MARGIN_MS = 5_000;
+
 /** Limit total paid turns, including a refused output and its smaller replacements.
  * Failed turns are never silently added to the stitched result. */
 export async function runManagedTurns<T, R, S = R>(options: {
@@ -89,7 +96,7 @@ export async function runManagedTurns<T, R, S = R>(options: {
   stitch: (results: R[]) => S;
   /** Optional callback invoked as each turn begins (1-indexed turn, total turns). */
   onProgress?: (turn: number, total: number) => Promise<void> | void;
-  /** Check after a turn completes whether the invocation should yield (audio-feed-vqu4). */
+  /** Preflight check invoked before each turn begins whether the invocation should yield (audio-feed-vqu4, audio-feed-9wqt). */
   shouldYield?: (completedCount: number, totalCount: number) => boolean;
 }): Promise<S> {
   const {
@@ -109,6 +116,16 @@ export async function runManagedTurns<T, R, S = R>(options: {
   let calls = 0;
   for (let index = 0; index < segments.length; index++) {
     const segment = segments[index]!;
+    // Preflight yield check: check BEFORE starting this turn whether the invocation budget can fit it (audio-feed-9wqt)
+    if (shouldYield?.(results.length, segments.length)) {
+      throw new SynthesisYieldError(
+        results.length,
+        segments.length,
+        `Synthesis yielded before turn ${
+          index + 1
+        }/${segments.length} to respect invocation budget`,
+      );
+    }
     if (onProgress) {
       await onProgress(index + 1, segments.length);
     }
@@ -126,14 +143,6 @@ export async function runManagedTurns<T, R, S = R>(options: {
       segments.splice(index, 1, ...replacement);
       index--;
       continue;
-    }
-    // Check if the invocation has reached its budget and should yield before starting the next turn
-    if (index + 1 < segments.length && shouldYield?.(results.length, segments.length)) {
-      throw new SynthesisYieldError(
-        results.length,
-        segments.length,
-        `Synthesis yielded after ${results.length}/${segments.length} segments to respect invocation budget`,
-      );
     }
   }
   return stitch(results);

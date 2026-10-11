@@ -39,6 +39,7 @@
 import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
 import {
   DEFAULT_NARRATION_VOICE,
+  DEFAULT_TIMEOUT_MS,
   formatCodeForTts,
   GeminiTtsClient,
   GeminiTtsError,
@@ -75,7 +76,12 @@ import {
   DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
   DEFAULT_MAX_INVOCATION_DURATION_MS,
 } from "../config.ts";
-import { SynthesisYieldError } from "../synthesis/limits.ts";
+import {
+  ESTIMATED_SCRIPT_STAGE_DURATION_MS,
+  ESTIMATED_TTS_TURN_DURATION_MS,
+  INVOCATION_FLUSH_MARGIN_MS,
+  SynthesisYieldError,
+} from "../synthesis/limits.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -97,13 +103,16 @@ export type Synthesizer = (job: {
    */
   resume?: SegmentResume;
   /**
-   * Invocation budget constraints (audio-feed-vqu4).
+   * Invocation budget constraints (audio-feed-vqu4, audio-feed-9wqt).
    * When limits are reached, synthesis yields cleanly with SynthesisYieldError.
    */
   invocationBudget?: {
     maxSegments?: number;
     maxDurationMs?: number;
     startTimeMonotonicMs?: number;
+    estimatedTurnDurationMs?: number;
+    estimatedScriptDurationMs?: number;
+    flushMarginMs?: number;
   };
 }) => Promise<DecodedAudioResult>;
 
@@ -514,6 +523,10 @@ export function createGeminiSynthesizer(
     scriptGenerator?: ScriptGenerator | null;
     /** Whole-stage deadline across continued turns; see DEFAULT_SCRIPT_STAGE_TIMEOUT_MS. */
     scriptTimeoutMs?: number;
+    perTurnTimeoutMs?: number;
+    estimatedScriptDurationMs?: number;
+    estimatedTurnDurationMs?: number;
+    flushMarginMs?: number;
   } = {},
 ): Synthesizer {
   const client = deps.client ?? new GeminiTtsClient(ttsClientConfig(ctx.config));
@@ -570,20 +583,31 @@ export function createGeminiSynthesizer(
       ) {
         return true;
       }
+      // Preflight check before each turn: does remaining budget fit next turn + flush margin? (audio-feed-9wqt)
       if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-        if (
-          performance.now() - invocationBudget.startTimeMonotonicMs >=
-            invocationBudget.maxDurationMs
-        ) {
+        const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+        const remaining = invocationBudget.maxDurationMs - elapsed;
+        const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+          deps.estimatedTurnDurationMs ??
+          ESTIMATED_TTS_TURN_DURATION_MS;
+        const flushMargin = invocationBudget.flushMarginMs ??
+          deps.flushMarginMs ??
+          INVOCATION_FLUSH_MARGIN_MS;
+        if (remaining < turnEstimate + flushMargin) {
           return true;
         }
       }
       return false;
     };
 
+    const perTurnDeadlineMs = Math.min(
+      deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+      invocationBudget?.maxDurationMs ?? Infinity,
+    );
     const ttsOptions = {
       ...(leaseSignal ? { signal: leaseSignal } : {}),
       ...(wrappedResume ? { resume: wrappedResume } : (resume ? { resume } : {})),
+      timeoutMs: perTurnDeadlineMs,
       onProgress,
       shouldYield,
     };
@@ -605,6 +629,26 @@ export function createGeminiSynthesizer(
       // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
       let turns = episode.scriptTurns;
       if (!turns || turns.length === 0) {
+        // Preflight check before script stage (audio-feed-9wqt):
+        if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+          const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+          const remaining = invocationBudget.maxDurationMs - elapsed;
+          const scriptEstimate = invocationBudget.estimatedScriptDurationMs ??
+            deps.estimatedScriptDurationMs ??
+            ESTIMATED_SCRIPT_STAGE_DURATION_MS;
+          const flushMargin = invocationBudget.flushMarginMs ??
+            deps.flushMarginMs ??
+            INVOCATION_FLUSH_MARGIN_MS;
+          if (remaining < scriptEstimate + flushMargin) {
+            throw new SynthesisYieldError(
+              0,
+              0,
+              `Preflight yield before script generation: remaining budget ${
+                Math.round(remaining)
+              }ms < required ${scriptEstimate + flushMargin}ms`,
+            );
+          }
+        }
         if (claimedBy) {
           await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
             phase: "generating_script",
@@ -643,19 +687,24 @@ export function createGeminiSynthesizer(
           // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
           episode.scriptTurns = turns;
 
-          // audio-feed-vqu4: if time budget was consumed by script generation, yield now
-          if (
-            invocationBudget?.maxDurationMs &&
-            invocationBudget?.startTimeMonotonicMs
-          ) {
-            if (
-              performance.now() - invocationBudget.startTimeMonotonicMs >=
-                invocationBudget.maxDurationMs
-            ) {
+          // audio-feed-9wqt: preflight check before first dialogue turn:
+          // ensure remaining time fits at least one turn + flush margin
+          if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+            const remaining = invocationBudget.maxDurationMs - elapsed;
+            const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+              deps.estimatedTurnDurationMs ??
+              ESTIMATED_TTS_TURN_DURATION_MS;
+            const flushMargin = invocationBudget.flushMarginMs ??
+              deps.flushMarginMs ??
+              INVOCATION_FLUSH_MARGIN_MS;
+            if (remaining < turnEstimate + flushMargin) {
               throw new SynthesisYieldError(
                 0,
                 turns.length,
-                "Script generated; yielding stage to respect invocation budget",
+                `Script generated; yielding before first turn: remaining budget ${
+                  Math.round(remaining)
+                }ms < required ${turnEstimate + flushMargin}ms`,
               );
             }
           }
@@ -1120,6 +1169,15 @@ export async function runSynthesisBatch(
       }`;
       result.deferred.push({ episodeId: episode.id, reason });
       continue;
+    }
+
+    // Preflight check before claiming: ensure remaining batch time fits at least one turn + flush margin (audio-feed-9wqt)
+    if (maxInvocationDurationMs) {
+      const elapsed = performance.now() - invocationStartMonotonicMs;
+      const remaining = maxInvocationDurationMs - elapsed;
+      if (remaining < ESTIMATED_TTS_TURN_DURATION_MS + INVOCATION_FLUSH_MARGIN_MS) {
+        break;
+      }
     }
 
     // Claim just-in-time, not at gather time. Claiming all five up front would

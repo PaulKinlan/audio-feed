@@ -14,6 +14,7 @@ import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts"
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { runManagedTurns, SynthesisYieldError } from "../src/synthesis/limits.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -708,4 +709,93 @@ Deno.test("audio-feed-vqu4: long synthesis completes across multiple bounded tic
   // Assert blob store holds the final assembled audio
   const finalBlob = await stores.blobs.get(epFinal.audioKey);
   assert(finalBlob, "final audio blob exists in blob store");
+});
+
+Deno.test("audio-feed-9wqt: (1) reviewer repro: preflight check yields BEFORE turn 2 starts (turns recorded = 1, not 2)", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  let yieldError: unknown = null;
+  try {
+    await runManagedTurns({
+      segments: [44, 20, 5],
+      maxTurns: 3,
+      request: (duration) => {
+        turns.push({ startedAt: ms, duration });
+        ms += duration;
+        return Promise.resolve(duration);
+      },
+      stitch: (parts) => parts,
+      // Preflight decision: does remaining budget fit next turn (20ms) + flush margin (5ms)?
+      // Here max budget is 45ms. After turn 1 (44ms), remaining is 1ms < 25ms -> should yield!
+      shouldYield: () => {
+        const remaining = 45 - ms;
+        return remaining < 20 + 5;
+      },
+    });
+  } catch (e) {
+    yieldError = e;
+  }
+
+  assert(yieldError instanceof SynthesisYieldError, "must throw SynthesisYieldError");
+  assertEquals(yieldError.completedTurns, 1, "completed turns must be 1");
+  assertEquals(turns.length, 1, "turn 2 MUST NOT have started (preflight abort!)");
+  assertEquals(turns[0], { startedAt: 0, duration: 44 });
+  assertEquals(ms, 44, "clock must be 44ms, NOT 64ms (turn 2 was never executed!)");
+});
+
+Deno.test("audio-feed-9wqt: (2) first turn exceeds budget: preflight yields before turn 1 starts (0 turns, 0 paid calls)", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  let yieldError: unknown = null;
+  try {
+    await runManagedTurns({
+      segments: [30, 20],
+      maxTurns: 2,
+      request: (duration) => {
+        turns.push({ startedAt: ms, duration });
+        ms += duration;
+        return Promise.resolve(duration);
+      },
+      stitch: (parts) => parts,
+      // Budget is 20ms. Required for turn 1 is 30ms + 5ms = 35ms. 20 < 35 -> yields immediately!
+      shouldYield: () => {
+        const remaining = 20 - ms;
+        return remaining < 30 + 5;
+      },
+    });
+  } catch (e) {
+    yieldError = e;
+  }
+
+  assert(yieldError instanceof SynthesisYieldError);
+  assertEquals(yieldError.completedTurns, 0, "completed turns must be 0");
+  assertEquals(turns.length, 0, "no turn was started (0 paid calls!)");
+  assertEquals(ms, 0, "no duration elapsed");
+});
+
+Deno.test("audio-feed-9wqt: (3) short work still completes in one invocation", async () => {
+  let ms = 0;
+  const turns: Array<{ startedAt: number; duration: number }> = [];
+
+  const result = await runManagedTurns({
+    segments: [5, 5, 5],
+    maxTurns: 3,
+    request: (duration) => {
+      turns.push({ startedAt: ms, duration });
+      ms += duration;
+      return Promise.resolve(duration);
+    },
+    stitch: (parts) => parts,
+    // Budget 45ms. Each turn is 5ms + 5ms margin = 10ms. 45ms easily fits all three turns!
+    shouldYield: () => {
+      const remaining = 45 - ms;
+      return remaining < 5 + 5;
+    },
+  });
+
+  assertEquals(result, [5, 5, 5], "all 3 turns completed and stitched");
+  assertEquals(turns.length, 3, "all 3 turns executed");
+  assertEquals(ms, 15, "total duration was 15ms");
 });
