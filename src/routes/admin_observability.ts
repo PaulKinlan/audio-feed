@@ -210,6 +210,18 @@ export async function handleAdminObservability(
       }".</span>`
       : String(value);
 
+  // audio-feed-yrg4 (found by an m11b-class sweep over aqms's new Retrying table): the reason cell is
+  // sourced from the LOG store while the section only gated on the QUEUE read, so an unreadable log store
+  // rendered a silent blank where a reason should be - the same "an absence reads as health" shape as the
+  // counts above. Three states, in the same shape as countCell: a reason, "could not read", or "none
+  // recorded" - never an empty cell whose meaning the operator has to guess.
+  const retryReasonCell = (retry: { lastRetryReason?: string }) =>
+    retry.lastRetryReason
+      ? esc(retry.lastRetryReason)
+      : logsUnreadable
+      ? `<strong>Unavailable — the log store could not be read</strong>`
+      : `<span class="muted">no reason recorded</span>`;
+
   // A read that failed is stated BEFORE the sections it affects (audio-feed-ciuw). The operator must
   // never have to infer "unreadable" from a zero, because a zero is what a healthy empty deployment
   // looks like - and that confusion is what sends an incident investigation the wrong way.
@@ -280,7 +292,11 @@ export async function handleAdminObservability(
       ? `<p>The queue could not be read, so this list means nothing — see the notice above.</p>`
       : report.retries.length === 0
       ? `<p>No yielded claims in the pending queue.</p>`
-      : `<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
+      : `${
+        logsUnreadable
+          ? `<p><strong>The log store could not be read</strong>, so a missing reason below means "could not read", not "none recorded".</p>`
+          : ""
+      }<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
         report.retries.map((retry) => {
           const age = retry.waitingMs >= 60_000
             ? `${Math.round(retry.waitingMs / 60_000)} min`
@@ -288,7 +304,7 @@ export async function handleAdminObservability(
           const title = report.episodes[retry.episodeId]?.title ?? retry.title ?? retry.episodeId;
           return `<tr><td>${esc(title)}</td><td>${esc(retry.phase)}</td><td>${
             esc(String(retry.attempts ?? "?"))
-          }</td><td>${esc(age)}</td><td>${esc(retry.lastRetryReason ?? "")}</td></tr>`;
+          }</td><td>${esc(age)}</td><td>${retryReasonCell(retry)}</td></tr>`;
         }).join("")
       }</tbody></table>`
   }
@@ -321,7 +337,9 @@ export async function handleAdminObservability(
       names the sequence range it read.</li>
       <li><strong>"Retrying" rows come from the pending queue snapshot</strong>, capped like the
       queue card, and name the episode's durable phase — a yielded attempt is never a terminal
-      write. The reason quoted there is the worker's recorded prose; the verdict is the state.</li>
+      write. The reason quoted there is the worker's recorded prose - it is read from the log store, so
+      when that store is unreadable the cell says so instead of rendering blank (audio-feed-yrg4) - and the
+      verdict is the state.</li>
       <li><strong>Unhandled request errors record their class, not their message.</strong> A thrown
       message can quote the request that caused it, which is how a client-chosen string would reach
       the store, so the message is deliberately not stored. For those, take the correlation id and
