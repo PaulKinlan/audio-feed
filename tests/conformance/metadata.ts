@@ -24,7 +24,7 @@ import { registerNotificationsCases } from "./metadata/notifications.ts";
 import { registerAuthCases } from "./metadata/auth.ts";
 import { registerSegmentsCases } from "./metadata/segments.ts";
 import { registerRepositoriesCases } from "./metadata/repositories.ts";
-import { registerLogsCases } from "./metadata/logs.ts";
+import { registerLifecycleLogCases, registerLogsCases } from "./metadata/logs.ts";
 
 export type { MetadataSuiteOptions };
 
@@ -42,4 +42,5 @@ export function runMetadataConformance(options: MetadataSuiteOptions) {
   registerSegmentsCases(suite);
   registerRepositoriesCases(suite);
   registerLogsCases(suite);
+  registerLifecycleLogCases(suite);
 }

@@ -647,7 +647,7 @@ export interface AuthRepository {
 export type LogSeverity = "debug" | "info" | "warn" | "error";
 
 /** Which process wrote a record. One shape covers all of them, deliberately. */
-export type LogProcess = "app" | "worker" | "cron" | "queue" | "cli";
+export type LogProcess = "app" | "worker" | "cron" | "queue" | "cli" | "storage";
 
 /**
  * One structured log record, the same shape from every process.

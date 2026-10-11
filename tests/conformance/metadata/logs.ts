@@ -9,6 +9,7 @@
 
 import type { MetadataHarness } from "./harness.ts";
 import { assert, assertEquals } from "@std/assert";
+import { makeEpisode, makeUser } from "../../fixtures.ts";
 import {
   MAX_LOG_CONTEXT_LENGTH,
   MAX_LOG_MESSAGE_LENGTH,
@@ -144,5 +145,151 @@ export function registerLogsCases(suite: MetadataHarness) {
     const stored = await store.appendLog(rec({ time: "not a date" }));
     assert(stored);
     assert(!Number.isNaN(Date.parse(stored.time)));
+  });
+}
+
+/**
+ * The lifecycle records (audio-feed-wzv9, for the siv1 defect).
+ *
+ * These are the acceptance cases for the thing this store was built for: the two failed demos on
+ * 2026-10-09 were abandoned with "no claim recorded a cause" because NOTHING durable was written
+ * between a claim and its terminal write. Each case below fails if that gap comes back.
+ */
+export function registerLifecycleLogCases(suite: MetadataHarness) {
+  const { test } = suite;
+
+  async function seedEpisode(store: Parameters<Parameters<MetadataHarness["test"]>[1]>[0]) {
+    const user = makeUser({
+      id: "user-wzv9",
+      email: "wzv9@example.com",
+      status: "approved",
+      feedToken: "token-wzv9",
+    });
+    await store.putUser(user);
+    const episode = makeEpisode({
+      id: "epi-wzv9",
+      userId: user.id,
+      status: "pending",
+      title: "A demo that records why it died",
+      createdAt: "2026-10-11T09:00:00.000Z",
+    });
+    await store.putEpisode(episode);
+    return { user, episode };
+  }
+
+  const claim = {
+    now: "2026-10-11T09:05:00.000Z",
+    leaseMs: 60_000,
+    owner: "worker-abc",
+    maxClaims: 3,
+  };
+
+  test("a claim is durable before any work starts", async (store) => {
+    const { episode } = await seedEpisode(store);
+    const claimed = await store.claimEpisode(episode.userId, episode.id, claim);
+    assert(claimed, "the claim succeeded");
+
+    const records = await store.listLogs();
+    const event = records.find((r) => r.type === "synthesis.claim");
+    assert(event, "the claim left a record");
+    assertEquals(event.severity, "info");
+    // The siv1 triple: which attempt, which phase, and enough identity to join it to everything
+    // else about this episode.
+    assertEquals(event.attempt, 1);
+    assertEquals(event.phase, "claimed");
+    assertEquals(event.episodeId, episode.id);
+    assertEquals(event.userId, episode.userId);
+    assertEquals(event.correlationId, episode.id);
+    assertEquals(event.job, "synthesis");
+  });
+
+  test("a claim with no terminal record is readable as a death, not a no-op", async (store) => {
+    // Exactly the siv1 situation: claim, then the process is gone. Nothing completes the episode.
+    const { episode } = await seedEpisode(store);
+    await store.claimEpisode(episode.userId, episode.id, claim);
+
+    const records = await store.listLogs();
+    assertEquals(records.map((r) => r.type), ["synthesis.claim"]);
+    // The episode itself is still "synthesizing" and will look that way until the lease expires —
+    // which is precisely why the log has to be the thing that explains it.
+    const after = await store.getEpisode(episode.userId, episode.id);
+    assertEquals(after?.status, "synthesizing");
+  });
+
+  test("a finished synthesis records its outcome and how long it took", async (store) => {
+    const { episode } = await seedEpisode(store);
+    const claimed = await store.claimEpisode(episode.userId, episode.id, claim);
+    assert(claimed);
+    await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "audio/whatever", byteLength: 1234 },
+      claim.owner,
+    );
+
+    const records = await store.listLogs();
+    const terminal = records.find((r) => r.type === "synthesis.ready");
+    assert(terminal, "the terminal outcome was recorded");
+    assertEquals(terminal.severity, "info");
+    assertEquals(terminal.phase, "terminal");
+    assert(typeof terminal.durationMs === "number", "a trace duration");
+    // Claim and terminal share the correlation id: one episode, one story.
+    const claimRecord = records.find((r) => r.type === "synthesis.claim");
+    assertEquals(claimRecord?.correlationId, terminal.correlationId);
+  });
+
+  test("a failed synthesis records the reason", async (store) => {
+    const { episode } = await seedEpisode(store);
+    const claimed = await store.claimEpisode(episode.userId, episode.id, claim);
+    assert(claimed);
+    await store.completeEpisode(
+      { ...claimed, status: "failed", error: "TTS provider returned 503 after 3 attempts" },
+      claim.owner,
+    );
+
+    const terminal = (await store.listLogs()).find((r) => r.type === "synthesis.failed");
+    assert(terminal, "the failure was recorded");
+    assertEquals(terminal.severity, "error");
+    assertEquals(terminal.reason, "TTS provider returned 503 after 3 attempts");
+  });
+
+  test("an abandonment records WHY, which is the sentence the old code could not state", async (store) => {
+    const { episode } = await seedEpisode(store);
+    // Burn the claim budget: each claim ends without a terminal write, exactly as in production.
+    // Each retry has to wait for the previous lease to expire, which is what makes a dead claim
+    // distinguishable from a live one — and what let three claims die in production unnoticed.
+    const base = Date.parse(claim.now);
+    for (let i = 1; i <= 3; i++) {
+      const claimed = await store.claimEpisode(episode.userId, episode.id, {
+        ...claim,
+        now: new Date(base + i * 120_000).toISOString(),
+      });
+      assert(claimed, `claim ${i} succeeded`);
+    }
+    // The fourth attempt is the one that abandons rather than re-billing.
+    assertEquals(
+      await store.claimEpisode(episode.userId, episode.id, {
+        ...claim,
+        now: new Date(base + 4 * 120_000).toISOString(),
+      }),
+      null,
+    );
+
+    const records = await store.listLogs();
+    const abandoned = records.find((r) => r.type === "synthesis.abandoned");
+    assert(abandoned, "the abandonment was recorded");
+    assertEquals(abandoned.severity, "error");
+    assertEquals(abandoned.phase, "abandoned");
+    assert(abandoned.reason && abandoned.reason.length > 0, "an abandonment must carry a reason");
+    // The reason must name the mechanism, because that is the diagnosis: the claims ended before
+    // their terminal write rather than failing in the narration.
+    assert(
+      abandoned.reason!.includes("before its terminal write") ||
+        abandoned.reason!.includes("last recorded error"),
+      `the reason explains the mechanism: ${abandoned.reason}`,
+    );
+    // And the three claims are still visible, which is what turns "no cause" into a timeline.
+    assertEquals(
+      records.filter((r) => r.type === "synthesis.claim").length,
+      3,
+    );
   });
 }
