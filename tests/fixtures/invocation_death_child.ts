@@ -15,9 +15,11 @@
  *           episode is out of claims, so this round observes the abandonment,
  *           and the script prints the final episode record as JSON.
  *
- * Timings are shrunken (lease 1500ms, budget 4000ms) but the ORDER of events is
- * production-faithful: claim -> checkpoint uploading_audio -> await put -> death
- * with the wrapper's deadline timer still in the future.
+ * Timings are shrunken (lease 1500ms; budget 4000ms in the survive control, 30000ms
+ * in the hang rounds - a deliberately widened kill window, see the batch options)
+ * but the ORDER of events is production-faithful: claim -> checkpoint
+ * uploading_audio -> await put -> death with the wrapper's deadline timer still in
+ * the future.
  */
 import { KvMetadataStore } from "../../src/storage/kv.ts";
 import type { BlobInfo, BlobObject, BlobStore } from "../../src/storage/mod.ts";
@@ -128,9 +130,18 @@ const batchPromise = runSynthesisBatch(ctx, synth, {
   batchSize: 1,
   // Production shape, shrunken: a lease that outlives the kill, a budget whose
   // deadline timer is still seconds away when the process dies mid-put.
+  // audio-feed-y2ex: the budget is MODE-DEPENDENT, and the hang rounds' 30s is a
+  // deliberately WIDENED bound, not a tight one. The hang rounds' real coupling is
+  // PARENT-SIDE: the parent SIGKILLs at the marker, and if the parent stalls past the
+  // child's deadline the child budget-yields BEFORE the kill and the abandonment
+  // assertion misreads. Order cannot be asserted across a SIGKILL, so the window
+  // widens (~30s marker-to-kill allowance) while the property stays exactly what it
+  // was: death mid-put, no terminal write. The SURVIVE control keeps 4s because its
+  // whole point is the deadline FIRING. Do not tighten the 30s back - it is not a
+  // measurement, it is headroom against a loaded box.
   leaseMs: 1_500,
   maxClaims: 3,
-  maxInvocationDurationMs: 4_000,
+  maxInvocationDurationMs: mode === "hang" ? 30_000 : 4_000,
   flushMarginMs: 500,
   estimatedTurnDurationMs: 1,
   estimatedUploadDurationMs: 5,
