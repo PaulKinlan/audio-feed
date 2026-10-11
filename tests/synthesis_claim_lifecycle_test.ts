@@ -79,10 +79,11 @@ Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, re
   });
   assert(claim2);
   assertEquals(claim2.attempts, 2);
-  // Verify that attempt 1's death and phase are preserved in the episode's error record
+  // Verify that attempt 1's expiry and phase are preserved in the episode's error record
   assert(claim2.error?.includes("worker-1"));
   assert(claim2.error?.includes("synthesizing_segment_1_of_4"));
-  assert(claim2.error?.includes("died before terminal write"));
+  assert(claim2.error?.includes("lease expired without terminal write"));
+  assert(!claim2.error?.includes("died"));
 
   // Worker 2 advances to segment 3, then isolate is killed again
   await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "worker-2", {
@@ -102,6 +103,7 @@ Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, re
   assert(claim3.error?.includes("worker-1"));
   assert(claim3.error?.includes("worker-2"));
   assert(claim3.error?.includes("synthesizing_segment_3_of_4"));
+  assert(claim3.error?.includes("lease expired without terminal write"));
 
   // Worker 3 advances to uploading_audio, then isolate dies
   await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "worker-3", {
@@ -128,17 +130,57 @@ Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, re
   // Must persist WHY: reason + phase + attempt count
   const error = episode.error ?? "";
   assertStringIncludes(error, "abandoned after 3 attempts");
-  assertStringIncludes(error, "worker died before terminal write");
+  assertStringIncludes(error, "claim lease expired without terminal write");
   assertStringIncludes(error, 'in phase "uploading_audio"');
   assertStringIncludes(error, "synthesizing_segment_1_of_4");
   assertStringIncludes(error, "synthesizing_segment_3_of_4");
   assertStringIncludes(error, "worker-1");
   assertStringIncludes(error, "worker-2");
   assertStringIncludes(error, "worker-3");
+  assert(!error.includes("died"), "must never assert death when only lease expired");
   assert(
     !error.includes("no claim recorded a cause"),
     "must never report 'no claim recorded a cause'",
   );
+});
+
+Deno.test("audio-feed-kd5r: live heartbeat near lease expiry is reported as lease expiry, not worker death", async () => {
+  const { stores } = await setupEnv();
+
+  // Claim at 14:00:00Z with 15-minute lease (900000ms)
+  const claim1 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-live",
+    now: "2026-10-11T14:00:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claim1);
+
+  // Active heartbeat 1 second before lease expiry at 14:14:59Z
+  const touched = await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "worker-live", {
+    phase: "synthesizing_segment_2_of_4",
+    now: "2026-10-11T14:14:59.000Z",
+  });
+  assertEquals(touched, true, "live worker successfully heartbeats before expiry");
+
+  // At 14:15:00Z, lease expires and another worker claims
+  const claim2 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-other",
+    now: "2026-10-11T14:15:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claim2);
+  assertEquals(claim2.attempts, 2);
+
+  // Assert recorded cause reports observed facts: lease expiry, last heartbeat, last phase
+  // MUST NOT assert death
+  const err = claim2.error ?? "";
+  assertStringIncludes(err, "lease expired without terminal write");
+  assertStringIncludes(err, 'phase "synthesizing_segment_2_of_4"');
+  assertStringIncludes(err, "last heartbeat 2026-10-11T14:14:59.000Z");
+  assertStringIncludes(err, "worker state unknown");
+  assert(!err.includes("died"), "must not assert worker death for active heartbeat");
 });
 
 Deno.test("audio-feed-siv1: deepdive mode persists scriptTurns so retries resume without regenerating script (across claims and within claim)", async () => {

@@ -192,8 +192,9 @@ export function createEpisodesRepository(
       const attempts = (found.attempts ?? 0) + 1;
       const prior = typeof found.error === "string" && found.error.length > 0 ? found.error : null;
 
-      // audio-feed-siv1: If previous claim expired before its terminal write,
-      // record its failure reason, phase, attempt count, and last heartbeat.
+      // audio-feed-siv1 / audio-feed-kd5r: If previous claim expired before its terminal write,
+      // record observed facts: expiry, last heartbeat, phase, and attempt count.
+      // Never claim "worker died" or "isolate killed" as fact when only lease expiry is known.
       const expiredPhase = found.phase ?? "claimed";
       const expiredHeartbeat = found.lastHeartbeat ?? found.claimedAt ?? "unknown";
       const expiredAttempt = found.attempts ?? 1;
@@ -201,7 +202,7 @@ export function createEpisodesRepository(
         ? `by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
         : "no claim details";
       const expiredMsg =
-        `claim ${expiredAttempt} (${expiredProvenance}) died before terminal write in phase "${expiredPhase}" (last heartbeat ${expiredHeartbeat})`;
+        `claim ${expiredAttempt} (${expiredProvenance}) lease expired without terminal write in phase "${expiredPhase}" (last heartbeat ${expiredHeartbeat}); worker state unknown (stopped, evicted, or running)`;
       const accumulatedError = isExpired
         ? (prior && prior.includes(expiredMsg)
           ? prior
@@ -211,11 +212,11 @@ export function createEpisodesRepository(
       if (attempts > claim.maxClaims) {
         // Abandon rather than re-bill: an input that keeps killing its host would
         // otherwise be re-claimed forever on lease expiry.
-        // audio-feed-siv1 / audio-feed-bp6r: persist WHY the episode failed:
+        // audio-feed-siv1 / audio-feed-kd5r / audio-feed-bp6r: persist WHY the episode failed:
         // reason + phase + attempt count + provenance + attempt history.
         const abandonedReason = accumulatedError
-          ? `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}"; history: [${accumulatedError}]`
-          : `abandoned after ${claim.maxClaims} attempts; reason: worker died before terminal write in phase "${expiredPhase}" (${expiredProvenance})`;
+          ? `abandoned after ${claim.maxClaims} attempts; reason: claim lease expired without terminal write in phase "${expiredPhase}"; history: [${accumulatedError}]`
+          : `abandoned after ${claim.maxClaims} attempts; reason: claim lease expired without terminal write in phase "${expiredPhase}" (${expiredProvenance}); worker state unknown (stopped, evicted, or running)`;
 
         removePendingPointer(state, found);
         removeSortedIndex(state.synthesizingIndex, oldSortKey);

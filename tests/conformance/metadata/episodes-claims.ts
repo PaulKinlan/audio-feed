@@ -194,7 +194,8 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const stored = await store.getEpisode("user-1", "e1");
     assertEquals(stored?.status, "failed");
     assert(stored?.error?.includes("abandoned after 3 attempts"), stored?.error);
-    assert(stored?.error?.includes("died before terminal write"), stored?.error);
+    assert(stored?.error?.includes("lease expired without terminal write"), stored?.error);
+    assert(!stored?.error?.includes("died"), "must not assert death when only lease expired");
     assert(stored?.error?.includes("worker-a"), stored?.error);
   });
 
@@ -250,9 +251,48 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     assert(stored?.error?.includes('in phase "uploading_audio"'), stored?.error);
     assert(stored?.error?.includes("synthesizing_segment_1_of_4"), stored?.error);
     assert(stored?.error?.includes("synthesizing_segment_2_of_4"), stored?.error);
+    assert(stored?.error?.includes("lease expired without terminal write"), stored?.error);
+    assert(!stored?.error?.includes("died"), "must not assert death when only lease expired");
     assert(stored?.error?.includes("worker-a"), stored?.error);
     assert(stored?.error?.includes("worker-b"), stored?.error);
     assert(stored?.error?.includes("worker-c"), stored?.error);
+  });
+
+  test("live heartbeat near lease expiry is reported as lease expiry, not worker death (audio-feed-kd5r)", async (store) => {
+    await store.putEpisode(queued());
+
+    // Claim at 14:00:00Z with 15-minute lease (900000ms)
+    const claim1 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-live",
+      now: "2026-10-11T14:00:00.000Z",
+    });
+    assert(claim1);
+
+    // Active heartbeat 1 second before lease expiry at 14:14:59Z
+    const touched = await store.touchEpisodeClaim("user-1", "e1", "worker-live", {
+      phase: "synthesizing_segment_2_of_4",
+      now: "2026-10-11T14:14:59.000Z",
+    });
+    assertEquals(touched, true, "live worker successfully heartbeats before expiry");
+
+    // At 14:15:00Z, lease expires and another worker claims
+    const claim2 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-other",
+      now: "2026-10-11T14:15:00.000Z",
+    });
+    assert(claim2);
+    assertEquals(claim2.attempts, 2);
+
+    // Assert recorded cause reports observed facts: lease expiry, last heartbeat, last phase
+    // MUST NOT assert death
+    const err = claim2.error ?? "";
+    assert(err.includes("lease expired without terminal write"), err);
+    assert(err.includes('phase "synthesizing_segment_2_of_4"'), err);
+    assert(err.includes("last heartbeat 2026-10-11T14:14:59.000Z"), err);
+    assert(err.includes("worker state unknown"), err);
+    assert(!err.includes("died"), "must not assert worker death for active heartbeat");
   });
 
   test("touchEpisodeClaim rejects non-owner or non-synthesizing caller (audio-feed-siv1)", async (store) => {
