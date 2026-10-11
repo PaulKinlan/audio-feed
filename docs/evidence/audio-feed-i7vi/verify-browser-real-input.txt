@@ -1,0 +1,44 @@
+[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[audio-feed] No usable PUBLIC_BASE_URL and no usable ALLOWED_HOSTS entry on a Deploy deployment — the host gate REFUSES every non-loopback host (421), because a deployment that cannot name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the public origin; ALLOWED_HOSTS only adds extra hosts.
+[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
+[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
+Listening on http://0.0.0.0:45897/ (http://localhost:45897/)
+[s3uk] Server started at http://localhost:45897/
+PASS  headless Chrome started and reported debugging port  — port 44571
+PASS  page target available
+[s3uk] Found interaction target: <INPUT id="request-email"> at (108.5, 218.140625)
+[s3uk] Dispatching trusted pointer interaction (click into input)...
+[s3uk] Dispatching trusted keyboard interaction (key press)...
+[s3uk] Dispatching trusted held-key sequence (key repeat)...
+[s3uk] Dispatched DOM events: 8
+PASS  all dispatched DOM events have isTrusted === true  — 8/8
+PASS  session received both pointerdown and keydown DOM events
+[s3uk] Event Timing entries recorded: 16
+  entry: pointerover duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: pointerenter duration=24ms interactionId=0
+  entry: mouseover duration=24ms interactionId=0
+  entry: pointerdown duration=24ms interactionId=537
+  entry: mousedown duration=24ms interactionId=0
+  entry: pointerup duration=24ms interactionId=537
+  entry: mouseup duration=24ms interactionId=0
+  entry: click duration=24ms interactionId=537
+[s3uk] Distinct non-zero interactionIds: 537
+PASS  Event Timing assigned interactionId to interactions  — 1 distinct ID(s)
+PASS  globalThis.cwvState is exposed and returns observed latencies
+[s3uk] cwvState.observed(): [24]
+[s3uk] Navigating away to trigger pagehide beacon flush...
+[s3uk] cwv.report records received in KV store: 2
+  report: metric=lcp value=184 page=home
+  report: metric=inp value=24 page=home
+PASS  cwv.report records persisted to metadata store  — 2 report(s)
+
+ALL INP INTERACTION VERIFICATION CHECKS PASSED.
