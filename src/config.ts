@@ -117,7 +117,11 @@ export interface AppConfig {
    * WebAuthn RP ID, since that derives from the advertised origin's hostname.
    * Unset, the gate still runs from `publicBaseUrl` alone; with neither value
    * set the set is empty and every non-loopback host is refused, so the app no
-   * longer keeps the request-derived origin behaviour of audio-feed-0k3. The
+   * longer keeps the request-derived origin behaviour of audio-feed-0k3. An
+   * EMPTY set is answered `500 server_misconfigured` naming `PUBLIC_BASE_URL`,
+   * because that state is a deployment that cannot name its own host rather than
+   * a misdirected request (audio-feed-3k2d); a non-empty set that does not
+   * contain the request host is still `421 Misdirected Request`. The
    * `publicBaseUrl` host is implicitly allowed; loopback always is.
    */
   allowedHosts?: string[];

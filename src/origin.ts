@@ -198,6 +198,36 @@ export function requestHostAllowed(config: OriginConfig, request: Request): bool
   return !effective.forwarded && isLoopbackHost(effective.host);
 }
 
+/**
+ * WHY the host gate is refusing this request, or `null` when it is allowed.
+ *
+ * Two refusals that used to be one response, and must never be confused
+ * (audio-feed-3k2d):
+ *
+ *  - `"unconfigured"` — the allowed set is EMPTY, i.e. neither PUBLIC_BASE_URL
+ *    nor a usable ALLOWED_HOSTS entry exists. Nothing can ever match, so the
+ *    fault is the deployment's configuration and the operator must be told
+ *    which variable is missing. This is the live incident in audio-feed-du8w:
+ *    the deployment answered a bare 421 `misdirected_request` to every visitor,
+ *    including the operator, which reads as "you asked for the wrong host" when
+ *    the truth was "this server cannot name its own host".
+ *  - `"misdirected"` — the deployment DOES know the hosts it serves and this
+ *    request arrived on a different one. That is the spoofed-Host case the gate
+ *    exists for (audio-feed-fp4r) and it stays a 421.
+ *
+ * The refusal itself is unchanged and still fail-closed: both cases refuse. Only
+ * the diagnosis differs, because a diagnosis the reader cannot act on is not a
+ * diagnosis. Do NOT collapse these back into one status: the empty set must
+ * never derive a host from the request to make itself look configured.
+ */
+export function hostGateRefusal(
+  config: OriginConfig,
+  request: Request,
+): "unconfigured" | "misdirected" | null {
+  if (requestHostAllowed(config, request)) return null;
+  return allowedHostSet(config).size === 0 ? "unconfigured" : "misdirected";
+}
+
 /** Strip trailing slashes so concatenation never produces `//feed`. */
 function normalise(origin: string): string {
   return origin.replace(/\/+$/, "");

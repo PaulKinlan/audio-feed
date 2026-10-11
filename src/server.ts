@@ -284,14 +284,24 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // lines so the log and the gate cannot drift apart again.
   const usableHostCount = allowedHostSet(config).size;
   if (!configuredHost && usableHostCount === 0) {
-    console.warn(
+    // audio-feed-3k2d: this state is the live outage of audio-feed-du8w — an unconfigured Deploy
+    // deployment that answers every visitor with a refusal naming nothing they can fix. It stays a
+    // warning rather than a thrown assertion because audio-feed-ft74 established that bad
+    // configuration must never be fatal at boot (and a boot crash on Deploy can be rolled back to
+    // the previous version, leaving the operator no diagnostic at all). What changed is the level on
+    // a real deployment: this is error-level there, because the deployment cannot serve anyone, and
+    // the line now says what the visitor actually gets (500 server_misconfigured, which names
+    // PUBLIC_BASE_URL) instead of the stale 421 wording.
+    const unconfiguredMessage =
       "[audio-feed] No usable PUBLIC_BASE_URL and no usable ALLOWED_HOSTS entry" +
-        (deploy ? " on a Deploy deployment" : "") +
-        (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
-        " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
-        "name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the " +
-        "public origin; ALLOWED_HOSTS only adds extra hosts.",
-    );
+      (deploy ? " on a Deploy deployment" : "") +
+      (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
+      " — the host gate REFUSES every non-loopback host and answers 500 server_misconfigured, " +
+      "naming this variable in the body, because a deployment that cannot name its own host must not " +
+      "advertise the one a client sent. Set PUBLIC_BASE_URL to the public origin; ALLOWED_HOSTS only " +
+      "adds extra hosts.";
+    if (deploy) console.error(unconfiguredMessage);
+    else console.warn(unconfiguredMessage);
   } else if (!configuredHost) {
     // ALLOWED_HOSTS alone still activates the gate. Previously this state logged nothing at all.
     console.log(

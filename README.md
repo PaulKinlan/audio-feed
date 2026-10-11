@@ -98,6 +98,9 @@ STORAGE_REGION=auto
 # The advertised origin (feed URLs, redirects, WebAuthn RP ID) is pinned to the
 # host of PUBLIC_BASE_URL, and a request arriving on any other host is answered
 # 421 - the protection configures itself and does not depend on this variable.
+# SET THIS ON A DEPLOYMENT: with neither PUBLIC_BASE_URL nor ALLOWED_HOSTS set the
+# host gate has nothing it can accept, so every non-loopback request is answered
+# 500 server_misconfigured (the body names PUBLIC_BASE_URL) instead of serving.
 # ALLOWED_HOSTS only ADDS hosts (staging, a preview URL, a custom domain).
 # Comma-separated; the PUBLIC_BASE_URL host and loopback are always accepted.
 # ALLOWED_HOSTS=staging.audio-feed.example

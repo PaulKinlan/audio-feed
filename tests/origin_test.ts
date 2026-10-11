@@ -22,6 +22,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import {
+  hostGateRefusal,
   isUnusableOrigin,
   originCacheControl,
   requestHostAllowed,
@@ -262,15 +263,105 @@ Deno.test("PRODUCTION REGRESSION: a deployment that has not been told its own ho
   // set, so an app that knew its host nowhere still accepted ANY Host header - correct code, inert,
   // no error. It now fails CLOSED, because a deployment that cannot name its own host must not
   // advertise the one a client sent.
+  //
+  // audio-feed-3k2d: failing closed is not enough on its own. This same state shipped to production and
+  // answered the 421 `misdirected_request` this test used to assert, so the operator reading the live
+  // site saw a message blaming their request for a Host this deployment could never accept. The refusal
+  // now stops being a 421 here: with an EMPTY allowed set there is no host that would have worked, so it
+  // is a 500 server misconfiguration that names the variable to set. The refusal itself is unchanged.
   const fetch = await unconfiguredApp();
   const refused = await fetch(req(`${DEPLOYED}/`));
-  await refused.body?.cancel();
-  assertEquals(refused.status, 421, "nothing configured means nothing is trusted");
+  const body = await refused.text();
+  assertEquals(
+    refused.status,
+    500,
+    "nothing configured is a server fault, not a misdirected request",
+  );
+  assertStringIncludes(body, "PUBLIC_BASE_URL");
+  assertStringIncludes(body, "server_misconfigured");
+  // The early return is still a full response, headers included.
+  assertEquals(refused.headers.get("x-content-type-options"), "nosniff");
 
   // Loopback needs no configuration, so local development is untouched.
   const local = await fetch(req("http://localhost:8000/"));
   await local.body?.cancel();
   assertEquals(local.status, 200, "local development must not require configuration");
+});
+
+Deno.test("audio-feed-3k2d: an empty allowed set is 'unconfigured', a spoofed host is 'misdirected'", () => {
+  // The two refusals the incident collapsed into one response. This is the function-level case the
+  // original 7lsy verification missed: it exercised the self-configuring path only where PUBLIC_BASE_URL
+  // WAS set, so nothing covered the shape the live deployment was actually in (neither variable set).
+  //
+  // Delete the empty-set branch in `hostGateRefusal` - making it always report "misdirected" - and the
+  // first assertion fails. That is the mutant this test exists to kill.
+  assertEquals(
+    hostGateRefusal({}, req(`${DEPLOYED}/`)),
+    "unconfigured",
+    "an empty set is our missing configuration, and the gate must say which one it is",
+  );
+  assertEquals(
+    hostGateRefusal({}, req("http://localhost:8000/")),
+    null,
+    "loopback is still served without any configuration",
+  );
+  assertEquals(
+    hostGateRefusal({}, req("https://evil.example/")),
+    "unconfigured",
+    "an empty set cannot misdirect: no host at all would have been accepted",
+  );
+
+  // A NON-EMPTY set is a different situation and keeps the 421 wording.
+  const configured = { publicBaseUrl: DEPLOYED };
+  assertEquals(hostGateRefusal(configured, req(`${DEPLOYED}/`)), null, "its own host is served");
+  assertEquals(
+    hostGateRefusal(configured, req("https://evil.example/")),
+    "misdirected",
+    "a host the deployment knows it does not serve is the spoofed-Host case",
+  );
+  // ALLOWED_HOSTS alone is configuration too - the set is non-empty, so the fault is the request's.
+  assertEquals(
+    hostGateRefusal({ allowedHosts: ["audio.example.com"] }, req("https://evil.example/")),
+    "misdirected",
+  );
+  // A value that configures nothing leaves the set empty, so it is the unconfigured case as well.
+  assertEquals(
+    hostGateRefusal({ publicBaseUrl: "not-a-url" }, req("https://evil.example/")),
+    "unconfigured",
+  );
+  assertEquals(
+    hostGateRefusal({ allowedHosts: ["not a host", ""] }, req("https://evil.example/")),
+    "unconfigured",
+    "an entry that does not parse configures nothing, so nothing is configured",
+  );
+});
+
+Deno.test("audio-feed-3k2d: the two refusals read differently end to end", async () => {
+  // The operator sees the SAME body a visitor does, so the bodies have to be distinguishable by
+  // someone who has only the page in front of them: one names the variable, the other does not.
+  const unconfigured = await unconfiguredApp();
+  const misconfigured = await unconfigured(req(`${DEPLOYED}/`));
+  const misconfiguredBody = await misconfigured.text();
+  assertEquals(misconfigured.status, 500);
+  assertStringIncludes(misconfiguredBody, "PUBLIC_BASE_URL");
+
+  const configured = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
+  const spoofed = await configured(req("https://evil.example/"));
+  const spoofedBody = await spoofed.text();
+  assertEquals(
+    spoofed.status,
+    421,
+    "a configured deployment still refuses a host it does not serve",
+  );
+  assertStringIncludes(spoofedBody, "misdirected_request");
+  assert(
+    !spoofedBody.includes("PUBLIC_BASE_URL"),
+    "a genuinely misdirected request must not read as our missing configuration",
+  );
+  assert(
+    misconfigured.status !== spoofed.status,
+    "the two refusals must not share a status code, or an operator cannot tell them apart in a log",
+  );
 });
 
 Deno.test("PRODUCTION REGRESSION: feed self-links and enclosures use the real host", async () => {

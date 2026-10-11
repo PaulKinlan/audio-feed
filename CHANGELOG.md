@@ -52,6 +52,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **An unconfigured deployment blamed every visitor for its own missing configuration
+  (audio-feed-3k2d)**: with neither `PUBLIC_BASE_URL` nor a usable `ALLOWED_HOSTS` entry set, the
+  host gate answered the same `421 misdirected_request` it uses for a forged `Host`, so the live
+  deployment (audio-feed-du8w) refused all traffic with a body that read as "you asked for the wrong
+  host" — the operator saw exactly what a visitor saw, and nothing named the variable to set. The
+  refusal now distinguishes the two states: an EMPTY allowed set (a deployment that cannot name its
+  own host) answers `500 server_misconfigured` whose detail names `PUBLIC_BASE_URL`, while a
+  non-empty set that does not contain the request host is still the `421` it always was. Failing
+  closed is unchanged — nothing is derived from the request. On a Deploy deployment the boot line for
+  the empty state is error-level and says what a visitor gets; tests now cover the empty-set shape
+  the incident shipped in, which the original 7lsy verification never exercised.
 - **TTS deadline brittleness (audio-feed-9yu8)**: The per-attempt synthesis deadline was 60s —
   inside the real 45-55s/segment distribution, and the 2026-10-09 incidents needed 59.8s for
   headers+body alone — and it was not settable. It is now 120s by default and settable with
