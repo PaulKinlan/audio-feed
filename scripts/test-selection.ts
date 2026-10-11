@@ -270,6 +270,8 @@ export interface NonTsClassification {
   documentation: string[];
   /** Suites that must run because a change touches data they observe. */
   suites: string[];
+  /** Declared in the ledger as observed by NOBODY (`readBy: []`): inert, with a stated reason. */
+  inert: string[];
   /** Not .ts, not markdown, not in the ledger: the caller must fall back to the FULL suite and say so. */
   unclassified: string[];
 }
@@ -285,6 +287,7 @@ export function classifyNonTsChanges(
   const classification: NonTsClassification = {
     documentation: [],
     suites: [],
+    inert: [],
     unclassified: [],
   };
   const suites = new Set<string>();
@@ -300,11 +303,32 @@ export function classifyNonTsChanges(
       classification.unclassified.push(file);
       continue;
     }
+    if (entry.readBy.length === 0) {
+      classification.inert.push(file);
+      continue;
+    }
     for (const suite of entry.readBy) suites.add(suite);
   }
 
   classification.suites = [...suites].sort();
   return classification;
+}
+
+/**
+ * Can an EMPTY selection be trusted for this change set?
+ *
+ * Only when every changed file is declared inert — markdown documentation, or a ledger entry whose
+ * `readBy` is empty and whose reason says nothing observes it. This is audio-feed-es8y condition 2: a gate
+ * that ran no suite must never read like a gate that ran suites and passed. Anything not proven inert (a
+ * standalone script nothing imports, an undeclared file) gets the FULL suite instead.
+ */
+export function isProvablyInert(
+  changed: readonly string[],
+  classification: NonTsClassification,
+): boolean {
+  if (!changed.length) return false;
+  const inert = new Set([...classification.documentation, ...classification.inert]);
+  return changed.every((file) => inert.has(file));
 }
 
 /**
@@ -336,6 +360,96 @@ export async function auditDataLedger(
   return problems;
 }
 
+/**
+ * The fixture corpus the discovery proof is run over: every pattern Deno's rule covers, planted in isolated
+ * directories, plus the look-alikes that must NOT be discovered and the trees the walk skips.
+ */
+const PROOF_CORPUS: Record<string, string> = {
+  "a_test.ts": 'Deno.test("a", () => {});\n',
+  "b.test.ts": 'Deno.test("b", () => {});\n',
+  "c_test.mts": 'Deno.test("c", () => {});\n',
+  "d_test.js": 'Deno.test("d", () => {});\n',
+  "test.ts": 'Deno.test("root test module", () => {});\n',
+  "helper.ts": "export const x = 1;\n",
+  "tests/t_test.ts": 'Deno.test("t", () => {});\n',
+  "tests/helper_in_tests.ts": "export const y = 2;\n",
+  "tests/sub/deep.test.ts": 'Deno.test("deep", () => {});\n',
+  "tests/sub/deep_test.ts": 'Deno.test("deep2", () => {});\n',
+  "nested/deeper/inner_test.ts": 'Deno.test("inner", () => {});\n',
+  "src/inline.test.ts": 'Deno.test("inline", () => {});\n',
+  "node_modules/dep/x_test.ts": 'Deno.test("dep", () => {});\n',
+  ".beads/export_test.ts": 'Deno.test("beads", () => {});\n',
+  "var/scratch_test.ts": 'Deno.test("scratch", () => {});\n',
+};
+
+export interface DiscoveryProof {
+  ok: boolean;
+  ours: string[];
+  deno: string[];
+  detail: string;
+}
+
+/**
+ * audio-feed-es8y condition 4: prove the universe EQUALS what Deno discovers, instead of asserting the
+ * pattern list is right. Plants the corpus in a temp tree and compares our walk with the module list
+ * `deno test --no-run` reports there (a fresh DENO_DIR per run, because a warm cache prints no Check lines).
+ *
+ * Needs `--allow-run=deno`: the full gate task grants it, and the test in
+ * tests/fast_gate_subset_test.ts is skipped where it is not granted (in the gate it always runs).
+ */
+export async function proveDiscoveryMatchesDeno(): Promise<DiscoveryProof> {
+  const dir = await Deno.makeTempDir({ prefix: "af-discovery-proof-" });
+  const denoDir = await Deno.makeTempDir({ prefix: "af-discovery-denodir-" });
+  try {
+    // The fixture carries the REPO's real `exclude` list, because the excludes are part of discovery: with
+    // no config, `deno test` happily scans .beads/ and var/, and the comparison would be measuring the
+    // fixture's missing config rather than our walk. Reading the live list also means a configured exclude
+    // the walk does not know about shows up here as a mismatch.
+    const repoConfig = JSON.parse(
+      (await Deno.readTextFile(`${ROOT}deno.json`))
+        .split("\n")
+        .filter((line) => !/^\s*\/\//.test(line))
+        .join("\n"),
+    ) as { exclude?: string[] };
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({ exclude: repoConfig.exclude ?? [] }, null, 2),
+    );
+
+    for (const [path, body] of Object.entries(PROOF_CORPUS)) {
+      const full = `${dir}/${path}`;
+      await Deno.mkdir(full.slice(0, full.lastIndexOf("/")), { recursive: true });
+      await Deno.writeTextFile(full, body);
+    }
+
+    const ours = await discoverFullGateTestFiles(`${dir}/`);
+    const output = await new Deno.Command("deno", {
+      args: ["test", "--no-run"],
+      cwd: dir,
+      env: { ...Deno.env.toObject(), DENO_DIR: denoDir, NO_COLOR: "1" },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(output.stdout) + new TextDecoder().decode(output.stderr);
+    const deno = [...text.matchAll(/^Check\s+(.+)$/gm)]
+      .map((m) => (m[1] ?? "").trim())
+      .map((path) => path.replace(/^file:\/\//, ""))
+      .map((path) => path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : path)
+      .sort();
+
+    const ok = deno.length > 0 && JSON.stringify(ours) === JSON.stringify(deno);
+    return {
+      ok,
+      ours,
+      deno,
+      detail: ok ? "" : `our walk: ${ours.join(", ")}\ndeno test --no-run: ${deno.join(", ")}`,
+    };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(denoDir, { recursive: true });
+  }
+}
+
 if (import.meta.main) {
   const full = await discoverFullGateTestFiles();
   const audit = auditSelection(full);
@@ -353,6 +467,26 @@ if (import.meta.main) {
       `fast-gate: DATA_LEDGER problem(s) (audio-feed-es8y):\n  ${ledgerProblems.join("\n  ")}`,
     );
     Deno.exit(1);
+  }
+
+  if (Deno.args.includes("--prove-discovery")) {
+    const proof = await proveDiscoveryMatchesDeno().catch((error) => ({
+      ok: false,
+      ours: [],
+      deno: [],
+      detail: `could not run \`deno test --no-run\` (does this task grant --allow-run=deno?): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    }));
+    if (!proof.ok) {
+      console.error(
+        `fast-gate: DISCOVERY MISMATCH (audio-feed-es8y): our test universe is not what Deno runs.\n${proof.detail}\nNeither gate may proceed on a universe it cannot prove.`,
+      );
+      Deno.exit(1);
+    }
+    console.log(
+      `test-selection: discovery proof ok against \`deno test --no-run\` (${proof.deno.length} planted module(s)).`,
+    );
   }
   console.log("test-selection: ok");
 }

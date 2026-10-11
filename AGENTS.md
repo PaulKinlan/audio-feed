@@ -29,28 +29,36 @@ it while iterating. `deno task test:fast` (scripts/fast-check.ts, audio-feed-pub
 the whole-repo type-check, then only the tests a change can affect: tests that reach a changed file
 in the static import graph without crossing the app/compose hubs, plus the name-convention tests
 (`<stem>_test.ts`, `<stem>_*_test.ts`, mirrored test subdirectories). Changed scripts/ modules
-select the tests that import them; only a script NOTHING imports selects none (the always-run
-type-check is its gate). It falls back to the FULL suite when deno.json/deno.lock changes, when a
-cross-cutting file (app/compose/router/http/config/server/origin) changes, when a changed src file
-has no covering test, when a changed script has importers but no reachable test, when a shared test
-helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file under src/ or tests/
-changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff itself
-fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
+select the tests that import them. It falls back to the FULL suite when deno.json/deno.lock changes,
+when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a changed src
+file has no covering test, when a changed script has importers but no reachable test, when a shared
+test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file under src/ or
+tests/ changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff
+itself fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
 
 Two things about that selection are CHECKED rather than assumed (audio-feed-es8y). First, the fast
 gate's selection is a proven SUBSET of the full gate's: both derive from
 `scripts/test-selection.ts`, which discovers what `deno test` with no arguments would run, and
-`deno task gate` runs that audit as its FIRST step, so a suite the fast gate could never select (a
-`tests/x.test.ts`, a `src/x_test.ts`) is a NAMED gate failure that says what to do rather than a
-suite that quietly never runs on a lane. A module genuinely run elsewhere belongs in
-`FAST_GATE_EXCLUSIONS` with the reason. Second, a non-TypeScript change OUTSIDE `src/` and `tests/`
-is no longer assumed unobservable: markdown is documentation, and everything else must be declared
-in the `DATA_LEDGER` of that same file — naming the suites that read it (a screenshot under
-`docs/evidence/` selects `tests/evidence_size_test.ts`, which asserts the PNG budgets; the
-observability agent runner script selects the suite that executes it) or declaring `readBy: []` with
-the reason that nothing does. An undeclared file runs the FULL suite and names itself, because the
-old rule ("not a .ts file, so no test can care") gave a fast-gate PASS on a tree where the full gate
-failed.
+`deno task gate` runs that audit (plus a proof over a planted corpus that the universe really equals
+`deno test --no-run`'s own scan, using this repo's exclude list) as its FIRST step, so a suite the
+fast gate could never select (a `tests/x.test.ts`, a `src/x_test.ts`) is a NAMED gate failure that
+says what to do rather than a suite that quietly never runs on a lane. A module genuinely run
+elsewhere belongs in `FAST_GATE_EXCLUSIONS` with the reason. Second, a non-TypeScript change OUTSIDE
+`src/` and `tests/` is no longer assumed unobservable: markdown is documentation, and everything
+else must be declared in the `DATA_LEDGER` of that same file — naming the suites that read it (a
+screenshot under `docs/evidence/` selects `tests/evidence_size_test.ts`, which asserts the PNG
+budgets; the observability agent runner script selects the suite that executes it) or declaring
+`readBy: []` with the reason that nothing does. An undeclared file runs the FULL suite and names
+itself, because the old rule ("not a .ts file, so no test can care") gave a fast-gate PASS on a tree
+where the full gate failed.
+
+An EMPTY selection is never a silent pass (audio-feed-es8y condition 2). It is only allowed when
+every changed file is declared inert — markdown, or a `readBy: []` ledger entry — and even then the
+run says so plainly (`NO SUITES SELECTED — 0 of N test module(s) ran`) and emits
+`fast-gate: unmapped: <files>`, which the fleet's coverage reporter turns into a COVERAGE WARNING,
+so a gate that ran nothing is visibly not a gate that ran suites and passed. Anything not provably
+inert runs the FULL suite instead: the old "a script NOTHING imports selects none, the type-check is
+its gate" carve-out is GONE, so `scripts/smoke.ts` runs the full suite.
 
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.

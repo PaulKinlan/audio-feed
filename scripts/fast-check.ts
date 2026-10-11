@@ -52,6 +52,7 @@ import {
   DATA_LEDGER,
   discoverFullGateTestFiles,
   isFastGateSelectable,
+  isProvablyInert,
 } from "./test-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
@@ -286,7 +287,7 @@ export async function nameMatchedTests(
  * "passed" is emitted only after a run that actually passed; a failing run emits "ran", so the log still
  * says which suites were attempted without ever claiming a pass.
  */
-export function suiteMarker(kind: "passed" | "ran", files: string[]): string {
+export function suiteMarker(kind: "passed" | "ran" | "unmapped", files: string[]): string {
   return `fast-gate: ${kind}: ${files.join(" ")}`;
 }
 
@@ -516,10 +517,29 @@ export function planTests(
   }
 
   if (!codeChanged.length) {
-    if (!data.suites.length) return { testFiles: [], reason: "no testable change" };
+    if (data.suites.length) {
+      return {
+        testFiles: data.suites,
+        reason: `data file(s) observed by: ${data.suites.join(", ")}`,
+      };
+    }
+    // audio-feed-es8y condition 2: an empty selection must never read like a pass. It is only allowed
+    // when EVERY changed file is declared inert (markdown documentation, or a ledger entry whose reason
+    // says nothing observes it). Anything else gets the full suite and names itself.
+    if (isProvablyInert(changed, data)) {
+      return {
+        testFiles: [],
+        reason: `no test-observable change (declared inert: ${
+          [...data.documentation, ...data.inert].join(", ")
+        })`,
+      };
+    }
     return {
-      testFiles: data.suites,
-      reason: `data file(s) observed by: ${data.suites.join(", ")}`,
+      testFiles: null,
+      reason:
+        `nothing selected and the change is not declared inert, so nothing can be claimed about it: ${
+          changed.join(", ")
+        }`,
     };
   }
 
@@ -548,6 +568,20 @@ export function planTests(
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
   }
   const dataNote = data.suites.length ? ` + data: ${data.suites.join(", ")}` : "";
+
+  // Condition 2 again, for the case that reaches here: a changed .ts file the graph cannot connect to any
+  // suite (a standalone scripts/ module nothing imports) selects nothing. The old carve-out treated that
+  // as "the type-check is its gate" and returned a silent empty pass, which is indistinguishable from
+  // "something ran and passed" (audio-feed-es8y; measured: scripts/smoke.ts -> 0 suites). A .ts change is
+  // never inert by declaration, so it gets the full suite.
+  if (!tests.size) {
+    return {
+      testFiles: null,
+      reason: `no suite is mapped to ${
+        codeChanged.join(", ")
+      } and a TypeScript change is not inert by declaration`,
+    };
+  }
   return {
     testFiles: [...tests].sort(),
     reason: `affected by: ${codeChanged.join(", ")}${dataNote}`,
@@ -613,7 +647,20 @@ if (import.meta.main) {
     }
     console.log(suiteMarker("passed", wholeSuite));
   } else if (testFiles.length === 0) {
-    console.log(`fast-check: no tests to run (${reason})`);
+    // audio-feed-es8y condition 2: a gate that ran NOTHING must not read like a gate that ran suites and
+    // passed. The state is distinct and loud, and it is reflected in the fleet's coverage line by the
+    // `unmapped:` marker the reporter already parses (it turns a non-empty list into a COVERAGE WARNING).
+    // Only reachable when every changed file is declared inert - anything else fell back to the full suite.
+    console.log(
+      `fast-check: NO SUITES SELECTED — 0 of ${
+        (await allTestFiles()).length
+      } test module(s) ran. ${reason}`,
+    );
+    console.log(
+      "  This is a statement about the changed files, NOT a test result: no suite in this repo observes",
+    );
+    console.log("  them (documentation and declared-inert files only).");
+    console.log(suiteMarker("unmapped", changed ?? []));
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);

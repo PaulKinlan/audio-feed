@@ -14,12 +14,13 @@
  * tests/helper_in_tests.ts did not) written down as a test, so the rule cannot quietly change under us
  * without this failing.
  *
- * Nothing here spawns a subprocess: `deno task test` grants no --allow-run (only the gate tasks do), so a
- * test that shelled out to `deno test --no-run` would pass in the gate and fail in `deno task test`.
+ * Nothing here spawns a subprocess EXCEPT the discovery proof, which needs `--allow-run=deno`; that test
+ * declares the requirement and is skipped where the permission is not granted (`deno task test` grants no
+ * --allow-run, the gate tasks do, and `deno task gate` also runs the same proof at the start via the CLI).
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { allTestFiles, planTests } from "../scripts/fast-check.ts";
+import { allTestFiles, planTests, suiteMarker } from "../scripts/fast-check.ts";
 import {
   auditDataLedger,
   auditSelection,
@@ -30,6 +31,7 @@ import {
   isFastGateSelectable,
   isTestModule,
   NEVER_WALKED,
+  proveDiscoveryMatchesDeno,
   ROOT,
 } from "../scripts/test-selection.ts";
 
@@ -252,10 +254,9 @@ Deno.test("documentation and declared-not-read files still run nothing", () => {
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED).testFiles, []);
   assertEquals(planTests(["docs/observability-api.md"], NO_GRAPH, NO_NAMED).testFiles, []);
   assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED).testFiles, []);
-  assertEquals(planTests([], NO_GRAPH, NO_NAMED).testFiles, []);
 });
 
-Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the three buckets", () => {
+Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the buckets", () => {
   const classified = classifyNonTsChanges([
     "src/server.ts",
     "README.md",
@@ -265,7 +266,131 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   ]);
   assertEquals(classified.documentation, ["README.md"]);
   assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
+  assertEquals(classified.inert, [".beads/issues.jsonl"]);
   assertEquals(classified.unclassified, ["mystery/payload.bin"]);
+});
+
+// ---------------------------------------------------------------------------
+// Condition 2: an empty selection is a distinct, loud state, never a silent pass
+// ---------------------------------------------------------------------------
+
+Deno.test("an empty selection is allowed only for provably inert changes (es8y condition 2)", () => {
+  // Declared inert: markdown documentation and the ledger's `readBy: []` entries.
+  for (
+    const inert of [
+      ["README.md"],
+      ["CHANGELOG.md"],
+      ["docs/observability-api.md"],
+      [".beads/issues.jsonl"],
+    ]
+  ) {
+    const plan = planTests(inert, NO_GRAPH, NO_NAMED);
+    assertEquals(plan.testFiles, [], `${inert} should select nothing: ${plan.reason}`);
+    assert(plan.reason.includes("declared inert"), plan.reason);
+  }
+  assertEquals(
+    planTests([], NO_GRAPH, NO_NAMED).testFiles,
+    null,
+    "an empty change set is NOT proven inert (nothing was checked)",
+  );
+});
+
+Deno.test("a standalone script nothing imports runs the FULL suite, not a silent zero (es8y)", () => {
+  // scripts/smoke.ts has no importer and no name-matched suite: the old carve-out called the type-check
+  // its gate and returned [], which is indistinguishable from "suites ran and passed".
+  const plan = planTests(["scripts/smoke.ts"], NO_GRAPH, NO_NAMED);
+  assertEquals(plan.testFiles, null, plan.reason);
+  assert(plan.reason.includes("scripts/smoke.ts"), plan.reason);
+  assert(plan.reason.includes("not inert by declaration"), plan.reason);
+});
+
+Deno.test("the empty state is marked `unmapped:` for the coverage line and said out loud", async () => {
+  // The fleet's coverage reporter parses `fast-gate: .*unmapped:` into explicit_unmapped and turns a
+  // non-empty list into a COVERAGE WARNING, so an all-inert change is visible in the coverage line
+  // instead of reading like a green test run.
+  const reporter = /(?:fast-gate:.*?)?unmapped:\s*(.*)/;
+  const line = suiteMarker("unmapped", ["README.md", "docs/observability-api.md"]);
+  const match = reporter.exec(line);
+  assert(match !== null, line);
+  assertEquals(match[1]!.split(/\s+/), ["README.md", "docs/observability-api.md"]);
+
+  const source = await Deno.readTextFile(`${ROOT}scripts/fast-check.ts`);
+  assert(source.includes("NO SUITES SELECTED"), "the fast gate must say the empty state out loud");
+  assert(source.includes('suiteMarker("unmapped"'), "and mark it unmapped for the coverage line");
+  assert(
+    !source.includes("no tests to run"),
+    "the old cheerful phrasing must be gone: it read like a pass",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Condition 4: the universe is PROVEN equal to Deno's discovery, by running Deno
+// ---------------------------------------------------------------------------
+
+const canRunDeno = (() => {
+  try {
+    return Deno.permissions.querySync({ name: "run", command: "deno" }).state === "granted";
+  } catch {
+    return false;
+  }
+})();
+
+Deno.test({
+  name:
+    "discovery equals `deno test --no-run` over a planted corpus (needs --allow-run=deno; the gate grants it)",
+  ignore: !canRunDeno,
+  fn: async () => {
+    const proof = await proveDiscoveryMatchesDeno();
+    assert(proof.ok, proof.detail);
+    assertEquals(proof.ours, proof.deno);
+    // The corpus really does cover the patterns and the look-alikes:
+    for (const planted of ["b.test.ts", "c_test.mts", "d_test.js", "src/inline.test.ts"]) {
+      assert(
+        proof.deno.includes(planted),
+        `${planted} should be discovered: ${proof.deno.join(", ")}`,
+      );
+    }
+    for (const notATest of ["tests/helper_in_tests.ts", "helper.ts"]) {
+      assert(!proof.deno.includes(notATest), `${notATest} must not be discovered`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// fastSelection(C) is inside the universe for an adversarial corpus
+// ---------------------------------------------------------------------------
+
+Deno.test("every selection in the adversarial corpus is inside the full gate's universe", async () => {
+  const universe = new Set(await discoverFullGateTestFiles(ROOT));
+  const corpus: string[][] = [
+    ["docs/evidence/audio-feed-0jp/edit-1280-light.png"],
+    ["scripts/observability-agent-run.sh"],
+    ["docs/observability-api.md"],
+    ["README.md"],
+    ["scripts/smoke.ts"],
+    ["src/storage/kv/runs.ts"],
+    ["src/app.ts"],
+    ["tests/fixtures.ts"],
+    ["tests/fixtures/page.html"],
+    ["deno.json"],
+    ["mystery/payload.bin"],
+    [],
+  ];
+  for (const changed of corpus) {
+    const plan = planTests(changed, new Map(), NO_NAMED);
+    if (plan.testFiles === null) continue; // the full suite is trivially inside itself
+    const outside = plan.testFiles.filter((f) => !universe.has(f));
+    assertEquals(outside, [], `${changed.join(", ")} selected modules outside the universe`);
+  }
+
+  // The case that FAILS on the pre-fix code: the name-matching convention accepts tests/foo-test.ts, which
+  // Deno never discovers - so selecting it makes the fast gate run something the full gate does not.
+  const mirror = planTests(
+    ["src/routes/widgets.ts"],
+    new Map(),
+    new Map([["src/routes/widgets.ts", ["tests/foo-test.ts"]]]),
+  );
+  assertEquals(mirror.testFiles, null, mirror.reason);
 });
 
 Deno.test("the data ledger's own claims hold on this repo", async () => {

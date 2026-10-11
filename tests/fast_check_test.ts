@@ -151,9 +151,16 @@ Deno.test("planTests: deno.json, a core file, a test helper, and a non-ts asset 
   }
 });
 
-Deno.test("planTests: docs-only and empty change sets run no tests", () => {
-  assertEquals(planTests(["README.md"], GRAPH, NO_NAMED).testFiles, []);
-  assertEquals(planTests([], GRAPH, NO_NAMED).testFiles, []);
+Deno.test("planTests: docs-only runs nothing; an EMPTY change set runs the full suite (es8y)", () => {
+  // Markdown is declared inert (no suite reads it), so a docs-only change is the one legal empty
+  // selection - and the gate says so loudly instead of reading like a pass (audio-feed-es8y).
+  const docs = planTests(["README.md"], GRAPH, NO_NAMED);
+  assertEquals(docs.testFiles, []);
+  assert(docs.reason.includes("declared inert"), docs.reason);
+
+  // An empty change set proves nothing about anything, so it is NOT inert: it gets the full suite. This
+  // used to select zero suites, which is exactly the shape that reads as a green test run.
+  assertEquals(planTests([], GRAPH, NO_NAMED).testFiles, null);
 });
 
 Deno.test("planTests: a changed test file runs itself without the graph", () => {

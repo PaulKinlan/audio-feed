@@ -11,17 +11,28 @@ All notable changes to this project will be documented in this file.
   of truth for which test modules exist — it discovers what `deno test` with no arguments would run
   (Deno's `{*_,*.,}test.<ext>` basename rule, verified empirically on Deno 2.9.7) — and the fast
   gate's universe is DERIVED from it by filtering, rather than being a second walk of `tests/`.
-  `deno task gate` now opens with `deno run --allow-read scripts/test-selection.ts`, which fails the
-  gate by NAME when a module the full gate runs can never be selected by the fast gate (or when a
-  `FAST_GATE_EXCLUSIONS` entry does not name a real module and say where it runs instead), so drift
-  is loud at the start of a run instead of discovered by a merger. Non-TypeScript changes outside
-  `src/` and `tests/` are no longer assumed unobservable: markdown is documentation, and everything
-  else must be declared in the same file's `DATA_LEDGER`, naming the suites that read it (a
-  `docs/evidence/*.png` selects `tests/evidence_size_test.ts`, which asserts the PNG budgets;
-  `scripts/observability-agent-run.sh` selects `tests/observability_agent_poll_test.ts`, which
-  executes it) or declaring `readBy: []` with the reason nothing does. An undeclared file runs the
-  full suite and names itself. Before this, a 200KB screenshot selected ZERO suites: the fast gate
-  passed while the full gate failed on the same tree.
+  `deno task gate` now opens with
+  `deno run --allow-read --allow-env --allow-run=deno
+  scripts/test-selection.ts --prove-discovery`,
+  which fails the gate by NAME when a module the full gate runs can never be selected by the fast
+  gate (or when a `FAST_GATE_EXCLUSIONS` entry does not name a real module and say where it runs
+  instead), so drift is loud at the start of a run instead of discovered by a merger. The same step
+  PROVES the universe rather than asserting it: it plants a corpus of `*_test.{ts,js,mts}` /
+  `*.test.*` files (plus look-alikes that must NOT be discovered, and files under the excluded
+  trees) and compares its walk with `deno test --no-run`'s own scan under this repo's exclude list.
+  Non-TypeScript changes outside `src/` and `tests/` are no longer assumed unobservable: markdown is
+  documentation, and everything else must be declared in the same file's `DATA_LEDGER`, naming the
+  suites that read it (a `docs/evidence/*.png` selects `tests/evidence_size_test.ts`, which asserts
+  the PNG budgets; `scripts/observability-agent-run.sh` selects
+  `tests/observability_agent_poll_test.ts`, which executes it) or declaring `readBy: []` with the
+  reason nothing does. An undeclared file runs the full suite and names itself. Before this, a 200KB
+  screenshot selected ZERO suites: the fast gate passed while the full gate failed on the same tree.
+  An EMPTY selection is never a silent pass either: it is allowed only when every changed file is
+  declared inert, and then the run says `NO SUITES SELECTED — 0 of N test module(s) ran` and emits
+  `fast-gate: unmapped: <files>`, which the fleet's coverage reporter turns into a COVERAGE WARNING,
+  so a gate that ran nothing is visibly not a gate that ran suites and passed. Anything not provably
+  inert runs the full suite — including a standalone `scripts/` module nothing imports, whose old
+  silent zero ("the type-check is its gate") is gone.
 
 - **An admin observability page: failures and job state without copying anything out
   (audio-feed-n6uu)**: `GET /admin/observability`, behind the existing admin gate (session plus
