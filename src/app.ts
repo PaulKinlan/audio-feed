@@ -132,6 +132,17 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // handler applies it); registered as its own route so the console shell stays data-free.
   router.get("/admin/observability", handleAdminObservability);
   // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.
+  // audio-feed-sw1r: a DEV/TEST-ONLY surface that THROWS, so the canary invariant test has a request path
+  // that reaches the server's unhandled-error record. The screen it exercises is the point; the route exists
+  // only when an operator sets AUDIO_FEED_TEST_THROW=1 (never in a deploy) and it reads the ambient env here
+  // rather than through config because it must be impossible to enable by a config file alone.
+  if (Deno.env.get("AUDIO_FEED_TEST_THROW") === "1") {
+    router.get("/__test/throw", ({ url }) => {
+      // The message carries ATTACKER-CHOSEN text on purpose: this is the surface the invariant test fuzzes,
+      // and it is the exact shape the screen exists for - a request string inside an unhandled error's message.
+      throw new Error(`test throw: ${url.searchParams.get("m") ?? "no message"}`);
+    });
+  }
   router.get("/login", handleLogin);
   router.get("/account", handleAccount);
   // audio-feed-ep1: bookmarklet convenience route /add redirecting to /account
@@ -390,12 +401,14 @@ export function deployFingerprint(
 export function createApp(
   ctx: AppContext,
   handlers: AppHandlers = {},
+  /** audio-feed-sw1r: the unhandled-error hook, so the record is written where the throw is caught. */
+  onUnhandledError?: (error: unknown, req: Request) => void | Promise<void>,
 ): {
   router: Router<AppContext>;
   fetch: (req: Request, info?: { remoteAddr?: { hostname?: string } }) => Promise<Response>;
 } {
   const router = createRouter(handlers);
-  const handle = router.fetchHandler(ctx);
+  const handle = router.fetchHandler(ctx, onUnhandledError);
   return {
     router,
     fetch: async (req, info) => {

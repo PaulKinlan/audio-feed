@@ -22,6 +22,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
+import { screenErrorMessage } from "./observability/error_screen.ts";
 import { createLogger, isHighVolumeRoute, isObservabilityRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
@@ -146,7 +147,26 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
 
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
   const handlers = createHandlers(ctx);
-  const app = createApp(ctx, handlers);
+  // audio-feed-sw1r: an unhandled throw is caught by the ROUTER's fetchHandler, so the record is written
+  // from the hook rather than from the try/catch below (which stays as defence in depth for a throw that
+  // escapes this path). Class name AND the SCREENED message - never the raw message, which can quote the
+  // request. The correlation id is minted per request below, so this hook does not have it; the route
+  // pattern is recorded instead, which is a constant from the route table.
+  const onUnhandledError = async (error: unknown, req: Request): Promise<void> => {
+    await appLog.error(
+      "http.request",
+      `unhandled ${errorName(error)} on ${
+        router.routePatternFor(
+          new URL(req.url),
+        )
+      }`,
+      {
+        route: router.routePatternFor(new URL(req.url)),
+        context: { error: errorName(error), errorMessage: screenErrorMessage(error) },
+      },
+    );
+  };
+  const app = createApp(ctx, handlers, onUnhandledError);
   // audio-feed-wzv9: the app's structured records, in one wrapper so no handler has to remember.
   // The correlation id is minted per request and echoed in a response header, so an operator
   // holding a failing request can find every record about it.
@@ -217,7 +237,12 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         correlationId,
         route,
         durationMs: durationMs(),
-        context: { error: errorName(error) },
+        // The message is SCREENED, not truncated (audio-feed-sw1r): a length bound or a character filter
+        // would only shorten a client-chosen string, so the stored value is drawn from a closed list of
+        // phrases this codebase throws and the original is discarded. See src/observability/error_screen.ts;
+        // the canary invariant test drives a request that THROWS with an attacker-chosen query string and
+        // asserts the canary is absent from the whole durable record.
+        context: { error: errorName(error), errorMessage: screenErrorMessage(error) },
       });
       throw error;
     }

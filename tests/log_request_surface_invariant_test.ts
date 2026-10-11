@@ -20,6 +20,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { openStores, type Stores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
+import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 
 const BASE = "https://audio.example";
 /** Long, mixed case, and containing a must-not-appear marker: nothing in the app resembles it. */
@@ -30,6 +31,12 @@ interface Surface {
   /** Build a request carrying the canary on this surface, for a matched and an unmatched path. */
   build(path: string): Request;
   /**
+   * True when the surface reaches the UNHANDLED-ERROR record. The router catches a handler throw and answers
+   * 500, so this surface is answered rather than throwing out of the server - asserting a throw would assert
+   * the wrong thing about this app (audio-feed-sw1r).
+   */
+  expectUnhandledError?: boolean;
+  /**
    * Socket-level input, which arrives BESIDE the request rather than inside it and is therefore its
    * own surface: the client address a runtime hands the handler. Not inside `Request`, so a fuzz
    * over requests alone would never reach it.
@@ -37,7 +44,26 @@ interface Surface {
   info?: { remoteAddr?: { hostname?: string } };
 }
 
+// audio-feed-sw1r: the surface that reaches the UNHANDLED-ERROR record. The route only exists when this is
+// set, and it has to be set before the app is bootstrapped because the route table is built then.
+Deno.env.set("AUDIO_FEED_TEST_THROW", "1");
+// audio-feed-sw1r FOUND THIS WHILE ADDING THE THROWING SURFACE: without a configured host this whole file
+// was driving the HOST-GATE REFUSAL, not the app. `isDeploy: true` with no PUBLIC_BASE_URL/ALLOWED_HOSTS makes
+// every request answer 500 `server_misconfigured` before any route runs (audio-feed-3k2d), so each surface
+// asserted the canary's absence from a refusal record that contains no request text at all - and the
+// anti-vacuity check passed, because a refusal IS a record. The canary test only means something when the
+// request reaches a handler, so the host is configured here.
+Deno.env.set("PUBLIC_BASE_URL", BASE);
+
 const SURFACES: Surface[] = [
+  {
+    // A query string echoed into an unhandled error's message. Every other surface here is answered by a
+    // handler; this one is thrown OUT of one, which is the only path that reaches the record the screen in
+    // src/observability/error_screen.ts guards (audio-feed-sw1r).
+    name: "query string inside an UNHANDLED error's message (/__test/throw)",
+    build: () => new Request(`${BASE}/__test/throw?m=${CANARY}`),
+    expectUnhandledError: true,
+  },
   {
     name: "method",
     build: (path) => new Request(`${BASE}${path}`, { method: CANARY }),
@@ -146,6 +172,11 @@ for (const surface of SURFACES) {
         const res = await fetch(surface.build(path), surface.info);
         // Nothing may hang: a request is answered, not left open.
         assert(res.status >= 200 && res.status < 600, `answered with ${res.status}`);
+        if (surface.expectUnhandledError) {
+          // The throw is caught by the ROUTER and answered 500, so about this surface the response says only
+          // that the failure was answered - the record assertions below carry the weight.
+          assertEquals(res.status, 500);
+        }
         // Handlers may append without the request waiting; give those appends a bounded moment.
         await new Promise((resolve) => setTimeout(resolve, 25));
         const records = await stores.metadata.listLogs();
@@ -170,6 +201,27 @@ for (const surface of SURFACES) {
           !serialised.includes(encodeURIComponent(CANARY)),
           `the encoded canary reached the store from ${surface.name}`,
         );
+        if (surface.expectUnhandledError) {
+          // ANTI-VACUITY FOR THE FIELD ITSELF (audio-feed-sw1r): the canary's absence above is worth nothing
+          // if the unhandled-error record was never written. This asserts the record EXISTS and that the
+          // message field it carries is the screen's own output - so removing the screen fails THIS test
+          // rather than quietly widening what is stored.
+          const unhandled = records.find((r) => JSON.stringify(r).includes("unhandled "));
+          assert(
+            unhandled,
+            `the unhandled-error record must be written for this surface (got ${
+              records.map((r) => r.type).join(", ") || "no records"
+            })`,
+          );
+          const recorded = JSON.parse(JSON.stringify(unhandled)) as {
+            context?: { error?: string; errorMessage?: string };
+          };
+          assertEquals(
+            recorded.context?.errorMessage,
+            SUPPRESSED_MESSAGE,
+            "the stored message must be the SCREENED value, not the thrown text",
+          );
+        }
       } finally {
         await close();
       }
