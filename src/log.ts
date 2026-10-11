@@ -160,6 +160,44 @@ const HIGH_VOLUME_ROUTES = new Set([
   "/manifest.json",
 ]);
 
+/**
+ * Everything the router dispatches, and nothing else (audio-feed-ao4s).
+ *
+ * Mirrors the router's own `Method` union, which is the point: the allowlist is the set of methods
+ * this app can actually serve, so a value outside it is not a method at all, it is a string a
+ * client chose.
+ */
+const KNOWN_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+]);
+
+/** The record for a method this app cannot serve. A constant, like every other logged name. */
+export const OTHER_METHOD = "<other>";
+
+/**
+ * Normalise the HTTP method before it becomes a field or a message (audio-feed-ao4s).
+ *
+ * THE METHOD IS ATTACKER-CONTROLLED TOO. Logging `req.method` raw is the same mistake as logging
+ * the raw path one field later: a client can send any token it likes as the method, so
+ * `Request(method: "<canary>")` used to arrive in the message AND in `context.method` and persist
+ * there — a capability the caller chose, stored by the app. The method must be normalised through
+ * the set of methods this app serves, exactly as the path is normalised to a route pattern, and
+ * anything else records a constant.
+ *
+ * Case-folded before the lookup because HTTP methods are case-sensitive in the spec but this app
+ * serves only the canonical spelling, and a lower-case `get` is untrusted input either way.
+ */
+export function normaliseMethod(raw: string): string {
+  const upper = raw.toUpperCase();
+  return KNOWN_METHODS.has(upper) && upper === raw ? upper : OTHER_METHOD;
+}
+
 export function isHighVolumeRoute(pattern: string): boolean {
   return HIGH_VOLUME_ROUTES.has(pattern);
 }

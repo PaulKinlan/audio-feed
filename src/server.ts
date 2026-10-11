@@ -21,7 +21,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
-import { createLogger, isHighVolumeRoute } from "./log.ts";
+import { createLogger, isHighVolumeRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -155,6 +155,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // during canonical-host handling (audio-feed-wzv9, audio-feed-pwu4).
   const router = app.router;
   const appLog = createLogger({ sink: stores.metadata, process: "app" });
+  // Only the class name of a throw, so an error message that quotes the request cannot reach a
+  // record (audio-feed-ao4s). The name comes from this codebase's own throw sites.
+  const errorName = (error: unknown): string =>
+    error instanceof Error && error.name ? error.name : "UnknownError";
   const serverFetch = async (
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },
@@ -173,13 +177,27 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       // write for nothing. Its failures still are.
       const worthRecording = res.status >= 400 || !isHighVolumeRoute(route);
       if (worthRecording) {
+        // AUDIT OF EVERY REQUEST-DERIVED FIELD IN THIS RECORD, since a path and then a method each
+        // leaked a client-chosen string (audio-feed-pwu4, audio-feed-ao4s). The rule is that no
+        // field derived from the request is logged raw:
+        //   method   normalised through the methods this app serves, else "<other>" (ao4s)
+        //   route    the registered pattern the URL matched, never the path (pwu4)
+        //   status   a number the platform bounds to a valid HTTP code; it cannot carry a string
+        //   durationMs  measured here, not taken from the request
+        //   correlationId  minted here with randomUUID; an inbound header is never adopted, so a
+        //              caller cannot choose the value that appears in a record
+        //   error    only the error's CLASS NAME, below — a name from this codebase's own throw
+        //            sites, never its message or stack, which can quote the request
+        // Nothing else about the request is recorded: no headers, no query string, no body, no
+        // client address. The invariant test fuzzes each of those surfaces independently.
+        const method = normaliseMethod(req.method);
         const fields = {
           correlationId,
           route,
           durationMs: durationMs(),
-          context: { method: req.method, status: res.status },
+          context: { method, status: res.status },
         };
-        const line = `${req.method} ${route} -> ${res.status}`;
+        const line = `${method} ${route} -> ${res.status}`;
         if (res.status >= 500) await appLog.error("http.request", line, fields);
         else if (res.status >= 400) await appLog.warn("http.request", line, fields);
         else await appLog.event("http.request", line, fields);
@@ -188,10 +206,14 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       headers.set("x-correlation-id", correlationId);
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
     } catch (error) {
-      await appLog.failure("http.request", error, {
+      // The error's NAME only. `failure()` would store the message and stack, and an unhandled
+      // error's message can quote the request that caused it — which is how a client-chosen string
+      // reaches a record through a field nobody thought of as request-derived.
+      await appLog.error("http.request", `unhandled ${errorName(error)} on ${route}`, {
         correlationId,
         route,
         durationMs: durationMs(),
+        context: { error: errorName(error) },
       });
       throw error;
     }

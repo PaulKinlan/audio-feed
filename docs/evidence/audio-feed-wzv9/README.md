@@ -179,3 +179,46 @@ heartbeat and phase, and that **worker state is unknown**. It never asserts that
 
 A heartbeat that repeats the current phase writes no record: one record per heartbeat would bury the
 transitions in noise, and a repeated phase is not a change.
+
+## Review round 5: no field derived from the request is logged raw
+
+### audio-feed-ao4s (P1) — the raw HTTP method
+
+`req.method` was stored in the message and in `context.method`, so `Request(method: "<canary>")`
+persisted the caller's string. Same family as the path leak, one field later. `normaliseMethod()`
+now passes the methods this app actually serves (the router's own `Method` union: GET, HEAD, POST,
+PUT, PATCH, DELETE, OPTIONS) through as the literal and records `<other>` for anything else. A
+method the app cannot serve is a string a client chose, not a method.
+
+### The audit, per request-derived field
+
+| field               | treatment                                                                                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `method`            | normalised through the served-method allowlist, else `<other>`                                                                                                                                                                         |
+| `route`             | the registered pattern the URL matched, never the path                                                                                                                                                                                 |
+| `status`            | a number the platform bounds to a valid HTTP code; it cannot carry a string                                                                                                                                                            |
+| `durationMs`        | measured in the wrapper, not taken from the request                                                                                                                                                                                    |
+| `correlationId`     | minted here with `randomUUID`; an inbound `x-correlation-id` header is **never adopted**, so a caller cannot choose the value in a record                                                                                              |
+| `error` (500 path)  | the error's **class name only**, from this codebase's own throw sites. The message and stack are not stored: an unhandled error's message can quote the request that caused it, which is a request-derived field nobody would call one |
+| not recorded at all | headers, query string, body, client address                                                                                                                                                                                            |
+
+### The class invariant: fuzz a canary per surface
+
+Four leaks in this family were each fixed correctly and each followed by another surface, because
+shape-by-shape tests check the shapes the author imagined.
+`tests/log_request_surface_invariant_test.ts` asserts no shapes. It fuzzes one canary through
+**every** attacker-controlled surface INDEPENDENTLY — method (including a lower-case spelling of a
+real one), path segment (positional capability, unmatched tail, mixed-case prefix), query string,
+and each header separately (`user-agent`, `x-correlation-id`, `referer`, `cookie`,
+`x-forwarded-for`, `content-type`) and body — across a matched and an unmatched path, and asserts
+the canary appears nowhere in the full serialised store. Adding a surface is one entry in
+`SURFACES`.
+
+**The first version of this test was vacuous**, and that is worth recording: it drove `createApp`,
+which does not log at all (the wrapper lives in `bootstrap`), so it asserted absence over a store
+nobody wrote to and 26 cases passed while proving nothing. Every case now also asserts that an
+`http.request` record EXISTS, which is the check that caught it. A leak test that cannot fail is
+worse than no test, because it is counted as coverage.
+
+**The guard was verified to bite**: reverting `normaliseMethod` to `return raw` fails exactly the
+three method cases, and restoring it returns the suite to 27 passed / 0 failed.
