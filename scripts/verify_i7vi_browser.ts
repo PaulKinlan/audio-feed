@@ -133,7 +133,10 @@ try {
       button: "left",
       clickCount: 1,
     });
-  const MOUSE_INTERACTIONS = 3;
+  // Which kinds to dispatch, so the count can be attributed to a KIND without any instrumentation
+  // inside the page: run the harness with CWV_INTERACTIONS=mouse and again with =key.
+  const kind = Deno.env.get("CWV_INTERACTIONS") ?? "both";
+  const MOUSE_INTERACTIONS = kind === "key" ? 0 : 3;
   for (let i = 0; i < MOUSE_INTERACTIONS; i++) {
     await press(40 + i * 20, 40);
     await release(40 + i * 20, 40);
@@ -144,7 +147,7 @@ try {
   // An unfocused page receives no keydown at all, so bring it to the front and focus it first.
   await cdp("Page.bringToFront");
   await cdp("Runtime.evaluate", { expression: "document.body.focus()" });
-  const KEY_INTERACTIONS = 2;
+  const KEY_INTERACTIONS = kind === "mouse" ? 0 : 2;
   for (let i = 0; i < KEY_INTERACTIONS; i++) {
     await cdp("Input.dispatchKeyEvent", {
       type: "keyDown",
