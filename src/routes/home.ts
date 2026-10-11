@@ -282,9 +282,16 @@ export function renderHomePage({
   <div id="result" role="status" aria-live="polite"></div>
 
   <div class="note bookmarklet-box u-mt-4">
-    <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link" href="${
+    <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link u-strong-link" href="${
     esc(bookmarkletHref(base))
-  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar" class="u-strong-link">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
+  }" draggable="true" title="Drag to your bookmarks bar" data-tooltip="Drag to your bookmarks bar">🎙️ Add to Audio Feed</a> to your bookmarks bar. Click it on any article to send it or subscribe in one click.</p>
+    <details class="bookmarklet-code u-mt-2">
+      <summary>Can’t drag it? Get the bookmarklet code</summary>
+      <p class="u-fs-sm u-mt-quarter">Browsers refuse <code>javascript:</code> links when clicked directly on a page protected by this app’s Content Security Policy. To install it manually, drag the link above to your bookmarks bar, or create a bookmark and paste this code as its URL:</p>
+      <pre class="bookmarklet-snippet u-break-all u-fs-xs"><code>${
+    esc(bookmarkletHref(base))
+  }</code></pre>
+    </details>
   </div>
 
   <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>

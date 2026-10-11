@@ -378,3 +378,27 @@ Deno.test("adding the homepage did not shadow another route", async () => {
   assertEquals(unknown.status, 404, "an unknown path must still 404, not serve the homepage");
   assertStringIncludes(unknown.headers.get("content-type") ?? "", "application/json");
 });
+
+Deno.test("the front door renders the bookmarklet disclosure without duplicate classes or inline script (audio-feed-3asd)", async () => {
+  const html = await (await app()(get("/"))).text();
+
+  // Single class attribute on the anchor (fixes duplicate class bug)
+  const anchorMatch = html.match(/<a[^>]+class="bookmarklet-link[^>]+>/i)?.[0];
+  assert(anchorMatch, "bookmarklet anchor must exist");
+  assertStringIncludes(anchorMatch, 'class="bookmarklet-link u-strong-link"');
+  assertEquals(
+    anchorMatch.split("class=").length - 1,
+    1,
+    "anchor must not carry duplicate class attributes",
+  );
+  assertStringIncludes(anchorMatch, 'draggable="true"');
+
+  // Disclosure details and fallback text
+  assertStringIncludes(html, '<details class="bookmarklet-code u-mt-2">');
+  assertStringIncludes(html, "<summary>Can’t drag it? Get the bookmarklet code</summary>");
+  assertStringIncludes(html, "Content Security Policy");
+  assertStringIncludes(
+    html,
+    '<pre class="bookmarklet-snippet u-break-all u-fs-xs"><code>javascript:(function()',
+  );
+});
