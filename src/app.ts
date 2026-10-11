@@ -31,6 +31,7 @@
 import { applySecurityHeaders, type Handler, Router } from "./router.ts";
 import { json, problem } from "./http.ts";
 import { handleAudio, notImplemented } from "./routes/audio.ts";
+import { sessionUser } from "./auth/sessions.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
 import { handleLogin } from "./routes/login.ts";
@@ -133,9 +134,25 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get("/share", handleShare);
   // The listener app (audio-feed-4xb): token-fronted, so a subscriber needs no
   // account — the feed token they already hold is the whole credential.
+  //
+  // The bare path is the PWA's start_url (audio-feed-b6nr). It used to render a landing page whose
+  // client read a remembered capability out of localStorage and redirected; now the SESSION does
+  // that here, so a home-screen launch still goes straight to the player without any credential
+  // sitting in readable storage. Without a session it is the landing page, as before.
   router.get(
     "/listen",
-    ({ ctx, req }) => {
+    async ({ ctx, req }) => {
+      const viewer = await sessionUser(ctx.stores.metadata, req);
+      if (viewer?.status === "approved") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: `/listen/${encodeURIComponent(viewer.feedToken)}`,
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+          },
+        });
+      }
       const nonce = newCspNonce();
       return htmlResponse(
         renderListenLanding(resolveOrigin(ctx.config, req).baseUrl, nonce),

@@ -39,6 +39,7 @@ const accountHtml = renderAccountPage({
 
 const listenHtml = renderListenPage({
   nonce: "test-nonce",
+  userId: "user-1",
   token: "test-token",
   subscriber: "Listener",
   feedUrl: "https://example.com/feed/test-token",

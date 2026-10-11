@@ -2,7 +2,7 @@
  * Tests for local-first playback position persistence (audio-feed-kzi).
  *
  * Verifies:
- *  1. Bounded, per-token storage isolation ({token} -> {episodeId: {position, updatedAt}});
+ *  1. Bounded, per-subscriber storage isolation ({scope} -> {episodeId: {position, updatedAt}});
  *  2. Finishing an episode clears position;
  *  3. Seeking to <= 2s clears position;
  *  4. Storage bounds cap at 50 newest items;
@@ -20,6 +20,10 @@ import type { AppConfig, Stores } from "../src/config.ts";
 const BASE = "https://audio.example.com";
 const TOKEN_A = "token-user-a";
 const TOKEN_B = "token-user-b";
+// audio-feed-b6nr: local storage is namespaced by the subscriber's id, not by the capability. The
+// capability must not appear in a key name or a value, so these are the ids the page is served.
+const SCOPE_A = "user-a";
+const SCOPE_B = "user-b";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 
 async function setupApp() {
@@ -40,7 +44,13 @@ Deno.test("playback position: client script includes position persistence and re
   const html = await (await fetch(new Request(`${BASE}/listen/${TOKEN_A}`))).text();
   const client = await playerClient(fetch, BASE, html);
 
-  assertStringIncludes(client, "audio-feed-positions:");
+  // audio-feed-b6nr: the key is built by scopedKey() from the subscriber's id, so the literal
+  // prefix is no longer written out in the source; the prefix and the scoping are what matter.
+  assertStringIncludes(client, "audio-feed-${kind}:");
+  assertStringIncludes(
+    client,
+    'for (const kind of ["positions", "played", "dismissed", "filter"])',
+  );
   assertStringIncludes(client, "savePosition");
   assertStringIncludes(client, "loadPositions");
   assertStringIncludes(client, "clearPosition");
@@ -61,10 +71,10 @@ Deno.test("playback position: per-token isolation and bounded storage simulation
   };
 
   const storage = makeStore();
-  const keyA = `audio-feed-positions:${TOKEN_A}`;
+  const keyA = `audio-feed-positions:${SCOPE_A}`;
 
-  function save(token: string, epId: string, seconds: number, now = Date.now()) {
-    const k = `audio-feed-positions:${token}`;
+  function save(scope: string, epId: string, seconds: number, now = Date.now()) {
+    const k = `audio-feed-positions:${scope}`;
     const raw = storage.getItem(k);
     const pos = raw ? JSON.parse(raw) : {};
     if (seconds <= 2) {
@@ -82,8 +92,8 @@ Deno.test("playback position: per-token isolation and bounded storage simulation
     storage.setItem(k, JSON.stringify(pos));
   }
 
-  function get(token: string, epId: string): number {
-    const k = `audio-feed-positions:${token}`;
+  function get(scope: string, epId: string): number {
+    const k = `audio-feed-positions:${scope}`;
     const raw = storage.getItem(k);
     if (!raw) return 0;
     const pos = JSON.parse(raw);
@@ -91,24 +101,24 @@ Deno.test("playback position: per-token isolation and bounded storage simulation
   }
 
   // Save for Alice
-  save(TOKEN_A, "ep-1", 125);
-  assertEquals(get(TOKEN_A, "ep-1"), 125);
+  save(SCOPE_A, "ep-1", 125);
+  assertEquals(get(SCOPE_A, "ep-1"), 125);
 
   // Bob's token must not see Alice's position
-  assertEquals(get(TOKEN_B, "ep-1"), 0);
+  assertEquals(get(SCOPE_B, "ep-1"), 0);
 
   // Save for Bob
-  save(TOKEN_B, "ep-1", 300);
-  assertEquals(get(TOKEN_B, "ep-1"), 300);
-  assertEquals(get(TOKEN_A, "ep-1"), 125); // Alice remains untouched
+  save(SCOPE_B, "ep-1", 300);
+  assertEquals(get(SCOPE_B, "ep-1"), 300);
+  assertEquals(get(SCOPE_A, "ep-1"), 125); // Alice remains untouched
 
   // Seeking <= 2s clears the position
-  save(TOKEN_A, "ep-1", 1);
-  assertEquals(get(TOKEN_A, "ep-1"), 0);
+  save(SCOPE_A, "ep-1", 1);
+  assertEquals(get(SCOPE_A, "ep-1"), 0);
 
   // Bounded storage: adding 55 items leaves exactly 50
   for (let i = 1; i <= 55; i++) {
-    save(TOKEN_A, `ep-${i}`, i * 10, 1000 + i);
+    save(SCOPE_A, `ep-${i}`, i * 10, 1000 + i);
   }
   const posA = JSON.parse(storage.getItem(keyA)!);
   assertEquals(Object.keys(posA).length, 50);

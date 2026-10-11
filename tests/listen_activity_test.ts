@@ -400,6 +400,7 @@ Deno.test({
   async fn() {
     const html = renderListenPage({
       nonce: "test-nonce",
+      userId: "user-1",
       token: "test-token",
       subscriber: "Paul",
       feedUrl: "https://example.com/feed.xml",

@@ -56,7 +56,15 @@ Deno.test("player filtering: client script includes filtering, honest count and 
   const html = await (await fetch(new Request(`${BASE}/listen/${TOKEN_A}`))).text();
   const client = await playerClient(fetch, BASE, html);
 
-  assertStringIncludes(client, "audio-feed-filter:");
+  // audio-feed-b6nr: the filter key is built by scopedKey() from the subscriber's id instead of
+  // being written out with the capability in it, so the literal prefix is gone from the source. The
+  // property this assertion exists for — the filter persists under a prefixed, per-subscriber key —
+  // is what is checked now.
+  assertStringIncludes(client, "audio-feed-${kind}:");
+  assertStringIncludes(
+    client,
+    'for (const kind of ["positions", "played", "dismissed", "filter"])',
+  );
   assertStringIncludes(client, "populateSourceFilter");
   assertStringIncludes(client, "matchesEpisode");
   assertStringIncludes(client, "matchesActivity");
