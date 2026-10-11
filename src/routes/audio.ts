@@ -68,14 +68,14 @@ function corsHeaders(): Record<string, string> {
 /**
  * The owning user of a canonical audio key, or null (audio-feed-ndc).
  *
- * Keys are `audio/<userId>/<mode>/<id>.<ext>` (audio-feed-3hb). A legacy flat
- * key carries no user, so its requests count toward the total only — an
- * unattributed request is better than a wrongly attributed one.
+ * Keys are `audio/<userId>/<mode>/<id>.<ext>` (audio-feed-3hb). Legacy flat
+ * keys without user attribution are rejected by isAllowedAudioKey (audio-feed-whsl).
  */
 export function userIdFromBlobKey(key: string): string | null {
   const parts = key.split("/");
-  if (parts.length < 4 || parts[0] !== "audio") return null;
-  return parts[1] || null;
+  if (parts.length >= 4 && parts[0] === "audio") return parts[1] || null;
+  if (parts.length === 3 && isAudioMode(parts[1])) return parts[0] || null;
+  return null;
 }
 
 /** Blob keys are path-shaped; reject anything that tries to escape the prefix. */
@@ -87,7 +87,7 @@ export function isSafeBlobKey(key: string): boolean {
 }
 
 /**
- * Restrict keys to canonical audio/ keys or legacy flat keys (*.wav, *.mp3).
+ * Restrict keys to canonical audio/ keys (*.wav, *.mp3).
  * Explicitly rejects intermediate synthesis segments (audio-segments/), voice samples
  * (voice-samples/), arbitrary multi-segment prefixes, and non-audio files.
  *
@@ -96,10 +96,10 @@ export function isSafeBlobKey(key: string): boolean {
  *   - `<userId>/<mode>/<file>` (3 segments, route-trimmed by /audio/:key+)
  * where <mode> is an AudioMode ("direct" | "deepdive") and <file> is *.wav | *.mp3.
  *
- * Legacy flat keys are single-segment filenames:
- *   - `<file>` or `audio/<file>` where <file> is *.wav | *.mp3.
+ * Legacy flat keys (parts.length < 3, e.g. "legacy.wav", "audio/ready.wav") are rejected
+ * to enforce user attribution and approval gating (audio-feed-whsl).
  *
- * Owned by: audio-feed-5iue.
+ * Owned by: audio-feed-5iue, audio-feed-whsl.
  */
 export function isAllowedAudioKey(rawKey: string): boolean {
   if (!isSafeBlobKey(rawKey)) return false;
@@ -127,30 +127,21 @@ export function isAllowedAudioKey(rawKey: string): boolean {
 
   const parts = rawKey.split("/");
 
-  // 1. Legacy flat key: e.g. "legacy.wav", "episode-1.mp3"
-  if (parts.length === 1) {
-    return true;
-  }
-
-  // 2. Legacy key prefixed with audio/: e.g. "audio/ready.wav"
-  if (parts.length === 2) {
-    return parts[0] === "audio";
-  }
-
-  // 3. Route-trimmed canonical key: <userId>/<mode>/<file>
+  // 1. Route-trimmed canonical key: <userId>/<mode>/<file>
   // Mode must be a valid AudioMode ("direct" | "deepdive")
   if (parts.length === 3) {
     const [userId, mode] = parts;
     return Boolean(userId) && isAudioMode(mode);
   }
 
-  // 4. Canonical key: audio/<userId>/<mode>/<file>
+  // 2. Canonical key: audio/<userId>/<mode>/<file>
   // Must start with "audio" and mode must be a valid AudioMode
   if (parts.length === 4) {
     const [prefix, userId, mode] = parts;
     return prefix === "audio" && Boolean(userId) && isAudioMode(mode);
   }
 
+  // Legacy flat keys (parts.length < 3) and over-nested keys (parts.length > 4) are rejected.
   return false;
 }
 
@@ -160,7 +151,7 @@ async function checkUserApproval(
   resolvedKey: string,
 ): Promise<Response | null> {
   const userId = userIdFromBlobKey(resolvedKey);
-  if (!userId) return null;
+  if (!userId) return forbidden("Not available");
   const user = await ctx.stores.metadata.getUser(userId);
   if (!user || user.status !== "approved") {
     const status = user?.status ?? "unknown";

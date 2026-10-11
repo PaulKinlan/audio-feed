@@ -51,13 +51,13 @@ async function seededApp() {
       sourceId: "stratechery",
       status: "ready",
       mode: "direct",
-      audioKey: "episode-1.mp3",
+      audioKey: "audio/user-1/direct/episode-1.mp3",
       byteLength: AUDIO.length,
       contentType: "audio/mpeg",
       durationSeconds: 12,
     }),
   );
-  await stores.blobs.put("episode-1.mp3", AUDIO, { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/user-1/direct/episode-1.mp3", AUDIO, { contentType: "audio/mpeg" });
   const handlers = createHandlers({ config, stores }, {
     fetchArticle: () => Promise.resolve(ARTICLE),
   });
@@ -167,7 +167,7 @@ Deno.test("a subscriber can read the feed, take the enclosure and fetch the audi
 
   const enclosure = enclosureUrl(xml);
   assert(enclosure, "the feed must advertise an enclosure");
-  assertStringIncludes(enclosure, "/audio/episode-1.mp3");
+  assertStringIncludes(enclosure, "/audio/user-1/direct/episode-1.mp3");
 
   // The enclosure must actually resolve: a feed pointing at a 404 is not a product.
   const audio = await fetch(new Request(enclosure));
@@ -232,7 +232,7 @@ Deno.test("an enclosure length comes from the store when the record lacks one", 
   assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-3.mp3" length="777"`);
   assertStringIncludes(
     xml,
-    `<enclosure url="${BASE}/audio/episode-1.mp3" length="${AUDIO.length}"`,
+    `<enclosure url="${BASE}/audio/user-1/direct/episode-1.mp3" length="${AUDIO.length}"`,
   );
 });
 
