@@ -6,7 +6,7 @@
  * - Refusal of Public Suffixes / eTLDs (deno.net, pages.dev, github.io, com) as RP IDs
  * - Acceptance of localhost and valid registrable domain suffixes
  * - Support for explicit WEBAUTHN_RP_ID configuration
- * - GET /.well-known/webauthn serves valid ROR JSON with origins list and public cache headers
+ * - GET /.well-known/webauthn serves valid ROR JSON with its origins list, uncacheable (no-store)
  */
 
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -143,7 +143,7 @@ Deno.test("GET /.well-known/webauthn: serves ROR JSON origins list (audio-feed-1
   const res = await fetch(new Request(`${BASE}/.well-known/webauthn`));
   assertEquals(res.status, 200);
   assertStringIncludes(String(res.headers.get("content-type")), "application/json");
-  assertStringIncludes(String(res.headers.get("cache-control")), "public");
+  assertEquals(res.headers.get("cache-control"), "no-store");
 
   const data = await res.json() as { origins: string[] };
   assert(Array.isArray(data.origins));
@@ -199,14 +199,11 @@ Deno.test("GET /.well-known/webauthn: a Host header cannot become the advertised
 
   // The canonical host is served, and the client-supplied Host never appears in the answer.
   assertEquals(res1.status, 200);
-  // The exact cache-control is deliberately not asserted here: with a pinned origin this answer is
-  // host-independent (that is what makes it worth pinning), so whether it is shared is a caching
-  // decision covered elsewhere. The poisoning protection no longer rests on the header at all - it
-  // rests on the refusal below.
-  assert(
-    (res1.headers.get("cache-control") ?? "").length > 0,
-    "the response must say something about caching",
-  );
+  // no-store, restored deliberately after the reviewer asked for the choice to be stated rather than
+  // incidental: this is auth metadata derived from deployment configuration, so a cache could serve an
+  // answer from before a reconfiguration. The header is NOT the poisoning defence - the 421 refusal
+  // below is - but that is an argument about the header's role, not a reason to make it cacheable.
+  assertEquals(res1.headers.get("cache-control"), "no-store");
   // The answer advertises the CONFIGURED origin - that is the point of pinning it - and never the
   // Host it was asked on.
   const body1Json = JSON.parse(body1) as { origins: string[] };

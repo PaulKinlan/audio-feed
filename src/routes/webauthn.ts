@@ -38,7 +38,15 @@ export const handleWebAuthnRelatedOrigins: Handler<AppContext> = ({ ctx }) => {
     }
   }
 
-  const cacheControl = origins.size > 0 ? "public, max-age=3600" : "no-store";
+  // no-store, unconditionally (audio-feed-7lsy review): this is passkey/auth metadata derived from
+  // deployment configuration, so an intermediary or shared cache could serve an answer from before a
+  // reconfiguration - and a stale origins list is exactly what breaks passkey registration after a
+  // domain change. There is no caching benefit on this endpoint worth that risk.
+  //
+  // What this header is NOT any more: load-bearing for Host poisoning. A request arriving on a host the
+  // deployment does not recognise is refused with 421 before the router runs (src/app.ts), so the
+  // protection is the refusal and this is defence in depth rather than the mechanism.
+  const cacheControl = "no-store";
 
   return Response.json(
     { origins: Array.from(origins) },
