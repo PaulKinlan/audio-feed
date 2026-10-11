@@ -80,7 +80,9 @@ const chrome = new Deno.Command(newestChrome(), {
 let debugPort = "";
 for (let i = 0; i < 100 && !debugPort; i++) {
   await sleep(100);
-  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split("\n")[0]!;
+  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+    "\n",
+  )[0]!;
 }
 
 const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
@@ -153,7 +155,11 @@ try {
   await until(`document.readyState === "complete"`, "homepage loaded");
 
   const requestHeader = await js(`document.getElementById("request-access")?.textContent`);
-  check("front door has request access section", requestHeader?.includes("Request access") === true, `header: '${requestHeader}'`);
+  check(
+    "front door has request access section",
+    requestHeader?.includes("Request access") === true,
+    `header: '${requestHeader}'`,
+  );
 
   const cueLink = await js(`!!document.querySelector('a[href="#request-access"]')`);
   check("subscribing copy links down to request access form", cueLink === true, "anchor present");
@@ -173,16 +179,27 @@ try {
     document.getElementById("request-access-form").requestSubmit();
   `);
 
-  await until(`document.getElementById("request-result")?.classList.contains("ok")`, "request submitted");
+  await until(
+    `document.getElementById("request-result")?.classList.contains("ok")`,
+    "request submitted",
+  );
 
   const resultText = await js(`document.getElementById("request-result")?.textContent`);
-  check("response acknowledges submission honestly", resultText?.includes("Access request received") === true, `msg: '${resultText}'`);
+  check(
+    "response acknowledges submission honestly",
+    resultText?.includes("Access request received") === true,
+    `msg: '${resultText}'`,
+  );
 
   const leakedToken = await js(`
     document.getElementById("request-result")?.textContent.includes("/feed/") ||
     document.getElementById("request-result")?.textContent.includes("/listen/")
   `);
-  check("response does NOT leak capability URL to unapproved applicant", leakedToken === false, "no token or URL exposed");
+  check(
+    "response does NOT leak capability URL to unapproved applicant",
+    leakedToken === false,
+    "no token or URL exposed",
+  );
 
   // Capture desktop submitted screenshot
   const shotDesktop2 = await cdp("Page.captureScreenshot", { format: "png" });
@@ -194,7 +211,11 @@ try {
 
   // Verify user in store
   const pendingUser = await stores.metadata.getUserByEmail("visitor@example.com");
-  check("user lands in metadata store as pending", pendingUser?.status === "pending", `status: '${pendingUser?.status}'`);
+  check(
+    "user lands in metadata store as pending",
+    pendingUser?.status === "pending",
+    `status: '${pendingUser?.status}'`,
+  );
   const token = pendingUser!.feedToken;
 
   // Verify spend gate authority: pending token is refused for ingest, player, and feed
@@ -203,13 +224,25 @@ try {
     headers: { "content-type": "application/json", "x-feed-token": token },
     body: JSON.stringify({ url: "https://example.com/test" }),
   });
-  check("pending user cannot ingest (403 forbidden)", ingestPending.status === 403, `status: ${ingestPending.status}`);
+  check(
+    "pending user cannot ingest (403 forbidden)",
+    ingestPending.status === 403,
+    `status: ${ingestPending.status}`,
+  );
 
   const playerPending = await fetch(`${BASE}/listen/${token}`);
-  check("pending user cannot access player (403 forbidden)", playerPending.status === 403, `status: ${playerPending.status}`);
+  check(
+    "pending user cannot access player (403 forbidden)",
+    playerPending.status === 403,
+    `status: ${playerPending.status}`,
+  );
 
   const feedPending = await fetch(`${BASE}/feed/${token}/master.xml`);
-  check("pending user cannot access feed (403 forbidden)", feedPending.status === 403, `status: ${feedPending.status}`);
+  check(
+    "pending user cannot access feed (403 forbidden)",
+    feedPending.status === 403,
+    `status: ${feedPending.status}`,
+  );
 
   // 2. Mobile pass (390x844)
   await cdp("Emulation.setDeviceMetricsOverride", {
@@ -222,8 +255,14 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/` });
   await until(`document.readyState === "complete"`, "mobile loaded");
 
-  const overflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
-  check("mobile front door has zero horizontal overflow at 390px", overflow === false, "no horizontal scroll");
+  const overflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
+  check(
+    "mobile front door has zero horizontal overflow at 390px",
+    overflow === false,
+    "no horizontal scroll",
+  );
 
   const shotMobile1 = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -238,7 +277,10 @@ try {
     document.getElementById("request-name").value = "Mobile User";
     document.getElementById("request-access-form").requestSubmit();
   `);
-  await until(`document.getElementById("request-result")?.classList.contains("ok")`, "mobile request submitted");
+  await until(
+    `document.getElementById("request-result")?.classList.contains("ok")`,
+    "mobile request submitted",
+  );
 
   const shotMobile2 = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -251,17 +293,29 @@ try {
   await approveUser(stores.metadata, pendingUser!.id, "admin");
 
   const playerApproved = await fetch(`${BASE}/listen/${token}`);
-  check("approved user accesses player (200 OK)", playerApproved.status === 200, `status: ${playerApproved.status}`);
+  check(
+    "approved user accesses player (200 OK)",
+    playerApproved.status === 200,
+    `status: ${playerApproved.status}`,
+  );
 
   const feedApproved = await fetch(`${BASE}/feed/${token}/master.xml`);
-  check("approved user accesses master feed (200 OK)", feedApproved.status === 200, `status: ${feedApproved.status}`);
+  check(
+    "approved user accesses master feed (200 OK)",
+    feedApproved.status === 200,
+    `status: ${feedApproved.status}`,
+  );
 
   const ingestApproved = await fetch(`${BASE}/api/ingest`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-feed-token": token },
     body: JSON.stringify({ url: "https://example.com/test-article" }),
   });
-  check("approved user can ingest (202 Queued)", ingestApproved.status === 202, `status: ${ingestApproved.status}`);
+  check(
+    "approved user can ingest (202 Queued)",
+    ingestApproved.status === 202,
+    `status: ${ingestApproved.status}`,
+  );
 
   // Navigate to player in Chrome and capture proof
   await cdp("Page.navigate", { url: `${BASE}/listen/${token}` });
@@ -305,7 +359,9 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join(
   console.error(err);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   await server.shutdown().catch(() => {});
   await cleanup();
 }

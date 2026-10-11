@@ -66,81 +66,85 @@ Deno.serve(
     },
   },
   async (request) => {
-  const url = new URL(request.url);
-  if (request.method === "OPTIONS") {
-    // 204 must be bodiless, so CORS headers are set directly here.
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "access-control-allow-origin": "*",
-        "access-control-allow-headers": "content-type, x-admin-token",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
-      },
-    });
-  }
-  const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
-  const token = request.headers.get("x-admin-token");
-
-  try {
-    switch (`${request.method} ${url.pathname}`) {
-      // Public signup: always lands in the approval queue.
-      case "POST /signup": {
-        const user = await createUser(store, { email: body.email, displayName: body.displayName });
-        return json({ id: user.id, status: user.status, email: user.email }, 201);
-      }
-
-      // Admin queue. Requires the admin token.
-      //
-      // `redactUser` is not decoration: `listUsers` returns the full record,
-      // and serialising it directly would hand every pending user's feed
-      // capability to anyone who can reach this endpoint. The feed token is a
-      // bearer credential — a leaked one grants read access to that user's feed
-      // until it is rotated, and rotation breaks every subscribed client.
-      case "GET /pending": {
-        await requireAdminToken(token, ADMIN_TOKEN);
-        const pending = await listUsers(store, "pending");
-        return json({ pending: pending.map(redactUser), adminId: admin.id });
-      }
-
-      case "POST /approve": {
-        await requireAdminToken(token, ADMIN_TOKEN);
-        const updated = await approveUser(store, body.userId, admin.id);
-        return json({ id: updated.id, status: updated.status });
-      }
-
-      case "POST /suspend": {
-        await requireAdminToken(token, ADMIN_TOKEN);
-        const updated = await suspendUser(store, body.userId, admin.id, body.reason);
-        return json({ id: updated.id, status: updated.status });
-      }
-
-      // The money path: refuses anything that is not an approved user.
-      case "POST /synthesize": {
-        const user = await assertAuthorizedForAudio(store, body.userId);
-        return json({ queued: true, userId: user.id, voice: user.voice ?? "Aoede" });
-      }
-
-      case "GET /": {
-        return new Response(
-          `auth harness up at ${origin} (admin token: ${ADMIN_TOKEN})`,
-          { headers: { "content-type": "text/plain" } },
-        );
-      }
-
-      default:
-        return json({ error: "not found" }, 404);
+    const url = new URL(request.url);
+    if (request.method === "OPTIONS") {
+      // 204 must be bodiless, so CORS headers are set directly here.
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-headers": "content-type, x-admin-token",
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+        },
+      });
     }
-  } catch (error) {
-    const unauthorized = error instanceof NotAuthorizedError;
-    return json(
-      {
-        error: unauthorized ? "not_authorized" : "forbidden",
-        message: String(error instanceof Error ? error.message : error),
-        status: unauthorized ? "blocked" : undefined,
-      },
-      unauthorized ? 403 : 401,
-    );
-  }
-});
+    const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+    const token = request.headers.get("x-admin-token");
+
+    try {
+      switch (`${request.method} ${url.pathname}`) {
+        // Public signup: always lands in the approval queue.
+        case "POST /signup": {
+          const user = await createUser(store, {
+            email: body.email,
+            displayName: body.displayName,
+          });
+          return json({ id: user.id, status: user.status, email: user.email }, 201);
+        }
+
+        // Admin queue. Requires the admin token.
+        //
+        // `redactUser` is not decoration: `listUsers` returns the full record,
+        // and serialising it directly would hand every pending user's feed
+        // capability to anyone who can reach this endpoint. The feed token is a
+        // bearer credential — a leaked one grants read access to that user's feed
+        // until it is rotated, and rotation breaks every subscribed client.
+        case "GET /pending": {
+          await requireAdminToken(token, ADMIN_TOKEN);
+          const pending = await listUsers(store, "pending");
+          return json({ pending: pending.map(redactUser), adminId: admin.id });
+        }
+
+        case "POST /approve": {
+          await requireAdminToken(token, ADMIN_TOKEN);
+          const updated = await approveUser(store, body.userId, admin.id);
+          return json({ id: updated.id, status: updated.status });
+        }
+
+        case "POST /suspend": {
+          await requireAdminToken(token, ADMIN_TOKEN);
+          const updated = await suspendUser(store, body.userId, admin.id, body.reason);
+          return json({ id: updated.id, status: updated.status });
+        }
+
+        // The money path: refuses anything that is not an approved user.
+        case "POST /synthesize": {
+          const user = await assertAuthorizedForAudio(store, body.userId);
+          return json({ queued: true, userId: user.id, voice: user.voice ?? "Aoede" });
+        }
+
+        case "GET /": {
+          return new Response(
+            `auth harness up at ${origin} (admin token: ${ADMIN_TOKEN})`,
+            { headers: { "content-type": "text/plain" } },
+          );
+        }
+
+        default:
+          return json({ error: "not found" }, 404);
+      }
+    } catch (error) {
+      const unauthorized = error instanceof NotAuthorizedError;
+      return json(
+        {
+          error: unauthorized ? "not_authorized" : "forbidden",
+          message: String(error instanceof Error ? error.message : error),
+          status: unauthorized ? "blocked" : undefined,
+        },
+        unauthorized ? 403 : 401,
+      );
+    }
+  },
+);
 
 console.log(`auth harness listening on ${origin}`);

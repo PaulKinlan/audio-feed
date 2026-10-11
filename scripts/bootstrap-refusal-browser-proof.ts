@@ -10,13 +10,11 @@
  *   deno run --allow-all --unstable-kv scripts/bootstrap-refusal-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
-const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-bootstrap-refusal-");
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile(
+  "audiofeed-bootstrap-refusal-",
+);
 const harness = await spawnHarness("scripts/account-harness.ts");
 const BASE = harness.base;
 const OUT = new URL("../docs/evidence/audio-feed-xw7/", import.meta.url).pathname;
@@ -190,7 +188,10 @@ try {
   );
 
   // 5. Verify /admin console loaded on session
-  await until(`document.getElementById("usersBody")?.children?.length > 0`, "console subscribers loaded");
+  await until(
+    `document.getElementById("usersBody")?.children?.length > 0`,
+    "console subscribers loaded",
+  );
   const adminEmail = await js(`document.querySelector(".signin-card strong")?.textContent || ""`);
   check(
     "admin console is signed in as new bootstrap admin",

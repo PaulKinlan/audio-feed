@@ -18,11 +18,7 @@
  *   deno run --allow-all --unstable-kv scripts/home-player-link-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-home-player-");
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -123,7 +119,11 @@ try {
   await until(`document.readyState === "complete"`, "homepage loaded");
 
   const headerNavLink = await js(`!!document.querySelector('.site-nav a[href="/listen"]')`);
-  check("header navigation links to /listen", headerNavLink === true, "Web Player nav link present");
+  check(
+    "header navigation links to /listen",
+    headerNavLink === true,
+    "Web Player nav link present",
+  );
 
   const ledeLink = await js(`!!document.querySelector('.lede a[href="/listen"]')`);
   check("hero lede links to /listen", ledeLink === true, "Web Player link in lede present");
@@ -142,17 +142,27 @@ try {
   // Set stored token and visit homepage again
   await js(`localStorage.setItem("audio-feed-token", "harness-token")`);
   await cdp("Page.navigate", { url: `${BASE}/` });
-  await until(`!document.getElementById("returningSubscriber")?.hidden`, "returning subscriber banner");
+  await until(
+    `!document.getElementById("returningSubscriber")?.hidden`,
+    "returning subscriber banner",
+  );
 
   const returningVisible = await js(`!document.getElementById("returningSubscriber")?.hidden`);
   check("returning subscriber banner is visible on /", returningVisible === true, "banner shown");
 
   const autoFilledToken = await js(`document.getElementById("token")?.value`);
-  check("feed token field auto-filled from storage", autoFilledToken === "harness-token", `token: '${autoFilledToken}'`);
+  check(
+    "feed token field auto-filled from storage",
+    autoFilledToken === "harness-token",
+    `token: '${autoFilledToken}'`,
+  );
 
   // Visiting /listen with stored token restores directly to /listen/:token
   await cdp("Page.navigate", { url: `${BASE}/listen` });
-  await until(`location.pathname.startsWith("/listen/harness-token")`, "restored to /listen/:token");
+  await until(
+    `location.pathname.startsWith("/listen/harness-token")`,
+    "restored to /listen/:token",
+  );
   check(
     "/listen with stored token restores directly to /listen/:token",
     (await js(`location.pathname`)).includes("harness-token"),
@@ -170,7 +180,9 @@ try {
   `);
   await until(`document.getElementById("result")?.classList.contains("ok")`, "submission success");
 
-  const playerLinkUrl = await js(`document.querySelector("#result .player-link")?.getAttribute("href")`);
+  const playerLinkUrl = await js(
+    `document.querySelector("#result .player-link")?.getAttribute("href")`,
+  );
   check(
     "submission success state offers 'Open in Web Player →'",
     typeof playerLinkUrl === "string" && playerLinkUrl.includes("/listen/harness-token"),
@@ -196,8 +208,14 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/` });
   await until(`document.readyState === "complete"`, "mobile load");
 
-  const overflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
-  check("mobile layout has zero horizontal overflow at 390px", overflow === false, "no horizontal scroll");
+  const overflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
+  check(
+    "mobile layout has zero horizontal overflow at 390px",
+    overflow === false,
+    "no horizontal scroll",
+  );
 
   const shotMobile = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -209,7 +227,9 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   harness.kill();
   await cleanup();
 }

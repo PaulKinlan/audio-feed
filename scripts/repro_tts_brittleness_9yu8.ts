@@ -143,7 +143,11 @@ const report: Record<string, unknown> = {
       truncated: audio.truncated,
     };
   } catch (error) {
-    outcome = { result: "failure", totalMs: Math.round(performance.now() - t0), ...describe(error) };
+    outcome = {
+      result: "failure",
+      totalMs: Math.round(performance.now() - t0),
+      ...describe(error),
+    };
   }
   report.partA_realNarration = {
     description:
@@ -175,7 +179,11 @@ const report: Record<string, unknown> = {
     await client.synthesizeNarration({ title: "Timeout verification", body: multiSegmentBody });
     outcome = { result: "unexpected success" };
   } catch (error) {
-    outcome = { result: "failure", totalMs: Math.round(performance.now() - t0), ...describe(error) };
+    outcome = {
+      result: "failure",
+      totalMs: Math.round(performance.now() - t0),
+      ...describe(error),
+    };
   }
   report.partB_deadlineRetry = {
     description:

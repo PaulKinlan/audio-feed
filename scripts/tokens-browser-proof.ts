@@ -16,7 +16,7 @@
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { createUser, approveUser } from "../src/auth/users.ts";
+import { approveUser, createUser } from "../src/auth/users.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { createTempChromeProfile, newestChrome } from "./proof-helper.ts";
@@ -89,7 +89,9 @@ const chrome = new Deno.Command(newestChrome(), {
 let debugPort = "";
 for (let i = 0; i < 100 && !debugPort; i++) {
   await sleep(100);
-  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split("\n")[0]!;
+  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+    "\n",
+  )[0]!;
 }
 
 const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
@@ -162,8 +164,12 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/` });
   await until(`document.readyState === "complete"`, "home loaded");
 
-  const homeSpace4 = await js(`getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`);
-  const homeRadius = await js(`getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`);
+  const homeSpace4 = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
+  );
+  const homeRadius = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`,
+  );
   check("home page computes unified --space-4", homeSpace4 === "1rem", `value: '${homeSpace4}'`);
   check("home page computes unified --radius", homeRadius === "12px", `value: '${homeRadius}'`);
 
@@ -177,10 +183,22 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/admin` });
   await until(`document.readyState === "complete"`, "admin loaded");
 
-  const adminSpace4 = await js(`getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`);
-  const adminRadius = await js(`getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`);
-  check("admin page computes identical unified --space-4", adminSpace4 === "1rem", `value: '${adminSpace4}'`);
-  check("admin page computes identical unified --radius", adminRadius === "12px", `value: '${adminRadius}'`);
+  const adminSpace4 = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
+  );
+  const adminRadius = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`,
+  );
+  check(
+    "admin page computes identical unified --space-4",
+    adminSpace4 === "1rem",
+    `value: '${adminSpace4}'`,
+  );
+  check(
+    "admin page computes identical unified --radius",
+    adminRadius === "12px",
+    `value: '${adminRadius}'`,
+  );
 
   const shotAdminDesktop = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -192,8 +210,14 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/listen` });
   await until(`document.readyState === "complete"`, "listen landing loaded");
 
-  const listenLandingSpace4 = await js(`getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`);
-  check("listen landing computes identical unified --space-4", listenLandingSpace4 === "1rem", `value: '${listenLandingSpace4}'`);
+  const listenLandingSpace4 = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
+  );
+  check(
+    "listen landing computes identical unified --space-4",
+    listenLandingSpace4 === "1rem",
+    `value: '${listenLandingSpace4}'`,
+  );
 
   const shotLandingDesktop = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -205,12 +229,30 @@ try {
   await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
   await until(`document.readyState === "complete"`, "player loaded");
 
-  const playerSpace4 = await js(`getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`);
-  const playerRadius = await js(`getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`);
-  const playerMuted = await js(`getComputedStyle(document.documentElement).getPropertyValue("--muted").trim()`);
-  check("web player computes identical unified --space-4", playerSpace4 === "1rem", `value: '${playerSpace4}'`);
-  check("web player computes identical unified --radius", playerRadius === "12px", `value: '${playerRadius}'`);
-  check("web player computes dark muted token", playerMuted === "#9a9aa4", `value: '${playerMuted}'`);
+  const playerSpace4 = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
+  );
+  const playerRadius = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--radius").trim()`,
+  );
+  const playerMuted = await js(
+    `getComputedStyle(document.documentElement).getPropertyValue("--muted").trim()`,
+  );
+  check(
+    "web player computes identical unified --space-4",
+    playerSpace4 === "1rem",
+    `value: '${playerSpace4}'`,
+  );
+  check(
+    "web player computes identical unified --radius",
+    playerRadius === "12px",
+    `value: '${playerRadius}'`,
+  );
+  check(
+    "web player computes dark muted token",
+    playerMuted === "#9a9aa4",
+    `value: '${playerMuted}'`,
+  );
 
   const shotPlayerDesktop = await cdp("Page.captureScreenshot", { format: "png" });
   await Deno.writeFile(
@@ -229,19 +271,25 @@ try {
   // Mobile home
   await cdp("Page.navigate", { url: `${BASE}/` });
   await until(`document.readyState === "complete"`, "mobile home loaded");
-  const homeOverflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
+  const homeOverflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
   check("mobile home zero horizontal overflow", homeOverflow === false, "no overflow");
 
   // Mobile admin
   await cdp("Page.navigate", { url: `${BASE}/admin` });
   await until(`document.readyState === "complete"`, "mobile admin loaded");
-  const adminOverflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
+  const adminOverflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
   check("mobile admin zero horizontal overflow", adminOverflow === false, "no overflow");
 
   // Mobile player
   await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
   await until(`document.readyState === "complete"`, "mobile player loaded");
-  const playerOverflow = await js(`document.documentElement.scrollWidth > document.documentElement.clientWidth`);
+  const playerOverflow = await js(
+    `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+  );
   check("mobile player zero horizontal overflow", playerOverflow === false, "no overflow");
 
   const shotPlayerMobile = await cdp("Page.captureScreenshot", { format: "png" });
@@ -284,7 +332,9 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join(
   console.error(err);
   exitCode = 1;
 } finally {
-  try { chrome.kill(); } catch { /* ignore */ }
+  try {
+    chrome.kill();
+  } catch { /* ignore */ }
   await server.shutdown().catch(() => {});
   await cleanup();
 }

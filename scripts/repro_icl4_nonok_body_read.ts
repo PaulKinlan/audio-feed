@@ -40,7 +40,11 @@ const hangingErrorBody = () =>
             signal?.addEventListener("abort", () => controller.error(signal.reason));
           },
         }),
-        { status: 503, statusText: "Service Unavailable", headers: { "content-type": "text/html" } },
+        {
+          status: 503,
+          statusText: "Service Unavailable",
+          headers: { "content-type": "text/html" },
+        },
       ),
     )) as typeof fetch;
 
@@ -70,7 +74,8 @@ const report: Record<string, unknown> = {
   capturedAt: new Date().toISOString(),
   capturedAgainst:
     "post-fix; the pre-fix persisted string is quoted from the reviewer's bead evidence",
-  preFixPersistedError: "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: " +
+  preFixPersistedError:
+    "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: " +
     "Service Unavailable [model=gemini-3.8-flash-tts, inputBytes=..., estimatedInputTokens<=..., " +
     "maxOutputTokens=16384] [mode direct; claim 1/3; provider status 503]",
 };

@@ -88,3 +88,31 @@ Deno.test("every script on disk is inside the checked tree (audio-feed-zjy)", as
     `expected the existing scripts, found ${onDisk.length}: ${onDisk.join(", ")}`,
   );
 });
+
+/**
+ * The gate must not report a property it does not check (audio-feed-7jsl). While scripts/ was
+ * absent from fmt.include, `deno fmt --check` passed over 205 files and never looked at the 45 in
+ * scripts/ -- 17 of which were unformatted -- so the gate was green about a tree it was blind to.
+ *
+ * The assertion is deliberately the general property rather than "scripts/ is listed": every tree
+ * the gate type-checks must also be inside the fmt scope. A new directory added to the check stage
+ * without a matching include fails here, which is exactly how this gap survived until someone
+ * happened to format a stray file and see the churn.
+ */
+Deno.test("every tree the gate type-checks is also inside the fmt scope (audio-feed-7jsl)", () => {
+  const checks = checkCommands(tasks.gate!);
+  assertEquals(checks.length, 1, "the gate has exactly one deno check stage");
+  const checked = checks[0]!.split(/\s+/).slice(3).filter((part) => !part.startsWith("-"));
+  assert(checked.length > 0, `could not read the checked paths from: ${checks[0]}`);
+
+  const include: string[] = denoJson.fmt?.include ?? [];
+  assert(include.length > 0, "fmt has an explicit scope, so this test has something to assert");
+
+  for (const tree of checked) {
+    assert(
+      include.includes(tree) || include.includes(`${tree}/`),
+      `${tree} is type-checked by the gate but is not in fmt.include, so formatting it is ` +
+        `unchecked: ${JSON.stringify(include)} (audio-feed-7jsl)`,
+    );
+  }
+});

@@ -89,7 +89,8 @@ const report: Record<string, unknown> = {
   capturedAt: new Date().toISOString(),
   // The committed capture was pre-fix (it demonstrates the bug); a re-run produces
   // post-fix behaviour and must not masquerade as the same artifact.
-  capturedAgainst: "post-fix re-run (the pre-fix capture demonstrating the bug is in git history at 7285f04)",
+  capturedAgainst:
+    "post-fix re-run (the pre-fix capture demonstrating the bug is in git history at 7285f04)",
   provider: {
     endpoint: `${PROXY}/models/gemini-3.8-flash-tts:generateContent`,
     note: "gemini.int.exe.xyz injects Paul's real API key; the client sends a dummy key",

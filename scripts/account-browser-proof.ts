@@ -15,11 +15,7 @@
  *   deno run --allow-all --unstable-kv scripts/account-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  newestChrome,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
 
 const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-account-");
 const harness = await spawnHarness("scripts/account-harness.ts");
@@ -284,7 +280,9 @@ try {
     "count drops after the reload",
   );
   await js(
-    `window.__confirms = [${JSON.stringify(firstConfirm)}]; window.confirm = (m) => (window.__confirms.push(m), true)`,
+    `window.__confirms = [${
+      JSON.stringify(firstConfirm)
+    }]; window.confirm = (m) => (window.__confirms.push(m), true)`,
   );
   await js(`document.getElementById("regenOutdated").click()`);
   await until(
@@ -367,7 +365,9 @@ try {
       "\n",
   );
   ws.close();
-  try { chrome.kill("SIGKILL"); } catch { /* ignore */ }
+  try {
+    chrome.kill("SIGKILL");
+  } catch { /* ignore */ }
   harness.kill();
   await Promise.allSettled([chrome.status, harness.process.status]);
   await cleanup();
