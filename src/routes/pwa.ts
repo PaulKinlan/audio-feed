@@ -325,16 +325,15 @@ export function handleIcon(_ctx: RouteContext<AppContext>): Response {
 }
 
 /**
- * `GET /robots.txt` (audio-feed-0mv).
+ * `GET /robots.txt` (audio-feed-0mv, audio-feed-nnek, audio-feed-qk63, audio-feed-nyih).
  *
- * The capability routes are token-fronted, so a crawler that follows one cannot
- * read anything — but it can still spend our KV budget asking, and an indexed
- * `/listen/<token>` URL is a subscriber's credential in a search result. The
- * disallow list is explicit rather than a bare `Disallow: /` so the public
- * surfaces stay crawlable.
+ * Effective deindexing: capability routes like `/feed/` and `/listen/` are NOT disallowed
+ * here so that search crawlers can fetch them, observe the `X-Robots-Tag: noindex`
+ * header (and HTML meta noindex), and drop the URL from search indexes completely
+ * (a robots.txt Disallow prevents crawlers from reading HTTP response headers, allowing
+ * bare URLs to be indexed from inbound links).
  */
 export const ROBOTS_TXT = `User-agent: *
-Disallow: /listen/
 Disallow: /admin
 Disallow: /api/
 Allow: /

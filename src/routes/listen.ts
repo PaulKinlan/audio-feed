@@ -234,6 +234,7 @@ export function renderListenPage(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>${esc(title)}</title>
+<meta name="robots" content="noindex">
 <meta name="theme-color" content="#0a0a0c">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon.svg">
@@ -734,6 +735,7 @@ export async function handleListen(
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      "x-robots-tag": "noindex",
       "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
     },
   });
@@ -776,6 +778,7 @@ export async function handleListenStatus(
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      "x-robots-tag": "noindex",
       "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
     },
   });
