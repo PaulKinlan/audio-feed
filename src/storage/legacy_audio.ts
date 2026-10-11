@@ -16,7 +16,7 @@
  * Owned by: audio-feed-e6xb.
  */
 
-import type { BlobObject, BlobStore, MetadataStore } from "./mod.ts";
+import type { BlobInfo, BlobStore, MetadataStore } from "./mod.ts";
 import { type AudioMode, type Episode, isAudioMode, type User } from "../types.ts";
 
 /**
@@ -185,7 +185,9 @@ export interface MigrationPlanItem {
   userId: string;
   oldKey: string;
   newKey: string;
+  status: "applied" | "dry_run" | "refused_missing_source" | "refused_conflict";
   blobCopied?: boolean;
+  error?: string;
 }
 
 export interface MigrationResult {
@@ -196,6 +198,8 @@ export interface MigrationResult {
   migrated: number;
   skippedAlreadyCanonical: number;
   blobCopies: number;
+  refusedMissingSource: number;
+  refusedConflict: number;
   plan: MigrationPlanItem[];
   errors: Array<{ episodeId: string; userId: string; error: string }>;
 }
@@ -206,10 +210,15 @@ export interface MigrationOptions {
    */
   apply?: boolean;
   /**
-   * Optional BlobStore: if provided and apply=true, ensures blob content
-   * is copied from legacy key to canonical key.
+   * BlobStore: required when apply=true (unless allowMissingBlobs=true).
+   * Used to verify source blob existence, verify destination conflicts, and copy blobs.
    */
   blobs?: BlobStore;
+  /**
+   * Allow metadata renames even when BlobStore is omitted or source blobs are missing.
+   * Default: false (strict blob presence and integrity required).
+   */
+  allowMissingBlobs?: boolean;
   /**
    * Optional userId filter to restrict migration to one user.
    */
@@ -221,8 +230,63 @@ export interface MigrationOptions {
 }
 
 /**
+ * Stream comparison helper: streams two bodies chunk by chunk to verify exact byte equality
+ * without assuming identical chunk boundaries.
+ */
+async function compareStreams(
+  s1: ReadableStream<Uint8Array>,
+  s2: ReadableStream<Uint8Array>,
+): Promise<boolean> {
+  const r1 = s1.getReader();
+  const r2 = s2.getReader();
+  try {
+    let buf1: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+    let buf2: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+    let done1 = false;
+    let done2 = false;
+
+    while (!done1 || !done2 || buf1.length > 0 || buf2.length > 0) {
+      if (buf1.length === 0 && !done1) {
+        const res = await r1.read();
+        if (res.done) done1 = true;
+        else buf1 = res.value;
+      }
+      if (buf2.length === 0 && !done2) {
+        const res = await r2.read();
+        if (res.done) done2 = true;
+        else buf2 = res.value;
+      }
+
+      if (buf1.length === 0 && buf2.length === 0) {
+        if (done1 && done2) return true;
+        if (done1 !== done2) return false;
+      }
+
+      const take = Math.min(buf1.length, buf2.length);
+      if (take === 0) {
+        if (done1 !== done2) return false;
+        continue;
+      }
+
+      for (let i = 0; i < take; i++) {
+        if (buf1[i] !== buf2[i]) return false;
+      }
+
+      buf1 = buf1.subarray(take);
+      buf2 = buf2.subarray(take);
+    }
+
+    return true;
+  } finally {
+    r1.releaseLock();
+    r2.releaseLock();
+  }
+}
+
+/**
  * Rewrites legacy flat audioKeys to canonical keys in the metadata store.
  * Idempotent, safe, and defaults to dry-run (no mutations without apply: true).
+ * Validates that source blobs exist and destination blobs do not conflict.
  */
 export async function migrateLegacyAudioKeys(
   metadata: MetadataStore,
@@ -241,6 +305,8 @@ export async function migrateLegacyAudioKeys(
   let migrated = 0;
   let skippedAlreadyCanonical = 0;
   let blobCopies = 0;
+  let refusedMissingSource = 0;
+  let refusedConflict = 0;
   const plan: MigrationPlanItem[] = [];
   const errors: Array<{ episodeId: string; userId: string; error: string }> = [];
 
@@ -265,36 +331,125 @@ export async function migrateLegacyAudioKeys(
         const oldKey = episode.audioKey;
         const newKey = canonicalizeAudioKey(episode);
 
+        // 1. Blob presence and conflict validation
+        let sourceKey: string | null = null;
+        let sourceInfo: BlobInfo | null = null;
+        let destInfo: BlobInfo | null = null;
+        let needCopy = false;
+
+        if (opts?.blobs) {
+          const candidates = oldKey.startsWith("audio/") ? [oldKey] : [`audio/${oldKey}`, oldKey];
+          for (const c of candidates) {
+            const h = await opts.blobs.head(c);
+            if (h) {
+              sourceKey = c;
+              sourceInfo = h;
+              break;
+            }
+          }
+          destInfo = await opts.blobs.head(newKey);
+
+          // If source blob is missing and allowMissingBlobs is false, refuse!
+          if (!sourceInfo && !opts?.allowMissingBlobs) {
+            refusedMissingSource++;
+            const error = `Source blob not found for legacy key "${oldKey}" in storage`;
+            errors.push({ episodeId: episode.id, userId: episode.userId, error });
+            log?.(`Refusing migration for episode ${episode.id}: ${error}`);
+            plan.push({
+              episodeId: episode.id,
+              userId: episode.userId,
+              oldKey,
+              newKey,
+              status: "refused_missing_source",
+              error,
+            });
+            continue;
+          }
+
+          // If destination blob already exists, verify it matches source
+          if (destInfo) {
+            if (sourceInfo) {
+              if (destInfo.size !== sourceInfo.size) {
+                refusedConflict++;
+                const error =
+                  `Conflicting destination blob already exists at "${newKey}" with different size (${destInfo.size} != ${sourceInfo.size})`;
+                errors.push({ episodeId: episode.id, userId: episode.userId, error });
+                log?.(`Refusing migration for episode ${episode.id}: ${error}`);
+                plan.push({
+                  episodeId: episode.id,
+                  userId: episode.userId,
+                  oldKey,
+                  newKey,
+                  status: "refused_conflict",
+                  error,
+                });
+                continue;
+              }
+              const [sourceObj, destObj] = await Promise.all([
+                opts.blobs.get(sourceKey!),
+                opts.blobs.get(newKey),
+              ]);
+              if (!sourceObj || !destObj) {
+                refusedConflict++;
+                const error = `Failed to read blobs during conflict verification for "${newKey}"`;
+                errors.push({ episodeId: episode.id, userId: episode.userId, error });
+                plan.push({
+                  episodeId: episode.id,
+                  userId: episode.userId,
+                  oldKey,
+                  newKey,
+                  status: "refused_conflict",
+                  error,
+                });
+                continue;
+              }
+              const matches = await compareStreams(sourceObj.body, destObj.body);
+              if (!matches) {
+                refusedConflict++;
+                const error =
+                  `Conflicting destination blob already exists at "${newKey}" with different content`;
+                errors.push({ episodeId: episode.id, userId: episode.userId, error });
+                log?.(`Refusing migration for episode ${episode.id}: ${error}`);
+                plan.push({
+                  episodeId: episode.id,
+                  userId: episode.userId,
+                  oldKey,
+                  newKey,
+                  status: "refused_conflict",
+                  error,
+                });
+                continue;
+              }
+            }
+          } else if (sourceInfo) {
+            needCopy = true;
+          }
+        } else if (apply && !opts?.allowMissingBlobs) {
+          throw new Error(
+            "BlobStore is required to safely apply audio key migrations (pass blobs or explicit allowMissingBlobs: true)",
+          );
+        }
+
         const planItem: MigrationPlanItem = {
           episodeId: episode.id,
           userId: episode.userId,
           oldKey,
           newKey,
+          status: apply ? "applied" : "dry_run",
         };
 
         if (apply) {
           try {
-            // If BlobStore is provided, ensure the blob is accessible under newKey
-            if (opts?.blobs) {
-              const headNew = await opts.blobs.head(newKey);
-              if (!headNew) {
-                // Find blob at candidate legacy keys
-                const candidates = oldKey.startsWith("audio/")
-                  ? [oldKey]
-                  : [`audio/${oldKey}`, oldKey];
-                let foundBlob: BlobObject | null = null;
-                for (const c of candidates) {
-                  foundBlob = await opts.blobs.get(c);
-                  if (foundBlob) break;
-                }
-                if (foundBlob) {
-                  await opts.blobs.put(newKey, foundBlob.body, {
-                    contentType: foundBlob.contentType,
-                  });
-                  blobCopies++;
-                  planItem.blobCopied = true;
-                  log?.(`Copied blob from legacy key to ${newKey}`);
-                }
+            // Copy source blob to canonical key if destination is not yet populated
+            if (opts?.blobs && needCopy && sourceKey) {
+              const sourceObj = await opts.blobs.get(sourceKey);
+              if (sourceObj) {
+                await opts.blobs.put(newKey, sourceObj.body, {
+                  contentType: sourceObj.contentType,
+                });
+                blobCopies++;
+                planItem.blobCopied = true;
+                log?.(`Copied blob from ${sourceKey} to ${newKey}`);
               }
             }
 
@@ -309,6 +464,7 @@ export async function migrateLegacyAudioKeys(
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             errors.push({ episodeId: episode.id, userId: episode.userId, error: errorMsg });
+            planItem.error = errorMsg;
             log?.(`Failed to migrate episode ${episode.id}: ${errorMsg}`);
           }
         }
@@ -327,6 +483,8 @@ export async function migrateLegacyAudioKeys(
     migrated,
     skippedAlreadyCanonical,
     blobCopies,
+    refusedMissingSource,
+    refusedConflict,
     plan,
     errors,
   };

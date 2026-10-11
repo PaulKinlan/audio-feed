@@ -32,12 +32,19 @@ console.log(`Already canonical:       ${result.skippedAlreadyCanonical}`);
 console.log(`Legacy keys found:       ${result.legacyFound}`);
 console.log(`Migrated:                ${result.migrated}`);
 console.log(`Blob copies:             ${result.blobCopies}`);
+console.log(`Refused (missing source):${result.refusedMissingSource}`);
+console.log(`Refused (conflict):      ${result.refusedConflict}`);
 console.log(`Errors:                  ${result.errors.length}`);
 
 if (result.plan.length > 0) {
   console.log("\nPlan / Actions:");
   for (const item of result.plan) {
-    console.log(`  - [${item.userId}] ep=${item.episodeId}: ${item.oldKey} -> ${item.newKey}`);
+    const statusNote = item.status !== "applied" && item.status !== "dry_run"
+      ? ` [${item.status}: ${item.error}]`
+      : "";
+    console.log(
+      `  - [${item.userId}] ep=${item.episodeId}: ${item.oldKey} -> ${item.newKey}${statusNote}`,
+    );
   }
 }
 console.log("=========================\n");
