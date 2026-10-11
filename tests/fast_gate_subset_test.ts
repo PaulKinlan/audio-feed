@@ -302,6 +302,27 @@ Deno.test("module-graph config runs the FULL suite even when a suite happens to 
   }
 });
 
+Deno.test("a derivation that cannot run WIDENS to the full suite and says why (es8y, detector fail-safe)", () => {
+  // The rule coord set for the detector: if it cannot understand, it must not answer "no read found". A
+  // data file with no relation available is therefore UNCLASSIFIED, which runs the full suite - never a
+  // silent zero. This pins the plan-level half; the gate-level half (the derivation THROWING) is proven by
+  // running the gate with a mutated detector and is recorded on the bead.
+  const noRelation = new Map<string, string[]>();
+  const plan = planTests(["docs/evidence/x.png"], NO_GRAPH, NO_NAMED, noRelation);
+  assertEquals(
+    plan.testFiles,
+    null,
+    "a data file must not be silently dropped when no relation is known",
+  );
+  assert(plan.reason.includes("docs/evidence/x.png"), plan.reason);
+  assert(plan.reason.includes("not read by any suite (derived)"), plan.reason);
+
+  // And the inert exception stays exactly as narrow as it was: markdown is documentation (loud, empty run),
+  // a declared-unread path is inert, and NOTHING else is.
+  assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, noRelation).testFiles, []);
+  assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED, noRelation).testFiles, []);
+});
+
 Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8y)", () => {
   // Before this: planTests(["docs/evidence/x.png"]) returned [] and the gate said
   // "no tests to run" - a fast PASS on a tree where evidence_size_test.ts fails.

@@ -627,13 +627,35 @@ if (import.meta.main) {
     console.error(selectionAudit.message);
     Deno.exit(1);
   }
-  const drift = universeDrift(fastUniverse, await allTestFiles());
+  const drift = await (async () => {
+    try {
+      return universeDrift(fastUniverse, await allTestFiles());
+    } catch (error) {
+      // The cross-check itself failing is not "unknown" - it is "we could not verify", so it stops the run.
+      return `fast-gate: SELECTION CROSS-CHECK FAILED (audio-feed-es8y): ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  })();
   if (drift) {
     console.error(drift);
     Deno.exit(1);
   }
   // The read relation is derived once per run: which data files the suites read or execute.
-  const readRelations = await deriveDataReadRelations(ROOT, fastUniverse);
+  //
+  // FAIL-SAFE DIRECTION (coord's condition on the detector): a derivation engine inside the gate may not
+  // fail OPEN. If the detector cannot run at all - an internal error, an unreadable tree - the gate must
+  // WIDEN to the full suite rather than select from a relation it could not compute. Note what is NOT done
+  // here: no `Deno.exit(1)` - a detector bug should not block every lane's gate, it should make the gate
+  // run everything and SAY WHY, which is the same safe default an unresolvable path already gets.
+  let readRelations: DataReadRelations;
+  let relationFailure: string | null = null;
+  try {
+    readRelations = await deriveDataReadRelations(ROOT, fastUniverse);
+  } catch (error) {
+    readRelations = new Map();
+    relationFailure = error instanceof Error ? error.message : String(error);
+  }
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
@@ -667,6 +689,12 @@ if (import.meta.main) {
   let plan: { testFiles: string[] | null; reason: string };
   if (forceAll) {
     plan = { testFiles: null, reason: "--all given" };
+  } else if (relationFailure !== null) {
+    // The detector could not run: widen, and name the failure as the reason.
+    plan = {
+      testFiles: null,
+      reason: `the data read relation could not be derived (${relationFailure})`,
+    };
   } else if (changed === null) {
     // Never silently green: an unknown change set gets the full suite.
     plan = { testFiles: null, reason: "git diff failed (stale or missing origin/main?)" };
