@@ -78,6 +78,7 @@ import {
 } from "../config.ts";
 import {
   ESTIMATED_TTS_TURN_DURATION_MS,
+  ESTIMATED_UPLOAD_DURATION_MS,
   INVOCATION_FLUSH_MARGIN_MS,
   InvocationBudgetAbortError,
   isInvocationBudgetAbort,
@@ -187,6 +188,8 @@ export interface SynthesisWorkerOptions {
   flushMarginMs?: number;
   /** Estimated worst-case duration for one TTS turn in ms (audio-feed-9wqt, audio-feed-vvwb). */
   estimatedTurnDurationMs?: number;
+  /** Estimated worst-case duration for terminal audio upload in ms (audio-feed-dv4p). */
+  estimatedUploadDurationMs?: number;
   /** Revision for a regenerated audio key. Injectable so a test can force a repeat. */
   revision?: () => string;
   /** Current time in ms since epoch; injectable so tests can advance time deterministically. */
@@ -209,6 +212,7 @@ const DEFAULTS: Required<
     | "maxInvocationDurationMs"
     | "flushMarginMs"
     | "estimatedTurnDurationMs"
+    | "estimatedUploadDurationMs"
   >
 > = {
   batchSize: 5,
@@ -1498,6 +1502,38 @@ export async function runSynthesisBatch(
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
+
+    // FOUR-PROPERTY INVARIANT COVERS TERMINAL PERSISTENCE (audio-feed-dv4p):
+    // 1. Bound: Invocation bound covers terminal audio blob write and metadata completion.
+    // 2. Preflight: Verify remaining budget fits upload + flush margin; yield before starting if it cannot.
+    // 3. Provenance: Upload timeout uses explicit InvocationBudgetAbortError sentinel; real blob store errors fail.
+    // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
+    const flushMargin = opts.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
+    const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
+
+    if (maxInvocationDurationMs) {
+      const elapsed = performance.now() - invocationStartMonotonicMs;
+      const remaining = maxInvocationDurationMs - elapsed;
+      if (remaining < uploadEstimate + flushMargin) {
+        // Preflight yield before terminal upload: cannot fit upload + commit within budget!
+        await metadata.yieldEpisodeClaim(
+          currentEpisode.userId,
+          currentEpisode.id,
+          opts.owner,
+          {
+            phase: "audio_synthesized",
+            advanceAttempts: false, // Progress was made (synthesis finished), attempts reset
+          },
+        );
+        result.yielded.push({
+          episodeId: currentEpisode.id,
+          completedTurns: 1,
+          totalTurns: 1,
+        });
+        break;
+      }
+    }
+
     try {
       await checkpointEpisodeClaim(metadata, currentEpisode.userId, currentEpisode.id, opts.owner, {
         phase: "uploading_audio",
@@ -1523,6 +1559,7 @@ export async function runSynthesisBatch(
       }
       continue;
     }
+
     // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
     // /audio is served immutable, and a first attempt used to write the deterministic canonical
     // key — so a superseded worker and the winner shared one key and the loser's cleanup below
@@ -1530,7 +1567,98 @@ export async function runSynthesisBatch(
     // delete this attempt's own blob. A regeneration additionally deletes the old key.
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const audioKey = audioBlobKey(currentEpisode, "wav", opts.revision());
-    const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
+
+    let uploadTimeoutMs = Infinity;
+    if (maxInvocationDurationMs) {
+      const elapsed = performance.now() - invocationStartMonotonicMs;
+      const available = maxInvocationDurationMs - elapsed - flushMargin;
+      if (available <= 0) {
+        await metadata.yieldEpisodeClaim(
+          currentEpisode.userId,
+          currentEpisode.id,
+          opts.owner,
+          {
+            phase: "audio_synthesized",
+            advanceAttempts: false,
+          },
+        );
+        result.yielded.push({
+          episodeId: currentEpisode.id,
+          completedTurns: 1,
+          totalTurns: 1,
+        });
+        break;
+      }
+      uploadTimeoutMs = available;
+    }
+
+    const uploadController = Number.isFinite(uploadTimeoutMs) ? new AbortController() : undefined;
+    let uploadTimer: ReturnType<typeof setTimeout> | undefined;
+    if (uploadController && Number.isFinite(uploadTimeoutMs)) {
+      uploadTimer = setTimeout(() => {
+        uploadController.abort(
+          new InvocationBudgetAbortError(
+            1,
+            1,
+            `Upload timed out at invocation budget deadline (${Math.round(uploadTimeoutMs)}ms)`,
+          ),
+        );
+      }, uploadTimeoutMs);
+    }
+
+    let stored: { size?: number };
+    try {
+      const uploadPromise = blobs.put(audioKey, bytes, { contentType: "audio/wav" });
+      const timeoutPromise = uploadController
+        ? new Promise<never>((_, reject) => {
+          uploadController.signal.addEventListener("abort", () => {
+            reject(uploadController.signal.reason);
+          }, { once: true });
+        })
+        : null;
+
+      stored = timeoutPromise
+        ? await Promise.race([uploadPromise, timeoutPromise])
+        : await uploadPromise;
+    } catch (err) {
+      if (uploadController?.signal.aborted || isInvocationBudgetAbort(err)) {
+        // Clean up partial staging blob on budget abort
+        blobs.delete(audioKey).catch(() => {});
+        await metadata.yieldEpisodeClaim(
+          currentEpisode.userId,
+          currentEpisode.id,
+          opts.owner,
+          {
+            phase: "audio_synthesized",
+            advanceAttempts: false,
+          },
+        );
+        result.yielded.push({
+          episodeId: currentEpisode.id,
+          completedTurns: 1,
+          totalTurns: 1,
+        });
+        break;
+      }
+      // Real blob store error -> fail the episode
+      const error = String((err as Error)?.message ?? err);
+      console.error(
+        `[audio-feed] audio upload failed for episode "${currentEpisode.id}": ${error}`,
+      );
+      const wrote = await metadata.completeEpisode(
+        unsynthesized(currentEpisode, error),
+        opts.owner,
+      );
+      if (wrote) {
+        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+        await notifyOnDemand(currentEpisode, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      }
+      continue;
+    } finally {
+      if (uploadTimer !== undefined) clearTimeout(uploadTimer);
+    }
 
     const byteLength = stored.size ?? bytes.length;
     // Claim-conditional: if this worker's lease expired and another already

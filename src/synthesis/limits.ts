@@ -109,6 +109,8 @@ export function isInvocationBudgetAbort(error: unknown): boolean {
 export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
 /** Worst-case estimated duration for grounded script generation stage in ms (audio-feed-9wqt). */
 export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
+/** Worst-case estimated duration for terminal audio blob upload in ms (audio-feed-dv4p). */
+export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
 /** Safety margin reserved for flushing checkpoints, commits, and claim yields in ms (audio-feed-9wqt). */
 export const INVOCATION_FLUSH_MARGIN_MS = 5_000;
 

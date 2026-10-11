@@ -1324,3 +1324,124 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   assertEquals(r3.failed.length, 0);
   assertEquals(paidCalls, 2, "paidCalls must be strictly bounded <= maxAttempts");
 });
+
+Deno.test("audio-feed-dv4p: (a) terminal upload preflight yields before slow upload starts when remaining budget is insufficient", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-dv4p-preflight",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let putCalls = 0;
+  stores.blobs.put = async (...args) => {
+    putCalls++;
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+
+  const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+  const synth = () => Promise.resolve(decodedFromWav(wav));
+
+  const start = performance.now();
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-1",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - start;
+
+  assert(elapsed < 80, `elapsed (${elapsed}ms) must be strictly less than 80ms budget`);
+  assertEquals(r1.ready.length, 0, "must not finish ready past budget");
+  assertEquals(r1.yielded.length, 1, "must preflight yield before upload");
+  assertEquals(putCalls, 0, "blobs.put must not have been called due to preflight yield");
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-preflight");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, "audio_synthesized");
+
+  // Tick 2: restore fast blobs.put; tick completes within normal budget
+  stores.blobs.put = oldPut;
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.ready.length, 1, "subsequent tick completes upload");
+  assertEquals(r2.yielded.length, 0);
+
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-dv4p-preflight");
+  assertEquals(ep2?.status, "ready");
+});
+
+Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation deadline without exceeding budget", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-dv4p-inflight",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let putCalls = 0;
+  stores.blobs.put = async (...args) => {
+    putCalls++;
+    await new Promise((r) => setTimeout(r, 135));
+    return oldPut(...args);
+  };
+
+  const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+  const synth = () => Promise.resolve(decodedFromWav(wav));
+
+  const start = performance.now();
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-inflight-1",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 10, // Allows preflight to pass (10 + 5 < 80)
+    flushMarginMs: 5,
+  });
+  const elapsed = performance.now() - start;
+
+  assert(elapsed < 90, `elapsed (${elapsed}ms) must be bounded by invocation budget`);
+  assertEquals(putCalls, 1, "blobs.put was started");
+  assertEquals(r1.ready.length, 0, "must not finish ready past budget");
+  assertEquals(r1.yielded.length, 1, "must abort upload and yield claim");
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, "audio_synthesized");
+
+  // Tick 2: restore fast blobs.put; tick completes within normal budget
+  stores.blobs.put = oldPut;
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "upload-probe-inflight-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.ready.length, 1, "subsequent tick completes upload");
+  assertEquals(r2.yielded.length, 0);
+
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
+  assertEquals(ep2?.status, "ready");
+});
