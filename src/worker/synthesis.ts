@@ -1105,6 +1105,9 @@ async function settleTerminalPersistence(
   }
 
   if (options?.terminalError) {
+    if (current?.status === "failed") {
+      return { committed: false, failed: true };
+    }
     // Exceeded upload retry cap: fail terminally rather than yielding back to pending (audio-feed-lqd6).
     const wrote = current && current.status === "synthesizing" && current.claimedBy === owner
       ? await metadata.completeEpisode(
@@ -1226,6 +1229,9 @@ export async function runSynthesisBatch(
   const maxInvocationDurationMs = options.maxInvocationDurationMs ??
     ctx.config.maxInvocationDurationMs ??
     DEFAULT_MAX_INVOCATION_DURATION_MS;
+  opts.maxUploadRetries = options.maxUploadRetries ??
+    ctx.config.maxUploadRetries ??
+    DEFAULT_MAX_UPLOAD_RETRIES;
   const flushMargin = opts.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
   const notifyEnabled = ctx.config.notifyOutboxEnabled ?? false;
 
@@ -1744,7 +1750,8 @@ export async function runSynthesisBatch(
 
     const currentUploadRetry = currentEpisode.uploadRetry ?? 0;
     const nextUploadRetry = currentUploadRetry + 1;
-    const maxRetries = opts.maxUploadRetries ?? DEFAULT_MAX_UPLOAD_RETRIES;
+    const maxRetries = opts.maxUploadRetries ?? ctx.config.maxUploadRetries ??
+      DEFAULT_MAX_UPLOAD_RETRIES;
     const uploadRetryExceeded = nextUploadRetry > maxRetries;
     const terminalRetryError = uploadRetryExceeded
       ? `terminal audio upload exceeded retry cap (${maxRetries}): ${bytes.length} bytes repeatedly ` +
@@ -1896,17 +1903,22 @@ export async function runSynthesisBatch(
         break;
       }
 
-      if (settle.failed || uploadRetryExceeded) {
-        const error = terminalRetryError!;
-        console.error(
-          `[audio-feed] terminal upload retries exceeded for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
-        );
-        result.failed.push({
-          episodeId: currentEpisode.id,
-          error,
-          title: currentEpisode.title,
-        });
-        await notifyOnDemand(currentEpisode, "failed", error);
+      if (uploadRetryExceeded) {
+        if (settle.failed) {
+          const error = terminalRetryError!;
+          console.error(
+            `[audio-feed] terminal upload retries exceeded for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
+          );
+          result.failed.push({
+            episodeId: currentEpisode.id,
+            error,
+            title: currentEpisode.title,
+          });
+          await notifyOnDemand(currentEpisode, "failed", error);
+        } else {
+          // Terminal write failed or was superseded (audio-feed-lqd6 review finding P1)
+          result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+        }
         break;
       }
 

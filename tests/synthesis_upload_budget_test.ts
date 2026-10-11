@@ -322,3 +322,54 @@ Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploa
   assertEquals(r4.yielded.length, 0);
   assertEquals(r4.failed.length, 0, "no more churn; episode stays failed");
 });
+
+Deno.test("audio-feed-lqd6: lost claim when exceeding retry cap reports superseded rather than failed (P1 review finding)", async () => {
+  const episodeId = "ep-lqd6-lost-claim";
+  const { ctx, stores } = await setupEnv(episodeId);
+
+  const audio = fakeAudio(15_000_000);
+  const synth = () => Promise.resolve(audio);
+
+  // Put episode with uploadRetry already at cap (2)
+  const ep = await stores.metadata.getEpisode("user-1", episodeId);
+  assert(ep);
+  await stores.metadata.putEpisode({ ...ep, uploadRetry: 2 });
+
+  // Mock completeEpisode to fail (lost ownership / concurrent worker won)
+  const origComplete = stores.metadata.completeEpisode.bind(stores.metadata);
+  stores.metadata.completeEpisode = ((
+    episode: Parameters<typeof origComplete>[0],
+    owner: string,
+    ...args: unknown[]
+  ) => {
+    if (episode.status === "failed") {
+      // Simulate lost claim
+      return Promise.resolve(false);
+    }
+    // deno-lint-ignore no-explicit-any
+    return (origComplete as any)(episode, owner, ...args);
+  }) as typeof origComplete;
+
+  // Upload aborts at deadline, retry cap exceeded, but completeEpisode fails
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = async (...args) => {
+    const signal = args[2]?.signal;
+    if (signal?.aborted) throw signal.reason;
+    await new Promise<void>((_, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    return oldPut(...args);
+  };
+
+  const r = await runSynthesisBatch(ctx, synth, {
+    owner: "lqd6-lost-worker",
+    maxUploadRetries: 2,
+    maxInvocationDurationMs: 1_800,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 100,
+    flushMarginMs: 100,
+  });
+
+  assertEquals(r.failed.length, 0, "must NOT report failed when terminal write did not succeed");
+  assertEquals(r.superseded.length, 1, "must report superseded when terminal write was refused");
+});

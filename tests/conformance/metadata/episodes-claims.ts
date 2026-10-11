@@ -459,6 +459,33 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const epAfterRetry = await store.getEpisode("user-1", "e1");
     assert(epAfterRetry);
     assertEquals(epAfterRetry.uploadRetry, undefined);
+
+    // completeEpisode ready, then requeueEpisode clears uploadRetry (audio-feed-lqd6)
+    const claimed4 = await store.claimEpisode("user-1", "e1", {
+      ...CLAIM,
+      owner: "worker-tick-4",
+      now: "2026-10-11T16:10:00.000Z",
+    });
+    assert(claimed4);
+    await store.completeEpisode(
+      {
+        ...claimed4,
+        status: "ready",
+        audioKey: "audio/test.wav",
+        contentType: "audio/wav",
+        uploadRetry: 2,
+      },
+      "worker-tick-4",
+      { byteLength: 100 },
+    );
+    const requeued = await store.requeueEpisode("user-1", "e1");
+    assert(requeued);
+    assertEquals(requeued.status, "pending");
+    assertEquals(requeued.uploadRetry, undefined);
+
+    const epAfterRequeue = await store.getEpisode("user-1", "e1");
+    assert(epAfterRequeue);
+    assertEquals(epAfterRequeue.uploadRetry, undefined);
   });
 
   // -- completeEpisode ----------------------------------------------------
