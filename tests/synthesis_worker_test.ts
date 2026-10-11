@@ -1682,3 +1682,48 @@ Deno.test("notify on-demand article: outbound is OFF by default when unconfigure
   const outbox = await stores.metadata.listOutbox();
   assertEquals(outbox.length, 0, "no notifications queued when disabled");
 });
+
+Deno.test("a thrown trace append cannot fail a completed synthesis (audio-feed-77j9)", async () => {
+  const { ctx, stores } = await queued();
+
+  // Break ONLY the span append. The failure event has to get through, or this test would be proving
+  // that a broken trace path is invisible — which is the bug it exists to prevent.
+  const appendLog = stores.metadata.appendLog.bind(stores.metadata);
+  let thrown = 0;
+  stores.metadata.appendLog = (record) => {
+    if (record.type === "synthesis.span") {
+      thrown++;
+      return Promise.reject(new Error("trace store is down"));
+    }
+    return appendLog(record);
+  };
+
+  const synthesize: Synthesizer = () => Promise.resolve(fakeAudio());
+  await runSynthesisBatch(ctx, synthesize, { maxAttempts: 1, retryBaseDelayMs: 1 });
+
+  // The work is not the trace's to fail: the ready commit is already durable when the span is
+  // appended, so a rejected append must leave a completed episode completed.
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(
+    episode?.status,
+    "ready",
+    "tracing must never fail the synthesis it observes",
+  );
+  // Without this the test could pass by never calling the poisoned path at all.
+  assertEquals(thrown, 1, "the span append really did throw");
+
+  const records = await stores.metadata.listLogs();
+  assert(
+    !records.some((r) => r.type === "synthesis.span"),
+    "the span itself was not stored, because its append threw",
+  );
+  const failed = records.find((r) => r.type === "synthesis.span_failed");
+  assert(
+    failed,
+    `the failure is recorded as its own event: got ${
+      records.map((r) => r.type).join(", ") || "nothing"
+    }`,
+  );
+  assertEquals(failed?.severity, "warn", "and at a severity the default poller serves");
+  assertEquals(failed?.episodeId, "episode-1", "so the fault is attributable to the episode");
+});
