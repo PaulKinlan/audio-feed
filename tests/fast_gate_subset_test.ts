@@ -23,6 +23,7 @@ import { assert, assertEquals } from "@std/assert";
 import {
   allTestFiles,
   deriveOrWiden,
+  deriveOrWidenReport,
   planForFailedRelation,
   planTests,
   suiteMarker,
@@ -32,6 +33,7 @@ import {
   auditSelection,
   classifyNonTsChanges,
   deriveDataReadRelations,
+  deriveReadRelationReport,
   discoverFullGateTestFiles,
   FAST_GATE_EXCLUSIONS,
   inertContradictions,
@@ -423,6 +425,91 @@ Deno.test("a markdown file a suite READS selects that suite, not an inert empty 
   );
   // Not read by anything -> documentation, and the loud inert state still applies.
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
+});
+
+Deno.test("audio-feed-q0ky: the detector REPORTS the read hints it could not resolve, it does not drop them", async () => {
+  // The rule below rests on this signal existing. A hint the scan produces that names nothing in the tree is
+  // the detector saying "a suite reads something here and I could not confirm what" - and it used to be
+  // dropped SILENTLY, which is how an unreadable universe came to be described as inert.
+  // NOTE the trailing slash: ROOT is `.../audio-feed/`, and the detector builds paths as `${root}${relPath}`,
+  // so a fixture root without it makes every read invisible and the test passes for the wrong reason (it did,
+  // on the first attempt - which is why this comment is here rather than in a commit message).
+  const root = (await Deno.makeTempDir({ prefix: "q0ky-relation-" })) + "/";
+  try {
+    await Deno.mkdir(`${root}docs`, { recursive: true });
+    await Deno.mkdir(`${root}tests`, { recursive: true });
+    await Deno.writeTextFile(`${root}docs/present.md`, "hello\n");
+
+    // A path-shaped template that names nothing: reported, not dropped.
+    await Deno.writeTextFile(
+      `${root}tests/unresolved_test.ts`,
+      "export async function readIt() {\n" +
+        "  return await Deno.readTextFile(`../docs/absent.html`);\n" +
+        "}\n",
+    );
+    const report = await deriveReadRelationReport(root, ["tests/unresolved_test.ts"]);
+    assertEquals(report.relations.size, 0);
+    assertEquals(
+      report.unresolved,
+      ["docs/absent.html"],
+      "a hint that names nothing must be REPORTED, not dropped silently",
+    );
+
+    // The resolvable case is silent, so the signal cannot be a constant that always fires.
+    await Deno.writeTextFile(
+      `${root}tests/resolved_test.ts`,
+      'export async function readIt() { return await Deno.readTextFile("../docs/present.md"); }\n',
+    );
+    const clean = await deriveReadRelationReport(root, ["tests/resolved_test.ts"]);
+    assertEquals(clean.unresolved, []);
+    assertEquals(clean.relations.get("docs/present.md"), ["tests/resolved_test.ts"]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {
+  const unresolved = ["data/table.csv", "fixtures.html"];
+  const widened = planTests(
+    ["docs/observability-api.md"],
+    NO_GRAPH,
+    NO_NAMED,
+    new Map(),
+    [],
+    unresolved,
+  );
+  assertEquals(
+    widened.testFiles,
+    null,
+    "no file may be called inert while the detector has unresolved reads (coord's decision (b))",
+  );
+  assert(widened.reason.includes("INCOMPLETE"), widened.reason);
+  assert(widened.reason.includes("docs/observability-api.md"), widened.reason);
+  assert(widened.reason.includes("data/table.csv"), widened.reason);
+  assertEquals(
+    widened.reason.includes("selects nothing"),
+    false,
+    "a widened run must not read like an empty selection",
+  );
+
+  // The rule keys on INCOMPLETENESS, not on markdown: with a complete relation the same change is still
+  // inert, which is what keeps a docs-only change off the full suite when nothing is in doubt.
+  assertEquals(planTests(["docs/observability-api.md"], NO_GRAPH, NO_NAMED).testFiles, []);
+
+  // And it cannot make an already-conservative path quieter: unclassified data still widens, named.
+  const dataish = planTests(["docs/evidence/x.png"], NO_GRAPH, NO_NAMED, new Map(), [], unresolved);
+  assertEquals(dataish.testFiles, null);
+  assert(dataish.reason.includes("docs/evidence/x.png"), dataish.reason);
+});
+
+Deno.test("audio-feed-q0ky: a derivation that THROWS still widens and reports no unresolved list", async () => {
+  const thrown = await deriveOrWidenReport(() => {
+    throw new Error("detector blew up");
+  });
+  assertEquals(thrown.failure, "detector blew up");
+  assertEquals(thrown.report.unresolved, []);
+  assertEquals(thrown.report.relations.size, 0);
+  assertEquals(planForFailedRelation(thrown.failure!).testFiles, null);
 });
 
 Deno.test("the ordering rule is CHECKED: inert documentation with a derived reader is a named full-suite run (38sn)", () => {

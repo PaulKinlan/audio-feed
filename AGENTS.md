@@ -91,6 +91,21 @@ not a gate that ran suites and passed. Anything not provably inert runs the FULL
 old "a script NOTHING imports selects none, the type-check is its gate" carve-out is GONE, so
 `scripts/smoke.ts` runs the full suite.
 
+AN INCOMPLETE RELATION MAKES THE INERT CLASS UNREACHABLE (audio-feed-q0ky, coord's decision (b)). An
+unread `.md` was inert, so a markdown read the detector could not resolve left the file inert and selected
+NOTHING - and the gate DESCRIBED that as a fact ("no suite is derived to read it") when the truth was "some
+suite reads something here and I could not confirm what". That is the same defect as the reporter printing
+`unmapped` for a run that executed every suite, and the same as a blank admin cell: A REPORT MUST NOT RENDER
+AN INABILITY TO KNOW AS A FACT. So: while the detector has UNRESOLVED read hints - path hints the scan
+produced that name nothing in the tree - NO file may be classified inert, and a change otherwise treated as
+inert widens to the FULL suite. The run says so twice, in words an operator can act on: the audit line
+`fast-gate: read relation INCOMPLETE: N read path hint(s) do not name anything in the tree (...)` and the
+plan's own reason (`the read relation is INCOMPLETE (...), so no file may be called inert: <files>`). It
+FIRES TODAY - this tree carries 4 such hints - so a docs-only change now costs a full suite; measured over
+the last 500 commits on main, 16 (3.2%) were markdown-only, which is the entire price of the rule. A
+resolvable markdown read is still caught by the derived relation, and a COMPLETE relation still allows the
+inert class, so the rule keys on incompleteness rather than on markdown.
+
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.
 
