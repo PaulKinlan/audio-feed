@@ -86,14 +86,23 @@ Deno.test("a malformed PUBLIC_BASE_URL does not crash boot, and the gate fails c
     assertEquals(booted.isDeploy, true, "it must boot at all - that is the bug");
 
     // Fail closed rather than trusting the Host header: an origin that cannot be parsed is not an
-    // origin, so nothing non-loopback may be advertised.
+    // origin, so nothing non-loopback may be advertised. audio-feed-3k2d: an empty allowed set is the
+    // deployment's misconfiguration, not a misdirected request, so the refusal names PUBLIC_BASE_URL.
     const refused = await booted.fetch(
       new Request("https://audio-feed.paulkinlan-ea.deno.net/", {
         headers: { host: "audio-feed.paulkinlan-ea.deno.net" },
       }),
     );
-    await refused.body?.cancel();
-    assertEquals(refused.status, 421, "an unusable configured origin must fail closed");
+    const refusedBody = await refused.text();
+    assertEquals(
+      refused.status,
+      500,
+      "an unusable configured origin cannot serve anyone: 5xx, not 421",
+    );
+    assert(
+      refusedBody.includes("PUBLIC_BASE_URL"),
+      `the refusal must name the fix; body: ${refusedBody}`,
+    );
 
     // And local development is unaffected, so a bad value degrades rather than blocks.
     const local = await booted.fetch(new Request("http://localhost:8000/"));
@@ -111,9 +120,12 @@ Deno.test("an ALLOWED_HOSTS list with no usable entry warns at boot and fails cl
   // either one alone is survivable - refusing while warning is defensible, and warning while serving
   // would be fine - but refusing invisibly is what costs an operator an afternoon. This fails if the
   // condition is reverted to `.length`, because then nothing is warned at all.
+  //
+  // audio-feed-3k2d: on a Deploy deployment this state is now error-level, because the deployment
+  // cannot serve any visitor - hence console.error rather than console.warn here.
   const warned: string[] = [];
-  const original = console.warn;
-  console.warn = (...args: unknown[]) => {
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
     warned.push(args.map((a) => String(a)).join(" "));
   };
   const stores = await openStores({ kvPath: ":memory:" });
@@ -138,10 +150,75 @@ Deno.test("an ALLOWED_HOSTS list with no usable entry warns at boot and fails cl
       }),
     );
     await refused.body?.cancel();
-    assertEquals(refused.status, 421, "and it must still fail closed");
+    assertEquals(
+      refused.status,
+      500,
+      "and it must still refuse to serve, naming the misconfiguration",
+    );
   } finally {
-    console.warn = original;
+    console.error = original;
     if (booted) await booted.shutdown();
+  }
+});
+
+Deno.test("audio-feed-3k2d: a deployment with no usable host logs the refusal at boot, error-level", async () => {
+  // Requirement from the incident: a deploy that cannot serve must not be silent. The line must exist,
+  // be at error level ON a Deploy deployment (where every visitor gets the 500), and name the variable
+  // the operator has to set. Asserted against a CONFIGURED deployment too, so deleting or over-broadening
+  // the branch fails: a log that fires on a working deployment is noise an operator learns to ignore.
+  const errors: string[] = [];
+  const logs: string[] = [];
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map((a) => String(a)).join(" "));
+  };
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map((a) => String(a)).join(" "));
+  };
+  const stores = await openStores({ kvPath: ":memory:" });
+  let broken: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  let working: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    broken = await bootstrap({ port: 0, stores, isDeploy: true, synthesizer: null, config: {} });
+    const unconfiguredLines = errors.filter((line) => line.includes("No usable PUBLIC_BASE_URL"));
+    assertEquals(
+      unconfiguredLines.length,
+      1,
+      `exactly one error line; got ${JSON.stringify(errors)}`,
+    );
+    const unconfiguredLine = unconfiguredLines[0] ?? "";
+    assert(
+      unconfiguredLine.includes("PUBLIC_BASE_URL"),
+      `the line must name the variable to set; got ${unconfiguredLine}`,
+    );
+    assert(
+      unconfiguredLine.includes("500"),
+      `and must say what a visitor actually gets; got ${unconfiguredLine}`,
+    );
+
+    errors.length = 0;
+    // A second, independent in-memory store: two bootstraps sharing one KV would close it twice.
+    working = await bootstrap({
+      port: 0,
+      stores: await openStores({ kvPath: ":memory:" }),
+      isDeploy: true,
+      synthesizer: null,
+      config: { publicBaseUrl: "https://audio.example.com" },
+    });
+    assert(
+      !errors.some((line) => line.includes("No usable PUBLIC_BASE_URL")),
+      `a deployment that can serve must not log this error; got ${JSON.stringify(errors)}`,
+    );
+    assert(
+      logs.some((line) => line.includes("Host gate: accepting audio.example.com")),
+      `and must say what it accepts instead; got ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    console.error = originalError;
+    console.log = originalLog;
+    if (broken) await broken.shutdown();
+    if (working) await working.shutdown();
   }
 });
 
@@ -299,7 +376,7 @@ Deno.test("a malformed ALLOWED_HOSTS entry is ignored, not fatal (audio-feed-ft7
       }),
     );
     await refused.body?.cancel();
-    assertEquals(refused.status, 421, "entries that do not parse must not open the gate");
+    assertEquals(refused.status, 500, "entries that do not parse must not open the gate");
   } finally {
     await booted.shutdown();
   }

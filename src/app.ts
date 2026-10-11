@@ -49,7 +49,7 @@ import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from ".
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import { handleCspReports } from "./routes/reports.ts";
 import type { AppConfig, Stores } from "./config.ts";
-import { requestHostAllowed, resolveOrigin } from "./origin.ts";
+import { hostGateRefusal, resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
 
 export interface AppContext {
@@ -398,13 +398,35 @@ export function createApp(
       // audio-feed-fp4r: with an allow-list configured, a request arriving on an
       // unlisted host is answered before any route runs — the advertised origin,
       // feed URLs, redirects and the WebAuthn RP ID never see a spoofed Host.
-      if (!requestHostAllowed(ctx.config, req)) {
-        return applySecurityHeaders(
-          problem({
+      //
+      // audio-feed-3k2d: the refusal says WHICH refusal it is. An EMPTY allow-list
+      // means this deployment cannot name its own host — a server misconfiguration
+      // that answers 500 and names PUBLIC_BASE_URL, so the operator (who sees the
+      // same body a visitor does) can act on it. Before this, that state answered
+      // the same 421 `misdirected_request` as a genuine spoofed Host, so the live
+      // deployment blamed every visitor for our missing configuration
+      // (audio-feed-du8w). Two situations, two responses — never one 421 for both,
+      // and never a request-derived host to make the empty case look configured.
+      const refusal = hostGateRefusal(ctx.config, req);
+      if (refusal) {
+        const response = refusal === "unconfigured"
+          ? problem({
+            status: 500,
+            title: "server_misconfigured",
+            detail:
+              "This deployment is not configured with the host it serves: PUBLIC_BASE_URL is unset " +
+              "and no usable ALLOWED_HOSTS entry is configured, so no host can be accepted. Set " +
+              "PUBLIC_BASE_URL to this deployment's public origin (for example " +
+              "https://audio-feed.example.com) and redeploy. This is a server configuration error, " +
+              "not a misdirected request from the client.",
+          })
+          : problem({
             status: 421,
             title: "misdirected_request",
             detail: "This deployment does not serve the requested host.",
-          }),
+          });
+        return applySecurityHeaders(
+          response,
           req,
           { trustProxyHeaders: Boolean(ctx.config.trustProxyHeaders) },
         );
