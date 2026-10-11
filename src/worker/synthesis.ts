@@ -1508,7 +1508,7 @@ export async function runSynthesisBatch(
         // 2. Persist orphan record to KV so even if isolate terminates, scavenger sweeps it
         await metadata.recordOrphanBlob(stagingKey).catch(() => {});
       },
-      fn: async () => {
+      fn: async (signal) => {
         await checkpointEpisodeClaim(
           metadata,
           currentEpisode.userId,
@@ -1518,7 +1518,26 @@ export async function runSynthesisBatch(
             phase: "uploading_audio",
           },
         );
-        const stored = await blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
+        if (signal?.aborted) {
+          throw signal.reason;
+        }
+
+        // Abort-aware put with settlement cleanup token (audio-feed-fsbk):
+        const putPromise = blobs.put(stagingKey, bytes, { contentType: "audio/wav" });
+        putPromise
+          .finally(async () => {
+            if (signal?.aborted) {
+              await blobs.delete(stagingKey).catch(() => {});
+            }
+          })
+          .catch(() => {});
+
+        const stored = await putPromise;
+        if (signal?.aborted) {
+          await blobs.delete(stagingKey).catch(() => {});
+          throw signal.reason;
+        }
+
         const byteLength = stored.size ?? bytes.length;
         const wrote = await metadata.completeEpisode({
           ...currentEpisode,
