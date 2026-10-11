@@ -411,6 +411,7 @@ export function createEpisodesRepository(
       update?: {
         phase?: string;
         now?: string;
+        advanceAttempts?: boolean;
       },
     ): Promise<boolean> {
       const key: Deno.KvKey = ["episode", userId, episodeId];
@@ -426,7 +427,7 @@ export function createEpisodesRepository(
         claimedBy: undefined,
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
-        attempts: 0,
+        attempts: update?.advanceAttempts ? (current.attempts ?? 0) + 1 : 0,
       };
       return await atomicPutEpisode(core, yielded, entry);
     },

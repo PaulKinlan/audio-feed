@@ -283,6 +283,7 @@ export class KvMetadataStore implements MetadataStore {
     update?: {
       phase?: string;
       now?: string;
+      advanceAttempts?: boolean;
     },
   ): Promise<boolean> {
     return this.repositories.episodes.yieldEpisodeClaim(userId, episodeId, owner, update);

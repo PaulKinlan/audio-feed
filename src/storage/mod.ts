@@ -428,6 +428,7 @@ export interface EpisodeRepository {
     update?: {
       phase?: string;
       now?: string;
+      advanceAttempts?: boolean;
     },
   ): Promise<boolean>;
 

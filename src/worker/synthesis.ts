@@ -79,6 +79,8 @@ import {
 import {
   ESTIMATED_TTS_TURN_DURATION_MS,
   INVOCATION_FLUSH_MARGIN_MS,
+  InvocationBudgetAbortError,
+  isInvocationBudgetAbort,
   SynthesisYieldError,
 } from "../synthesis/limits.ts";
 
@@ -487,17 +489,20 @@ async function runScriptStage(
   isBudgetEnforced = false,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
-  // Two bounds, because one is not enough (audio-feed-yaz5 review). The signal bounds a generator
-  // that passes it to fetch, which the real one does; the race bounds a generator that ignores it,
-  // which an injected one can. Either way synthesis reaches the fallback instead of waiting on a
-  // stalled search call forever.
-  const deadline = AbortSignal.timeout(timeoutMs);
+  // Two bounds: budgetController identifies our own timeout by provenance (audio-feed-zni7).
+  const budgetController = new AbortController();
+  const deadline = budgetController.signal;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`grounded script stage exceeded ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    timer = setTimeout(() => {
+      const err = new InvocationBudgetAbortError(
+        0,
+        0,
+        `grounded script stage exceeded ${timeoutMs}ms`,
+      );
+      budgetController.abort(err);
+      reject(err);
+    }, timeoutMs);
   });
   const work = generator(input, { signal: deadline });
   try {
@@ -505,14 +510,15 @@ async function runScriptStage(
   } catch (error) {
     if (
       isBudgetEnforced &&
-      (deadline.aborted ||
-        (error instanceof Error && error.message.includes("exceeded")))
+      (budgetController.signal.aborted || isInvocationBudgetAbort(error))
     ) {
-      throw new SynthesisYieldError(
-        0,
-        0,
-        `Grounded script stage timed out at invocation budget deadline (${timeoutMs}ms)`,
-      );
+      const yieldErr = isInvocationBudgetAbort(error) ? error : (budgetController.signal.reason ??
+        new InvocationBudgetAbortError(
+          0,
+          0,
+          `grounded script stage exceeded ${timeoutMs}ms`,
+        ));
+      throw yieldErr;
     }
     console.warn(
       `[synthesis] grounded script stage failed for "${input.article.title}": ` +
@@ -627,9 +633,21 @@ export function createGeminiSynthesizer(
             flushMargin,
         )
         : undefined;
-    const budgetSignal = remainingTtsBudgetMs !== undefined
-      ? AbortSignal.timeout(remainingTtsBudgetMs)
-      : undefined;
+
+    const budgetController = remainingTtsBudgetMs !== undefined ? new AbortController() : undefined;
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    if (budgetController && remainingTtsBudgetMs !== undefined) {
+      budgetTimer = setTimeout(() => {
+        budgetController.abort(
+          new InvocationBudgetAbortError(
+            newlySynthesizedCount,
+            MAX_TTS_SEGMENTS,
+            `Invocation budget deadline (${Math.round(remainingTtsBudgetMs)}ms) reached during TTS`,
+          ),
+        );
+      }, remainingTtsBudgetMs);
+    }
+    const budgetSignal = budgetController?.signal;
     const combinedSignal = budgetSignal && leaseSignal
       ? AbortSignal.any([leaseSignal, budgetSignal])
       : (budgetSignal ?? leaseSignal);
@@ -645,68 +663,48 @@ export function createGeminiSynthesizer(
       onProgress,
       shouldYield,
     };
-    const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
-    if (mode === "deepdive") {
-      // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
-      // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
-      // - the comment was describing an intention the line did not have, and
-      // audio-feed-4xt made this branch reachable in production for the first time,
-      // so the two could now disagree while both looked correct.
-      // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
-      // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
-      const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
-      const speakers: [DialogueSpeaker, DialogueSpeaker] = [
-        { name: "Alex", role: "expert", voice: expert },
-        { name: "Sam", role: "curious_foil", voice: foil },
-      ];
-      // Research and write the script first (audio-feed-yaz5).
-      // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
-      let turns = episode.scriptTurns;
-      if (!turns || turns.length === 0) {
-        let scriptStageTimeoutMs = deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS;
-        let isBudgetEnforced = false;
+    try {
+      const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
+      if (mode === "deepdive") {
+        // One home for the pair. This used to repeat ["Kore", "Puck"] as a literal
+        // while the doc comment above claimed it fell back to DEFAULT_VOICES.deepdive
+        // - the comment was describing an intention the line did not have, and
+        // audio-feed-4xt made this branch reachable in production for the first time,
+        // so the two could now disagree while both looked correct.
+        // No `!`: DEFAULT_VOICES is typed Required, so the completeness of the fallback
+        // is a compile-time guarantee rather than an assertion (audio-feed-9cz).
+        const [expert, foil] = source?.voices.deepdive ?? DEFAULT_VOICES.deepdive;
+        const speakers: [DialogueSpeaker, DialogueSpeaker] = [
+          { name: "Alex", role: "expert", voice: expert },
+          { name: "Sam", role: "curious_foil", voice: foil },
+        ];
+        // Research and write the script first (audio-feed-yaz5).
+        // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
+        let turns = episode.scriptTurns;
+        if (!turns || turns.length === 0) {
+          let scriptStageTimeoutMs = deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS;
+          let isBudgetEnforced = false;
 
-        if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-          isBudgetEnforced = true;
-          const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
-          const remaining = invocationBudget.maxDurationMs - elapsed;
-          const availableBudget = remaining - flushMargin;
-          if (availableBudget <= 0) {
-            throw new SynthesisYieldError(
-              0,
-              0,
-              `Preflight yield before script generation: remaining budget ${
-                Math.round(remaining)
-              }ms < flush margin ${flushMargin}ms`,
-            );
+          if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+            isBudgetEnforced = true;
+            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+            const remaining = invocationBudget.maxDurationMs - elapsed;
+            const availableBudget = remaining - flushMargin;
+            if (availableBudget <= 0) {
+              throw new SynthesisYieldError(
+                0,
+                0,
+                `Preflight yield before script generation: remaining budget ${
+                  Math.round(remaining)
+                }ms < flush margin ${flushMargin}ms`,
+              );
+            }
+            scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, availableBudget);
           }
-          scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, availableBudget);
-        }
-        if (remainingMs !== undefined) {
-          scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, remainingMs);
-        }
+          if (remainingMs !== undefined) {
+            scriptStageTimeoutMs = Math.min(scriptStageTimeoutMs, remainingMs);
+          }
 
-        if (claimedBy) {
-          await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
-            phase: "generating_script",
-          });
-        }
-        const script = await runScriptStage(
-          scriptGenerator,
-          {
-            article: {
-              title: article.title,
-              author: article.author,
-              body: article.content,
-              summary: article.excerpt,
-            },
-            speakers,
-          },
-          scriptStageTimeoutMs,
-          isBudgetEnforced,
-        );
-        turns = script?.turns;
-        if (turns && turns.length > 0) {
           if (claimedBy) {
             await checkpointEpisodeClaim(
               ctx.stores.metadata,
@@ -714,63 +712,133 @@ export function createGeminiSynthesizer(
               episode.id,
               claimedBy,
               {
-                phase: "script_generated",
-                scriptTurns: turns,
+                phase: "generating_script",
               },
             );
           }
-          // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
-          episode.scriptTurns = turns;
-
-          // audio-feed-9wqt, audio-feed-vvwb: preflight check before first dialogue turn:
-          // ensure remaining time fits at least one turn + flush margin
-          if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
-            const remaining = invocationBudget.maxDurationMs - elapsed;
-            const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
-              deps.estimatedTurnDurationMs ??
-              ESTIMATED_TTS_TURN_DURATION_MS;
-            if (remaining < turnEstimate + flushMargin) {
-              throw new SynthesisYieldError(
-                0,
-                turns.length,
-                `Script generated; yielding before first turn: remaining budget ${
-                  Math.round(remaining)
-                }ms < required ${turnEstimate + flushMargin}ms`,
+          const script = await runScriptStage(
+            scriptGenerator,
+            {
+              article: {
+                title: article.title,
+                author: article.author,
+                body: article.content,
+                summary: article.excerpt,
+              },
+              speakers,
+            },
+            scriptStageTimeoutMs,
+            isBudgetEnforced,
+          );
+          turns = script?.turns;
+          if (turns && turns.length > 0) {
+            if (claimedBy) {
+              await checkpointEpisodeClaim(
+                ctx.stores.metadata,
+                episode.userId,
+                episode.id,
+                claimedBy,
+                {
+                  phase: "script_generated",
+                  scriptTurns: turns,
+                },
               );
+            }
+            // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
+            episode.scriptTurns = turns;
+
+            // audio-feed-9wqt, audio-feed-vvwb: preflight check before first dialogue turn:
+            // ensure remaining time fits at least one turn + flush margin
+            if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+              const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+              const remaining = invocationBudget.maxDurationMs - elapsed;
+              const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+                deps.estimatedTurnDurationMs ??
+                ESTIMATED_TTS_TURN_DURATION_MS;
+              if (remaining < turnEstimate + flushMargin) {
+                throw new SynthesisYieldError(
+                  0,
+                  turns.length,
+                  `Script generated; yielding before first turn: remaining budget ${
+                    Math.round(remaining)
+                  }ms < required ${turnEstimate + flushMargin}ms`,
+                );
+              }
             }
           }
         }
-      }
-      try {
-        return await client.synthesizeDialogue({
-          title: article.title,
-          article: {
+        try {
+          return await client.synthesizeDialogue({
             title: article.title,
-            author: article.author,
-            body: article.content,
-            summary: article.excerpt,
-          },
-          speakers,
-          turns,
+            article: {
+              title: article.title,
+              author: article.author,
+              body: article.content,
+              summary: article.excerpt,
+            },
+            speakers,
+            turns,
+            codeHandling,
+            codeSummarizer: deps.codeSummarizer,
+          }, ttsOptions);
+        } catch (error) {
+          if (budgetController?.signal.aborted) {
+            const reason = budgetController.signal.reason;
+            if (isInvocationBudgetAbort(reason)) {
+              throw reason;
+            }
+            throw new InvocationBudgetAbortError(
+              newlySynthesizedCount,
+              turns?.length ?? MAX_TTS_SEGMENTS,
+              `Invocation budget deadline reached during dialogue TTS`,
+            );
+          }
+          if (leaseSignal?.aborted) {
+            throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
+          }
+          throw error;
+        }
+      }
+
+      // Only read the user record when nothing above it decided, so the common case
+      // (a source with an explicit voice) costs no extra store read.
+      const sourceVoice = source?.voices.direct;
+      const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
+      // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
+      // "cleared but never set" looks like in stored data, and `??` would hand it to
+      // the API as a voice name — the client's own `||` fallback would then silently
+      // pick Charon and skip both the user preference and DEFAULT_VOICE.
+      const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
+        .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
+        DEFAULT_NARRATION_VOICE;
+
+      if (claimedBy) {
+        await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
+          phase: "preparing_input",
+        });
+      }
+
+      try {
+        return await client.synthesizeNarration({
+          title: article.title,
+          author: article.author,
+          publishedAt: article.publishedAt,
+          sourceName: source?.title ?? episode.sourceTitle,
+          body: article.content,
+          voice,
           codeHandling,
           codeSummarizer: deps.codeSummarizer,
         }, ttsOptions);
       } catch (error) {
-        if (
-          budgetSignal?.aborted ||
-          error instanceof SynthesisYieldError ||
-          (error instanceof Error &&
-            (error.name === "AbortError" || error.name === "TimeoutError") &&
-            remainingTtsBudgetMs !== undefined)
-        ) {
-          if (error instanceof SynthesisYieldError) throw error;
-          throw new SynthesisYieldError(
+        if (budgetController?.signal.aborted) {
+          const reason = budgetController.signal.reason;
+          if (isInvocationBudgetAbort(reason)) {
+            throw reason;
+          }
+          throw new InvocationBudgetAbortError(
             newlySynthesizedCount,
-            turns?.length ?? MAX_TTS_SEGMENTS,
-            `Invocation budget deadline (${
-              Math.round(remainingTtsBudgetMs ?? 0)
-            }ms) reached during dialogue TTS`,
+            MAX_TTS_SEGMENTS,
+            `Invocation budget deadline reached during narration TTS`,
           );
         }
         if (leaseSignal?.aborted) {
@@ -778,58 +846,10 @@ export function createGeminiSynthesizer(
         }
         throw error;
       }
-    }
-
-    // Only read the user record when nothing above it decided, so the common case
-    // (a source with an explicit voice) costs no extra store read.
-    const sourceVoice = source?.voices.direct;
-    const user = sourceVoice ? null : await ctx.stores.metadata.getUser(episode.userId);
-    // First NON-EMPTY wins, not first non-nullish: an empty `direct` string is what
-    // "cleared but never set" looks like in stored data, and `??` would hand it to
-    // the API as a voice name — the client's own `||` fallback would then silently
-    // pick Charon and skip both the user preference and DEFAULT_VOICE.
-    const voice = [sourceVoice, user?.voice, ctx.config.defaultVoice, DEFAULT_NARRATION_VOICE]
-      .find((name): name is string => typeof name === "string" && name.trim() !== "") ??
-      DEFAULT_NARRATION_VOICE;
-
-    if (claimedBy) {
-      await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
-        phase: "preparing_input",
-      });
-    }
-
-    try {
-      return await client.synthesizeNarration({
-        title: article.title,
-        author: article.author,
-        publishedAt: article.publishedAt,
-        sourceName: source?.title ?? episode.sourceTitle,
-        body: article.content,
-        voice,
-        codeHandling,
-        codeSummarizer: deps.codeSummarizer,
-      }, ttsOptions);
-    } catch (error) {
-      if (
-        budgetSignal?.aborted ||
-        error instanceof SynthesisYieldError ||
-        (error instanceof Error &&
-          (error.name === "AbortError" || error.name === "TimeoutError") &&
-          remainingTtsBudgetMs !== undefined)
-      ) {
-        if (error instanceof SynthesisYieldError) throw error;
-        throw new SynthesisYieldError(
-          newlySynthesizedCount,
-          MAX_TTS_SEGMENTS,
-          `Invocation budget deadline (${
-            Math.round(remainingTtsBudgetMs ?? 0)
-          }ms) reached during narration TTS`,
-        );
+    } finally {
+      if (budgetTimer !== undefined) {
+        clearTimeout(budgetTimer);
       }
-      if (leaseSignal?.aborted) {
-        throw new GeminiTtsError("synthesis stopped before claim lease expired", 400, error);
-      }
-      throw error;
     }
   };
 }
@@ -1367,17 +1387,13 @@ export async function runSynthesisBatch(
         break;
       } catch (error) {
         lastError = error;
-        if (
-          error instanceof SynthesisYieldError ||
-          (error instanceof Error &&
-            (error.name === "AbortError" || error.name === "TimeoutError") &&
-            maxInvocationDurationMs)
-        ) {
+        if (isInvocationBudgetAbort(error)) {
           const yieldErr = error instanceof SynthesisYieldError
             ? error
-            : new SynthesisYieldError(0, 0, "Invocation budget reached");
+            : new InvocationBudgetAbortError(0, 0, "Invocation budget reached");
           lastError = yieldErr;
-          // audio-feed-vqu4, audio-feed-q7zy: clean yield to respect invocation budget
+
+          // audio-feed-vqu4, audio-feed-q7zy, audio-feed-zni7: clean yield to respect invocation budget
           const yielded = await metadata.yieldEpisodeClaim(
             currentEpisode.userId,
             currentEpisode.id,
@@ -1411,7 +1427,10 @@ export async function runSynthesisBatch(
     }
 
     if (!audio) {
-      if (lastError instanceof SynthesisYieldError) {
+      if (
+        isInvocationBudgetAbort(lastError) &&
+        result.yielded.some((y) => y.episodeId === currentEpisode.id)
+      ) {
         // audio-feed-vqu4: clean yield to respect invocation budget.
         // Check if whole batch time budget is spent before picking up another episode.
         if (

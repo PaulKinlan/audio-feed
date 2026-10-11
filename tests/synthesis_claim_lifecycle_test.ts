@@ -720,12 +720,12 @@ Deno.test("audio-feed-9wqt: (1) reviewer repro: preflight check yields BEFORE tu
     await runManagedTurns({
       segments: [44, 20, 5],
       maxTurns: 3,
-      request: (duration) => {
+      request: (duration: number) => {
         turns.push({ startedAt: ms, duration });
         ms += duration;
         return Promise.resolve(duration);
       },
-      stitch: (parts) => parts,
+      stitch: (parts: number[]) => parts,
       // Preflight decision: does remaining budget fit next turn (20ms) + flush margin (5ms)?
       // Here max budget is 45ms. After turn 1 (44ms), remaining is 1ms < 25ms -> should yield!
       shouldYield: () => {
@@ -753,12 +753,12 @@ Deno.test("audio-feed-9wqt: (2) first turn exceeds budget: preflight yields befo
     await runManagedTurns({
       segments: [30, 20],
       maxTurns: 2,
-      request: (duration) => {
+      request: (duration: number) => {
         turns.push({ startedAt: ms, duration });
         ms += duration;
         return Promise.resolve(duration);
       },
-      stitch: (parts) => parts,
+      stitch: (parts: number[]) => parts,
       // Budget is 20ms. Required for turn 1 is 30ms + 5ms = 35ms. 20 < 35 -> yields immediately!
       shouldYield: () => {
         const remaining = 20 - ms;
@@ -782,12 +782,12 @@ Deno.test("audio-feed-9wqt: (3) short work still completes in one invocation", a
   const result = await runManagedTurns({
     segments: [5, 5, 5],
     maxTurns: 3,
-    request: (duration) => {
+    request: (duration: number) => {
       turns.push({ startedAt: ms, duration });
       ms += duration;
       return Promise.resolve(duration);
     },
-    stitch: (parts) => parts,
+    stitch: (parts: number[]) => parts,
     // Budget 45ms. Each turn is 5ms + 5ms margin = 10ms. 45ms easily fits all three turns!
     shouldYield: () => {
       const remaining = 45 - ms;
@@ -1079,4 +1079,99 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
   const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-script");
   assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
   assertEquals(ep?.attempts, 0, "attempts must be reset to 0");
+});
+
+Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecycle and fails episode (no livelock)", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-provider-aborterror",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let calls = 0;
+  const providerAbortSynth = () => {
+    calls++;
+    throw new DOMException("provider terminated connection", "AbortError");
+  };
+
+  // Run batch with maxAttempts: 1
+  const result = await runSynthesisBatch(ctx, providerAbortSynth, {
+    owner: "worker-provider-abort",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 45_000,
+  });
+
+  assertEquals(calls, 1, "synthesizer was called");
+  assertEquals(result.yielded.length, 0, "provider AbortError must NOT yield as budget");
+  assertEquals(result.failed.length, 1, "provider AbortError must fail the episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "provider terminated connection");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-provider-aborterror");
+  assertEquals(ep?.status, "failed", "episode status must be failed");
+  assertStringIncludes(ep?.error ?? "", "provider terminated connection");
+
+  // Subsequent tick must NOT re-pick the failed episode
+  const result2 = await runSynthesisBatch(ctx, providerAbortSynth, {
+    owner: "worker-provider-abort-tick2",
+    maxAttempts: 1,
+    maxInvocationDurationMs: 45_000,
+  });
+  assertEquals(result2.failed.length, 0);
+  assertEquals(result2.yielded.length, 0);
+  assertEquals(calls, 1, "failed episode must not be picked up again");
+});
+
+Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle and does not livelock", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-lease-abort",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    fetchFn: (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      }),
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+  });
+
+  // Short leaseMs triggers leaseSignal abort
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-lease-abort",
+    leaseMs: 60_050, // leaves ~50ms remainingMs before leaseExpiry minus 60s
+    maxAttempts: 1,
+  });
+
+  assertEquals(result.yielded.length, 0, "lease abort must NOT yield as budget");
+  assertEquals(result.failed.length, 1, "lease abort must fail episode");
+  assertStringIncludes(result.failed[0]?.error ?? "", "lease expired");
+
+  const ep = await stores.metadata.getEpisode("user-1", "ep-lease-abort");
+  assertEquals(ep?.status, "failed");
 });

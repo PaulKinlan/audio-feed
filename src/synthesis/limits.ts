@@ -70,6 +70,41 @@ export class SynthesisYieldError extends Error {
   }
 }
 
+/**
+ * Sentinel abort reason used to identify an invocation-budget abort by provenance (audio-feed-zni7).
+ * Prevents third-party or provider-originated AbortErrors from being misclassified as budget yields.
+ */
+export const INVOCATION_BUDGET_ABORT_REASON = Symbol.for("audio-feed.invocation-budget-abort");
+
+export class InvocationBudgetAbortError extends SynthesisYieldError {
+  readonly sentinel = INVOCATION_BUDGET_ABORT_REASON;
+  constructor(
+    completedTurns = 0,
+    totalTurns = 0,
+    message = "Invocation budget exceeded",
+  ) {
+    super(completedTurns, totalTurns, message);
+    this.name = "InvocationBudgetAbortError";
+  }
+}
+
+/**
+ * Determine if an error originated from our own invocation budget abort by provenance.
+ */
+export function isInvocationBudgetAbort(error: unknown): boolean {
+  if (error instanceof InvocationBudgetAbortError) return true;
+  if (error instanceof SynthesisYieldError) return true;
+  if (error && typeof error === "object") {
+    const rec = error as Record<string, unknown>;
+    if (rec.sentinel === INVOCATION_BUDGET_ABORT_REASON) return true;
+    if (rec.reason && typeof rec.reason === "object") {
+      const inner = rec.reason as Record<string, unknown>;
+      if (inner.sentinel === INVOCATION_BUDGET_ABORT_REASON) return true;
+    }
+  }
+  return false;
+}
+
 /** Worst-case estimated duration for a single TTS turn in ms (audio-feed-9wqt). */
 export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
 /** Worst-case estimated duration for grounded script generation stage in ms (audio-feed-9wqt). */

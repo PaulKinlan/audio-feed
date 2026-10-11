@@ -279,6 +279,7 @@ export function createEpisodesRepository(
       update?: {
         phase?: string;
         now?: string;
+        advanceAttempts?: boolean;
       },
     ): Promise<boolean> {
       const key = scoped(userId, episodeId);
@@ -295,7 +296,7 @@ export function createEpisodesRepository(
         claimedBy: undefined,
         phase: update?.phase ?? current.phase,
         lastHeartbeat: update?.now ?? new Date().toISOString(),
-        attempts: 0,
+        attempts: update?.advanceAttempts ? (current.attempts ?? 0) + 1 : 0,
       };
       writeEpisode(state, yielded);
       return Promise.resolve(true);
