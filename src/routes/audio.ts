@@ -15,7 +15,7 @@
 
 import { forbidden, notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
-import type { RouteContext } from "../router.ts";
+import { redactAudioKey, type RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
 import { isAudioMode } from "../types.ts";
 
@@ -175,7 +175,11 @@ export async function handleAudio(
 ): Promise<Response> {
   const rawKey = params.key;
   if (!rawKey || !isAllowedAudioKey(rawKey)) {
-    console.warn(`[audio-feed] audio 404: disallowed or unsafe key "${rawKey}"`);
+    // audio-feed-0eae, audio-feed-f9wf: the key is a capability — and attacker-controlled
+    // text. It is never logged in cleartext.
+    console.warn(
+      `[audio-feed] audio 404: disallowed or unsafe key "${redactAudioKey(rawKey)}"`,
+    );
     return notFound("Unknown audio object");
   }
 
@@ -205,9 +209,7 @@ export async function handleAudio(
     }
     if (!info || !resolvedKey) {
       console.warn(
-        `[audio-feed] audio HEAD 404: key "${rawKey}" not found (candidates: ${
-          candidateKeys.join(", ")
-        })`,
+        `[audio-feed] audio HEAD 404: key "${redactAudioKey(rawKey)}" not found`,
       );
       return notFound("Unknown audio object");
     }
@@ -274,9 +276,7 @@ export async function handleAudio(
     // the get() loop below, which costs one get() on a genuine miss.
     if (everyKeyHasDirectUrl) {
       console.warn(
-        `[audio-feed] audio direct-url 404: key "${rawKey}" not found (candidates: ${
-          candidateKeys.join(", ")
-        })`,
+        `[audio-feed] audio direct-url 404: key "${redactAudioKey(rawKey)}" not found`,
       );
       return notFound("Unknown audio object");
     }
@@ -313,9 +313,7 @@ export async function handleAudio(
 
   if (!object || !resolvedKey) {
     console.warn(
-      `[audio-feed] audio GET 404: key "${rawKey}" not found in storage (candidates: ${
-        candidateKeys.join(", ")
-      })`,
+      `[audio-feed] audio GET 404: key "${redactAudioKey(rawKey)}" not found in storage`,
     );
     return notFound("Unknown audio object");
   }

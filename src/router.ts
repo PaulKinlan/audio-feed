@@ -29,10 +29,21 @@ interface Route<Ctx> {
 }
 
 /**
+ * Redact an audio capability key for logging.
+ *
+ * Owned by: audio-feed-0eae, audio-feed-f9wf.
+ */
+export function redactAudioKey(_key?: unknown): string {
+  return "[redacted]";
+}
+
+/**
  * Sanitize a request URL for error logging by redacting capability tokens
  * (e.g. following /feed/ and /listen/) and stripping query parameters.
  *
- * Owned by: audio-feed-n2ha.
+ * Owned by: audio-feed-n2ha; /audio/ redaction added by audio-feed-0eae:
+ * the enclosure key is a multi-segment capability (`/audio/:key+`), so
+ * EVERYTHING after /audio/ is redacted, not just the next segment.
  */
 export function sanitizeRequestUrl(rawUrl: unknown): string {
   const raw = String(rawUrl ?? "");
@@ -42,6 +53,14 @@ export function sanitizeRequestUrl(rawUrl: unknown): string {
     url.hash = "";
     const segments = url.pathname.split("/");
     for (let i = 0; i < segments.length; i++) {
+      if (segments[i] === "audio" && i + 1 < segments.length) {
+        if (segments.slice(i + 1).some((s) => s !== "")) {
+          // Multi-segment key: collapse the whole tail.
+          segments.length = i + 1;
+          segments.push("[redacted]");
+          break;
+        }
+      }
       if ((segments[i] === "feed" || segments[i] === "listen") && i + 1 < segments.length) {
         if (segments[i + 1] !== "") {
           segments[i + 1] = "[redacted]";
@@ -55,7 +74,9 @@ export function sanitizeRequestUrl(rawUrl: unknown): string {
     return url.href;
   } catch {
     const withoutQuery = raw.split("?")[0]?.split("#")[0] ?? "";
-    return withoutQuery.replace(/(\/(?:feed|listen)\/)[^/]+/g, "$1[redacted]");
+    return withoutQuery
+      .replace(/(\/audio\/).+$/g, "$1[redacted]")
+      .replace(/(\/(?:feed|listen)\/)[^/]+/g, "$1[redacted]");
   }
 }
 

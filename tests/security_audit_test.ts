@@ -3,6 +3,7 @@
  * 1. audio-feed-8k19: Baseline security headers (CSP, nosniff, frame-ancestors / X-Frame-Options, HSTS)
  * 2. audio-feed-n2ha: Redact capability tokens from req.url in router 500 error logging
  * 3. audio-feed-5iue: Enforce prefix allowlist and user approval check on /audio/ enclosure route
+ * 4. audio-feed-0eae: Redact /audio/ capability tokens in sanitizeRequestUrl and audio 404 warning logs
  */
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -321,10 +322,31 @@ Deno.test("token redaction: sanitizeRequestUrl redacts feed and listen capabilit
     sanitizeRequestUrl("https://audio.example.com/listen/bearer-token-xyz/episodes/ep-1/retry"),
     "https://audio.example.com/listen/[redacted]/episodes/ep-1/retry",
   );
-  // /listen landing without token is unchanged
+  // /audio/ capability keys (audio-feed-0eae)
+  assertEquals(
+    sanitizeRequestUrl("https://audio.example.com/audio/secret-token-xyz.mp3?k=v#hash"),
+    "https://audio.example.com/audio/[redacted]",
+  );
+  assertEquals(
+    sanitizeRequestUrl("https://audio.example.com/audio/user-1/direct/ep-1.wav?debug=1"),
+    "https://audio.example.com/audio/[redacted]",
+  );
+  assertEquals(
+    sanitizeRequestUrl("https://audio.example.com/audio/audio/user-1/deepdive/ep-1.mp3"),
+    "https://audio.example.com/audio/[redacted]",
+  );
+  // /listen and /audio landings without token are unchanged
   assertEquals(
     sanitizeRequestUrl("https://audio.example.com/listen"),
     "https://audio.example.com/listen",
+  );
+  assertEquals(
+    sanitizeRequestUrl("https://audio.example.com/audio"),
+    "https://audio.example.com/audio",
+  );
+  assertEquals(
+    sanitizeRequestUrl("https://audio.example.com/audio/"),
+    "https://audio.example.com/audio/",
   );
   // query parameters are stripped on generic paths
   assertEquals(
@@ -341,6 +363,19 @@ Deno.test("token redaction: sanitizeRequestUrl redacts feed and listen capabilit
   assertEquals(
     sanitizeRequestUrl("/listen/my-listen-tok"),
     "/listen/[redacted]",
+  );
+  assertEquals(
+    sanitizeRequestUrl("/audio/my-audio-tok.mp3?debug=1"),
+    "/audio/[redacted]",
+  );
+  assertEquals(
+    sanitizeRequestUrl("/audio/user-1/direct/ep-1.wav"),
+    "/audio/[redacted]",
+  );
+  // unparseable fallback handles feed, listen, and audio
+  assertEquals(
+    sanitizeRequestUrl("http://[::1/audio/cap-key-123/track.mp3?leak=yes"),
+    "http://[::1/audio/[redacted]",
   );
 });
 
@@ -430,6 +465,166 @@ Deno.test("token redaction: 404 response body redacts capability tokens from URL
     "/feed/[redacted]/unknown-route",
     "404 body detail must contain redacted pathname",
   );
+
+  // 404 for /audio/:key on unknown route (audio-feed-0eae)
+  const SECRET_AUDIO_TOKEN = "private-audio-token-123456789";
+  const audioRes = await fetch(
+    new Request(`${BASE}/service/audio/${SECRET_AUDIO_TOKEN}`),
+  );
+  assertEquals(audioRes.status, 404);
+  const audioBody = await audioRes.json();
+  const audioSerialized = JSON.stringify(audioBody);
+  assert(
+    !audioSerialized.includes(SECRET_AUDIO_TOKEN),
+    `404 body must not contain audio capability token: ${audioSerialized}`,
+  );
+  assertStringIncludes(
+    audioSerialized,
+    "/audio/[redacted]",
+    "404 body detail must contain redacted audio pathname",
+  );
+});
+
+Deno.test("token redaction: Router 500 error logging redacts audio capability token and preserves error stack (audio-feed-0eae)", async () => {
+  const SECRET_AUDIO_TOKEN = "private-audio-token-987654321.mp3";
+  const stores = memoryStores();
+  stores.blobs.get = () => {
+    throw new Error("unexpected blob failure during audio fetch");
+  };
+  const { fetch } = setupTestApp(stores);
+
+  const loggedErrors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  try {
+    const res = await fetch(
+      new Request(`${BASE}/audio/${SECRET_AUDIO_TOKEN}?subscriber=bob`),
+    );
+    assertEquals(res.status, 500);
+    const body = await res.json();
+    assertEquals(body.error, "internal_error");
+
+    assertEquals(loggedErrors.length, 1);
+    const logLine = String(loggedErrors[0]?.[0]);
+    const loggedException = loggedErrors[0]?.[1];
+
+    // Capability token must NOT appear in the log line
+    assert(
+      !logLine.includes(SECRET_AUDIO_TOKEN),
+      `Log line must not contain audio capability token: ${logLine}`,
+    );
+    assert(
+      !logLine.includes("subscriber=bob"),
+      `Log line must not contain query parameters: ${logLine}`,
+    );
+    assertStringIncludes(
+      logLine,
+      "/audio/[redacted]",
+      "Log line must contain redacted URL",
+    );
+
+    // Error object / stack must be preserved
+    assert(loggedException instanceof Error, "Logged second argument must be the Error object");
+    assertEquals(
+      (loggedException as Error).message,
+      "unexpected blob failure during audio fetch",
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+Deno.test("token redaction: audio route 404 logs redacted key on disallowed or unsafe key (audio-feed-0eae)", async () => {
+  const SECRET_UNSAFE_KEY = "disallowed-secret-capability-key-998877";
+  const { fetch } = setupTestApp();
+
+  const loggedWarnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    loggedWarnings.push(args);
+  };
+
+  try {
+    const res = await fetch(new Request(`${BASE}/audio/${SECRET_UNSAFE_KEY}`));
+    assertEquals(res.status, 404);
+    const body = await res.json();
+    assertEquals(body.error, "not_found");
+
+    assertEquals(loggedWarnings.length, 1);
+    const warnLine = String(loggedWarnings[0]?.[0]);
+
+    // Unsafe / disallowed key must NOT be logged in cleartext
+    assert(
+      !warnLine.includes(SECRET_UNSAFE_KEY),
+      `Warning line must not contain rawKey: ${warnLine}`,
+    );
+    assertStringIncludes(
+      warnLine,
+      'audio 404: disallowed or unsafe key "[redacted]"',
+      "Warning line must redact the disallowed/unsafe key",
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+Deno.test("token redaction: audio route storage-miss 404s (GET, HEAD, direct-url) redact valid capability keys (audio-feed-f9wf)", async () => {
+  const VALID_MISSING_KEY = "user-secret-7/direct/never-existed.mp3";
+  const { fetch } = setupTestApp();
+
+  const loggedWarnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    loggedWarnings.push(args);
+  };
+
+  try {
+    // 1. GET 404
+    const getRes = await fetch(
+      new Request(`${BASE}/audio/${VALID_MISSING_KEY}`, { headers: { Origin: BASE } }),
+    );
+    assertEquals(getRes.status, 404);
+    const getWarn = loggedWarnings.map((w) => w.join(" ")).find((w) => w.includes("audio GET 404"));
+    assert(getWarn, "audio GET 404 warning must be logged");
+    assertStringIncludes(getWarn, 'key "[redacted]" not found in storage');
+    assert(!getWarn.includes("user-secret-7") && !getWarn.includes("never-existed.mp3"));
+
+    // 2. HEAD 404
+    loggedWarnings.length = 0;
+    const headRes = await fetch(
+      new Request(`${BASE}/audio/${VALID_MISSING_KEY}`, {
+        method: "HEAD",
+        headers: { Origin: BASE },
+      }),
+    );
+    assertEquals(headRes.status, 404);
+    const headWarn = loggedWarnings.map((w) => w.join(" ")).find((w) =>
+      w.includes("audio HEAD 404")
+    );
+    assert(headWarn, "audio HEAD 404 warning must be logged");
+    assertStringIncludes(headWarn, 'key "[redacted]" not found');
+    assert(!headWarn.includes("user-secret-7") && !headWarn.includes("never-existed.mp3"));
+
+    // 3. direct-url 404
+    loggedWarnings.length = 0;
+    const directStore = memoryStores();
+    directStore.blobs.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
+    directStore.blobs.head = () => Promise.resolve(null);
+    const { fetch: directFetch } = setupTestApp(directStore);
+    const directRes = await directFetch(new Request(`${BASE}/audio/${VALID_MISSING_KEY}`));
+    assertEquals(directRes.status, 404);
+    const directWarn = loggedWarnings.map((w) => w.join(" ")).find((w) =>
+      w.includes("audio direct-url 404")
+    );
+    assert(directWarn, "audio direct-url 404 warning must be logged");
+    assertStringIncludes(directWarn, 'key "[redacted]" not found');
+    assert(!directWarn.includes("user-secret-7") && !directWarn.includes("never-existed.mp3"));
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 // ===========================================================================
