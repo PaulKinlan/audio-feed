@@ -5,6 +5,12 @@
  * (`this.#kv` -> `core.kv`, and cross-domain helpers through `core`).
  */
 
+import {
+  abandonedClaimEvent,
+  CLAIM_START_PHASE,
+  claimLifecycleEvent,
+  elapsedSince,
+} from "../episode_events.ts";
 import type { Episode } from "../../types.ts";
 import type {
   EpisodeClaim,
@@ -362,6 +368,22 @@ export function createEpisodesRepository(
           lastHeartbeat: found.lastHeartbeat,
         };
         await atomicPutEpisode(core, abandoned, entry);
+        // audio-feed-wzv9: the record the siv1 incident was missing, written from the transition
+        // that decides the abandonment — a different process from the one that expired.
+        await host().appendLog(
+          abandonedClaimEvent(abandoned, {
+            phase: expiredPhase,
+            attempt: expiredAttempt,
+            reason: expiredMsg,
+            // Derived, not asserted: the instant the lease stopped being honoured.
+            ...(found.claimedAt && !Number.isNaN(Date.parse(found.claimedAt))
+              ? { expiredAt: new Date(Date.parse(found.claimedAt) + claim.leaseMs).toISOString() }
+              : {}),
+            lastHeartbeat: expiredHeartbeat,
+            provenance: expiredProvenance,
+            maxClaims: claim.maxClaims,
+          }),
+        );
         return null;
       }
 
@@ -378,6 +400,14 @@ export function createEpisodesRepository(
       const ok = await atomicPutEpisode(core, claimed, entry);
       // A failed check means another worker won the race — the normal answer, not
       // an error. The caller moves on to the next job.
+      if (ok) {
+        // Before the worker does anything: a process killed mid-synthesis leaves this record
+        // behind, and its lack of a terminal partner is what says the work died rather than never
+        // started (audio-feed-siv1).
+        await host().appendLog(
+          claimLifecycleEvent(claimed, { phase: CLAIM_START_PHASE, attempt: attempts }),
+        );
+      }
       return ok ? claimed : null;
     },
     async touchEpisodeClaim(
@@ -402,7 +432,18 @@ export function createEpisodesRepository(
         phase: update.phase ?? current.phase,
         scriptTurns: update.scriptTurns ?? current.scriptTurns,
       };
-      return await atomicPutEpisode(core, updated, entry);
+      const wrote = await atomicPutEpisode(core, updated, entry);
+      if (wrote && update.phase && update.phase !== current.phase) {
+        // Only a real change: one record per heartbeat would bury the transitions in noise.
+        await host().appendLog(
+          claimLifecycleEvent(updated, {
+            phase: update.phase,
+            attempt: updated.attempts ?? 1,
+            time: updated.lastHeartbeat,
+          }),
+        );
+      }
+      return wrote;
     },
     async completeEpisode(episode: Episode, owner: string): Promise<boolean> {
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
@@ -421,7 +462,25 @@ export function createEpisodesRepository(
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
-      return await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry);
+      const wrote = await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry);
+      if (wrote) {
+        await host().appendLog(
+          claimLifecycleEvent(episode, {
+            phase: episode.phase ?? CLAIM_START_PHASE,
+            attempt: episode.attempts ?? 1,
+            durationMs: elapsedSince(current.claimedAt),
+            // The outcome lives in the reason so the terminal moment does not need its own event
+            // type: a clean finish states no reason, a failure states the episode's own error.
+            ...(episode.status === "failed"
+              ? {
+                reason: episode.error ?? "synthesis failed without a recorded error",
+                severity: "error" as const,
+              }
+              : {}),
+          }),
+        );
+      }
+      return wrote;
     },
     async retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const entry = await core.kv.get<Episode>(["episode", userId, id]);

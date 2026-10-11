@@ -146,3 +146,36 @@ contiguous seqs, and a burst of differently sized appends loses nothing.
 registered pattern. Recorded because the first version of the evidence script expected the marker
 there and called the mismatch a leak — the script now labels a leak and a stale expectation
 differently, since conflating them is how a real leak gets ignored.
+
+## The claim-lifecycle event shape (converged with audio-feed-siv1)
+
+One event type carries the whole claim story: `claim.lifecycle`. Before this, the lifecycle was five
+types (`synthesis.claim`, `.phase`, `.ready`, `.failed`, `.abandoned`) — five names for one fact, so
+a reader had to know all five to answer "what happened to this episode", and the store and the
+worker could each write a differently shaped record for the same thing. The variable FIELD says
+which moment it is:
+
+| field                        | meaning                                                                                                                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `type`                       | `"claim.lifecycle"` — the only type the claim lifecycle writes                                                                                                                                                                 |
+| `phase`                      | `"claimed"` at the start of an attempt, otherwise the worker's execution phase — **the same vocabulary siv1 persists on the episode** (`reading_article`, `generating_script`, `uploading_audio`, …), so one fact has one name |
+| `attempt`                    | 1-based attempt number, from the episode's own counter                                                                                                                                                                         |
+| `reason`                     | present only when an attempt ENDED: the observable cause. Absent on a start, and absent on a clean finish                                                                                                                      |
+| `episodeId`, `correlationId` | the episode, so every attempt reads as one story without a join                                                                                                                                                                |
+| `durationMs`                 | claim → terminal, on the terminal record                                                                                                                                                                                       |
+| `context`                    | the observed facts: `owner`/`leaseMs`/`maxClaims` on a claim; `expiredAt`/`lastHeartbeat`/`provenance`/`workerState: "unknown"` on an abandonment                                                                              |
+
+**The producer is the storage state transition, in both adapters** — `claimEpisode` (start, and the
+abandonment), `touchEpisodeClaim` (phase), `completeEpisode` (terminal). That is deliberate rather
+than convenient: siv1 made phase and heartbeat _durable writes on the episode_, so the transition is
+the only place that cannot miss a phase change, and the worker needs no log writer of its own —
+which is what stops two shapes appearing for one fact. The start record is written before the claim
+is honoured, because a process killed mid-synthesis leaves it behind and its lack of a terminal
+partner is what distinguishes a dead claim from one that never started.
+
+An abandonment states only what the store can see: the lease expired, when it expired, the last
+heartbeat and phase, and that **worker state is unknown**. It never asserts that a worker died
+(`audio-feed-kd5r`), because a later reader cannot tell an observation from a guess.
+
+A heartbeat that repeats the current phase writes no record: one record per heartbeat would bury the
+transitions in noise, and a repeated phase is not a change.

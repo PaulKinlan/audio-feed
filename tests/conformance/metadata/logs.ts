@@ -192,17 +192,21 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     assert(claimed, "the claim succeeded");
 
     const records = await store.listLogs();
-    const event = records.find((r) => r.type === "synthesis.claim");
-    assert(event, "the claim left a record");
+    // ONE event type carries the whole claim story (converged with audio-feed-siv1): the phase
+    // field says which moment this is, so a consumer does not have to know a family of type names.
+    assertEquals([...new Set(records.map((r) => r.type))], ["claim.lifecycle"]);
+    const event = records[0]!;
     assertEquals(event.severity, "info");
-    // The siv1 triple: which attempt, which phase, and enough identity to join it to everything
-    // else about this episode.
-    assertEquals(event.attempt, 1);
     assertEquals(event.phase, "claimed");
+    // Which attempt, which phase, and enough identity to join it to everything else about this
+    // episode — the siv1 triple.
+    assertEquals(event.attempt, 1);
     assertEquals(event.episodeId, episode.id);
     assertEquals(event.userId, episode.userId);
     assertEquals(event.correlationId, episode.id);
     assertEquals(event.job, "synthesis");
+    // A start has no reason: nothing has ended.
+    assertEquals(event.reason, undefined);
   });
 
   test("a claim with no terminal record is readable as a death, not a no-op", async (store) => {
@@ -211,11 +215,39 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     await store.claimEpisode(episode.userId, episode.id, claim);
 
     const records = await store.listLogs();
-    assertEquals(records.map((r) => r.type), ["synthesis.claim"]);
+    assertEquals(records.map((r) => r.type), ["claim.lifecycle"]);
+    assertEquals(records[0]?.phase, "claimed");
     // The episode itself is still "synthesizing" and will look that way until the lease expires —
     // which is precisely why the log has to be the thing that explains it.
     const after = await store.getEpisode(episode.userId, episode.id);
     assertEquals(after?.status, "synthesizing");
+  });
+
+  test("a phase transition is recorded against the claim, once per real change", async (store) => {
+    // siv1 made phase and heartbeat durable writes on the episode, so the storage transition is the
+    // only place a phase change can happen — and therefore the only place it needs recording.
+    const { episode } = await seedEpisode(store);
+    const claimed = await store.claimEpisode(episode.userId, episode.id, claim);
+    assert(claimed);
+    assert(
+      await store.touchEpisodeClaim(episode.userId, episode.id, claim.owner, {
+        phase: "generating_script",
+        now: "2026-10-11T09:05:30.000Z",
+      }),
+    );
+    // A heartbeat that repeats the phase is not a change and must not add a record.
+    assert(
+      await store.touchEpisodeClaim(episode.userId, episode.id, claim.owner, {
+        now: "2026-10-11T09:05:40.000Z",
+      }),
+    );
+
+    const records = await store.listLogs();
+    assertEquals([...new Set(records.map((r) => r.type))], ["claim.lifecycle"]);
+    assertEquals(records.map((r) => r.phase), ["claimed", "generating_script"]);
+    // The phase name is siv1's own vocabulary, not a second naming of the same fact.
+    assertEquals(records[1]?.attempt, 1);
+    assertEquals(records[1]?.episodeId, episode.id);
   });
 
   test("a finished synthesis records its outcome and how long it took", async (store) => {
@@ -228,17 +260,18 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     );
 
     const records = await store.listLogs();
-    const terminal = records.find((r) => r.type === "synthesis.ready");
+    const terminal = records.find((r) => r.durationMs !== undefined);
     assert(terminal, "the terminal outcome was recorded");
     assertEquals(terminal.severity, "info");
-    assertEquals(terminal.phase, "terminal");
+    assertEquals([...new Set(records.map((r) => r.type))], ["claim.lifecycle"]);
     assert(typeof terminal.durationMs === "number", "a trace duration");
+    // A clean finish states no reason; only something that ended badly does.
+    assertEquals(terminal.reason, undefined);
     // Claim and terminal share the correlation id: one episode, one story.
-    const claimRecord = records.find((r) => r.type === "synthesis.claim");
-    assertEquals(claimRecord?.correlationId, terminal.correlationId);
+    assertEquals(records[0]?.correlationId, terminal.correlationId);
   });
 
-  test("a failed synthesis records the reason", async (store) => {
+  test("a failed synthesis records the reason on the terminal record", async (store) => {
     const { episode } = await seedEpisode(store);
     const claimed = await store.claimEpisode(episode.userId, episode.id, claim);
     assert(claimed);
@@ -247,13 +280,16 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
       claim.owner,
     );
 
-    const terminal = (await store.listLogs()).find((r) => r.type === "synthesis.failed");
+    const records = await store.listLogs();
+    const terminal = records.find((r) => r.durationMs !== undefined);
     assert(terminal, "the failure was recorded");
+    // The outcome rides on the ONE lifecycle type rather than adding a second type for failure.
+    assertEquals([...new Set(records.map((r) => r.type))], ["claim.lifecycle"]);
     assertEquals(terminal.severity, "error");
     assertEquals(terminal.reason, "TTS provider returned 503 after 3 attempts");
   });
 
-  test("an abandonment records WHY, which is the sentence the old code could not state", async (store) => {
+  test("an abandonment records the OBSERVED facts, never an asserted death", async (store) => {
     const { episode } = await seedEpisode(store);
     // Burn the claim budget: each claim ends without a terminal write, exactly as in production.
     // Each retry has to wait for the previous lease to expire, which is what makes a dead claim
@@ -276,23 +312,28 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     );
 
     const records = await store.listLogs();
-    const abandoned = records.find((r) => r.type === "synthesis.abandoned");
+    assertEquals([...new Set(records.map((r) => r.type))], ["claim.lifecycle"]);
+    const abandoned = records.find((r) => r.severity === "error");
     assert(abandoned, "the abandonment was recorded");
-    assertEquals(abandoned.severity, "error");
-    assertEquals(abandoned.phase, "abandoned");
     assert(abandoned.reason && abandoned.reason.length > 0, "an abandonment must carry a reason");
     // The reason must name the mechanism, because that is the diagnosis: the claims ended before
     // their terminal write rather than failing in the narration.
     assert(
       abandoned.reason!.includes("before its terminal write") ||
-        abandoned.reason!.includes("last recorded error"),
+        abandoned.reason!.includes("lease expired"),
       `the reason explains the mechanism: ${abandoned.reason}`,
     );
-    // And the three claims are still visible, which is what turns "no cause" into a timeline.
-    assertEquals(
-      records.filter((r) => r.type === "synthesis.claim").length,
-      3,
-    );
+    // Observed facts, and only those. The store can see that nobody wrote a result; it cannot see
+    // why, and audio-feed-kd5r is explicit that a record must not assert a worker died.
+    assert(abandoned.reason!.includes("worker state unknown"), "no asserted cause of death");
+    const context = abandoned.context as Record<string, unknown> | undefined;
+    assertEquals(context?.workerState, "unknown");
+    assert(typeof context?.expiredAt === "string", "the expiry instant is an observed fact");
+    assert(typeof context?.lastHeartbeat === "string", "and so is the last heartbeat");
+    // And the three claims are still visible, which is what turns "no cause" into a timeline. The
+    // abandonment record reuses the phase the claim was last known in, so a start is identified by
+    // having no reason rather than by its phase.
+    assertEquals(records.filter((r) => r.phase === "claimed" && r.reason === undefined).length, 3);
   });
 }
 

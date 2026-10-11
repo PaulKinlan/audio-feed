@@ -70,16 +70,16 @@ await runSynthesisBatch({ config, stores }, () => {
 const afterA = (await stores.metadata.listLogs()).filter((r) => r.episodeId === "epi-A");
 timeline(afterA);
 const types = afterA.map((r) => r.type);
-check("A: the claim was recorded", types.includes("synthesis.claim"));
-check("A: the phase it reached was recorded", types.includes("synthesis.phase"));
-check("A: a failed narration attempt recorded its reason", types.includes("synthesis.attempt"));
+check("A: the claim was recorded", types.includes("claim.lifecycle"));
+check("A: the phase it reached was recorded", types.includes("claim.lifecycle"));
+check("A: a failed narration attempt recorded its reason", types.includes("claim.lifecycle"));
 check(
   "A: a terminal outcome recorded the reason",
-  afterA.some((r) => r.type === "synthesis.failed" && Boolean(r.reason)),
+  afterA.some((r) => r.type === "claim.lifecycle" && Boolean(r.reason)),
 );
 check(
   "A: the terminal record carries a duration",
-  afterA.some((r) => r.type === "synthesis.failed" && typeof r.durationMs === "number"),
+  afterA.some((r) => r.type === "claim.lifecycle" && typeof r.durationMs === "number"),
 );
 check(
   "A: every record for the episode shares one correlation id",
@@ -103,11 +103,16 @@ const afterB = (await stores.metadata.listLogs()).filter((r) => r.episodeId === 
 timeline(afterB);
 check(
   "B: the claim is readable after the worker vanished",
-  afterB.some((r) => r.type === "synthesis.claim" && r.phase === "claimed"),
+  afterB.some((r) => r.type === "claim.lifecycle" && r.phase === "claimed"),
 );
 check(
   "B: no terminal record exists, which is itself the finding",
-  !afterB.some((r) => r.type === "synthesis.ready" || r.type === "synthesis.failed"),
+  // Under ONE event type, "no terminal record" means no record that ends the story: a terminal one
+  // carries a duration, and a failure or abandonment carries a reason. The claim start carries
+  // neither, which is exactly why its lack of a partner is the finding.
+  !afterB.some((r) =>
+    r.type === "claim.lifecycle" && (r.durationMs !== undefined || r.reason !== undefined)
+  ),
 );
 const episodeB = await stores.metadata.getEpisode(userId, "epi-B");
 check(
@@ -136,20 +141,30 @@ timeline(afterC);
 check("C: no further claim was granted", fourth === null);
 check(
   "C: the abandonment was recorded with a reason",
-  afterC.some((r) => r.type === "synthesis.abandoned" && Boolean(r.reason)),
+  afterC.some((r) => r.type === "claim.lifecycle" && Boolean(r.reason)),
 );
 check(
   "C: the three dead claims are still visible as a timeline",
-  afterC.filter((r) => r.type === "synthesis.claim").length === 3,
+  // A start is a lifecycle record with no reason: the abandonment record reuses the phase the claim
+  // was last known in, so counting by phase would count it as a fourth claim.
+  afterC.filter((r) => r.type === "claim.lifecycle" && r.reason === undefined).length === 3,
+);
+check(
+  "C: the whole claim story uses ONE event type, and its phase is siv1's vocabulary",
+  new Set(afterC.map((r) => r.type)).size === 1 &&
+    afterC.every((r) => r.type === "claim.lifecycle") &&
+    afterC.every((r) => typeof r.phase === "string"),
 );
 const episodeC = await stores.metadata.getEpisode(userId, "epi-C");
 console.log(`\n    episode status: ${episodeC?.status}`);
 console.log(`    episode error : ${episodeC?.error}`);
 check(
-  "C: the reason names the mechanism",
+  "C: the reason names the mechanism, as an OBSERVATION and not a verdict",
   Boolean(
-    episodeC?.error?.includes("before its terminal write") ||
-      episodeC?.error?.includes("last recorded error"),
+    episodeC?.error?.includes("lease expired without terminal write") &&
+      // audio-feed-kd5r: only lease expiry is known, so the record must say worker state is
+      // unknown rather than asserting a death that a later reader could not distinguish from a guess.
+      episodeC?.error?.includes("worker state unknown"),
   ),
 );
 
