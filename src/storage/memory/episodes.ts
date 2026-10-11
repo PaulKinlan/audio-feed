@@ -5,6 +5,12 @@
  * (`this.#<field>` -> `state.<field>`).
  */
 
+import {
+  abandonedClaimEvent,
+  CLAIM_START_PHASE,
+  claimLifecycleEvent,
+  elapsedSince,
+} from "../episode_events.ts";
 import type { Episode } from "../../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "../mod.ts";
 import type { EpisodePage, EpisodePageResult } from "../mod.ts";
@@ -220,7 +226,7 @@ export function createEpisodesRepository(
 
         removePendingPointer(state, found);
         removeSortedIndex(state.synthesizingIndex, oldSortKey);
-        state.episodes.set(key, {
+        const abandoned: Episode = {
           ...unsynthesized(
             structuredClone(found),
             abandonedReason,
@@ -229,8 +235,21 @@ export function createEpisodesRepository(
           claimedBy: undefined,
           phase: found.phase,
           lastHeartbeat: found.lastHeartbeat,
-        });
-        return Promise.resolve(null);
+        };
+        state.episodes.set(key, abandoned);
+        return host().appendLog(
+          abandonedClaimEvent(abandoned, {
+            phase: expiredPhase,
+            attempt: expiredAttempt,
+            reason: expiredMsg,
+            ...(found.claimedAt && !Number.isNaN(Date.parse(found.claimedAt))
+              ? { expiredAt: new Date(Date.parse(found.claimedAt) + claim.leaseMs).toISOString() }
+              : {}),
+            lastHeartbeat: expiredHeartbeat,
+            provenance: expiredProvenance,
+            maxClaims: claim.maxClaims,
+          }),
+        ).then(() => null);
       }
 
       const claimed: Episode = {
@@ -250,7 +269,9 @@ export function createEpisodesRepository(
         id: episodeId,
       });
       state.episodes.set(key, claimed);
-      return Promise.resolve(structuredClone(claimed));
+      return host()
+        .appendLog(claimLifecycleEvent(claimed, { phase: CLAIM_START_PHASE, attempt: attempts }))
+        .then(() => structuredClone(claimed));
     },
     touchEpisodeClaim(
       userId: string,
@@ -267,9 +288,21 @@ export function createEpisodesRepository(
       if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
         return Promise.resolve(false);
       }
+      const previousPhase = current.phase;
       current.lastHeartbeat = update.now ?? new Date().toISOString();
       if (update.phase) current.phase = update.phase;
       if (update.scriptTurns) current.scriptTurns = update.scriptTurns;
+      if (update.phase && update.phase !== previousPhase) {
+        return host()
+          .appendLog(
+            claimLifecycleEvent(current, {
+              phase: update.phase,
+              attempt: current.attempts ?? 1,
+              time: current.lastHeartbeat,
+            }),
+          )
+          .then(() => true);
+      }
       return Promise.resolve(true);
     },
     completeEpisode(episode: Episode, owner: string): Promise<boolean> {
@@ -291,7 +324,23 @@ export function createEpisodesRepository(
       removeSortedIndex(state.synthesizingIndex, sortKey);
       removePendingPointer(state, current);
       state.episodes.set(key, structuredClone({ ...episode, claimedBy: owner }));
-      return Promise.resolve(true);
+      return host()
+        .appendLog(
+          claimLifecycleEvent(episode, {
+            phase: episode.phase ?? CLAIM_START_PHASE,
+            attempt: episode.attempts ?? 1,
+            durationMs: elapsedSince(current.claimedAt),
+            // The outcome lives in the reason so the terminal moment does not need its own event
+            // type: a clean finish states no reason, a failure states the episode's own error.
+            ...(episode.status === "failed"
+              ? {
+                reason: episode.error ?? "synthesis failed without a recorded error",
+                severity: "error" as const,
+              }
+              : {}),
+          }),
+        )
+        .then(() => true);
     },
     retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const key = scoped(userId, id);

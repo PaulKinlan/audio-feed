@@ -18,6 +18,7 @@ import {
   type ArticleRepository,
   type AuthRepository,
   type EpisodeRepository,
+  type LogRepository,
   type MetadataRepositories,
   type MetadataStore,
   type NotificationRepository,
@@ -65,6 +66,7 @@ const DOMAIN_NAMES = [
   "articles",
   "auth",
   "episodes",
+  "logs",
   "notifications",
   "orphanBlobs",
   "runs",
@@ -101,6 +103,7 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
     NotificationRepository,
     RunRepository,
     AuthRepository,
+    LogRepository,
   ] = [
     store.repositories.users,
     store.repositories.sources,
@@ -112,6 +115,7 @@ Deno.test("every domain is reachable, and typed as its own repository (audio-fee
     store.repositories.notifications,
     store.repositories.runs,
     store.repositories.auth,
+    store.repositories.logs,
   ];
   for (const view of views) {
     assert(view !== (store as unknown as UserRepository), "a domain is its own implementation now");
@@ -128,6 +132,7 @@ Deno.test("a domain object exposes its own methods only (audio-feed-8r1e)", () =
     articles: ["getEpisode", "getUser"],
     episodes: ["getArticle", "getUser"],
     auth: ["getUser", "getEpisode"],
+    logs: ["getEpisode", "getUser", "append"],
   };
   for (const [domain, names] of Object.entries(foreign)) {
     const view = store.repositories[domain as keyof MetadataRepositories] as unknown as Record<

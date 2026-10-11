@@ -49,7 +49,33 @@ export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
  */
 export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
 
+/**
+ * How long the structured log store keeps a record (audio-feed-wzv9).
+ *
+ * A week, because the store exists to explain failures that are noticed late — the two demos that
+ * prompted it were investigated days after their claims died. It is deliberately a duration and not
+ * "keep everything": the errors API answers a cursor into this store, and an unbounded store makes
+ * the one promise the cursor makes ("everything below oldestSeq is gone") impossible to keep
+ * honestly.
+ *
+ * Set LOG_RETENTION_DAYS to change it. Zero disables pruning entirely, which is a deliberate
+ * opt-in for a deployment that has somewhere else to put the records.
+ */
+export const DEFAULT_LOG_RETENTION_DAYS = 7;
+
 export interface AppConfig {
+  /**
+   * Days of structured log records to retain (audio-feed-wzv9). 0 means prune nothing.
+   *
+   * OPTIONAL, like globalDailyEpisodeBudget and for the same reason: a caller constructing a
+   * config for one behaviour should not have to restate every deployment default, and the value
+   * that matters is the one `loadConfig` resolves. The cron pass reads it through
+   * `DEFAULT_LOG_RETENTION_DAYS`, so an omission means the default rather than "prune nothing".
+   *
+   * The daily pass is what enforces it; the errors API reads `logBounds()` to tell a caller that a
+   * cursor has aged out rather than silently skipping records.
+   */
+  logRetentionDays?: number;
   port: number;
   /**
    * Explicit public origin. OPTIONAL, and optional on purpose (audio-feed-0k3).
@@ -218,7 +244,20 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  const logRetentionRaw = env("LOG_RETENTION_DAYS");
+  let logRetentionDays = DEFAULT_LOG_RETENTION_DAYS;
+  if (logRetentionRaw !== undefined && logRetentionRaw !== "") {
+    logRetentionDays = Number(logRetentionRaw);
+    if (!Number.isInteger(logRetentionDays) || logRetentionDays < 0) {
+      throw new Error(
+        `Invalid LOG_RETENTION_DAYS: "${logRetentionRaw}". ` +
+          `Expected a non-negative integer number of days (0 keeps records indefinitely).`,
+      );
+    }
+  }
+
   return {
+    logRetentionDays,
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
     // which is the only thing that knows the real origin.

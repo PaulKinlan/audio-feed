@@ -21,6 +21,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
+import { createLogger, isHighVolumeRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
 
@@ -145,7 +146,78 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // audio-feed-agl: build the lane handlers, or every product route answers 501.
   const handlers = createHandlers(ctx);
   const app = createApp(ctx, handlers);
-  const serverFetch = app.fetch;
+  // audio-feed-wzv9: the app's structured records, in one wrapper so no handler has to remember.
+  // The correlation id is minted per request and echoed in a response header, so an operator
+  // holding a failing request can find every record about it.
+  const appFetch = app.fetch;
+  // The route table the app dispatches with, so the request record can name a pattern instead of a
+  // path. Looked up per request rather than carried on the Request: the app rebuilds requests
+  // during canonical-host handling (audio-feed-wzv9, audio-feed-pwu4).
+  const router = app.router;
+  const appLog = createLogger({ sink: stores.metadata, process: "app" });
+  // Only the class name of a throw, so an error message that quotes the request cannot reach a
+  // record (audio-feed-ao4s). The name comes from this codebase's own throw sites.
+  const errorName = (error: unknown): string =>
+    error instanceof Error && error.name ? error.name : "UnknownError";
+  const serverFetch = async (
+    req: Request,
+    info?: { remoteAddr?: { hostname?: string } },
+  ): Promise<Response> => {
+    const correlationId = crypto.randomUUID();
+    const started = performance.now();
+    // The ROUTE PATTERN the URL matches, never the path: a constant from the route table, so no
+    // user-controlled byte can reach a record (audio-feed-wzv9, audio-feed-pwu4). A request that
+    // matches nothing records a fixed marker rather than any raw path content.
+    const route = router.routePatternFor(new URL(req.url));
+    const durationMs = () => Math.round(performance.now() - started);
+    try {
+      const res = await appFetch(req, info);
+      // A successful asset or enclosure fetch is deliberately not recorded — see
+      // isHighVolumeAssetPath — because podcast clients hammer it and each line would cost a
+      // write for nothing. Its failures still are.
+      const worthRecording = res.status >= 400 || !isHighVolumeRoute(route);
+      if (worthRecording) {
+        // AUDIT OF EVERY REQUEST-DERIVED FIELD IN THIS RECORD, since a path and then a method each
+        // leaked a client-chosen string (audio-feed-pwu4, audio-feed-ao4s). The rule is that no
+        // field derived from the request is logged raw:
+        //   method   normalised through the methods this app serves, else "<other>" (ao4s)
+        //   route    the registered pattern the URL matched, never the path (pwu4)
+        //   status   a number the platform bounds to a valid HTTP code; it cannot carry a string
+        //   durationMs  measured here, not taken from the request
+        //   correlationId  minted here with randomUUID; an inbound header is never adopted, so a
+        //              caller cannot choose the value that appears in a record
+        //   error    only the error's CLASS NAME, below — a name from this codebase's own throw
+        //            sites, never its message or stack, which can quote the request
+        // Nothing else about the request is recorded: no headers, no query string, no body, no
+        // client address. The invariant test fuzzes each of those surfaces independently.
+        const method = normaliseMethod(req.method);
+        const fields = {
+          correlationId,
+          route,
+          durationMs: durationMs(),
+          context: { method, status: res.status },
+        };
+        const line = `${method} ${route} -> ${res.status}`;
+        if (res.status >= 500) await appLog.error("http.request", line, fields);
+        else if (res.status >= 400) await appLog.warn("http.request", line, fields);
+        else await appLog.event("http.request", line, fields);
+      }
+      const headers = new Headers(res.headers);
+      headers.set("x-correlation-id", correlationId);
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    } catch (error) {
+      // The error's NAME only. `failure()` would store the message and stack, and an unhandled
+      // error's message can quote the request that caused it — which is how a client-chosen string
+      // reaches a record through a field nobody thought of as request-derived.
+      await appLog.error("http.request", `unhandled ${errorName(error)} on ${route}`, {
+        correlationId,
+        route,
+        durationMs: durationMs(),
+        context: { error: errorName(error) },
+      });
+      throw error;
+    }
+  };
 
   console.log(
     `[audio-feed] ${stores.describe} base=${config.publicBaseUrl ?? "<derived from each request>"}`,

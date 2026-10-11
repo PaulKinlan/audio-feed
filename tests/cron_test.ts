@@ -66,8 +66,8 @@ Deno.test("registerCronJobs: registers poll-feeds and synthesis jobs with expect
     synthesizer: () => Promise.resolve(mockAudio()),
   });
 
-  assertEquals(jobs.registered, 2);
-  assertEquals(registered.length, 2);
+  assertEquals(jobs.registered, 3);
+  assertEquals(registered.length, 3);
 
   const pollJob = registered.find((j) => j.name === "audio-feed-poll-feeds");
   assert(pollJob, "audio-feed-poll-feeds must be registered");
@@ -76,6 +76,12 @@ Deno.test("registerCronJobs: registers poll-feeds and synthesis jobs with expect
   const synthJob = registered.find((j) => j.name === "audio-feed-synthesis");
   assert(synthJob, "audio-feed-synthesis must be registered");
   assertEquals(synthJob.schedule, "*/2 * * * *", "synthesis must run every 2 minutes");
+
+  // audio-feed-wzv9: retention is its own daily job, registered unconditionally — pruning the log
+  // store needs no provider credentials, so it must not disappear when synthesis is unconfigured.
+  const retentionJob = registered.find((j) => j.name === "audio-feed-log-retention");
+  assert(retentionJob, "audio-feed-log-retention must be registered");
+  assertEquals(retentionJob.schedule, "17 4 * * *", "retention runs once a day, not every tick");
 });
 
 Deno.test("registerCronJobs: skips synthesis cron job when geminiApiKey is unset and no synthesizer provided", () => {
@@ -88,10 +94,17 @@ Deno.test("registerCronJobs: skips synthesis cron job when geminiApiKey is unset
   };
 
   const jobs = registerCronJobs(ctx, { cron: mockCron });
-  assertEquals(jobs.registered, 1);
-  assertEquals(registered.length, 1);
+  // The synthesis job is skipped without credentials; the poll job and the retention job are not,
+  // because neither needs a provider (audio-feed-wzv9).
+  assertEquals(jobs.registered, 2);
+  assertEquals(registered.length, 2);
   assertEquals(registered[0]!.name, "audio-feed-poll-feeds");
   assertEquals(registered[0]!.schedule, "*/15 * * * *");
+  assertEquals(registered[1]!.name, "audio-feed-log-retention");
+  assert(
+    !registered.some((j) => j.name === "audio-feed-synthesis"),
+    "no synthesis job without a provider",
+  );
 });
 
 Deno.test("registerCronJobs: handlers execute batch operations and handle errors gracefully", async () => {
@@ -171,7 +184,13 @@ Deno.test("registerCronJobs: supports lazy context provider function (audio-feed
       synthesizer: () => Promise.resolve(mockAudio()),
     }), { cron: mockCron });
 
-  assertEquals(registered.length, 2);
+  assertEquals(registered.length, 3);
+
+  // audio-feed-wzv9: retention is its own daily job, registered unconditionally — pruning the log
+  // store needs no provider credentials, so it must not disappear when synthesis is unconfigured.
+  const retentionJob = registered.find((j) => j.name === "audio-feed-log-retention");
+  assert(retentionJob, "audio-feed-log-retention must be registered");
+  assertEquals(retentionJob.schedule, "17 4 * * *", "retention runs once a day, not every tick");
   const synthJob = registered.find((j) => j.name === "audio-feed-synthesis");
   assert(synthJob);
   await synthJob.handler();
@@ -443,11 +462,15 @@ Deno.test("registerCronJobs: an unavailable Deno.cron is a loud, distinguishable
   if (typeof (globalThis as { Deno?: { cron?: unknown } }).Deno?.cron === "function") {
     // Under --unstable-cron the real API exists, so registration must succeed.
     assertEquals(result.ok, true, "real Deno.cron must accept registration");
-    assertEquals(result.registered, 2);
+    assertEquals(result.registered, 3);
     assertEquals(
       result.jobs.map((j) => j.name).sort(),
-      ["audio-feed-poll-feeds", "audio-feed-synthesis"],
-      "both job names must reach the real platform API",
+      ["audio-feed-log-retention", "audio-feed-poll-feeds", "audio-feed-synthesis"],
+      "every job name must reach the real platform API",
+    );
+    assertEquals(
+      result.jobs.find((j) => j.name === "audio-feed-log-retention")?.schedule,
+      "17 4 * * *",
     );
     assertEquals(
       result.jobs.find((j) => j.name === "audio-feed-poll-feeds")?.schedule,

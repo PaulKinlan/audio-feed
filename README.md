@@ -110,7 +110,52 @@ STORAGE_REGION=auto
 # Optional: daily paid episodes across ALL subscribers, together (audio-feed-m182).
 # Unset means 500 — ten subscribers' worth of the default above. 0 means nothing is synthesised.
 # GLOBAL_DAILY_EPISODE_BUDGET=500
+
+# Optional: how many days of structured log records to keep (audio-feed-wzv9).
+# Unset means 7. 0 keeps them indefinitely, which is opt-in because the store's cursor
+# promises to know what it has dropped.
+# LOG_RETENTION_DAYS=7
 ```
+
+### Structured logs
+
+Every process — the app, the synthesis worker and the cron ticks — writes one record shape into one
+store, and the errors API reads that store rather than keeping a second log of its own.
+
+```json
+{
+  "seq": 42,
+  "time": "2026-10-11T09:05:00.108Z",
+  "severity": "error",
+  "type": "synthesis.failed",
+  "message": "synthesis failed: TTS provider returned 503 after 3 attempts",
+  "process": "storage",
+  "correlationId": "epi-abc",
+  "job": "synthesis",
+  "episodeId": "epi-abc",
+  "userId": "user-1",
+  "phase": "terminal",
+  "attempt": 2,
+  "reason": "TTS provider returned 503 after 3 attempts",
+  "durationMs": 184223,
+  "context": { "status": "failed" }
+}
+```
+
+- `seq` is the cursor: durable, monotonic, and the **only** ordering key. Timestamps collide and
+  lose events, so `time` is for people and `seq` is for reading.
+- `correlationId` carries one id through a request or a job, so every record about one episode —
+  including every retry — reads as a single story. HTTP responses also echo it as
+  `x-correlation-id`.
+- Errors keep their `stack`, and the siv1 triple (`phase`, `attempt`, `reason`) is what makes a
+  claim that dies mid-synthesis explainable: the claim is recorded before any work starts, so a
+  process that never returns still leaves the phase it reached.
+- **Capability tokens never reach the store.** Request paths are redacted to labels
+  (`/listen/:token`, `/audio/:key`) before they become fields, query strings are never recorded, and
+  the store redacts by field name as a second line of defence.
+- `LOG_RETENTION_DAYS` (default 7) is enforced by a daily cron pass. `logBounds()` reports the
+  oldest retained `seq`, so a reader holding an expired cursor can be told "cursor too old" instead
+  of silently skipping records.
 
 ### Daily spend ceiling
 

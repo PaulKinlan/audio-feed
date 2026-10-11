@@ -27,6 +27,7 @@ export function registerRepositoriesCases(suite: MetadataHarness) {
         "articles",
         "auth",
         "episodes",
+        "logs",
         "notifications",
         "orphanBlobs",
         "runs",
@@ -54,6 +55,7 @@ export function registerRepositoriesCases(suite: MetadataHarness) {
       usage: ["getDownloadCounts", "getEpisode"],
       notifications: ["listOutbox", "getArticle"],
       runs: ["listRuns", "getEpisode"],
+      logs: ["listLogs", "getEpisode"],
       auth: ["getSession", "getUser"],
     };
     for (const [domain, [own, foreign]] of Object.entries(spotChecks)) {

@@ -21,6 +21,10 @@ import type {
   EpisodeQuery,
   ListPendingOptions,
   ListPendingResult,
+  LogBounds,
+  LogQuery,
+  LogRecord,
+  LogSummary,
   MetadataRepositories,
   MetadataStore,
   RunRecord,
@@ -37,6 +41,7 @@ import { createOrphanBlobsRepository } from "./kv/orphan-blobs.ts";
 import { createUsageRepository } from "./kv/usage.ts";
 import { createNotificationsRepository } from "./kv/notifications.ts";
 import { createRunsRepository } from "./kv/runs.ts";
+import { createLogsRepository } from "./kv/logs.ts";
 import { createAuthRepository } from "./kv/auth.ts";
 
 export {
@@ -73,6 +78,7 @@ export class KvMetadataStore implements MetadataStore {
       orphanBlobs: createOrphanBlobsRepository(this.#core, () => this),
       usage: createUsageRepository(this.#core, () => this),
       notifications: createNotificationsRepository(this.#core, () => this),
+      logs: createLogsRepository(this.#core, () => this),
       runs: createRunsRepository(this.#core, () => this),
       auth: createAuthRepository(this.#core, () => this),
     };
@@ -371,6 +377,22 @@ export class KvMetadataStore implements MetadataStore {
   }
   listRuns(limit?: number): Promise<RunRecord[]> {
     return this.repositories.runs.listRuns(limit);
+  }
+  // -- logs (audio-feed-wzv9) --
+  appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
+    return this.repositories.logs.appendLog(record);
+  }
+  listLogs(query?: LogQuery): Promise<LogRecord[]> {
+    return this.repositories.logs.listLogs(query);
+  }
+  logBounds(): Promise<LogBounds> {
+    return this.repositories.logs.logBounds();
+  }
+  summarizeLogs(query?: LogQuery): Promise<LogSummary> {
+    return this.repositories.logs.summarizeLogs(query);
+  }
+  pruneLogs(before: Date): Promise<number> {
+    return this.repositories.logs.pruneLogs(before);
   }
   // -- auth --
   putSession(session: Session): Promise<void> {

@@ -642,6 +642,93 @@ export interface AuthRepository {
   consumeChallenge(challenge: string): Promise<AuthChallenge | null>;
 }
 
+// -- observability: the log store (audio-feed-wzv9) -------------------------
+
+export type LogSeverity = "debug" | "info" | "warn" | "error";
+
+/** Which process wrote a record. One shape covers all of them, deliberately. */
+export type LogProcess = "app" | "worker" | "cron" | "queue" | "cli" | "storage";
+
+/**
+ * One structured log record, the same shape from every process.
+ *
+ * `seq` is the cursor: assigned by the store, monotonically increasing, and durable across
+ * restarts. It is the ONLY ordering key - the errors API (obs-1) is explicit that a timestamp
+ * cursor collides and loses events, so `time` is for humans and `seq` is for reading.
+ *
+ * The rest is the field list obs-1 publishes, plus what the two consumer beads need:
+ * `durationMs` for obs-4's traces (a slow synthesis and a bad LCP are the same class of
+ * finding), and `phase`/`attempt`/`reason` for the siv1 defect this store exists to make
+ * answerable - a claim that died before its terminal write used to leave nothing to read.
+ */
+export interface LogRecord {
+  /** Assigned by the store under a compare-and-swap. Never supplied by a caller. */
+  seq: number;
+  time: string;
+  severity: LogSeverity;
+  /**
+   * Stable dotted classifier ("synthesis.claim", "csp.violation"), not free text: obs-1 counts
+   * by it and obs-3 ranks by it.
+   */
+  type: string;
+  message: string;
+  process: LogProcess;
+  /** Carries one id across every record of a request or a job. */
+  correlationId?: string;
+  route?: string;
+  job?: string;
+  episodeId?: string;
+  userId?: string;
+  /** The siv1 triple: how far the work got, which attempt, and why it ended. */
+  phase?: string;
+  attempt?: number;
+  reason?: string;
+  /** Errors only, verbatim (capped, control characters stripped). */
+  stack?: string;
+  durationMs?: number;
+  /** Bounded, redacted structured extras. */
+  context?: Record<string, unknown>;
+}
+
+/** A read window. `sinceSeq` is EXCLUSIVE: pass the last seq you have already seen. */
+export interface LogQuery {
+  sinceSeq?: number;
+  untilSeq?: number;
+  limit?: number;
+}
+
+/**
+ * What the store still holds. `oldestSeq` is what makes obs-1's "cursor too old" answerable
+ * rather than a silent skip: a cursor below it has to be refused, and the API can only know
+ * that if the store will say what it retained. An empty store has oldestSeq > newestSeq.
+ */
+export interface LogBounds {
+  oldestSeq: number;
+  newestSeq: number;
+}
+
+export interface LogSummary {
+  total: number;
+  bySeverity: Record<LogSeverity, number>;
+  byType: { type: string; count: number }[];
+}
+
+export interface LogRepository {
+  /**
+   * Append one record, numbering it. Bounded and redacted on the way in.
+   *
+   * Resolves to `null` instead of throwing when the write cannot be made: callers are lifecycle
+   * paths, and a claim or a finished synthesis must never fail because its log line could not be
+   * stored.
+   */
+  appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null>;
+  listLogs(query?: LogQuery): Promise<LogRecord[]>;
+  logBounds(): Promise<LogBounds>;
+  summarizeLogs(query?: LogQuery): Promise<LogSummary>;
+  /** Retention: drop records older than `before`, advancing what `bounds()` reports. */
+  pruneLogs(before: Date): Promise<number>;
+}
+
 /**
  * Every domain of the metadata store, as one object.
  *
@@ -660,7 +747,8 @@ export interface MetadataStore
     UsageRepository,
     NotificationRepository,
     RunRepository,
-    AuthRepository {
+    AuthRepository,
+    LogRepository {
   /**
    * The domain views of this store; see `MetadataRepositories`.
    *
@@ -729,6 +817,7 @@ export interface MetadataRepositories {
   readonly notifications: NotificationRepository;
   readonly runs: RunRepository;
   readonly auth: AuthRepository;
+  readonly logs: LogRepository;
 }
 
 /** The outcome of `MetadataStore.atomicUpdate`: what is stored, and whether we wrote it. */
