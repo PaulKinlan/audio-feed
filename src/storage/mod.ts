@@ -756,6 +756,16 @@ export interface BlobStore {
     opts?: { contentType?: string },
   ): Promise<BlobInfo>;
   /**
+   * Atomic conditional create.
+   * If the key already exists, returns `null` without modifying the existing object.
+   * Backed by S3 `If-None-Match: *` (HTTP 412 -> null).
+   */
+  putIfAbsent(
+    key: string,
+    body: Uint8Array | ReadableStream<Uint8Array>,
+    opts?: { contentType?: string },
+  ): Promise<BlobInfo | null>;
+  /**
    * Range requests are not optional: podcast clients (Apple Podcasts, Pocket
    * Casts, Overcast) seek with `Range`, and a store that ignores it breaks
    * scrubbing.

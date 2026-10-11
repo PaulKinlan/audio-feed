@@ -60,6 +60,28 @@ export class MemoryBlobStore implements BlobStore {
     return { key, size: bytes.byteLength, contentType };
   }
 
+  /**
+   * Atomic conditional create for MemoryBlobStore.
+   * Note: In-memory store provides single-isolate atomicity; test-only.
+   * Guarantees that if the key already exists, returns null without overwriting.
+   */
+  async putIfAbsent(
+    key: string,
+    body: Uint8Array | ReadableStream<Uint8Array>,
+    opts?: { contentType?: string },
+  ): Promise<BlobInfo | null> {
+    if (this.#objects.has(key)) {
+      return null;
+    }
+    const bytes = body instanceof Uint8Array ? body : await collect(body);
+    const contentType = opts?.contentType ?? "application/octet-stream";
+    if (this.#objects.has(key)) {
+      return null;
+    }
+    this.#objects.set(key, { bytes, contentType });
+    return { key, size: bytes.byteLength, contentType };
+  }
+
   // The `async` keyword here is load-bearing, not decoration. `resolveRange`
   // throws for an unsatisfiable range; from a sync function returning
   // `Promise.resolve(...)` that throw escapes *before* the promise exists, so

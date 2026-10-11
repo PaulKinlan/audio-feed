@@ -37,6 +37,7 @@ const KEY = "audio/user-1/direct/ep-1.wav";
 function redirectingStore(inner: Stores["blobs"]): Stores["blobs"] {
   return {
     put: (key, body, opts) => inner.put(key, body, opts),
+    putIfAbsent: (key, body, opts) => inner.putIfAbsent(key, body, opts),
     head: (key) => inner.head(key),
     delete: (key) => inner.delete(key),
     get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
