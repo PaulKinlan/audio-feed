@@ -29,12 +29,15 @@ it while iterating. `deno task test:fast` (scripts/fast-check.ts, audio-feed-pub
 the whole-repo type-check, then only the tests a change can affect: tests that reach a changed file
 in the static import graph without crossing the app/compose hubs, plus the name-convention tests
 (`<stem>_test.ts`, `<stem>_*_test.ts`, mirrored test subdirectories). Changed scripts/ modules
-select the tests that import them. It falls back to the FULL suite when deno.json/deno.lock changes,
-when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a changed src
-file has no covering test, when a changed script has importers but no reachable test, when a shared
-test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file under src/ or
-tests/ changes (assets, HTML fixtures — the import graph cannot see them), or when the git diff
-itself fails (a stale/missing origin/main must never read as "no changes"). Safe beats fast.
+select the tests that import them. It falls back to the FULL suite when a module-graph config file
+changes (`deno.json`, `deno.jsonc`, `deno.lock`, `import_map.json`, `tsconfig.json` — checked by
+name, because a change there can move what every suite resolves and no suite's own code can show
+that), when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a
+changed src file has no covering test, when a changed script has importers but no reachable test,
+when a shared test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file
+under src/ or tests/ changes (assets, HTML fixtures — the import graph cannot see them), or when the
+git diff itself fails (a stale/missing origin/main must never read as "no changes"). Safe beats
+fast.
 
 Two things about that selection are CHECKED rather than assumed (audio-feed-es8y). First, the fast
 gate's selection is a proven SUBSET of the full gate's: both derive from

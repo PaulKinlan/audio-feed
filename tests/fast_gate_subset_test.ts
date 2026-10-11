@@ -258,6 +258,27 @@ Deno.test("the relation is derived through a path CONSTANT and a default paramet
   assert(/dir: string = EVIDENCE_DIR/.test(compress), "the read call must take it by default");
 });
 
+Deno.test("module-graph config runs the FULL suite even when a suite happens to read it (es8y)", () => {
+  // Found while answering a review question about the allowlist-versus-property shape: the config check used
+  // to be a two-filename list, so a NEW config file that some suite reads (add import_map.json, read it in
+  // one suite) would select that one suite while every suite's module resolution moved. The family that can
+  // move the graph is now checked by name, and the unclassified default still covers everything new.
+  const relations = new Map([["import_map.json", ["tests/deno-task-coverage_test.ts"]]]);
+  for (
+    const config of [
+      "deno.json",
+      "deno.jsonc",
+      "deno.lock",
+      "import_map.json",
+      "tsconfig.json",
+    ]
+  ) {
+    const plan = planTests([config], NO_GRAPH, NO_NAMED, relations);
+    assertEquals(plan.testFiles, null, `${config} must run the full suite: ${plan.reason}`);
+    assert(plan.reason.includes("module-graph config"), plan.reason);
+  }
+});
+
 Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8y)", () => {
   // Before this: planTests(["docs/evidence/x.png"]) returned [] and the gate said
   // "no tests to run" - a fast PASS on a tree where evidence_size_test.ts fails.

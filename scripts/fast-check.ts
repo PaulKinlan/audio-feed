@@ -77,6 +77,15 @@ const CORE = new Set([
   "src/origin.ts",
 ]);
 
+/**
+ * Files whose change can move what EVERY suite resolves: Deno's own config surface for the module
+ * resolver. A list, not a derivation - the resolver's inputs are not statically knowable from the repo -
+ * but it is safe by construction, because anything else that is not derived by the read relation, not
+ * documentation and not declared unread already falls back to the FULL suite (audio-feed-es8y: the same
+ * allowlist-versus-property shape as the CORE set, found while answering a review question).
+ */
+const GRAPH_CONFIG_FILES = /^(deno\.json|deno\.jsonc|deno\.lock|import_map\.json|tsconfig\.json)$/;
+
 const TEST_FLAGS = [
   "--allow-net",
   "--allow-env",
@@ -476,8 +485,14 @@ export function planTests(
   named: Map<string, string[]>,
   readRelations: DataReadRelations = new Map(),
 ): { testFiles: string[] | null; reason: string } {
-  if (changed.some((f) => f === "deno.json" || f === "deno.lock")) {
-    return { testFiles: null, reason: "deno.json/deno.lock changed — import graph may have moved" };
+  const graphConfig = changed.filter((f) => GRAPH_CONFIG_FILES.test(f));
+  if (graphConfig.length) {
+    return {
+      testFiles: null,
+      reason: `module-graph config changed: ${
+        graphConfig.join(", ")
+      } (any suite's resolution may have moved)`,
+    };
   }
 
   const codeChanged = changed.filter((f) => f.endsWith(".ts"));
@@ -611,6 +626,9 @@ if (import.meta.main) {
   const readRelations = await deriveDataReadRelations(
     ROOT,
     fullGateTestFiles.filter(isFastGateSelectable),
+  );
+  console.log(
+    `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
   const ledgerProblems = await auditUnreadDeclarations(
     ROOT,
