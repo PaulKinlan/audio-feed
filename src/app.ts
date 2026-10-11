@@ -49,7 +49,7 @@ import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from ".
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
 import { handleCspReports } from "./routes/reports.ts";
 import type { AppConfig, Stores } from "./config.ts";
-import { hostGateRefusal, resolveOrigin } from "./origin.ts";
+import { hostGateRefusal, isHostGateExempt, resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
 
 export interface AppContext {
@@ -407,8 +407,22 @@ export function createApp(
       // deployment blamed every visitor for our missing configuration
       // (audio-feed-du8w). Two situations, two responses — never one 421 for both,
       // and never a request-derived host to make the empty case look configured.
-      const refusal = hostGateRefusal(ctx.config, req);
+      // audio-feed-2tbv: the error-log reader is exempt from this gate, and ONLY the reader. The
+      // gate exists to stop an attacker-chosen Host becoming the advertised origin; these two paths
+      // answer log-store JSON behind the observability key and derive nothing from the request, so
+      // leaving them behind the gate only means an operator cannot read the incident FROM the
+      // incident. See HOST_GATE_EXEMPT_PATHS for the properties that keep this narrow (exact path
+      // match, key-gated, no request-derived output, product routes untouched).
+      const refusal = isHostGateExempt(new URL(req.url).pathname)
+        ? null
+        : hostGateRefusal(ctx.config, req);
       if (refusal) {
+        // The refusal body names where errors CAN be read (audio-feed-2tbv). A path, never an origin:
+        // nothing here is derived from the request, and the endpoint it names is key-gated.
+        const logHint =
+          " The error log for this deployment is readable at GET /api/observability/errors with the " +
+          "observability key; that endpoint is deliberately not behind this check, so a host refusal " +
+          "here does not hide the reason for it (see docs/observability-api.md).";
         const response = refusal === "unconfigured"
           ? problem({
             status: 500,
@@ -418,12 +432,12 @@ export function createApp(
               "and no usable ALLOWED_HOSTS entry is configured, so no host can be accepted. Set " +
               "PUBLIC_BASE_URL to this deployment's public origin (for example " +
               "https://audio-feed.example.com) and redeploy. This is a server configuration error, " +
-              "not a misdirected request from the client.",
+              "not a misdirected request from the client." + logHint,
           })
           : problem({
             status: 421,
             title: "misdirected_request",
-            detail: "This deployment does not serve the requested host.",
+            detail: "This deployment does not serve the requested host." + logHint,
           });
         return applySecurityHeaders(
           response,

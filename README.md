@@ -121,7 +121,10 @@ STORAGE_REGION=auto
 # promises to know what it has dropped.
 # LOG_RETENTION_DAYS=7
 # Shared key for GET /api/observability/{errors,summary}. With it unset the API is CLOSED
-# (503 observability_not_configured) rather than open. See docs/observability-api.md.
+# (503 observability_not_configured) rather than open, and that refusal names this variable so an
+# operator is not left reading a generic failure. These two endpoints stay reachable when the host
+# gate is refusing every other request, which is the case you most need them in (audio-feed-2tbv).
+# See docs/observability-api.md.
 AUDIOFEED_OBSERVABILITY_KEY=<shared-secret>
 ```
 

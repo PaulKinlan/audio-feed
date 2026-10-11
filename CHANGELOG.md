@@ -60,6 +60,16 @@ All notable changes to this project will be documented in this file.
   precedence over the dashboard. `tests/deploy_config_test.ts` fails the repo's own gate if the
   block is removed or the entrypoint path stops naming a real file, so the next typo costs
   milliseconds here instead of a failed build on the platform.
+- **The error log is now readable during the incident that is refusing requests (audio-feed-2tbv)**: the
+  observability API sits behind the host gate, and the gate refuses before any route runs, so during
+  the live 421 (`audio-feed-du8w`) `GET /api/observability/errors` answered 421 on the very host being
+  diagnosed — the tool for reading the incident was itself refused by the incident. Those two JSON
+  endpoints (`/errors`, `/summary`) are now served even when the gate refuses, and both refusal bodies
+  name them so an operator is told where the errors are. This is not a hole in the gate: they remain
+  key-gated (401 without `AUDIOFEED_OBSERVABILITY_KEY`, 503 naming the variable when it is unset), they
+  emit nothing derived from the request — no redirect, no origin, no `Access-Control-Allow-Origin` —
+  and matching is exact, so no product route, lookalike or sub-path is exempt. The "`Host` header does
+  not change `request.url` locally" trap is pinned by function tests.
 
 - **An unconfigured deployment blamed every visitor for its own missing configuration
   (audio-feed-3k2d)**: with neither `PUBLIC_BASE_URL` nor a usable `ALLOWED_HOSTS` entry set, the
