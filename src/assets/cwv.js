@@ -87,6 +87,15 @@
   addEventListener("pointerdown", countStart, { capture: true, passive: true });
   addEventListener("keydown", countStart, { capture: true, passive: true });
 
+  // Read-only view of what the collector counted and observed, published on the page scope so a
+  // verification run can compare it against interactions it dispatched deliberately. The count is a
+  // load-bearing assumption (it decides whether INP is a value or an upper bound), so it has to be
+  // checkable from outside the page rather than assumed.
+  globalThis.cwvState = {
+    starts: () => interactionStarts,
+    observed: () => interactionLatencies(interactions),
+  };
+
   const flush = () => {
     if (sent) return;
     sent = true;
