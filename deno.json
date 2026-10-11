@@ -2,6 +2,18 @@
   "name": "@paulkinlan/audio-feed",
   "version": "0.1.0",
   "exports": "./src/server.ts",
+  // audio-feed-w55i: pin the Deno Deploy runtime entrypoint IN THE REPO. The live project failed a
+  // build with "Entrypoint at /tmp/build/src/src/server.ts not found" (src/ applied twice) because
+  // the entrypoint lived only in the dashboard, where nobody could see it drift. Deno Deploy reads
+  // this block from deno.json and, once a build succeeds from source configuration, the
+  // corresponding dashboard fields become code-managed. main.ts is the root deno-serve entrypoint
+  // Paul added in bc47dd4; it re-exports src/server.ts's default fetch handler.
+  "deploy": {
+    "runtime": {
+      "type": "dynamic",
+      "entrypoint": "main.ts"
+    }
+  },
   "tasks": {
     "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write --unstable-kv src/server.ts",
     "start": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv src/server.ts",
