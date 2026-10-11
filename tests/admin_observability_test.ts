@@ -886,10 +886,13 @@ Deno.test("audio-feed-n6uu: the page states the limits it cannot fix, including 
   const { stores, page } = await setup();
   const body = await (await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`))
     .text();
-  // The invariant this page must not paper over: request-handler error messages are deliberately
-  // NOT stored, and the page has to say where the detail actually lives instead of implying it is
-  // hidden. Removing this text means an operator hunts for a message that was never recorded.
-  assertStringIncludes(body, "record their class, not their message");
+  // The invariant this page must not paper over: a request-handler error's message is SCREENED rather than
+  // stored raw, and the page has to say what the operator is looking at instead of implying the detail is
+  // hidden. Updated by audio-feed-sw1r: the page now shows a screened phrase (never nothing), so the text
+  // names the rule AND the marker - "not their message" became "a SCREENED message", which is a different
+  // claim, and the old assertion is exactly what caught the difference.
+  assertStringIncludes(body, "record their class and a SCREENED message");
+  assertStringIncludes(body, "message suppressed (not authored by this codebase)");
   assertStringIncludes(body, "correlation id");
   // And the host-gate limit: this page cannot render when the gate refuses the host.
   assertStringIncludes(body, "host gate");
@@ -1024,4 +1027,39 @@ Deno.test("audio-feed-yrg4: a readable log store with no yield record says 'no r
   assertStringIncludes(body, "upload_retry");
   assertStringIncludes(body, "no reason recorded");
   assertEquals(body.includes("Unavailable — the log store could not be read"), false);
+});
+
+Deno.test("audio-feed-sw1r: the page renders the SCREENED message and says that it is screened", async () => {
+  // The write side is proven in tests/log_request_surface_invariant_test.ts and tests/error_screen_test.ts.
+  // This asserts the READ side matches it: an unhandled-error record's screened message is shown, and the
+  // reader is told why the text is one of our phrases rather than the thrown message.
+  const { stores, page } = await setup();
+  await stores.metadata.appendLog({
+    time: new Date().toISOString(),
+    severity: "error",
+    type: "http.request",
+    process: "app",
+    message: "unhandled Error on /listen/:token",
+    route: "/listen/:token",
+    correlationId: "corr-sw1r",
+    context: {
+      error: "Error",
+      errorMessage: "Unauthorized: admin token required",
+    },
+  });
+
+  const body = await (await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`))
+    .text();
+  assert(
+    body.includes("Unauthorized: admin token required"),
+    "the screened message must be rendered for the operator",
+  );
+  assert(
+    body.includes("screened before it was written"),
+    "the page must say the message was screened rather than quoting it as the thrown text",
+  );
+  assert(
+    body.includes("Unhandled request errors record their class and a SCREENED message"),
+    "the limits section must describe what is actually stored",
+  );
 });

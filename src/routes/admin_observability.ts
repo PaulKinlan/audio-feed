@@ -164,6 +164,14 @@ function failureRowHtml(failure: FailureRow, report: ObservabilityReport): strin
   return `<section class="card" id="ep-${esc(failure.episodeId ?? String(failure.seq))}">
   <h3>${cell(failure.severity)} · ${cell(failure.type)} · ${timeCell(failure.time)}</h3>
   <p><strong>${esc(failure.message)}</strong></p>
+  ${
+    failure.errorMessage
+      ? `<p><strong>Message:</strong> <code>${esc(failure.errorMessage)}</code>
+  <span class="muted">— screened before it was written: only phrases this service itself throws are
+  stored, so a thrown message that quoted your request was discarded rather than stored
+  (audio-feed-sw1r).</span></p>`
+      : ""
+  }
   <dl>
     <dt>Route</dt><dd>${cell(failure.route)}</dd>
     <dt>Status</dt><dd>${cell(failure.status)}</dd>
@@ -350,10 +358,14 @@ export async function handleAdminObservability(
       so interrupted uploads do not churn forever. The reason quoted there is the worker's recorded prose - it is read from the log store, so
       when that store is unreadable the cell says so instead of rendering blank (audio-feed-yrg4) - and the
       verdict is the state.</li>
-      <li><strong>Unhandled request errors record their class, not their message.</strong> A thrown
-      message can quote the request that caused it, which is how a client-chosen string would reach
-      the store, so the message is deliberately not stored. For those, take the correlation id and
-      the route above and read the platform log line for the same request. Synthesis and claim
+      <li><strong>Unhandled request errors record their class and a SCREENED message, never the raw
+      one.</strong> A thrown message can quote the request that caused it, which is how a client-chosen
+      string would reach the store - so the stored value is drawn from a closed list: a phrase this
+      service itself throws (matched as a prefix, with everything after it discarded: that tail is where
+      the request gets quoted) or the words "message suppressed (not authored by this codebase)". A
+      message you see here is therefore one of OUR phrases, and a message that is not ours shows as the
+      suppression marker rather than as itself. To read the platform's own line for the request, take the
+      correlation id and the route above (audio-feed-sw1r). Synthesis and claim
       failures — the ones this page is for — do carry their reason and error text, because our own
       worker and storage code write them.</li>
       <li><strong>This page cannot render while the host gate is refusing this host.</strong> The

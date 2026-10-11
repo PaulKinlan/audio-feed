@@ -104,6 +104,12 @@ export interface FailureRow {
   message: string;
   /** The join to every other record about this request, and to the platform log. */
   correlationId?: string;
+  /**
+   * The SCREENED message an unhandled error carries (audio-feed-sw1r): the server stores a phrase this
+   * codebase itself throws, or a suppression marker, never the thrown text - so what the page renders here
+   * cannot contain a client-chosen string.
+   */
+  errorMessage?: string;
   episodeId?: string;
   userId?: string;
   attempt?: number;
@@ -356,6 +362,7 @@ export async function buildObservabilityReport(
       status: typeof context.status === "number" ? context.status : undefined,
       message: record.message,
       correlationId: record.correlationId,
+      errorMessage: typeof context.errorMessage === "string" ? context.errorMessage : undefined,
       episodeId: record.episodeId,
       userId: record.userId,
       attempt: record.attempt,
