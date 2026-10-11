@@ -728,3 +728,93 @@ Deno.test("a malformed or empty model reply files nothing rather than a garbage 
   assertEquals(only.title, "Fix the claim CAS");
   assertEquals(only.fingerprints, ["ab"]);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Review findings from rev-yl6b (zxhv, w0b5, 9l6v) - each pinned by a test that bites
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("a persistent backlog keeps ONE bead: the SECOND run consults the open set (audio-feed-zxhv)", async () => {
+  // The first version of the backlog test never ran twice, so it passed while the poll filed an
+  // identical bead EVERY hour: the stable fingerprint it was built on was never checked against the
+  // open set. This is the test whose absence made that a false green.
+  await withTempDir(async (dir) => {
+    const old = new Date(Date.parse("2026-10-11T12:00:00.000Z") - 8 * 3_600_000).toISOString();
+    const many = Array.from({ length: 300 }, (_, i) => event({ seq: i + 1, time: old }));
+    const backend = (open: Set<string>, filed: RankedSuggestion[]) =>
+      deps({
+        fetchSummary: () =>
+          Promise.resolve({
+            ok: true as const,
+            body: summary({ total: 300, window: { oldestRetained: 1, newest: 300 } }),
+          }),
+        fetchErrors: () =>
+          Promise.resolve({ ok: true as const, body: page(many, { hasMore: true }) }),
+        openFingerprints: () => Promise.resolve(open),
+        callModel: () =>
+          Promise.resolve({ ok: true, text: "[]", inputTokens: 10, outputTokens: 5, error: null }),
+        fileBead: (_bin, suggestion) => {
+          filed.push(suggestion);
+          return Promise.resolve(`audio-feed-fake${filed.length}`);
+        },
+      });
+    const first: RankedSuggestion[] = [];
+    await runOnce(config(dir), backend(new Set<string>(), first));
+    assertEquals(
+      first.filter((s) => s.fingerprints.includes(BACKLOG_FINGERPRINT)).length,
+      1,
+      "the first run reports the backlog once",
+    );
+    const second: RankedSuggestion[] = [];
+    await runOnce(config(dir), backend(new Set([BACKLOG_FINGERPRINT]), second));
+    assertEquals(
+      second.filter((s) => s.fingerprints.includes(BACKLOG_FINGERPRINT)).length,
+      0,
+      "a second run on a still-behind poll must NOT file another backlog bead",
+    );
+  });
+});
+
+Deno.test("one event always fits the prompt, so the oversized branch is a safety net (audio-feed-w0b5)", () => {
+  // The reviewer's wedge needs a single event larger than MAX_PROMPT_BYTES. The rendering slices `message`
+  // to 300 characters and every other LogEvent field is short, so that cannot happen today: this test
+  // records WHY, so a future change to the slicing bound - or a new field on LogEvent - is caught here
+  // rather than turning into a silent wedge in production. The cursor-advance branch stays as the net.
+  const giant = event({
+    seq: 1,
+    message: "x".repeat(200_000),
+    route: "/api/" + "y".repeat(20_000),
+    correlationId: "z".repeat(50_000),
+  });
+  const built = buildPrompt([giant]);
+  assertEquals(built.eventsSent, 1, "a single event must always fit the prompt on its own");
+  assert(built.bytes <= MAX_PROMPT_BYTES, `rendered ${built.bytes} bytes exceeds the cap`);
+});
+
+Deno.test("the runner propagates a cap refusal instead of reporting success (audio-feed-9l6v)", async () => {
+  // Ending the runner with `exit 0` made a capped run look like a success to whatever scheduled it,
+  // which is the opposite of fail-closed. The stamp is touched BEFORE the run, so a non-zero status
+  // cannot cause a retry storm.
+  await withTempDir(async (dir) => {
+    const bin = await Deno.makeTempDir();
+    try {
+      await Deno.writeTextFile(`${bin}/deno`, "#!/bin/sh\necho 'refused: capped' >&2\nexit 2\n");
+      await Deno.chmod(`${bin}/deno`, 0o755);
+      const cmd = new Deno.Command("sh", {
+        args: [
+          "-c",
+          `PATH="${bin}:$PATH" AUDIOFEED_AGENT_STATE_DIR="${dir}" sh scripts/observability-agent-run.sh --interval-seconds 0`,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const out = await cmd.output();
+      assertEquals(out.code, 2, "the runner must not turn a cap refusal into exit 0");
+      assert(
+        new TextDecoder().decode(out.stderr).includes("spend cap"),
+        "and it must say why, so an operator sees it",
+      );
+    } finally {
+      await Deno.remove(bin, { recursive: true });
+    }
+  });
+});

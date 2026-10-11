@@ -55,4 +55,9 @@ case "$status" in
   2) echo "[observability-agent] a spend cap stopped this run; see $LOG" >&2 ;;
   *) echo "[observability-agent] run failed with status $status; see $LOG" >&2 ;;
 esac
-exit 0
+
+# PROPAGATE, do not swallow (audio-feed-9l6v). Ending with exit 0 here made a capped or failed run look
+# like a success to whatever scheduled it, which is the opposite of fail-closed: a cap is only real if
+# the run is observably not-ok. The stamp above is touched BEFORE the run, so a non-zero exit cannot
+# cause a retry storm - it costs one skipped interval, which is the intended trade.
+exit "$status"

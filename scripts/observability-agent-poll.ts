@@ -148,7 +148,9 @@ export type SkipReason =
   | "model-failed"
   | "api-failed"
   /** Another run holds the lock. The daily ceiling is a construction only if two runs cannot race it. */
-  | "locked";
+  | "locked"
+  /** The oldest queued event cannot fit the prompt even alone. It is SKIPPED, and recorded (audio-feed-w0b5). */
+  | "oversized";
 
 export interface RunArtifact {
   startedAt: string;
@@ -174,6 +176,8 @@ export interface RunArtifact {
   gapReported: { from: number; resumedAt: number } | null;
   fingerprintsSeen: string[];
   fingerprintsFiled: string[];
+  /** The seq of an event that could not fit the prompt even alone and was skipped. A recorded loss. */
+  skippedOversized: number | null;
   fingerprintsSkipped: string[];
   beadIds: string[];
   modelCalls: number;
@@ -289,6 +293,9 @@ export function renderDigest(a: RunArtifact): string {
     `- model calls: ${a.modelCalls}`,
     `- beads filed: ${a.beadIds.length ? a.beadIds.join(", ") : "none"}`,
     `- fingerprints skipped as already open: ${a.fingerprintsSkipped.length}`,
+    a.skippedOversized === null
+      ? `- oversized events skipped (not analysed): none`
+      : `- oversized events skipped (NOT analysed): seq ${a.skippedOversized}`,
   ];
   if (a.gapReported) {
     lines.push(
@@ -747,6 +754,7 @@ export async function runOnce(
     gapReported: null,
     fingerprintsSeen: [],
     fingerprintsFiled: [],
+    skippedOversized: null,
     fingerprintsSkipped: [],
     beadIds: [],
     modelCalls: 0,
@@ -875,6 +883,28 @@ export async function runOnce(
   artifact.truncated = prompt.truncated;
   artifact.backlog = prompt.backlog;
   if (prompt.eventsSent === 0) {
+    // A SAFETY NET, and deliberately so: with `message` sliced to 300 characters and every other
+    // LogEvent field short, a single event cannot exceed the cap today (pinned by a test). The branch
+    // exists because the alternative failure is the worst this job has - a record that can never be
+    // sent wedges the cursor forever and ends coverage silently. Note the cap cases below still HOLD the
+    // cursor, which is correct: a cap must not skip work, but an unsendable record must not stop it.
+    // PROGRESS IS NOT OPTIONAL. If nothing can be sent, the cursor still has to move past the oldest
+    // queued event: otherwise every run refetches the same record and the poll is wedged forever, which
+    // is worse than skipping one event, because a wedge ends all coverage silently (audio-feed-w0b5).
+    // The skip is RECORDED - this is a loss, and the artifact says so rather than dropping it quietly.
+    const oldest = withPrints[0];
+    if (oldest !== undefined) {
+      const past = oldest.event.seq;
+      artifact.reason = "oversized";
+      artifact.skippedOversized = past;
+      artifact.cursorAfter = past;
+      state = { ...state, cursor: past };
+      artifact.note =
+        `The oldest queued event (seq ${past}) does not fit the ${MAX_PROMPT_BYTES}-byte prompt even ` +
+        `alone, so it was SKIPPED and the cursor advanced past it. Without that advance every run ` +
+        `would refetch it and the poll would never move again. This event was NOT analysed.`;
+      return { artifact: await finish("skipped"), state };
+    }
     artifact.reason = prompt.bytes > 0 ? "cap-prompt-bytes" : "cap-events";
     artifact.note =
       "The per-run input cap was reached before a single event could be sent; nothing was ranked.";
@@ -964,7 +994,12 @@ export async function runOnce(
   // reuses the fingerprint mechanism with a STABLE fingerprint, a backlog that persists for days keeps
   // one open bead rather than filing a new one every hour.
   if (
-    artifact.newestUnsentAgeHours !== null && artifact.newestUnsentAgeHours >= BACKLOG_ALERT_HOURS
+    artifact.newestUnsentAgeHours !== null &&
+    artifact.newestUnsentAgeHours >= BACKLOG_ALERT_HOURS &&
+    // The check the stable fingerprint exists FOR. Filing this bead without consulting the open set was
+    // the whole defect (audio-feed-zxhv): a poll that stayed behind for a week filed a new bead every
+    // hour, which is bead spam and, worse, buries the signal it was meant to raise.
+    !alreadyOpen.has(BACKLOG_FINGERPRINT)
   ) {
     const id = await deps.fileBead(
       config.bdBin,
