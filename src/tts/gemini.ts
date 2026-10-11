@@ -310,7 +310,14 @@ export interface SynthesisOptions {
       segmentText: string,
       voice: string,
     ) => Promise<{ wav: Uint8Array } | "synthesize" | "held">;
-    commit: (segmentText: string, decoded: DecodedAudioResult, voice: string) => Promise<void>;
+    commit: (
+      segmentText: string,
+      decoded: DecodedAudioResult,
+      voice: string,
+      /** The caller's abort signal (budget + lease): the segment put must be interruptible
+       * (audio-feed-y9kk) — a commit that uploads without it is a background zombie. */
+      signal?: AbortSignal,
+    ) => Promise<void>;
   };
   /**
    * Which failures may be retried. "transient" (default) covers only statuses that mean the API
@@ -1544,7 +1551,10 @@ export class GeminiTtsClient {
           );
           // A truncated segment must never be persisted as resumable: decodedFromWav would
           // serve it later as STOP-complete. Only complete audio becomes resume material.
-          if (!decoded.truncated) await options.resume?.commit(segment, decoded, voice);
+          // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
+          if (!decoded.truncated) {
+            await options.resume?.commit(segment, decoded, voice, options.signal);
+          }
           return decoded;
         },
         splitOnOutputLimit: (segment, error) => {
@@ -1645,7 +1655,10 @@ export class GeminiTtsClient {
             buildDialogueRequest(part, speakers, options.temperature),
             batches.length > 1 ? { ...options, maxRetries: options.maxRetries ?? 0 } : options,
           );
-          if (!decoded.truncated) await options.resume?.commit(segmentText, decoded, dialogueVoice);
+          if (!decoded.truncated) {
+            // The stage signal rides along so the segment put is abortable (audio-feed-y9kk).
+            await options.resume?.commit(segmentText, decoded, dialogueVoice, options.signal);
+          }
           return decoded;
         },
         stitch: (audio) => {

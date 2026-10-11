@@ -54,7 +54,10 @@ export const isVoiceSampleName = (name: string): name is GeminiTtsVoice =>
  * returned, `sampleBytes` is what every caller stores and serves.
  */
 export interface VoiceSampleClient {
-  synthesizeNarration(input: NarrationInput): Promise<DecodedAudioResult>;
+  synthesizeNarration(
+    input: NarrationInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<DecodedAudioResult>;
 }
 
 /** A refusal that carries the status the route should answer with. */
@@ -73,6 +76,8 @@ export class VoiceSampleError extends Error {
 export async function synthesizeVoiceSample(
   client: VoiceSampleClient,
   voice: GeminiTtsVoice,
+  /** The requesting client's signal: a disconnected listener cancels the paid call (audio-feed-y9kk). */
+  opts?: { signal?: AbortSignal },
 ): Promise<Uint8Array> {
   let result: DecodedAudioResult;
   try {
@@ -81,7 +86,7 @@ export async function synthesizeVoiceSample(
       body: VOICE_SAMPLE_TEXT,
       voice,
       includeIntro: false,
-    });
+    }, opts?.signal ? { signal: opts.signal } : {});
   } catch (error) {
     const message = String((error as Error)?.message ?? error ?? "synthesis failed");
     throw new VoiceSampleError(502, `Sample synthesis failed: ${message}`);

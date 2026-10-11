@@ -359,3 +359,74 @@ Deno.test("the real GeminiTtsClient is asked for the fixed line in the chosen vo
     "Aoede",
   );
 });
+
+Deno.test("a disconnected listener aborts the sample synthesis and the cache put (audio-feed-y9kk)", async () => {
+  // This route has NO invocation budget at all — it is a request handler. Threading
+  // req.signal is the WHOLE fix here, and what it buys is CANCELLATION, not a bound:
+  // the paid call and the ~220KB cache put both tear down when the client is gone,
+  // instead of the isolate sitting inside them until the platform kills the request.
+  const seenSignals: Array<AbortSignal | undefined> = [];
+  let firstCall = true;
+  const client = {
+    synthesizeNarration: (input: NarrationInput, opts?: { signal?: AbortSignal }) => {
+      seenSignals.push(opts?.signal);
+      if (firstCall) {
+        firstCall = false;
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve(fakeClient([]).synthesizeNarration(input));
+    },
+  };
+  const config: AppConfig = {
+    port: 8080,
+    publicBaseUrl: BASE,
+    adminToken: "admin-secret",
+    geminiApiKey: "key",
+  };
+  const stores: Stores = memoryStores();
+  const ctx = { config, stores };
+  const handlers = createHandlers(ctx, { ttsClient: client as never });
+  const { fetch } = createApp(ctx, handlers);
+  const rawUser = await createUser(stores.metadata, {
+    email: "abort@example.com",
+    displayName: "Abort",
+  });
+  const user = await approveUser(stores.metadata, rawUser.id, "admin");
+  const session = await createSession(stores.metadata, user.id);
+
+  const controller = new AbortController();
+  const request = new Request(`${BASE}/assets/voices/Charon`, {
+    headers: cookieFor(session),
+    signal: controller.signal,
+  });
+
+  const pending = fetch(request).catch(() => null);
+  // Let the route reach the in-flight synthesis, then disconnect the listener.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.abort();
+  await pending;
+
+  // The client received the request's own signal (the wiring this bead pins)...
+  assertEquals(seenSignals.length, 1);
+  assert(
+    seenSignals[0] instanceof AbortSignal && seenSignals[0]!.aborted,
+    "the request's own (derived) abort signal must reach the synthesis call and fire",
+  );
+  // ...and nothing was cached for a listener who is gone.
+  const cached = await stores.blobs.get(voiceSampleKey("Charon")).catch(() => null);
+  assertEquals(cached, null, "an aborted audition must not write the cache");
+
+  // The in-flight entry was cleared, so the next listener pays for itself and is served.
+  const retry = await fetch(
+    new Request(`${BASE}/assets/voices/Charon`, { headers: cookieFor(session) }),
+  );
+  assertEquals(retry.status, 200, "a retry after an abort must succeed");
+  const cachedAfter = await stores.blobs.get(voiceSampleKey("Charon"));
+  assert(cachedAfter, "the retry's synthesis is cached");
+});

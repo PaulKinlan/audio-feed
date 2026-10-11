@@ -93,11 +93,22 @@ export function createVoiceSampleHandler(
     let pending = inFlight.get(key);
     if (!pending) {
       const client = deps.client ?? new GeminiTtsClient(ttsClientConfig(ctx.config));
-      pending = synthesizeVoiceSample(client, name)
+      // audio-feed-y9kk: this route has NO invocation budget at all — it is a request
+      // handler, not a cron tick. Threading req.signal is therefore the WHOLE fix here,
+      // and what it buys is CANCELLATION, not a budget: a disconnected listener tears down
+      // the paid synthesis and the cache put instead of the isolate sitting in both until
+      // the platform kills the request. The signal is the INITIATOR's: the in-flight
+      // generation is shared across concurrent requests, so a joiner rides the initiator's
+      // cancellation and retries on its own next request — the alternative (a composite
+      // all-waiters-gone signal) is not worth the machinery for a ~220KB cache write.
+      pending = synthesizeVoiceSample(client, name, { signal: req.signal })
         .then(async (bytes) => {
           // Cache under the versioned key: a later text/model change writes a new
           // key instead of overwriting clips that this text did not produce.
-          await ctx.stores.blobs.put(key, bytes, { contentType: VOICE_SAMPLE_CONTENT_TYPE });
+          await ctx.stores.blobs.put(key, bytes, {
+            contentType: VOICE_SAMPLE_CONTENT_TYPE,
+            signal: req.signal,
+          });
           return bytes;
         })
         .finally(() => {
