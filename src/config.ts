@@ -66,10 +66,16 @@ export const DEFAULT_LOG_RETENTION_DAYS = 7;
 export interface AppConfig {
   /**
    * Days of structured log records to retain (audio-feed-wzv9). 0 means prune nothing.
-   * The daily cron pass is what enforces it; the errors API reads `logBounds()` to tell a
-   * caller that a cursor has aged out rather than silently skipping records.
+   *
+   * OPTIONAL, like globalDailyEpisodeBudget and for the same reason: a caller constructing a
+   * config for one behaviour should not have to restate every deployment default, and the value
+   * that matters is the one `loadConfig` resolves. The cron pass reads it through
+   * `DEFAULT_LOG_RETENTION_DAYS`, so an omission means the default rather than "prune nothing".
+   *
+   * The daily pass is what enforces it; the errors API reads `logBounds()` to tell a caller that a
+   * cursor has aged out rather than silently skipping records.
    */
-  logRetentionDays: number;
+  logRetentionDays?: number;
   port: number;
   /**
    * Explicit public origin. OPTIONAL, and optional on purpose (audio-feed-0k3).

@@ -11,6 +11,7 @@
  */
 
 import type { AppContext } from "./app.ts";
+import { DEFAULT_LOG_RETENTION_DAYS } from "./config.ts";
 import { runFeedPollBatch } from "./ingest/feed.ts";
 import { recordRun } from "./stats.ts";
 import {
@@ -136,7 +137,9 @@ export function registerCronJobs(
     handler: async () => {
       try {
         const { ctx } = await resolveContext();
-        const days = ctx.config.logRetentionDays;
+        // `loadConfig` always resolves this; the fallback covers a hand-built config (a test, or a
+        // caller that only cares about one behaviour), where an omission means the default.
+        const days = ctx.config.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS;
         if (days <= 0) {
           console.log("[audio-feed] cron log retention: disabled (LOG_RETENTION_DAYS=0)");
           return;
