@@ -33,6 +33,7 @@ import {
   createObservabilityErrorsHandler,
   createObservabilitySummaryHandler,
 } from "./routes/observability.ts";
+import { createCwvHandler } from "./routes/cwv.ts";
 import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { handleCspReports } from "./routes/reports.ts";
 import { discoverFeeds } from "./ingest/url.ts";
@@ -114,6 +115,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
   return {
     observabilityErrors: createObservabilityErrorsHandler(ctx),
     observabilitySummary: createObservabilitySummaryHandler(ctx),
+    cwvBeacon: createCwvHandler(ctx),
     masterFeed: createMasterFeedHandler(ctx),
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),

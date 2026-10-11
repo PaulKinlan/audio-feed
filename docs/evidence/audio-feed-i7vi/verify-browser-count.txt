@@ -1,0 +1,16 @@
+=== the interaction count cannot be derived from ids (measured) ===
+  /tmp/i7vi-id-both.txt:  OBSERVED: the page counted 3892
+  /tmp/i7vi-id-both.txt:FAIL  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 3892 of 5 dispatched
+  /tmp/i7vi-id-mouse.txt:  OBSERVED: the page counted 7381
+  /tmp/i7vi-id-mouse.txt:FAIL  the page counted no more interactions than were dispatched (an overcount would understate INP)  — counted 7381 of 3 dispatched
+
+=== what ships instead: INP over the reported interactions, by dispatch kind ===
+-- CWV_INTERACTIONS=both
+    OBSERVED: interaction durations the observer reported: [80,16]
+  All checks passed.
+-- CWV_INTERACTIONS=mouse
+    OBSERVED: interaction durations the observer reported: [64,40]
+  All checks passed.
+-- CWV_INTERACTIONS=key
+    OBSERVED: interaction durations the observer reported: [16]
+  All checks passed.

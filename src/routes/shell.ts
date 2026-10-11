@@ -21,6 +21,8 @@ import { DESIGN_TOKENS } from "./tokens.ts";
 // out of admin.js by audio-feed-3xq part 4c); the same `with { type: "text" }` idiom
 // src/routes/assets.ts uses to serve it.
 import confirmSharedSource from "../assets/confirm-shared.js" with { type: "text" };
+import cwvStatsSource from "../assets/cwv-stats.js" with { type: "text" };
+import cwvClientSource from "../assets/cwv.js" with { type: "text" };
 import tooltipClientSource from "../assets/tooltip-client.js" with { type: "text" };
 
 /** Who the header says is signed in. `null` for a visitor. */
@@ -554,6 +556,15 @@ export const TOOLTIP_HTML =
  */
 export const TOOLTIP_CLIENT = tooltipClientSource;
 
+/**
+ * Real-user Core Web Vitals collector (audio-feed-i7vi).
+ *
+ * Inlined rather than fetched: it observes the page's own performance, so a request to fetch it
+ * would be part of what it measures — and it registers its observers only, sending nothing until
+ * the page goes away.
+ */
+export const CWV_CLIENT = `${cwvStatsSource}\n${cwvClientSource}`;
+
 const MARK =
   `<svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="var(--accent)"/><g stroke="var(--accent-ink)" stroke-width="2.4" stroke-linecap="round"><path d="M9 13v6"/><path d="M13.5 9v14"/><path d="M18 12v8"/><path d="M22.5 14.5v3"/></g></svg>`;
 
@@ -700,8 +711,8 @@ ${CONFIRM_DIALOG_HTML}
 ${TOOLTIP_HTML}
 ${
     o.script
-      ? `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n${o.script}\n</script>`
-      : `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n</script>`
+      ? `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n${o.script}\n${CWV_CLIENT}\n</script>`
+      : `<script nonce="${nonce}">\n${TOOLTIP_CLIENT}\n${CWV_CLIENT}\n</script>`
   }
 ${o.scriptModule ? `<script type="module" src="${o.scriptModule}"></script>` : ""}
 </body>

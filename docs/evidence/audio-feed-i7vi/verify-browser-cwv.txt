@@ -1,0 +1,18 @@
+[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — the advertised origin and WebAuthn RP ID are derived from each request's host. Set ALLOWED_HOSTS to pin them.
+[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
+[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
+Listening on http://0.0.0.0:34243/ (http://localhost:34243/)
+PASS  the collector is inlined in the served page
+PASS  headless Chrome started and reported a debugging port  — port 35811
+PASS  a page target is available to drive
+  records: http.request(-=null) http.request(-=null) cwv.report(lcp=200) cwv.report(lcp=84)
+PASS  a real browser sent at least one CWV report  — 2 report(s)
+PASS  an LCP value arrived from the browser  — 200
+PASS  the arrived value is inside the plausible range  — 200ms
+PASS  the beacon never became a request-log field  — 2 request record(s), none about cwv (the page loads themselves belong in the log)
+PASS  a page label came with it  — home
+  INP: not observed in this run
+
+All checks passed.

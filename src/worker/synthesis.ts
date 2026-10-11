@@ -71,6 +71,7 @@ import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from
 import { collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { DEFAULT_DAILY_EPISODE_BUDGET, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET } from "../config.ts";
+import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../observability/spans.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -1034,6 +1035,20 @@ export async function runSynthesisBatch(
       continue;
     }
     claimedAny = true;
+    // audio-feed-i7vi: this attempt's span opens at the claim, because that is the moment the
+    // episode stopped waiting for a worker and started working.
+    const spanStartedAt = performance.now();
+    /**
+     * How long the episode waited for a worker — a PROXY, and deliberately labelled one.
+     *
+     * There is no enqueue timestamp on an episode, so this measures from `createdAt`: an episode that
+     * sat in the queue after being created reads correctly, and one created long before it could be
+     * processed reads too high. Measured anyway because a total cannot separate "the queue was backed
+     * up" from "the TTS call hung", and those need different fixes; the direction of the error is
+     * written down here rather than hidden behind a number that looks exact.
+     */
+    const spanQueueWaitMs = Date.parse(claimed.claimedAt ?? claimed.createdAt) -
+      Date.parse(claimed.createdAt);
     try {
       await checkpointEpisodeClaim(metadata, claimed.userId, claimed.id, opts.owner, {
         phase: "reading_article",
@@ -1201,6 +1216,9 @@ export async function runSynthesisBatch(
     // delete this attempt's own blob. A regeneration additionally deletes the old key.
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
     const audioKey = audioBlobKey(currentEpisode, "wav", opts.revision());
+    // Everything to here is the synthesis: reading the article, writing the script and the paid TTS
+    // calls. What follows is storage, so the phases split where the work changes kind.
+    const synthesisEndedAt = performance.now();
     const stored = await blobs.put(audioKey, bytes, { contentType: "audio/wav" });
 
     const byteLength = stored.size ?? bytes.length;
@@ -1228,6 +1246,39 @@ export async function runSynthesisBatch(
     }, opts.owner);
 
     if (wrote) {
+      // audio-feed-i7vi: emitted only when the completion write was OURS. A superseded attempt's
+      // timings describe work whose result was discarded, and recording them as a span would put a
+      // phantom episode's cost into the traces.
+      const spanPhases = {
+        queueWaitMs: spanQueueWaitMs,
+        synthesisMs: synthesisEndedAt - spanStartedAt,
+        writeMs: performance.now() - synthesisEndedAt,
+      };
+      // TRACING MUST NEVER FAIL A SYNTHESIS THAT SUCCEEDED (audio-feed-77j9). The ready commit above
+      // is already durable, so a rejected append here would report a completed episode as failed —
+      // the reverse of what this span is for. appendLog is expected to resolve null rather than
+      // reject, and this guard does not assume it: a throw is caught, the episode stays ready, and
+      // the failure is recorded as its own event so a broken trace path is visible instead of silent.
+      const spanRecord = synthesisSpan(currentEpisode, spanPhases, spanSeverity(spanPhases));
+      try {
+        await metadata.appendLog(spanRecord);
+      } catch (err) {
+        console.error(
+          `[audio-feed] span append failed for episode ${currentEpisode.id}; synthesis is unaffected:`,
+          err,
+        );
+        try {
+          await metadata.appendLog({
+            ...spanRecord,
+            type: `${SYNTHESIS_SPAN_EVENT}_failed`,
+            severity: "warn",
+            message: `could not store the span for episode ${currentEpisode.id}`,
+            reason: err instanceof Error ? err.name : "unknown",
+          });
+        } catch {
+          // Nothing left to record it in. The synthesis result is what matters and it is intact.
+        }
+      }
       result.ready.push({ episodeId: currentEpisode.id, audioKey, byteLength });
       // The stitched audio is committed; the per-segment blobs have done their job.
       try {
