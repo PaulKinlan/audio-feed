@@ -456,6 +456,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     // Not a security boundary by itself, but it keeps the console out of
     // indexes and stops credentials leaking through referrers.
     "referrer-policy": "no-referrer",
+    "x-robots-tag": "noindex",
   };
 
   if (user && !isActiveAdmin(user)) {

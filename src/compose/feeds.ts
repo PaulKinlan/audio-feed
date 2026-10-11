@@ -85,6 +85,7 @@ function feedResponse(xml: string): Response {
       "content-type": "application/rss+xml; charset=utf-8",
       // Feeds are per-user capabilities: never let a shared cache hold one.
       "cache-control": "private, no-store",
+      "x-robots-tag": "noindex",
     },
   });
 }

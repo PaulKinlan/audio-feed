@@ -829,6 +829,7 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     headers: {
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      "x-robots-tag": "noindex",
     },
   });
 }
