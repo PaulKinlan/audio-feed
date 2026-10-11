@@ -16,7 +16,7 @@
  * are the ones production writes — not hand-built fixtures that would pass while the real writer
  * changed shape.
  */
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -62,6 +62,27 @@ async function setup() {
 }
 
 const sessionFor = (stores: Stores, userId: string) => createSession(stores.metadata, userId);
+
+/**
+ * `stores` with some durable reads failing, so the tests can prove a READ FAILURE is never rendered
+ * as an absence (audio-feed-ciuw). A proxy rather than a spread: `MemoryMetadataStore` is a class,
+ * so its methods live on the prototype and a spread would silently produce a store with no methods
+ * at all - which is a different bug from the one under test.
+ */
+function breakStore(
+  stores: Stores,
+  overrides: Record<string, (...args: never[]) => Promise<never>>,
+): Stores {
+  const metadata = new Proxy(stores.metadata, {
+    get(target, property, receiver) {
+      const override = overrides[property as string];
+      if (override) return override;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...stores, metadata };
+}
 
 /**
  * The incident shape: three workers claim the same episode, each dies mid-phase without a terminal
@@ -400,6 +421,146 @@ Deno.test("audio-feed-n6uu: the claimable count is capped and says so rather tha
   const report = await buildObservabilityReport(stores, Date.parse("2026-10-11T10:00:00.000Z"));
   assertEquals(report.queue.claimable, REPORT_QUEUE_CAP);
   assertEquals(report.queue.claimableCapped, true);
+});
+
+// ---------------------------------------------------------------------------
+// Review findings from the first round (audio-feed-506m, audio-feed-ciuw)
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-506m: newer unrelated feed polls cannot hide the synthesis run the drain verdict needs", async () => {
+  // The finding: listRuns(20) is a GLOBAL newest-first page, cut to 20, so twenty feed-poll runs
+  // crowded out the synthesis run and the page reported drain=unknown with a synthesis run sitting
+  // in the store. A page whose job is "is the queue draining" must not be blinded by job kind.
+  const { stores, page } = await setup();
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-q",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "pending",
+      createdAt: "2026-10-11T09:00:00.000Z",
+    }),
+  );
+  await stores.metadata.recordRun({
+    id: "syn",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: "2026-10-11T09:50:00.000Z",
+    durationMs: 1_000,
+    ready: 3,
+    failed: 0,
+    deferred: 0,
+  });
+  for (let i = 0; i < 20; i++) {
+    await stores.metadata.recordRun({
+      id: `poll-${i}`,
+      kind: "feed-poll",
+      trigger: "cron",
+      startedAt: `2026-10-11T09:51:${String(i).padStart(2, "0")}.000Z`,
+      durationMs: 500,
+      polled: 1,
+      queued: 0,
+      failed: 0,
+    });
+  }
+
+  // The unscoped read is the bug: it no longer contains the synthesis run at all. Pinned so that a
+  // revert to a global page fails HERE rather than only in the report's drain verdict.
+  assertEquals(
+    (await stores.metadata.listRuns(20)).some((run) => run.kind === "synthesis"),
+    false,
+    "the unscoped page is what hid the run",
+  );
+
+  const report = await buildObservabilityReport(stores, Date.parse("2026-10-11T10:00:00.000Z"));
+  assertEquals(report.queue.claimable, 1);
+  assert(
+    report.queue.lastSynthesisRun,
+    "the retained synthesis run must be found behind 20 newer feed polls",
+  );
+  assertEquals(report.queue.drain, "draining", "and the drain verdict must use it");
+
+  const body = await (await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`))
+    .text();
+  assertStringIncludes(body, "Last synthesis run");
+  assertStringIncludes(body, "3 ready");
+  assertEquals(
+    body.includes("no run recorded"),
+    false,
+    "the page must not claim no run was recorded",
+  );
+});
+
+Deno.test("audio-feed-ciuw: a failed durable queue read is UNREADABLE, never zero work", async () => {
+  // The finding: `.catch(() => ({episodes: []}))` turned a read FAILURE into an empty queue, so the
+  // page said "nothing queued" at the exact moment it could not see the queue - the most dangerous
+  // possible lie in this feature. Three states now: populated, empty, unreadable.
+  const { stores } = await setup();
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "episode-p", userId: "user-1", sourceId: "stratechery", status: "pending" }),
+  );
+  const broken = breakStore(stores, {
+    listPendingEpisodes: () => Promise.reject(new Error("kv unavailable")),
+  });
+
+  const report = await buildObservabilityReport(broken, Date.parse("2026-10-11T10:00:00.000Z"));
+  assertEquals(report.queue.claimable, null, "an unreadable queue is null, NOT zero");
+  assertEquals(report.queue.drain, "unreadable");
+  assertEquals(report.queue.readError?.includes("kv unavailable"), true);
+  assertEquals(report.readErrors.some((failure) => failure.store === "queue"), true);
+
+  // The page still renders (it must keep working while things are broken), and it says what broke.
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200, "the page must render even when its own queue read fails");
+  assertStringIncludes(body, "This is NOT an empty queue");
+  assertStringIncludes(body, "kv unavailable");
+  assertEquals(
+    body.includes("nothing queued"),
+    false,
+    "an unreadable queue must never render as 'nothing queued'",
+  );
+});
+
+Deno.test("audio-feed-ciuw: failed log and run reads are reported as unreadable, not as absence", async () => {
+  const { stores } = await setup();
+  const broken = breakStore(stores, {
+    listLogs: () => Promise.reject(new Error("log store down")),
+    listRuns: () => Promise.reject(new Error("run store down")),
+  });
+
+  const report = await buildObservabilityReport(broken, Date.parse("2026-10-11T10:00:00.000Z"));
+  assertEquals(report.readErrors.map((failure) => failure.store).sort(), ["logs", "runs"]);
+  assertEquals(report.queue.runsReadError?.includes("run store down"), true);
+
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, "log store down");
+  assertStringIncludes(body, "run store down");
+  assertStringIncludes(body, "the run history read failed");
+  assertEquals(
+    body.includes("No warn/error records"),
+    false,
+    "a log read failure must not render as 'no failures'",
+  );
+  assertEquals(
+    body.includes("no run recorded"),
+    false,
+    "a run read failure must not render as 'it never ran'",
+  );
 });
 
 // ---------------------------------------------------------------------------

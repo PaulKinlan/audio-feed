@@ -195,8 +195,45 @@ export async function handleAdminObservability(
     draining: "queued work is being processed (the last synthesis run made progress)",
     stalled: "queued work is NOT being processed (the last synthesis run made no progress)",
     unknown: "no synthesis run history is retained, so progress cannot be judged",
+    unreadable: "the queue could not be read, so nothing about it can be claimed",
   }[queue.drain];
 
+  // A read that failed is stated BEFORE the sections it affects (audio-feed-ciuw). The operator must
+  // never have to infer "unreadable" from a zero, because a zero is what a healthy empty deployment
+  // looks like - and that confusion is what sends an incident investigation the wrong way.
+  const readFailureNotice = report.readErrors.length === 0 ? "" : `<div class="card" role="alert">
+    <h2>Some durable state could not be read</h2>
+    <p>These sections are NOT reporting an absence of problems — they could not be read at all:</p>
+    <ul>${
+    report.readErrors.map((failure) =>
+      `<li><strong>${esc(failure.store)}</strong>: ${esc(failure.message)}</li>`
+    ).join("")
+  }</ul>
+  </div>`;
+
+  const queueCell = queue.claimable === null
+    ? `<strong>Unavailable — the queue read failed</strong> <span class="muted">(${
+      esc(queue.readError ?? "no reason recorded")
+    }). This is NOT an empty queue.</span>`
+    : `${queue.claimable}${queue.claimableCapped ? "+" : ""} ${
+      queue.oldestClaimableAt ? `— oldest waiting since ${timeCell(queue.oldestClaimableAt)}` : ""
+    }`;
+
+  const lastRunCell = queue.runsReadError
+    ? `<strong>Unavailable — the run history read failed</strong> <span class="muted">(${
+      esc(queue.runsReadError)
+    }). This is NOT "it never ran".</span>`
+    : lastRun
+    ? `${timeCell(lastRun.startedAt)} (${esc(lastRun.trigger)}) — ${
+      lastRun.error
+        ? `error: ${esc(lastRun.error)}`
+        : `${lastRun.ready ?? 0} ready, ${lastRun.failed ?? 0} failed, ${
+          lastRun.deferred ?? 0
+        } deferred`
+    }`
+    : "no run recorded";
+
+  const logsUnreadable = report.readErrors.some((failure) => failure.store === "logs");
   const main = `<div class="wrap">
   <p class="eyebrow">Admin</p>
   <h1>Observability</h1>
@@ -204,37 +241,34 @@ export async function handleAdminObservability(
   controls on this page on purpose — the page that reports an incident must not be able to cause
   one. <a href="/admin">Back to the console</a>.</p>
 
+  ${readFailureNotice}
+
   <section class="card" aria-labelledby="queue-h">
     <h2 id="queue-h">Queue</h2>
     <dl>
-      <dt>Claimable now</dt><dd>${queue.claimable}${queue.claimableCapped ? "+" : ""} ${
-    queue.oldestClaimableAt ? `— oldest waiting since ${timeCell(queue.oldestClaimableAt)}` : ""
-  }</dd>
+      <dt>Claimable now</dt><dd>${queueCell}</dd>
       <dt>Draining</dt><dd>${esc(drainNote)}</dd>
       <dt>Live claims (retained window)</dt><dd>${queue.liveClaims}</dd>
       <dt>Abandoned attempts (retained window)</dt><dd>${queue.abandoned}</dd>
-      <dt>Last synthesis run</dt><dd>${
-    lastRun
-      ? `${timeCell(lastRun.startedAt)} (${esc(lastRun.trigger)}) — ${
-        lastRun.error
-          ? `error: ${esc(lastRun.error)}`
-          : `${lastRun.ready ?? 0} ready, ${lastRun.failed ?? 0} failed, ${
-            lastRun.deferred ?? 0
-          } deferred`
-      }`
-      : "no run recorded"
-  }</dd>
+      <dt>Last synthesis run</dt><dd>${lastRunCell}</dd>
     </dl>
   </section>
 
   <section aria-labelledby="failures-h">
     <h2 id="failures-h">Recent failures</h2>
-    <p class="muted">Newest first, at most 25, over records ${readWindow.readFrom}..${
-    esc(String(readWindow.newestSeq))
-  } (retention keeps records from sequence ${readWindow.oldestRetained}; older failures have been
-  pruned, not fixed).</p>
+    <p class="muted">${
+    logsUnreadable
+      ? `The retained-log window could not be read, so the failure list below means nothing — see the notice above.`
+      : `Newest first, at most 25, over records ${readWindow.readFrom}..${
+        esc(String(readWindow.newestSeq))
+      } (retention keeps records from sequence ${readWindow.oldestRetained}; older failures have been
+      pruned, not fixed).`
+  }</p>
     ${
-    report.failures.length === 0
+    logsUnreadable
+      ? `<p><strong>The log store could not be read</strong>, so this is not a statement that there
+      were no failures — see the notice above.</p>`
+      : report.failures.length === 0
       ? `<p>No warn/error records in the retained window.</p>`
       : report.failures.map((failure) => failureRowHtml(failure, report)).join("")
   }

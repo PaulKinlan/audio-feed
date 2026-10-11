@@ -121,10 +121,18 @@ export interface EpisodeContext {
 }
 
 export interface QueueSnapshot {
-  /** Episodes the worker could claim now (pending, or a synthesizing claim whose lease died). */
-  claimable: number;
+  /**
+   * Episodes the worker could claim now (pending, or a synthesizing claim whose lease died).
+   *
+   * `null` means the durable read FAILED — deliberately not `0`, which is what a swallowed
+   * rejection used to render as (audio-feed-ciuw): the page then told the operator "no work" at the
+   * exact moment it could not see the work, which is the one lie a diagnostic page must not tell.
+   */
+  claimable: number | null;
   /** True when the count hit REPORT_QUEUE_CAP and the real number is higher. */
   claimableCapped: boolean;
+  /** The queue read's failure, so the page can say what broke instead of looking empty. */
+  readError?: string;
   /** The oldest claimable episode's createdAt, so "how long has this been waiting" is answerable. */
   oldestClaimableAt?: string;
   /** Live claims seen in the window: an attempt with no end record and an unexpired lease. */
@@ -133,15 +141,25 @@ export interface QueueSnapshot {
   abandoned: number;
   /** The most recent synthesis run, which is how "is it draining" is answered. */
   lastSynthesisRun?: RunRecord;
+  /** The run-history read's failure; `lastSynthesisRun` being absent is then NOT "it never ran". */
+  runsReadError?: string;
   /**
    * `"empty"` nothing queued; `"draining"` work queued and the last run made progress;
-   * `"stalled"` work queued and the last run did not; `"unknown"` no run history at all.
+   * `"stalled"` work queued and the last run did not; `"unknown"` no run history at all;
+   * `"unreadable"` the queue could not be read, so nothing about it can be claimed.
    */
-  drain: "empty" | "draining" | "stalled" | "unknown";
+  drain: "empty" | "draining" | "stalled" | "unknown" | "unreadable";
 }
 
 export interface ObservabilityReport {
   generatedAt: string;
+  /**
+   * Durable reads that FAILED. A section whose facts could not be read must say so rather than
+   * render an empty value: "the queue is empty" and "I could not read the queue" are different
+   * statements, and a diagnostic page that confuses them sends the operator the wrong way
+   * (audio-feed-ciuw). Empty means every read succeeded.
+   */
+  readErrors: { store: "logs" | "queue" | "runs" | "episodes"; message: string }[];
   window: {
     /** The oldest retained sequence in the store — what retention has NOT dropped. */
     oldestRetained: number;
@@ -230,14 +248,31 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
   return rows.sort((a, b) => a.attempt - b.attempt);
 }
 
+/** A failure message from a store, bounded and safe to render (the reader escapes it). */
+function readFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 300);
+}
+
 /** The report, read from durable state only. */
 export async function buildObservabilityReport(
   stores: Stores,
   nowMs: number = Date.now(),
 ): Promise<ObservabilityReport> {
-  const bounds = await stores.metadata.logBounds();
-  const readFrom = Math.max(bounds.oldestSeq - 1, bounds.newestSeq - REPORT_WINDOW);
-  const records = await stores.metadata.listLogs({ sinceSeq: readFrom, limit: REPORT_WINDOW });
+  const readErrors: ObservabilityReport["readErrors"] = [];
+
+  // The log store first, and its failure is recorded rather than thrown: a page whose whole job is
+  // to report on a broken deployment must still render when one of its own reads fails. What it
+  // must NOT do is render that failure as an absence of failures (audio-feed-ciuw).
+  let bounds = { oldestSeq: 1, newestSeq: 0 };
+  let records: LogRecord[] = [];
+  try {
+    bounds = await stores.metadata.logBounds();
+    const readFrom = Math.max(bounds.oldestSeq - 1, bounds.newestSeq - REPORT_WINDOW);
+    records = await stores.metadata.listLogs({ sinceSeq: readFrom, limit: REPORT_WINDOW });
+  } catch (error) {
+    readErrors.push({ store: "logs", message: readFailure(error) });
+  }
 
   const failures: FailureRow[] = [];
   const claimRecords: Record<string, LogRecord[]> = {};
@@ -289,7 +324,14 @@ export async function buildObservabilityReport(
   for (const { id, userId } of wanted) {
     if (seen.has(id)) continue;
     seen.add(id);
-    const episode = await stores.metadata.getEpisode(userId, id).catch(() => null);
+    let episode = null;
+    try {
+      episode = await stores.metadata.getEpisode(userId, id);
+    } catch (error) {
+      // The failure row still renders; only the episode context is missing, and the page says so
+      // rather than showing a failure with no episode as though there had been none.
+      readErrors.push({ store: "episodes", message: readFailure(error) });
+    }
     if (!episode) continue;
     episodes[id] = {
       id: episode.id,
@@ -303,12 +345,35 @@ export async function buildObservabilityReport(
     };
   }
 
-  const pending = await stores.metadata.listPendingEpisodes({
-    limit: REPORT_QUEUE_CAP + 1,
-    nowMs,
-  }).catch(() => ({ episodes: [] as Episode[] }));
-  const runs = await stores.metadata.listRuns(20).catch(() => [] as RunRecord[]);
-  const lastSynthesisRun = runs.find((run) => run.kind === "synthesis");
+  // A queue read that failed is NOT an empty queue (audio-feed-ciuw). `claimable: null` carries the
+  // difference through the type so a caller cannot accidentally render it as zero, and the drain
+  // verdict is "unreadable" rather than "empty" or "unknown", both of which would be claims about
+  // a queue nobody managed to look at.
+  let queueEpisodes: Episode[] | null = null;
+  let queueReadError: string | undefined;
+  try {
+    const pending = await stores.metadata.listPendingEpisodes({
+      limit: REPORT_QUEUE_CAP + 1,
+      nowMs,
+    });
+    queueEpisodes = pending.episodes;
+  } catch (error) {
+    queueReadError = readFailure(error);
+    readErrors.push({ store: "queue", message: queueReadError });
+  }
+
+  // Scoped to THIS job kind. A global newest-first page let twenty feed-poll runs crowd out the
+  // synthesis run the drain verdict depends on, so the page read "no run recorded" from a page full
+  // of unrelated jobs (audio-feed-506m).
+  let lastSynthesisRun: RunRecord | undefined;
+  let runsReadError: string | undefined;
+  try {
+    const runs = await stores.metadata.listRuns(20, "synthesis");
+    lastSynthesisRun = runs.find((run) => run.kind === "synthesis");
+  } catch (error) {
+    runsReadError = readFailure(error);
+    readErrors.push({ store: "runs", message: runsReadError });
+  }
 
   const liveClaims = Object.values(attempts)
     .flat()
@@ -317,37 +382,48 @@ export async function buildObservabilityReport(
     .flat()
     .filter((attempt) => attempt.outcome === "abandoned").length;
 
-  const claimable = pending.episodes.length;
-  const claimableCapped = claimable > REPORT_QUEUE_CAP;
-  const oldestClaimableAt = pending.episodes
-    .map((episode) => episode.createdAt)
+  const claimable = queueEpisodes ? queueEpisodes.length : null;
+  const claimableCapped = claimable !== null && claimable > REPORT_QUEUE_CAP;
+  const oldestClaimableAt = queueEpisodes
+    ?.map((episode) => episode.createdAt)
     .sort()[0];
 
-  let drain: QueueSnapshot["drain"] = "unknown";
-  if (claimable === 0) drain = "empty";
+  let drain: QueueSnapshot["drain"];
+  if (queueEpisodes === null) drain = "unreadable";
+  else if (claimable === 0) drain = "empty";
+  else if (runsReadError) drain = "unknown";
   else if (lastSynthesisRun) {
     const startedAgo = nowMs - Date.parse(lastSynthesisRun.startedAt);
     const recent = Number.isFinite(startedAgo) && startedAgo <= SYNTHESIS_TICK_MS * 3;
     drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.ready ?? 0) > 0
       ? "draining"
       : "stalled";
+  } else {
+    drain = "unknown";
   }
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    readErrors,
     window: {
+      /** The oldest sequence the store still holds — what retention has NOT dropped. */
       oldestRetained: bounds.oldestSeq,
       newestSeq: bounds.newestSeq,
-      readFrom: records.length > 0 ? records[0]!.seq : readFrom,
+      /** The first sequence actually read for this report. */
+      readFrom: records.length > 0
+        ? records[0]!.seq
+        : Math.max(bounds.oldestSeq - 1, bounds.newestSeq - REPORT_WINDOW),
       recordsRead: records.length,
     },
     queue: {
-      claimable: Math.min(claimable, REPORT_QUEUE_CAP),
+      claimable: claimable === null ? null : Math.min(claimable, REPORT_QUEUE_CAP),
       claimableCapped,
+      readError: queueReadError,
       oldestClaimableAt,
       liveClaims,
       abandoned,
       lastSynthesisRun,
+      runsReadError,
       drain,
     },
     failures,

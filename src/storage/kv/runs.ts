@@ -57,11 +57,14 @@ export function createRunsRepository(core: KvCore, _host: () => MetadataStore): 
         // History is diagnostic. Losing a record must not fail the run it describes.
       }
     },
-    /** Every job's newest-first history, merged. No job can contribute more than `limit`. */
-    async listRuns(limit = RUN_HISTORY_LIMIT * RUN_KINDS.length): Promise<RunRecord[]> {
+    /** Every job's newest-first history, merged; `kind` scopes it to one job (see RunRepository). */
+    async listRuns(
+      limit = RUN_HISTORY_LIMIT * RUN_KINDS.length,
+      kind?: RunRecord["kind"],
+    ): Promise<RunRecord[]> {
       const out: RunRecord[] = [];
-      for (const kind of RUN_KINDS) {
-        for await (const entry of core.kv.list<RunRecord>({ prefix: ["run", kind] }, { limit })) {
+      for (const job of kind ? [kind] : RUN_KINDS) {
+        for await (const entry of core.kv.list<RunRecord>({ prefix: ["run", job] }, { limit })) {
           if (entry.value) out.push(entry.value);
         }
       }
