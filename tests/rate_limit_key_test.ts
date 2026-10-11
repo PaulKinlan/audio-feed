@@ -125,7 +125,12 @@ Deno.test("formed addresses are accepted, and near-misses are not (audio-feed-u2
     "unknown",
     "",
     "2001:db8::1::2",
+    // Not hex at all: rejected by the alphabet, where the forms above are rejected by the
+    // structure. Both have to hold, and coord asked for this family by name.
+    "zz::1",
+    "0g:1:2:3:4:5:6:7",
     "0:",
+    "2001:db8::zzzz",
     "13:",
     "abc:",
     ":::",
