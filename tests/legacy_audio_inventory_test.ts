@@ -768,15 +768,34 @@ Deno.test("migrateLegacyAudioKeys: reviewer repro for lock expiry and stale take
   for (const kind of ["memory", "kv"] as const) {
     const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
     try {
-      const first = await acquireMigrationLock(stores.metadata, "first", 50);
-      const immediate = await acquireMigrationLock(stores.metadata, "second", 50);
-      await new Promise((r) => setTimeout(r, 110));
-      const afterLease = await acquireMigrationLock(stores.metadata, "second", 50);
+      // Fixed timestamps, not sleeps: the lock's expiry decision is a FUNCTION OF nowMs,
+      // and asserting it at chosen instants measures the lock, not the machine
+      // (audio-feed-y2ex: a test that sleeps against a real lease flakes under load).
+      const first = await acquireMigrationLock(stores.metadata, "first", 50, 10_000);
+      const immediate = await acquireMigrationLock(stores.metadata, "second", 50, 10_005);
+      const justInside = await acquireMigrationLock(stores.metadata, "second", 50, 10_049);
+      const afterLease = await acquireMigrationLock(stores.metadata, "second", 50, 10_051);
       assertEquals(first, true, "first must acquire");
       assertEquals(immediate, false, "immediate second must be refused");
-      assertEquals(afterLease, true, "second must acquire after lease expiry without renewal");
+      assertEquals(justInside, false, "last instant inside the lease must still be refused");
+      assertEquals(afterLease, true, "first instant past the lease must acquire without renewal");
     } finally {
       await stores.metadata.close?.();
+    }
+    // The EXACT boundary instant gets its own store: a successful takeover at the boundary
+    // would install a fresh lease and mask the next instant, so it cannot share a timeline
+    // with the probes above. A 50ms lease is expired at elapsed 50 — this is the instant an
+    // off-by-one comparison would flip.
+    {
+      const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
+      try {
+        const first = await acquireMigrationLock(stores.metadata, "first", 50, 10_000);
+        const exactBoundary = await acquireMigrationLock(stores.metadata, "second", 50, 10_050);
+        assertEquals(first, true, "first must acquire (boundary probe)");
+        assertEquals(exactBoundary, true, "the boundary instant itself must take over");
+      } finally {
+        await stores.metadata.close?.();
+      }
     }
   }
 });
@@ -786,17 +805,28 @@ Deno.test("migrateLegacyAudioKeys: heartbeat renewal holds lock indefinitely pas
     const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
     try {
       const leaseMs = 60;
-      const first = await acquireMigrationLock(stores.metadata, "holder-1", leaseMs);
+      // Renewal at fixed instants across a span more than twice the original lease —
+      // the same property the old 150ms real-time loop asserted, minus the sleeps
+      // (audio-feed-y2ex).
+      const first = await acquireMigrationLock(stores.metadata, "holder-1", leaseMs, 20_000);
       assertEquals(first, true);
 
-      // Periodically renew for 150ms (> 2x original lease of 60ms)
-      for (let i = 0; i < 5; i++) {
-        await new Promise((r) => setTimeout(r, 25));
-        const renewed = await renewMigrationLock(stores.metadata, "holder-1", leaseMs);
+      for (let i = 1; i <= 5; i++) {
+        const renewed = await renewMigrationLock(
+          stores.metadata,
+          "holder-1",
+          leaseMs,
+          20_000 + i * 25,
+        );
         assertEquals(renewed, true, "holder-1 must renew successfully");
 
-        // Concurrent holder must still be refused
-        const secondAttempt = await acquireMigrationLock(stores.metadata, "holder-2", leaseMs);
+        // Concurrent holder must still be refused while the heartbeat is fresh
+        const secondAttempt = await acquireMigrationLock(
+          stores.metadata,
+          "holder-2",
+          leaseMs,
+          20_000 + i * 25 + 1,
+        );
         assertEquals(
           secondAttempt,
           false,
@@ -804,13 +834,35 @@ Deno.test("migrateLegacyAudioKeys: heartbeat renewal holds lock indefinitely pas
         );
       }
 
-      // Explicit release by holder-1
-      await releaseMigrationLock(stores.metadata, "holder-1");
+      // Past the ORIGINAL lease (20_000 + 60) with renewals still fresh: still held.
+      const pastOriginalTtl = await acquireMigrationLock(
+        stores.metadata,
+        "holder-2",
+        leaseMs,
+        20_000 + 125,
+      );
+      assertEquals(
+        pastOriginalTtl,
+        false,
+        "renewal must hold the lock past the original TTL",
+      );
 
-      // holder-2 can now acquire immediately
-      const secondAcquired = await acquireMigrationLock(stores.metadata, "holder-2", leaseMs);
-      assertEquals(secondAcquired, true, "second holder must acquire immediately after release");
+      // No renewal after 20_125; one instant past that heartbeat's lease: takeover.
+      const stale = await acquireMigrationLock(stores.metadata, "holder-2", leaseMs, 20_125 + 61);
+      assertEquals(stale, true, "lock must be acquirable once the last heartbeat's lease lapses");
+
+      // Explicit release by the taker
       await releaseMigrationLock(stores.metadata, "holder-2");
+
+      // holder-3 can now acquire immediately
+      const thirdAcquired = await acquireMigrationLock(
+        stores.metadata,
+        "holder-3",
+        leaseMs,
+        21_000,
+      );
+      assertEquals(thirdAcquired, true, "next holder must acquire immediately after release");
+      await releaseMigrationLock(stores.metadata, "holder-3");
     } finally {
       await stores.metadata.close?.();
     }
