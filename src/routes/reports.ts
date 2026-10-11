@@ -12,6 +12,8 @@
  * because the reporting endpoint is public and unauthenticated.
  * - String values are sanitized by stripping control characters and enforcing strict length caps.
  * - Dangerous object keys (__proto__, constructor, prototype) are discarded.
+ * - Bounded stream reading stops at 64KiB + 1 bytes before allocation or JSON parsing (audio-feed-19db).
+ * - Per-client rate limit and write budget protects the shared log store from flooding (audio-feed-jbpz).
  * - Reports are persisted into the structured log store (MetadataStore.appendLog) using the
  *   typed event family `report.*` (e.g. `report.csp-violation`, `report.crash`).
  * - Report contents are NEVER rendered unescaped in HTML or admin contexts.
@@ -21,22 +23,25 @@ import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import type { LogSeverity } from "../storage/mod.ts";
 import { cleanString, MAX_LOG_MESSAGE_LENGTH, redactContext } from "../storage/log_shape.ts";
+import {
+  extractClientIp,
+  type RateLimitConfig,
+  SlidingWindowRateLimiter,
+} from "../auth/rate_limit.ts";
 
 /** Maximum payload size accepted on the reporting endpoint (64 KiB). */
 export const MAX_REPORT_PAYLOAD_BYTES = 64 * 1024;
 
-/** Maximum number of reports processed from a single batch. */
-export const MAX_REPORTS_PER_BATCH = 50;
+/** Maximum number of reports processed from a single request batch (audio-feed-jbpz). */
+export const MAX_REPORTS_PER_BATCH = 10;
 
-/** Known report types to log severity mapping. */
-export const REPORT_SEVERITY: Record<string, LogSeverity> = {
-  "crash": "error",
-  "csp-violation": "warn",
-  "network-error": "warn",
-  "coep": "warn",
-  "permissions-policy-violation": "warn",
-  "intervention": "warn",
-  "deprecation": "info",
+/** Maximum reports written per window per client (audio-feed-jbpz). */
+export const DEFAULT_MAX_REPORTS_PER_WINDOW = 25;
+
+/** Default sliding window rate limit for public reports endpoint (audio-feed-jbpz). */
+export const DEFAULT_REPORTS_RATE_LIMIT: RateLimitConfig = {
+  windowMs: 60_000,
+  maxRequests: 5,
 };
 
 export interface RawReportItem {
@@ -54,6 +59,17 @@ export interface SanitizedReport {
   age?: number;
   body: Record<string, unknown>;
 }
+
+/** Known report types to log severity mapping. */
+export const REPORT_SEVERITY: Record<string, LogSeverity> = {
+  "crash": "error",
+  "csp-violation": "warn",
+  "network-error": "warn",
+  "coep": "warn",
+  "permissions-policy-violation": "warn",
+  "intervention": "warn",
+  "deprecation": "info",
+};
 
 /**
  * Filter out prototype-pollution vectors and clean primitive values in a report body.
@@ -180,118 +196,239 @@ export function buildReportMessage(report: SanitizedReport): string {
 }
 
 /**
- * Handle incoming CSP and Reporting API payloads.
+ * Bounded stream reader for request bodies (audio-feed-19db).
+ * Stops reading as soon as totalBytes exceeds maxBytes (without buffering the rest).
  */
-export const handleCspReports: Handler<AppContext> = async ({ req, ctx }) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "allow": "POST, OPTIONS",
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "POST, OPTIONS",
-        "access-control-allow-headers": "content-type",
-      },
-    });
-  }
-
-  if (req.method !== "POST") {
-    return new Response(null, {
-      status: 405,
-      headers: { "allow": "POST, OPTIONS" },
-    });
-  }
-
-  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
-  const isReportsJson = contentType.includes("application/reports+json");
-  const isCspReport = contentType.includes("application/csp-report");
-  const isJson = contentType.includes("application/json");
-
-  if (!isReportsJson && !isCspReport && !isJson) {
-    // Flush cleanly for unknown or unsupported browser headers
-    return new Response(null, { status: 204 });
-  }
-
-  // Safe bounded body read
-  let text = "";
-  try {
-    const rawBytes = await req.arrayBuffer();
-    if (rawBytes.byteLength > MAX_REPORT_PAYLOAD_BYTES) {
-      return new Response(null, { status: 413 });
+export async function readBoundedBody(
+  req: Request,
+  maxBytes: number = MAX_REPORT_PAYLOAD_BYTES,
+): Promise<{ ok: true; text: string } | { ok: false; status: 413 | 400 }> {
+  const contentLengthHeader = req.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      if (req.body) {
+        await req.body.cancel("payload_too_large").catch(() => {});
+      }
+      return { ok: false, status: 413 };
     }
-    text = new TextDecoder().decode(rawBytes);
-  } catch {
-    return new Response(null, { status: 400 });
   }
 
-  if (!text.trim()) {
-    return new Response(null, { status: 204 });
+  if (!req.body) {
+    return { ok: true, text: "" };
   }
 
-  let parsed: unknown;
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    return new Response(null, { status: 400 });
-  }
-
-  const rawReports: RawReportItem[] = [];
-
-  if (Array.isArray(parsed)) {
-    for (const item of parsed.slice(0, MAX_REPORTS_PER_BATCH)) {
-      if (item && typeof item === "object") {
-        rawReports.push(item as RawReportItem);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel("payload_too_large").catch(() => {});
+          return { ok: false, status: 413 };
+        }
+        chunks.push(value);
       }
     }
-  } else if (parsed && typeof parsed === "object") {
-    const record = parsed as Record<string, unknown>;
-    if (
-      "csp-report" in record && record["csp-report"] && typeof record["csp-report"] === "object"
-    ) {
-      // Legacy application/csp-report format
-      const csp = record["csp-report"] as Record<string, unknown>;
-      rawReports.push({
-        type: "csp-violation",
-        url: csp["document-uri"],
-        user_agent: req.headers.get("user-agent") ?? undefined,
-        body: csp,
+  } catch {
+    return { ok: false, status: 400 };
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(combined) };
+}
+
+/**
+ * Handle incoming CSP and Reporting API payloads with rate limiting and bounded reading.
+ */
+export function createCspReportsHandler(
+  ctx: AppContext,
+  deps: {
+    rateLimiter?: SlidingWindowRateLimiter;
+    rateLimitConfig?: RateLimitConfig;
+    maxReportsPerBatch?: number;
+    maxReportsPerWindow?: number;
+  } = {},
+): Handler<AppContext> {
+  const limiter = deps.rateLimiter ??
+    new SlidingWindowRateLimiter(
+      deps.rateLimitConfig ?? DEFAULT_REPORTS_RATE_LIMIT,
+      ctx.stores.metadata,
+      "reports:csp",
+    );
+  const maxBatch = deps.maxReportsPerBatch ?? MAX_REPORTS_PER_BATCH;
+  const maxPerWindow = deps.maxReportsPerWindow ?? DEFAULT_MAX_REPORTS_PER_WINDOW;
+
+  return async ({ req, remoteAddr }) => {
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "allow": "POST, OPTIONS",
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "POST, OPTIONS",
+          "access-control-allow-headers": "content-type",
+        },
       });
-    } else if (typeof record.type === "string") {
-      rawReports.push(record as RawReportItem);
     }
-  }
 
-  if (rawReports.length === 0) {
-    return new Response(null, { status: 204 });
-  }
-
-  const defaultUserAgent = req.headers.get("user-agent") ?? undefined;
-
-  for (const raw of rawReports) {
-    if (!raw.user_agent && defaultUserAgent) {
-      raw.user_agent = defaultUserAgent;
+    if (req.method !== "POST") {
+      return new Response(null, {
+        status: 405,
+        headers: { "allow": "POST, OPTIONS" },
+      });
     }
-    const report = sanitizeReport(raw);
-    const severity = REPORT_SEVERITY[report.type] ?? "warn";
-    const type = `report.${report.type}`;
-    const message = buildReportMessage(report);
 
-    await ctx.stores.metadata.appendLog({
-      time: new Date().toISOString(),
-      severity,
-      type,
-      message,
-      process: "app",
-      route: "/api/reports/csp",
-      context: {
-        reportType: report.type,
-        ...(report.url ? { url: report.url } : {}),
-        ...(report.userAgent ? { userAgent: report.userAgent } : {}),
-        ...(report.age !== undefined ? { age: report.age } : {}),
-        body: report.body,
+    const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+    const isReportsJson = contentType.includes("application/reports+json");
+    const isCspReport = contentType.includes("application/csp-report");
+    const isJson = contentType.includes("application/json");
+
+    if (!isReportsJson && !isCspReport && !isJson) {
+      // Flush cleanly for unknown or unsupported browser headers
+      return new Response(null, { status: 204 });
+    }
+
+    // Rate limit check (audio-feed-jbpz): public endpoint must not flood the error store
+    const clientKey = extractClientIp(
+      req,
+      Boolean(ctx.config.trustProxyHeaders),
+      remoteAddr,
+    );
+    const rateResult = await limiter.check(clientKey);
+    if (!rateResult.allowed) {
+      return new Response(null, {
+        status: 429,
+        headers: {
+          "retry-after": Math.max(1, Math.ceil(rateResult.resetMs / 1000)).toString(),
+        },
+      });
+    }
+
+    // Bounded stream read (audio-feed-19db): stop reading as soon as limit is exceeded
+    const bodyResult = await readBoundedBody(req, MAX_REPORT_PAYLOAD_BYTES);
+    if (!bodyResult.ok) {
+      return new Response(null, {
+        status: bodyResult.status,
+        headers: { "connection": "close" },
+      });
+    }
+
+    const text = bodyResult.text;
+    if (!text.trim()) {
+      return new Response(null, { status: 204 });
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+
+    const rawReports: RawReportItem[] = [];
+
+    if (Array.isArray(parsed)) {
+      for (const item of parsed.slice(0, maxBatch)) {
+        if (item && typeof item === "object") {
+          rawReports.push(item as RawReportItem);
+        }
+      }
+    } else if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      if (
+        "csp-report" in record && record["csp-report"] &&
+        typeof record["csp-report"] === "object"
+      ) {
+        // Legacy application/csp-report format
+        const csp = record["csp-report"] as Record<string, unknown>;
+        rawReports.push({
+          type: "csp-violation",
+          url: csp["document-uri"],
+          user_agent: req.headers.get("user-agent") ?? undefined,
+          body: csp,
+        });
+      } else if (typeof record.type === "string") {
+        rawReports.push(record as RawReportItem);
+      }
+    }
+
+    if (rawReports.length === 0) {
+      return new Response(null, { status: 204 });
+    }
+
+    // Per-window write budget check (audio-feed-jbpz): cap total reports stored per client window
+    const now = Date.now();
+    const windowStart = now -
+      (deps.rateLimitConfig?.windowMs ?? DEFAULT_REPORTS_RATE_LIMIT.windowMs);
+    let budgetAdmitted = false;
+    await ctx.stores.metadata.atomicUpdate<number[]>(
+      `reports:budget:${clientKey}`,
+      (current) => {
+        const active = (current ?? []).filter((t) => t > windowStart);
+        if (active.length + rawReports.length > maxPerWindow) {
+          budgetAdmitted = false;
+          return active;
+        }
+        for (let i = 0; i < rawReports.length; i++) {
+          active.push(now);
+        }
+        budgetAdmitted = true;
+        return active;
       },
-    });
-  }
+      (deps.rateLimitConfig?.windowMs ?? DEFAULT_REPORTS_RATE_LIMIT.windowMs) * 2,
+    );
 
-  return new Response(null, { status: 204 });
+    if (!budgetAdmitted) {
+      return new Response(null, {
+        status: 429,
+        headers: { "retry-after": "60" },
+      });
+    }
+
+    const defaultUserAgent = req.headers.get("user-agent") ?? undefined;
+
+    for (const raw of rawReports) {
+      if (!raw.user_agent && defaultUserAgent) {
+        raw.user_agent = defaultUserAgent;
+      }
+      const report = sanitizeReport(raw);
+      const severity = REPORT_SEVERITY[report.type] ?? "warn";
+      const type = `report.${report.type}`;
+      const message = buildReportMessage(report);
+
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity,
+        type,
+        message,
+        process: "app",
+        route: "/api/reports/csp",
+        context: {
+          reportType: report.type,
+          ...(report.url ? { url: report.url } : {}),
+          ...(report.userAgent ? { userAgent: report.userAgent } : {}),
+          ...(report.age !== undefined ? { age: report.age } : {}),
+          body: report.body,
+        },
+      });
+    }
+
+    return new Response(null, { status: 204 });
+  };
+}
+
+/** Default singleton handler delegating to createCspReportsHandler. */
+export const handleCspReports: Handler<AppContext> = (req) => {
+  return createCspReportsHandler(req.ctx)(req);
 };

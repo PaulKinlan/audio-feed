@@ -356,3 +356,74 @@ Deno.test("CSP reporting endpoint: rejects non-POST and oversized payloads safel
   );
   assertEquals(hugeRes.status, 413, "payload over 64KB must be rejected with 413");
 });
+
+Deno.test("audio-feed-19db: chunked oversized upload rejects with 413 without buffering full stream", async () => {
+  const { app } = await setupApp();
+
+  let emittedChunks = 0;
+  const chunkBytes = new Uint8Array(8192).fill(32);
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (emittedChunks >= 128) {
+        controller.close();
+        return;
+      }
+      emittedChunks++;
+      controller.enqueue(chunkBytes);
+    },
+  });
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: { "content-type": "application/reports+json" },
+      body: stream,
+      // @ts-ignore: duplex is required in RequestInit for streaming bodies in fetch
+      duplex: "half",
+    }),
+  );
+
+  assertEquals(res.status, 413, "must reject oversized stream with 413");
+  // Stream should stop pulling as soon as limit is exceeded (at ~9 chunks = 73,728 bytes)
+  assert(
+    emittedChunks <= 16,
+    `stream must not buffer full 128 chunks (emitted: ${emittedChunks})`,
+  );
+});
+
+Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited and capped per window", async () => {
+  const { app, stores } = await setupApp();
+
+  // Send repeated batches of reports from the same client IP
+  const statuses: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const res = await app.fetch(
+      new Request(`${BASE}/api/reports/csp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/reports+json",
+          "x-forwarded-for": "203.0.113.195",
+        },
+        body: JSON.stringify(
+          Array.from({ length: 10 }, (_, n) => ({
+            type: "crash",
+            body: { reason: `flood-${i}-${n}` },
+          })),
+        ),
+      }),
+    );
+    statuses.push(res.status);
+  }
+
+  // The first batches are admitted; subsequent batches must be rejected with 429
+  assert(statuses.includes(429), "repeated batches must hit 429 rate limit");
+  const rejectedIndex = statuses.indexOf(429);
+  assert(rejectedIndex >= 1, "first batch should be allowed, later limited");
+
+  // Log store must NOT be flooded with all 60 reports
+  const logs = await stores.metadata.listLogs();
+  assert(
+    logs.length <= 25,
+    `log store must be protected from unbounded flood (stored: ${logs.length})`,
+  );
+});
