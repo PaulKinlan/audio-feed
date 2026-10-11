@@ -16,7 +16,11 @@
 import { assert, assertEquals } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
-import { DEFAULT_DAILY_EPISODE_BUDGET, memoryStores } from "../src/config.ts";
+import {
+  DEFAULT_DAILY_EPISODE_BUDGET,
+  DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
+  memoryStores,
+} from "../src/config.ts";
 import { runAdminScript } from "./admin_script.ts";
 import { makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -85,13 +89,18 @@ Deno.test("an empty deployment reports zeroes, not absences (audio-feed-ndc)", a
   assertEquals(body.ok, true);
   assertEquals(body.downloads, { total: 0, perUser: [] });
   // `defaultDailyEpisodeBudget` and `usersWithoutBudget` are the spend-ceiling fields
-  // (audio-feed-khk3): the same rule applies to them — a deployment with no subscribers reports
-  // the ceiling it would apply and a count of zero, not an absent key.
+  // (audio-feed-khk3), and `globalDailyEpisodeBudget`, `globalBudgetSource` and
+  // `globalEpisodesToday` are the fleet-wide ceiling (audio-feed-m182): the same rule applies to all
+  // of them — a deployment with no subscribers reports the ceilings it would apply, where they came
+  // from, and zero usage, not absent keys.
   assertEquals(body.synthesis, {
     total: 0,
     totalBytes: 0,
     defaultDailyEpisodeBudget: DEFAULT_DAILY_EPISODE_BUDGET,
     usersWithoutBudget: 0,
+    globalDailyEpisodeBudget: DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
+    globalBudgetSource: "default",
+    globalEpisodesToday: 0,
     perUser: [],
   });
   assertEquals(body.runs, []);

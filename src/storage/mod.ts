@@ -512,6 +512,13 @@ export interface UsageRepository {
   recordSynthesis(userId: string, bytes: number, at?: Date): Promise<void>;
   getSynthesisCounts(today?: string): Promise<SynthesisCounts>;
   getUserDailySynthesisCount(userId: string, day: string): Promise<number>;
+  /**
+   * Paid episodes recorded on a UTC day across every subscriber (audio-feed-m182).
+   *
+   * Written in the same transaction as the per-user counter, so the two cannot drift apart; the
+   * conformance suite asserts the sum invariant.
+   */
+  getDailySynthesisCount(day: string): Promise<number>;
 }
 
 /**

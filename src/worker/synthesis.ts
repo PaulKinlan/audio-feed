@@ -70,7 +70,7 @@ import {
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
 import { collect } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
-import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET } from "../config.ts";
 
 /** Segment blob deletions in flight at once (audio-feed-ikst). Bounded so the sweep
  * that follows a finished run cannot stampede the blob store. */
@@ -132,6 +132,15 @@ export interface SynthesisWorkerOptions {
    * and a default spread into the options object would have silently masked it.
    */
   defaultDailyEpisodeBudget?: number;
+  /**
+   * The ceiling on paid episodes per UTC day across EVERY subscriber (audio-feed-m182).
+   *
+   * The per-subscriber ceiling above bounds one subscriber, so total spend grows with the number of
+   * approved subscribers. This bounds the sum. Resolved explicit -> deployment config -> constant,
+   * and resolved inside the worker like the ceiling above, so no entry point that synthesises can
+   * forget it. Also deliberately NOT a key of DEFAULTS, for the same reason.
+   */
+  globalDailyEpisodeBudget?: number;
   /** How long a claim is honoured before another worker may take the episode. */
   leaseMs?: number;
   /** Claims per episode before it is abandoned as unprocessable. */
@@ -150,7 +159,9 @@ export interface SynthesisWorkerOptions {
  */
 const WORKER_ID = `worker-${crypto.randomUUID()}`;
 
-const DEFAULTS: Required<Omit<SynthesisWorkerOptions, "nowMs" | "defaultDailyEpisodeBudget">> = {
+const DEFAULTS: Required<
+  Omit<SynthesisWorkerOptions, "nowMs" | "defaultDailyEpisodeBudget" | "globalDailyEpisodeBudget">
+> = {
   batchSize: 5,
   intervalMs: 15_000,
   maxAttempts: 3,
@@ -192,6 +203,46 @@ export function dailyEpisodeBudgetFor(
     ? deploymentDefault
     : DEFAULT_DAILY_EPISODE_BUDGET;
   return { limit: fallback, source: "default" };
+}
+
+/**
+ * The fleet-wide daily ceiling in force, and where it came from (audio-feed-m182).
+ *
+ * The same shape as dailyEpisodeBudgetFor, and for the same reason: an unusable value (negative,
+ * NaN, non-integer, Infinity) means ABSENT, not unlimited, so no caller, test double or future
+ * refactor can hand this function something that means "no ceiling". `configured` distinguishes a
+ * number an operator set (option or environment) from the built-in constant, because those are
+ * different decisions and the defer reason should say which one stopped the work.
+ */
+export function globalDailyEpisodeBudgetFor(
+  option?: number,
+  deployment?: number,
+): { limit: number; source: "configured" | "default" } {
+  const usable = (value: number | undefined): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const configured = usable(option) ?? usable(deployment);
+  return configured === undefined
+    ? { limit: DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET, source: "default" }
+    : { limit: configured, source: "configured" };
+}
+
+/**
+ * The deferral reason when the fleet-wide ceiling has been reached.
+ *
+ * Parallel to budgetDeferReason, and it names the ceiling it was, the day's usage, and whether the
+ * number was configured or the built-in default — an operator reading a deferred episode has to be
+ * able to tell "I set this" from "nobody set this".
+ */
+function globalCeilingDeferReason(
+  budget: { limit: number; source: "configured" | "default" },
+  spentToday: number,
+): string {
+  const base =
+    `daily spend ceiling reached across all subscribers (limit: ${budget.limit}, used: ` +
+    `${spentToday}`;
+  return budget.source === "configured"
+    ? `${base})`
+    : `${base}, source: built-in default - no global budget configured)`;
 }
 
 /**
@@ -662,6 +713,16 @@ export async function runSynthesisBatch(
    */
   const deploymentDailyEpisodeBudget = options.defaultDailyEpisodeBudget ??
     ctx.config.defaultDailyEpisodeBudget;
+  /**
+   * The fleet-wide ceiling for this tick (audio-feed-m182). Resolved here rather than at each gate,
+   * for the same reason the per-subscriber ceiling is: the gather-time filter and the spend gate
+   * must not be able to disagree about whether the deployment has money left.
+   */
+  const globalBudget = globalDailyEpisodeBudgetFor(
+    options.globalDailyEpisodeBudget,
+    ctx.config.globalDailyEpisodeBudget,
+  );
+  let warnedGlobalCeiling = false;
   /** Users already reported as held by the deployment default this run (audio-feed-khk3). */
   const warnedDefaultBudget = new Set<string>();
   /**
@@ -678,6 +739,18 @@ export async function runSynthesisBatch(
     warnedDefaultBudget.add(userId);
     console.warn(
       `[audio-feed] holding work for user ${userId} at the deployment default daily ceiling of ${limit} (no per-user budget configured; set DEFAULT_DAILY_EPISODE_BUDGET or this subscriber's budget) (audio-feed-khk3)`,
+    );
+  };
+  /**
+   * Say it once per tick when the fleet-wide ceiling is what stopped the run (audio-feed-m182).
+   *
+   * Once per tick rather than per subscriber: the fleet ceiling belongs to the deployment, so a log
+   * line per subscriber would be the same fact repeated, and khk3's per-user warning already covers
+   * the per-subscriber case.
+   */
+  const warnGlobalCeiling = (limit: number): void => {
+    console.warn(
+      `[audio-feed] holding all work at the fleet-wide daily ceiling of ${limit} paid episodes (set GLOBAL_DAILY_EPISODE_BUDGET to raise it) (audio-feed-m182)`,
     );
   };
   const result: SynthesisBatchResult = {
@@ -744,13 +817,26 @@ export async function runSynthesisBatch(
     // Check per-user daily episode budget ceiling (audio-feed-9mp, audio-feed-akm)
     if (reason === null) {
       try {
-        const user = await metadata.getUser(userId);
-        const budget = dailyEpisodeBudgetFor(user, deploymentDailyEpisodeBudget);
         const today = utcDayKey(new Date(nowMs));
-        const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
-        if (spentToday >= budget.limit) {
-          reason = budgetDeferReason(budget, spentToday);
-          if (budget.source === "default") warnDefaultCeiling(userId, budget.limit);
+        // audio-feed-m182: the fleet-wide ceiling first. It is the ceiling on the sum, so it applies
+        // to every subscriber at once, and reading it per check means a tick that spends up to it
+        // stops there rather than at the snapshot taken when the tick started.
+        const globalToday = await metadata.getDailySynthesisCount(today);
+        if (globalToday >= globalBudget.limit) {
+          reason = globalCeilingDeferReason(globalBudget, globalToday);
+          if (globalBudget.source === "default" && !warnedGlobalCeiling) {
+            warnedGlobalCeiling = true;
+            warnGlobalCeiling(globalBudget.limit);
+          }
+        }
+        if (reason === null) {
+          const user = await metadata.getUser(userId);
+          const budget = dailyEpisodeBudgetFor(user, deploymentDailyEpisodeBudget);
+          const spentToday = await metadata.getUserDailySynthesisCount(userId, today);
+          if (spentToday >= budget.limit) {
+            reason = budgetDeferReason(budget, spentToday);
+            if (budget.source === "default") warnDefaultCeiling(userId, budget.limit);
+          }
         }
       } catch (err) {
         // Fail closed for spend ceiling: if daily count cannot be verified, defer rather than spending
@@ -813,11 +899,25 @@ export async function runSynthesisBatch(
       continue;
     }
 
-    // Check budget at spend gate (audio-feed-9mp, audio-feed-akm, audio-feed-khk3)
+    // Check budget at spend gate (audio-feed-9mp, audio-feed-akm, audio-feed-khk3, audio-feed-m182)
     try {
+      const today = utcDayKey(new Date(nowMs));
+      // The fleet-wide ceiling is re-read here, not reused from the gather pass: a tick is not
+      // instantaneous (5 episodes at ~10s each), so episodes completed during it have already added
+      // to today's total. This is the check that stops the money; the gather pass only decides who
+      // gets the batch.
+      const globalToday = await metadata.getDailySynthesisCount(today);
+      if (globalToday >= globalBudget.limit) {
+        const reason = globalCeilingDeferReason(globalBudget, globalToday);
+        if (globalBudget.source === "default" && !warnedGlobalCeiling) {
+          warnedGlobalCeiling = true;
+          warnGlobalCeiling(globalBudget.limit);
+        }
+        result.deferred.push({ episodeId: episode.id, reason });
+        continue;
+      }
       const spendUser = await metadata.getUser(episode.userId);
       const budget = dailyEpisodeBudgetFor(spendUser, deploymentDailyEpisodeBudget);
-      const today = utcDayKey(new Date(nowMs));
       const spentToday = await metadata.getUserDailySynthesisCount(episode.userId, today);
       if (spentToday >= budget.limit) {
         const reason = budgetDeferReason(budget, spentToday);

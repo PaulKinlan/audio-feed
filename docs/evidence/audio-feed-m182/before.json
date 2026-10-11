@@ -1,0 +1,14 @@
+{
+  "bead": "audio-feed-m182",
+  "measuredAt": "2026-10-11T00:45:57.276Z",
+  "mode": "no global ceiling (pre-change tree)",
+  "subscribers": 3,
+  "episodesQueued": 9,
+  "configuredGlobalCeiling": null,
+  "paidCalls": 9,
+  "readyEpisodes": 9,
+  "stillPending": 0,
+  "globalCountForToday": null,
+  "deferredReasons": [],
+  "warnedAboutTheDefaultCeiling": []
+}
