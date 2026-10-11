@@ -95,10 +95,12 @@ STORAGE_REGION=auto
 # Enable only behind a proxy that APPENDS the client address it saw. The rate limiter keys on the
 # last x-forwarded-for entry for that reason: a caller that prepends a forged address is ignored
 # rather than handed a fresh allowance.
-# Pin the advertised origin (feed URLs, redirects, WebAuthn RP ID) to a fixed
-# set of hosts; requests arriving on any other host are answered 421.
-# Comma-separated; the PUBLIC_BASE_URL host and loopback are always allowed.
-# ALLOWED_HOSTS=audio-feed.paulkinlan-ea.deno.net
+# The advertised origin (feed URLs, redirects, WebAuthn RP ID) is pinned to the
+# host of PUBLIC_BASE_URL, and a request arriving on any other host is answered
+# 421 - the protection configures itself and does not depend on this variable.
+# ALLOWED_HOSTS only ADDS hosts (staging, a preview URL, a custom domain).
+# Comma-separated; the PUBLIC_BASE_URL host and loopback are always accepted.
+# ALLOWED_HOSTS=staging.audio-feed.example
 
 # Optional: system default narration voice
 # DEFAULT_VOICE=Aoede

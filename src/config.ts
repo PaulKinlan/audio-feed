@@ -106,7 +106,11 @@ export interface AppConfig {
   /**
    * Hosts this deployment is willing to advertise (audio-feed-fp4r).
    *
-   * From `ALLOWED_HOSTS` (comma-separated). When set, a request arriving on an
+   * EXTRA hosts to accept, from `ALLOWED_HOSTS` (comma-separated), on top of
+   * the host of `publicBaseUrl` — which is accepted on its own, without this
+   * variable being set (audio-feed-7lsy). An override for staging or a custom
+   * domain, never a prerequisite for the protection to exist. When set, a
+   * request arriving on an
    * unlisted host is answered `421 Misdirected Request` at the app boundary and
    * never becomes the advertised origin — which also pins the WebAuthn RP ID,
    * since that derives from the advertised origin's hostname. Unset keeps the

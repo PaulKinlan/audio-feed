@@ -6,7 +6,7 @@
  * - Refusal of Public Suffixes / eTLDs (deno.net, pages.dev, github.io, com) as RP IDs
  * - Acceptance of localhost and valid registrable domain suffixes
  * - Support for explicit WEBAUTHN_RP_ID configuration
- * - GET /.well-known/webauthn serves valid ROR JSON with origins list and public cache headers
+ * - GET /.well-known/webauthn serves valid ROR JSON with its origins list, uncacheable (no-store)
  */
 
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -143,7 +143,7 @@ Deno.test("GET /.well-known/webauthn: serves ROR JSON origins list (audio-feed-1
   const res = await fetch(new Request(`${BASE}/.well-known/webauthn`));
   assertEquals(res.status, 200);
   assertStringIncludes(String(res.headers.get("content-type")), "application/json");
-  assertStringIncludes(String(res.headers.get("cache-control")), "public");
+  assertEquals(res.headers.get("cache-control"), "no-store");
 
   const data = await res.json() as { origins: string[] };
   assert(Array.isArray(data.origins));
@@ -168,11 +168,14 @@ Deno.test("GET /.well-known/webauthn: unconfigured returns empty origins with no
   assertEquals(data.origins, []);
 });
 
-Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poisoning with byte-identical responses (audio-feed-1o2)", async () => {
-  // publicBaseUrl UNSET (where the Host header fallback path lived)
+Deno.test("GET /.well-known/webauthn: a Host header cannot become the advertised origin (audio-feed-1o2, audio-feed-7lsy)", async () => {
+  // audio-feed-7lsy: the answer to Host poisoning is now a REFUSAL rather than a byte-identical page.
+  // With the host configured, every other Host is answered 421 before any handler runs, so a poisoned
+  // request cannot reach this endpoint at all - strictly stronger than ignoring the header.
   const config: AppConfig = {
     port: 8080,
     adminToken: "admin-secret",
+    publicBaseUrl: "https://victim.com",
   };
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
@@ -194,12 +197,29 @@ Deno.test("GET /.well-known/webauthn: behaviourally immune to Host header poison
   );
   const body2 = await res2.text();
 
-  // Both responses are byte-identical and equal to {"origins":[]}, ignoring any client Host header
-  assertEquals(body1, body2);
+  // The canonical host is served, and the client-supplied Host never appears in the answer.
+  assertEquals(res1.status, 200);
+  // no-store, restored deliberately after the reviewer asked for the choice to be stated rather than
+  // incidental: this is auth metadata derived from deployment configuration, so a cache could serve an
+  // answer from before a reconfiguration. The header is NOT the poisoning defence - the 421 refusal
+  // below is - but that is an argument about the header's role, not a reason to make it cacheable.
   assertEquals(res1.headers.get("cache-control"), "no-store");
-  assertEquals(res2.headers.get("cache-control"), "no-store");
-  assertEquals(JSON.parse(body1), { origins: [] });
-  assertEquals(JSON.parse(body2), { origins: [] });
+  // The answer advertises the CONFIGURED origin - that is the point of pinning it - and never the
+  // Host it was asked on.
+  const body1Json = JSON.parse(body1) as { origins: string[] };
+  assert(
+    body1Json.origins.includes("https://victim.com"),
+    "the answer must advertise the configured origin",
+  );
+  assert(!body1.includes("attacker-evil.com"), "and never a client-supplied host");
+
+  // The poisoned host is refused outright: the response is not a copy of the real answer, and it is
+  // not an origin advertisement either. Nothing about the attacker's Host reaches the body.
+  assertEquals(res2.status, 421, "a poisoned Host must be refused, not served the real response");
+  assert(
+    !body2.includes("victim.com"),
+    "a refused request must not leak the configured origin either",
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -118,23 +118,30 @@ function isLoopbackHost(host: string): boolean {
  * allow-list is configured (the request host is then the only source of truth
  * and is used as-is).
  *
- * The list only activates when the operator sets ALLOWED_HOSTS. The
- * `publicBaseUrl` host is folded in so the canonical host never rejects
- * itself, but setting PUBLIC_BASE_URL alone does not turn the gate on — the
- * advertised origin is already pinned in that deployment, and gating would
- * only break its preview URLs.
+ * The gate is ACTIVE whenever the deployment knows its own host, which
+ * `PUBLIC_BASE_URL` is: that host is the accepted one, and ALLOWED_HOSTS adds
+ * to it rather than being a prerequisite for it (audio-feed-7lsy, Paul's
+ * directive). Treating the variable as required made the check correct AND
+ * inert — no behaviour change, exposure open, no error — which is worse than a
+ * loud refusal because it is indistinguishable from working.
+ *
+ * With neither value set the set is EMPTY, and an empty set means loopback
+ * only: the gate fails CLOSED rather than trusting whatever `Host` the client
+ * sent. A deployment that does not know its own host must not advertise an
+ * attacker's.
  */
-function allowedHostSet(config: OriginConfig): Set<string> | null {
-  if (!config.allowedHosts?.length) return null;
+function allowedHostSet(config: OriginConfig): Set<string> {
   const hosts = new Set<string>();
-  for (const entry of config.allowedHosts) {
+  for (const entry of config.allowedHosts ?? []) {
     const host = normaliseHost(entry);
     if (host) hosts.add(host);
   }
   if (!isUnusableOrigin(config.publicBaseUrl)) {
     hosts.add(bareHost(new URL(config.publicBaseUrl!).hostname));
   }
-  return hosts.size ? hosts : null;
+  // Deliberately returned even when empty: an empty set refuses everything but
+  // loopback, which is the fail-closed case (audio-feed-7lsy).
+  return hosts;
 }
 
 /**
@@ -169,8 +176,8 @@ function effectiveRequestHost(
 /**
  * Is this request arriving on a host the deployment is willing to advertise?
  *
- * `true` when no allow-list is configured (preserving the request-derived
- * behaviour that fixed audio-feed-0k3), when the host is on the list, or when
+ * `true` when the host is one the deployment accepts — its own configured
+ * host, a listed one — or when
  * it is exact loopback AND the host the request actually arrived on — a local
  * dev machine has nothing to poison but itself, and refusing it would break
  * `deno task dev` the moment anyone sets the list. A client-supplied
@@ -178,7 +185,6 @@ function effectiveRequestHost(
  */
 export function requestHostAllowed(config: OriginConfig, request: Request): boolean {
   const allowed = allowedHostSet(config);
-  if (!allowed) return true;
   const effective = effectiveRequestHost(request, config.trustProxyHeaders);
   if (!effective) return false;
   if (allowed.has(effective.host)) return true;
@@ -272,12 +278,18 @@ export function resolveOrigin(config: OriginConfig, request: Request): ResolvedO
   // `app.fetch` this branch is unreachable anyway — the 421 gate fires first —
   // so it exists for direct handler callers.
   if (!requestHostAllowed(config, request)) {
-    const pinned = [...allowedHostSet(config)!][0];
-    let proto = "https";
-    try {
-      if (new URL(request.url).protocol === "http:") proto = "http";
-    } catch { /* keep https */ }
-    return { baseUrl: `${proto}://${pinned}`, explicit: true };
+    // Pinning to a host the deployment recognises is better than echoing the
+    // client's. With nothing configured there is no such host, so fall through
+    // to the last-resort branch below — the 421 gate in app.fetch answers this
+    // request before it can get here anyway.
+    const pinned = [...allowedHostSet(config)][0];
+    if (pinned) {
+      let proto = "https";
+      try {
+        if (new URL(request.url).protocol === "http:") proto = "http";
+      } catch { /* keep https */ }
+      return { baseUrl: `${proto}://${pinned}`, explicit: true };
+    }
   }
 
   const derived = requestOrigin(request, { trustProxyHeaders: config.trustProxyHeaders });

@@ -10,6 +10,7 @@
 
 import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
+import { isUnusableOrigin } from "./origin.ts";
 import { type AppConfig, loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
@@ -260,16 +261,32 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         "Only correct behind a proxy that overwrites client-supplied values.",
     );
   }
-  // audio-feed-fp4r: with neither a pinned origin nor an allow-list, the
-  // advertised origin (and the WebAuthn RP ID derived from it) is whatever host
-  // each request arrived on. On Deno Deploy the platform router validates the
-  // host, but DENO_DEPLOYMENT_ID identifies the deployment, not its hostname —
-  // the pin has to come from configuration.
-  if (deploy && !config.publicBaseUrl && !config.allowedHosts?.length) {
+  // audio-feed-7lsy: the host gate configures itself. PUBLIC_BASE_URL's host is the accepted
+  // one and the WebAuthn RP ID already comes from the same value, so the app does not need an
+  // operator to type its own hostname into a second variable; ALLOWED_HOSTS only ADDS hosts
+  // (staging, a custom domain). Saying so at boot is the point — the previous design was
+  // correct but inert, which is indistinguishable from working.
+  // audio-feed-ft74: a configured origin that cannot be parsed must not crash STARTUP. The earlier
+  // version of this line called `new URL(...)` unguarded, so PUBLIC_BASE_URL=not-a-url killed boot with
+  // a raw TypeError while only warning was appropriate. isUnusableOrigin already treats such a value as
+  // unusable and the gate then refuses every non-loopback host, so the logging path says that instead
+  // of throwing - bad configuration must never be fatal at boot, and never from a log statement.
+  const configuredHost = config.publicBaseUrl && !isUnusableOrigin(config.publicBaseUrl)
+    ? new URL(config.publicBaseUrl).hostname
+    : null;
+  if (!configuredHost && !config.allowedHosts?.length) {
     console.warn(
-      "[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — " +
-        "the advertised origin and WebAuthn RP ID are derived from each request's host. " +
-        "Set ALLOWED_HOSTS to pin them.",
+      "[audio-feed] No usable PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
+        (deploy ? " on a Deploy deployment" : "") +
+        (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
+        " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
+        "name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the " +
+        "public origin; ALLOWED_HOSTS only adds extra hosts.",
+    );
+  } else if (configuredHost && !config.allowedHosts?.length) {
+    console.log(
+      `[audio-feed] Host gate: accepting ${configuredHost} ` +
+        `(from PUBLIC_BASE_URL). ALLOWED_HOSTS overrides/extends this list.`,
     );
   }
   if (!config.geminiApiKey) {
