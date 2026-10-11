@@ -12,9 +12,13 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   allTestFiles,
+  extractFailingTests,
+  failureMarkers,
+  formatFailureOutput,
   nameMatchedTests,
   planTests,
   reachableTests,
+  run,
   suiteMarker,
 } from "../scripts/fast-check.ts";
 
@@ -271,4 +275,171 @@ Deno.test("the fleet reporter stem normalization matches both ways (dq08)", () =
   const underscoreSource = normalize("fast_check");
   assert(underscoreSource.has("fast-check_test"), "fast_check must match fast-check_test");
   assert(underscoreSource.has("test-fast-check"), "fast_check must match test-fast-check");
+});
+
+// ---------------------------------------------------------------------------------------------
+// audio-feed-pkv1: failure output streams and failing test attribution
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("formatFailureOutput includes both stdout and stderr with stdout first (pkv1)", () => {
+  const stdout =
+    "test_failure_on_stdout ... FAILED\n\n ERRORS \n\ntest_failure_on_stdout => ./tests/example_test.ts:1:1";
+  const stderr = "error: Test failed";
+
+  const outBoth = formatFailureOutput(stdout, stderr);
+  assert(outBoth.includes("test_failure_on_stdout ... FAILED"));
+  assert(outBoth.includes("error: Test failed"));
+  assert(
+    outBoth.indexOf("test_failure_on_stdout") < outBoth.indexOf("error: Test failed"),
+    "stdout must come before stderr so test failure reports precede error notes",
+  );
+
+  // Single-stream edge cases
+  assertEquals(formatFailureOutput(stdout, ""), stdout);
+  assertEquals(formatFailureOutput("", stderr), stderr);
+  assertEquals(formatFailureOutput("", ""), "");
+});
+
+Deno.test("run includes STDOUT in failure output when a command fails (pkv1)", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    ["deno", "eval", "console.log('RECOGNISABLE_TEST_FAILURE_ON_STDOUT'); Deno.exit(1);"],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+
+  assertEquals(res.code, 1, "command must exit non-zero on failure");
+  const combined = logged.join("\n");
+  assert(
+    combined.includes("RECOGNISABLE_TEST_FAILURE_ON_STDOUT"),
+    `failure output must preserve stdout; got: ${JSON.stringify(combined)}`,
+  );
+});
+
+Deno.test("run preserves STDERR alongside STDOUT on command failure (pkv1)", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    [
+      "deno",
+      "eval",
+      "console.log('STDOUT_REPORT'); console.error('STDERR_DEBUG'); Deno.exit(1);",
+    ],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+
+  assertEquals(res.code, 1);
+  const combined = logged.join("\n");
+  assert(combined.includes("STDOUT_REPORT"), "must contain stdout report");
+  assert(combined.includes("STDERR_DEBUG"), "must contain stderr debug output");
+  assert(
+    combined.indexOf("STDOUT_REPORT") < combined.indexOf("STDERR_DEBUG"),
+    "stdout must precede stderr",
+  );
+});
+
+Deno.test("run remains completely quiet on success (pkv1)", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    ["deno", "eval", "console.log('SHOULD_NOT_LEAK'); Deno.exit(0);"],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+
+  assertEquals(res.code, 0, "successful command must return 0");
+  assertEquals(logged, [], "success path must not print stdout or stderr");
+});
+
+Deno.test("extractFailingTests parses Deno test summary FAILURES block (pkv1)", () => {
+  const sample = `
+running 2 tests from ./tests/account_test.ts
+account creation passes ... ok (1ms)
+account deletion fails ... FAILED (2ms)
+
+ ERRORS 
+
+account deletion fails => ./tests/account_test.ts:42:6
+error: AssertionError: Values not equal
+  throw new AssertionError();
+        ^
+
+ FAILURES 
+
+account deletion fails => ./tests/account_test.ts:42:6
+
+FAILED | 1 passed | 1 failed (5ms)
+`;
+
+  const parsed = extractFailingTests(sample);
+  assertEquals(parsed, [
+    { name: "account deletion fails", file: "tests/account_test.ts" },
+  ]);
+
+  const markers = failureMarkers(sample, ["tests/account_test.ts"]);
+  assertEquals(markers, [
+    "fast-gate: failed: tests/account_test.ts (account deletion fails)",
+  ]);
+});
+
+Deno.test("extractFailingTests parses uncaught module error in FAILURES block (pkv1)", () => {
+  const sample = `
+Uncaught error from ./tests/corrupt_test.ts FAILED
+
+ ERRORS 
+
+./tests/corrupt_test.ts (uncaught error)
+error: top level boom
+
+ FAILURES 
+
+./tests/corrupt_test.ts (uncaught error)
+
+FAILED | 0 passed | 1 failed
+`;
+
+  const parsed = extractFailingTests(sample);
+  assertEquals(parsed, [
+    { name: "(uncaught error)", file: "tests/corrupt_test.ts" },
+  ]);
+
+  const markers = failureMarkers(sample);
+  assertEquals(markers, [
+    "fast-gate: failed: tests/corrupt_test.ts ((uncaught error))",
+  ]);
+});
+
+Deno.test("extractFailingTests falls back to inline failure when summary block is missing (pkv1)", () => {
+  const sample = `
+running 1 test from ./tests/interrupted_test.ts
+interrupted test case ... FAILED (10ms)
+`;
+
+  const parsed = extractFailingTests(sample);
+  assertEquals(parsed, [{ name: "interrupted test case" }]);
+
+  const markers = failureMarkers(sample, ["tests/interrupted_test.ts"]);
+  assertEquals(markers, [
+    "fast-gate: failed: tests/interrupted_test.ts (interrupted test case)",
+  ]);
+});
+
+Deno.test("failureMarkers emits unextracted diagnostic without fragile heuristics (pkv1)", () => {
+  // Single suite known
+  assertEquals(
+    failureMarkers("", ["tests/single_test.ts"]),
+    ["fast-gate: failed: tests/single_test.ts (unextracted test)"],
+  );
+
+  // Multiple suites (cannot guess)
+  assertEquals(
+    failureMarkers("", ["tests/a_test.ts", "tests/b_test.ts"]),
+    ["fast-gate: failed: (unextracted test)"],
+  );
+});
+
+Deno.test("the gate emits failureMarkers in the tail on both test failure paths (pkv1)", async () => {
+  const src = await Deno.readTextFile(new URL("../scripts/fast-check.ts", import.meta.url));
+  const failureCalls = src.match(/for \(const \w+ of failureMarkers\(/g) ?? [];
+  assertEquals(
+    failureCalls.length,
+    2,
+    "both the FULL and the scoped failure paths must emit failure markers in the tail",
+  );
 });

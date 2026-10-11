@@ -282,13 +282,161 @@ export async function allTestFiles(): Promise<string[]> {
   return out.sort();
 }
 
-async function run(args: string[]): Promise<number> {
-  console.log(`$ ${args.join(" ")}`);
-  const out = await new Deno.Command(args[0]!, { args: args.slice(1), cwd: ROOT }).output();
-  if (!out.success) {
-    console.error(new TextDecoder().decode(out.stderr));
+function normaliseTestPath(filePath: string): string {
+  let p = filePath.trim();
+  if (p.startsWith("file://")) {
+    p = p.slice("file://".length);
   }
-  return out.code;
+  if (p.startsWith(ROOT)) {
+    p = p.slice(ROOT.length);
+  }
+  if (p.startsWith("./")) {
+    p = p.slice(2);
+  }
+  return p;
+}
+
+export interface FailingTest {
+  name: string;
+  file?: string;
+}
+
+/**
+ * Extract failing test names and suite paths from test runner output.
+ *
+ * Deno test formats failures in a summary `FAILURES` section with lines of
+ * `<test name> => <file>:<line>:<col>` or `<file> (uncaught error)`.
+ * If runner output cannot be parsed cleanly (e.g. killed before formatting),
+ * returns empty array rather than inventing fragile heuristics.
+ */
+export function extractFailingTests(output: string): FailingTest[] {
+  // deno-lint-ignore no-control-regex
+  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  const failures: FailingTest[] = [];
+
+  const failuresBlock = clean.match(
+    /(?:^|\n)\s*FAILURES\s*\n([\s\S]*?)(?:\n\s*(?:FAILED\b|\n\n)|$)/,
+  );
+  if (failuresBlock && failuresBlock[1]) {
+    for (const line of failuresBlock[1].split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const arrowMatch = trimmed.match(/^(.*)\s+=>\s+([^:]+):(\d+):(\d+)$/);
+      if (arrowMatch && arrowMatch[1] && arrowMatch[2]) {
+        failures.push({
+          name: arrowMatch[1].trim(),
+          file: normaliseTestPath(arrowMatch[2]),
+        });
+        continue;
+      }
+      const uncaughtMatch = trimmed.match(/^(.*?)\s*\(uncaught error\)$/);
+      if (uncaughtMatch && uncaughtMatch[1]) {
+        failures.push({
+          name: "(uncaught error)",
+          file: normaliseTestPath(uncaughtMatch[1]),
+        });
+        continue;
+      }
+    }
+  }
+
+  // Fallback: match inline "<test name> ... FAILED" if summary block was missing
+  if (failures.length === 0) {
+    for (const m of clean.matchAll(/(?:^|\n)\s*(.*?)\s+\.\.\.\s+FAILED\b/g)) {
+      const name = m[1]?.trim();
+      if (name && !name.startsWith("running ")) {
+        failures.push({ name });
+      }
+    }
+  }
+
+  return failures;
+}
+
+/**
+ * Machine-readable failure marker naming the failing suite and test.
+ * Structured so log parsers / coverage tools can extract the failing suite
+ * while keeping the failing test name prominent in the gate's tail.
+ */
+export function failureMarker(file: string, testName: string): string {
+  return `fast-gate: failed: ${file} (${testName})`;
+}
+
+/**
+ * Emit failure markers for all failing tests identified in stdout.
+ * If no specific failing test could be parsed reliably, emit a diagnostic
+ * marker without guessing.
+ */
+export function failureMarkers(
+  stdout: string,
+  fallbackFiles?: string[],
+): string[] {
+  const failures = extractFailingTests(stdout);
+  if (failures.length > 0) {
+    return failures.map((f) => {
+      const file = f.file ??
+        (fallbackFiles && fallbackFiles.length === 1 ? fallbackFiles[0]! : "unknown");
+      return failureMarker(file, f.name);
+    });
+  }
+  // When runner stdout could not be parsed for specific test failures (e.g. killed
+  // or aborted before formatting failures), do not guess with fragile heuristics:
+  // state that it was unextracted.
+  if (fallbackFiles && fallbackFiles.length === 1) {
+    return [`fast-gate: failed: ${fallbackFiles[0]} (unextracted test)`];
+  }
+  return ["fast-gate: failed: (unextracted test)"];
+}
+
+/**
+ * Format command failure output, ensuring BOTH stdout and stderr are preserved,
+ * with stdout first (where test runners emit failure details and stack traces)
+ * followed by stderr (where runner errors and diagnostic notes land).
+ */
+export function formatFailureOutput(stdout: string, stderr: string): string {
+  const parts: string[] = [];
+  const trimmedStdout = stdout.trimEnd();
+  if (trimmedStdout.length > 0) {
+    parts.push(trimmedStdout);
+  }
+  const trimmedStderr = stderr.trimEnd();
+  if (trimmedStderr.length > 0) {
+    parts.push(trimmedStderr);
+  }
+  return parts.join("\n");
+}
+
+export interface RunResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface RunOptions {
+  cwd?: string;
+  onOutput?: (msg: string) => void;
+}
+
+export async function run(
+  args: string[],
+  options: RunOptions = {},
+): Promise<RunResult> {
+  console.log(`$ ${args.join(" ")}`);
+  const cwd = options.cwd ?? ROOT;
+  const out = await new Deno.Command(args[0]!, { args: args.slice(1), cwd }).output();
+  const stdout = new TextDecoder().decode(out.stdout);
+  const stderr = new TextDecoder().decode(out.stderr);
+  if (!out.success) {
+    const formatted = formatFailureOutput(stdout, stderr);
+    if (formatted.length > 0) {
+      if (options.onOutput) {
+        options.onOutput(formatted);
+      } else {
+        console.error(formatted);
+      }
+    }
+  }
+  return { code: out.code, stdout, stderr };
 }
 
 /**
@@ -350,7 +498,11 @@ if (import.meta.main) {
   // an UNTOUCHED importer of a changed file is exactly what skipping them
   // would miss.
   for (const step of [["deno", "fmt", "--check"], ["deno", "lint"], ["deno", "task", "check"]]) {
-    if (await run(step) !== 0) Deno.exit(1);
+    const res = await run(step);
+    if (res.code !== 0) {
+      console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
+      Deno.exit(1);
+    }
   }
 
   const changed = await changedFiles();
@@ -370,8 +522,12 @@ if (import.meta.main) {
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
     const wholeSuite = await allTestFiles();
-    if (await run(["deno", "test", ...TEST_FLAGS]) !== 0) {
+    const res = await run(["deno", "test", ...TEST_FLAGS]);
+    if (res.code !== 0) {
       console.log(suiteMarker("ran", wholeSuite));
+      for (const m of failureMarkers(res.stdout, wholeSuite)) {
+        console.log(m);
+      }
       Deno.exit(1);
     }
     console.log(suiteMarker("passed", wholeSuite));
@@ -380,8 +536,12 @@ if (import.meta.main) {
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);
-    if (await run(["deno", "test", ...TEST_FLAGS, ...testFiles]) !== 0) {
+    const res = await run(["deno", "test", ...TEST_FLAGS, ...testFiles]);
+    if (res.code !== 0) {
       console.log(suiteMarker("ran", testFiles));
+      for (const m of failureMarkers(res.stdout, testFiles)) {
+        console.log(m);
+      }
       Deno.exit(1);
     }
     console.log(suiteMarker("passed", testFiles));
