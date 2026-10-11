@@ -247,10 +247,16 @@ try {
   // Inspect cwvState
   const cwvStateRaw = await cdp("Runtime.evaluate", {
     expression:
-      "JSON.stringify(globalThis.cwvState ? { observed: globalThis.cwvState.observed() } : null)",
+      "JSON.stringify(globalThis.cwvState ? { starts: globalThis.cwvState.starts(), pointerStarts: globalThis.cwvState.pointerStarts(), keyStarts: globalThis.cwvState.keyStarts(), isTrusted: globalThis.cwvState.isTrusted(), observed: globalThis.cwvState.observed() } : null)",
     returnByValue: true,
   }) as { result?: { value?: string } };
-  const cwvState = JSON.parse(cwvStateRaw.result?.value ?? "null") as { observed: number[] } | null;
+  const cwvState = JSON.parse(cwvStateRaw.result?.value ?? "null") as {
+    starts: number;
+    pointerStarts: number;
+    keyStarts: number;
+    isTrusted: boolean;
+    observed: number[];
+  } | null;
 
   console.log(`[s3uk] Dispatched DOM events: ${probeData.domEvents.length}`);
   const trustedCount = probeData.domEvents.filter((e) => e.isTrusted).length;
@@ -263,6 +269,30 @@ try {
   const hasPointer = probeData.domEvents.some((e) => e.type === "pointerdown");
   const hasKey = probeData.domEvents.some((e) => e.type === "keydown");
   check("session received both pointerdown and keydown DOM events", hasPointer && hasKey);
+
+  check(
+    "globalThis.cwvState.isTrusted() confirms all counted events were trusted",
+    cwvState?.isTrusted === true,
+  );
+
+  console.log(
+    `[s3uk] cwvState counts: total=${cwvState?.starts}, pointer=${cwvState?.pointerStarts}, key=${cwvState?.keyStarts}`,
+  );
+  check(
+    "pointer interactions counted == dispatched (1 click dispatched)",
+    cwvState?.pointerStarts === 1,
+    `counted ${cwvState?.pointerStarts} of 1`,
+  );
+  check(
+    "keyboard interactions counted == dispatched with held-key repeat suppressed (2 key interactions: 'h' + held 'e')",
+    cwvState?.keyStarts === 2,
+    `counted ${cwvState?.keyStarts} of 2 (held-key repeat suppressed)`,
+  );
+  check(
+    "total interaction starts counted == dispatched",
+    cwvState?.starts === 3,
+    `counted ${cwvState?.starts} of 3 dispatched`,
+  );
 
   console.log(`[s3uk] Event Timing entries recorded: ${probeData.timingEntries.length}`);
   for (const entry of probeData.timingEntries) {
