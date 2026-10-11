@@ -8,6 +8,7 @@
 
 import type { MetadataHarness } from "./harness.ts";
 import { assert, assertEquals } from "@std/assert";
+import { unsynthesized } from "../../../src/types.ts";
 import { CLAIM } from "./harness.ts";
 import { queued } from "./harness.ts";
 
@@ -624,6 +625,78 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     const counts = await store.getSynthesisCounts(today);
     assertEquals(counts.total, 0, "rejected completions must not increment synthesis count");
     assertEquals(counts.totalBytes, 0, "rejected completions must not corrupt total bytes");
+  });
+
+  test("completeEpisode ready+error carve-out verifies durable audioKey and refuses unbilled new audio (audio-feed-pr5v)", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+
+    // 1. Caller attaches error string but supplies a NEW audioKey without billing: must throw TypeError
+    let threw = false;
+    try {
+      // @ts-expect-error unbilled ready must be refused by type and runtime
+      await store.completeEpisode(
+        {
+          ...claimed,
+          status: "ready",
+          audioKey: "brand-new-unbilled.wav",
+          contentType: "audio/wav",
+          error: "i-claim-restore",
+        },
+        "worker-a",
+      );
+    } catch (err) {
+      threw = true;
+      assert(err instanceof TypeError);
+    }
+    assertEquals(
+      threw,
+      true,
+      "ready transition with new audioKey must require billing even if error is set",
+    );
+    assertEquals((await store.getEpisode("user-1", "e1"))?.status, "synthesizing");
+
+    // 2. Genuine restore: episode was ready with existing audioKey, requeued/regenerating, then fails synthesis.
+    // Completing with the SAME existing audioKey and error is allowed without billing.
+    await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "existing-audio.wav", contentType: "audio/wav" },
+      "worker-a",
+      { byteLength: 500 },
+    );
+    const requeued = await store.requeueEpisode("user-1", "e1");
+    assert(requeued);
+    const regenClaim = await store.claimEpisode("user-1", "e1", { ...CLAIM, owner: "worker-b" });
+    assert(regenClaim);
+    assertEquals(regenClaim.audioKey, "existing-audio.wav");
+
+    const today = new Date().toISOString().slice(0, 10);
+    const countBeforeRestore = await store.getDailySynthesisCount(today);
+
+    const restoredPayload = unsynthesized(regenClaim, "synthesis failed, restoring old audio");
+    assertEquals(restoredPayload.status, "ready");
+    assertEquals(restoredPayload.audioKey, "existing-audio.wav");
+
+    const restored = await store.completeEpisode(
+      restoredPayload,
+      "worker-b",
+    );
+    assertEquals(
+      restored,
+      true,
+      "genuine restore of durable audioKey must succeed without billing",
+    );
+    const epAfterRestore = await store.getEpisode("user-1", "e1");
+    assertEquals(epAfterRestore?.status, "ready");
+    assertEquals(epAfterRestore?.audioKey, "existing-audio.wav");
+    assertEquals(epAfterRestore?.error, "synthesis failed, restoring old audio");
+
+    const countAfterRestore = await store.getDailySynthesisCount(today);
+    assertEquals(
+      countAfterRestore,
+      countBeforeRestore,
+      "restore must not charge or increment daily synthesis count",
+    );
   });
 
   test("completeEpisode with status ready atomically updates spend and replay does not double charge (audio-feed-thrs, audio-feed-a7i9)", async (store) => {
