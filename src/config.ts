@@ -50,6 +50,8 @@ export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
 export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
 /** Default maximum execution duration per synthesis invocation before yielding (audio-feed-vqu4). */
 export const DEFAULT_MAX_INVOCATION_DURATION_MS = 45_000;
+/** Default maximum terminal-upload retry count before failing terminally (audio-feed-lqd6). */
+export const DEFAULT_MAX_UPLOAD_RETRIES = 3;
 
 /**
  * How long the structured log store keeps a record (audio-feed-wzv9).
@@ -165,6 +167,11 @@ export interface AppConfig {
    * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (45_000ms).
    */
   maxInvocationDurationMs?: number;
+  /**
+   * Maximum terminal-upload retries allowed before an episode fails terminally (audio-feed-lqd6).
+   * Defaults to DEFAULT_MAX_UPLOAD_RETRIES (3).
+   */
+  maxUploadRetries?: number;
   adminToken?: string;
   /**
    * Shared key for the observability API (audio-feed-s2pi / obs-1).
@@ -331,6 +338,13 @@ export function loadConfig(): AppConfig {
     globalDailyEpisodeBudget: globalDailyEpisodeBudget ?? DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
     maxSegmentsPerInvocation,
     maxInvocationDurationMs: maxInvocationDurationMs ?? DEFAULT_MAX_INVOCATION_DURATION_MS,
+    maxUploadRetries: (() => {
+      const raw = env("MAX_UPLOAD_RETRIES");
+      const parsed = raw !== undefined ? parseInt(raw, 10) : undefined;
+      return parsed !== undefined && Number.isFinite(parsed) && parsed >= 0
+        ? parsed
+        : DEFAULT_MAX_UPLOAD_RETRIES;
+    })(),
     adminToken: env("ADMIN_TOKEN"),
     // Read here and never anywhere else, so there is one place a reviewer has to look to confirm the
     // key is not logged: nothing writes it to a record, and a request record carries no headers.

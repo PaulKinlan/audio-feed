@@ -123,11 +123,11 @@ function outcomeLabel(attempt: ClaimAttempt): string {
   }
 }
 
-function failureRowHtml(failure: FailureRow, report: ObservabilityReport): string {
-  const episode = failure.episodeId ? report.episodes[failure.episodeId] : undefined;
-  const attempts = failure.episodeId ? report.attempts[failure.episodeId] ?? [] : [];
-  const history = attempts.length > 0
-    ? `<table>
+function attemptsTableHtml(attempts: ClaimAttempt[]): string {
+  if (attempts.length === 0) {
+    return `<p class="muted">No claim-lifecycle records are retained for this episode.</p>`;
+  }
+  return `<table>
   <caption>Attempt history for this episode — every claim, the phase it reached, and whether it ended with a terminal write</caption>
   <thead><tr>
     <th scope="col">Attempt</th><th scope="col">Owner</th><th scope="col">Started</th>
@@ -136,26 +136,31 @@ function failureRowHtml(failure: FailureRow, report: ObservabilityReport): strin
     <th scope="col">Reason</th>
   </tr></thead>
   <tbody>${
-      attempts.map((attempt) =>
-        `<tr>
+    attempts.map((attempt) =>
+      `<tr>
     <td>${attempt.attempt}</td>
     <td><code>${cell(attempt.owner)}</code></td>
     <td>${timeCell(attempt.startedAt)}</td>
     <td>${timeCell(attempt.lastHeartbeat)}</td>
     <td>${
-          attempt.phases.length > 0
-            ? attempt.phases.map((phase) => esc(phase)).join(" → ")
-            : cell(attempt.phase)
-        }</td>    <td>${timeCell(attempt.leaseExpiresAt)}${
-          attempt.leaseExpired === true ? ` <strong>(expired)</strong>` : ""
-        }</td>
+        attempt.phases.length > 0
+          ? attempt.phases.map((phase) => esc(phase)).join(" → ")
+          : cell(attempt.phase)
+      }</td>    <td>${timeCell(attempt.leaseExpiresAt)}${
+        attempt.leaseExpired === true ? ` <strong>(expired)</strong>` : ""
+      }</td>
     <td>${esc(outcomeLabel(attempt))}</td>
     <td>${cell(attempt.reason)}</td>
   </tr>`
-      ).join("")
-    }</tbody>
-</table>`
-    : `<p class="muted">No claim-lifecycle records are retained for this episode.</p>`;
+    ).join("")
+  }</tbody>
+</table>`;
+}
+
+function failureRowHtml(failure: FailureRow, report: ObservabilityReport): string {
+  const episode = failure.episodeId ? report.episodes[failure.episodeId] : undefined;
+  const attempts = failure.episodeId ? report.attempts[failure.episodeId] ?? [] : [];
+  const history = attemptsTableHtml(attempts);
 
   const episodeError = episode?.error
     ? `<p><strong>Episode record:</strong> <code>${esc(episode.error)}</code></p>`
@@ -317,11 +322,17 @@ export async function handleAdminObservability(
           const retryCount = typeof retry.uploadRetry === "number"
             ? String(retry.uploadRetry)
             : "—";
+          const retryAttempts = report.attempts[retry.episodeId] ?? [];
+          const historyHtml = retryAttempts.length > 0
+            ? `<details><summary class="muted">Claim history (${retryAttempts.length})</summary>${
+              attemptsTableHtml(retryAttempts)
+            }</details>`
+            : "";
           return `<tr><td>${esc(title)}</td><td>${esc(retry.phase)}</td><td>${
             esc(String(retry.attempts ?? "?"))
           }</td><td>${esc(retryCount)}</td><td>${esc(age)}</td><td>${
             retryReasonCell(retry)
-          }</td></tr>`;
+          }${historyHtml}</td></tr>`;
         }).join("")
       }</tbody></table>`
   }

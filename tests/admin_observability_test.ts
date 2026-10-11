@@ -671,6 +671,8 @@ Deno.test("audio-feed-lqd6: upload retries counter and reason are surfaced in cl
   assertStringIncludes(body, "<th>Upload retries</th>");
   assertStringIncludes(body, "<td>2</td>");
   assertStringIncludes(body, "retry 2/3");
+  assertStringIncludes(body, "Claim history (1)");
+  assertStringIncludes(body, "retrying (upload retry 2)");
 
   // Verify claim attempts folding and outcome labels:
   // Both attempts are folded into attempt 1 with outcome "retrying" and uploadRetry
