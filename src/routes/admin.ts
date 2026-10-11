@@ -32,6 +32,7 @@
  */
 
 import type { AppContext } from "../app.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { assetUrl } from "./assets.ts";
@@ -55,6 +56,14 @@ export interface AdminPageOptions {
   viewer?: Viewer | null;
   /** CSP nonce for this response (audio-feed-syhu); stamped on the shell's inline tags. */
   nonce: string;
+  /**
+   * The daily ceiling a subscriber with no budget of their own is held to
+   * (audio-feed-khk3/umac). Rendered into the form and into the data island: a form that
+   * says "blank for unlimited" while blank means this number is a lie the operator acts
+   * on, and the number is passed in rather than written into the markup so it cannot go
+   * stale again when the default changes.
+   */
+  defaultDailyEpisodeBudget?: number;
 }
 
 export function renderAdminPage(
@@ -64,9 +73,15 @@ export function renderAdminPage(
     adminTokenShort = false,
     viewer = null,
     nonce,
+    defaultDailyEpisodeBudget = DEFAULT_DAILY_EPISODE_BUDGET,
   }: AdminPageOptions,
 ): string {
   const signedIn = Boolean(viewer?.isAdmin);
+  // A zero default is worth spelling out: "the deployment default of 0" reads like a bug, and an
+  // operator who set it meant "nobody synthesises until I give them a budget".
+  const budgetDefaultNote = defaultDailyEpisodeBudget === 0
+    ? " - nothing is synthesised until a budget is set"
+    : "";
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -182,7 +197,7 @@ export function renderAdminPage(
     <div class="table-wrap">
       <table>
         <caption id="synthesisCaption">Not loaded.</caption>
-        <thead><tr><th>Subscriber</th><th>Episodes</th><th>Audio generated</th><th>Today</th></tr></thead>
+        <thead><tr><th>Subscriber</th><th>Episodes</th><th>Audio generated</th><th>Today</th><th>Daily ceiling</th></tr></thead>
         <tbody id="synthesisBody"></tbody>
       </table>
     </div>
@@ -222,9 +237,9 @@ export function renderAdminPage(
       </div>
       <div class="field">
         <label for="newDailyBudget">Daily episode budget (optional)
-          <span class="hint">Ceiling on synthesized episodes per UTC day. Blank for unlimited (audio-feed-9mp).</span>
+          <span class="hint">Ceiling on synthesized episodes per UTC day. Blank means the deployment default of ${defaultDailyEpisodeBudget}${budgetDefaultNote} (audio-feed-umac).</span>
         </label>
-        <input id="newDailyBudget" name="dailyBudget" type="number" min="0" class="field-auto" placeholder="Unlimited" autocomplete="off" />
+        <input id="newDailyBudget" name="dailyBudget" type="number" min="0" class="field-auto" placeholder="Default (${defaultDailyEpisodeBudget})" autocomplete="off" />
       </div>
       <div class="check">
         <input type="checkbox" id="newIsAdmin" />
@@ -390,6 +405,7 @@ export function renderAdminPage(
     jsonForScript({
       origin: publicBaseUrl,
       signedIn,
+      defaultDailyEpisodeBudget,
     })
   }</script>
 </body>
@@ -467,6 +483,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     adminTokenShort,
     viewer: viewerOf(user),
     nonce,
+    defaultDailyEpisodeBudget: ctx.config.defaultDailyEpisodeBudget ?? DEFAULT_DAILY_EPISODE_BUDGET,
   });
   return htmlResponse(html, nonce, { status: 200, headers: baseHeaders });
 }
