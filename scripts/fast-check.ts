@@ -480,6 +480,33 @@ export async function run(
  * The whole selection decision, pure so the tests can pin every fallback:
  * `testFiles: null` means "run the FULL suite".
  */
+/**
+ * FAIL-SAFE DIRECTION (coord's condition on the detector, audio-feed-es8y): a derivation engine inside the
+ * gate may not fail OPEN. If it cannot run - an argument it cannot resolve, a call site it does not model,
+ * an internal error - the gate must WIDEN to the full suite rather than select from a relation it could not
+ * compute, because a detector that fails open puts the silent-green hole back inside the component added to
+ * close it. So this never throws: it returns the reason, and main() turns that into the full suite. It is
+ * EXTRACTED rather than inlined so a test can pass a throwing function and pin the failure mode, which a
+ * transcript from a mutated run cannot do.
+ */
+export async function deriveOrWiden(
+  derive: () => Promise<DataReadRelations>,
+): Promise<{ relations: DataReadRelations; failure: string | null }> {
+  try {
+    return { relations: await derive(), failure: null };
+  } catch (error) {
+    return {
+      relations: new Map(),
+      failure: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** The plan a failed derivation forces: everything, with the failure itself as the reason. */
+export function planForFailedRelation(failure: string): { testFiles: null; reason: string } {
+  return { testFiles: null, reason: `the data read relation could not be derived (${failure})` };
+}
+
 export function planTests(
   changed: string[],
   reverse: Map<string, string[]>,
@@ -641,21 +668,20 @@ if (import.meta.main) {
     console.error(drift);
     Deno.exit(1);
   }
-  // The read relation is derived once per run: which data files the suites read or execute.
-  //
-  // FAIL-SAFE DIRECTION (coord's condition on the detector): a derivation engine inside the gate may not
-  // fail OPEN. If the detector cannot run at all - an internal error, an unreadable tree - the gate must
-  // WIDEN to the full suite rather than select from a relation it could not compute. Note what is NOT done
-  // here: no `Deno.exit(1)` - a detector bug should not block every lane's gate, it should make the gate
-  // run everything and SAY WHY, which is the same safe default an unresolvable path already gets.
-  let readRelations: DataReadRelations;
-  let relationFailure: string | null = null;
-  try {
-    readRelations = await deriveDataReadRelations(ROOT, fastUniverse);
-  } catch (error) {
-    readRelations = new Map();
-    relationFailure = error instanceof Error ? error.message : String(error);
+  // The audit line's two numbers are CHECKED, not merely printed (coord: "a printed-but-unchecked number is
+  // a comment with extra steps"). They are equal by construction today - same walk, same predicate - which is
+  // exactly the kind of promise this bead replaces with a refusal.
+  const auditUniverseDrift = universeDrift(fastUniverse, selectionAudit.fastGateUniverse);
+  if (auditUniverseDrift) {
+    console.error(`fast-gate: AUDIT/RUN UNIVERSE MISMATCH (audio-feed-es8y):
+${auditUniverseDrift}`);
+    Deno.exit(1);
   }
+  // The read relation is derived once per run: which data files the suites read or execute. A detector that
+  // cannot run widens (see deriveOrWiden) rather than answering "no read found".
+  const { relations: readRelations, failure: relationFailure } = await deriveOrWiden(() =>
+    deriveDataReadRelations(ROOT, fastUniverse)
+  );
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
@@ -691,10 +717,7 @@ if (import.meta.main) {
     plan = { testFiles: null, reason: "--all given" };
   } else if (relationFailure !== null) {
     // The detector could not run: widen, and name the failure as the reason.
-    plan = {
-      testFiles: null,
-      reason: `the data read relation could not be derived (${relationFailure})`,
-    };
+    plan = planForFailedRelation(relationFailure);
   } else if (changed === null) {
     // Never silently green: an unknown change set gets the full suite.
     plan = { testFiles: null, reason: "git diff failed (stale or missing origin/main?)" };

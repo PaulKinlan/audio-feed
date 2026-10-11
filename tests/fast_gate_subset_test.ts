@@ -20,7 +20,13 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { allTestFiles, planTests, suiteMarker } from "../scripts/fast-check.ts";
+import {
+  allTestFiles,
+  deriveOrWiden,
+  planForFailedRelation,
+  planTests,
+  suiteMarker,
+} from "../scripts/fast-check.ts";
 import {
   auditSelection,
   auditUnreadDeclarations,
@@ -300,6 +306,27 @@ Deno.test("module-graph config runs the FULL suite even when a suite happens to 
     assertEquals(plan.testFiles, null, `${config} must run the full suite: ${plan.reason}`);
     assert(plan.reason.includes("module-graph config"), plan.reason);
   }
+});
+
+Deno.test('a detector that THROWS widens instead of answering "no read found" (es8y fail-safe)', async () => {
+  // The gap coord named: the plan-level rule was tested, but a THROWING detector was only ever proven by a
+  // transcript from a mutated run. A silent empty relation would be the hole itself, so the failure has to
+  // be REPORTED and the plan has to widen, never shrink.
+  const thrown = await deriveOrWiden(() => {
+    throw new Error("detector blew up");
+  });
+  assertEquals(thrown.relations.size, 0);
+  assertEquals(thrown.failure, "detector blew up");
+  const widened = planForFailedRelation(thrown.failure!);
+  assertEquals(widened.testFiles, null);
+  assert(widened.reason.includes("detector blew up"), widened.reason);
+
+  // The happy path returns the relation AND no failure, so the reported failure cannot be a constant.
+  const ok = await deriveOrWiden(async () =>
+    new Map([["docs/evidence/", ["tests/evidence_size_test.ts"]]])
+  );
+  assertEquals(ok.failure, null);
+  assertEquals(ok.relations.get("docs/evidence/"), ["tests/evidence_size_test.ts"]);
 });
 
 Deno.test("a derivation that cannot run WIDENS to the full suite and says why (es8y, detector fail-safe)", () => {
