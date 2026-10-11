@@ -10,6 +10,7 @@
 
 import { type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
+import { isUnusableOrigin } from "./origin.ts";
 import { type AppConfig, loadConfig, openStores } from "./config.ts";
 import {
   createGeminiSynthesizer,
@@ -262,17 +263,26 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // operator to type its own hostname into a second variable; ALLOWED_HOSTS only ADDS hosts
   // (staging, a custom domain). Saying so at boot is the point — the previous design was
   // correct but inert, which is indistinguishable from working.
-  if (!config.publicBaseUrl && !config.allowedHosts?.length) {
+  // audio-feed-ft74: a configured origin that cannot be parsed must not crash STARTUP. The earlier
+  // version of this line called `new URL(...)` unguarded, so PUBLIC_BASE_URL=not-a-url killed boot with
+  // a raw TypeError while only warning was appropriate. isUnusableOrigin already treats such a value as
+  // unusable and the gate then refuses every non-loopback host, so the logging path says that instead
+  // of throwing - bad configuration must never be fatal at boot, and never from a log statement.
+  const configuredHost = config.publicBaseUrl && !isUnusableOrigin(config.publicBaseUrl)
+    ? new URL(config.publicBaseUrl).hostname
+    : null;
+  if (!configuredHost && !config.allowedHosts?.length) {
     console.warn(
-      "[audio-feed] No PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
+      "[audio-feed] No usable PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
         (deploy ? " on a Deploy deployment" : "") +
+        (config.publicBaseUrl ? ` (${config.publicBaseUrl} is not a usable origin)` : "") +
         " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
         "name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the " +
         "public origin; ALLOWED_HOSTS only adds extra hosts.",
     );
-  } else if (config.publicBaseUrl && !config.allowedHosts?.length) {
+  } else if (configuredHost && !config.allowedHosts?.length) {
     console.log(
-      `[audio-feed] Host gate: accepting ${new URL(config.publicBaseUrl).hostname} ` +
+      `[audio-feed] Host gate: accepting ${configuredHost} ` +
         `(from PUBLIC_BASE_URL). ALLOWED_HOSTS overrides/extends this list.`,
     );
   }

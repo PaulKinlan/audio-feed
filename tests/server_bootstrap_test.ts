@@ -68,3 +68,61 @@ Deno.test("the worker gate and the poller gate are independent (audio-feed-1kw)"
     await result.shutdown();
   }
 });
+
+Deno.test("a malformed PUBLIC_BASE_URL does not crash boot, and the gate fails closed (audio-feed-ft74)", async () => {
+  // The regression this pins: the boot logging path called `new URL(config.publicBaseUrl)` unguarded, so
+  // PUBLIC_BASE_URL=not-a-url threw a raw TypeError out of bootstrap and killed startup. Bad
+  // configuration must not be fatal at boot, and never from a log statement - the gate already treats
+  // such a value as unusable, so boot warns and refuses instead.
+  const stores = await openStores({ kvPath: ":memory:" });
+  const booted = await bootstrap({
+    port: 0,
+    stores,
+    isDeploy: true,
+    synthesizer: null,
+    config: { publicBaseUrl: "not-a-url" },
+  });
+  try {
+    assertEquals(booted.isDeploy, true, "it must boot at all - that is the bug");
+
+    // Fail closed rather than trusting the Host header: an origin that cannot be parsed is not an
+    // origin, so nothing non-loopback may be advertised.
+    const refused = await booted.fetch(
+      new Request("https://audio-feed.paulkinlan-ea.deno.net/", {
+        headers: { host: "audio-feed.paulkinlan-ea.deno.net" },
+      }),
+    );
+    await refused.body?.cancel();
+    assertEquals(refused.status, 421, "an unusable configured origin must fail closed");
+
+    // And local development is unaffected, so a bad value degrades rather than blocks.
+    const local = await booted.fetch(new Request("http://localhost:8000/"));
+    await local.body?.cancel();
+    assert(local.status !== 421, "loopback must not be refused, bad value or not");
+  } finally {
+    await booted.shutdown();
+  }
+});
+
+Deno.test("a malformed ALLOWED_HOSTS entry is ignored, not fatal (audio-feed-ft74)", async () => {
+  const stores = await openStores({ kvPath: ":memory:" });
+  const booted = await bootstrap({
+    port: 0,
+    stores,
+    isDeploy: true,
+    synthesizer: null,
+    config: { allowedHosts: ["not a host", ""] },
+  });
+  try {
+    // The set is empty, so nothing non-loopback is accepted - and nothing threw getting there.
+    const refused = await booted.fetch(
+      new Request("https://audio-feed.paulkinlan-ea.deno.net/", {
+        headers: { host: "audio-feed.paulkinlan-ea.deno.net" },
+      }),
+    );
+    await refused.body?.cancel();
+    assertEquals(refused.status, 421, "entries that do not parse must not open the gate");
+  } finally {
+    await booted.shutdown();
+  }
+});
