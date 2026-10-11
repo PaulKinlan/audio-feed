@@ -214,88 +214,59 @@ Deno.test("a page whose fast interactions were suppressed is reported as the slo
   assertEquals(p98(observed), 1000, "an upper bound, and it errs by overstating");
 });
 
-Deno.test("a zero-scoring shift still OPENS a session window (audio-feed-d55l)", () => {
+Deno.test("a zero-valued shift neither opens nor continues a window (audio-feed-d55l, reviewer ruling)", () => {
   const shift = (startTime: number, value: number) => ({ startTime, value, hadRecentInput: false });
 
-  // The reviewer's sequence, and the expected value is 0.6 rather than 0.5: CLS is the LARGEST session
-  // window, and the shift at t=5400 is more than 1000ms after t=900, so it opens its own window worth
-  // 0.6 while the first window (a zero-scoring shift at t=0 plus 0.5 at t=900) is worth 0.5. The zero
-  // shift's effect on which shifts belong to the FIRST window is what the next case pins down.
-  const reviewerCase = [shift(0, 0), shift(900, 0.5), shift(5400, 0.6)];
-  assertEquals(largestSessionWindow(reviewerCase).value, 0.6);
-  assertEquals(largestSessionWindow(reviewerCase).observed, true, "a zero score is a measurement");
-
-  // Where the inference IS observable: the winning window's origin. A zero-scoring shift at t=0 that
-  // does not open a window makes the next shift start one at its own time, so the origin moves from 0
-  // to 500 and this assertion fails - which is what pins the fix.
-  assertEquals(
-    largestSessionWindow([shift(0, 0), shift(500, 0.4)]).value,
-    0.4,
-    "a zero-scoring shift then a real one, inside both limits",
-  );
-  assertEquals(
-    largestSessionWindow([shift(0, 0), shift(500, 0.4)]).peakWindowStart,
-    0,
-    "the window must begin at the zero-scoring shift; inferring existence from the value reports 500",
-  );
-  // And the same with two zeros: the origin is still the FIRST of them.
+  // web-vitals' continuation test requires a POSITIVE accumulated score, so a zero-valued shift neither
+  // opens nor continues a window: it is skipped and the next positive shift starts a window of its own.
+  // The earlier version of this test asserted the opposite (origin 0, value 0.5 for the sequence below),
+  // which locked in the wrong semantics.
+  const zeroThenPositive = largestSessionWindow([shift(0, 0), shift(500, 0.4)]);
+  assertEquals(zeroThenPositive.peakWindowStart, 500, "the zero shift must not open a window");
+  assert(Math.abs(zeroThenPositive.value - 0.4) < 1e-9);
   assertEquals(
     largestSessionWindow([shift(0, 0), shift(400, 0), shift(900, 0.4)]).peakWindowStart,
-    0,
+    900,
+    "the origin is the positive shift, not either zero",
   );
 
-  // NOTE on what the old inference could NOT change, since it looked like a value bug and is not one:
-  // a zero-scoring shift contributes nothing to the sum, and the origin it moves can only ever be
-  // LATER, which excludes shifts rather than including them. So every sequence tried here gives the
-  // same `value` with or without the fix; what changes is the window the value is attributed to. The
-  // tests below pin the values so a future change cannot move them silently.
-  assertEquals(
-    largestSessionWindow([shift(0, 0), shift(900, 0.5), shift(1800, 0.25)]).value,
-    0.75,
-    "shifts inside the limits still accumulate from the zero-scoring first one",
-  );
+  // An all-zero page is still a measurement OF zero - the other half of this bead, which must survive.
+  const allZero = largestSessionWindow([shift(0, 0), shift(500, 0)]);
+  assertEquals(allZero.value, 0);
+  assertEquals(allZero.observed, true, "zero CLS is a measurement, not the absence of one");
 
-  // The rest of the rule still holds, including that a zero score is still an observation.
+  // The rest of the timing rules are unchanged: positive shifts inside both limits accumulate, a gap
+  // beyond 1s starts a new window, and recent input is excluded entirely.
   assertEquals(
     largestSessionWindow([shift(0, 0.25), shift(900, 0.25), shift(1800, 0.25)]).value,
     0.75,
   );
-  assertEquals(largestSessionWindow([shift(0, 0)]).value, 0);
-  assertEquals(largestSessionWindow([shift(0, 0)]).observed, true);
-  // A gap longer than 1s starts a new window whatever the values are.
   assertEquals(largestSessionWindow([shift(0, 0), shift(1100, 0.7)]).value, 0.7);
-  // Recent input is excluded entirely, so it neither opens nor extends a window.
   assertEquals(
     largestSessionWindow([{ startTime: 0, value: 9, hadRecentInput: true }, shift(10, 0.2)]).value,
     0.2,
   );
 });
 
-Deno.test("seven shifts with a zero-scoring first one report 0.5 from an origin of 0 (audio-feed-d55l)", () => {
+Deno.test("six positive shifts after a zero report 0.6 from an origin of 900 (audio-feed-d55l, reviewer ruling)", () => {
   const shift = (startTime: number, value: number) => ({ startTime, value, hadRecentInput: false });
 
-  // The reviewer's actual reproduction: shifts at 0, 900, 1800, 2700, 3600, 4500, 5400 where the one at
-  // t=0 has value 0 and each of the other six has value 0.1.
-  //
-  // With the window opened by the t=0 shift, its 5s limit ends at t=5000, so t=5400 does NOT join and
-  // starts its own window: 0 + 0.1*5 = 0.5, and the other window is 0.1. CLS is the larger, 0.5.
+  // The reviewer's reproduction, verbatim: shifts at 0, 900, 1800, 2700, 3600, 4500 and 5400, value 0 at
+  // t=0 and 0.1 at each of the other six. The zero-valued shift neither opens nor continues a window, so
+  // t=900 starts one, the six shifts have 900ms gaps and span 4500ms, and CLS is six times 0.1 from an
+  // origin of 900. My earlier version of this test asserted 0.5 from an origin of 0.
   const sequence = [0, 900, 1800, 2700, 3600, 4500, 5400].map((t, i) =>
     shift(t, i === 0 ? 0 : 0.1)
   );
   const win = largestSessionWindow(sequence);
-  assert(
-    Math.abs(win.value - 0.5) < 1e-9,
-    `expected 0.5, got ${win.value}`,
-  );
-  assertEquals(win.peakWindowStart, 0, "the window opens at the zero-scoring shift at t=0");
+  assert(Math.abs(win.value - 0.6) < 1e-9, `expected 0.6, got ${win.value}`);
+  assertEquals(win.peakWindowStart, 900, "the window that scores begins at t=900, not t=0");
 
-  // This is the case that refutes my earlier claim that the `windowValue !== 0` inference cannot change
-  // the reported VALUE, and it does so exactly here: with the inference, the t=900 shift restarts the
-  // window (the accumulated value is still 0), so the origin becomes 900, the 5s limit becomes 14000,
-  // t=5400 joins, and the answer is 0.6 - the value the review observed. The origin is what moves, and
-  // the VALUE moves with it, so both are asserted above.
-  assert(
-    win.value < 0.6,
-    "0.6 is what the inference produced by moving the origin to t=900, and is not the answer",
-  );
+  // The band impact the reviewer measured, scaled so the two readings fall in different bands: six
+  // shifts of 0.05 is 0.30 under this rule, where the zero-holds-the-window-open reading gives 0.25 for
+  // the same page. A misclassified CLS band is the user-visible consequence.
+  const scaled = [0, 900, 1800, 2700, 3600, 4500, 5400].map((t, i) => shift(t, i === 0 ? 0 : 0.05));
+  const scaledWin = largestSessionWindow(scaled);
+  assert(Math.abs(scaledWin.value - 0.3) < 1e-9, `expected 0.30, got ${scaledWin.value}`);
+  assert(scaledWin.value > 0.25, "and it is above the 0.25 boundary, so the band differs");
 });

@@ -43,17 +43,21 @@ function largestSessionWindow(entries) {
   // only way the zero-scoring-shift bug (audio-feed-d55l) can be observed at all.
   let peakWindowStart = 0;
   let windowValue = 0;
-  // null means NO window is open. Existence is deliberately not inferred from `windowValue !== 0`: a
-  // shift worth zero still STARTS a session window, and inferring from the value let a zero-scoring
-  // first shift be skipped, so the window opened later and the 5s limit was measured from the wrong
-  // origin - which pulled unrelated shifts into the same window (audio-feed-d55l).
+  // A window is open when the accumulated score is POSITIVE, which is what web-vitals' continuation test
+  // requires. A zero-valued shift therefore neither opens nor continues a window: it is skipped, and the
+  // next positive shift starts a window of its own with that shift's time as the origin
+  // (audio-feed-d55l, reviewer ruling). The earlier change here held a window open on any prior entry
+  // (`windowStart !== null`), which misreported six 0.1 shifts after a zero at t=0 as 0.5 from an origin
+  // of 0 instead of 0.6 from an origin of 900 - correct behaviour replaced by wrong behaviour.
   let windowStart = null;
   let windowLast = 0;
   for (const entry of entries) {
     if (entry.hadRecentInput) continue;
     observed = true;
     const start = entry.startTime;
-    const joins = windowStart !== null && start - windowLast < 1000 && start - windowStart < 5000;
+    // Positive accumulated score, then the two timing rules - the same shape as web-vitals. The short
+    // circuit keeps windowStart a number whenever the subtraction happens.
+    const joins = windowValue !== 0 && start - windowLast < 1000 && start - windowStart < 5000;
     if (!joins) {
       windowStart = start;
       windowValue = 0;
