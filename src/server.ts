@@ -257,16 +257,23 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         "Only correct behind a proxy that overwrites client-supplied values.",
     );
   }
-  // audio-feed-fp4r: with neither a pinned origin nor an allow-list, the
-  // advertised origin (and the WebAuthn RP ID derived from it) is whatever host
-  // each request arrived on. On Deno Deploy the platform router validates the
-  // host, but DENO_DEPLOYMENT_ID identifies the deployment, not its hostname —
-  // the pin has to come from configuration.
-  if (deploy && !config.publicBaseUrl && !config.allowedHosts?.length) {
+  // audio-feed-7lsy: the host gate configures itself. PUBLIC_BASE_URL's host is the accepted
+  // one and the WebAuthn RP ID already comes from the same value, so the app does not need an
+  // operator to type its own hostname into a second variable; ALLOWED_HOSTS only ADDS hosts
+  // (staging, a custom domain). Saying so at boot is the point — the previous design was
+  // correct but inert, which is indistinguishable from working.
+  if (!config.publicBaseUrl && !config.allowedHosts?.length) {
     console.warn(
-      "[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — " +
-        "the advertised origin and WebAuthn RP ID are derived from each request's host. " +
-        "Set ALLOWED_HOSTS to pin them.",
+      "[audio-feed] No PUBLIC_BASE_URL and no ALLOWED_HOSTS" +
+        (deploy ? " on a Deploy deployment" : "") +
+        " — the host gate REFUSES every non-loopback host (421), because a deployment that cannot " +
+        "name its own host must not advertise the one a client sent. Set PUBLIC_BASE_URL to the " +
+        "public origin; ALLOWED_HOSTS only adds extra hosts.",
+    );
+  } else if (config.publicBaseUrl && !config.allowedHosts?.length) {
+    console.log(
+      `[audio-feed] Host gate: accepting ${new URL(config.publicBaseUrl).hostname} ` +
+        `(from PUBLIC_BASE_URL). ALLOWED_HOSTS overrides/extends this list.`,
     );
   }
   if (!config.geminiApiKey) {

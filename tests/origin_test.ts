@@ -241,11 +241,15 @@ async function unconfiguredApp(overrides: Partial<AppConfig> = {}) {
   return fetch;
 }
 
-Deno.test("PRODUCTION REGRESSION: the homepage advertises the host it was asked on", async () => {
-  const fetch = await unconfiguredApp();
+Deno.test("PRODUCTION REGRESSION: the homepage advertises the host the deployment was configured with", async () => {
+  // audio-feed-7lsy: the deployment's own host now configures the gate, so this test configures the
+  // deployment the way production does - PUBLIC_BASE_URL - instead of relying on the gate being off.
+  // The assertion is unchanged: a visitor is never told to subscribe to localhost.
+  const fetch = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
   const res = await fetch(req(`${DEPLOYED}/`));
   const html = await res.text();
 
+  assertEquals(res.status, 200);
   assertStringIncludes(html, `${DEPLOYED}/feed/`);
   assert(
     !html.includes("localhost"),
@@ -253,8 +257,24 @@ Deno.test("PRODUCTION REGRESSION: the homepage advertises the host it was asked 
   );
 });
 
-Deno.test("PRODUCTION REGRESSION: feed self-links and enclosures use the real host", async () => {
+Deno.test("PRODUCTION REGRESSION: a deployment that has not been told its own host refuses a public one", async () => {
+  // THE FAILURE MODE THIS BEAD EXISTS TO KILL: the gate used to switch on only when ALLOWED_HOSTS was
+  // set, so an app that knew its host nowhere still accepted ANY Host header - correct code, inert,
+  // no error. It now fails CLOSED, because a deployment that cannot name its own host must not
+  // advertise the one a client sent.
   const fetch = await unconfiguredApp();
+  const refused = await fetch(req(`${DEPLOYED}/`));
+  await refused.body?.cancel();
+  assertEquals(refused.status, 421, "nothing configured means nothing is trusted");
+
+  // Loopback needs no configuration, so local development is untouched.
+  const local = await fetch(req("http://localhost:8000/"));
+  await local.body?.cancel();
+  assertEquals(local.status, 200, "local development must not require configuration");
+});
+
+Deno.test("PRODUCTION REGRESSION: feed self-links and enclosures use the real host", async () => {
+  const fetch = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
 
   const xml = await (await fetch(req(`${DEPLOYED}/feed/${TOKEN}/master.xml`))).text();
 
@@ -274,7 +294,7 @@ Deno.test("PRODUCTION REGRESSION: feed self-links and enclosures use the real ho
 });
 
 Deno.test("PRODUCTION REGRESSION: the per-source feed too", async () => {
-  const fetch = await unconfiguredApp();
+  const fetch = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
   const xml = await (await fetch(req(`${DEPLOYED}/feed/${TOKEN}/stratechery/direct.xml`))).text();
 
   assertEquals(
@@ -287,8 +307,15 @@ Deno.test("PRODUCTION REGRESSION: the per-source feed too", async () => {
 Deno.test("the homepage is not publicly cacheable when the origin was derived", async () => {
   // A document whose content depends on the request host must not sit in a
   // shared cache: one spoofed request would poison every later visitor.
-  const derived = await (await unconfiguredApp())(req(`${DEPLOYED}/`));
+  //
+  // audio-feed-7lsy: the derived path is now reached by listing extra hosts WITHOUT pinning the
+  // origin - the override case. With a pinned PUBLIC_BASE_URL the origin is explicit and this
+  // branch is not taken at all.
+  const derived = await (await unconfiguredApp({
+    allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"],
+  }))(req(`${DEPLOYED}/`));
   await derived.body?.cancel();
+  assertEquals(derived.status, 200);
   assertStringIncludes(derived.headers.get("cache-control") ?? "", "private");
   // Host because the origin is derived; Cookie because the header names the
   // signed-in viewer (audio-feed-8fc).
@@ -306,7 +333,7 @@ Deno.test("a spoofed host cannot redirect a subscriber to an attacker's origin",
   // The whole reason x-forwarded-* is opt-in. Without this, an attacker sets a
   // header, a shared cache stores the response, and every later visitor is told
   // to send their feed token to evil.example.
-  const fetch = await unconfiguredApp();
+  const fetch = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
   const html = await (await fetch(
     req(`${DEPLOYED}/`, { "x-forwarded-host": "evil.example", "x-forwarded-proto": "https" }),
   )).text();
@@ -316,7 +343,7 @@ Deno.test("a spoofed host cannot redirect a subscriber to an attacker's origin",
 });
 
 Deno.test("a spoofed host cannot poison a feed's enclosure URLs either", async () => {
-  const fetch = await unconfiguredApp();
+  const fetch = await unconfiguredApp({ publicBaseUrl: DEPLOYED });
   const xml = await (await fetch(
     req(`${DEPLOYED}/feed/${TOKEN}/master.xml`, { "x-forwarded-host": "evil.example" }),
   )).text();
@@ -410,12 +437,19 @@ Deno.test("fp4r: IPv6 hosts can be listed and match", () => {
   assertEquals(requestHostAllowed(config, req("http://[2001:db8::2]/")), false);
 });
 
-Deno.test("fp4r: an empty allow-list keeps the gate inert", () => {
-  assertEquals(requestHostAllowed({ allowedHosts: [] }, req("https://anything.example/")), true);
+Deno.test("an empty or unusable allow-list fails closed (audio-feed-7lsy)", () => {
+  // fp4r left this path inert: an empty list meant "no gate", so any Host was accepted. That is the
+  // failure mode Paul rejected - correct code, no behaviour change, exposure open, no error - so an
+  // empty set now refuses every non-loopback host instead of switching the gate off.
+  assertEquals(requestHostAllowed({ allowedHosts: [] }, req("https://anything.example/")), false);
   assertEquals(
     requestHostAllowed({ allowedHosts: ["  ", ""] }, req("https://anything.example/")),
-    true,
+    false,
+    "entries that do not parse as a host must not silently turn the gate off",
   );
+  // And it is still the case that a mis-shaped entry cannot turn the gate ON with a value nothing
+  // can match; the loopback exemption is the only thing an empty set permits.
+  assertEquals(requestHostAllowed({ allowedHosts: [] }, req("http://localhost:8000/")), true);
 });
 
 Deno.test("fp4r: a mis-shaped entry with a path still matches its host", () => {
@@ -430,9 +464,15 @@ Deno.test("fp4r: the publicBaseUrl host is implicitly allowed", () => {
   assertEquals(requestHostAllowed(config, req("https://evil.example/")), false);
 });
 
-Deno.test("fp4r: no allow-list means the request host is used, unchanged (0k3 behaviour)", () => {
-  assertEquals(requestHostAllowed({}, req("https://anything.example/")), true);
-  const resolved = resolveOrigin({}, req("https://anything.example/"));
+Deno.test("a listed host is still used as a derived origin (0k3 behaviour, via the override)", () => {
+  // audio-feed-7lsy: with nothing configured the request host is no longer trusted, so the 0k3
+  // behaviour (audio-feed-0k3: the advertised origin follows the request host when nothing is pinned)
+  // is reached by LISTING the host instead - which is the override case, and what a preview URL or a
+  // staging host uses. The derived-origin property is unchanged.
+  assertEquals(requestHostAllowed({}, req("https://anything.example/")), false);
+  const config = { allowedHosts: ["anything.example"] };
+  assertEquals(requestHostAllowed(config, req("https://anything.example/")), true);
+  const resolved = resolveOrigin(config, req("https://anything.example/"));
   assertEquals(resolved.baseUrl, "https://anything.example");
   assertEquals(resolved.explicit, false);
 });
@@ -483,4 +523,60 @@ Deno.test("fp4r: a forged Host cannot steer the /add redirect", async () => {
   await res.body?.cancel();
 
   assertEquals(res.status, 421, "the redirect must not be built on a spoofed host");
+});
+
+Deno.test("the host gate configures itself from PUBLIC_BASE_URL (audio-feed-7lsy)", () => {
+  const canonical = "audio-feed.paulkinlan-ea.deno.net";
+
+  // The bug this fixes: a deployment that already knows its own host — the WebAuthn RP ID is derived
+  // from this very value — nevertheless accepted ANY Host header, because the gate only switched on
+  // when ALLOWED_HOSTS was set. Correct code, inert, no error: indistinguishable from working.
+  const config = { publicBaseUrl: `https://${canonical}` };
+  assertEquals(
+    requestHostAllowed(config, req(`https://${canonical}/feed`)),
+    true,
+    "the deployment's own host is accepted without any ALLOWED_HOSTS",
+  );
+  assertEquals(
+    requestHostAllowed(config, req("https://evil.example/feed")),
+    false,
+    "and a host it does not recognise is refused, which is the whole point",
+  );
+  // Local development must not need configuration: exact loopback is still allowed.
+  assertEquals(requestHostAllowed(config, req("http://localhost:8000/")), true);
+});
+
+Deno.test("with nothing configured at all the gate fails closed (audio-feed-7lsy)", () => {
+  // A deployment that cannot name its own host must not advertise the one a client sent.
+  assertEquals(requestHostAllowed({}, req("http://localhost:8000/")), true, "loopback only");
+  assertEquals(
+    requestHostAllowed({}, req("https://audio-feed.paulkinlan-ea.deno.net/")),
+    false,
+    "nothing configured means nothing is trusted",
+  );
+  assertEquals(requestHostAllowed({}, req("https://evil.example/")), false);
+});
+
+Deno.test("ALLOWED_HOSTS adds hosts rather than switching the gate on (audio-feed-7lsy)", () => {
+  const config = {
+    publicBaseUrl: "https://audio-feed.paulkinlan-ea.deno.net",
+    allowedHosts: ["staging.example"],
+  };
+  assertEquals(
+    requestHostAllowed(config, req("https://staging.example/")),
+    true,
+    "the override adds",
+  );
+  assertEquals(
+    requestHostAllowed(config, req("https://audio-feed.paulkinlan-ea.deno.net/")),
+    true,
+    "and does not replace the host the app already knew",
+  );
+});
+
+Deno.test("resolveOrigin survives an empty host set (audio-feed-7lsy)", () => {
+  // The fail-closed set is empty, so there is no host to pin to and this must fall through to the
+  // last-resort branch rather than throwing on an empty list.
+  const resolved = resolveOrigin({}, req("https://evil.example/feed"));
+  assertEquals(typeof resolved.baseUrl, "string");
 });

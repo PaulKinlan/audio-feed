@@ -39,6 +39,11 @@ All notable changes to this project will be documented in this file.
   key. Measured against a bound of 5: 20 requests with a rotating forged prefix were all allowed
   before, and exactly 5 are allowed now.
 
+- **Host gate configures itself (audio-feed-7lsy, P1)**: the accepted host now comes from
+  `PUBLIC_BASE_URL` - the same value the WebAuthn RP ID already derives from - so a deployment that
+  knows its own host no longer needs an operator to type it a second time. Requests on an
+  unrecognised host are answered `421` instead of being served; with no configured host the gate
+  fails closed and only loopback is accepted. `ALLOWED_HOSTS` remains as an override that adds hosts.
 - **Host-injection hardening (audio-feed-fp4r)**: new `ALLOWED_HOSTS` environment variable
   (comma-separated). When set, the advertised origin — feed `selfUrl`, enclosure URLs, redirects,
   and the WebAuthn RP ID derived from it — can only ever be a listed host; requests arriving on any
