@@ -299,6 +299,19 @@ export function suiteMarker(kind: "passed" | "ran" | "unmapped", files: string[]
 }
 
 /**
+ * The UNIFORM coverage marker (audio-feed-psjb). `passed:` and `ran:` stay exactly as they are - they are a
+ * consumed contract, and breaking them to make parsing easier would fix one reader by breaking others - but
+ * they mean DIFFERENT things depending on how the run ended, so a reporter that only knows the passing one
+ * cannot tell "the gate ran these suites and something failed" from "the gate never got that far". This
+ * marker means the same thing on every path: the suites the gate actually EXECUTED, or an explicit
+ * UNKNOWN/NONE when the honest answer is not a list. A report must never render an inability to know as a
+ * zero - a lint failure means the coverage note has NO INFORMATION, not that coverage was empty.
+ */
+export function coverageMarker(payload: string): string {
+  return `fast-gate: coverage: ${payload}`;
+}
+
+/**
  * Every test file the fast gate can run, in the rel paths the reporter expects (tests/...).
  *
  * DERIVED from the full gate's universe (audio-feed-es8y) by filtering it, rather than walked
@@ -703,6 +716,13 @@ ${auditUniverseDrift}`);
     const res = await run(step);
     if (res.code !== 0) {
       console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
+      // The harness never ran, so the coverage note has NO INFORMATION rather than no coverage - say which,
+      // in the marker itself, so nobody has to infer it from an absent line (audio-feed-psjb).
+      console.log(
+        coverageMarker(
+          `UNKNOWN (the gate stopped before the test harness: ${step.slice(1).join(" ")})`,
+        ),
+      );
       Deno.exit(1);
     }
   }
@@ -744,12 +764,14 @@ ${auditUniverseDrift}`);
     const res = await run(["deno", "test", ...TEST_FLAGS]);
     if (res.code !== 0) {
       console.log(suiteMarker("ran", wholeSuite));
+      console.log(coverageMarker(wholeSuite.join(" ")));
       for (const m of failureMarkers(res.stdout, wholeSuite)) {
         console.log(m);
       }
       Deno.exit(1);
     }
     console.log(suiteMarker("passed", wholeSuite));
+    console.log(coverageMarker(wholeSuite.join(" ")));
   } else if (testFiles.length === 0) {
     // audio-feed-es8y condition 2: a gate that ran NOTHING must not read like a gate that ran suites and
     // passed. The state is distinct and loud, and it is reflected in the fleet's coverage line by the
@@ -764,18 +786,21 @@ ${auditUniverseDrift}`);
     );
     console.log("  them (documentation and declared-inert files only).");
     console.log(suiteMarker("unmapped", changed ?? []));
+    console.log(coverageMarker("NONE (no suite observes the changed files)"));
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);
     const res = await run(["deno", "test", ...TEST_FLAGS, ...testFiles]);
     if (res.code !== 0) {
       console.log(suiteMarker("ran", testFiles));
+      console.log(coverageMarker(testFiles.join(" ")));
       for (const m of failureMarkers(res.stdout, testFiles)) {
         console.log(m);
       }
       Deno.exit(1);
     }
     console.log(suiteMarker("passed", testFiles));
+    console.log(coverageMarker(testFiles.join(" ")));
   }
 
   console.log(`fast-check: ok in ${((performance.now() - started) / 1000).toFixed(1)}s`);

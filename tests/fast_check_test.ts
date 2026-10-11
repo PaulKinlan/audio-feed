@@ -451,3 +451,105 @@ Deno.test("the gate emits failureMarkers in the tail on both test failure paths 
     "both the FULL and the scoped failure paths must emit failure markers in the tail",
   );
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-psjb: the fleet's coverage NOTE must never turn "I could not tell"
+// into "nothing ran". These tests encode the REPORTER'S parse rules in-repo,
+// because a rule that lives only in another repository drifts silently - and it
+// already did: the reporter matches `unmapped:` ANYWHERE in a line, so a test
+// NAME was harvested as a list of changed files.
+// ---------------------------------------------------------------------------
+
+/** The reporter's rules as they stand today (`remote/check-coverage.py`: `passed|completed` and `unmapped`
+ * matched anywhere in a line), PLUS the uniform `coverage:` marker this gate now emits on every path. */
+function coverageNoteFromLog(log: string): string {
+  const executed = new Set<string>();
+  let unknown: string | null = null;
+  let none: string | null = null;
+  for (const line of log.split("\n")) {
+    const passed = /fast-gate:.*?(?:passed|completed):\s*(.*)/.exec(line);
+    if (passed) { for (const f of passed[1]!.split(/\s+/)) if (f) executed.add(f); }
+    const uniform = /^fast-gate: coverage:\s*(.*)$/.exec(line);
+    if (uniform) {
+      const payload = uniform[1]!.trim();
+      if (payload.startsWith("UNKNOWN")) unknown = payload;
+      else if (payload.startsWith("NONE")) none = payload;
+      else for (const f of payload.split(/\s+/)) if (f) executed.add(f);
+    }
+  }
+  if (unknown) return `no information: ${unknown}`;
+  if (none) return `no suites ran: ${none}`;
+  if (executed.size === 0) return "0 suite(s) ran";
+  return `${executed.size} suite(s) ran: ${[...executed].sort().join(" ")}`;
+}
+
+/** The OLD rule, kept so the mutation is a function rather than a claim: only the passing marker counts. */
+function coverageNoteWithPassedOnlyRule(log: string): string {
+  const executed = new Set<string>();
+  for (const line of log.split("\n")) {
+    const passed = /fast-gate:.*?(?:passed|completed):\s*(.*)/.exec(line);
+    if (passed) { for (const f of passed[1]!.split(/\s+/)) if (f) executed.add(f); }
+  }
+  return executed.size === 0 ? "0 suite(s) ran" : `${executed.size} suite(s) ran`;
+}
+
+Deno.test("psjb: a FAILING run's coverage note names the suites that ran, not zero", () => {
+  const failingLog = [
+    "fast-gate: selection audit ok: 103 full-gate module(s), 103 fast-selectable",
+    "fast-check: 2 test file(s) (affected by: src/a.ts, tests/b_test.ts)",
+    "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
+    "fast-gate: failed: tests/b_test.ts (some assertion)",
+    "fast-gate: coverage: tests/a_test.ts tests/b_test.ts",
+  ].join("\n");
+
+  // The uniform marker means the same thing after a failure as after a pass: these suites EXECUTED.
+  assertEquals(
+    coverageNoteFromLog(failingLog),
+    "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
+  );
+
+  // MUTATION, as a function: the old passed|completed-only rule reports ZERO suites for the same log,
+  // which is exactly the defect this bead is about - an inability to know rendered as a zero.
+  assertEquals(coverageNoteWithPassedOnlyRule(failingLog), "0 suite(s) ran");
+});
+
+Deno.test("psjb: a gate that never reached the harness says NO INFORMATION, not zero suites", () => {
+  // A lint failure means the note has no information rather than no coverage; saying so is what stops a
+  // lane reading "unmapped: everything" after a lint error and hunting a coverage bug that does not exist.
+  const stoppedLog = [
+    "fast-gate: failed: lint",
+    "fast-gate: coverage: UNKNOWN (the gate stopped before the test harness: lint)",
+  ].join("\n");
+  const note = coverageNoteFromLog(stoppedLog);
+  assert(note.startsWith("no information:"), note);
+  assert(note.includes("lint"), note);
+  assertEquals(note.includes("0 suite"), false, "an unknown must never be rendered as a zero");
+
+  // And the inert case is a THIRD state: the harness ran and selected nothing, which is a fact.
+  const noneLog = [
+    "fast-check: NO SUITES SELECTED — 0 of 103 test module(s) ran.",
+    "fast-gate: unmapped: README.md",
+    "fast-gate: coverage: NONE (no suite observes the changed files)",
+  ].join("\n");
+  const noneNote = coverageNoteFromLog(noneLog);
+  assert(noneNote.startsWith("no suites ran:"), noneNote);
+  assertEquals(noneNote.includes("0 suite"), false);
+});
+
+Deno.test("psjb: the uniform marker is emitted on EVERY path, not only the passing one", () => {
+  // The gate must not require the reader to infer the state from an ABSENT line: every exit emits it.
+  const source = Deno.readTextFileSync(new URL("../scripts/fast-check.ts", import.meta.url));
+  const emissions = source.match(/console\.log\(\s*coverageMarker\(/g) ?? [];
+  assertEquals(
+    emissions.length,
+    6,
+    "pass/fail for both paths, the inert case, and the pre-harness case",
+  );
+  assert(
+    source.includes("the gate stopped before the test harness"),
+    "the pre-harness UNKNOWN must name what stopped it",
+  );
+  // The consumed contract stays intact: passed:/ran: are still emitted where they always were.
+  assertEquals((source.match(/console\.log\(\s*suiteMarker\("passed"/g) ?? []).length, 2);
+  assertEquals((source.match(/console\.log\(\s*suiteMarker\("ran"/g) ?? []).length, 2);
+});
