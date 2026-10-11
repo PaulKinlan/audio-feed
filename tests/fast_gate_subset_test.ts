@@ -322,9 +322,8 @@ Deno.test('a detector that THROWS widens instead of answering "no read found" (e
   assert(widened.reason.includes("detector blew up"), widened.reason);
 
   // The happy path returns the relation AND no failure, so the reported failure cannot be a constant.
-  const ok = await deriveOrWiden(async () =>
-    new Map([["docs/evidence/", ["tests/evidence_size_test.ts"]]])
-  );
+  const known = new Map([["docs/evidence/", ["tests/evidence_size_test.ts"]]]);
+  const ok = await deriveOrWiden(() => Promise.resolve(known));
   assertEquals(ok.failure, null);
   assertEquals(ok.relations.get("docs/evidence/"), ["tests/evidence_size_test.ts"]);
 });
