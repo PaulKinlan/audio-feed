@@ -486,8 +486,9 @@ Deno.test("token redaction: 404 response body redacts capability tokens from URL
 });
 
 Deno.test("token redaction: Router 500 error logging redacts audio capability token and preserves error stack (audio-feed-0eae)", async () => {
-  const SECRET_AUDIO_TOKEN = "private-audio-token-987654321.mp3";
+  const SECRET_AUDIO_TOKEN = "user-1/direct/private-audio-token-987654321.mp3";
   const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   stores.blobs.get = () => {
     throw new Error("unexpected blob failure during audio fetch");
   };
@@ -663,11 +664,11 @@ Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat
   assertEquals(isAllowedAudioKey("audio/u1/direct/e1.mp3"), true);
   assertEquals(isAllowedAudioKey("user-1/direct/ep-1.wav"), true); // route-trimmed canonical
   assertEquals(isAllowedAudioKey("u1/deepdive/e1.mp3"), true); // route-trimmed canonical
-  assertEquals(isAllowedAudioKey("audio/ready.wav"), true);
 
-  // Allowed: legacy flat keys
-  assertEquals(isAllowedAudioKey("legacy.wav"), true);
-  assertEquals(isAllowedAudioKey("episode-1.mp3"), true);
+  // Disallowed: legacy flat keys (audio-feed-whsl: parts.length < 3 rejected to enforce user approval gating)
+  assertEquals(isAllowedAudioKey("audio/ready.wav"), false);
+  assertEquals(isAllowedAudioKey("legacy.wav"), false);
+  assertEquals(isAllowedAudioKey("episode-1.mp3"), false);
 });
 
 Deno.test("audio route: intermediate synthesis segments under audio-segments/ return 404", async () => {
@@ -801,7 +802,7 @@ Deno.test("audio route: account-status oracle closed (nonexistent object returns
   await headRes.body?.cancel();
 });
 
-Deno.test("audio route: voice-samples bypass is closed (404), while approved user 200s and legacy flat key serves", async () => {
+Deno.test("audio route: voice-samples and legacy flat keys return 404, while approved user 200s (audio-feed-whsl)", async () => {
   const stores = memoryStores();
 
   const approvedUser = makeUser({ id: "user-approved", status: "approved" });
@@ -835,14 +836,14 @@ Deno.test("audio route: voice-samples bypass is closed (404), while approved use
   assertEquals(appRes.status, 200, "Canonical approved-user key must return 200");
   await appRes.body?.cancel();
 
-  // 3. Legacy flat .wav: returns 200
+  // 3. Legacy flat .wav: returns 404 (closed legacy approval bypass)
   const legWavRes = await fetch(new Request(`${BASE}/audio/${legacyWavKey}`));
-  assertEquals(legWavRes.status, 200, "Legacy flat .wav must return 200");
+  assertEquals(legWavRes.status, 404, "Legacy flat .wav must return 404");
   await legWavRes.body?.cancel();
 
-  // 4. Legacy flat .mp3: returns 200
+  // 4. Legacy flat .mp3: returns 404 (closed legacy approval bypass)
   const legMp3Res = await fetch(new Request(`${BASE}/audio/${legacyMp3Key}`));
-  assertEquals(legMp3Res.status, 200, "Legacy flat .mp3 must return 200");
+  assertEquals(legMp3Res.status, 404, "Legacy flat .mp3 must return 404");
   await legMp3Res.body?.cancel();
 
   // 5. On direct-URL store as well: voice-samples MUST return 404, not 302

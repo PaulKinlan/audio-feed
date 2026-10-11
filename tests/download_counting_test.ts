@@ -101,16 +101,28 @@ Deno.test("a redirect counts when it is ISSUED (audio-feed-ndc)", async () => {
   assertEquals(counts.perUser, [{ userId: "user-1", count: 1 }]);
 });
 
-Deno.test("a legacy flat key counts toward the total only (audio-feed-ndc)", async () => {
+Deno.test("an unattributed download counts toward the total only (audio-feed-ndc, audio-feed-whsl)", async () => {
+  const { stores } = await app();
+
+  // Legacy flat keys are rejected at the route (404), but the metadata store
+  // still handles unattributed downloads cleanly (null userId moves total only).
+  await stores.metadata.recordDownload(null);
+
+  const counts = await stores.metadata.getDownloadCounts();
+  assertEquals(counts.total, 1, "the unattributed record happened, so total must move");
+  assertEquals(counts.perUser, [], "nobody may be charged with an unattributed download");
+});
+
+Deno.test("a legacy flat key returns 404 and does not record a download (audio-feed-whsl)", async () => {
   const { fetch, stores } = await app();
 
   const res = await fetch(new Request(`${BASE}/audio/${LEGACY_KEY}`));
-  assertEquals(res.status, 200);
-  await res.arrayBuffer();
+  assertEquals(res.status, 404);
+  await res.body?.cancel();
 
   const counts = await stores.metadata.getDownloadCounts();
-  assertEquals(counts.total, 1, "the request happened, so the total must move");
-  assertEquals(counts.perUser, [], "but nobody may be charged with it");
+  assertEquals(counts.total, 0, "rejected key must not record a download");
+  assertEquals(counts.perUser, []);
 });
 
 // -- what deliberately does not count -------------------------------------

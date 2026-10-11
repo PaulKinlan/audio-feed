@@ -15,18 +15,19 @@ import { assert, assertEquals } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
+import { makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { BlobObject } from "../src/storage/mod.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 const BYTES = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
-const LEGACY_KEY = "legacy.wav";
+const CANONICAL_KEY = "user-1/direct/ep-1.wav";
 
 /**
- * A store that serves `audio/*` keys by direct URL and everything else only
+ * A store that serves `.mp3` keys by direct URL and everything else only
  * through the isolate — the exact shape the bead measured. `url()` therefore
- * answers differently for two keys in the same candidate list.
+ * answers differently for two keys in the same store.
  */
 function perKeyStore(inner: Stores["blobs"]): Stores["blobs"] {
   return {
@@ -34,15 +35,15 @@ function perKeyStore(inner: Stores["blobs"]): Stores["blobs"] {
     head: (key) => inner.head(key),
     delete: (key) => inner.delete(key),
     get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
-    url: (key) =>
-      Promise.resolve(key.startsWith("audio/") ? `https://cdn.example.com/${key}` : null),
+    url: (key) => Promise.resolve(key.endsWith(".mp3") ? `https://cdn.example.com/${key}` : null),
   };
 }
 
 async function app(blobs?: (inner: Stores["blobs"]) => Stores["blobs"]) {
   const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   if (blobs) stores.blobs = blobs(stores.blobs);
-  await stores.blobs.put(LEGACY_KEY, BYTES, { contentType: "audio/wav" });
+  await stores.blobs.put(`audio/${CANONICAL_KEY}`, BYTES, { contentType: "audio/wav" });
   const ctx = { config, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx));
   return { fetch, stores };
@@ -51,14 +52,13 @@ async function app(blobs?: (inner: Stores["blobs"]) => Stores["blobs"]) {
 Deno.test("an object a per-key store cannot serve directly is still served (audio-feed-gxn)", async () => {
   const { fetch } = await app(perKeyStore);
   // HEAD sees it: so the object unquestionably exists.
-  const head = await fetch(new Request(`${BASE}/audio/${LEGACY_KEY}`, { method: "HEAD" }));
+  const head = await fetch(new Request(`${BASE}/audio/${CANONICAL_KEY}`, { method: "HEAD" }));
   assertEquals(head.status, 200);
   assertEquals(head.headers.get("content-length"), String(BYTES.length));
 
-  // The regression: this returned 404, because the FIRST candidate
-  // ("audio/legacy.wav") yielded a CDN URL while the second ("legacy.wav") did not,
-  // and the handler had already decided the store redirects.
-  const got = await fetch(new Request(`${BASE}/audio/${LEGACY_KEY}`));
+  // The regression: this returned 404, because the store yielded a direct URL for
+  // some keys but not others, and the handler had already decided the store redirects.
+  const got = await fetch(new Request(`${BASE}/audio/${CANONICAL_KEY}`));
   assertEquals(got.status, 200, "an object that HEAD can see must be readable");
   assertEquals((await got.bytes()).length, BYTES.length);
   assertEquals(got.headers.get("content-type"), "audio/wav");
@@ -68,27 +68,31 @@ Deno.test("a store that can serve a key directly is still used directly", async 
   // The 302 path must survive the fix: when url() answers AND head() hits, the
   // client still goes straight to the CDN rather than through the isolate.
   const stores: Stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   stores.blobs = perKeyStore(stores.blobs);
-  await stores.blobs.put("audio/direct.wav", BYTES, { contentType: "audio/wav" });
+  await stores.blobs.put("audio/user-1/direct/direct.mp3", BYTES, { contentType: "audio/mpeg" });
   const ctx = { config, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx));
 
-  const res = await fetch(new Request(`${BASE}/audio/direct.wav`));
+  const res = await fetch(new Request(`${BASE}/audio/user-1/direct/direct.mp3`));
   assertEquals(res.status, 302);
-  assertEquals(res.headers.get("location"), "https://cdn.example.com/audio/direct.wav");
+  assertEquals(
+    res.headers.get("location"),
+    "https://cdn.example.com/audio/user-1/direct/direct.mp3",
+  );
 });
 
 Deno.test("a genuinely missing object is still a 404 against a per-key store", async () => {
   const { fetch } = await app(perKeyStore);
   // The fix costs one get() on a miss instead of a cheap 404; it must still 404.
-  const res = await fetch(new Request(`${BASE}/audio/nothing-here.wav`));
+  const res = await fetch(new Request(`${BASE}/audio/user-1/direct/nothing-here.wav`));
   assertEquals(res.status, 404);
 });
 
 Deno.test("seeking still works through a per-key store", async () => {
   const { fetch } = await app(perKeyStore);
   const res = await fetch(
-    new Request(`${BASE}/audio/${LEGACY_KEY}`, { headers: { range: "bytes=0-3" } }),
+    new Request(`${BASE}/audio/${CANONICAL_KEY}`, { headers: { range: "bytes=0-3" } }),
   );
   assertEquals(res.status, 206);
   assertEquals(res.headers.get("content-range"), `bytes 0-3/${BYTES.length}`);
@@ -104,7 +108,7 @@ Deno.test("audio route 404 logs diagnostic warnings with redacted key (audio-fee
 
   try {
     const { fetch } = await app(perKeyStore);
-    const res = await fetch(new Request(`${BASE}/audio/missing-track.wav`));
+    const res = await fetch(new Request(`${BASE}/audio/user-1/direct/missing-track.wav`));
     assertEquals(res.status, 404);
 
     const warn = warnings.find((w) =>

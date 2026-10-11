@@ -204,10 +204,9 @@ Deno.test("audio: direct-URL store redirects 302 on GET without calling get() (a
   assertEquals(getCalls, 0, "direct URL must bypass get() completely");
 });
 
-Deno.test("audio: direct-URL store resolves legacy flat key to existing key without dead redirect (audio-feed-vlw)", async () => {
+Deno.test("audio: direct-URL store redirects canonical key without calling get() (audio-feed-vlw)", async () => {
   const { fetch, stores } = await app();
-  // Store has ONLY legacy.mp3 (flat key), NOT audio/legacy.mp3
-  await stores.blobs.put("legacy.mp3", bytes(500), { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/legacy.mp3", bytes(500), { contentType: "audio/mpeg" });
 
   let getCalls = 0;
   stores.blobs.get = () => {
@@ -217,29 +216,29 @@ Deno.test("audio: direct-URL store resolves legacy flat key to existing key with
   // S3BlobStore.url() synthesizes a URL without checking existence
   stores.blobs.url = (key) => Promise.resolve(`https://cdn.example.com/${key}`);
 
-  // 1. GET /audio/legacy.mp3 redirects to legacy.mp3, not audio/legacy.mp3
-  const res = await fetch(get("/audio/legacy.mp3"));
+  // 1. GET /audio/u1/direct/legacy.mp3 redirects to canonical direct URL
+  const res = await fetch(get("/audio/u1/direct/legacy.mp3"));
   assertEquals(res.status, 302);
-  assertEquals(res.headers.get("location"), "https://cdn.example.com/legacy.mp3");
+  assertEquals(res.headers.get("location"), "https://cdn.example.com/audio/u1/direct/legacy.mp3");
   assertEquals(getCalls, 0, "direct URL must bypass get() completely");
 
-  // 2. HEAD /audio/legacy.mp3 returns 200 (HEAD and GET agree)
-  const headRes = await fetch(get("/audio/legacy.mp3", { method: "HEAD" }));
+  // 2. HEAD /audio/u1/direct/legacy.mp3 returns 200 (HEAD and GET agree)
+  const headRes = await fetch(get("/audio/u1/direct/legacy.mp3", { method: "HEAD" }));
   assertEquals(headRes.status, 200);
   assertEquals(headRes.headers.get("content-length"), "500");
   await headRes.body?.cancel();
 
-  // 3. GET /audio/missing.mp3 returns 404 (HEAD and GET agree)
-  const missingRes = await fetch(get("/audio/missing.mp3"));
+  // 3. GET /audio/u1/direct/missing.mp3 returns 404 (HEAD and GET agree)
+  const missingRes = await fetch(get("/audio/u1/direct/missing.mp3"));
   assertEquals(missingRes.status, 404);
   assertEquals(getCalls, 0, "missing check on direct-URL store must not call get()");
 });
 
 Deno.test("audio: HEAD returns metadata with no body", async () => {
   const { fetch, stores } = await app();
-  await stores.blobs.put("k.mp3", bytes(512), { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", bytes(512), { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { method: "HEAD" }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { method: "HEAD" }));
 
   assertEquals(res.status, 200);
   assertEquals(res.headers.get("content-length"), "512");
@@ -250,9 +249,9 @@ Deno.test("audio: HEAD returns metadata with no body", async () => {
 Deno.test("audio: a Range request gets 206 with the right slice and headers", async () => {
   const { fetch, stores } = await app();
   const payload = bytes(1000);
-  await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", payload, { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=100-199" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=100-199" } }));
 
   assertEquals(res.status, 206);
   assertEquals(res.headers.get("content-range"), "bytes 100-199/1000");
@@ -263,9 +262,9 @@ Deno.test("audio: a Range request gets 206 with the right slice and headers", as
 Deno.test("audio: a suffix Range works (clients resume with these)", async () => {
   const { fetch, stores } = await app();
   const payload = bytes(1000);
-  await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", payload, { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=-100" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=-100" } }));
 
   assertEquals(res.status, 206);
   assertEquals(res.headers.get("content-range"), "bytes 900-999/1000");
@@ -274,9 +273,9 @@ Deno.test("audio: a suffix Range works (clients resume with these)", async () =>
 
 Deno.test("audio: an unsatisfiable Range is 416 with content-range", async () => {
   const { fetch, stores } = await app();
-  await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", bytes(100), { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=500-600" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=500-600" } }));
 
   assertEquals(res.status, 416);
   assertEquals(res.headers.get("content-range"), "bytes */100");
@@ -285,9 +284,9 @@ Deno.test("audio: an unsatisfiable Range is 416 with content-range", async () =>
 
 Deno.test("audio: suffix Range bytes=-0 is 416 unsatisfiable per RFC 9110", async () => {
   const { fetch, stores } = await app();
-  await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", bytes(100), { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=-0" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=-0" } }));
 
   assertEquals(res.status, 416);
   assertEquals(res.headers.get("content-range"), "bytes */100");
@@ -297,9 +296,9 @@ Deno.test("audio: suffix Range bytes=-0 is 416 unsatisfiable per RFC 9110", asyn
 Deno.test("audio: suffix Range bytes=-1 returns the last byte", async () => {
   const { fetch, stores } = await app();
   const payload = bytes(1000);
-  await stores.blobs.put("k.mp3", payload, { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", payload, { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=-1" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=-1" } }));
 
   assertEquals(res.status, 206);
   assertEquals(res.headers.get("content-range"), "bytes 999-999/1000");
@@ -309,9 +308,9 @@ Deno.test("audio: suffix Range bytes=-1 returns the last byte", async () => {
 
 Deno.test("audio: a malformed Range is ignored, not fatal", async () => {
   const { fetch, stores } = await app();
-  await stores.blobs.put("k.mp3", bytes(100), { contentType: "audio/mpeg" });
+  await stores.blobs.put("audio/u1/direct/k.mp3", bytes(100), { contentType: "audio/mpeg" });
 
-  const res = await fetch(get("/audio/k.mp3", { headers: { range: "bytes=abc" } }));
+  const res = await fetch(get("/audio/u1/direct/k.mp3", { headers: { range: "bytes=abc" } }));
 
   assertEquals(res.status, 200, "an unparseable Range falls back to the full object");
   await res.body?.cancel();
