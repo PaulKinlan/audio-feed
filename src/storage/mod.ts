@@ -443,6 +443,8 @@ export interface EpisodeRepository {
       phase?: string;
       now?: string;
       advanceAttempts?: boolean;
+      uploadRetry?: number;
+      incrementUploadRetry?: boolean;
     },
   ): Promise<boolean>;
 

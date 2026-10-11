@@ -338,6 +338,11 @@ export interface Episode {
    * with the exact same turn text, matching segment hashes for audio reuse.
    */
   scriptTurns?: Array<{ speaker: string; text: string }>;
+  /**
+   * Terminal audio upload retries recorded by the worker (audio-feed-lqd6).
+   * Bounded by maxUploadRetries so budget-interrupted uploads do not churn forever.
+   */
+  uploadRetry?: number;
 }
 
 /**
@@ -361,6 +366,15 @@ export const DEFAULT_CLAIM_LEASE_MS = 15 * 60_000;
  * poison job: crash, expire, re-claim, crash, bill again.
  */
 export const DEFAULT_MAX_CLAIMS = 3;
+
+/**
+ * Terminal-upload retries allowed before an episode fails terminally (audio-feed-lqd6).
+ *
+ * An upload interrupted by the invocation budget yields with phase upload_retry
+ * and resets attempts to 0. A distinct counter bounds the retry churn so an
+ * upload that cannot finish does not retry forever.
+ */
+export const DEFAULT_MAX_UPLOAD_RETRIES = 3;
 
 /**
  * Whether an existing claim may be taken over.

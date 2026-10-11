@@ -105,6 +105,8 @@ export interface ClaimLifecycleFields {
    * terminal write - a false statement about the episode's durable state.
    */
   claimOutcome?: "yielded";
+  /** Terminal-upload retry count recorded by the worker when yielding (audio-feed-lqd6). */
+  uploadRetry?: number;
   /** Which attempt this record is about, when the caller knows better than the episode does. */
   attempt?: number;
   severity?: "info" | "warn" | "error";
@@ -137,6 +139,7 @@ export function claimLifecycleEvent(
   const context = {
     ...fields.context,
     ...(fields.claimOutcome ? { claimOutcome: fields.claimOutcome } : {}),
+    ...(fields.uploadRetry !== undefined ? { uploadRetry: fields.uploadRetry } : {}),
   };
   return {
     ...identity(episode),

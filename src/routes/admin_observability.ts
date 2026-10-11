@@ -108,6 +108,10 @@ function outcomeLabel(attempt: ClaimAttempt): string {
       return "finished (terminal write)";
     case "failed":
       return "failed (terminal write)";
+    case "retrying":
+      return typeof attempt.uploadRetry === "number" && attempt.uploadRetry > 0
+        ? `retrying (upload retry ${attempt.uploadRetry})`
+        : "retrying";
     case "abandoned":
       return attempt.endedWithTerminalWrite
         ? "abandoned"
@@ -296,15 +300,20 @@ export async function handleAdminObservability(
         logsUnreadable
           ? `<p><strong>The log store could not be read</strong>, so a missing reason below means "could not read", not "none recorded".</p>`
           : ""
-      }<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
+      }<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Upload retries</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
         report.retries.map((retry) => {
           const age = retry.waitingMs >= 60_000
             ? `${Math.round(retry.waitingMs / 60_000)} min`
             : `${Math.round(retry.waitingMs / 1000)} s`;
           const title = report.episodes[retry.episodeId]?.title ?? retry.title ?? retry.episodeId;
+          const retryCount = typeof retry.uploadRetry === "number"
+            ? String(retry.uploadRetry)
+            : "—";
           return `<tr><td>${esc(title)}</td><td>${esc(retry.phase)}</td><td>${
             esc(String(retry.attempts ?? "?"))
-          }</td><td>${esc(age)}</td><td>${retryReasonCell(retry)}</td></tr>`;
+          }</td><td>${esc(retryCount)}</td><td>${esc(age)}</td><td>${
+            retryReasonCell(retry)
+          }</td></tr>`;
         }).join("")
       }</tbody></table>`
   }
@@ -337,7 +346,8 @@ export async function handleAdminObservability(
       names the sequence range it read.</li>
       <li><strong>"Retrying" rows come from the pending queue snapshot</strong>, capped like the
       queue card, and name the episode's durable phase — a yielded attempt is never a terminal
-      write. The reason quoted there is the worker's recorded prose - it is read from the log store, so
+      write. Upload retries carry a distinct uploadRetry counter bounded by maxUploadRetries (audio-feed-lqd6)
+      so interrupted uploads do not churn forever. The reason quoted there is the worker's recorded prose - it is read from the log store, so
       when that store is unreadable the cell says so instead of rendering blank (audio-feed-yrg4) - and the
       verdict is the state.</li>
       <li><strong>Unhandled request errors record their class, not their message.</strong> A thrown
