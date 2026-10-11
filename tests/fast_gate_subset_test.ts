@@ -19,7 +19,7 @@
  * --allow-run, the gate tasks do, and `deno task gate` also runs the same proof at the start via the CLI).
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   allTestFiles,
   deriveOrWiden,
@@ -514,6 +514,55 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in the relation, and no-reader ones still widen", async () => {
+  // The property this bead adds, asserted against the REAL tree because that is where the two halves meet:
+  // the detector must produce a relation for a non-TS file under src/ or tests/ that a suite reads, and the
+  // OLD scope note (recorded nowhere) must be gone. MEASURED BEFORE: four relations, and every one of these
+  // paths was UNCLASSIFIED, i.e. all 108 suites ran for a one-line CSS change. MEASURED AFTER: fifteen.
+  const { relations } = await deriveReadRelationReport(ROOT);
+  assert(
+    relations.has("src/assets/admin.css"),
+    "an asset inside src/ that a suite reads must be in the relation (audio-feed-40ch)",
+  );
+  const derived = classifyNonTsChanges(["src/assets/admin.css"], relations);
+  assertEquals(
+    derived.unclassified,
+    [],
+    "a src/ asset with a derived reader must not fall to the full-suite class",
+  );
+  assertEquals(
+    derived.suites,
+    relations.get("src/assets/admin.css"),
+    "the suites named by the relation are the suites selected",
+  );
+
+  // Anti-vacuity for the FALLBACK, which is the thing that makes this change safe to make: a non-TS file
+  // under src/ that NOTHING is derived to read must still widen to the full suite, and must never be inert.
+  const unread = classifyNonTsChanges(["src/assets/home.css"], relations);
+  assertEquals(unread.inert, [], "an unread asset is not documentation - it may not be inert");
+  assertEquals(unread.suites, [], "nothing is derived to read it");
+  assertEquals(unread.unclassified, ["src/assets/home.css"], "so it keeps the full-suite fallback");
+
+  // AND THE DECISION ITSELF, through planTests - because the classification above is only a step. My first
+  // version of this case asserted the classification and stopped there, and the PLANNER was still returning
+  // the full suite for src/assets/admin.css: a guard ahead of the relation widened every non-.ts file under
+  // src/ or tests/ before the relation was ever consulted, so the relation's entries for those paths were
+  // unreachable. Measuring the planner is what found it, so the planner is what this asserts.
+  const derivedPlan = planTests(["src/assets/admin.css"], new Map(), new Map(), relations);
+  assertEquals(
+    derivedPlan.testFiles,
+    relations.get("src/assets/admin.css")!,
+    "a src/ asset a suite reads must SELECT that suite, not the full suite",
+  );
+  const unreadPlan = planTests(["src/assets/home.css"], new Map(), new Map(), relations);
+  assertEquals(
+    unreadPlan.testFiles,
+    null,
+    "an unread asset must still run the FULL suite - the fallback is what makes this change safe",
+  );
+  assertStringIncludes(unreadPlan.reason, "src/assets/home.css");
 });
 
 Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {

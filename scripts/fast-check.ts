@@ -561,17 +561,15 @@ export function planTests(
 
   const codeChanged = changed.filter((f) => f.endsWith(".ts"));
 
-  // Non-TypeScript under src/ or tests/ is still test-asserted content —
-  // src/assets/*.js|css have tests pinning their bytes, tests/fixtures/*.html
-  // feed parsers — and the import graph cannot see any of it.
-  const nonTsCode = changed.filter((f) => !f.endsWith(".ts") && /^(src|tests)\//.test(f));
-  if (nonTsCode.length) {
-    return {
-      testFiles: null,
-      reason: `non-TypeScript code/fixture(s) changed: ${nonTsCode.join(", ")}`,
-    };
-  }
-
+  // audio-feed-40ch FOUND THIS BY MEASURING THE PLANNER RATHER THAN THE RELATION: a guard here used to return
+  // the FULL suite for every non-.ts file under src/ or tests/ BEFORE the relation below was consulted, which
+  // made the relation's entries for exactly those paths unreachable - a change to src/assets/admin.css ran all
+  // 108 suites even after the relation named the one suite that reads it. That contradicts the ordering rule
+  // this function is built on ("the derived relation is consulted FIRST and outranks every category
+  // heuristic"), so the guard is gone: non-.ts content is classified below, where a path a suite is DERIVED to
+  // read selects that suite, and a path nothing is derived to read lands in `unclassified` and still runs the
+  // full suite with its own name in the reason. The import graph cannot see any of it either way, which is
+  // why the relation - not the graph - is what decides.
   // Non-TypeScript OUTSIDE src/ and tests/ (docs, evidence, tooling, generated exports) is the case that
   // produced a fast-gate PASS with a full-gate FAIL on the same tree (audio-feed-es8y): a 200KB
   // docs/evidence/*.png selected ZERO suites while tests/evidence_size_test.ts asserted its byte budget.
