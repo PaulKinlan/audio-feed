@@ -585,17 +585,25 @@ export function createGeminiSynthesizer(
       }
     };
 
-    let newlySynthesizedCount = 0;
+    let initiatedTurnsCount = 0;
+    let committedTurnsCount = 0;
     const wrappedResume = resume
       ? {
         prepare: async (segmentText: string, voice: string) => {
           const res = await resume.prepare(segmentText, voice);
           if (res === "synthesize") {
-            newlySynthesizedCount++;
+            initiatedTurnsCount++;
           }
           return res;
         },
-        commit: resume.commit,
+        commit: async (
+          segmentText: string,
+          decoded: DecodedAudioResult,
+          voice: string,
+        ) => {
+          await resume.commit(segmentText, decoded, voice);
+          committedTurnsCount++;
+        },
       }
       : undefined;
 
@@ -606,7 +614,7 @@ export function createGeminiSynthesizer(
     const shouldYield = (_completed: number, _total: number) => {
       if (
         invocationBudget?.maxSegments &&
-        newlySynthesizedCount >= invocationBudget.maxSegments
+        initiatedTurnsCount >= invocationBudget.maxSegments
       ) {
         return true;
       }
@@ -640,7 +648,7 @@ export function createGeminiSynthesizer(
       budgetTimer = setTimeout(() => {
         budgetController.abort(
           new InvocationBudgetAbortError(
-            newlySynthesizedCount,
+            committedTurnsCount,
             MAX_TTS_SEGMENTS,
             `Invocation budget deadline (${Math.round(remainingTtsBudgetMs)}ms) reached during TTS`,
           ),
@@ -788,7 +796,7 @@ export function createGeminiSynthesizer(
               throw reason;
             }
             throw new InvocationBudgetAbortError(
-              newlySynthesizedCount,
+              committedTurnsCount,
               turns?.length ?? MAX_TTS_SEGMENTS,
               `Invocation budget deadline reached during dialogue TTS`,
             );
@@ -836,7 +844,7 @@ export function createGeminiSynthesizer(
             throw reason;
           }
           throw new InvocationBudgetAbortError(
-            newlySynthesizedCount,
+            committedTurnsCount,
             MAX_TTS_SEGMENTS,
             `Invocation budget deadline reached during narration TTS`,
           );
@@ -1369,7 +1377,9 @@ export async function runSynthesisBatch(
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
     let currentEpisode = claimed;
-    const hadScriptTurnsInitially = Boolean(claimed.scriptTurns?.length);
+    const initialScriptTurns = claimed.scriptTurns?.length ?? 0;
+    const initialSegments = (await metadata.listSynthesisSegments(claimed.userId, claimed.id))
+      .filter((s) => s.finalized).length;
 
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
@@ -1395,17 +1405,22 @@ export async function runSynthesisBatch(
             : new InvocationBudgetAbortError(0, 0, "Invocation budget reached");
           lastError = yieldErr;
 
-          // FOUR-PROPERTY SYNTHESIS INVOCATION INVARIANT (audio-feed-fsr3):
+          // FOUR-PROPERTY SYNTHESIS INVOCATION INVARIANT (audio-feed-fsr3, audio-feed-o88z):
           // 1. Bound: Per-invocation work is bounded by maxDurationMs and maxSegments.
           // 2. Preflight: Work is verified to fit before initiation, yielding if margin is insufficient.
           // 3. Provenance: Only our explicit InvocationBudgetAbortError sentinel yields; provider/lease aborts take retry/failure.
-          // 4. Progress: Every yield must either make durable progress (turns completed or scriptTurns checkpointed) resetting attempts to 0,
-          //    or count against opts.maxAttempts. Zero-progress budget yields advance attempts and fail once maxAttempts is exhausted,
-          //    preventing infinite livelocks across cron ticks.
+          // 4. Progress: DURABLE PROGRESS = observable on the next tick after a restart; anything else is not progress.
+          //    Every yield must either make durable progress (finalized segments committed or scriptTurns checkpointed)
+          //    resetting attempts to 0, or count against opts.maxAttempts. Zero-progress budget yields advance attempts
+          //    and fail once maxAttempts is exhausted, preventing infinite livelocks and unbounded paid spend across cron ticks.
           const refreshed = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
-          const madeProgress = yieldErr.completedTurns > 0 ||
-            (Boolean(refreshed?.scriptTurns?.length) && !hadScriptTurnsInitially) ||
-            (refreshed?.phase === "script_generated" && claimed.phase !== "script_generated");
+          const finalScriptTurns = refreshed?.scriptTurns?.length ?? 0;
+          const finalSegments =
+            (await metadata.listSynthesisSegments(currentEpisode.userId, currentEpisode.id))
+              .filter((s) => s.finalized).length;
+
+          const madeProgress = (finalSegments > initialSegments) ||
+            (finalScriptTurns > 0 && initialScriptTurns === 0);
 
           if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
             // Refuse infinite livelock: zero progress across maxAttempts must fail the episode.
@@ -1418,14 +1433,14 @@ export async function runSynthesisBatch(
             currentEpisode.id,
             opts.owner,
             {
-              phase: `synthesized_${yieldErr.completedTurns}_of_${yieldErr.totalTurns}`,
+              phase: `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`,
               advanceAttempts: !madeProgress,
             },
           );
           if (yielded) {
             result.yielded.push({
               episodeId: currentEpisode.id,
-              completedTurns: yieldErr.completedTurns,
+              completedTurns: finalSegments,
               totalTurns: yieldErr.totalTurns,
             });
           } else {

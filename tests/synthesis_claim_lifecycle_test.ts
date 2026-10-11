@@ -964,7 +964,7 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
 
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-tts",
-    maxAttempts: 1,
+    maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
@@ -976,7 +976,7 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
 
   const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort-tts");
   assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
-  assertEquals(ep?.attempts, 0, "attempts must be reset to 0");
+  assertEquals(ep?.attempts, 1, "attempt count is preserved for uncommitted yield");
   assert(ep?.phase?.startsWith("synthesized_"), "phase must indicate progress or yield");
 });
 
@@ -1244,4 +1244,83 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
   assertEquals(ep2?.status, "failed", "episode must terminate as failed");
   assertStringIncludes(ep2?.error ?? "", "exceeded");
   assertEquals(scriptCalls, 2, "script was called on each attempt");
+});
+
+Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attempts each tick, cap paidCalls <= maxAttempts, and fail", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-o88z-stall",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "direct",
+    }),
+  );
+
+  let paidCalls = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      paidCalls++;
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  // Tick 1: yields with attempts=1
+  const r1 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-1",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r1.yielded.length, 1);
+  assertEquals(r1.failed.length, 0);
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.attempts, 1, "attempts must advance to 1 on uncommitted yield");
+
+  // Tick 2: reaches maxAttempts (2) with zero progress -> fails!
+  const r2 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-2",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r2.yielded.length, 0);
+  assertEquals(r2.failed.length, 1);
+  const ep2 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
+  assertEquals(ep2?.status, "failed");
+  assertEquals(ep2?.attempts, 2, "attempts must be 2");
+
+  // Tick 3: failed episode is not picked up, paidCalls remains bounded
+  const r3 = await runSynthesisBatch(ctx, synth, {
+    owner: "repro-3",
+    maxAttempts: 2,
+    maxInvocationDurationMs: 100,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(r3.yielded.length, 0);
+  assertEquals(r3.failed.length, 0);
+  assertEquals(paidCalls, 2, "paidCalls must be strictly bounded <= maxAttempts");
 });
