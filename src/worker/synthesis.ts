@@ -77,6 +77,7 @@ import {
   DEFAULT_MAX_INVOCATION_DURATION_MS,
 } from "../config.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../observability/spans.ts";
+import { claimLifecycleEvent } from "../storage/episode_events.ts";
 import {
   ASSUMED_UPLOAD_BYTES_PER_MS,
   type BudgetedOutcome,
@@ -1066,12 +1067,16 @@ async function settleTerminalPersistence(
     return { committed: true, episode: current };
   }
 
-  // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit
+  // Not ready with stagingKey: revert claim to pending so completeEpisode cannot commit.
+  // audio-feed-aqms: the phase names WHAT WILL HAPPEN NEXT, not what finished: an
+  // episode requeued here is RETRYING its upload on a later tick, and "upload_retry"
+  // is legible as retrying on the admin page and in the claim history where
+  // "audio_synthesized" read as a finished state with no reason attached.
   await metadata.yieldEpisodeClaim(
     userId,
     episodeId,
     owner,
-    { phase: "audio_synthesized", now: new Date(nowMs).toISOString() },
+    { phase: "upload_retry", now: new Date(nowMs).toISOString() },
   ).catch(() => {});
 
   // Re-check durable state: did completeEpisode commit concurrently during the yield?
@@ -1797,6 +1802,24 @@ export async function runSynthesisBatch(
         completedTurns: 1,
         totalTurns: 1,
       });
+      // audio-feed-aqms: the retry churn must be OPERATOR-VISIBLE, not a pending
+      // episode with no reason. The claim history gets one record per interrupted
+      // upload naming the cause, so an episode stuck retrying reads as retrying
+      // (coord condition on landing). Best-effort: a logging failure must never
+      // disturb the yield that already happened.
+      try {
+        await metadata.appendLog(
+          claimLifecycleEvent(currentEpisode, {
+            phase: "upload_retry",
+            attempt: currentEpisode.attempts ?? 1,
+            reason: `terminal upload interrupted by invocation budget (${
+              Math.round(bytes.length / 1024)
+            } KB); retrying on a later tick`,
+          }),
+        );
+      } catch {
+        // nothing left to record it with; the yield itself is durable
+      }
       break;
     }
 

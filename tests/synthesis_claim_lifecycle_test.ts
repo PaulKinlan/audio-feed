@@ -1385,7 +1385,7 @@ Deno.test("audio-feed-dv4p: (a) terminal upload preflight yields before slow upl
 
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-preflight");
   assertEquals(ep1?.status, "pending");
-  assertEquals(ep1?.phase, "audio_synthesized");
+  assertEquals(ep1?.phase, "upload_retry");
 
   // Tick 2: restore fast blobs.put; tick completes within normal budget
   stores.blobs.put = oldPut;
@@ -1446,7 +1446,7 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
 
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-dv4p-inflight");
   assertEquals(ep1?.status, "pending");
-  assertEquals(ep1?.phase, "audio_synthesized");
+  assertEquals(ep1?.phase, "upload_retry");
 
   // Tick 2: restore fast blobs.put; tick completes within normal budget
   stores.blobs.put = oldPut;

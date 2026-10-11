@@ -120,7 +120,7 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
       `batch must have awaited the put to its deadline before yielding (awaited ${r.awaitedMs}ms)`,
     );
     assertEquals(r.episode?.status, "pending", "claim released non-terminally");
-    assertEquals(r.episode?.phase, "audio_synthesized", "phase records resumable progress");
+    assertEquals(r.episode?.phase, "upload_retry", "phase records the upload retry");
   } finally {
     await Deno.remove(kvPath).catch(() => {});
   }

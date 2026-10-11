@@ -14,7 +14,7 @@
  *    checkpoint" in the abandonment record), and no claim-lifecycle log events are
  *    produced by the heartbeat itself.
  */
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
@@ -98,7 +98,18 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
 
   const ep1 = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep1?.status, "pending");
-  assertEquals(ep1?.phase, "audio_synthesized");
+  assertEquals(ep1?.phase, "upload_retry");
+
+  // The retry churn is operator-visible in the claim history: one lifecycle
+  // record per interrupted upload, naming the cause (coord landing condition).
+  const retryEvents = (await stores.metadata.listLogs({ limit: 100 }))
+    .filter((l) => (l as unknown as { type?: string; phase?: string }).type === "claim.lifecycle")
+    .filter((l) => (l as unknown as { phase?: string }).phase === "upload_retry");
+  assertEquals(retryEvents.length, 1, "interrupted upload writes a claim-history record");
+  assertStringIncludes(
+    (retryEvents[0] as unknown as { message?: string }).message ?? "",
+    "terminal upload interrupted by invocation budget",
+  );
 
   // Next tick: fresh budget, synthesis served from the resume cache, put fits.
   const r2 = await runSynthesisBatch(ctx, synth, {
