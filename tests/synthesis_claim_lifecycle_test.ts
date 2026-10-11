@@ -799,3 +799,127 @@ Deno.test("audio-feed-9wqt: (3) short work still completes in one invocation", a
   assertEquals(turns.length, 3, "all 3 turns executed");
   assertEquals(ms, 15, "total duration was 15ms");
 });
+
+Deno.test("audio-feed-vvwb: a stage that would take longer than the budget is aborted at the budget deadline and yields with progress checkpointed", async () => {
+  const { ctx, stores } = await setupEnv();
+
+  let scriptCalls = 0;
+  let simulatedMs = 1;
+  const originalNow = performance.now;
+  performance.now = () => simulatedMs;
+
+  try {
+    const synth = createGeminiSynthesizer(ctx, {
+      flushMarginMs: 5,
+      estimatedTurnDurationMs: 10,
+      scriptGenerator: (_input, options) => {
+        scriptCalls++;
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            simulatedMs += 200;
+            resolve({
+              turns: [{ speaker: "Alex" as const, text: "Hello" }],
+              sources: [],
+              counterarguments: [],
+              researchSummary: "",
+            });
+          }, 200);
+
+          options?.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            simulatedMs = 40;
+            reject(new Error("aborted by deadline"));
+          });
+        });
+      },
+    });
+
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "ep-budget-abort",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        mode: "deepdive",
+      }),
+    );
+
+    const result = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-budget-test",
+      maxInvocationDurationMs: 45,
+      flushMarginMs: 5,
+      estimatedTurnDurationMs: 10,
+    });
+
+    assertEquals(result.yielded.length, 1, "must yield cleanly");
+    assert(simulatedMs <= 45, `elapsed (${simulatedMs}) must be <= budget (45)`);
+    const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort");
+    assertEquals(ep?.status, "pending", "episode must be pending for next tick");
+    assertEquals(ep?.attempts, 0, "attempts must be 0 (not incremented on yield)");
+  } finally {
+    performance.now = originalNow;
+  }
+});
+
+Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptTurns and yields before dialogue", async () => {
+  const { ctx, stores } = await setupEnv();
+
+  let scriptCalls = 0;
+  let simulatedMs = 1;
+  const originalNow = performance.now;
+  performance.now = () => simulatedMs;
+
+  try {
+    const synth = createGeminiSynthesizer(ctx, {
+      scriptGenerator: () => {
+        scriptCalls++;
+        simulatedMs += 40_000;
+        return Promise.resolve({
+          turns: [
+            { speaker: "Alex" as const, text: "Turn 1" },
+            { speaker: "Sam" as const, text: "Turn 2" },
+          ],
+          sources: [],
+          counterarguments: [],
+          researchSummary: "",
+        });
+      },
+    });
+
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "ep-script-checkpoint-yield",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        mode: "deepdive",
+      }),
+    );
+
+    const result1 = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-tick-1",
+      maxInvocationDurationMs: 45_000,
+    });
+
+    assertEquals(result1.yielded.length, 1, "must yield cleanly");
+    const epAfterTick1 = await stores.metadata.getEpisode("user-1", "ep-script-checkpoint-yield");
+    assertEquals(epAfterTick1?.status, "pending");
+    assertEquals(epAfterTick1?.phase, "synthesized_0_of_2");
+    assertEquals(epAfterTick1?.scriptTurns?.length, 2, "scriptTurns must be durably checkpointed!");
+    assertEquals(epAfterTick1?.attempts, 0);
+
+    // Tick 2: fresh tick resumes, skips script generation entirely!
+    simulatedMs = 1;
+    await runSynthesisBatch(ctx, synth, {
+      owner: "worker-tick-2",
+      maxInvocationDurationMs: 45_000,
+      maxSegmentsPerInvocation: 2,
+    });
+
+    assertEquals(scriptCalls, 1, "scriptGenerator must NOT be called in Tick 2 (resumed from KV!)");
+  } finally {
+    performance.now = originalNow;
+  }
+});
