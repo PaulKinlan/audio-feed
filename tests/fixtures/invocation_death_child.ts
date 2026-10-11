@@ -34,13 +34,15 @@ class HangingPutBlobStore implements BlobStore {
   putIfAbsent(): Promise<BlobInfo | null> {
     return new Promise<BlobInfo | null>(() => {});
   }
-  async get(_key: string): Promise<BlobObject | null> {
+  get(_key: string): Promise<BlobObject | null> {
     return Promise.resolve(null);
   }
-  async head(_key: string): Promise<BlobInfo | null> {
+  head(_key: string): Promise<BlobInfo | null> {
     return Promise.resolve(null);
   }
-  async delete(_key: string): Promise<void> {}
+  delete(_key: string): Promise<void> {
+    return Promise.resolve();
+  }
   url(): Promise<string | null> {
     return Promise.resolve(null);
   }
@@ -57,8 +59,13 @@ const metadata = await KvMetadataStore.open(kvPath);
 const stores: Stores = {
   metadata,
   blobs: new HangingPutBlobStore(),
+  describe: "invocation-death-repro",
 };
-const config: AppConfig = { port: 8000, publicBaseUrl: "https://audio.example.com", adminToken: "x" };
+const config: AppConfig = {
+  port: 8000,
+  publicBaseUrl: "https://audio.example.com",
+  adminToken: "x",
+};
 const ctx = { config, stores };
 
 // Seed once; later rounds must NOT overwrite the claim state.

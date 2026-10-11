@@ -111,6 +111,39 @@ export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
 export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
 /** Worst-case estimated duration for terminal audio blob upload in ms (audio-feed-dv4p). */
 export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
+/**
+ * Assumed upload throughput in bytes per ms (audio-feed-aqms): ~10 MB/s.
+ *
+ * The floor estimate above says "a small upload takes ~5s"; it says nothing about an
+ * 80 MB episode WAV. A preflight bound enforced by an estimate that ignores payload
+ * size is the siv1 class again - by estimate rather than by construction - because it
+ * STARTS a put that cannot finish inside the remaining invocation budget, and a put
+ * that outlives the isolate dies without a terminal write (the phase is checkpointed
+ * BEFORE the put starts, so nothing downstream can rescue it). Scaling the estimate
+ * by bytes makes the preflight honest for large payloads: it refuses to start the
+ * upload and yields the claim resumably instead of dying mid-flight.
+ *
+ * The number is a CONSERVATIVE planning assumption, not a measurement: R2 from a Deno
+ * Deploy isolate typically does several times better, so the estimate errs toward
+ * deferring (a later tick with a fresh budget) rather than toward starting a doomed
+ * put. When it is wrong the failure mode is a 2-minute retry, not a lost episode.
+ */
+export const ASSUMED_UPLOAD_BYTES_PER_MS = 10;
+
+/**
+ * Honest worst-case duration for uploading `byteLength` bytes (audio-feed-aqms).
+ *
+ * `floorMs` seeds the estimate for small payloads (connection setup, signing, the
+ * first write); the byte-scaled term dominates for real episode audio.
+ */
+export function estimateUploadDurationMs(
+  byteLength: number,
+  floorMs: number = ESTIMATED_UPLOAD_DURATION_MS,
+  bytesPerMs: number = ASSUMED_UPLOAD_BYTES_PER_MS,
+): number {
+  if (byteLength <= 0 || bytesPerMs <= 0) return Math.max(0, floorMs);
+  return Math.max(floorMs, Math.ceil(byteLength / bytesPerMs));
+}
 /** Safety margin reserved for flushing checkpoints, commits, and claim yields in ms (audio-feed-9wqt). */
 export const INVOCATION_FLUSH_MARGIN_MS = 5_000;
 
