@@ -68,7 +68,7 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
-import { collect } from "../storage/mod.ts";
+import { collect, type MetadataStore } from "../storage/mod.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { DEFAULT_DAILY_EPISODE_BUDGET, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET } from "../config.ts";
 
@@ -325,6 +325,47 @@ function isPermanent(error: unknown): boolean {
 }
 
 /**
+ * Record a phase and heartbeat checkpoint for an owned claim (audio-feed-2m5z).
+ *
+ * Every phase/script checkpoint write must be awaited and checked. If the store throws
+ * or returns false (CAS failure: claim lost, lease expired, or taken over), abort the
+ * claim visibly with a permanent GeminiTtsError so synthesis does not proceed to paid work.
+ */
+export async function checkpointEpisodeClaim(
+  metadata: MetadataStore,
+  userId: string,
+  episodeId: string,
+  owner: string,
+  update: {
+    phase: string;
+    now?: string;
+    scriptTurns?: Array<{ speaker: string; text: string }>;
+  },
+): Promise<void> {
+  let ok: boolean;
+  try {
+    ok = await metadata.touchEpisodeClaim(userId, episodeId, owner, update);
+  } catch (error) {
+    throw new GeminiTtsError(
+      `claim checkpoint failed at phase "${update.phase}": ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      500,
+      error,
+      true, // permanent: abort claim immediately without retry
+    );
+  }
+  if (!ok) {
+    throw new GeminiTtsError(
+      `claim checkpoint failed at phase "${update.phase}": claim no longer held by worker ${owner}`,
+      409,
+      undefined,
+      true, // permanent: claim lost / superseded, abort immediately
+    );
+  }
+}
+
+/**
  * The failure reason persisted on an episode and shown in the UI (audio-feed-bp6r).
  *
  * The TTS client wraps a turn failure as "TTS turn failed; ..." (audio-feed-bp6r) — its own status
@@ -456,9 +497,9 @@ export function createGeminiSynthesizer(
     const claimedBy = episode.claimedBy ?? "";
     const onProgress = async (turn: number, total: number) => {
       if (claimedBy) {
-        await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+        await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
           phase: `synthesizing_segment_${turn}_of_${total}`,
-        }).catch(() => {});
+        });
       }
     };
     const ttsOptions = {
@@ -485,9 +526,9 @@ export function createGeminiSynthesizer(
       let turns = episode.scriptTurns;
       if (!turns || turns.length === 0) {
         if (claimedBy) {
-          await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+          await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
             phase: "generating_script",
-          }).catch(() => {});
+          });
         }
         const script = await runScriptStage(
           scriptGenerator,
@@ -507,13 +548,20 @@ export function createGeminiSynthesizer(
         );
         turns = script?.turns;
         if (turns && turns.length > 0) {
-          episode.scriptTurns = turns;
           if (claimedBy) {
-            await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
-              phase: "script_generated",
-              scriptTurns: turns,
-            }).catch(() => {});
+            await checkpointEpisodeClaim(
+              ctx.stores.metadata,
+              episode.userId,
+              episode.id,
+              claimedBy,
+              {
+                phase: "script_generated",
+                scriptTurns: turns,
+              },
+            );
           }
+          // Only cache in episode once checkpoint write has durably succeeded (audio-feed-2m5z)
+          episode.scriptTurns = turns;
         }
       }
       try {
@@ -551,9 +599,9 @@ export function createGeminiSynthesizer(
       DEFAULT_NARRATION_VOICE;
 
     if (claimedBy) {
-      await ctx.stores.metadata.touchEpisodeClaim(episode.userId, episode.id, claimedBy, {
+      await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
         phase: "preparing_input",
-      }).catch(() => {});
+      });
     }
 
     try {
@@ -986,9 +1034,28 @@ export async function runSynthesisBatch(
       continue;
     }
     claimedAny = true;
-    await metadata.touchEpisodeClaim(claimed.userId, claimed.id, opts.owner, {
-      phase: "reading_article",
-    }).catch(() => {});
+    try {
+      await checkpointEpisodeClaim(metadata, claimed.userId, claimed.id, opts.owner, {
+        phase: "reading_article",
+      });
+    } catch (err) {
+      const error = String((err as Error)?.message ?? err);
+      console.error(
+        `[audio-feed] synthesis checkpoint failed for episode "${claimed.id}": ${error}`,
+      );
+      if (err instanceof GeminiTtsError && err.status === 409) {
+        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      } else {
+        const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+        if (wrote) {
+          result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
+          await notifyOnDemand(claimed, "failed", error);
+        } else {
+          result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+        }
+      }
+      continue;
+    }
 
     const article = await metadata.getArticle(claimed.userId, claimed.articleId);
     // A regeneration that produces no new audio goes back to ready on its old audio
@@ -1084,23 +1151,49 @@ export async function runSynthesisBatch(
       console.error(
         `[audio-feed] synthesis failed for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
       );
-      const wrote = await metadata.completeEpisode(
-        unsynthesized(currentEpisode, error),
-        opts.owner,
-      );
-      if (wrote) {
-        result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
-        await notifyOnDemand(currentEpisode, "failed", error);
-      } else {
+      if (lastError instanceof GeminiTtsError && lastError.status === 409) {
         result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      } else {
+        const wrote = await metadata.completeEpisode(
+          unsynthesized(currentEpisode, error),
+          opts.owner,
+        );
+        if (wrote) {
+          result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+          await notifyOnDemand(currentEpisode, "failed", error);
+        } else {
+          result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+        }
       }
       continue;
     }
 
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
-    await metadata.touchEpisodeClaim(currentEpisode.userId, currentEpisode.id, opts.owner, {
-      phase: "uploading_audio",
-    }).catch(() => {});
+    try {
+      await checkpointEpisodeClaim(metadata, currentEpisode.userId, currentEpisode.id, opts.owner, {
+        phase: "uploading_audio",
+      });
+    } catch (err) {
+      const error = String((err as Error)?.message ?? err);
+      console.error(
+        `[audio-feed] upload checkpoint failed for episode "${currentEpisode.id}": ${error}`,
+      );
+      if (err instanceof GeminiTtsError && err.status === 409) {
+        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      } else {
+        const wrote = await metadata.completeEpisode(
+          unsynthesized(currentEpisode, error),
+          opts.owner,
+        );
+        if (wrote) {
+          result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+          await notifyOnDemand(currentEpisode, "failed", error);
+        } else {
+          result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+        }
+      }
+      continue;
+    }
     // Every attempt writes under its OWN revision, first synthesis included (audio-feed-xsu):
     // /audio is served immutable, and a first attempt used to write the deterministic canonical
     // key — so a superseded worker and the winner shared one key and the loser's cleanup below

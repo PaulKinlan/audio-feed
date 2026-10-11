@@ -399,3 +399,198 @@ Deno.test("audio-feed-siv1: completeEpisode is idempotent for the same owner and
   );
   assertEquals(write3, false, "completion with different audio key must return false");
 });
+
+Deno.test("audio-feed-2m5z: (a) rejecting checkpoint at script_generated fails visibly and does not call TTS", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+  let scriptCalls = 0;
+  let dialogueCalls = 0;
+
+  const mockScriptGenerator = () => {
+    scriptCalls++;
+    return Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: "Turn 1" },
+        { speaker: "Sam", text: "Turn 2" },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+  };
+
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  mockClient.synthesizeDialogue = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  // Intercept touchEpisodeClaim on metadata store to reject at script_generated
+  const origTouch = stores.metadata.touchEpisodeClaim.bind(stores.metadata);
+  stores.metadata.touchEpisodeClaim = (userId, episodeId, owner, update) => {
+    if (update.phase === "script_generated") {
+      return Promise.reject(new Error("KV store write failed"));
+    }
+    return origTouch(userId, episodeId, owner, update);
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-reject-test",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  const batch = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-reject",
+    maxClaims: 3,
+    maxAttempts: 1,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(dialogueCalls, 0, "TTS MUST NOT be called when checkpoint write rejects");
+  assertEquals(batch.failed.length, 1, "batch reports failure");
+  const failedError = batch.failed[0]?.error ?? "";
+  assertStringIncludes(
+    failedError,
+    'claim checkpoint failed at phase "script_generated"',
+  );
+  assertStringIncludes(failedError, "KV store write failed");
+
+  // In-memory scriptTurns must not have leaked into stored episode
+  const ep = await stores.metadata.getEpisode("user-1", "ep-reject-test");
+  assertEquals(
+    ep?.scriptTurns,
+    undefined,
+    "failed checkpoint must not leave scriptTurns persisted",
+  );
+});
+
+Deno.test("audio-feed-2m5z: (b) false-returning (lost ownership) checkpoint at script_generated aborts claim and does not call TTS", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+  let scriptCalls = 0;
+  let dialogueCalls = 0;
+
+  const mockScriptGenerator = () => {
+    scriptCalls++;
+    return Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: "Turn 1" },
+        { speaker: "Sam", text: "Turn 2" },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+  };
+
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  mockClient.synthesizeDialogue = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  // Intercept touchEpisodeClaim to simulate lost ownership (returns false) at script_generated
+  const origTouch = stores.metadata.touchEpisodeClaim.bind(stores.metadata);
+  stores.metadata.touchEpisodeClaim = (userId, episodeId, owner, update) => {
+    if (update.phase === "script_generated") {
+      return Promise.resolve(false);
+    }
+    return origTouch(userId, episodeId, owner, update);
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-lost-test",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  const batch = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-lost",
+    maxClaims: 3,
+    maxAttempts: 1,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(dialogueCalls, 0, "TTS MUST NOT be called when ownership is lost at checkpoint");
+  assertEquals(batch.superseded.length, 1, "batch reports superseded");
+  assertEquals(batch.superseded[0]?.episodeId, "ep-lost-test");
+});
+
+Deno.test("audio-feed-2m5z: (c) good checkpoint at script_generated still proceeds to TTS", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+  let scriptCalls = 0;
+  let dialogueCalls = 0;
+
+  const mockScriptGenerator = () => {
+    scriptCalls++;
+    return Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: "Turn 1" },
+        { speaker: "Sam", text: "Turn 2" },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+  };
+
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  mockClient.synthesizeDialogue = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-good-test",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+  });
+
+  const batch = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-good",
+    maxClaims: 3,
+    maxAttempts: 1,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(dialogueCalls, 1, "TTS was called after successful checkpoint");
+  assertEquals(batch.ready.length, 1, "batch completed successfully");
+});
