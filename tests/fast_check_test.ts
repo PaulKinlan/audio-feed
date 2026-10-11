@@ -9,7 +9,7 @@
  * the suite it can never affect.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
   allTestFiles,
   extractFailingTests,
@@ -473,8 +473,14 @@ function coverageNoteFromLog(log: string): string {
     if (uniform) {
       const payload = uniform[1]!.trim();
       if (payload.startsWith("UNKNOWN")) unknown = payload;
-      else if (payload.startsWith("NONE")) none = payload;
-      else for (const f of payload.split(/\s+/)) if (f) executed.add(f);
+      else if (/^ran 0 suite\(s\)/.test(payload)) none = payload;
+      else {
+        // One dialect for one concept: the marker's executed case uses the RUNNER'S OWN wording
+        // (`coverage: ran N suite(s): <files>`), so the parse is a parse of the vocabulary the fleet
+        // already prints - not a second phrasing invented for the same fact (coord, audio-feed-psjb).
+        const ran = /^ran (\d+) suite\(s\)(?::\s*(.*))?$/.exec(payload);
+        if (ran) { for (const f of (ran[2] ?? "").split(/\s+/)) if (f) executed.add(f); }
+      }
     }
   }
   if (unknown) return `no information: ${unknown}`;
@@ -499,7 +505,7 @@ Deno.test("psjb: a FAILING run's coverage note names the suites that ran, not ze
     "fast-check: 2 test file(s) (affected by: src/a.ts, tests/b_test.ts)",
     "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
     "fast-gate: failed: tests/b_test.ts (some assertion)",
-    "fast-gate: coverage: tests/a_test.ts tests/b_test.ts",
+    "fast-gate: coverage: ran 2 suite(s): tests/a_test.ts tests/b_test.ts",
   ].join("\n");
 
   // The uniform marker means the same thing after a failure as after a pass: these suites EXECUTED.
@@ -507,6 +513,11 @@ Deno.test("psjb: a FAILING run's coverage note names the suites that ran, not ze
     coverageNoteFromLog(failingLog),
     "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
   );
+
+  // The marker speaks the RUNNER'S dialect for the executed case - `ran N suite(s)` - so a reader who has
+  // seen the fleet's own coverage line does not have to learn a second phrasing for the same fact.
+  const markerLine = failingLog.split("\n").find((l) => l.startsWith("fast-gate: coverage:"))!;
+  assertMatch(markerLine, /^fast-gate: coverage: ran \d+ suite\(s\)(: .+)?$/);
 
   // MUTATION, as a function: the old passed|completed-only rule reports ZERO suites for the same log,
   // which is exactly the defect this bead is about - an inability to know rendered as a zero.
@@ -518,7 +529,7 @@ Deno.test("psjb: a gate that never reached the harness says NO INFORMATION, not 
   // lane reading "unmapped: everything" after a lint error and hunting a coverage bug that does not exist.
   const stoppedLog = [
     "fast-gate: failed: lint",
-    "fast-gate: coverage: UNKNOWN (the gate stopped before the test harness: lint)",
+    "fast-gate: coverage: UNKNOWN - the gate stopped before the test harness: lint",
   ].join("\n");
   const note = coverageNoteFromLog(stoppedLog);
   assert(note.startsWith("no information:"), note);
@@ -529,11 +540,14 @@ Deno.test("psjb: a gate that never reached the harness says NO INFORMATION, not 
   const noneLog = [
     "fast-check: NO SUITES SELECTED — 0 of 103 test module(s) ran.",
     "fast-gate: unmapped: README.md",
-    "fast-gate: coverage: NONE (no suite observes the changed files)",
+    "fast-gate: coverage: ran 0 suite(s) - no suite observes the changed files",
   ].join("\n");
   const noneNote = coverageNoteFromLog(noneLog);
   assert(noneNote.startsWith("no suites ran:"), noneNote);
-  assertEquals(noneNote.includes("0 suite"), false);
+  // Here a ZERO is a fact rather than an inability to know, so the note says zero AND says why: the harness
+  // ran and selected nothing. That is the whole difference between this state and the UNKNOWN one above.
+  assert(noneNote.includes("0 suite"), noneNote);
+  assert(noneNote.includes("no suite observes"), noneNote);
 });
 
 Deno.test("psjb: the uniform marker is emitted on EVERY path, not only the passing one", () => {
