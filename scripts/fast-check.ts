@@ -22,7 +22,7 @@
  *   - a non-TypeScript file outside src/ and tests/ (a docs/evidence PNG, a shell runner) selects the
  *     suites the DERIVED read relation says read or execute it - the relation is scanned out of the
  *     suites' own code in scripts/test-selection.ts, not listed beside them - and anything the derivation
- *     cannot see, that is not declared unread, runs the FULL suite and names itself (audio-feed-es8y: "not
+ *     cannot see runs the FULL suite and names itself (audio-feed-es8y: "not
  *     a .ts file" used to mean "no test can care", which gave a fast PASS on a tree where the full gate
  *     failed);
  *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
@@ -55,6 +55,7 @@ import {
   deriveDataReadRelations,
   discoverFullGateTestFiles,
   GRAPH_CONFIG_FILES,
+  inertContradictions,
   isFastGateSelectable,
   isProvablyInert,
   resolverConfigInputs,
@@ -536,7 +537,10 @@ export function planTests(
   // docs/evidence/*.png selected ZERO suites while tests/evidence_size_test.ts asserted its byte budget.
   // The relation is DERIVED from the suites (scripts/test-selection.ts) rather than listed here, so a suite
   // that starts reading a new data file is covered without anyone editing a selection table. Anything the
-  // derivation cannot see and that is not declared unread runs the FULL suite and names itself.
+  // derivation cannot see runs the FULL suite and names itself. THE ORDERING RULE: the derived relation is
+  // consulted FIRST and outranks every category heuristic - a path a suite is seen to read is a real input
+  // whatever it looks like (audio-feed-38sn), and inertContradictions() below makes an inversion of that
+  // order a NAMED failure instead of a silent empty selection.
   const data = classifyNonTsChanges(changed, readRelations);
   if (data.unclassified.length) {
     return {
@@ -571,6 +575,19 @@ export function planTests(
     // EVERY changed file is documentation that NO suite is derived to read (audio-feed-r9fe removed the
     // declarations, so markdown is the only inert class left). Anything else gets the full suite and names
     // itself.
+    // Defence in depth for the ordering rule (audio-feed-38sn): classifyNonTsChanges() asks the relation
+    // first, so this cannot be reached today - and if a future change inverts that order, the answer must
+    // still not be an empty pass. It becomes the FULL suite, with the contradiction named.
+    const inertWithReaders = inertContradictions(changed, readRelations);
+    if (inertWithReaders.length) {
+      return {
+        testFiles: null,
+        reason:
+          `ORDERING BUG: path(s) treated as inert documentation while the derived relation names a reader: ${
+            inertWithReaders.join(", ")
+          } (the derived relation outranks the documentation heuristic)`,
+      };
+    }
     if (isProvablyInert(changed, data)) {
       return {
         testFiles: [],
@@ -737,7 +754,8 @@ ${auditUniverseDrift}`);
     // audio-feed-es8y condition 2: a gate that ran NOTHING must not read like a gate that ran suites and
     // passed. The state is distinct and loud, and it is reflected in the fleet's coverage line by the
     // `unmapped:` marker the reporter already parses (it turns a non-empty list into a COVERAGE WARNING).
-    // Only reachable when every changed file is declared inert - anything else fell back to the full suite.
+    // Only reachable when every changed file is inert documentation that NO suite is derived to read -
+    // anything else fell back to the full suite.
     console.log(
       `fast-check: NO SUITES SELECTED — 0 of ${fastUniverse.length} test module(s) ran. ${reason}`,
     );

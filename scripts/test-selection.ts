@@ -221,6 +221,23 @@ export function isDocumentation(relPath: string): boolean {
 }
 
 /**
+ * THE ORDERING RULE, as a check rather than a comment (coord, after rev-13 found the 38sn hole in review):
+ * the DERIVED read relation outranks every category heuristic. A path the relation names a reader for is a
+ * real input whatever it looks like, so if a path is ever treated as inert documentation WHILE a derived
+ * reader exists, that is not an empty selection - it is an ORDERING BUG, and the gate must name it and run
+ * the full suite instead. This is the check that would have caught 38sn, and the one that catches the next
+ * path-shaped heuristic added above the relation.
+ */
+export function inertContradictions(
+  changed: readonly string[],
+  relations: DataReadRelations,
+): string[] {
+  return changed.filter((file) =>
+    isDocumentation(file) && suitesObserving(file, relations).length > 0
+  );
+}
+
+/**
  * Files whose change can move what EVERY suite resolves. A NET, not the safety mechanism: the protection is
  * the unclassified default in classifyNonTsChanges()/planTests(), where any file that is not documentation
  * and has no derived reader runs the FULL suite. auditResolverConfigs() keeps this list honest against the

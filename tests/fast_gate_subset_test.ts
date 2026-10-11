@@ -34,6 +34,7 @@ import {
   deriveDataReadRelations,
   discoverFullGateTestFiles,
   FAST_GATE_EXCLUSIONS,
+  inertContradictions,
   isFastGateSelectable,
   isTestModule,
   NEVER_WALKED,
@@ -395,6 +396,22 @@ Deno.test("a markdown file a suite READS selects that suite, not an inert empty 
   );
   // Not read by anything -> documentation, and the loud inert state still applies.
   assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
+});
+
+Deno.test("the ordering rule is CHECKED: inert documentation with a derived reader is a named full-suite run (38sn)", () => {
+  // rev-13 found an ORDERING bug, so the order is what the gate now checks: the derived relation outranks the
+  // category heuristic. The planner selects the reader (relation first), and the guard - the check that
+  // would have caught 38sn - names any path treated as inert while a derived reader exists. Mutating the
+  // order in classifyNonTsChanges() kills the planner half; the guard half is a pure function on purpose.
+  const relations = new Map([["README.md", ["tests/readme_docs_test.ts"]]]);
+  assertEquals(inertContradictions(["README.md"], relations), ["README.md"]);
+  assertEquals(inertContradictions(["README.md"], RELATIONS), []);
+  assertEquals(inertContradictions(["docs/evidence/x.png"], RELATIONS), []);
+  assertEquals(
+    planTests(["README.md"], NO_GRAPH, NO_NAMED, relations).testFiles,
+    ["tests/readme_docs_test.ts"],
+    "the derived relation must outrank the documentation heuristic",
+  );
 });
 
 Deno.test("documentation still runs nothing, and a formerly-declared path runs EVERYTHING (r9fe)", () => {
