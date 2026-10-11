@@ -15,7 +15,6 @@
     "proof": "deno run --allow-all --unstable-kv",
     "test:fast": "deno run --allow-read --allow-run=git,deno --allow-env scripts/fast-check.ts",
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
-    "migrate:audio-keys": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio-keys.ts",
     "gate": "deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv"
   },
   "imports": {

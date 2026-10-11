@@ -1,31 +1,27 @@
 /**
- * Tests for legacy flat audio key inventory and migration helper (audio-feed-e6xb).
+ * Tests for read-only legacy flat audio key inventory (audio-feed-e6xb).
  *
  * Verifies:
- * 1. isCanonicalAudioKey and canonicalizeAudioKey logic.
+ * 1. isCanonicalAudioKey classification (4-part and 3-part canonical vs legacy flat).
  * 2. Key stem redaction for safe logging.
  * 3. Inventory scanning across Memory and KV metadata stores.
- * 4. Safe dry-run default migration (no mutations without apply: true).
- * 5. Explicit apply migration (rewrites audioKey, copies blobs, idempotent).
+ * 4. Paging and bounding over large catalogues in KV.
+ * 5. Strictly read-only behaviour (zero mutations performed).
  * 6. Integration with server bootstrap boot-time inventory.
  */
 
 import { assert, assertEquals } from "@std/assert";
 import { memoryStores, openStores } from "../src/config.ts";
 import {
-  canonicalizeAudioKey,
   inventoryLegacyAudioKeys,
   isCanonicalAudioKey,
-  migrateLegacyAudioKeys,
   redactSampleKey,
 } from "../src/storage/legacy_audio.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { bootstrap } from "../src/server.ts";
 
-const AUDIO_BYTES = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
-
 // ---------------------------------------------------------------------------
-// 1. Unit tests: key classification and canonicalization
+// 1. Unit tests: key classification and redaction
 // ---------------------------------------------------------------------------
 
 Deno.test("isCanonicalAudioKey: identifies canonical keys and rejects legacy flat keys", () => {
@@ -58,40 +54,6 @@ Deno.test("isCanonicalAudioKey: identifies canonical keys and rejects legacy fla
   assertEquals(isCanonicalAudioKey("voice-samples/user-1/direct/ep-1.mp3", ep), false);
 });
 
-Deno.test("canonicalizeAudioKey: produces canonical keys idempotently", () => {
-  const epDirect = makeEpisode({
-    id: "ep-1",
-    userId: "user-1",
-    mode: "direct",
-    audioKey: "legacy.mp3",
-  });
-  assertEquals(canonicalizeAudioKey(epDirect), "audio/user-1/direct/legacy.mp3");
-
-  const epPrefixed = makeEpisode({
-    id: "ep-2",
-    userId: "user-1",
-    mode: "deepdive",
-    audioKey: "audio/ready.wav",
-  });
-  assertEquals(canonicalizeAudioKey(epPrefixed), "audio/user-1/deepdive/ready.wav");
-
-  const epAlreadyCanonical = makeEpisode({
-    id: "ep-3",
-    userId: "user-1",
-    mode: "direct",
-    audioKey: "audio/user-1/direct/canonical.mp3",
-  });
-  assertEquals(canonicalizeAudioKey(epAlreadyCanonical), "audio/user-1/direct/canonical.mp3");
-
-  const epTrimmed = makeEpisode({
-    id: "ep-4",
-    userId: "user-1",
-    mode: "direct",
-    audioKey: "user-1/direct/canonical.mp3",
-  });
-  assertEquals(canonicalizeAudioKey(epTrimmed), "audio/user-1/direct/canonical.mp3");
-});
-
 Deno.test("redactSampleKey: masks inner tokens while preserving shape and extension", () => {
   assertEquals(redactSampleKey("legacy.wav"), "le**cy.wav");
   assertEquals(redactSampleKey("audio/ready.wav"), "audio/re**dy.wav");
@@ -100,10 +62,10 @@ Deno.test("redactSampleKey: masks inner tokens while preserving shape and extens
 });
 
 // ---------------------------------------------------------------------------
-// 2. Inventory tests on Memory and KV stores
+// 2. Inventory tests on Memory store (strictly read-only)
 // ---------------------------------------------------------------------------
 
-Deno.test("inventoryLegacyAudioKeys: reports accurate counts on Memory store", async () => {
+Deno.test("inventoryLegacyAudioKeys: reports accurate counts on Memory store without mutating records", async () => {
   const stores = memoryStores();
   await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
   await stores.metadata.putUser(makeUser({ id: "user-2", status: "approved" }));
@@ -161,9 +123,19 @@ Deno.test("inventoryLegacyAudioKeys: reports accurate counts on Memory store", a
   assert(
     inv.legacySamples.some((s) => s.episodeId === "ep-legacy-2" && s.redactedKey.includes(".mp3")),
   );
+
+  // Strictly read-only assertion: stored episode records must remain unchanged
+  const ep1 = await stores.metadata.getEpisode("user-1", "ep-legacy-1");
+  assertEquals(ep1?.audioKey, "legacy-track-1.wav", "inventory must be strictly read-only");
+  const ep2 = await stores.metadata.getEpisode("user-2", "ep-legacy-2");
+  assertEquals(ep2?.audioKey, "audio/ready-2.mp3", "inventory must be strictly read-only");
 });
 
-Deno.test("inventoryLegacyAudioKeys: pages through large KV store catalogue", async () => {
+// ---------------------------------------------------------------------------
+// 3. Inventory tests on KV store (paging across multiple batches)
+// ---------------------------------------------------------------------------
+
+Deno.test("inventoryLegacyAudioKeys: pages through large KV store catalogue without mutating records", async () => {
   const stores = await openStores({ kvPath: ":memory:" });
   try {
     await stores.metadata.putUser(makeUser({ id: "user-kv", status: "approved" }));
@@ -186,287 +158,10 @@ Deno.test("inventoryLegacyAudioKeys: pages through large KV store catalogue", as
     assertEquals(inv.canonicalCount, 100);
     assertEquals(inv.legacyCount, 5);
     assertEquals(inv.legacySamples.length, 3, "maxSamples option bounds samples collected");
-  } finally {
-    await stores.metadata.close();
-  }
-});
 
-// ---------------------------------------------------------------------------
-// 3. Migration helper tests: dry-run default, explicit apply, idempotency
-// ---------------------------------------------------------------------------
-
-Deno.test("migrateLegacyAudioKeys: dry-run default makes NO store mutations", async () => {
-  const stores = memoryStores();
-  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-legacy",
-      userId: "user-1",
-      mode: "direct",
-      audioKey: "old-track.mp3",
-    }),
-  );
-
-  // Run with NO options (default dryRun: true)
-  const dryResult = await migrateLegacyAudioKeys(stores.metadata);
-  assertEquals(dryResult.dryRun, true);
-  assertEquals(dryResult.legacyFound, 1);
-  assertEquals(dryResult.migrated, 0);
-  assertEquals(dryResult.plan.length, 1);
-  assertEquals(dryResult.plan[0]?.oldKey, "old-track.mp3");
-  assertEquals(dryResult.plan[0]?.newKey, "audio/user-1/direct/old-track.mp3");
-
-  // Verify stored episode is UNCHANGED
-  const ep = await stores.metadata.getEpisode("user-1", "ep-legacy");
-  assertEquals(ep?.audioKey, "old-track.mp3", "dry-run must not mutate store");
-});
-
-Deno.test("migrateLegacyAudioKeys: apply=true rewrites keys and copies blobs idempotently (Memory)", async () => {
-  const stores = memoryStores();
-  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
-  await stores.blobs.put("legacy-item.wav", AUDIO_BYTES, { contentType: "audio/wav" });
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-1",
-      userId: "user-1",
-      mode: "direct",
-      audioKey: "legacy-item.wav",
-    }),
-  );
-
-  // 1. Apply migration
-  const applyResult = await migrateLegacyAudioKeys(stores.metadata, {
-    apply: true,
-    blobs: stores.blobs,
-  });
-
-  assertEquals(applyResult.dryRun, false);
-  assertEquals(applyResult.legacyFound, 1);
-  assertEquals(applyResult.migrated, 1);
-  assertEquals(applyResult.blobCopies, 1);
-  assertEquals(applyResult.errors.length, 0);
-
-  // Verify episode record updated in store
-  const updatedEp = await stores.metadata.getEpisode("user-1", "ep-1");
-  assertEquals(updatedEp?.audioKey, "audio/user-1/direct/legacy-item.wav");
-
-  // Verify blob copied to new canonical key
-  const newBlob = await stores.blobs.get("audio/user-1/direct/legacy-item.wav");
-  assert(newBlob !== null, "blob must be copied to canonical key");
-  assertEquals(await new Response(newBlob.body).bytes(), AUDIO_BYTES);
-
-  // Verify old blob remains intact for backward compatibility
-  const oldBlob = await stores.blobs.get("legacy-item.wav");
-  assert(oldBlob !== null, "old blob remains intact");
-
-  // 2. IDEMPOTENCY: running apply again produces 0 mutations
-  const repeatResult = await migrateLegacyAudioKeys(stores.metadata, {
-    apply: true,
-    blobs: stores.blobs,
-  });
-
-  assertEquals(repeatResult.dryRun, false);
-  assertEquals(repeatResult.legacyFound, 0);
-  assertEquals(repeatResult.migrated, 0);
-  assertEquals(repeatResult.blobCopies, 0);
-  assertEquals(repeatResult.skippedAlreadyCanonical, 1);
-});
-
-Deno.test("migrateLegacyAudioKeys: apply=true executes cleanly on KV store", async () => {
-  const stores = await openStores({ kvPath: ":memory:" });
-  try {
-    await stores.metadata.putUser(makeUser({ id: "user-kv", status: "approved" }));
-    await stores.blobs.put("audio/flat-1.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
-    await stores.blobs.put("audio/flat-2.wav", AUDIO_BYTES, { contentType: "audio/wav" });
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-flat-1",
-        userId: "user-kv",
-        mode: "direct",
-        audioKey: "flat-1.mp3",
-      }),
-    );
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-flat-2",
-        userId: "user-kv",
-        mode: "deepdive",
-        audioKey: "audio/flat-2.wav",
-      }),
-    );
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-canonical",
-        userId: "user-kv",
-        mode: "direct",
-        audioKey: "audio/user-kv/direct/ok.mp3",
-      }),
-    );
-
-    // Dry-run first
-    const dry = await migrateLegacyAudioKeys(stores.metadata, { blobs: stores.blobs });
-    assertEquals(dry.dryRun, true);
-    assertEquals(dry.legacyFound, 2);
-    assertEquals(dry.migrated, 0);
-
-    // Apply
-    const applied = await migrateLegacyAudioKeys(stores.metadata, {
-      apply: true,
-      blobs: stores.blobs,
-    });
-    assertEquals(applied.dryRun, false);
-    assertEquals(applied.legacyFound, 2);
-    assertEquals(applied.migrated, 2);
-    assertEquals(applied.blobCopies, 2);
-
-    // Verify KV store records
-    const ep1 = await stores.metadata.getEpisode("user-kv", "ep-flat-1");
-    assertEquals(ep1?.audioKey, "audio/user-kv/direct/flat-1.mp3");
-
-    const ep2 = await stores.metadata.getEpisode("user-kv", "ep-flat-2");
-    assertEquals(ep2?.audioKey, "audio/user-kv/deepdive/flat-2.wav");
-
-    // Idempotent repeat
-    const repeat = await migrateLegacyAudioKeys(stores.metadata, {
-      apply: true,
-      blobs: stores.blobs,
-    });
-    assertEquals(repeat.legacyFound, 0);
-    assertEquals(repeat.migrated, 0);
-    assertEquals(repeat.skippedAlreadyCanonical, 3);
-  } finally {
-    await stores.metadata.close();
-  }
-});
-
-Deno.test("migrateLegacyAudioKeys: refuses to migrate when source blob is missing (audio-feed-ogd7)", async () => {
-  const stores = memoryStores();
-  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-missing-blob",
-      userId: "user-1",
-      audioKey: "missing.wav",
-    }),
-  );
-
-  const res = await migrateLegacyAudioKeys(stores.metadata, {
-    apply: true,
-    blobs: stores.blobs,
-  });
-
-  assertEquals(res.migrated, 0, "must not migrate when source blob is missing");
-  assertEquals(res.refusedMissingSource, 1);
-  assertEquals(res.errors.length, 1);
-  assert(res.errors[0]?.error.includes("Source blob not found"));
-
-  // Stored episode audioKey must remain unchanged
-  const ep = await stores.metadata.getEpisode("user-1", "ep-missing-blob");
-  assertEquals(ep?.audioKey, "missing.wav", "old key must be preserved on failure");
-});
-
-Deno.test("migrateLegacyAudioKeys: refuses to migrate when destination blob conflicts (audio-feed-rv3a)", async () => {
-  const stores = memoryStores();
-  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
-  await stores.blobs.put("old.wav", new Uint8Array([1, 1, 1]));
-  await stores.blobs.put("audio/user-1/direct/old.wav", new Uint8Array([2, 2, 2]));
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-conflict",
-      userId: "user-1",
-      mode: "direct",
-      audioKey: "old.wav",
-    }),
-  );
-
-  const res = await migrateLegacyAudioKeys(stores.metadata, {
-    apply: true,
-    blobs: stores.blobs,
-  });
-
-  assertEquals(res.migrated, 0, "must refuse to migrate when destination conflicts");
-  assertEquals(res.refusedConflict, 1);
-  assertEquals(res.errors.length, 1);
-  assert(res.errors[0]?.error.includes("Conflicting destination blob"));
-
-  // Stored episode audioKey must remain unchanged
-  const ep = await stores.metadata.getEpisode("user-1", "ep-conflict");
-  assertEquals(ep?.audioKey, "old.wav", "old key must be preserved on conflict");
-
-  // Destination bytes must NOT be overwritten
-  const destBlob = await stores.blobs.get("audio/user-1/direct/old.wav");
-  assert(destBlob !== null);
-  assertEquals(await new Response(destBlob.body).bytes(), new Uint8Array([2, 2, 2]));
-});
-
-Deno.test("migrateLegacyAudioKeys: reuses destination blob if bytes match without duplicate copy", async () => {
-  const stores = memoryStores();
-  await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
-  await stores.blobs.put("old.wav", new Uint8Array([42, 43, 44]));
-  await stores.blobs.put("audio/user-1/direct/old.wav", new Uint8Array([42, 43, 44]));
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-matching",
-      userId: "user-1",
-      mode: "direct",
-      audioKey: "old.wav",
-    }),
-  );
-
-  const res = await migrateLegacyAudioKeys(stores.metadata, {
-    apply: true,
-    blobs: stores.blobs,
-  });
-
-  assertEquals(res.migrated, 1, "migrates when destination matches source");
-  assertEquals(res.blobCopies, 0, "no duplicate blob copy needed");
-  assertEquals(res.errors.length, 0);
-
-  const ep = await stores.metadata.getEpisode("user-1", "ep-matching");
-  assertEquals(ep?.audioKey, "audio/user-1/direct/old.wav");
-});
-
-Deno.test("migrateLegacyAudioKeys: refuses missing source and conflicts on KV store (audio-feed-ogd7, audio-feed-rv3a)", async () => {
-  const stores = await openStores({ kvPath: ":memory:" });
-  try {
-    await stores.metadata.putUser(makeUser({ id: "user-kv-err", status: "approved" }));
-
-    // 1. Missing source
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-kv-missing",
-        userId: "user-kv-err",
-        audioKey: "ghost.wav",
-      }),
-    );
-
-    // 2. Conflicting destination
-    await stores.blobs.put("audio/collide.mp3", new Uint8Array([10, 20]));
-    await stores.blobs.put("audio/user-kv-err/direct/collide.mp3", new Uint8Array([99, 99]));
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-kv-conflict",
-        userId: "user-kv-err",
-        mode: "direct",
-        audioKey: "collide.mp3",
-      }),
-    );
-
-    const res = await migrateLegacyAudioKeys(stores.metadata, {
-      apply: true,
-      blobs: stores.blobs,
-    });
-
-    assertEquals(res.migrated, 0);
-    assertEquals(res.refusedMissingSource, 1);
-    assertEquals(res.refusedConflict, 1);
-    assertEquals(res.errors.length, 2);
-
-    const ep1 = await stores.metadata.getEpisode("user-kv-err", "ep-kv-missing");
-    assertEquals(ep1?.audioKey, "ghost.wav");
-
-    const ep2 = await stores.metadata.getEpisode("user-kv-err", "ep-kv-conflict");
-    assertEquals(ep2?.audioKey, "collide.mp3");
+    // Strictly read-only assertion: records remain unchanged in KV
+    const sampleEp = await stores.metadata.getEpisode("user-kv", "ep-000");
+    assertEquals(sampleEp?.audioKey, "legacy-0.mp3", "KV store must not be mutated by inventory");
   } finally {
     await stores.metadata.close();
   }
