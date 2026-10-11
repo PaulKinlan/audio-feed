@@ -433,7 +433,20 @@ Deno.test("the ordering rule is CHECKED: inert documentation with a derived read
   const relations = new Map([["README.md", ["tests/readme_docs_test.ts"]]]);
   assertEquals(inertContradictions(["README.md"], relations), ["README.md"]);
   assertEquals(inertContradictions(["README.md"], RELATIONS), []);
-  assertEquals(inertContradictions(["docs/evidence/x.png"], RELATIONS), []);
+  // The inverse, and the reason the guard exists: THIS repo's relation observes docs/evidence/, so a data
+  // path reaching the inert bucket is precisely the ordering bug - the guard must flag it. (With the
+  // predicate-based guard this returned [] because the path is not markdown, which is how the .md-shaped
+  // guard covered the instance and missed the shape - audio-feed-t0sp.)
+  assertEquals(inertContradictions(["docs/evidence/x.png"], RELATIONS), ["docs/evidence/x.png"]);
+  // audio-feed-t0sp: the guard covers the BUCKET, not the .md predicate. A NON-markdown category that some
+  // future change pushes into the inert bucket is caught here even though isDocumentation() is false for it -
+  // rev-16's repro (a `.csv` with a named reader) expressed as a guard call rather than as a classifier
+  // mutation, which is what makes it a regression test rather than a demonstration.
+  const csvRelations = new Map([["data/table.csv", ["tests/table_docs_test.ts"]]]);
+  assertEquals(inertContradictions(["data/table.csv"], csvRelations), ["data/table.csv"]);
+  // And the guard must not be a predicate in disguise: it is handed a bucket, so a path in that bucket with
+  // NO derived reader is fine (the loud inert state), whatever its extension.
+  assertEquals(inertContradictions(["data/table.csv"], RELATIONS), []);
   assertEquals(
     planTests(["README.md"], NO_GRAPH, NO_NAMED, relations).testFiles,
     ["tests/readme_docs_test.ts"],
@@ -465,7 +478,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
     ".beads/issues.jsonl",
     "mystery/payload.bin",
   ], RELATIONS);
-  assertEquals(classified.documentation, ["README.md"]);
+  assertEquals(classified.inert, ["README.md"]);
   assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
@@ -485,7 +498,7 @@ Deno.test("an empty selection is allowed only for provably inert changes (es8y c
   ) {
     const plan = planTests(inert, NO_GRAPH, NO_NAMED);
     assertEquals(plan.testFiles, [], `${inert} should select nothing: ${plan.reason}`);
-    assert(plan.reason.includes("documentation only"), plan.reason);
+    assert(plan.reason.includes("inert, no suite is derived to read it"), plan.reason);
   }
   // A tooling path is NOT inert any more: it runs the full suite and names itself.
   assertEquals(planTests([".beads/issues.jsonl"], NO_GRAPH, NO_NAMED).testFiles, null);

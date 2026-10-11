@@ -229,12 +229,15 @@ export function isDocumentation(relPath: string): boolean {
  * path-shaped heuristic added above the relation.
  */
 export function inertContradictions(
-  changed: readonly string[],
+  inertPaths: readonly string[],
   relations: DataReadRelations,
 ): string[] {
-  return changed.filter((file) =>
-    isDocumentation(file) && suitesObserving(file, relations).length > 0
-  );
+  // NOTE THE PARAMETER (audio-feed-t0sp): this takes the CLASSIFIER'S INERT BUCKET, not the change set, and it
+  // deliberately does NOT re-test any predicate of its own. A guard that asked `isDocumentation(file)` was
+  // only as broad as the category that existed when it was written, so a second inert category - a `.csv`
+  // pushed into the bucket by someone who never read this file - would have gone straight past it and
+  // produced the 38sn empty pass again.
+  return inertPaths.filter((path) => suitesObserving(path, relations).length > 0);
 }
 
 /**
@@ -587,8 +590,16 @@ export function suitesObserving(
 }
 
 export interface NonTsClassification {
-  /** Markdown: no suite reads it, so no selection consequence. */
-  documentation: string[];
+  /**
+   * THE INERT BUCKET: files whose change may legally select NOTHING. Markdown that no suite is derived to
+   * read is the only member today, and it is deliberately a BUCKET rather than a predicate - any future
+   * inert category appends HERE, and both the empty-selection decision (isProvablyInert) and the ordering
+   * guard (inertContradictions) read THIS LIST. That is audio-feed-t0sp: a guard written against
+   * `isDocumentation(file)` covered only the one predicate that existed when it was written, so a second
+   * inert category would have reintroduced the 38sn empty pass - a real input the relation names a reader
+   * for, silently selecting nothing.
+   */
+  inert: string[];
   /** Suites that must run because the DERIVED relation says they read the changed data. */
   suites: string[];
   /** Not .ts, not markdown, not read by anything detectable and not declared: full suite, by name. */
@@ -605,7 +616,7 @@ export function classifyNonTsChanges(
   relations: DataReadRelations,
 ): NonTsClassification {
   const classification: NonTsClassification = {
-    documentation: [],
+    inert: [],
     suites: [],
     unclassified: [],
   };
@@ -624,7 +635,7 @@ export function classifyNonTsChanges(
       continue;
     }
     if (isDocumentation(file)) {
-      classification.documentation.push(file);
+      classification.inert.push(file);
       continue;
     }
     classification.unclassified.push(file);
@@ -647,7 +658,7 @@ export function isProvablyInert(
   classification: NonTsClassification,
 ): boolean {
   if (!changed.length) return false;
-  const inert = new Set(classification.documentation);
+  const inert = new Set(classification.inert);
   return changed.every((file) => inert.has(file));
 }
 

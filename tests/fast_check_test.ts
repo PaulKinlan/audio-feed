@@ -157,7 +157,7 @@ Deno.test("planTests: docs-only runs nothing; an EMPTY change set runs the full 
   // only inert class left; a tooling path (.beads/, .github/, .gitignore) now runs the full suite.
   const docs = planTests(["README.md"], GRAPH, NO_NAMED);
   assertEquals(docs.testFiles, []);
-  assert(docs.reason.includes("documentation only"), docs.reason);
+  assert(docs.reason.includes("inert, no suite is derived to read it"), docs.reason);
 
   // An empty change set proves nothing about anything, so it is NOT inert: it gets the full suite. This
   // used to select zero suites, which is exactly the shape that reads as a green test run.
