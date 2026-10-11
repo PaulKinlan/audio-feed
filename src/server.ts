@@ -152,6 +152,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   );
   // One-time boot inventory of legacy flat audio keys (audio-feed-e6xb).
   // Informs operator of surviving legacy flat audio keys without blocking startup.
+  // Strictly aggregate counts only — never logs user IDs or key fragments (audio-feed-tyxd).
   const inventory = options.inventory !== false
     ? inventoryLegacyAudioKeys(stores.metadata)
       .then((inv) => {
@@ -159,7 +160,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
           console.warn(
             `[audio-feed] legacy audio key inventory: found ${inv.legacyCount} legacy flat key(s) ` +
               `(${inv.canonicalCount} canonical, ${inv.totalEpisodesScanned} total episodes across ${inv.totalUsersScanned} user(s)). ` +
-              `Samples: ${JSON.stringify(inv.legacySamples)}`,
+              `Shapes: flat=${inv.byShape.flat} audioPrefixed=${inv.byShape.audioPrefixed} nested=${inv.byShape.nested}. ` +
+              `Extensions: wav=${inv.byExtension[".wav"]} mp3=${inv.byExtension[".mp3"]} other=${
+                inv.byExtension["other"]
+              }`,
           );
         } else {
           console.log(

@@ -8,11 +8,12 @@
  *
  * This module provides strictly read-only scanning and diagnostic reporting:
  * 1. Detection of canonical vs legacy audio keys (isCanonicalAudioKey).
- * 2. Key and identifier redaction for diagnostic logging (redactSampleKey, hashIdentifier).
+ * 2. Whitelist-based extension and structural shape categorization.
  * 3. Inventory scanning across MetadataStore (Memory and KV).
  *
- * Privacy and safety constraints (audio-feed-2qgb):
- * Samples must NEVER reveal raw user identifiers or unmasked path components.
+ * Privacy and safety constraints (audio-feed-2qgb, audio-feed-tyxd):
+ * Produces STRICTLY AGGREGATE COUNTS ONLY. Never emits user IDs, key fragments,
+ * filenames, or arbitrary suffixes into logs or CLI output.
  *
  * Strictly no mutations or writes are performed by this module.
  *
@@ -20,7 +21,42 @@
  */
 
 import type { MetadataStore } from "./mod.ts";
-import { type AudioMode, type Episode, isAudioMode } from "../types.ts";
+import { type Episode, isAudioMode } from "../types.ts";
+
+/** Strict whitelist of recognized safe audio extensions. */
+export const KNOWN_AUDIO_EXTENSIONS = [
+  ".wav",
+  ".mp3",
+  ".m4a",
+  ".ogg",
+  ".webm",
+] as const;
+
+export type KnownAudioExtension = (typeof KNOWN_AUDIO_EXTENSIONS)[number] | "other" | "none";
+
+/**
+ * Categorizes an audio key's file extension against a strict whitelist.
+ * Arbitrary user-supplied suffixes (e.g. .sensitive-2026) are grouped into "other"
+ * to prevent data exfiltration through operational diagnostics (audio-feed-tyxd).
+ */
+export function categorizeExtension(key: string): KnownAudioExtension {
+  const lower = key.toLowerCase();
+  for (const ext of KNOWN_AUDIO_EXTENSIONS) {
+    if (lower.endsWith(ext)) return ext;
+  }
+  if (key.includes(".")) return "other";
+  return "none";
+}
+
+/**
+ * Categorizes the structure shape of a legacy audio key.
+ */
+export function categorizeShape(key: string): "flat" | "audioPrefixed" | "nested" {
+  const parts = key.split("/");
+  if (parts.length === 1) return "flat";
+  if (parts.length === 2 && parts[0] === "audio") return "audioPrefixed";
+  return "nested";
+}
 
 /**
  * Checks whether an audio key is in canonical format.
@@ -66,86 +102,52 @@ export function isCanonicalAudioKey(
   return false;
 }
 
-/**
- * Categorizes the structure shape of a legacy audio key.
- */
-export function categorizeAudioKeyShape(
-  rawKey: string,
-): "flat" | "audio-prefixed" | "nested" {
-  const parts = rawKey.split("/");
-  if (parts.length === 1) return "flat";
-  if (parts.length === 2 && parts[0] === "audio") return "audio-prefixed";
-  return "nested";
-}
-
-/**
- * Generates a stable, truncated non-reversible SHA-256 hash of an identifier (e.g. userId),
- * allowing correlation across samples without exposing subscriber identities (audio-feed-2qgb).
- */
-export async function hashIdentifier(id: string): Promise<string> {
-  const data = new TextEncoder().encode(id);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 8);
-}
-
-/**
- * Redacts an audio key for safe diagnostic logging (audio-feed-2qgb).
- * Guarantees that NO path components or filename stems are exposed in cleartext.
- * Only the public prefix ("audio", if present) and file extension (.mp3 / .wav) are preserved.
- */
-export function redactSampleKey(rawKey: string): string {
-  if (!rawKey) return "";
-  const parts = rawKey.split("/");
-  const file = parts.pop() || "";
-  const dotIndex = file.lastIndexOf(".");
-  const ext = dotIndex !== -1 ? file.slice(dotIndex).toLowerCase() : "";
-
-  const maskedParts: string[] = parts.map((seg) => (seg === "audio" ? "audio" : "[path]"));
-  maskedParts.push(`[token]${ext}`);
-  return maskedParts.join("/");
-}
-
-export interface AudioInventorySample {
-  userHash: string;
-  mode: AudioMode;
-  shape: "flat" | "audio-prefixed" | "nested";
-  segmentCount: number;
-  extension: string;
-  maskedKey: string;
-}
-
 export interface AudioInventoryResult {
   totalUsersScanned: number;
   totalEpisodesScanned: number;
   episodesWithAudioKey: number;
   canonicalCount: number;
   legacyCount: number;
-  legacySamples: AudioInventorySample[];
+  byShape: {
+    flat: number;
+    audioPrefixed: number;
+    nested: number;
+  };
+  byExtension: Record<KnownAudioExtension, number>;
 }
 
 /**
  * Scans the metadata store to inventory episodes with canonical vs legacy audio keys.
  * Strictly read-only: performs zero mutations against the store.
- * Anonymizes samples with non-reversible hashes and masked path tokens (audio-feed-2qgb).
+ * Returns STRICTLY AGGREGATE COUNTS ONLY with zero user identifiers or key fragments.
  */
 export async function inventoryLegacyAudioKeys(
   metadata: MetadataStore,
-  opts?: { maxSamples?: number },
 ): Promise<AudioInventoryResult> {
-  const maxSamples = opts?.maxSamples ?? 5;
   const users = await metadata.listUsers();
   let totalEpisodesScanned = 0;
   let episodesWithAudioKey = 0;
   let canonicalCount = 0;
   let legacyCount = 0;
-  const legacySamples: AudioInventorySample[] = [];
+
+  const byShape = {
+    flat: 0,
+    audioPrefixed: 0,
+    nested: 0,
+  };
+
+  const byExtension: Record<KnownAudioExtension, number> = {
+    ".wav": 0,
+    ".mp3": 0,
+    ".m4a": 0,
+    ".ogg": 0,
+    ".webm": 0,
+    "other": 0,
+    "none": 0,
+  };
 
   for (const user of users) {
     let cursor: string | undefined = undefined;
-    const userHash = await hashIdentifier(user.id);
     do {
       const page = await metadata.listEpisodePage({
         userId: user.id,
@@ -160,21 +162,8 @@ export async function inventoryLegacyAudioKeys(
           canonicalCount++;
         } else {
           legacyCount++;
-          if (legacySamples.length < maxSamples) {
-            const parts = episode.audioKey.split("/");
-            const file = parts[parts.length - 1] || "";
-            const dotIndex = file.lastIndexOf(".");
-            const ext = dotIndex !== -1 ? file.slice(dotIndex).toLowerCase() : "";
-
-            legacySamples.push({
-              userHash,
-              mode: episode.mode,
-              shape: categorizeAudioKeyShape(episode.audioKey),
-              segmentCount: parts.length,
-              extension: ext,
-              maskedKey: redactSampleKey(episode.audioKey),
-            });
-          }
+          byShape[categorizeShape(episode.audioKey)]++;
+          byExtension[categorizeExtension(episode.audioKey)]++;
         }
       }
       cursor = page.cursor;
@@ -187,6 +176,7 @@ export async function inventoryLegacyAudioKeys(
     episodesWithAudioKey,
     canonicalCount,
     legacyCount,
-    legacySamples,
+    byShape,
+    byExtension,
   };
 }
