@@ -1,0 +1,9 @@
+=== BEFORE the fix this state passed silently; now: deno task gate ===
+[0m[32mTask[0m [0m[36mgate[0m deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv
+
+[0m[1mfrom[0m /home/exedev/worktrees/audio-feed-7jsl/scripts/auth-demo.ts:
+152[0m[38;5;245m |[0m [0m[1m[31m-[0m[0m[37m[41m[0m
+152[0m[38;5;245m |[0m [0m[1m[32m+[0m[0m[30m[42mconst deliberatelyUnformatted = [1, 2, 3]; // audio-feed-7jsl gate proof[0m
+153[0m[38;5;245m |[0m [0m[1m[31m-[0m[0m[37m[41mconst deliberatelyUnformatted=[1,2,3];   // audio-feed-7jsl gate proof[0m
+
+[0m[1m[31merror[0m: Found 1 not formatted file in 250 files
