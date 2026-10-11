@@ -64,3 +64,31 @@ server shut down in the same `finally`, and the whole run under a 90s wall clock
 So: the ingest contract, the severity bands and the LCP path are verified end to end from a real
 browser. INP and CLS are verified as far as the parser, severities and refusals, and are honestly
 marked as not-yet-observed from a browser rather than claimed.
+
+## The interaction count, checked in a real browser (audio-feed-dzgj)
+
+INP needs the number of interactions, because the platform's reporter clamps at 16ms and never
+reports the interactions it suppresses. That count is load-bearing, so
+`scripts/verify_i7vi_browser.ts` dispatches a KNOWN number (three mouse press/releases, each also
+emitting a click, plus two key presses) and reads the collector's own count back out of the page.
+Transcript: `verify-browser-count.txt`.
+
+WHAT WAS OBSERVED, across six runs: the page counted **2, 2, 4, 2, 2, 4** of the 5 dispatched, and
+every reported duration was 32-96ms — the durations of the mouse interactions. No key interaction
+was ever counted, and `Page.bringToFront` plus focusing the body did not change that, so keyboard
+clicks in a headless page do not reach the collector at all. The overcount direction was never
+observed.
+
+WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that the collector counts the interactions the
+page actually receives, that it never overcounted in six runs, and that the one concrete overcount
+mechanism found while doing this — a held key repeating keydown, which the platform counts as ONE
+interaction — is now guarded in the collector, because an inflated count makes `inpFromObserved`
+subtract unobserved interactions that never existed and thereby UNDERSTATES INP. It does NOT
+establish that `keydown` is counted when it does arrive, because this harness could not deliver one,
+and it does not establish that the count is complete under real input in a real browser.
+
+WHY AN UNDERCOUNT IS RECORDED RATHER THAN FIXED FURTHER: it is safe by construction.
+`inpFromObserved` clamps `u = max(0, N - k)`, so a short count degrades to a percentile over the
+reported entries — the upper bound this work exists to improve on — and can never subtract imagined
+interactions from the rank. The honest claim is conditional: INP is the true 98th percentile when
+every interaction is counted, and an upper bound when interactions went uncounted.

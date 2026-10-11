@@ -141,6 +141,9 @@ try {
   }
   // Keys after the mouse, because the click focuses the page and an unfocused page receives no
   // keydown at all.
+  // An unfocused page receives no keydown at all, so bring it to the front and focus it first.
+  await cdp("Page.bringToFront");
+  await cdp("Runtime.evaluate", { expression: "document.body.focus()" });
   const KEY_INTERACTIONS = 2;
   for (let i = 0; i < KEY_INTERACTIONS; i++) {
     await cdp("Input.dispatchKeyEvent", {

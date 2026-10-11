@@ -81,11 +81,23 @@
   // the pointerdown that began the same interaction, so counting it would count most mouse
   // interactions twice. A keyboard activation fires keydown, which is counted.
   let interactionStarts = 0;
-  const countStart = () => {
+  // A key that is HELD fires keydown repeatedly, and the platform treats that as ONE interaction. So a
+  // repeat must not be counted: overcounting inflates N, and an inflated N makes inpFromObserved
+  // subtract unobserved interactions that never existed, which UNDERSTATES INP - the dangerous
+  // direction for a metric an operator watches (audio-feed-dzgj).
+  const keysDown = new Set();
+  const countPointer = () => {
     interactionStarts++;
   };
-  addEventListener("pointerdown", countStart, { capture: true, passive: true });
-  addEventListener("keydown", countStart, { capture: true, passive: true });
+  const countKey = (event) => {
+    if (event.repeat || keysDown.has(event.code)) return;
+    keysDown.add(event.code);
+    interactionStarts++;
+  };
+  const keyUp = (event) => keysDown.delete(event.code);
+  addEventListener("pointerdown", countPointer, { capture: true, passive: true });
+  addEventListener("keydown", countKey, { capture: true, passive: true });
+  addEventListener("keyup", keyUp, { capture: true, passive: true });
 
   // Read-only view of what the collector counted and observed, published on the page scope so a
   // verification run can compare it against interactions it dispatched deliberately. The count is a
