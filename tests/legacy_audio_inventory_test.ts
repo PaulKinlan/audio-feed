@@ -33,6 +33,7 @@ import {
   isCanonicalAudioKey,
   migrateLegacyAudioKeys,
   releaseMigrationLock,
+  renewMigrationLock,
 } from "../src/storage/legacy_audio.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { bootstrap } from "../src/server.ts";
@@ -761,4 +762,104 @@ Deno.test("migrateLegacyAudioKeys: concurrent episode metadata update preserves 
       }
     }
   }
+});
+
+Deno.test("migrateLegacyAudioKeys: reviewer repro for lock expiry and stale takeover (audio-feed-hrfn)", async () => {
+  for (const kind of ["memory", "kv"] as const) {
+    const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
+    try {
+      const first = await acquireMigrationLock(stores.metadata, "first", 50);
+      const immediate = await acquireMigrationLock(stores.metadata, "second", 50);
+      await new Promise((r) => setTimeout(r, 110));
+      const afterLease = await acquireMigrationLock(stores.metadata, "second", 50);
+      assertEquals(first, true, "first must acquire");
+      assertEquals(immediate, false, "immediate second must be refused");
+      assertEquals(afterLease, true, "second must acquire after lease expiry without renewal");
+    } finally {
+      await stores.metadata.close?.();
+    }
+  }
+});
+
+Deno.test("migrateLegacyAudioKeys: heartbeat renewal holds lock indefinitely past original TTL (audio-feed-hrfn)", async () => {
+  for (const kind of ["memory", "kv"] as const) {
+    const stores = kind === "memory" ? memoryStores() : await openStores({ kvPath: ":memory:" });
+    try {
+      const leaseMs = 60;
+      const first = await acquireMigrationLock(stores.metadata, "holder-1", leaseMs);
+      assertEquals(first, true);
+
+      // Periodically renew for 150ms (> 2x original lease of 60ms)
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        const renewed = await renewMigrationLock(stores.metadata, "holder-1", leaseMs);
+        assertEquals(renewed, true, "holder-1 must renew successfully");
+
+        // Concurrent holder must still be refused
+        const secondAttempt = await acquireMigrationLock(stores.metadata, "holder-2", leaseMs);
+        assertEquals(
+          secondAttempt,
+          false,
+          "second holder must be refused while heartbeat is fresh",
+        );
+      }
+
+      // Explicit release by holder-1
+      await releaseMigrationLock(stores.metadata, "holder-1");
+
+      // holder-2 can now acquire immediately
+      const secondAcquired = await acquireMigrationLock(stores.metadata, "holder-2", leaseMs);
+      assertEquals(secondAcquired, true, "second holder must acquire immediately after release");
+      await releaseMigrationLock(stores.metadata, "holder-2");
+    } finally {
+      await stores.metadata.close?.();
+    }
+  }
+});
+
+Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediately (audio-feed-hrfn)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-abort", status: "approved" }));
+  await stores.blobs.put("track-1.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep-abort-1", userId: "user-abort", audioKey: "track-1.mp3" }),
+  );
+
+  const stealingBlobs = wrapBlobs(stores.blobs, {
+    get: async (k, opts) => {
+      // Steal the lock while migration is reading the blob
+      await stores.metadata.atomicUpdate(
+        "migration_lock:legacy_audio_keys",
+        () => ({
+          active: true,
+          lockedAt: Date.now(),
+          lastHeartbeat: Date.now(),
+          leaseMs: 600_000,
+          holder: "rogue-stealer",
+        }),
+      );
+      // Wait for heartbeat callback (10ms) to fire and observe lock loss
+      await new Promise((r) => setTimeout(r, 25));
+      return stores.blobs.get(k, opts);
+    },
+  });
+
+  let threw = false;
+  try {
+    await migrateLegacyAudioKeys(stores.metadata, {
+      apply: true,
+      blobs: stealingBlobs,
+      leaseMs: 30,
+      heartbeatIntervalMs: 10,
+    });
+  } catch (err) {
+    threw = true;
+    assert(String(err).includes("Migration aborted") || String(err).includes("lock lost"));
+  }
+  // The run must fail closed when lock cannot be renewed
+  assert(threw, "migration must abort when lock is lost mid-run");
+
+  // Verify episode audioKey was NOT updated (failed closed)
+  const ep = await stores.metadata.getEpisode("user-abort", "ep-abort-1");
+  assertEquals(ep?.audioKey, "track-1.mp3", "must not mutate when lock is lost");
 });

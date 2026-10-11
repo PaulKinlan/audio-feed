@@ -248,6 +248,14 @@ export interface MigrationOptions {
    * Progress logging callback.
    */
   log?: (msg: string) => void;
+  /**
+   * Lock lease TTL in milliseconds (default: 600,000ms / 10min).
+   */
+  leaseMs?: number;
+  /**
+   * Heartbeat renewal interval in milliseconds (default: leaseMs / 3).
+   */
+  heartbeatIntervalMs?: number;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -258,14 +266,17 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-interface MigrationLockRecord {
+export interface MigrationLockRecord {
   active: boolean;
   lockedAt: number;
+  lastHeartbeat: number;
+  leaseMs: number;
   holder: string;
 }
 
 /**
  * Single-writer migration lock guard across isolates and processes.
+ * Returns true if acquired, false if actively held by a live holder with fresh heartbeat (audio-feed-hrfn).
  */
 export async function acquireMigrationLock(
   metadata: MetadataStore,
@@ -276,10 +287,41 @@ export async function acquireMigrationLock(
   const res = await metadata.atomicUpdate<MigrationLockRecord>(
     "migration_lock:legacy_audio_keys",
     (current) => {
-      if (current && current.active && now - current.lockedAt < leaseMs) {
-        return null; // actively held
+      if (current && current.active) {
+        const lastBeat = current.lastHeartbeat || current.lockedAt;
+        const currentLease = current.leaseMs || leaseMs;
+        if (now - lastBeat < currentLease) {
+          return null; // actively held with fresh heartbeat; refuse second holder
+        }
       }
-      return { active: true, lockedAt: now, holder };
+      return { active: true, lockedAt: now, lastHeartbeat: now, leaseMs, holder };
+    },
+    leaseMs,
+  );
+  return res.committed;
+}
+
+/**
+ * Renews the migration lock heartbeat. Must be called periodically while the holder is active.
+ * Returns true if renewed, false if lock was lost or taken over (audio-feed-hrfn).
+ */
+export async function renewMigrationLock(
+  metadata: MetadataStore,
+  holder: string,
+  leaseMs = 600_000,
+): Promise<boolean> {
+  const now = Date.now();
+  const res = await metadata.atomicUpdate<MigrationLockRecord>(
+    "migration_lock:legacy_audio_keys",
+    (current) => {
+      if (current && current.active && current.holder === holder) {
+        return {
+          ...current,
+          lastHeartbeat: now,
+          leaseMs,
+        };
+      }
+      return null; // lock lost or held by someone else
     },
     leaseMs,
   );
@@ -295,7 +337,7 @@ export async function releaseMigrationLock(
       "migration_lock:legacy_audio_keys",
       (current) => {
         if (current && current.holder === holder) {
-          return { active: false, lockedAt: 0, holder: "" };
+          return { active: false, lockedAt: 0, lastHeartbeat: 0, leaseMs: 0, holder: "" };
         }
         return null;
       },
@@ -319,15 +361,33 @@ export async function migrateLegacyAudioKeys(
   const apply = opts?.apply ?? false;
   const dryRun = !apply;
   const log = opts?.log;
+  const leaseMs = opts?.leaseMs ?? 600_000;
+  const heartbeatIntervalMs = opts?.heartbeatIntervalMs ?? Math.max(10, Math.floor(leaseMs / 3));
 
   const lockHolder = `migrator-${crypto.randomUUID().slice(0, 8)}`;
+  let lockLost = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined = undefined;
+
   if (apply) {
-    const locked = await acquireMigrationLock(metadata, lockHolder);
+    const locked = await acquireMigrationLock(metadata, lockHolder, leaseMs);
     if (!locked) {
       throw new Error(
         "Cannot run migration: another migration is actively in progress or holds the lock",
       );
     }
+
+    heartbeatTimer = setInterval(async () => {
+      try {
+        const renewed = await renewMigrationLock(metadata, lockHolder, leaseMs);
+        if (!renewed) {
+          lockLost = true;
+          log?.(`[migration] ERROR: lock renewal failed for holder ${lockHolder}; lock lost`);
+        }
+      } catch (err) {
+        lockLost = true;
+        log?.(`[migration] ERROR: lock renewal threw: ${err}`);
+      }
+    }, heartbeatIntervalMs);
   }
 
   try {
@@ -354,6 +414,11 @@ export async function migrateLegacyAudioKeys(
           limit: 100,
         });
         for (const episode of page.episodes) {
+          if (apply && lockLost) {
+            throw new Error(
+              `Migration aborted: lock lost or renewal failed mid-run for holder ${lockHolder}`,
+            );
+          }
           episodesScanned++;
           if (!episode.audioKey) continue;
 
@@ -500,6 +565,12 @@ export async function migrateLegacyAudioKeys(
 
           // 3. Apply mode: Atomic conditional write (putIfAbsent) to prevent TOCTOU overwrites (qm7b)
           let blobWasCopied = false;
+
+          if (apply && lockLost) {
+            throw new Error(
+              `Migration aborted: lock lost or renewal failed mid-run for holder ${lockHolder}`,
+            );
+          }
 
           if (opts?.blobs && sourceBytes) {
             let createdInfo = null;
@@ -653,6 +724,9 @@ export async function migrateLegacyAudioKeys(
     };
   } finally {
     if (apply) {
+      if (heartbeatTimer !== undefined) {
+        clearInterval(heartbeatTimer);
+      }
       await releaseMigrationLock(metadata, lockHolder);
     }
   }
