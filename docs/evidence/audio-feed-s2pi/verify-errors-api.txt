@@ -1,0 +1,33 @@
+[audio-feed] Deno.cron is unavailable in this runtime; background cron jobs not scheduled
+[audio-feed] metadata=kv blobs=memory base=<derived from each request>
+[audio-feed] PUBLIC_BASE_URL and ALLOWED_HOSTS are both unset on a Deploy deployment — the advertised origin and WebAuthn RP ID are derived from each request's host. Set ALLOWED_HOSTS to pin them.
+[audio-feed] GEMINI_API_KEY unset — synthesis will be unavailable
+[audio-feed] ADMIN_TOKEN unset — admin approval routes are unusable
+Listening on http://0.0.0.0:34401/ (http://localhost:34401/)
+seeded sequences 1, 2, 3, 4, 5
+
+PASS  anonymous request is refused  — status 401
+PASS  and told how to authenticate
+PASS  a wrong key is refused  — status 401
+PASS  page 1 is served  — status 200
+  page 1: seqs [1, 2] cursor=2 scanned=2 returned=2 hasMore=true
+PASS  page 2 is served  — status 200
+  page 2: seqs [3, 4] cursor=4 scanned=2 returned=2 hasMore=true
+PASS  page 3 is served  — status 200
+  page 3: seqs [5, 6] cursor=6 scanned=2 returned=2 hasMore=true
+PASS  page 4 is served  — status 200
+  page 4: seqs [7] cursor=7 scanned=1 returned=1 hasMore=false
+PASS  the cursor walk saw every seeded event exactly once, in order
+PASS  and never moved backwards
+PASS  a poll at the cursor returns nothing and keeps the cursor
+PASS  summary says nothing changed  — {"debug":0,"info":0,"warn":0,"error":0}
+PASS  summary counts what did change  — seeded 5 in [{"type":"synthesis.failed","count":4},{"type":"http.request","count":2},{"type":"claim.lifecycle","count":1}]
+  byType: [{"type":"synthesis.failed","count":4},{"type":"http.request","count":2},{"type":"claim.lifecycle","count":1}]
+PASS  and reports something new afterwards
+PASS  with a cursor that moved
+PASS  a cursor retention has passed is refused, not skipped  — status 410 oldestRetained=9
+  detail: Events after sequence 0 are no longer retained, so this cursor cannot be resumed without skipping events. Oldest retained: 9. Resume from that sequence minus one, or re-baseline from the current cursor.
+PASS  and the summary refuses it identically
+PASS  the shared key is never stored
+
+All checks passed.

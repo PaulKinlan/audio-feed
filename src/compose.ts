@@ -29,6 +29,10 @@
  */
 
 import { createAccountHandlers } from "./routes/account_api.ts";
+import {
+  createObservabilityErrorsHandler,
+  createObservabilitySummaryHandler,
+} from "./routes/observability.ts";
 import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { discoverFeeds } from "./ingest/url.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
@@ -107,6 +111,8 @@ export {
 /** Build every lane seam for a real server. Called by src/server.ts. */
 export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHandlers {
   return {
+    observabilityErrors: createObservabilityErrorsHandler(ctx),
+    observabilitySummary: createObservabilitySummaryHandler(ctx),
     masterFeed: createMasterFeedHandler(ctx),
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),

@@ -144,6 +144,14 @@ export interface AppConfig {
   globalDailyEpisodeBudget?: number;
   adminToken?: string;
   /**
+   * Shared key for the observability API (audio-feed-s2pi / obs-1).
+   *
+   * Optional here for the same reason as `logRetentionDays`: many test configs are hand-built, and
+   * what matters is the value `loadConfig` resolves. The endpoint itself FAILS CLOSED — with no key
+   * configured it refuses everyone rather than serving observability data openly, and says so.
+   */
+  observabilityKey?: string;
+  /**
    * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
    *
    * Unset means "no system preference", which is different from Charon: the chain
@@ -276,6 +284,9 @@ export function loadConfig(): AppConfig {
     // still treats an unusable value as absent rather than as unlimited.
     globalDailyEpisodeBudget: globalDailyEpisodeBudget ?? DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET,
     adminToken: env("ADMIN_TOKEN"),
+    // Read here and never anywhere else, so there is one place a reviewer has to look to confirm the
+    // key is not logged: nothing writes it to a record, and a request record carries no headers.
+    observabilityKey: env("AUDIOFEED_OBSERVABILITY_KEY"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
     webAuthnRpId: env("WEBAUTHN_RP_ID"),
     webAuthnRelatedOrigins: env("WEBAUTHN_RELATED_ORIGINS")
