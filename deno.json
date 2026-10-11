@@ -29,7 +29,7 @@
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
     "migrate-legacy-audio": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
     "migrate:audio-keys": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
-    "gate": "deno run --allow-read --allow-env --allow-run=deno scripts/test-selection.ts --prove-discovery && deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv"
+    "gate": "deno run --allow-read --allow-write --allow-env --allow-run=deno scripts/test-selection.ts --prove-discovery && deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1.0.10",
