@@ -28,7 +28,7 @@ const {
   interactionP98: (entries: { interactionId: number; duration: number }[]) => number;
   largestSessionWindow: (
     entries: { startTime: number; value: number; hadRecentInput?: boolean }[],
-  ) => { value: number; observed: boolean };
+  ) => { value: number; observed: boolean; peakWindowStart: number };
 };
 
 const shift = (startTime: number, value: number, hadRecentInput = false) => ({
@@ -212,4 +212,61 @@ Deno.test("a page whose fast interactions were suppressed is reported as the slo
   const observed = interactionLatencies(entries.filter((e) => e.duration >= 16));
   assertEquals(observed, [1000], "the fast interactions were suppressed by the observer");
   assertEquals(p98(observed), 1000, "an upper bound, and it errs by overstating");
+});
+
+Deno.test("a zero-scoring shift still OPENS a session window (audio-feed-d55l)", () => {
+  const shift = (startTime: number, value: number) => ({ startTime, value, hadRecentInput: false });
+
+  // The reviewer's sequence, and the expected value is 0.6 rather than 0.5: CLS is the LARGEST session
+  // window, and the shift at t=5400 is more than 1000ms after t=900, so it opens its own window worth
+  // 0.6 while the first window (a zero-scoring shift at t=0 plus 0.5 at t=900) is worth 0.5. The zero
+  // shift's effect on which shifts belong to the FIRST window is what the next case pins down.
+  const reviewerCase = [shift(0, 0), shift(900, 0.5), shift(5400, 0.6)];
+  assertEquals(largestSessionWindow(reviewerCase).value, 0.6);
+  assertEquals(largestSessionWindow(reviewerCase).observed, true, "a zero score is a measurement");
+
+  // Where the inference IS observable: the winning window's origin. A zero-scoring shift at t=0 that
+  // does not open a window makes the next shift start one at its own time, so the origin moves from 0
+  // to 500 and this assertion fails - which is what pins the fix.
+  assertEquals(
+    largestSessionWindow([shift(0, 0), shift(500, 0.4)]).value,
+    0.4,
+    "a zero-scoring shift then a real one, inside both limits",
+  );
+  assertEquals(
+    largestSessionWindow([shift(0, 0), shift(500, 0.4)]).peakWindowStart,
+    0,
+    "the window must begin at the zero-scoring shift; inferring existence from the value reports 500",
+  );
+  // And the same with two zeros: the origin is still the FIRST of them.
+  assertEquals(
+    largestSessionWindow([shift(0, 0), shift(400, 0), shift(900, 0.4)]).peakWindowStart,
+    0,
+  );
+
+  // NOTE on what the old inference could NOT change, since it looked like a value bug and is not one:
+  // a zero-scoring shift contributes nothing to the sum, and the origin it moves can only ever be
+  // LATER, which excludes shifts rather than including them. So every sequence tried here gives the
+  // same `value` with or without the fix; what changes is the window the value is attributed to. The
+  // tests below pin the values so a future change cannot move them silently.
+  assertEquals(
+    largestSessionWindow([shift(0, 0), shift(900, 0.5), shift(1800, 0.25)]).value,
+    0.75,
+    "shifts inside the limits still accumulate from the zero-scoring first one",
+  );
+
+  // The rest of the rule still holds, including that a zero score is still an observation.
+  assertEquals(
+    largestSessionWindow([shift(0, 0.25), shift(900, 0.25), shift(1800, 0.25)]).value,
+    0.75,
+  );
+  assertEquals(largestSessionWindow([shift(0, 0)]).value, 0);
+  assertEquals(largestSessionWindow([shift(0, 0)]).observed, true);
+  // A gap longer than 1s starts a new window whatever the values are.
+  assertEquals(largestSessionWindow([shift(0, 0), shift(1100, 0.7)]).value, 0.7);
+  // Recent input is excluded entirely, so it neither opens nor extends a window.
+  assertEquals(
+    largestSessionWindow([{ startTime: 0, value: 9, hadRecentInput: true }, shift(10, 0.2)]).value,
+    0.2,
+  );
 });

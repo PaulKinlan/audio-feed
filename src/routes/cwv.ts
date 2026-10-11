@@ -32,6 +32,81 @@ export interface CwvDeps {
   limiter?: SlidingWindowRateLimiter;
 }
 
+/**
+ * Copy at most `cap + 1` bytes out of `source`, then fail.
+ *
+ * The point is that the BOUND IS THE STREAM, not a check afterwards (audio-feed-6q9g). Reading the raw
+ * body and comparing the running total means an attacker who sends one oversized chunk has already had
+ * that chunk handed to the handler before any check runs; a stream that cannot emit more than `cap + 1`
+ * bytes makes the limit a property of the shape of the data instead. `cap + 1` rather than `cap`
+ * because one byte past the limit is what distinguishes "exactly the limit" from "over it".
+ *
+ * What this does and does not bound, stated plainly: nothing beyond `cap + 1` bytes is ever copied into
+ * the handler's accumulation, and the source is cancelled on overflow. The platform may still hand the
+ * transformer a larger chunk internally - that is the runtime's buffer and not ours to size - but it
+ * never reaches the parse, and the bytes we hold are bounded by construction.
+ */
+export function limitBodyStream(
+  source: ReadableStream<Uint8Array>,
+  cap: number,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let emitted = 0;
+  let over = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (over) {
+        await reader.cancel().catch(() => {});
+        controller.error(new Error("body exceeds cap"));
+        return;
+      }
+      const { value, done } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      if (!value?.byteLength) return;
+      const room = cap + 1 - emitted;
+      if (value.byteLength >= room) {
+        over = true;
+        emitted += room;
+        controller.enqueue(value.subarray(0, room));
+        return;
+      }
+      emitted += value.byteLength;
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      over = true;
+      return reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+/** Read a body that cannot yield more than `cap + 1` bytes; `overflow` means it tried to. */
+async function readCappedBody(
+  body: ReadableStream<Uint8Array>,
+  cap: number,
+): Promise<{ chunks: Uint8Array[]; total: number; overflow: boolean }> {
+  const limited = limitBodyStream(body, cap).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    let read: ReadableStreamReadResult<Uint8Array>;
+    try {
+      read = await limited.read();
+    } catch {
+      return { chunks, total, overflow: true };
+    }
+    if (read.done) break;
+    if (!read.value?.byteLength) continue;
+    total += read.value.byteLength;
+    if (total > cap) return { chunks, total, overflow: true };
+    chunks.push(read.value);
+  }
+  return { chunks, total, overflow: false };
+}
+
 export function createCwvHandler(ctx: AppContext, deps: CwvDeps = {}): Handler<AppContext> {
   // Namespaced so this window cannot collide with the admin or request-access windows on the same
   // client (audio-feed-2zvc).
@@ -74,36 +149,29 @@ export function createCwvHandler(ctx: AppContext, deps: CwvDeps = {}): Handler<A
 
     let parsed: unknown;
     try {
-      // STOP READING at `cap + 1` BYTES (audio-feed-6q9g). Two earlier mistakes are both avoided
-      // here: a character count is not a byte count (a multibyte body passes a length check while
-      // being several times the size), and reading the whole body before measuring it means the cap
-      // is enforced after the process has already paid for the memory. Nothing past the cap is read,
-      // so an oversized body costs one byte more, and refusing it is the only outcome.
-      const reader = req.body?.getReader();
-      if (!reader) {
+      // The read is bounded BY CONSTRUCTION (audio-feed-6q9g, round 2): readCappedBody reads a stream
+      // that cannot emit more than cap + 1 bytes, so an oversized chunk - however it is chunked, even
+      // as one 8MiB slice - is truncated before this handler accumulates anything, and a byte count is
+      // used rather than a character count because a multibyte body passes a length check while being
+      // several times the size. A declared content-length over the cap is refused before the body is
+      // touched at all.
+      if (!req.body) {
         return problem({
           status: 400,
           title: "invalid_report",
           detail: "A CWV beacon must have a JSON body.",
         });
       }
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (!value?.byteLength) continue;
-        total += value.byteLength;
-        if (total > MAX_CWV_BODY_BYTES) {
-          await reader.cancel().catch(() => {});
-          return problem({
-            status: 413,
-            title: "payload_too_large",
-            detail: "CWV beacons are small.",
-          });
-        }
-        chunks.push(value);
+      const capped = await readCappedBody(req.body, MAX_CWV_BODY_BYTES);
+      if (capped.overflow) {
+        return problem({
+          status: 413,
+          title: "payload_too_large",
+          detail: "CWV beacons are small.",
+        });
       }
+      const chunks = capped.chunks;
+      const total = capped.total;
       const bytes = new Uint8Array(total);
       let offset = 0;
       for (const chunk of chunks) {

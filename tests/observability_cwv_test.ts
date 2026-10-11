@@ -10,7 +10,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, type Stores } from "../src/config.ts";
-import { CWV_RATE_LIMIT, MAX_CWV_BODY_BYTES } from "../src/routes/cwv.ts";
+import { CWV_RATE_LIMIT, limitBodyStream, MAX_CWV_BODY_BYTES } from "../src/routes/cwv.ts";
 import { cwvRecord, cwvSeverity, parseCwvReport } from "../src/observability/cwv.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../src/observability/spans.ts";
 
@@ -259,4 +259,78 @@ Deno.test("a pathological queue wait is an error, not invisible info (audio-feed
   const both = spanSeverity({ queueWaitMs: 3_600_000, synthesisMs: 400_000, writeMs: 10 });
   assertEquals(both.severity, "error");
   assertStringIncludes(both.reason ?? "", "worker");
+});
+
+Deno.test("the read is bounded by construction, not by checking afterwards (audio-feed-6q9g)", async () => {
+  const cap = 1024;
+
+  // The reviewer's case: the whole body in ONE chunk, far larger than the cap. Reading the raw body
+  // and comparing a running total would have handed this chunk to the handler before any check ran.
+  const big = new Uint8Array(8 * 1024 * 1024).fill(65);
+  const limited = limitBodyStream(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(big);
+        controller.close();
+      },
+    }),
+    cap,
+  );
+
+  const reader = limited.getReader();
+  const chunks: Uint8Array[] = [];
+  let emitted = 0;
+  let failed = false;
+  while (true) {
+    try {
+      const { value, done } = await reader.read();
+      if (done) break;
+      emitted += value.byteLength;
+      chunks.push(value);
+    } catch {
+      failed = true;
+      break;
+    }
+  }
+
+  // MAX BYTES CONSUMED is the assertion, not merely the status: the stream may not emit more than
+  // cap + 1 bytes no matter how the source is chunked, and it must fail rather than quietly truncate.
+  assertEquals(emitted, cap + 1, "at most cap + 1 bytes ever leave the stream");
+  assert(failed, "exceeding the cap is an error, not a silent truncation");
+  assertEquals(chunks.length, 1, "the oversized chunk was truncated, not accumulated");
+
+  // Many small chunks over the cap behave the same way.
+  const many = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 100; i++) controller.enqueue(new Uint8Array(100).fill(65));
+      controller.close();
+    },
+  });
+  const manyReader = limitBodyStream(many, cap).getReader();
+  let seen = 0;
+  let over = false;
+  try {
+    while (true) {
+      const { value, done } = await manyReader.read();
+      if (done) break;
+      seen += value.byteLength;
+    }
+  } catch {
+    over = true;
+  }
+  assertEquals(seen, cap + 1, "the same bound holds for many small chunks");
+  assert(over, "and it still fails rather than truncating silently");
+
+  // A body exactly at the cap is NOT an error: cap + 1 is the sentinel, not the limit.
+  const exact = await limitBodyStream(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(cap).fill(65));
+        controller.close();
+      },
+    }),
+    cap,
+  ).getReader().read();
+  assertEquals(exact.value?.byteLength, cap);
+  assertEquals(exact.done, false);
 });

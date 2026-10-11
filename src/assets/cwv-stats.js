@@ -38,23 +38,34 @@ function p98(values) {
 function largestSessionWindow(entries) {
   let observed = false;
   let best = 0;
+  // The start of the window that is currently winning. Exposed so the window's ORIGIN is testable:
+  // a change to how existence is inferred moves this number without moving the value, which is the
+  // only way the zero-scoring-shift bug (audio-feed-d55l) can be observed at all.
+  let peakWindowStart = 0;
   let windowValue = 0;
-  let windowStart = 0;
+  // null means NO window is open. Existence is deliberately not inferred from `windowValue !== 0`: a
+  // shift worth zero still STARTS a session window, and inferring from the value let a zero-scoring
+  // first shift be skipped, so the window opened later and the 5s limit was measured from the wrong
+  // origin - which pulled unrelated shifts into the same window (audio-feed-d55l).
+  let windowStart = null;
   let windowLast = 0;
   for (const entry of entries) {
     if (entry.hadRecentInput) continue;
     observed = true;
     const start = entry.startTime;
-    const joins = windowValue !== 0 && start - windowLast < 1000 && start - windowStart < 5000;
+    const joins = windowStart !== null && start - windowLast < 1000 && start - windowStart < 5000;
     if (!joins) {
       windowStart = start;
       windowValue = 0;
     }
     windowValue += entry.value;
     windowLast = start;
-    if (windowValue > best) best = windowValue;
+    if (windowValue > best) {
+      best = windowValue;
+      peakWindowStart = windowStart;
+    }
   }
-  return { value: best, observed };
+  return { value: best, observed, peakWindowStart };
 }
 
 /**
