@@ -47,6 +47,7 @@ import { htmlResponse, newCspNonce } from "./routes/csp.ts";
 import { handleShare } from "./routes/share.ts";
 import { handleIcon, handleManifest, handleRobots, handleServiceWorker } from "./routes/pwa.ts";
 import { handleWebAuthnRelatedOrigins } from "./routes/webauthn.ts";
+import { handleCspReports } from "./routes/reports.ts";
 import type { AppConfig, Stores } from "./config.ts";
 import { requestHostAllowed, resolveOrigin } from "./origin.ts";
 import type { AccountHandlers } from "./routes/account_api.ts";
@@ -104,6 +105,8 @@ export interface AppHandlers {
   adminListEpisodes?: Handler<AppContext>;
   adminRegenerateEpisode?: Handler<AppContext>;
   adminRegenerateFeed?: Handler<AppContext>;
+  /** audio-feed-kxjg — CSP and Browser Reporting API endpoint. */
+  cspReports?: Handler<AppContext>;
   /** Anything a lane needs that is not in the map above. Announce it to coord. */
   extra?: (router: Router<AppContext>) => void;
 }
@@ -328,6 +331,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
     "/api/admin/users/:id/regenerate",
     handlers.adminRegenerateFeed ?? (() => notImplemented("Admin regenerate feed")),
   );
+
+  // audio-feed-kxjg: CSP and browser reporting endpoint
+  router.post("/api/reports/csp", handlers.cspReports ?? handleCspReports);
+  router.add("OPTIONS", "/api/reports/csp", handlers.cspReports ?? handleCspReports);
 
   handlers.extra?.(router);
 

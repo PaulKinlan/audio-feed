@@ -114,7 +114,7 @@ export function isHttpsRequest(
 export function applySecurityHeaders(
   res: Response,
   req?: Request,
-  opts?: { trustProxyHeaders?: boolean },
+  opts?: { trustProxyHeaders?: boolean; publicBaseUrl?: string },
 ): Response {
   let headers: Headers;
   let recreated = false;
@@ -138,6 +138,23 @@ export function applySecurityHeaders(
   }
 
   if (isHtml) {
+    let reportUrl = "https://localhost/api/reports/csp";
+    if (opts?.publicBaseUrl) {
+      try {
+        const u = new URL(opts.publicBaseUrl);
+        reportUrl = `${u.protocol}//${u.host}/api/reports/csp`;
+      } catch { /* fallback */ }
+    } else if (req) {
+      try {
+        const u = new URL(req.url);
+        const host = req.headers.get("host") || u.host;
+        const proto = isHttpsRequest(req, opts)
+          ? "https"
+          : (u.protocol === "http:" ? "http" : "https");
+        reportUrl = `${proto}://${host}/api/reports/csp`;
+      } catch { /* fallback */ }
+    }
+
     if (!headers.has("content-security-policy")) {
       // Fallback only: every HTML route attaches the nonce-bearing policy itself via
       // `htmlResponse` (audio-feed-syhu). This default is deliberately strict — no
@@ -145,9 +162,51 @@ export function applySecurityHeaders(
       // quietly re-opening inline script. See src/routes/csp.ts.
       headers.set(
         "content-security-policy",
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; report-to csp-endpoint; report-uri ${reportUrl}`,
+      );
+    } else {
+      let csp = headers.get("content-security-policy")!;
+      if (!csp.includes("report-to")) {
+        csp = `${csp}; report-to csp-endpoint`;
+      }
+      if (!csp.includes("report-uri")) {
+        csp = `${csp}; report-uri ${reportUrl}`;
+      }
+      headers.set("content-security-policy", csp);
+    }
+
+    if (!headers.has("reporting-endpoints")) {
+      headers.set("reporting-endpoints", `csp-endpoint="${reportUrl}"`);
+    }
+
+    if (!headers.has("report-to")) {
+      headers.set(
+        "report-to",
+        [
+          JSON.stringify({
+            group: "csp-endpoint",
+            max_age: 10886400,
+            endpoints: [{ url: reportUrl }],
+          }),
+          JSON.stringify({
+            group: "network-errors",
+            max_age: 2592000,
+            endpoints: [{ url: reportUrl }],
+          }),
+        ].join(", "),
       );
     }
+
+    if (!headers.has("nel")) {
+      headers.set(
+        "nel",
+        JSON.stringify({
+          report_to: "network-errors",
+          max_age: 2592000,
+        }),
+      );
+    }
+
     if (!headers.has("x-frame-options")) {
       headers.set("x-frame-options", "DENY");
     }
@@ -242,7 +301,8 @@ export class Router<Ctx> {
     const trustProxyHeaders = Boolean(
       (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
     );
-    const secOpts = { trustProxyHeaders };
+    const publicBaseUrl = (ctx as { config?: { publicBaseUrl?: string } })?.config?.publicBaseUrl;
+    const secOpts = { trustProxyHeaders, publicBaseUrl };
 
     for (const route of this.#routes) {
       const match = route.pattern.exec({ pathname: url.pathname });
@@ -291,7 +351,8 @@ export class Router<Ctx> {
     const trustProxyHeaders = Boolean(
       (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
     );
-    const secOpts = { trustProxyHeaders };
+    const publicBaseUrl = (ctx as { config?: { publicBaseUrl?: string } })?.config?.publicBaseUrl;
+    const secOpts = { trustProxyHeaders, publicBaseUrl };
 
     return async (req, info) => {
       try {
