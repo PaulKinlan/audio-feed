@@ -75,6 +75,13 @@ heuristic (documentation is inert). The derived relation therefore outranks ever
 is this" guess, and `inertContradictions()` makes an inversion of that order a NAMED failure that
 runs the full suite rather than a silent empty selection.
 
+The audit line's two numbers are CHECKED rather than printed: the universe the audit measured is
+compared with the universe the run selects from, using the same `universeDrift()` that fails by
+name. That comparison is a GATE-LEVEL check whose call site is not covered by a unit test -
+neutering it leaves the suite green (measured) - so it is a known gap rather than an implied
+guarantee, and the same is true of the selection cross-check call site. A reviewer should read those
+two lines as checks that run, not as checks that are themselves verified.
+
 An EMPTY selection is never a silent pass (audio-feed-es8y condition 2). It is only allowed when
 every changed file is documentation that no suite is DERIVED to read — markdown is the only inert
 class left after `UNREAD_DECLARATIONS` was deleted — and even then the run says so plainly

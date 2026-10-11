@@ -478,10 +478,17 @@ Deno.test("a standalone script nothing imports runs the FULL suite, not a silent
   assert(plan.reason.includes("not inert by declaration"), plan.reason);
 });
 
-Deno.test("the empty state is marked `unmapped:` for the coverage line and said out loud", async () => {
-  // The fleet's coverage reporter parses `fast-gate: .*unmapped:` into explicit_unmapped and turns a
-  // non-empty list into a COVERAGE WARNING, so an all-inert change is visible in the coverage line
-  // instead of reading like a green test run.
+Deno.test("the empty state is announced for the coverage line and said out loud", async () => {
+  // PROSE MUST NOT BE PARSEABLE AS A GATE MARKER (audio-feed-psjb). The fleet's coverage reporter matches
+  // `unmapped:` ANYWHERE in a line, so a test NAME containing that token is harvested as a list of changed
+  // files: this test used to be called `... marked \`unmapped:\` ...` and the reporter published sixteen
+  // English words ("and", "for", "line", "ok", ...) as changed files on a run where four files changed -
+  // confident nonsense rather than an honest absence. This name is deliberately free of every marker token
+  // (passed:, ran:, unmapped:); name new tests the same way.
+  //
+  // The reporter parses `fast-gate: .*unmapped:` into explicit_unmapped and turns a non-empty list into a
+  // COVERAGE WARNING, so an all-inert change is visible in the coverage line instead of reading like a
+  // green test run.
   const reporter = /(?:fast-gate:.*?)?unmapped:\s*(.*)/;
   const line = suiteMarker("unmapped", ["README.md", "docs/observability-api.md"]);
   const match = reporter.exec(line);
