@@ -14,6 +14,28 @@ import { KvMetadataStore } from "./storage/kv.ts";
 import { S3BlobStore } from "./storage/s3.ts";
 import { DEFAULT_TIMEOUT_MS, GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tts/gemini.ts";
 
+/**
+ * The daily per-user episode ceiling that applies when a subscriber has no
+ * `dailyEpisodeBudget` of their own (audio-feed-khk3).
+ *
+ * WHY A NUMBER AND NOT "UNLIMITED": audio-feed-9mp made the per-user budget OPTIONAL and recorded
+ * "default is no ceiling" as an accepted criterion, to avoid changing behaviour for the single-user
+ * deployment. That is the hole this closes — discretionary spend had no ceiling for exactly the
+ * subscribers nobody had configured, and the only other bounds were the admin approval gate and the
+ * worker's ~150 episodes/hour of throughput, neither of which is a spending limit.
+ *
+ * WHY 50: it has to sit above a real personal day and below a runaway. Feed ingest caps at 10 items
+ * per source per poll (src/ingest/feed.ts), so a busy day for the feeds this was built for is single
+ * digits to low tens of episodes — 50 is clear of that. The pathological case 9mp itself measured is
+ * one subscriber with twenty feeds queueing ~200 episodes, which this now stops at a quarter of.
+ *
+ * Exceeding it DEFERS rather than fails: nothing is spent, and the episodes are picked up the next
+ * day when the counter resets (the audio-feed-9mp shape). An operator who wants a different ceiling —
+ * including a deliberately large one — sets DEFAULT_DAILY_EPISODE_BUDGET; there is no sentinel that
+ * restores unbounded, so "no ceiling" can only be chosen by naming a number.
+ */
+export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
+
 export interface AppConfig {
   port: number;
   /**
@@ -56,6 +78,17 @@ export interface AppConfig {
    * that expires mid-synthesis.
    */
   ttsTimeoutMs?: number;
+  /**
+   * Daily per-user episode ceiling applied to a subscriber who has no
+   * `dailyEpisodeBudget` of their own, from DEFAULT_DAILY_EPISODE_BUDGET
+   * (audio-feed-khk3).
+   *
+   * The field on the user record is optional, and before this existed "unset"
+   * meant "no ceiling at all": paid synthesis was unbounded for exactly the
+   * subscribers nobody had got round to configuring. 0 is a legal value and
+   * means an unconfigured subscriber synthesises nothing.
+   */
+  defaultDailyEpisodeBudget?: number;
   adminToken?: string;
   /**
    * System default voice, from DEFAULT_VOICE (audio-feed-4xt).
@@ -125,6 +158,24 @@ export function loadConfig(): AppConfig {
     }
   }
 
+  // audio-feed-khk3: the ceiling that applies when a subscriber has no budget of their own. Fail
+  // closed at boot for the same reason TTS_TIMEOUT_MS does: a typo that silently fell back to the
+  // default would restore the unbounded behaviour this knob exists to remove, and would look
+  // healthy while doing it.
+  const defaultBudgetRaw = env("DEFAULT_DAILY_EPISODE_BUDGET");
+  let defaultDailyEpisodeBudget: number | undefined;
+  if (defaultBudgetRaw !== undefined) {
+    // `env` already treats an empty value as absent, so `DEFAULT_DAILY_EPISODE_BUDGET=` means
+    // "unset" and lands on the constant below rather than on 0.
+    defaultDailyEpisodeBudget = Number(defaultBudgetRaw);
+    if (!Number.isInteger(defaultDailyEpisodeBudget) || defaultDailyEpisodeBudget < 0) {
+      throw new Error(
+        `Invalid DEFAULT_DAILY_EPISODE_BUDGET: "${defaultBudgetRaw}". ` +
+          `Expected a non-negative integer number of episodes per subscriber per day.`,
+      );
+    }
+  }
+
   return {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
@@ -139,6 +190,7 @@ export function loadConfig(): AppConfig {
       env("NOTIFY_OUTBOX_ENABLED") === "1",
     geminiApiKey: env("GEMINI_API_KEY"),
     ttsTimeoutMs: ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+    defaultDailyEpisodeBudget: defaultDailyEpisodeBudget ?? DEFAULT_DAILY_EPISODE_BUDGET,
     adminToken: env("ADMIN_TOKEN"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
     webAuthnRpId: env("WEBAUTHN_RP_ID"),

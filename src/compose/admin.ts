@@ -7,7 +7,12 @@
  */
 import { articleUrl, IngestError } from "../ingest/url.ts";
 import { runFeedPollBatch, subscribeToFeed } from "../ingest/feed.ts";
-import { createGeminiSynthesizer, runSynthesisBatch } from "../worker/synthesis.ts";
+import {
+  createGeminiSynthesizer,
+  dailyEpisodeBudgetFor,
+  runSynthesisBatch,
+} from "../worker/synthesis.ts";
+import { DEFAULT_DAILY_EPISODE_BUDGET } from "../config.ts";
 import { recordRun } from "../stats.ts";
 import {
   approveUser,
@@ -704,6 +709,12 @@ export function createAdminStatsHandler(
 
     // Resolve ids to emails so the dashboard shows a person, not a ULID.
     const emailById = new Map(users.map((u) => [u.id, u.email]));
+    // One ceiling per user, resolved once by the function the worker spends against.
+    const budgetById = new Map(
+      users.map((u) => [u.id, dailyEpisodeBudgetFor(u, ctx.config.defaultDailyEpisodeBudget)]),
+    );
+    // Synthesis history can outlive a user record; report the ceiling the worker would apply.
+    const orphanBudget = dailyEpisodeBudgetFor(null, ctx.config.defaultDailyEpisodeBudget);
 
     // Feed processing times come from the poll runs we recorded, not from a
     // separate timer: one source of truth means the dashboard cannot disagree
@@ -729,9 +740,20 @@ export function createAdminStatsHandler(
         synthesis: {
           total: synthesis.total,
           totalBytes: synthesis.totalBytes,
+          // Spend visibility for the ceiling itself (audio-feed-khk3). `usersWithoutBudget` is the
+          // operator's cue: with the ceiling now applying to unconfigured subscribers, this is the
+          // number that says how much of the deployment is running on the default rather than on a
+          // decision. The per-user ceiling is resolved by the SAME function the worker spends
+          // against, so the dashboard cannot disagree with the gate that is actually charging money.
+          defaultDailyEpisodeBudget: ctx.config.defaultDailyEpisodeBudget ??
+            DEFAULT_DAILY_EPISODE_BUDGET,
+          usersWithoutBudget:
+            users.filter((u) => budgetById.get(u.id)!.source === "default").length,
           perUser: synthesis.perUser.map((s) => ({
             ...s,
             email: emailById.get(s.userId) ?? null,
+            dailyBudget: (budgetById.get(s.userId) ?? orphanBudget).limit,
+            budgetSource: (budgetById.get(s.userId) ?? orphanBudget).source,
           })),
         },
         feedProcessing: {

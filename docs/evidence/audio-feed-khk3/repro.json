@@ -1,0 +1,96 @@
+{
+  "bead": "audio-feed-khk3",
+  "user": {
+    "id": "unbudgeted-user",
+    "dailyEpisodeBudget": null
+  },
+  "queuedEpisodes": 60,
+  "ticks": 12,
+  "batchSize": 5,
+  "paidTtsCalls": 50,
+  "readyTotal": 50,
+  "deferredTotal": 10,
+  "countedTodayInStore": 50,
+  "firstTickWithDeferral": 10,
+  "deferReasons": [
+    "daily episode budget exceeded (limit: 50, used: 50, source: deployment default - no per-user budget configured)"
+  ],
+  "perTick": [
+    {
+      "tick": 0,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 1,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 2,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 3,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 4,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 5,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 6,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 7,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 8,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 9,
+      "ready": 5,
+      "deferred": 0,
+      "reasons": []
+    },
+    {
+      "tick": 10,
+      "ready": 0,
+      "deferred": 5,
+      "reasons": [
+        "daily episode budget exceeded (limit: 50, used: 50, source: deployment default - no per-user budget configured)"
+      ]
+    },
+    {
+      "tick": 11,
+      "ready": 0,
+      "deferred": 5,
+      "reasons": [
+        "daily episode budget exceeded (limit: 50, used: 50, source: deployment default - no per-user budget configured)"
+      ]
+    }
+  ]
+}
