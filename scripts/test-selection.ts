@@ -473,10 +473,34 @@ function readCallAt(source: string, index: number): boolean {
  * What it cannot see is a path assembled at runtime from variables — that residual is why an undeclared file
  * OUTSIDE src/ and tests/ still falls back to the full suite, and it is stated rather than papered over.
  */
+/**
+ * The relation PLUS what the detector could not resolve (audio-feed-q0ky, coord's decision (b)).
+ *
+ * `unresolved` lists path HINTS the scan produced that do not name anything in the tree. Such a hint is the
+ * detector saying "some suite reads something here and I could not confirm what": it is dropped from the
+ * relation (a key derived from a mis-parsed template can never match a changed file), and dropping it
+ * SILENTLY is what let the gate describe an unreadable universe as inert. The caller must not classify any
+ * file inert while this list is non-empty - see planTests - because "no derived reader" and "I could not
+ * resolve a read of it" are different facts, and only one of them may select nothing.
+ */
+export interface ReadRelationReport {
+  relations: DataReadRelations;
+  /** Hints that did not resolve to an existing path, sorted for a stable reason string. */
+  unresolved: string[];
+}
+
+/** The relation alone, for callers that do not need the incompleteness signal. */
 export async function deriveDataReadRelations(
   root: string = ROOT,
   suiteFiles?: readonly string[],
 ): Promise<DataReadRelations> {
+  return (await deriveReadRelationReport(root, suiteFiles)).relations;
+}
+
+export async function deriveReadRelationReport(
+  root: string = ROOT,
+  suiteFiles?: readonly string[],
+): Promise<ReadRelationReport> {
   const suites = suiteFiles ?? (await discoverFullGateTestFiles(root)).filter(isFastGateSelectable);
   const sources = new Map<string, string>();
   const read = async (relPath: string): Promise<string | null> => {
@@ -568,11 +592,14 @@ export async function deriveDataReadRelations(
   // Keep only paths that exist in the tree: a key derived from a mis-parsed template can never match a
   // changed file, and dropping it keeps the audit output readable.
   const existing: DataReadRelations = new Map();
+  const unresolved: string[] = [];
   for (const [path, observers] of relations) {
     const stat = await Deno.stat(`${root}${path.replace(/\/$/, "")}`).catch(() => null);
     if (stat) existing.set(path, observers);
+    else unresolved.push(path);
   }
-  return existing;
+  unresolved.sort();
+  return { relations: existing, unresolved };
 }
 
 /** The suites the derived relation says observe a changed path (exact match or directory prefix). */
