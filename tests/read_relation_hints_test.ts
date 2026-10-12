@@ -694,7 +694,7 @@ Deno.test("audio-feed-axlt: own module constant cannot override its function par
       [],
       "the outer constant must not stand in for the parameter",
     );
-    assertEquals(report.unresolved, ["FILE"], "unknown parameter value must be reported");
+    assertEquals(report.unclassified, ["FILE"], "unknown parameter value must be reported");
   });
 });
 
@@ -714,11 +714,29 @@ Deno.test("audio-feed-axlt: unsupported destructured and namespace imports repor
       'read({ FILE: "docs/other.md" });',
     ].join("\n"),
   }, async (root) => {
-    for (const suite of ["tests/destructured_test.ts", "tests/namespace_test.ts"]) {
-      const report = await deriveReadRelationReport(root, [suite]);
-      assertEquals([...report.relations], [], `${suite}: no scope may be guessed`);
-      assertEquals(report.unresolved, ["FILE"], `${suite}: an unsupported import must be reported`);
-    }
+    const destructuredReport = await deriveReadRelationReport(root, ["tests/destructured_test.ts"]);
+    assertEquals(
+      [...destructuredReport.relations],
+      [],
+      "tests/destructured_test.ts: no scope may be guessed",
+    );
+    assertEquals(
+      destructuredReport.unclassified,
+      ["FILE"],
+      "tests/destructured_test.ts: an unsupported import must be reported",
+    );
+
+    const namespaceReport = await deriveReadRelationReport(root, ["tests/namespace_test.ts"]);
+    assertEquals(
+      [...namespaceReport.relations],
+      [],
+      "tests/namespace_test.ts: no scope may be guessed",
+    );
+    assertEquals(
+      namespaceReport.unresolved,
+      ["FILE"],
+      "tests/namespace_test.ts: an unsupported import must be reported",
+    );
   });
 });
 
@@ -740,8 +758,8 @@ Deno.test("audio-feed-3xla: helper imported constant does not leak into caller p
     ].join("\n"),
   }, async (root) => {
     const report = await deriveReadRelationReport(root, ["tests/caller_test.ts"]);
-    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unresolved.
-    assertEquals(report.unresolved, ["FILE"]);
+    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unclassified.
+    assertEquals(report.unclassified, ["FILE"]);
     // It must NOT silently attribute to docs/present/
     assert(!report.relations.has("docs/present/"));
   });
