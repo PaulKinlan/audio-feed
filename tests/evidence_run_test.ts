@@ -531,3 +531,207 @@ Deno.test("NEGATIVE CONTROL (Unresolved Executor): missing declared executor fai
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+Deno.test("readDeclaration parses valid - Timeout: variants (audio-feed-kphw)", () => {
+  const readmeNumeric = `
+# Title
+- Script: scripts/proof.ts
+- Timeout: 600
+- Asserts: claim
+`;
+  const info1 = readDeclaration(readmeNumeric);
+  assertEquals(info1.declared, "scripts/proof.ts");
+  assertEquals(info1.timeoutSec, 600);
+  assertEquals(info1.rawTimeout, "600");
+  assertEquals(info1.timeoutMalformed, false);
+
+  const readmeSecondsSuffix = `
+# Title
+- Script: scripts/proof.ts
+- Timeout: 600s
+`;
+  const info2 = readDeclaration(readmeSecondsSuffix);
+  assertEquals(info2.timeoutSec, 600);
+  assertEquals(info2.timeoutMalformed, false);
+
+  const readmeQuotes = `
+# Title
+- Script: scripts/proof.ts
+- Timeout: "350"
+`;
+  const info3 = readDeclaration(readmeQuotes);
+  assertEquals(info3.timeoutSec, 350);
+  assertEquals(info3.timeoutMalformed, false);
+
+  const readmeBackticks = `
+# Title
+- Script: scripts/proof.ts
+- Timeout: \`120.5\`
+`;
+  const info4 = readDeclaration(readmeBackticks);
+  assertEquals(info4.timeoutSec, 120.5);
+  assertEquals(info4.timeoutMalformed, false);
+
+  // Negative control: absence leaves timeoutSec as null, not malformed
+  const readmeNoTimeout = `
+# Title
+- Script: scripts/proof.ts
+`;
+  const info5 = readDeclaration(readmeNoTimeout);
+  assertEquals(info5.timeoutSec, null);
+  assertEquals(info5.rawTimeout, null);
+  assertEquals(info5.timeoutMalformed, false);
+});
+
+Deno.test("readDeclaration identifies malformed - Timeout: declarations (audio-feed-kphw)", () => {
+  const malformedCases = [
+    { text: "- Timeout: invalid", raw: "invalid" },
+    { text: "- Timeout: -10", raw: "-10" },
+    { text: "- Timeout: 0", raw: "0" },
+    { text: "- Timeout:", raw: "" },
+    { text: "- Timeout: NaN", raw: "NaN" },
+  ];
+
+  for (const c of malformedCases) {
+    const readme = `# Title\n- Script: scripts/proof.ts\n${c.text}\n`;
+    const info = readDeclaration(readme);
+    assertEquals(
+      info.timeoutMalformed,
+      true,
+      `expected '${c.text}' to be flagged malformed`,
+    );
+    assertEquals(info.timeoutSec, null);
+    assertEquals(info.rawTimeout, c.raw);
+  }
+});
+
+Deno.test("declared per-proof bound wins over global default (audio-feed-kphw)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "kphw-declared-win-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-long"), { recursive: true });
+
+    // Script takes ~1.5s to complete and prints PASS
+    await Deno.writeTextFile(
+      join(scriptsDir, "proof.ts"),
+      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+    );
+
+    // Declares Timeout: 5, while global flag is --timeout 1.
+    // Declared bound (5s) must WIN over global flag (1s), allowing the 1.5s proof to pass.
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-long", "README.md"),
+      "- Script: scripts/proof.ts\n- Timeout: 5\n- Asserts: finished\n",
+    );
+
+    const res = await runTier(tempDir, ["--timeout", "1"]);
+    assertEquals(
+      res.code,
+      0,
+      `expected run to pass but failed with code ${res.code}: ${res.stdout}\n${res.stderr}`,
+    );
+    assertStringIncludes(res.stdout, "ok   docs/evidence/audio-feed-long");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("missing declaration falls back to global default WITH provenance visible (audio-feed-kphw)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "kphw-default-provenance-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-undeclared"), { recursive: true });
+
+    // Script takes ~1.5s to complete
+    await Deno.writeTextFile(
+      join(scriptsDir, "proof.ts"),
+      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+    );
+
+    // No Timeout declared in README
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-undeclared", "README.md"),
+      "- Script: scripts/proof.ts\n- Asserts: finished\n",
+    );
+
+    // Global bound of 1s will kill the 1.5s proof -> UNKNOWN with [default] provenance
+    const res = await runTier(tempDir, ["--timeout", "1"]);
+    assertEquals(res.code, 1, "exceeded default bound must report UNKNOWN / exit 1");
+    assertStringIncludes(
+      res.stdout,
+      "UNKNOWN (exceeded the 1s bound [default]; raise --timeout to decide it)",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("declared bound exceedance reports [declared] provenance (audio-feed-kphw)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "kphw-declared-provenance-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-tight"), { recursive: true });
+
+    // Script takes ~1.5s to complete
+    await Deno.writeTextFile(
+      join(scriptsDir, "proof.ts"),
+      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+    );
+
+    // README declares tight 1s bound
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-tight", "README.md"),
+      "- Script: scripts/proof.ts\n- Timeout: 1\n- Asserts: finished\n",
+    );
+
+    // Run with high global timeout (10s); declared 1s bound must kill it -> [declared] provenance
+    const res = await runTier(tempDir, ["--timeout", "10"]);
+    assertEquals(res.code, 1, "exceeded declared bound must report UNKNOWN / exit 1");
+    assertStringIncludes(
+      res.stdout,
+      "UNKNOWN (exceeded the 1s bound [declared]; raise --timeout to decide it)",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("malformed - Timeout: is an UNRESOLVED failure (exit 1) refusing the run (audio-feed-kphw)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "kphw-malformed-refused-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-bad-timeout"), { recursive: true });
+
+    await Deno.writeTextFile(
+      join(scriptsDir, "proof.ts"),
+      `console.log("PASS ok");\n`,
+    );
+
+    // README carries malformed Timeout
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-bad-timeout", "README.md"),
+      "- Script: scripts/proof.ts\n- Timeout: unparseable-garbage\n- Asserts: ok\n",
+    );
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 1, "malformed timeout must exit 1 (refusal)");
+    assertStringIncludes(
+      res.stderr,
+      "[evidence] FAIL docs/evidence/audio-feed-bad-timeout -> timeout 'unparseable-garbage' (UNRESOLVED TIMEOUT: expected positive number of seconds)",
+    );
+    assertStringIncludes(
+      res.stderr,
+      "[evidence] RED: 1 declared timeout(s) are malformed; refusing run - malformed timeout declarations must be fixed",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
