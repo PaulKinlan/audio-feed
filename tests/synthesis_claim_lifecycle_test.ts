@@ -1860,7 +1860,7 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
   };
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-tail-skip",
-    maxInvocationDurationMs: 80,
+    maxInvocationDurationMs: 45_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
@@ -1869,6 +1869,33 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
   const today = new Date().toISOString().slice(0, 10);
   const count = await stores.metadata.getDailySynthesisCount(today);
   assertEquals(count, 1, "daily synthesis count must be recorded as part of terminal path");
+});
+
+Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)", async () => {
+  const { ctx, stores } = await setupEnv();
+  const put = stores.blobs.put.bind(stores.blobs);
+  let putPromise: Promise<unknown> | undefined;
+  stores.blobs.put = (...args) => {
+    const p = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return put(...args);
+    })();
+    putPromise = p.catch(() => {});
+    return p;
+  };
+  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "review-tail-bound-fires",
+    maxInvocationDurationMs: 40,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  await putPromise;
+  assertEquals(result.ready.length, 0, "episode must not be completed ready when budget exceeded");
+  assertEquals(result.yielded.length, 1, "episode must cleanly yield when budget exceeded");
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 0, "daily synthesis count must not be recorded when budget exceeded");
 });
 
 Deno.test("audio-feed-uecw: terminal completion commits episode ready and billing counters in a single atomic transaction", async () => {
