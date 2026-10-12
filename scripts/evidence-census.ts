@@ -41,13 +41,47 @@
  * target. A generic `Deno.write*` gets no such credit - its target must resolve
  * into docs/evidence itself, which is what separates a write from a mention.
  */
-export const WRITE_CALLS: readonly { pattern: RegExp; evidenceHelper: boolean }[] = [
-  { pattern: /\bwriteEvidenceReadme\s*\(/g, evidenceHelper: true },
-  { pattern: /\bwriteEvidencePng\s*\(/g, evidenceHelper: true },
-  { pattern: /\bDeno\.writeTextFile\s*\(/g, evidenceHelper: false },
-  { pattern: /\bDeno\.writeFile\s*\(/g, evidenceHelper: false },
-  { pattern: /\bDeno\.mkdir\s*\(/g, evidenceHelper: false },
-  { pattern: /\bDeno\.copyFile\s*\(/g, evidenceHelper: false },
+export const WRITE_CALLS: readonly {
+  pattern: RegExp;
+  evidenceHelper: boolean;
+  /**
+   * WHICH ARGUMENT CARRIES THE TARGET, PER DENO'S OWN SIGNATURES, and this is a
+   * per-entry answer rather than a default (audio-feed-vex8, vac2's finding):
+   *   Deno.writeTextFile(path, data)  -> 1
+   *   Deno.writeFile(path, data)      -> 1
+   *   Deno.mkdir(path)                -> 1
+   *   Deno.copyFile(fromPath, toPath) -> 2   <-- the DESTINATION is what is written
+   *   writeEvidenceReadme(options)    -> 1
+   *   writeEvidencePng(options)       -> 1
+   * "THE TARGET IS ARGUMENT 1" WAS NOT TRUE OF EVERY ENTRY IN THIS SET. copyFile's
+   * target is its SECOND argument, so resolving argument 1 dropped an explicitly
+   * listed write call ENTIRELY - a false negative on a WRITER, which is invisible,
+   * where the mention false positives this file was built to fix are merely
+   * over-reporting and visible. A test iterates THIS TABLE and asserts that every
+   * entry has a sample (tests/evidence_census_test.ts), so a call cannot be added
+   * here without its target argument being stated and exercised.
+   *
+   * DECLARED LIMIT, MEASURED: `Deno.rename(oldPath, newPath)` creates its second argument, and it
+   * is NOT in this set - a move into docs/evidence would be a write this predicate does not see.
+   * Measured on the tree at the time of writing: eleven files call rename and ZERO of their
+   * destinations are under the evidence prefix, so nothing is missed today; the shape is named
+   * rather than assumed away, and adding it is one table entry when a rename does move evidence.
+   */
+  targetArgument: number;
+}[] = [
+  { pattern: /\bwriteEvidenceReadme\s*\(/g, evidenceHelper: true, targetArgument: 1 },
+  { pattern: /\bwriteEvidencePng\s*\(/g, evidenceHelper: true, targetArgument: 1 },
+  { pattern: /\bDeno\.writeTextFile\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.writeFile\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.mkdir\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.copyFile\s*\(/g, evidenceHelper: false, targetArgument: 2 },
+  // THE Sync FAMILY, ADDED BECAUSE MEASURING "THE REST OF THE SET" FOUND IT MISSING (there is one
+  // writeTextFileSync call in the tree today, in a test whose target is not evidence, so no number
+  // moves - but a script writing evidence synchronously was simply invisible to this predicate).
+  { pattern: /\bDeno\.writeTextFileSync\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.writeFileSync\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.mkdirSync\s*\(/g, evidenceHelper: false, targetArgument: 1 },
+  { pattern: /\bDeno\.copyFileSync\s*\(/g, evidenceHelper: false, targetArgument: 2 },
 ];
 
 /** The directory every evidence slice lives under. Required in a write target. */
@@ -206,25 +240,39 @@ export function maskNonCode(source: string): string {
  * stated at all). A template `${ ... }` containing a comma is handled correctly,
  * because the masker leaves that expression as code and its braces are counted here.
  */
-export function firstArgument(masked: string, raw: string, open: number): string | null {
+export function argumentRange(
+  masked: string,
+  open: number,
+  index: number,
+): { start: number; end: number } | null {
   let parens = 0;
   let braces = 0;
   let brackets = 0;
-  for (let i = open; i < masked.length; i++) {
+  let nth = 1;
+  let start = open + 1;
+  for (let i = open + 1; i < masked.length; i++) {
     const ch = masked[i]!;
     if (ch === "(") parens++;
     else if (ch === ")") {
+      if (parens === 0) return nth === index ? { start, end: i } : null;
       parens--;
-      if (parens === 0) return raw.slice(open + 1, i);
     } else if (ch === "{") braces++;
     else if (ch === "}") braces--;
     else if (ch === "[") brackets++;
     else if (ch === "]") brackets--;
-    else if (ch === "," && parens === 1 && braces === 0 && brackets === 0) {
-      return raw.slice(open + 1, i);
+    else if (ch === "," && parens === 0 && braces === 0 && brackets === 0) {
+      if (nth === index) return { start, end: i };
+      nth++;
+      start = i + 1;
     }
   }
   return null;
+}
+
+/** The first argument, which is the target of every entry whose targetArgument is 1. */
+export function firstArgument(masked: string, raw: string, open: number): string | null {
+  const range = argumentRange(masked, open, 1);
+  return range === null ? null : raw.slice(range.start, range.end);
 }
 
 /** The properties of an evidence helper that NAME THE SLICE, from its own option types. */
@@ -363,7 +411,7 @@ export function censusSource(source: string): ScriptCensus {
   // THE MASKED SOURCE IS WHAT IS SCANNED (audio-feed-ehon): a call written inside a comment or a
   // string is not a call site, and the raw source made both look like one.
   const masked = maskNonCode(source);
-  for (const { pattern, evidenceHelper } of WRITE_CALLS) {
+  for (const { pattern, evidenceHelper, targetArgument } of WRITE_CALLS) {
     pattern.lastIndex = 0;
     for (const match of masked.matchAll(pattern)) {
       const open = match.index + match[0].length - 1;
@@ -371,10 +419,11 @@ export function censusSource(source: string): ScriptCensus {
       // payload naming docs/evidence made a script that writes to /tmp look like a writer. WITHIN
       // that argument, an object literal names the slice through its target property and its other
       // properties are prose (audio-feed-vex8) - see targetWithin.
-      const start = match.index + match[0].length;
-      const args = firstArgument(masked, source, open);
-      if (args === null) continue;
-      const targetText = targetWithin(masked, source, start, start + args.length);
+      // THE TARGET ARGUMENT IS PER CALL SHAPE (audio-feed-vex8): copyFile writes its SECOND
+      // argument, so assuming argument 1 dropped that write call entirely.
+      const range = argumentRange(masked, open, targetArgument);
+      if (range === null) continue;
+      const targetText = targetWithin(masked, source, range.start, range.end);
       const target = resolveTarget(targetText, bindings);
       // A generic write must name docs/evidence. The evidence helpers may name
       // the slice directly, because naming it IS their contract.

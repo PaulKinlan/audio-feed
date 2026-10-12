@@ -15,7 +15,7 @@
  * with a mention and no write.
  */
 import { assert, assertEquals } from "@std/assert";
-import { census, censusSource, EVIDENCE_PREFIX } from "../scripts/evidence-census.ts";
+import { census, censusSource, EVIDENCE_PREFIX, WRITE_CALLS } from "../scripts/evidence-census.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
 /**
@@ -310,5 +310,103 @@ Deno.test("audio-feed-vex8: a comma at depth > 0 is not an argument separator", 
     ).writes,
     [dir("fallback")],
     "an object with no target property falls back to the whole argument",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-vex8 (vac2's axis): THE TARGET IS NOT ARGUMENT 1 FOR EVERY ENTRY.
+// Deno.copyFile(fromPath, toPath) writes its SECOND argument, so resolving the
+// first dropped that write call ENTIRELY - a false negative on a WRITER, which is
+// invisible, where the mention false positives this file fixes are over-reporting
+// and visible. No comma-depth fix touches this shape: the first argument is a
+// perfectly well-formed single token, correctly parsed.
+// ---------------------------------------------------------------------------
+
+/**
+ * One sample per WRITE_CALLS entry. The coverage test below fails if an entry has
+ * no sample, so a write call cannot be added to the set without its target argument
+ * being stated and exercised - the bad state is unrepresentable rather than absent.
+ */
+const TARGET_SAMPLES: Record<string, { source: string; expected: string }> = {
+  "writeEvidenceReadme(": {
+    source: 'await writeEvidenceReadme({ dir: "audio-feed-hlp", title: "t" });\n',
+    expected: "hlp",
+  },
+  "writeEvidencePng(": {
+    source: 'await writeEvidencePng({ dir: "audio-feed-png", name: "01.png" });\n',
+    expected: "png",
+  },
+  "Deno.writeTextFile(": {
+    source: 'await Deno.writeTextFile("' + ev(dir("wtf") + "/x.md") + '", "body");\n',
+    expected: "wtf",
+  },
+  "Deno.writeFile(": {
+    source: 'await Deno.writeFile("' + ev(dir("wf") + "/x.png") + '", bytes);\n',
+    expected: "wf",
+  },
+  "Deno.mkdir(": {
+    source: 'await Deno.mkdir("' + ev(dir("mkd") + "/") + '", { recursive: true });\n',
+    expected: "mkd",
+  },
+  // THE FINDING: the target is the SECOND argument. The first names the SOURCE, which this
+  // call READS - crediting it would be a false positive of the same kind the bead is about.
+  "Deno.copyFile(": {
+    source: 'await Deno.copyFile("' + dir("src-bean") + '.png", "' + ev(dir("dst") + "/shot.png") +
+      '");\n',
+    expected: "dst",
+  },
+  "Deno.writeTextFileSync(": {
+    source: 'Deno.writeTextFileSync("' + ev(dir("wts") + "/x.md") + '", "body");\n',
+    expected: "wts",
+  },
+  "Deno.writeFileSync(": {
+    source: 'Deno.writeFileSync("' + ev(dir("wfs") + "/x.png") + '", bytes);\n',
+    expected: "wfs",
+  },
+  "Deno.mkdirSync(": {
+    source: 'Deno.mkdirSync("' + ev(dir("mks") + "/") + '");\n',
+    expected: "mks",
+  },
+  "Deno.copyFileSync(": {
+    source: 'Deno.copyFileSync("' + dir("src-sync") + '.png", "' + ev(dir("ds2") + "/s.png") +
+      '");\n',
+    expected: "ds2",
+  },
+};
+
+Deno.test("audio-feed-vex8: EVERY write call resolves its REAL target argument, per Deno's signature", () => {
+  // Coverage first: a new entry in WRITE_CALLS with no sample here fails this, by construction.
+  for (const { pattern } of WRITE_CALLS) {
+    const covered = Object.keys(TARGET_SAMPLES).some((name) => pattern.test(name));
+    pattern.lastIndex = 0;
+    assert(covered, `WRITE_CALLS entry ${pattern} has no sample: state its target argument`);
+  }
+  for (const [name, { source, expected }] of Object.entries(TARGET_SAMPLES)) {
+    const result = censusSource(source);
+    assertEquals(result.writes, [dir(expected)], `${name} must resolve its real target argument`);
+  }
+  // ...and the same table must cover the whole set, not a subset of it.
+  assertEquals(
+    Object.keys(TARGET_SAMPLES).length,
+    WRITE_CALLS.length,
+    "every WRITE_CALLS entry needs exactly one sample",
+  );
+});
+
+Deno.test("audio-feed-vex8: copyFile counts the DESTINATION and not the source it reads", () => {
+  const source = 'await Deno.copyFile("' + dir("src-bean") + '.png", "' +
+    ev(dir("dst") + "/shot.png") +
+    '");\n';
+  const result = censusSource(source);
+  assertEquals(result.writes, [dir("dst")], "the destination is the write target");
+  assert(
+    !result.writes.includes(dir("src-bean")),
+    "the source is read, not written: crediting it would be the false positive shape",
+  );
+  // A copy whose DESTINATION is outside docs/evidence is not an evidence writer at all.
+  assertEquals(
+    censusSource('await Deno.copyFile("' + dir("src-bean") + '.png", "/tmp/out.png");\n').writes,
+    [],
+    "copying an evidence file OUT to /tmp writes no evidence",
   );
 });
