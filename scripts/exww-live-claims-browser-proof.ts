@@ -41,8 +41,11 @@ import { EVIDENCE_PNG_BUDGET_BYTES } from "./evidence-compress.ts";
  * than to trust that it was taken tall enough (audio-feed-u3m1): the width is bytes 16..19 and the
  * height 20..23 of a PNG, both big-endian.
  */
-function pngHeight(bytes: Uint8Array): number {
-  return (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
+function pngSize(bytes: Uint8Array): { width: number; height: number } {
+  return {
+    width: (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!,
+    height: (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!,
+  };
 }
 
 /**
@@ -62,15 +65,20 @@ function pngHeight(bytes: Uint8Array): number {
  * colour, so its standard deviation is zero whatever colour that flat is: measured about 1e-8 for both
  * the blank #f7f7f7 clip and a pure white one, against 0.188-0.195 for the committed captures.
  *
- * Cropped to the SECTION's own rows rather than to the whole clip: the clip deliberately includes 8px
- * of the PREVIOUS section above it, and those pixels are not the section's.
+ * Cropped to the rectangle the caller names rather than to the whole clip: the clip deliberately
+ * includes 8px of the PREVIOUS section above it, and those pixels are not the section's.
  */
-async function pixelVariation(path: string, top: number, rows: number): Promise<number> {
+async function pixelVariation(
+  path: string,
+  rect: { x: number; y: number; width: number; height: number },
+): Promise<number> {
   const out = await new Deno.Command("convert", {
     args: [
       path,
       "-crop",
-      `1280x${rows}+0+${top}`,
+      `${Math.max(1, Math.round(rect.width))}x${Math.max(1, Math.round(rect.height))}+${
+        Math.max(0, Math.round(rect.x))
+      }+${Math.max(0, Math.round(rect.y))}`,
       "+repage",
       "-colorspace",
       "gray",
@@ -104,6 +112,46 @@ async function pixelVariation(path: string, top: number, rows: number): Promise<
  * page ought to have.
  */
 const MIN_PIXEL_VARIATION = 0.01;
+
+/**
+ * The viewport the proof drives Chrome at, and the width every clip is bounded by.
+ */
+const VIEWPORT_WIDTH = 1280;
+
+/**
+ * The scale the committed artefacts are documented at (docs/evidence/audio-feed-exww/README.md shows
+ * 1280-wide, full-scale captures). The clip asks for THIS scale and the image is required to match it,
+ * so a capture at any other scale fails rather than quietly passing at a size nothing documents -
+ * and every pixel-space crop is derived from the clip's scale rather than assuming 1 (audio-feed-9zgi).
+ */
+const EVIDENCE_SCALE = 1;
+
+/**
+ * A document-space rectangle expressed in the image's own pixels.
+ */
+function inImagePixels(
+  rect: { x: number; y: number; width: number; height: number },
+  scale: number,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: rect.x * scale,
+    y: rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale,
+  };
+}
+
+/**
+ * The minimum structure the claim text's OWN box shows (audio-feed-9zgi).
+ *
+ * MEASURED, not chosen to make a failure stop: the four committed captures' claim boxes measure
+ * 0.303373, 0.299339, 0.235022 and 0.352550 (standard deviation of grey over the text's own element),
+ * while the same box with its text painted in the page's background colour measures about 1e-8 - one
+ * flat colour, whatever that colour is. The threshold sits an order of magnitude below every real
+ * claim box and orders of magnitude above flat, so it answers "does this box show ink" and not "how
+ * much ink should this page have".
+ */
+const MIN_CLAIM_INK_VARIATION = 0.01;
 
 /**
  * Compress a written capture in place, with the repository's own recipe (scripts/evidence-compress.ts:
@@ -407,14 +455,19 @@ await runProof("audio-feed-exww", async (checker) => {
       /** The rendered geometry of one section, in document space. */
       const sectionBounds = async (
         ariaLabelledby: string,
-      ): Promise<{ top: number; bottom: number }> =>
+      ): Promise<{ top: number; bottom: number; left: number; right: number }> =>
         JSON.parse(
           String(
             await js(`JSON.stringify((() => {
               const el = document.querySelector('[aria-labelledby="${ariaLabelledby}"]');
-              if (!el) return { top: -1, bottom: -1 };
+              if (!el) return { top: -1, bottom: -1, left: -1, right: -1 };
               const r = el.getBoundingClientRect();
-              return { top: r.top + window.scrollY, bottom: r.bottom + window.scrollY };
+              return {
+                top: r.top + window.scrollY,
+                bottom: r.bottom + window.scrollY,
+                left: r.left,
+                right: r.right,
+              };
             })())`),
           ),
         );
@@ -515,15 +568,23 @@ await runProof("audio-feed-exww", async (checker) => {
         // ONE object, used both for the request and for the assertions about it (audio-feed-g86r):
         // while the clip was a literal in the capture call, every assertion described what we MEANT to
         // capture, so a clip moved to another part of the page still passed every check.
+        //
+        // BOTH AXES, AND THE SCALE, COME FROM THE SECTION'S BOX (audio-feed-9zgi): the first version
+        // took y and the height from the box and hard-coded x=0 and the full page width, so a capture
+        // shifted HORIZONTALLY - the section's own rows, someone else's columns - satisfied every
+        // check, and a capture of the right box at the wrong SCALE satisfied them too because the
+        // assertions compared document coordinates against each other and never against the image.
         const clip = {
-          x: 0,
+          x: Math.max(0, Math.floor(bounds.left) - 8),
           y: Math.max(0, Math.floor(bounds.top) - 8),
-          width: 1280,
-          height: Math.ceil(bounds.bottom) - Math.max(0, Math.floor(bounds.top) - 8) + 8,
-          scale: 1,
+          width: 0,
+          height: 0,
+          scale: EVIDENCE_SCALE,
         };
+        clip.width = Math.max(1, Math.min(VIEWPORT_WIDTH, Math.ceil(bounds.right) + 8) - clip.x);
+        clip.height = Math.ceil(bounds.bottom) + 8 - clip.y;
         await cdp("Emulation.setDeviceMetricsOverride", {
-          width: 1280,
+          width: VIEWPORT_WIDTH,
           height: Math.max(1400, Math.ceil(bounds.bottom) + 40),
           deviceScaleFactor: 1,
           mobile: false,
@@ -537,7 +598,7 @@ await runProof("audio-feed-exww", async (checker) => {
         const path = `${OUT}${name}`;
         await Deno.writeFile(path, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
         const bytes = await compressInPlace(path);
-        const imageHeight = pngHeight(await Deno.readFile(path));
+        const image = pngSize(await Deno.readFile(path));
         checker.check(
           `${name} is within the ${
             (EVIDENCE_PNG_BUDGET_BYTES / 1024).toFixed(0)
@@ -545,32 +606,48 @@ await runProof("audio-feed-exww", async (checker) => {
           bytes <= EVIDENCE_PNG_BUDGET_BYTES,
           `${(bytes / 1024).toFixed(0)}KB`,
         );
+        // The image's own dimensions must be the clip's dimensions AT THE CLIP'S SCALE, which is the
+        // assertion that makes a wrong-scale capture fail rather than silently pass: the document-space
+        // checks below are all expressed in the section's coordinates and cannot see a rescaled image.
+        const expectedWidth = Math.round(clip.width * EVIDENCE_SCALE);
+        const expectedHeight = Math.round(clip.height * EVIDENCE_SCALE);
         checker.check(
           `${name} covers ${coversLabel}`,
-          imageHeight >= clip.height - 1,
-          `image is ${imageHeight}px tall for a section spanning y=${Math.round(bounds.top)}..${
-            Math.round(bounds.bottom)
-          }`,
+          image.width === expectedWidth && image.height === expectedHeight,
+          `image is ${image.width}x${image.height} for a clip of ${clip.width}x${clip.height} ` +
+            `at scale ${clip.scale}, so it should be ${expectedWidth}x${expectedHeight}`,
         );
-        // BINDING THE IMAGE TO THE SECTION (audio-feed-g86r). The checks above are all satisfied by a
-        // capture of SOME nonflat region: the height check only confirms Chrome honoured the requested
-        // size. So the region we ASKED FOR is compared against the section's own box, re-read after the
-        // capture - `clip` above, not a variable of the same name computed from it.
+        // BINDING THE IMAGE TO THE SECTION. The checks above are all satisfied by a capture of SOME
+        // nonflat region of the right size. So the region we ASKED FOR is compared against the
+        // section's own box, re-read after the capture - `clip` above, not a variable computed from it.
         const live = await sectionBounds(ariaLabelledby);
+        const slack = 16;
         checker.check(
           `${name} captured the section's own box, not another region of the page`,
-          Math.abs(live.top - clip.y) <= 16 && Math.abs(live.bottom - (clip.y + clip.height)) <= 16,
-          `clip was y=${clip.y}..${clip.y + clip.height} and the section is y=${
-            Math.round(live.top)
-          }..${Math.round(live.bottom)} (16px of deliberate padding around it)`,
+          Math.abs(live.left - clip.x) <= slack &&
+            Math.abs(live.right - (clip.x + clip.width)) <= slack &&
+            Math.abs(live.top - clip.y) <= slack &&
+            Math.abs(live.bottom - (clip.y + clip.height)) <= slack,
+          `clip was x=${clip.x}..${clip.x + clip.width} y=${clip.y}..${
+            clip.y + clip.height
+          } and the ` +
+            `section is x=${Math.round(live.left)}..${Math.round(live.right)} y=${
+              Math.round(live.top)
+            }..${Math.round(live.bottom)} (${slack}px of deliberate padding around it)`,
         );
-        // ...and the section's own rows must lie INSIDE the clip, or the pixel measurement below would
-        // be measuring someone else's pixels and reporting them as this section's content.
-        const sectionRows = Math.ceil(bounds.bottom) - Math.floor(bounds.top);
-        const sectionOffset = Math.floor(bounds.top) - clip.y;
-        const sectionInClip = sectionOffset >= 0 && sectionOffset + sectionRows <= clip.height;
+        // ...and the section's own rectangle must lie INSIDE the clip, or the pixel measurements below
+        // would be measuring someone else's pixels and reporting them as this section's content.
+        const sectionRect = {
+          x: Math.floor(bounds.left) - clip.x,
+          y: Math.floor(bounds.top) - clip.y,
+          width: Math.ceil(bounds.right) - Math.floor(bounds.left),
+          height: Math.ceil(bounds.bottom) - Math.floor(bounds.top),
+        };
+        const sectionInClip = sectionRect.x >= 0 && sectionRect.y >= 0 &&
+          sectionRect.x + sectionRect.width <= clip.width &&
+          sectionRect.y + sectionRect.height <= clip.height;
         const variation = sectionInClip
-          ? await pixelVariation(path, sectionOffset, sectionRows)
+          ? await pixelVariation(path, inImagePixels(sectionRect, clip.scale))
           : Number.NaN;
         checker.check(
           `${name} is a capture of rendered content, not a flat single-colour clip`,
@@ -578,13 +655,12 @@ await runProof("audio-feed-exww", async (checker) => {
           sectionInClip
             ? `pixel variation ${
               variation.toFixed(8)
-            } over the section's own rows (a clip whose section rows render nothing is ` +
-              `one flat colour and measures about 1e-8; the committed captures measure 0.188-0.195)`
-            : `the section's rows y=${Math.floor(bounds.top)}..${
-              Math.ceil(bounds.bottom)
-            } are not inside the captured clip y=${clip.y}..${
-              clip.y + clip.height
-            }, so this image ` +
+            } over the section's own rows and columns (a clip whose section renders nothing is ` +
+              `one flat colour and measures about 1e-8; the committed captures measure 0.167-0.199)`
+            : `the section's box x=${sectionRect.x}..${sectionRect.x + sectionRect.width} ` +
+              `y=${sectionRect.y}..${
+                sectionRect.y + sectionRect.height
+              } is not inside the captured clip ${clip.width}x${clip.height}, so this image ` +
               `cannot be the section`,
         );
         // The claim text itself must be in a PAINTED element inside that section - the half the pixel
@@ -597,11 +673,12 @@ await runProof("audio-feed-exww", async (checker) => {
           claim.found && claim.visible,
           claim.reason,
         );
-        // ...and that painted text must be INSIDE THE CAPTURED PIXELS. Without this the claim was
-        // satisfied by text painted anywhere in the section while the image could show anything at all
-        // - the two ends of the check were never tied together (audio-feed-g86r).
-        const inImage = claim.rect !== null && claim.rect.top >= clip.y &&
-          claim.rect.bottom <= clip.y + clip.height;
+        // ...that painted text must be inside the captured pixels ON BOTH AXES. Without this the claim
+        // was satisfied by text painted anywhere in the section while the image could show anything at
+        // all - the two ends of the check were never tied together (audio-feed-g86r, audio-feed-9zgi).
+        const inImage = claim.rect !== null &&
+          claim.rect.left >= clip.x && claim.rect.right <= clip.x + clip.width &&
+          claim.rect.top >= clip.y && claim.rect.bottom <= clip.y + clip.height;
         checker.check(
           `${name} has ${
             JSON.stringify(claimText)
@@ -609,9 +686,40 @@ await runProof("audio-feed-exww", async (checker) => {
           inImage,
           claim.rect === null
             ? `the text has no rendered box (${claim.reason})`
-            : `the text is at y=${Math.round(claim.rect.top)}..${
-              Math.round(claim.rect.bottom)
-            } and the image covers y=${clip.y}..${clip.y + clip.height}`,
+            : `the text is at x=${Math.round(claim.rect.left)}..${Math.round(claim.rect.right)} y=${
+              Math.round(claim.rect.top)
+            }..${Math.round(claim.rect.bottom)} and the image covers ` +
+              `x=${clip.x}..${clip.x + clip.width} y=${clip.y}..${clip.y + clip.height}`,
+        );
+        // ...and the claim's OWN pixels must carry ink (audio-feed-9zgi). The visibility check above
+        // reads computed style, so a claim painted in the background's own colour - or under an opaque
+        // overlay - is "visible" to it and blank in the image; this is the one measurement that says
+        // the text the claim names is what the pixels actually show.
+        const claimRect = claim.rect === null ? null : {
+          x: claim.rect.left - clip.x,
+          y: claim.rect.top - clip.y,
+          width: claim.rect.right - claim.rect.left,
+          height: claim.rect.bottom - claim.rect.top,
+        };
+        const claimInClip = claimRect !== null && claimRect.x >= 0 && claimRect.y >= 0 &&
+          claimRect.width > 0 && claimRect.height > 0 &&
+          claimRect.x + claimRect.width <= clip.width &&
+          claimRect.y + claimRect.height <= clip.height;
+        const claimInk = claimInClip
+          ? await pixelVariation(path, inImagePixels(claimRect, clip.scale))
+          : Number.NaN;
+        checker.check(
+          `${name} shows ink where ${
+            JSON.stringify(claimText)
+          } is painted, not a background-coloured claim`,
+          Number.isFinite(claimInk) && claimInk > MIN_CLAIM_INK_VARIATION,
+          claimInClip
+            ? `pixel variation ${claimInk.toFixed(8)} over the claim's own text box at x=${
+              Math.round(claimRect.x)
+            },y=${Math.round(claimRect.y)} ${Math.round(claimRect.width)}x${
+              Math.round(claimRect.height)
+            } (rendered text varies; a box painted in one colour measures about 1e-8)`
+            : `the claim's box is not inside the captured pixels (${claim.reason})`,
         );
       };
 
@@ -843,18 +951,22 @@ await runProof("audio-feed-exww", async (checker) => {
           "01-live-lease-expiries-worker-healthy.png covers the live-claims section with a live and an expired claim",
           "01-live-lease-expiries-worker-healthy.png captured the section's own box, not another region of the page",
           '01-live-lease-expiries-worker-healthy.png has "LEASE EXPIRED with no terminal write" inside the captured pixels, not merely painted somewhere on the page',
+          '01-live-lease-expiries-worker-healthy.png shows ink where "LEASE EXPIRED with no terminal write" is painted, not a background-coloured claim',
           "02-live-lease-expiries-worker-unavailable.png is within the 150KB budget after a replay",
           "02-live-lease-expiries-worker-unavailable.png covers the live-claims section with the worker path unavailable and the default-lease label",
           "02-live-lease-expiries-worker-unavailable.png captured the section's own box, not another region of the page",
           '02-live-lease-expiries-worker-unavailable.png has "computed from the deployment lease" inside the captured pixels, not merely painted somewhere on the page',
+          '02-live-lease-expiries-worker-unavailable.png shows ink where "computed from the deployment lease" is painted, not a background-coloured claim',
           "03-live-lease-expiries-store-unreachable.png is within the 150KB budget after a replay",
           "03-live-lease-expiries-store-unreachable.png covers the live-claims section reporting UNREADABLE",
           "03-live-lease-expiries-store-unreachable.png captured the section's own box, not another region of the page",
           '03-live-lease-expiries-store-unreachable.png has "Unavailable — the episode store could not be read" inside the captured pixels, not merely painted somewhere on the page',
+          '03-live-lease-expiries-store-unreachable.png shows ink where "Unavailable — the episode store could not be read" is painted, not a background-coloured claim',
           "04-recent-failures-real-provider-error.png is within the 150KB budget after a replay",
           "04-recent-failures-real-provider-error.png covers the Recent failures section carrying the provider error",
           "04-recent-failures-real-provider-error.png captured the section's own box, not another region of the page",
           '04-recent-failures-real-provider-error.png has "provider status 500" inside the captured pixels, not merely painted somewhere on the page',
+          '04-recent-failures-real-provider-error.png shows ink where "provider status 500" is painted, not a background-coloured claim',
           "01-live-lease-expiries-worker-healthy.png is a capture of rendered content, not a flat single-colour clip",
           "02-live-lease-expiries-worker-unavailable.png is a capture of rendered content, not a flat single-colour clip",
           "03-live-lease-expiries-store-unreachable.png is a capture of rendered content, not a flat single-colour clip",
@@ -933,13 +1045,16 @@ confused in either direction.`,
             heading: "Screenshots, and what each one is proved to cover",
             body:
               `Every capture is clipped to the section its README entry describes (\`captureBeyondViewport\` plus a
-clip) and then has SIX assertions, and the first two bind the image to the section rather than
-describing the intention: (0) the captured region is compared against the section's own box, re-read
-after the capture, so a clip moved anywhere else on the page FAILS (audio-feed-g86r) - the clip is one
-object used for both the request and the assertions about it, because while it was a literal in the
-capture call every check described what the proof MEANT to capture; (1) the image's own IHDR pixel
-height reaches the section's rendered bottom, so a capture that stops short FAILS the run
-(audio-feed-u3m1); (2) the file is within the repository's 150KB budget, and the proof
+clip) and then has SEVEN assertions, and the first three bind the image to the section rather than
+describing the intention: (0) the captured region is compared against the section's own box on BOTH
+AXES, re-read after the capture, so a clip moved anywhere else on the page FAILS (audio-feed-g86r for
+the vertical axis, audio-feed-9zgi for the horizontal one) - the clip is one object used both for the
+request and for the assertions about it, because while it was a literal in the capture call every check
+described what the proof MEANT to capture; (1) the image's own IHDR width and height match the clip's
+dimensions at the full scale the artefacts are documented at, so a capture of the right box at the
+WRONG SCALE FAILS rather than passing at a size no README entry describes, and the height reaches the
+section's rendered bottom so a capture that stops short also FAILS (audio-feed-u3m1, audio-feed-9zgi);
+(2) the file is within the repository's 150KB budget, and the proof
 compresses its own output with the repository's own recipe (\`convert -strip -colors 256 PNG8:\`) so a
 replay does not write over-budget PNGs (audio-feed-vvo7); (3) the pixels carry rendered content - the
 STANDARD DEVIATION of grey over the section's OWN rows is measured back out of the PNG and must exceed
@@ -953,11 +1068,14 @@ reject; and (4) the text each
 claim names is in a PAINTED element inside that section - no \`display:none\`, \`visibility:hidden\`,
 \`opacity:0\` or empty box on that element or any ancestor up to the section - because hiding a section
 leaves textContent and layout intact while the image records background; (5) that painted text lies
-INSIDE THE CAPTURED PIXELS, so text painted in the right section while the image shows something else
-FAILS; and the pixel measurement (3) is refused outright when the section's rows are not inside the
-captured clip, rather than reporting someone else's pixels as this section's content. Not covered, and stated here
-rather than left to be discovered: text painted in the background colour, and content covered by an
-overlapping element.
+INSIDE THE CAPTURED PIXELS ON BOTH AXES, so text painted in the right section while the image shows
+something else FAILS; (6) the claim's OWN box is measured back out of the PNG and must carry ink
+(STANDARD DEVIATION over the text's own element: 0.235-0.353 in the committed captures, about 1e-8 when
+that text is painted in the page's own background colour), which is the measurement that catches a claim
+painted invisibly - the computed-style check above cannot see a colour; and the pixel measurements (3)
+and (6) are refused outright when the section's or the claim's box is not inside the captured clip,
+rather than reporting someone else's pixels as this section's content. Not covered, and stated here
+rather than left to be discovered: content covered by an overlapping element.
 
 - \`01-live-lease-expiries-worker-healthy.png\`: the lease table with a held upload and an expired
   upload (called out AND timed).
