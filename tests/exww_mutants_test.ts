@@ -19,8 +19,15 @@
  * `deno task evidence:mutants` runs all seven when someone wants the matrix. The row is shared with that
  * harness rather than redefined here, so a row cannot drift between the tier and the gate.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { applyMutant, buildScratch, PROOF_REL, runProofIn } from "../scripts/exww-mutants.ts";
+import { assertEquals } from "@std/assert";
+import {
+  applyMutant,
+  buildScratch,
+  interpretRun,
+  MUTANTS,
+  PROOF_REL,
+  runProofIn,
+} from "../scripts/exww-mutants.ts";
 
 /** Where the mutated script goes, and how long a run may take. Shared with the harness's own bound. */
 const ROW = "wrong-scale";
@@ -43,32 +50,38 @@ Deno.test({
       // the seven-row matrix share one runner as well as one row definition, so a bound or a failure parser
       // cannot drift between them either.
       const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
+      // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
+      // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
+      // opinion of its own about it.
+      const baselineVerdict = interpretRun(baseline, { kind: "green" });
       assertEquals(
-        baseline.code,
-        0,
-        `the UNMUTATED proof must pass before any mutant can mean anything: exit ${baseline.code}${
-          baseline.timedOut ? " (TIMED OUT - a bound, not a proof failure)" : ""
-        }\n${baseline.failures.slice(0, 4).join("\n")}\n${baseline.tail.slice(-800)}`,
+        baselineVerdict.verdict,
+        "green",
+        `the UNMUTATED proof must pass before any mutant can mean anything: ${baselineVerdict.detail}` +
+          `\n${baseline.failures.slice(0, 4).join("\n")}\n${baseline.tail.slice(-800)}`,
       );
-      assertEquals(baseline.failures, [], "the unmutated proof must report no FAIL line");
 
       await Deno.writeTextFile(proofInScratch, applyMutant(source, ROW));
       const mutated = await runProofIn(scratch, RUN_TIMEOUT_MS);
       // A bound killing the run and the mutant reddening it are DIFFERENT outcomes: 124/137/143 is unknown,
       // never a pass and never a fail, so the timeout is asserted out before the mutant's red is believed.
-      assert(
-        mutated.code !== 0 && !mutated.timedOut,
-        `the ${ROW} mutant must fail the proof run, not time out (exit ${mutated.code}, timedOut=${mutated.timedOut})`,
-      );
-      // The mutated value must appear in the red, so the failure is attributable to the predicate: a spawn
-      // error, a missing browser or a crash would produce no such line.
-      assertStringIncludes(
-        mutated.failures.join("\n"),
-        "image is 640x473 for a clip of 1280x946",
-        `the ${ROW} mutant reddened something else: ${
-          mutated.failures.slice(0, 4).map((f) => f.slice(0, 120)).join(" | ") ||
-          mutated.tail.slice(-300)
-        }`,
+      const row = MUTANTS.find((m) => m.name === ROW)!;
+      // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
+      // the suite and the CLI came to disagree about what a killed run means - the suite checked `timedOut`,
+      // the CLI accepted any non-zero exit, and a row killed by the bound could be counted as an expected red.
+      const mutatedVerdict = interpretRun(mutated, {
+        kind: "detector",
+        expect: row.expect,
+        soleRed: row.soleRed,
+      });
+      assertEquals(
+        mutatedVerdict.verdict,
+        "red on the named check",
+        `the ${ROW} mutant must redden its named check inside the bound, not time out and not redden ` +
+          `something else: ${mutatedVerdict.detail}\n${
+            mutated.failures.slice(0, 4).map((f) => f.slice(0, 120)).join(" | ") ||
+            mutated.tail.slice(-300)
+          }`,
       );
     } finally {
       await Deno.remove(scratch, { recursive: true }).catch(() => {});

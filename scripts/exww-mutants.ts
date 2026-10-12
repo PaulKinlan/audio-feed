@@ -360,10 +360,137 @@ export async function runProofIn(
   return {
     code: output.code,
     seconds: (performance.now() - started) / 1000,
-    timedOut: output.code === 124 || output.code === 137,
+    timedOut: isUnknownExit(output.code),
     failures,
     passCount: lines.filter((line) => line.startsWith("PASS ")).length,
     tail: lines.slice(-6).join("\n  "),
+  };
+}
+
+/**
+ * THE FLEET'S DEFINITION OF UNKNOWN, IN ONE PLACE (audio-feed-l6b6): 124 is the bound, 137 is SIGKILL and 143
+ * is SIGTERM. A run killed by a bound is UNKNOWN - never a pass and never a fail - and the CLI used to omit
+ * 143, so a `timeout` that escalated would have read as an ordinary non-zero exit.
+ */
+export const UNKNOWN_EXIT_CODES: readonly number[] = [124, 137, 143];
+
+export function isUnknownExit(code: number): boolean {
+  return UNKNOWN_EXIT_CODES.includes(code);
+}
+
+/** What a run can mean. `unknown` is its own outcome, not a flavour of pass or fail. */
+export type Verdict = "green" | "red on the named check" | "unknown" | "unexpected";
+
+/** A row's recorded outcome: the interpretation's verdicts plus the two states that are not run outcomes. */
+export type RowResultVerdict = Verdict | "inapplicable" | "failed to run";
+
+/**
+ * The display form, derived in ONE place from the same enum the summary counts. The CLI's counts and its
+ * printout were briefly off by a representation (a `green` baseline counted as `unexpected`) because two
+ * strings described one verdict - so the enum is the record and this is the only place it becomes prose.
+ */
+export function describeVerdict(verdict: RowResultVerdict): string {
+  switch (verdict) {
+    case "green":
+      return "as expected (green)";
+    case "red on the named check":
+      return "as expected (red on the named check)";
+    case "unknown":
+      return "UNKNOWN (a bound killed it: not a pass, not a fail)";
+    case "inapplicable":
+      return "INAPPLICABLE (the row's anchor is gone)";
+    case "failed to run":
+      return "FAILED TO RUN";
+    default:
+      return "UNEXPECTED";
+  }
+}
+
+/** The three-way count the CLI reports. Extracted because a CLERICAL bug lived here: a `green` baseline was
+ *  counted as unexpected when the record held the enum and the counter compared display strings, and the run
+ *  went RED with every row correct. A count is not a presentation, so it is its own function with its own test. */
+export interface Summary {
+  expected: number;
+  unknown: number;
+  unexpected: number;
+}
+
+export function summarise(results: readonly { verdict: RowResultVerdict }[]): Summary {
+  const summary: Summary = { expected: 0, unknown: 0, unexpected: 0 };
+  for (const { verdict } of results) {
+    if (verdict === "green" || verdict === "red on the named check") summary.expected++;
+    else if (verdict === "unknown") summary.unknown++;
+    else summary.unexpected++;
+  }
+  return summary;
+}
+
+/** What a caller expects of a run: the BASELINE must be green, a detector row must redden its named check. */
+export type Expectation =
+  | { kind: "green" }
+  | { kind: "detector"; expect: string[]; soleRed?: string[] };
+
+export interface Interpretation {
+  verdict: Verdict;
+  detail: string;
+}
+
+/**
+ * ONE INTERPRETATION FOR EVERY CALLER - the CLI's summary and the mapped suite - because two parsers of the
+ * same outcome is how the CLI and the suite came to disagree (audio-feed-l6b6: the suite checked `timedOut`
+ * and the CLI accepted any non-zero exit, so a run the bound killed could be counted as an expected detector
+ * red). The unknown check comes FIRST and returns regardless of what the run printed before it died: a named
+ * FAIL emitted before the bound hit does NOT make a killed run a red, because the row's whole point is that a
+ * bound is unknown. That false green - "as expected" produced by a killed run - is the exact defect the row
+ * exists to prevent, arriving through the harness's own CLI.
+ */
+export function interpretRun(outcome: RunOutcome, expectation: Expectation): Interpretation {
+  if (outcome.timedOut || isUnknownExit(outcome.code)) {
+    return {
+      verdict: "unknown",
+      detail: `killed by the bound (exit ${outcome.code}) after ${outcome.seconds.toFixed(1)}s: ` +
+        `a bound is UNKNOWN, never a pass and never a fail, whatever the run printed first`,
+    };
+  }
+  if (expectation.kind === "green") {
+    return outcome.code === 0 && outcome.failures.length === 0
+      ? { verdict: "green", detail: `${outcome.passCount} check(s) passed` }
+      : {
+        verdict: "unexpected",
+        detail: `expected a green run: exit ${outcome.code}, ${outcome.failures.length} failed`,
+      };
+  }
+  if (outcome.code === 0) {
+    return {
+      verdict: "unexpected",
+      detail: "the mutant did not redden the proof: exit 0, so the check did not react",
+    };
+  }
+  const expectedSeen = expectation.expect.every((needle) =>
+    outcome.failures.some((f) => f.includes(needle))
+  );
+  const soleRedOk = !expectation.soleRed ||
+    (outcome.failures.length === expectation.soleRed.length &&
+      outcome.failures.every((f) => expectation.soleRed!.some((needle) => f.includes(needle))));
+  if (!expectedSeen) {
+    return {
+      verdict: "unexpected",
+      detail:
+        `MISSING the expected red: ${
+          expectation.expect.join(" | ")
+        } - the mutant applied and the ` +
+        `check did not react, which is the state this harness exists to make loud`,
+    };
+  }
+  if (!soleRedOk) {
+    return {
+      verdict: "unexpected",
+      detail: `SOLE-RED violated: expected only ${expectation.soleRed?.join(" | ")}`,
+    };
+  }
+  return {
+    verdict: "red on the named check",
+    detail: `exit ${outcome.code}, ${outcome.failures.length} check(s) red`,
   };
 }
 
@@ -424,31 +551,34 @@ if (import.meta.main) {
 
   const scratch = await buildScratch(options);
   console.log(`[mutants] scratch tree ${scratch} (the invoking worktree is not written to)`);
-  const results: Array<{ row: string; verdict: string; detail: string }> = [];
+  const results: Array<{ row: string; verdict: RowResultVerdict; detail: string }> = [];
 
   try {
     // The BASELINE is not decoration: without it, a harness that reddens everything would look correct.
     const baseline = await runProofIn(scratch, options.timeoutMs);
-    const baselineOk = baseline.code === 0 && baseline.failures.length === 0;
+    const baselineVerdict = interpretRun(baseline, { kind: "green" });
+    const baselineOk = baselineVerdict.verdict === "green";
     console.log(
-      `[mutants] BASELINE ${baselineOk ? "ok  " : "FAIL"} exit ${baseline.code}, ${
-        baseline.seconds.toFixed(1)
-      }s, ` +
+      `[mutants] BASELINE ${
+        baselineVerdict.verdict === "green"
+          ? "ok  "
+          : baselineVerdict.verdict === "unknown"
+          ? "UNKNOWN"
+          : "FAIL"
+      } exit ${baseline.code}, ${baseline.seconds.toFixed(1)}s, ` +
         `${baseline.passCount} check(s) passed, ${baseline.failures.length} failed`,
     );
-    if (!baselineOk) console.log(`  ${baseline.tail}`);
+    if (!baselineOk) console.log(`  ${baselineVerdict.detail}`);
     results.push({
       row: "BASELINE (unmutated)",
-      verdict: baselineOk ? "as expected (green)" : "UNEXPECTED",
-      detail: baselineOk
-        ? `${baseline.passCount} checks passed`
-        : (baseline.failures[0] ?? baseline.tail),
+      verdict: baselineVerdict.verdict,
+      detail: baselineVerdict.detail,
     });
   } catch (err) {
     console.log(`[mutants] BASELINE could not run: ${(err as Error).message}`);
     results.push({
       row: "BASELINE (unmutated)",
-      verdict: "FAILED TO RUN",
+      verdict: "failed to run",
       detail: (err as Error).message,
     });
   }
@@ -459,45 +589,30 @@ if (import.meta.main) {
       mutated = mutant.apply(source);
     } catch (err) {
       console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
-      results.push({ row: mutant.name, verdict: "INAPPLICABLE", detail: (err as Error).message });
+      results.push({ row: mutant.name, verdict: "inapplicable", detail: (err as Error).message });
       continue;
     }
     const digest = await sha256(mutated);
     await Deno.writeTextFile(join(scratch, PROOF), mutated);
     const outcome = await runProofIn(scratch, options.timeoutMs);
-    const expectedSeen = mutant.expect.every((needle) =>
-      outcome.failures.some((f) => f.includes(needle))
-    );
-    const soleRedOk = !mutant.soleRed ||
-      (outcome.failures.length === mutant.soleRed.length &&
-        outcome.failures.every((f) => mutant.soleRed!.some((needle) => f.includes(needle))));
-    const asExpected = outcome.code !== 0 && expectedSeen && soleRedOk;
+    const judged = interpretRun(outcome, {
+      kind: "detector",
+      expect: mutant.expect,
+      soleRed: mutant.soleRed,
+    });
+    const asExpected = judged.verdict === "red on the named check";
     console.log(
-      `[mutants] ${asExpected ? "ok  " : "UNEXPECTED"} ${
+      `[mutants] ${asExpected ? "ok  " : judged.verdict === "unknown" ? "UNKNOWN" : "UNEXPECTED"} ${
         mutant.name.padEnd(26)
-      } modified-sha ${digest} ` +
-        `exit ${outcome.code}, ${
-          outcome.seconds.toFixed(1)
-        }s, ${outcome.failures.length} check(s) red` +
-        (outcome.timedOut ? " TIMEOUT (unknown, not a red)" : ""),
+      } modified-sha ${digest} ` + judged.detail,
     );
     if (!asExpected) {
       for (const failure of outcome.failures) console.log(`      red: ${failure.slice(0, 130)}`);
-      if (!expectedSeen) {
-        console.log(
-          `      MISSING the expected red: ${
-            mutant.expect.join(" | ")
-          } - the mutant applied and the ` +
-            `check did not react, which is the state this harness exists to make loud`,
-        );
-      }
-      if (!soleRedOk) {
-        console.log(`      SOLE-RED violated: expected only ${mutant.soleRed?.join(" | ")}`);
-      }
+      console.log(`      ${judged.detail}`);
     }
     results.push({
       row: mutant.name,
-      verdict: asExpected ? "as expected (red on the named check)" : "UNEXPECTED",
+      verdict: judged.verdict,
       detail: asExpected
         ? `${outcome.failures.length} check(s) red, sha256 ${digest}`
         : `exit ${outcome.code}, ${outcome.failures.length} red`,
@@ -507,24 +622,37 @@ if (import.meta.main) {
   }
 
   printMatrix();
+  // UNKNOWN IS ITS OWN ROW IN THE SUMMARY, not a flavour of unexpected (audio-feed-l6b6): a bound that killed
+  // a row means that row was NOT TESTED, which is a different statement from a row that behaved wrongly - and
+  // the difference is the whole reason 124/137/143 are called unknown in this fleet.
+  // THE COUNT IS ITS OWN FUNCTION (summarise), so the clerical bug this fix hit - a `green` baseline counted
+  // as unexpected because the counter compared display strings - is testable without a browser and cannot come
+  // back silently.
+  const counts = summarise(results);
+  const unknown = results.filter((r) => r.verdict === "unknown");
   const unexpected = results.filter((r) =>
-    r.verdict !== "as expected (green)" && r.verdict !== "as expected (red on the named check)"
+    r.verdict !== "green" && r.verdict !== "red on the named check" && r.verdict !== "unknown"
   );
   console.log(
-    `[mutants] ${
-      results.length - unexpected.length
-    } row(s) as expected, ${unexpected.length} unexpected`,
+    `[mutants] ${counts.expected} row(s) as expected, ${counts.unknown} UNKNOWN ` +
+      `(a bound killed it: not a pass, not a fail, the row was not tested), ${counts.unexpected} unexpected`,
   );
   if (!options.keep) {
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   } else {
     console.log(`[mutants] scratch kept at ${scratch} (--keep)`);
   }
+  if (unknown.length > 0) {
+    console.log("[mutants] UNKNOWN rows: a bound killed the run, so the row proved nothing");
+    for (const row of unknown) console.log(`  ${row.row}: ${row.detail}`);
+  }
   if (unexpected.length > 0) {
     console.log("[mutants] RED: a row did not behave as the matrix claims");
-    for (const row of unexpected) console.log(`  ${row.row}: ${row.verdict} - ${row.detail}`);
-    Deno.exit(1);
+    for (const row of unexpected) {
+      console.log(`  ${row.row}: ${describeVerdict(row.verdict)} - ${row.detail}`);
+    }
   }
+  if (counts.unexpected > 0 || counts.unknown > 0) Deno.exit(1);
   console.log(
     "[mutants] every row behaved as the matrix claims, and the declared non-detectors are listed above",
   );
