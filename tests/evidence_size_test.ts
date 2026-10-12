@@ -98,6 +98,50 @@ async function checkEvidenceDeclaration(name: string): Promise<string | null> {
   return null;
 }
 
+/** Repo root, so the git query does not depend on the caller's cwd (scripts/fast-check.ts does the same). */
+const ROOT = import.meta.dirname!.replace(/\/tests$/, "") + "/";
+
+/**
+ * audio-feed-9qvz — the evidence directories the TREE carries, asked of git rather than of the working directory.
+ *
+ * WHY THIS IS A GIT QUERY AND NOT `Deno.stat`: the debt list is a claim about what the REPOSITORY contains, while
+ * the working directory is private to whoever is running the suite. A directory that exists on disk but is not in
+ * the index - an untracked scratch directory, or the empty folder residue `git rm -r` leaves behind - made the
+ * filesystem predicate answer YES for an entry the tree does not carry, so the stale entry this check exists to
+ * reject passed locally and failed on a clean clone. The inverse is wrong in the other direction too: a directory
+ * the index carries whose folder has been deleted from the worktree (an unstaged `rm -rf`) answered NO, reddening a
+ * run for a tree that is perfectly fine.
+ *
+ * `git ls-files` reads the INDEX, which is what the next commit carries - the same source of truth the evidence
+ * size audit uses on audio-feed-3teu. Unknown must not read as a pass, so a failed git call throws: without git we
+ * cannot tell a carried directory from a scratch one, and "nothing is carried" would redden every entry for the
+ * wrong reason.
+ */
+async function carriedEvidenceDirs(): Promise<Set<string>> {
+  const out = await new Deno.Command("git", {
+    args: ["ls-files", "-z", "--", "docs/evidence"],
+    cwd: ROOT,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!out.success) {
+    throw new Error(
+      `git ls-files docs/evidence failed, so what the tree carries is unknown: ` +
+        new TextDecoder().decode(out.stderr).trim(),
+    );
+  }
+  const names = new Set<string>();
+  for (const path of new TextDecoder().decode(out.stdout).split("\0")) {
+    if (!path.startsWith("docs/evidence/")) continue;
+    const rest = path.slice("docs/evidence/".length);
+    const slash = rest.indexOf("/");
+    // A tracked directory always has at least one tracked file under it (git cannot store an empty
+    // directory), so the first path segment is the directory and a bare file is not one.
+    if (slash > 0) names.add(rest.slice(0, slash));
+  }
+  return names;
+}
+
 Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {
   const undeclared: string[] = [];
 
@@ -108,7 +152,21 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
   }
 
   const declaredDebt: string[] = [];
+  const staleDebt: string[] = [];
+  // audio-feed-9qvz: asked of the INDEX, not of the working directory - see carriedEvidenceDirs.
+  const carried = await carriedEvidenceDirs();
   for (const name of EVIDENCE_UNDECLARED) {
+    // audio-feed-237f: the list is SHRINK-ONLY and its length is the debt number that gets quoted,
+    // so an entry naming a directory the tree does not carry is not harmless clutter - it is a
+    // directory that was removed and did not take its entry with it, which inflates the debt and
+    // hides that the list did not shrink. `checkEvidenceDeclaration` cannot see the difference: it
+    // reports "no README.md" for a missing directory and for a real directory that has no README
+    // alike, so the declared case below is the only one it can flag. Listed must imply the TREE
+    // CARRIES IT, and listed must imply NOT DECLARED (tp4x) - the two directions of one predicate.
+    if (!carried.has(name)) {
+      staleDebt.push(name);
+      continue;
+    }
     const err = await checkEvidenceDeclaration(name);
     if (err === null) {
       declaredDebt.push(name);
@@ -127,5 +185,15 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
     [],
     "evidence directories listed in EVIDENCE_UNDECLARED already have valid declarations and must be removed from the debt list: " +
       declaredDebt.join(", "),
+  );
+  assertEquals(
+    staleDebt,
+    [],
+    "EVIDENCE_UNDECLARED may only name evidence directories the TREE carries (audio-feed-237f, " +
+      "audio-feed-9qvz): the list is shrink-only and its length is the debt number, so an entry for a " +
+      "directory that has been removed inflates the debt and hides that the list did not shrink. " +
+      "Existence is asked of git (the index), not of the working directory, so a directory that is " +
+      "merely present on disk - untracked, or the residue `git rm` leaves - does not count. Remove " +
+      "these entries: " + staleDebt.join(", "),
   );
 });
