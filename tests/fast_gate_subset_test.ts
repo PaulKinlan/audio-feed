@@ -423,8 +423,14 @@ Deno.test("a markdown file a suite READS selects that suite, not an inert empty 
     planTests(["README.md"], NO_GRAPH, NO_NAMED, relations).testFiles,
     ["tests/readme_docs_test.ts"],
   );
-  // Not read by anything -> documentation, and the loud inert state still applies.
-  assertEquals(planTests(["README.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
+  // Not read by anything -> documentation, and the loud inert state still applies. NOTE ON THE EXAMPLE, because
+  // this line used to name README.md and no longer can: tests/evidence_size_test.ts (audio-feed-fnrp) now READS
+  // the docs/evidence READMEs to enforce the declaration rule, so the repo's derived relation names markdown as
+  // a real input and README.md is no longer an inert document. That is the evolution this file's own header
+  // anticipates - "a `.md` a suite reads is a real input like any other", and a hand-written "nothing reads
+  // this" is "a standing assertion that a later suite can contradict" - so the unread example moves to a
+  // document no suite reads rather than the read being hidden from the detector.
+  assertEquals(planTests(["docs/unread-notes.md"], NO_GRAPH, NO_NAMED, RELATIONS).testFiles, []);
 });
 
 Deno.test("audio-feed-q0ky: the detector REPORTS the read hints it could not resolve, it does not drop them", async () => {
@@ -616,7 +622,14 @@ Deno.test("the ordering rule is CHECKED: inert documentation with a derived read
   // order in classifyNonTsChanges() kills the planner half; the guard half is a pure function on purpose.
   const relations = new Map([["README.md", ["tests/readme_docs_test.ts"]]]);
   assertEquals(inertContradictions(["README.md"], relations), ["README.md"]);
-  assertEquals(inertContradictions(["README.md"], RELATIONS), []);
+  // And now against the repo's OWN derived relations: README.md is a contradiction there too, because
+  // tests/evidence_size_test.ts really does read the docs/evidence READMEs (audio-feed-fnrp). A guard firing on
+  // the repo's real relation rather than on a synthetic one is the case that matters most, so this replaces the
+  // earlier assertion that the repo had no such contradiction - true when written, false since markdown became
+  // a real input.
+  assertEquals(inertContradictions(["README.md"], RELATIONS), ["README.md"]);
+  // The case the guard must still pass: a document nothing derives a reader for.
+  assertEquals(inertContradictions(["docs/unread-notes.md"], RELATIONS), []);
   // The inverse, and the reason the guard exists: THIS repo's relation observes docs/evidence/, so a data
   // path reaching the inert bucket is precisely the ordering bug - the guard must flag it. (With the
   // predicate-based guard this returned [] because the path is not markdown, which is how the .md-shaped
@@ -658,11 +671,14 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   const classified = classifyNonTsChanges([
     "src/server.ts",
     "README.md",
+    "docs/unread-notes.md",
     "docs/evidence/x.png",
     ".beads/issues.jsonl",
     "mystery/payload.bin",
   ], RELATIONS);
-  assertEquals(classified.inert, ["README.md"]);
+  // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
+  // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
+  assertEquals(classified.inert, ["docs/unread-notes.md"]);
   assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
