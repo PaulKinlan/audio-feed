@@ -170,7 +170,7 @@ await runProof("audio-feed-ep1", async (checker) => {
         await Deno.writeFile(path, raw);
         try {
           const cmd = new Deno.Command("convert", {
-            args: [path, "-colors", "256", `png8:${path}.tmp`],
+            args: [path, "-strip", "-colors", "256", `png8:${path}.tmp`],
           });
           const out = await cmd.output();
           if (out.success) {
