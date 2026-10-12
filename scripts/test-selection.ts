@@ -338,9 +338,149 @@ function stripComments(source: string): string {
     .replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
 }
 
-/** Static path hints found inside one call expression. */
-function staticPathHints(call: string, moduleDir: string, root: string): string[] {
+/**
+ * Spans of `source` that are STRING CONTENT rather than code (audio-feed-lm4d).
+ *
+ * The scan is textual, so a read call that exists only inside a string literal looks exactly like a read
+ * site. It cannot be one - string content is data - and counting it as one put five paths into the
+ * unresolved list that no suite can ever read, because `tests/fast_gate_subset_test.ts` carries synthetic
+ * module sources as fixtures and those fixtures read things (`data/table.csv`, `fixtures.html`,
+ * `docs/absent.html`, `docs/present.md`). Under audio-feed-q0ky's rule those five are enough on their own to
+ * keep the inert class disabled for EVERY change, so a documentation-only edit paid the full suite.
+ *
+ * A template INTERPOLATION is code, not string content, so a read inside `${...}` is still a read: that is
+ * the boundary, and it is asserted in tests/read_relation_hints_test.ts.
+ */
+function stringContentSpans(source: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const scan = (from: number, to: number): void => {
+    let i = from;
+    while (i < to) {
+      const ch = source[i]!;
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < to && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < to && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        const start = i++;
+        while (i < to && source[i] !== ch) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        spans.push([start, Math.min(i, to)]);
+        continue;
+      }
+      if (ch === "`") {
+        i++;
+        let chunk = i;
+        while (i < to) {
+          const c = source[i]!;
+          if (c === "\\") {
+            i += 2;
+            continue;
+          }
+          if (c === "`") {
+            i++;
+            break;
+          }
+          if (c === "$" && source[i + 1] === "{") {
+            spans.push([chunk, i]);
+            i += 2;
+            const codeStart = i;
+            let depth = 1;
+            while (i < to && depth > 0) {
+              const d = source[i]!;
+              if (d === "{") {
+                depth++;
+              } else if (d === "}") {
+                depth--;
+                if (depth === 0) break;
+              } else if (d === '"' || d === "'" || d === "`") {
+                i++;
+                while (i < to && source[i] !== d) {
+                  if (source[i] === "\\") i++;
+                  i++;
+                }
+              }
+              i++;
+            }
+            scan(codeStart, i);
+            i++;
+            chunk = i;
+            continue;
+          }
+          i++;
+        }
+        spans.push([chunk, i]);
+        continue;
+      }
+      i++;
+    }
+  };
+  scan(0, source.length);
+  return spans;
+}
+
+/** Whether an index falls inside string content rather than code. */
+function insideSpans(spans: ReadonlyArray<[number, number]>, index: number): boolean {
+  for (const [start, end] of spans) {
+    if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
+/**
+ * Names bound to a path rooted OUTSIDE the repository (audio-feed-lm4d): an OS temp directory or `$HOME`.
+ *
+ * `${dir}/state.json` with `dir = await Deno.makeTempDir()` was offered as the repo-relative path
+ * `state.json`, and `const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`` with
+ * `home = Deno.env.get("HOME")` as `.cache/puppeteer/chrome`. Neither can ever name a file a CHANGE can
+ * touch - the tree is the repository - so offering them as repo hints made the completeness check fire
+ * forever on reads of files that live outside it, which is what kept the inert class unreachable.
+ */
+function outOfRepoNames(source: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
+    const name = match[1];
+    const rhs = match[2] ?? "";
+    if (name && /Deno\.makeTemp(?:Dir|File)\s*\(/.test(rhs)) names.add(name);
+    else if (name && /Deno\.env\.get\(\s*["'](?:HOME|TMPDIR|TEMP|TMP)["']/.test(rhs)) {
+      names.add(name);
+    } else if (name && /(?:os|platform)\.(?:homedir|tmpdir)\s*\(/.test(rhs)) names.add(name);
+  }
+  return names;
+}
+
+/** The last identifier of an interpolation, so `${stateDir}` and `${config.dir}` both yield a name. */
+function interpolationBaseName(token: string): string {
+  const open = token.lastIndexOf("${");
+  if (open < 0) return "";
+  const expr = token.slice(open + 2, token.lastIndexOf("}"));
+  return /([A-Za-z_$][\w$]*)\s*$/.exec(expr)?.[1] ?? "";
+}
+
+/** Static path hints found inside one call expression. * Hints are returned in two lists, because they are not the same kind of evidence (audio-feed-lm4d):
+ * `paths` are path-shaped things an author wrote (a literal, or a directory prefix before an interpolation);
+ * `tailCandidates` are the SUFFIXES after an interpolation, offered so that a resolvable one over-selects.
+ * A suffix is not the path the author wrote, so a miss from one is not evidence of a read that could not be
+ * resolved - see the `unattributed` bucket on ReadRelationReport.
+ */
+function staticPathHints(
+  call: string,
+  moduleDir: string,
+  root: string,
+  outOfRepo: ReadonlySet<string> = new Set(),
+  suppressed: Set<string> = new Set(),
+): { paths: string[]; tailCandidates: string[] } {
   const hints: string[] = [];
+  const tailCandidates: string[] = [];
   const literals = [...call.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)];
   for (const match of literals) {
     let text = match[1] ?? match[2] ?? match[3] ?? "";
@@ -377,14 +517,22 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
         // is offered as a path candidate: if it names a real file, the relation over-selects that suite (the
         // safe direction), and if it names nothing it becomes an UNRESOLVED hint, which under audio-feed-q0ky's
         // rule makes the inert class unreachable and widens the run rather than selecting nothing.
+        //
+        // audio-feed-lm4d: that widening is only meaningful when the base COULD be a repository path. When
+        // the base is bound outside the repo (outOfRepoNames above), the tail can never name a file a change
+        // touches, so it is reported as out-of-repo instead of being offered and then found missing forever.
         const tail = token.slice(token.lastIndexOf("}") + 1);
-        if (/\/[^/]/.test(tail)) hints.push(tail.replace(/^\/+/, ""));
+        if (/\/[^/]/.test(tail)) {
+          const base = interpolationBaseName(token);
+          if (base && outOfRepo.has(base)) suppressed.add(tail.replace(/^\/+/, ""));
+          else tailCandidates.push(tail.replace(/^\/+/, ""));
+        }
       }
       continue;
     }
     hints.push(text);
   }
-  return hints;
+  return { paths: hints, tailCandidates };
 }
 
 /**
@@ -394,22 +542,40 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
  * A resolved constant with no file extension is recorded as a directory prefix, which over-selects rather
  * than under-selects - the trade this whole bead is about.
  */
-function pathConstants(source: string, moduleDir: string, root: string): Map<string, string> {
+function pathConstants(
+  source: string,
+  moduleDir: string,
+  root: string,
+  outOfRepo: ReadonlySet<string> = new Set(),
+  suppressed: Set<string> = new Set(),
+): Map<string, string> {
   const constants = new Map<string, string>();
   const declare = (name: string, resolved: string) => {
     const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
     constants.set(name, isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved);
   };
   const resolve = (expr: string): string | null => {
-    const hints = staticPathHints(expr, moduleDir, root);
-    if (hints.length !== 1) return null;
-    return toRepoPath(hints[0]!, moduleDir, root);
+    const { paths, tailCandidates } = staticPathHints(expr, moduleDir, root, outOfRepo, suppressed);
+    // A constant can be built from a suffix: `const readme = `${dir}/README.md`` is how tests/evidence_size_test
+    // reaches the root README, and dropping the tail here (audio-feed-lm4d, first attempt) DROPPED that
+    // relation - the under-selection direction. The tail is accepted as the constant's value; if the constant
+    // is then used at a read site and the path names nothing, it is reported as an unresolved hint, which is
+    // the conservative side of the fragment/vs-authored distinction.
+    if (paths.length === 1) return toRepoPath(paths[0]!, moduleDir, root);
+    if (paths.length === 0 && tailCandidates.length === 1) {
+      return toRepoPath(tailCandidates[0]!, moduleDir, root);
+    }
+    return null;
   };
 
   const lines = source.split("\n").map((line) => line.trim());
   for (const line of lines) {
     const match = /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
     if (!match?.[1] || !match[2]) continue;
+    // audio-feed-lm4d: `const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" })` used to register
+    // the file SUFFIX as this constant's path, so every `readTextFile(tempHtmlFile)` contributed `.html/` to
+    // the relation. A name bound outside the repo is not a repo path and is not a constant to resolve.
+    if (outOfRepo.has(match[1])) continue;
     const resolved = resolve(match[2]) ?? constants.get(match[2].replace(/;$/, "").trim());
     if (resolved) declare(match[1], resolved);
   }
@@ -504,6 +670,25 @@ export interface ReadRelationReport {
   relations: DataReadRelations;
   /** Hints that did not resolve to an existing path, sorted for a stable reason string. */
   unresolved: string[];
+  /**
+   * SUFFIXES of a runtime-assembled path (the text after an interpolation) that did not resolve
+   * (audio-feed-lm4d), sorted for a stable reason string.
+   *
+   * A suffix is not the path an author wrote: it is a candidate offered so that a resolvable one over-selects
+   * the suite. When it names nothing, the honest statement is "this fragment names no file in the tree", not
+   * "a suite reads something here and I could not resolve it" - and the difference decides whether the inert
+   * class is disabled for EVERY change. Reported, never silent (audio-feed-q0ky).
+   */
+  unattributed: string[];
+  /**
+   * Hints whose base is bound OUTSIDE the repository (audio-feed-lm4d), sorted for a stable reason string.
+   *
+   * They are not repo-path evidence and so they neither enter the relation nor the completeness signal -
+   * but they are REPORTED, because the q0ky lesson is that dropping a hint SILENTLY is what let an
+   * unreadable universe be described as inert. This bucket is the reason the `unresolved` list can be empty
+   * on this tree at all.
+   */
+  outOfRepo: string[];
 }
 
 /** The relation alone, for callers that do not need the incompleteness signal. */
@@ -529,6 +714,9 @@ export async function deriveReadRelationReport(
   };
 
   const relations: DataReadRelations = new Map();
+  const outOfRepoHints = new Set<string>();
+  const authoredPaths = new Set<string>();
+  const tailPaths = new Set<string>();
   const add = (path: string, suite: string) => {
     // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
     // never be consulted, and it would bury the non-TS paths that matter.
@@ -559,14 +747,28 @@ export async function deriveReadRelationReport(
       seen.add(relPath);
       const source = stripComments(await read(relPath) ?? "");
       if (source === null) continue;
+      // Two classes of hint that are not repo-path evidence, computed once per scanned file (audio-feed-lm4d):
+      // the file's string CONTENT (fixture code-as-data) and its names bound outside the repository.
+      const spans = stringContentSpans(source);
+      const outOfRepo = outOfRepoNames(source);
 
-      for (const [name, path] of pathConstants(source, dir, root)) {
+      for (const [name, path] of pathConstants(source, dir, root, outOfRepo, outOfRepoHints)) {
         if (!constants.has(name)) constants.set(name, path);
       }
+      // A NAME CAN BE BOTH, and the repo-attributable binding wins (audio-feed-lm4d):
+      // tests/evidence_size_test.ts has a temp-dir local `dir` in one test and a `dir` parameter whose
+      // default is the repo's evidence directory in another. Reading the name only as out-of-repo dropped a
+      // REAL relation (`README.md <- tests/evidence_size_test.ts`, measured) - the under-selection direction,
+      // which is the one that must never happen. So a name the constant pass resolved stays a repo candidate:
+      // if its candidate resolves it over-selects (safe), and if it names nothing it is a reported fragment.
+      const outOfRepoEffective = new Set([...outOfRepo].filter((name) => !constants.has(name)));
 
       for (const call of READ_CALLS) {
         for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
           const at = match.index ?? 0;
+          // A read that exists only inside a string is data, not a read site: the suite that carries the
+          // detector's own fixtures was contributing ITS fixtures' reads as if they were its own.
+          if (insideSpans(spans, at)) continue;
           if (!readCallAt(source, at)) continue;
           // Scan to the matching close paren so the literals belong to this call.
           let depthParen = 0;
@@ -583,9 +785,29 @@ export async function deriveReadRelationReport(
             }
           }
           const callText = source.slice(at, end + 1);
-          for (const hint of staticPathHints(callText, dir, root)) {
+          const { paths, tailCandidates } = staticPathHints(
+            callText,
+            dir,
+            root,
+            outOfRepoEffective,
+            outOfRepoHints,
+          );
+          for (const hint of paths) {
             const path = toRepoPath(hint, dir, root);
-            if (path) add(path, suite);
+            if (path) {
+              authoredPaths.add(path);
+              add(path, suite);
+            }
+          }
+          // The suffix after an interpolation is a CANDIDATE: it resolves into the relation when it names a
+          // real file, and when it names nothing it is reported without being mistaken for a read we could
+          // not resolve (audio-feed-lm4d). `authoredPaths` wins on a path offered both ways.
+          for (const hint of tailCandidates) {
+            const path = toRepoPath(hint, dir, root);
+            if (path) {
+              tailPaths.add(path);
+              add(path, suite);
+            }
           }
           // An argument passed by NAME still resolves through the constants collected above.
           for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
@@ -612,13 +834,16 @@ export async function deriveReadRelationReport(
   // changed file, and dropping it keeps the audit output readable.
   const existing: DataReadRelations = new Map();
   const unresolved: string[] = [];
+  const unattributed: string[] = [];
   for (const [path, observers] of relations) {
     const stat = await Deno.stat(`${root}${path.replace(/\/$/, "")}`).catch(() => null);
     if (stat) existing.set(path, observers);
+    else if (!authoredPaths.has(path) && tailPaths.has(path)) unattributed.push(path);
     else unresolved.push(path);
   }
   unresolved.sort();
-  return { relations: existing, unresolved };
+  unattributed.sort();
+  return { relations: existing, unresolved, unattributed, outOfRepo: [...outOfRepoHints].sort() };
 }
 
 /** The suites the derived relation says observe a changed path (exact match or directory prefix). */
