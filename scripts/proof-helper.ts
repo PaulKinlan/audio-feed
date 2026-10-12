@@ -17,6 +17,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 
 export interface SupervisedHarness {
   port: number;
@@ -130,7 +131,7 @@ export async function sweepStaleProfiles(
       const info = await Deno.stat(full);
       const age = nowMs - (info.mtime?.getTime() ?? nowMs);
       if (age < ageMs) continue;
-      await Deno.remove(full, { recursive: true });
+      await originalRemove(full, { recursive: true });
       swept.push(full);
     } catch {
       // A live run, a concurrent reclaim, or a permission we do not have: leave it, never throw.
@@ -146,19 +147,22 @@ export async function createTempChromeProfile(
   // accumulate across runs (audio-feed-u8nv).
   const sweptStale = (await sweepStaleProfiles(prefix)).length;
   const profileDir = await Deno.makeTempDir({ prefix });
+  const normProfileDir = normalizeFilePath(profileDir);
+  activeChromeProfiles.add(normProfileDir);
   let cleaned = false;
 
   return {
     profileDir,
     sweptStale,
     cleanup: async () => {
+      activeChromeProfiles.delete(normProfileDir);
       if (cleaned) return;
       const maxAttempts = 10;
       let lastError: unknown = null;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          await Deno.remove(profileDir, { recursive: true });
+          await originalRemove(profileDir, { recursive: true });
           cleaned = true;
           return;
         } catch (err) {
@@ -541,7 +545,12 @@ export interface CheckerOptions {
   logger?: CheckLogger;
 }
 
-export type RunProofOptions = CheckerOptions;
+export interface RunProofOptions extends CheckerOptions {
+  rollbackHook?: (
+    phase: "start" | "end" | "lock-acquired",
+    path?: string,
+  ) => Promise<void> | void;
+}
 
 export interface Checker extends Disposable {
   check: (name: string, pass: boolean, detail?: string) => boolean;
@@ -594,9 +603,226 @@ function createCheckerInternal(deferred: boolean, logger?: CheckLogger): Checker
   };
 }
 
+export type SnapshotEntry =
+  | Uint8Array
+  | { isDirectory: true }
+  | { isSymlink: true; target: string }
+  | null;
+
+let globalCommitSeq = 0;
+const committedFileTimestamps = new Map<string, number>();
+
+interface LockHolder {
+  ownerId?: number;
+  count: number;
+  releasePromise: Promise<void>;
+  resolveRelease: () => void;
+}
+
+class PathLock {
+  #activeHolders = new Map<string, LockHolder>();
+
+  isLocked(path: string): boolean {
+    const active = activeProofStorage.getStore();
+    const currentOwnerId = active?.id;
+    for (const [lockedPath, holder] of this.#activeHolders.entries()) {
+      if (
+        path === lockedPath ||
+        path.startsWith(lockedPath + "/") ||
+        lockedPath.startsWith(path + "/")
+      ) {
+        if (currentOwnerId === undefined || holder.ownerId !== currentOwnerId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async acquire(path: string): Promise<() => void> {
+    const active = activeProofStorage.getStore();
+    const currentOwnerId = active?.id;
+
+    // Fast-path for same owner reacquiring exact same path
+    const existing = this.#activeHolders.get(path);
+    if (
+      existing &&
+      currentOwnerId !== undefined &&
+      existing.ownerId === currentOwnerId
+    ) {
+      existing.count++;
+      return () => {
+        existing.count--;
+        if (existing.count === 0) {
+          if (this.#activeHolders.get(path) === existing) {
+            this.#activeHolders.delete(path);
+          }
+          existing.resolveRelease();
+        }
+      };
+    }
+
+    while (true) {
+      const conflicting: Promise<void>[] = [];
+      for (const [lockedPath, holder] of this.#activeHolders.entries()) {
+        if (
+          path === lockedPath ||
+          path.startsWith(lockedPath + "/") ||
+          lockedPath.startsWith(path + "/")
+        ) {
+          if (
+            currentOwnerId === undefined || holder.ownerId !== currentOwnerId
+          ) {
+            conflicting.push(holder.releasePromise);
+          }
+        }
+      }
+
+      if (conflicting.length === 0) {
+        const currentHolder = this.#activeHolders.get(path);
+        if (
+          currentHolder &&
+          currentOwnerId !== undefined &&
+          currentHolder.ownerId === currentOwnerId
+        ) {
+          currentHolder.count++;
+          return () => {
+            currentHolder.count--;
+            if (currentHolder.count === 0) {
+              if (this.#activeHolders.get(path) === currentHolder) {
+                this.#activeHolders.delete(path);
+              }
+              currentHolder.resolveRelease();
+            }
+          };
+        }
+
+        let resolveRelease!: () => void;
+        const releasePromise = new Promise<void>((r) => {
+          resolveRelease = r;
+        });
+        const holder: LockHolder = {
+          ownerId: currentOwnerId,
+          count: 1,
+          releasePromise,
+          resolveRelease,
+        };
+        this.#activeHolders.set(path, holder);
+
+        return () => {
+          holder.count--;
+          if (holder.count === 0) {
+            if (this.#activeHolders.get(path) === holder) {
+              this.#activeHolders.delete(path);
+            }
+            resolveRelease();
+          }
+        };
+      }
+
+      await Promise.all(conflicting);
+    }
+  }
+
+  async withLock<T>(path: string, fn: () => Promise<T> | T): Promise<T> {
+    const release = await this.acquire(path);
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
+
+export const proofPathLocks = new PathLock();
+
+let globalProofSeq = 0;
+let activeProofCount = 0;
+
+interface PathSnapshotRecord {
+  proofId: number;
+  writtenBy?: number;
+  entry: SnapshotEntry;
+}
+
+const pathSnapshotChains = new Map<string, PathSnapshotRecord[]>();
+const failedProofs = new Set<number>();
+const pathLastWriter = new Map<string, number>();
+
+function recordPathSnapshot(norm: string, activeId: number, content: SnapshotEntry) {
+  const writer = pathLastWriter.get(norm);
+  const writtenBy = (writer !== undefined && writer !== activeId) ? writer : undefined;
+  let chain = pathSnapshotChains.get(norm);
+  if (!chain) {
+    chain = [];
+    pathSnapshotChains.set(norm, chain);
+  }
+  const existingIdx = chain.findIndex((r) => r.proofId === activeId);
+  const record: PathSnapshotRecord = { proofId: activeId, writtenBy, entry: content };
+  if (existingIdx >= 0) {
+    chain[existingIdx] = record;
+  } else {
+    chain.push(record);
+  }
+  pathLastWriter.set(norm, activeId);
+}
+
+function getSafeRestoreContent(
+  filePath: string,
+  proofId: number,
+  fallback: SnapshotEntry,
+): SnapshotEntry {
+  const chain = pathSnapshotChains.get(filePath);
+  if (!chain) return fallback;
+  const idx = chain.findIndex((r) => r.proofId === proofId);
+  if (idx < 0) return fallback;
+  let curr: PathSnapshotRecord | undefined = chain[idx];
+  while (curr && curr.writtenBy !== undefined && failedProofs.has(curr.writtenBy)) {
+    const prevIdx = chain.findIndex((r) => r.proofId === curr?.writtenBy);
+    if (prevIdx >= 0) {
+      curr = chain[prevIdx];
+    } else {
+      break;
+    }
+  }
+  return curr ? curr.entry : fallback;
+}
+
+const proofWaitGraph = new Map<number, number>();
+
+function wouldDeadlock(fromProofId: number, targetProofId: number): boolean {
+  let curr: number | undefined = targetProofId;
+  while (curr !== undefined) {
+    if (curr === fromProofId) return true;
+    curr = proofWaitGraph.get(curr);
+  }
+  return false;
+}
+
+interface InFlightWrite {
+  proofId: number;
+  proofName: string;
+  done: Promise<void>;
+}
+const inFlightProofWrites = new Map<string, InFlightWrite>();
+
+interface CommittedPathRecord {
+  proofId: number;
+  commitSeq: number;
+  entry: SnapshotEntry;
+}
+const committedPathRecords = new Map<string, CommittedPathRecord>();
+
 export interface ActiveProofContext {
+  id: number;
   name: string;
   checker: Checker;
+  startTime: number;
+  snapshots: Map<string, SnapshotEntry>;
+  snapshotSeq: Map<string, number>;
+  completionPromise: Promise<void>;
+  trackedChildProcesses: Deno.ChildProcess[];
+  lastWrittenBytes: Map<string, SnapshotEntry>;
 }
 
 const activeProofStorage = new AsyncLocalStorage<ActiveProofContext>();
@@ -605,45 +831,2610 @@ export function getActiveProof(): ActiveProofContext | undefined {
   return activeProofStorage.getStore();
 }
 
+// Intercept Deno file writes during runProof to support atomic rollback on proof failure (audio-feed-2bfv)
+const originalWriteFile = Deno.writeFile;
+const originalWriteFileSync = Deno.writeFileSync;
+const originalWriteTextFile = Deno.writeTextFile;
+const originalWriteTextFileSync = Deno.writeTextFileSync;
+const originalRename = Deno.rename;
+const originalRenameSync = Deno.renameSync;
+const originalRemove = Deno.remove;
+const originalRemoveSync = Deno.removeSync;
+const originalMkdir = Deno.mkdir;
+const originalMkdirSync = Deno.mkdirSync;
+const originalSymlink = Deno.symlink;
+const originalSymlinkSync = Deno.symlinkSync;
+const originalOpen = Deno.open;
+const originalOpenSync = Deno.openSync;
+let originalCopyFile = Deno.copyFile;
+let originalCopyFileSync = Deno.copyFileSync;
+
+export function setOriginalCopyFileForTesting(fn: typeof Deno.copyFile) {
+  originalCopyFile = fn;
+}
+
+export function setOriginalCopyFileSyncForTesting(fn: typeof Deno.copyFileSync) {
+  originalCopyFileSync = fn;
+}
+
+export {
+  originalCopyFile,
+  originalCopyFileSync,
+  originalOpen,
+  originalOpenSync,
+  originalWriteFile,
+  originalWriteFileSync,
+};
+
+function normalizeFilePath(path: string | URL, baseDir?: string): string {
+  let p: string;
+  if (path instanceof URL) {
+    if (path.protocol === "file:") {
+      p = fromFileUrl(path);
+    } else {
+      p = path.pathname;
+    }
+  } else if (typeof path === "string" && path.startsWith("file://")) {
+    p = fromFileUrl(path);
+  } else {
+    p = String(path);
+  }
+  return baseDir ? resolve(baseDir, p) : resolve(p);
+}
+
+const activeChromeProfiles = new Set<string>();
+
+export function isChromeProfilePath(path: string | URL): boolean {
+  const norm = normalizeFilePath(path);
+  for (const prof of activeChromeProfiles) {
+    if (norm === prof || norm.startsWith(`${prof}/`)) return true;
+  }
+  const baseDir = normalizeFilePath(Deno.env.get("TMPDIR") ?? "/tmp");
+  if (
+    norm.startsWith(`${baseDir}/`) &&
+    (norm.includes("audiofeed-chrome-") || norm.includes("audiofeed-proof-"))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function registerInFlightWrite(active: ActiveProofContext, path: string) {
+  inFlightProofWrites.set(path, {
+    proofId: active.id,
+    proofName: active.name,
+    done: active.completionPromise,
+  });
+}
+
+async function snapshotDirectoryRecursive(
+  snapshots: Map<string, SnapshotEntry>,
+  dir: string,
+  options?: { followSymlinkTarget?: boolean; capturedKeys?: Set<string> },
+) {
+  const normDir = normalizeFilePath(dir);
+  const active = activeProofStorage.getStore();
+  if (active && !active.snapshotSeq.has(normDir)) {
+    active.snapshotSeq.set(normDir, ++globalCommitSeq);
+  }
+  if (snapshots.has(normDir) && snapshots.get(normDir) === null) {
+    // Preserve null baseline for directory created during this proof
+  } else if (!snapshots.has(normDir)) {
+    snapshots.set(normDir, { isDirectory: true });
+    options?.capturedKeys?.add(normDir);
+    if (active) recordPathSnapshot(normDir, active.id, { isDirectory: true });
+  }
+  for await (const entry of Deno.readDir(normDir)) {
+    const fullPath = `${normDir}/${entry.name}`;
+    if (entry.isDirectory) {
+      await snapshotDirectoryRecursive(snapshots, fullPath, options);
+    } else {
+      await snapshotPath(snapshots, fullPath, options);
+    }
+  }
+}
+
+function snapshotDirectoryRecursiveSync(
+  snapshots: Map<string, SnapshotEntry>,
+  dir: string,
+  options?: { followSymlinkTarget?: boolean; capturedKeys?: Set<string> },
+) {
+  const normDir = normalizeFilePath(dir);
+  const active = activeProofStorage.getStore();
+  if (active && !active.snapshotSeq.has(normDir)) {
+    active.snapshotSeq.set(normDir, ++globalCommitSeq);
+  }
+  if (snapshots.has(normDir) && snapshots.get(normDir) === null) {
+    // Preserve null baseline for directory created during this proof
+  } else if (!snapshots.has(normDir)) {
+    snapshots.set(normDir, { isDirectory: true });
+    options?.capturedKeys?.add(normDir);
+    if (active) recordPathSnapshot(normDir, active.id, { isDirectory: true });
+  }
+  for (const entry of Deno.readDirSync(normDir)) {
+    const fullPath = `${normDir}/${entry.name}`;
+    if (entry.isDirectory) {
+      snapshotDirectoryRecursiveSync(snapshots, fullPath, options);
+    } else {
+      snapshotPathSync(snapshots, fullPath, options);
+    }
+  }
+}
+
+async function snapshotPath(
+  snapshots: Map<string, SnapshotEntry>,
+  path: string | URL,
+  options?: { followSymlinkTarget?: boolean; capturedKeys?: Set<string> },
+) {
+  const norm = normalizeFilePath(path);
+  if (isChromeProfilePath(norm)) return;
+  const active = activeProofStorage.getStore();
+  const committedSeq = committedFileTimestamps.get(norm) ?? 0;
+  const currentSnapSeq = active ? (active.snapshotSeq.get(norm) ?? 0) : 0;
+  if (active) {
+    if (!active.snapshotSeq.has(norm) || committedSeq > currentSnapSeq) {
+      active.snapshotSeq.set(norm, ++globalCommitSeq);
+      if (committedSeq > currentSnapSeq) {
+        snapshots.delete(norm);
+      }
+    }
+  }
+  if (snapshots.has(norm) && snapshots.get(norm) === null) {
+    // Preserve original null baseline for path created during this proof
+    return;
+  }
+  const existing = snapshots.get(norm);
+  if (existing !== undefined) {
+    if (options?.followSymlinkTarget) {
+      try {
+        const currentTarget = await Deno.readLink(norm);
+        const resolvedCurrent = resolve(dirname(norm), currentTarget);
+        if (!snapshots.has(resolvedCurrent)) {
+          await snapshotPath(snapshots, resolvedCurrent, options);
+        }
+      } catch {
+        if (
+          existing && typeof existing === "object" && "isSymlink" in existing
+        ) {
+          const resolvedTarget = resolve(dirname(norm), existing.target);
+          if (!snapshots.has(resolvedTarget)) {
+            await snapshotPath(snapshots, resolvedTarget, options);
+          }
+        }
+      }
+    }
+    return;
+  }
+  try {
+    const lstat = await Deno.lstat(norm);
+    if (lstat.isSymlink) {
+      const target = await Deno.readLink(norm);
+      const entry: SnapshotEntry = { isSymlink: true, target };
+      snapshots.set(norm, entry);
+      options?.capturedKeys?.add(norm);
+      if (active) recordPathSnapshot(norm, active.id, entry);
+      if (options?.followSymlinkTarget) {
+        const resolvedTarget = resolve(dirname(norm), target);
+        if (!snapshots.has(resolvedTarget)) {
+          await snapshotPath(snapshots, resolvedTarget, options);
+        }
+      }
+      return;
+    }
+    if (lstat.isDirectory) {
+      await snapshotDirectoryRecursive(snapshots, norm, options);
+      return;
+    }
+    const bytes = await Deno.readFile(norm);
+    snapshots.set(norm, bytes);
+    options?.capturedKeys?.add(norm);
+    if (active) recordPathSnapshot(norm, active.id, bytes);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      snapshots.set(norm, null);
+      options?.capturedKeys?.add(norm);
+      if (active) recordPathSnapshot(norm, active.id, null);
+    } else {
+      throw err;
+    }
+  }
+}
+
+function snapshotPathSync(
+  snapshots: Map<string, SnapshotEntry>,
+  path: string | URL,
+  options?: { followSymlinkTarget?: boolean; capturedKeys?: Set<string> },
+) {
+  const norm = normalizeFilePath(path);
+  if (isChromeProfilePath(norm)) return;
+  const active = activeProofStorage.getStore();
+  const committedSeq = committedFileTimestamps.get(norm) ?? 0;
+  const currentSnapSeq = active ? (active.snapshotSeq.get(norm) ?? 0) : 0;
+  if (active) {
+    if (!active.snapshotSeq.has(norm) || committedSeq > currentSnapSeq) {
+      active.snapshotSeq.set(norm, ++globalCommitSeq);
+      if (committedSeq > currentSnapSeq) {
+        snapshots.delete(norm);
+      }
+    }
+  }
+  if (snapshots.has(norm) && snapshots.get(norm) === null) {
+    // Preserve original null baseline for path created during this proof
+    return;
+  }
+  const existing = snapshots.get(norm);
+  if (existing !== undefined) {
+    if (options?.followSymlinkTarget) {
+      try {
+        const currentTarget = Deno.readLinkSync(norm);
+        const resolvedCurrent = resolve(dirname(norm), currentTarget);
+        if (!snapshots.has(resolvedCurrent)) {
+          snapshotPathSync(snapshots, resolvedCurrent, options);
+        }
+      } catch {
+        if (
+          existing && typeof existing === "object" && "isSymlink" in existing
+        ) {
+          const resolvedTarget = resolve(dirname(norm), existing.target);
+          if (!snapshots.has(resolvedTarget)) {
+            snapshotPathSync(snapshots, resolvedTarget, options);
+          }
+        }
+      }
+    }
+    return;
+  }
+  try {
+    const lstat = Deno.lstatSync(norm);
+    if (lstat.isSymlink) {
+      const target = Deno.readLinkSync(norm);
+      const entry: SnapshotEntry = { isSymlink: true, target };
+      snapshots.set(norm, entry);
+      options?.capturedKeys?.add(norm);
+      if (active) recordPathSnapshot(norm, active.id, entry);
+      if (options?.followSymlinkTarget) {
+        const resolvedTarget = resolve(dirname(norm), target);
+        if (!snapshots.has(resolvedTarget)) {
+          snapshotPathSync(snapshots, resolvedTarget, options);
+        }
+      }
+      return;
+    }
+    if (lstat.isDirectory) {
+      snapshotDirectoryRecursiveSync(snapshots, norm, options);
+      return;
+    }
+    const bytes = Deno.readFileSync(norm);
+    snapshots.set(norm, bytes);
+    options?.capturedKeys?.add(norm);
+    if (active) recordPathSnapshot(norm, active.id, bytes);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      snapshots.set(norm, null);
+      options?.capturedKeys?.add(norm);
+      if (active) recordPathSnapshot(norm, active.id, null);
+    } else {
+      throw err;
+    }
+  }
+}
+
+async function resolveNearestExistingPath(norm: string): Promise<string> {
+  const parts: string[] = [];
+  let curr = norm;
+  while (true) {
+    try {
+      const realCurr = await Deno.realPath(curr);
+      if (parts.length === 0) return realCurr;
+      let result = realCurr;
+      for (let i = parts.length - 1; i >= 0; i--) {
+        result = resolve(result, parts[i]!);
+      }
+      return result;
+    } catch {
+      const p = dirname(curr);
+      if (!p || p === curr) return norm;
+      parts.push(basename(curr));
+      curr = p;
+    }
+  }
+}
+
+function resolveNearestExistingPathSync(norm: string): string {
+  const parts: string[] = [];
+  let curr = norm;
+  while (true) {
+    try {
+      const realCurr = Deno.realPathSync(curr);
+      if (parts.length === 0) return realCurr;
+      let result = realCurr;
+      for (let i = parts.length - 1; i >= 0; i--) {
+        result = resolve(result, parts[i]!);
+      }
+      return result;
+    } catch {
+      const p = dirname(curr);
+      if (!p || p === curr) return norm;
+      parts.push(basename(curr));
+      curr = p;
+    }
+  }
+}
+
+async function resolveTargetPath(path: string | URL): Promise<string> {
+  const norm = normalizeFilePath(path);
+  try {
+    const lstat = await Deno.lstat(norm);
+    if (lstat.isSymlink) {
+      try {
+        const realParent = await resolveNearestExistingPath(dirname(norm));
+        return resolve(realParent, basename(norm));
+      } catch {
+        return norm;
+      }
+    }
+  } catch { /* does not exist */ }
+
+  return await resolveNearestExistingPath(norm);
+}
+
+function resolveTargetPathSync(path: string | URL): string {
+  const norm = normalizeFilePath(path);
+  try {
+    const lstat = Deno.lstatSync(norm);
+    if (lstat.isSymlink) {
+      try {
+        const realParent = resolveNearestExistingPathSync(dirname(norm));
+        return resolve(realParent, basename(norm));
+      } catch {
+        return norm;
+      }
+    }
+  } catch { /* does not exist */ }
+
+  return resolveNearestExistingPathSync(norm);
+}
+
+async function resolveWritePath(path: string | URL): Promise<string> {
+  const norm = normalizeFilePath(path);
+  try {
+    const lstat = await Deno.lstat(norm);
+    if (lstat.isSymlink) {
+      const target = await Deno.readLink(norm);
+      const physicalParent = await resolveNearestExistingPath(dirname(norm));
+      const resolvedTarget = resolve(physicalParent, target);
+      return await resolveWritePath(resolvedTarget);
+    }
+  } catch { /* does not exist */ }
+
+  return await resolveNearestExistingPath(norm);
+}
+
+function resolveWritePathSync(path: string | URL): string {
+  const norm = normalizeFilePath(path);
+  try {
+    const lstat = Deno.lstatSync(norm);
+    if (lstat.isSymlink) {
+      const target = Deno.readLinkSync(norm);
+      const physicalParent = resolveNearestExistingPathSync(dirname(norm));
+      const resolvedTarget = resolve(physicalParent, target);
+      return resolveWritePathSync(resolvedTarget);
+    }
+  } catch { /* does not exist */ }
+
+  return resolveNearestExistingPathSync(norm);
+}
+
+async function discardFailedWriteSnapshots(
+  active: ActiveProofContext,
+  capturedKeys: Set<string>,
+  writeTarget: string,
+) {
+  for (const k of capturedKeys) {
+    if (active.lastWrittenBytes.has(k)) continue;
+    if (k !== writeTarget) {
+      active.snapshots.delete(k);
+      active.snapshotSeq.delete(k);
+      pathSnapshotChains.get(k)?.pop();
+    } else {
+      try {
+        const st = await Deno.lstat(writeTarget);
+        if (st.isDirectory) {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          pathSnapshotChains.get(k)?.pop();
+        }
+      } catch (err) {
+        if (err instanceof Deno.errors.NotFound) {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          pathSnapshotChains.get(k)?.pop();
+        }
+      }
+    }
+  }
+}
+
+function discardFailedWriteSnapshotsSync(
+  active: ActiveProofContext,
+  capturedKeys: Set<string>,
+  writeTarget: string,
+) {
+  for (const k of capturedKeys) {
+    if (active.lastWrittenBytes.has(k)) continue;
+    if (k !== writeTarget) {
+      active.snapshots.delete(k);
+      active.snapshotSeq.delete(k);
+      pathSnapshotChains.get(k)?.pop();
+    } else {
+      try {
+        const st = Deno.lstatSync(writeTarget);
+        if (st.isDirectory) {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          pathSnapshotChains.get(k)?.pop();
+        }
+      } catch (err) {
+        if (err instanceof Deno.errors.NotFound) {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          pathSnapshotChains.get(k)?.pop();
+        }
+      }
+    }
+  }
+}
+
+Deno.writeFile = async function (
+  path: string | URL,
+  data: Uint8Array | ReadableStream<Uint8Array>,
+  options?: Deno.WriteFileOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = await Deno.lstat(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return await originalWriteFile(path, data, options);
+      }
+    }
+    const writeTarget = await resolveWritePath(path);
+    return await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      const capturedKeys = new Set<string>();
+      try {
+        await snapshotPath(active.snapshots, writeTarget, { capturedKeys });
+        const res = await originalWriteFile(writeTarget, data, options);
+        try {
+          active.lastWrittenBytes.set(
+            writeTarget,
+            await Deno.readFile(writeTarget),
+          );
+        } catch { /* ignore */ }
+        return res;
+      } catch (err) {
+        await discardFailedWriteSnapshots(active, capturedKeys, writeTarget);
+        throw err;
+      }
+    });
+  }
+  return await originalWriteFile(path, data, options);
+};
+
+Deno.writeFileSync = function (
+  path: string | URL,
+  data: Uint8Array,
+  options?: Deno.WriteFileOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = Deno.lstatSync(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return originalWriteFileSync(path, data, options);
+      }
+    }
+    const writeTarget = resolveWritePathSync(path);
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous write to '${writeTarget}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    const capturedKeys = new Set<string>();
+    try {
+      snapshotPathSync(active.snapshots, writeTarget, { capturedKeys });
+      const res = originalWriteFileSync(writeTarget, data, options);
+      try {
+        active.lastWrittenBytes.set(
+          writeTarget,
+          Deno.readFileSync(writeTarget),
+        );
+      } catch { /* ignore */ }
+      return res;
+    } catch (err) {
+      discardFailedWriteSnapshotsSync(active, capturedKeys, writeTarget);
+      throw err;
+    }
+  }
+  return originalWriteFileSync(path, data, options);
+};
+
+Deno.writeTextFile = async function (
+  path: string | URL,
+  data: string | ReadableStream<string>,
+  options?: Deno.WriteFileOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = await Deno.lstat(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return await originalWriteTextFile(path, data, options);
+      }
+    }
+    const writeTarget = await resolveWritePath(path);
+    return await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      const capturedKeys = new Set<string>();
+      try {
+        await snapshotPath(active.snapshots, writeTarget, { capturedKeys });
+        const res = await originalWriteTextFile(writeTarget, data, options);
+        try {
+          active.lastWrittenBytes.set(
+            writeTarget,
+            await Deno.readFile(writeTarget),
+          );
+        } catch { /* ignore */ }
+        return res;
+      } catch (err) {
+        await discardFailedWriteSnapshots(active, capturedKeys, writeTarget);
+        throw err;
+      }
+    });
+  }
+  return await originalWriteTextFile(path, data, options);
+};
+
+Deno.writeTextFileSync = function (
+  path: string | URL,
+  data: string,
+  options?: Deno.WriteFileOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = Deno.lstatSync(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return originalWriteTextFileSync(path, data, options);
+      }
+    }
+    const writeTarget = resolveWritePathSync(path);
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous write to '${writeTarget}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    const capturedKeys = new Set<string>();
+    try {
+      snapshotPathSync(active.snapshots, writeTarget, { capturedKeys });
+      const res = originalWriteTextFileSync(writeTarget, data, options);
+      try {
+        active.lastWrittenBytes.set(
+          writeTarget,
+          Deno.readFileSync(writeTarget),
+        );
+      } catch { /* ignore */ }
+      return res;
+    } catch (err) {
+      discardFailedWriteSnapshotsSync(active, capturedKeys, writeTarget);
+      throw err;
+    }
+  }
+  return originalWriteTextFileSync(path, data, options);
+};
+
+Deno.rename = async function (oldPath: string | URL, newPath: string | URL) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const oldTarget = await resolveTargetPath(oldPath);
+    const newTarget = await resolveTargetPath(newPath);
+
+    const runWithLocks = async (fn: () => Promise<void>): Promise<void> => {
+      if (oldTarget === newTarget) {
+        return await proofPathLocks.withLock(oldTarget, fn);
+      }
+      const [first, second] = oldTarget < newTarget
+        ? [oldTarget, newTarget]
+        : [newTarget, oldTarget];
+      return await proofPathLocks.withLock(first, async () => {
+        return await proofPathLocks.withLock(second, fn);
+      });
+    };
+
+    return await runWithLocks(async () => {
+      registerInFlightWrite(active, oldTarget);
+      registerInFlightWrite(active, newTarget);
+      const prevSnapKeys = new Set(active.snapshots.keys());
+
+      try {
+        // Snapshot target file/dir state before it is overwritten
+        await snapshotPath(active.snapshots, newTarget);
+
+        // Snapshot source: if already tracked in snapshots, preserve it.
+        // If not tracked yet, snapshot its full file/dir/symlink state.
+        if (!active.snapshots.has(oldTarget)) {
+          await snapshotPath(active.snapshots, oldTarget);
+        }
+        try {
+          const lstat = await Deno.lstat(oldTarget);
+          if (lstat.isDirectory) {
+            if (!active.snapshots.has(newTarget)) {
+              active.snapshots.set(newTarget, null);
+              active.snapshotSeq.set(newTarget, ++globalCommitSeq);
+            }
+            // Mark all destination paths for items moving from oldTarget into newTarget as null in snapshots,
+            // so if the proof fails, these moved items in newTarget will be cleaned up in rollback step 1!
+            const markDestinationChildrenNull = async (
+              src: string,
+              dest: string,
+            ) => {
+              for await (const entry of Deno.readDir(src)) {
+                const srcChild = `${src}/${entry.name}`;
+                const destChild = `${dest}/${entry.name}`;
+                if (!active.snapshots.has(destChild)) {
+                  active.snapshots.set(destChild, null);
+                  active.snapshotSeq.set(destChild, ++globalCommitSeq);
+                }
+                if (entry.isDirectory) {
+                  await markDestinationChildrenNull(srcChild, destChild);
+                }
+              }
+            };
+            await markDestinationChildrenNull(oldTarget, newTarget);
+          }
+        } catch (err) {
+          if (!(err instanceof Deno.errors.NotFound)) throw err;
+        }
+        const res = await originalRename(oldTarget, newTarget);
+        active.lastWrittenBytes.set(oldTarget, null);
+        for (const key of active.snapshots.keys()) {
+          if (key.startsWith(oldTarget + "/")) {
+            active.lastWrittenBytes.set(key, null);
+          }
+        }
+        for (const key of active.lastWrittenBytes.keys()) {
+          if (key.startsWith(oldTarget + "/")) {
+            active.lastWrittenBytes.set(key, null);
+          }
+        }
+        try {
+          const stat = await Deno.lstat(newTarget);
+          if (stat.isSymlink) {
+            active.lastWrittenBytes.set(newTarget, {
+              isSymlink: true,
+              target: await Deno.readLink(newTarget),
+            });
+          } else if (stat.isDirectory) {
+            active.lastWrittenBytes.set(newTarget, { isDirectory: true });
+            const captureMovedDirectoryChildren = async (dir: string) => {
+              for await (const entry of Deno.readDir(dir)) {
+                const childPath = `${dir}/${entry.name}`;
+                try {
+                  const childStat = await Deno.lstat(childPath);
+                  if (childStat.isSymlink) {
+                    active.lastWrittenBytes.set(childPath, {
+                      isSymlink: true,
+                      target: await Deno.readLink(childPath),
+                    });
+                  } else if (childStat.isDirectory) {
+                    active.lastWrittenBytes.set(childPath, {
+                      isDirectory: true,
+                    });
+                    await captureMovedDirectoryChildren(childPath);
+                  } else {
+                    active.lastWrittenBytes.set(
+                      childPath,
+                      await Deno.readFile(childPath),
+                    );
+                  }
+                } catch {
+                  active.lastWrittenBytes.set(childPath, null);
+                }
+              }
+            };
+            await captureMovedDirectoryChildren(newTarget);
+          } else {
+            active.lastWrittenBytes.set(
+              newTarget,
+              await Deno.readFile(newTarget),
+            );
+          }
+        } catch {
+          active.lastWrittenBytes.set(newTarget, null);
+        }
+        return res;
+      } catch (err) {
+        // Rename is atomic; if it threw, no mutation occurred on oldTarget or newTarget.
+        // Discard any snapshots introduced solely by this failed rename attempt so concurrent
+        // external edits to destination or created sources are preserved!
+        for (const k of Array.from(active.snapshots.keys())) {
+          if (!prevSnapKeys.has(k)) {
+            active.snapshots.delete(k);
+            active.snapshotSeq.delete(k);
+            const chain = pathSnapshotChains.get(k);
+            if (
+              chain && chain.length > 0 &&
+              chain[chain.length - 1]?.proofId === active.id
+            ) {
+              chain.pop();
+              if (chain.length === 0) pathSnapshotChains.delete(k);
+            }
+          }
+        }
+        throw err;
+      }
+    });
+  }
+  return await originalRename(oldPath, newPath);
+};
+
+Deno.renameSync = function (oldPath: string | URL, newPath: string | URL) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const oldTarget = resolveTargetPathSync(oldPath);
+    const newTarget = resolveTargetPathSync(newPath);
+    if (proofPathLocks.isLocked(oldTarget) || proofPathLocks.isLocked(newTarget)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous rename between '${oldTarget}' and '${newTarget}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+
+    const prevSnapKeys = new Set(active.snapshots.keys());
+
+    try {
+      snapshotPathSync(active.snapshots, newTarget);
+
+      if (!active.snapshots.has(oldTarget)) {
+        snapshotPathSync(active.snapshots, oldTarget);
+      }
+      try {
+        const lstat = Deno.lstatSync(oldTarget);
+        if (lstat.isDirectory) {
+          if (!active.snapshots.has(newTarget)) {
+            active.snapshots.set(newTarget, null);
+            active.snapshotSeq.set(newTarget, ++globalCommitSeq);
+          }
+          const markDestinationChildrenNullSync = (
+            src: string,
+            dest: string,
+          ) => {
+            for (const entry of Deno.readDirSync(src)) {
+              const srcChild = `${src}/${entry.name}`;
+              const destChild = `${dest}/${entry.name}`;
+              if (!active.snapshots.has(destChild)) {
+                active.snapshots.set(destChild, null);
+                active.snapshotSeq.set(destChild, ++globalCommitSeq);
+              }
+              if (entry.isDirectory) {
+                markDestinationChildrenNullSync(srcChild, destChild);
+              }
+            }
+          };
+          markDestinationChildrenNullSync(oldTarget, newTarget);
+        }
+      } catch (err) {
+        if (!(err instanceof Deno.errors.NotFound)) throw err;
+      }
+      const res = originalRenameSync(oldTarget, newTarget);
+      active.lastWrittenBytes.set(oldTarget, null);
+      for (const key of active.snapshots.keys()) {
+        if (key.startsWith(oldTarget + "/")) {
+          active.lastWrittenBytes.set(key, null);
+        }
+      }
+      for (const key of active.lastWrittenBytes.keys()) {
+        if (key.startsWith(oldTarget + "/")) {
+          active.lastWrittenBytes.set(key, null);
+        }
+      }
+      try {
+        const stat = Deno.lstatSync(newTarget);
+        if (stat.isSymlink) {
+          active.lastWrittenBytes.set(newTarget, {
+            isSymlink: true,
+            target: Deno.readLinkSync(newTarget),
+          });
+        } else if (stat.isDirectory) {
+          active.lastWrittenBytes.set(newTarget, { isDirectory: true });
+          const captureMovedDirectoryChildrenSync = (dir: string) => {
+            for (const entry of Deno.readDirSync(dir)) {
+              const childPath = `${dir}/${entry.name}`;
+              try {
+                const childStat = Deno.lstatSync(childPath);
+                if (childStat.isSymlink) {
+                  active.lastWrittenBytes.set(childPath, {
+                    isSymlink: true,
+                    target: Deno.readLinkSync(childPath),
+                  });
+                } else if (childStat.isDirectory) {
+                  active.lastWrittenBytes.set(childPath, { isDirectory: true });
+                  captureMovedDirectoryChildrenSync(childPath);
+                } else {
+                  active.lastWrittenBytes.set(
+                    childPath,
+                    Deno.readFileSync(childPath),
+                  );
+                }
+              } catch {
+                active.lastWrittenBytes.set(childPath, null);
+              }
+            }
+          };
+          captureMovedDirectoryChildrenSync(newTarget);
+        } else {
+          active.lastWrittenBytes.set(newTarget, Deno.readFileSync(newTarget));
+        }
+      } catch {
+        active.lastWrittenBytes.set(newTarget, null);
+      }
+      return res;
+    } catch (err) {
+      // Rename is atomic; if it threw, no mutation occurred on oldTarget or newTarget.
+      // Discard any snapshots introduced solely by this failed rename attempt so concurrent
+      // external edits to destination or created sources are preserved!
+      for (const k of Array.from(active.snapshots.keys())) {
+        if (!prevSnapKeys.has(k)) {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          const chain = pathSnapshotChains.get(k);
+          if (
+            chain && chain.length > 0 &&
+            chain[chain.length - 1]?.proofId === active.id
+          ) {
+            chain.pop();
+            if (chain.length === 0) pathSnapshotChains.delete(k);
+          }
+        }
+      }
+      throw err;
+    }
+  }
+  return originalRenameSync(oldPath, newPath);
+};
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+interface CommandRunState {
+  outputPaths: string[];
+  newlySnapshotted: Set<string>;
+  preStats: Map<string, { exists: boolean; entry: SnapshotEntry }>;
+}
+
+const OriginalCommand = Deno.Command;
+// deno-lint-ignore no-explicit-any
+(Deno as any).Command = class Command extends OriginalCommand {
+  #command: string | URL;
+  #options?: Deno.CommandOptions;
+  constructor(command: string | URL, options?: Deno.CommandOptions) {
+    super(command, options);
+    this.#command = command;
+    this.#options = options;
+  }
+
+  #snapshotCandidate(
+    pathStr: string,
+    runState: CommandRunState,
+    active: ActiveProofContext,
+    baseDir?: string,
+  ) {
+    const clean = pathStr.replace(/^[A-Za-z0-9]+:/, "").trim();
+    if (!clean || clean.startsWith("-")) return;
+    const resolved = normalizeFilePath(clean, baseDir);
+    const realTarget = resolveWritePathSync(resolved);
+    if (!runState.outputPaths.includes(realTarget)) {
+      runState.outputPaths.push(realTarget);
+    }
+    registerInFlightWrite(active, realTarget);
+    const hadPriorSnapshot = active.snapshots.has(realTarget);
+    snapshotPathSync(active.snapshots, realTarget);
+    if (!hadPriorSnapshot && active.snapshots.has(realTarget)) {
+      runState.newlySnapshotted.add(realTarget);
+    }
+    let preEntry: SnapshotEntry = null;
+    try {
+      const stat = Deno.lstatSync(realTarget);
+      if (stat.isSymlink) {
+        preEntry = { isSymlink: true, target: Deno.readLinkSync(realTarget) };
+      } else if (stat.isDirectory) {
+        preEntry = { isDirectory: true };
+      } else {
+        preEntry = Deno.readFileSync(realTarget);
+      }
+    } catch {
+      preEntry = null;
+    }
+    runState.preStats.set(realTarget, {
+      exists: preEntry !== null,
+      entry: preEntry,
+    });
+  }
+
+  #snapshotCopiedTree(
+    srcDir: string,
+    destDir: string,
+    runState: CommandRunState,
+    active: ActiveProofContext,
+    baseDir?: string,
+  ) {
+    try {
+      for (const entry of Deno.readDirSync(srcDir)) {
+        const srcChild = join(srcDir, entry.name);
+        const destChild = join(destDir, entry.name);
+        if (entry.isDirectory) {
+          let destChildExistsAsDir = false;
+          try {
+            destChildExistsAsDir = Deno.lstatSync(destChild).isDirectory;
+          } catch {
+            destChildExistsAsDir = false;
+          }
+          if (!destChildExistsAsDir) {
+            this.#snapshotCandidate(destChild, runState, active, baseDir);
+          }
+          this.#snapshotCopiedTree(
+            srcChild,
+            destChild,
+            runState,
+            active,
+            baseDir,
+          );
+        } else {
+          this.#snapshotCandidate(destChild, runState, active, baseDir);
+        }
+      }
+    } catch { /* proceed */ }
+  }
+
+  #captureNewDirectoryChildren(
+    dir: string,
+    active: ActiveProofContext,
+    preStats: Map<string, { exists: boolean; entry: SnapshotEntry }>,
+  ) {
+    try {
+      for (const entry of Deno.readDirSync(dir)) {
+        const childPath = join(dir, entry.name);
+        if (!preStats.has(childPath)) {
+          if (!active.snapshots.has(childPath)) {
+            active.snapshots.set(childPath, null);
+            active.snapshotSeq.set(childPath, ++globalCommitSeq);
+            recordPathSnapshot(childPath, active.id, null);
+          }
+          try {
+            const stat = Deno.lstatSync(childPath);
+            if (stat.isSymlink) {
+              active.lastWrittenBytes.set(childPath, {
+                isSymlink: true,
+                target: Deno.readLinkSync(childPath),
+              });
+            } else if (stat.isDirectory) {
+              active.lastWrittenBytes.set(childPath, { isDirectory: true });
+              this.#captureNewDirectoryChildren(childPath, active, preStats);
+            } else {
+              active.lastWrittenBytes.set(
+                childPath,
+                Deno.readFileSync(childPath),
+              );
+            }
+          } catch { /* proceed */ }
+        }
+      }
+    } catch { /* proceed */ }
+  }
+
+  #captureOutputs(runState: CommandRunState) {
+    const active = activeProofStorage.getStore();
+    if (!active) return;
+    for (const p of runState.outputPaths) {
+      const pre = runState.preStats.get(p);
+      let changed = false;
+      try {
+        const stat = Deno.lstatSync(p);
+        if (!pre?.exists) {
+          changed = true;
+          if (stat.isSymlink) {
+            active.lastWrittenBytes.set(p, {
+              isSymlink: true,
+              target: Deno.readLinkSync(p),
+            });
+          } else if (stat.isDirectory) {
+            active.lastWrittenBytes.set(p, { isDirectory: true });
+            this.#captureNewDirectoryChildren(p, active, runState.preStats);
+          } else {
+            active.lastWrittenBytes.set(p, Deno.readFileSync(p));
+          }
+        } else {
+          if (stat.isSymlink) {
+            const newTarget = Deno.readLinkSync(p);
+            const preTarget = (pre.entry && typeof pre.entry === "object" &&
+                !(pre.entry instanceof Uint8Array) &&
+                "isSymlink" in pre.entry)
+              ? pre.entry.target
+              : undefined;
+            if (newTarget !== preTarget) {
+              changed = true;
+              active.lastWrittenBytes.set(p, {
+                isSymlink: true,
+                target: newTarget,
+              });
+            }
+          } else if (stat.isDirectory) {
+            const preIsDir = Boolean(
+              pre.entry && typeof pre.entry === "object" &&
+                !(pre.entry instanceof Uint8Array) &&
+                "isDirectory" in pre.entry,
+            );
+            if (!preIsDir) {
+              changed = true;
+              active.lastWrittenBytes.set(p, { isDirectory: true });
+              this.#captureNewDirectoryChildren(p, active, runState.preStats);
+            }
+          } else {
+            const currentBytes = Deno.readFileSync(p);
+            const preBytes = pre.entry instanceof Uint8Array ? pre.entry : null;
+            if (!preBytes || !bytesEqual(currentBytes, preBytes)) {
+              changed = true;
+              active.lastWrittenBytes.set(p, currentBytes);
+            }
+          }
+        }
+      } catch {
+        if (pre?.exists) {
+          changed = true;
+          active.lastWrittenBytes.set(p, null);
+        }
+      }
+
+      if (!changed && runState.newlySnapshotted.has(p)) {
+        active.snapshots.delete(p);
+        active.snapshotSeq.delete(p);
+        const chain = pathSnapshotChains.get(p);
+        if (
+          chain && chain.length > 0 &&
+          chain[chain.length - 1]?.proofId === active.id
+        ) {
+          chain.pop();
+          if (chain.length === 0) pathSnapshotChains.delete(p);
+        }
+      }
+    }
+  }
+
+  #prepareOutputs(): CommandRunState {
+    const runState: CommandRunState = {
+      outputPaths: [],
+      newlySnapshotted: new Set(),
+      preStats: new Map(),
+    };
+    const active = activeProofStorage.getStore();
+    if (!active || !this.#options?.args) return runState;
+    const baseDir = this.#options.cwd ? normalizeFilePath(this.#options.cwd) : undefined;
+    const cmdName = typeof this.#command === "string" ? this.#command : "";
+    const args = this.#options.args;
+
+    const extractShellWord = (
+      script: string,
+      startIndex: number,
+    ): { word: string; nextIndex: number } | null => {
+      let i = startIndex;
+      while (i < script.length && /\s/.test(script[i]!)) i++;
+      if (i >= script.length) return null;
+      const start = i;
+      while (i < script.length) {
+        const ch = script[i]!;
+        if (/\s|[;&|<>]/.test(ch)) break;
+        if (ch === "'") {
+          i++;
+          while (i < script.length && script[i] !== "'") i++;
+          if (i < script.length) i++;
+        } else if (ch === '"') {
+          i++;
+          while (i < script.length && script[i] !== '"') {
+            if (script[i] === "\\" && i + 1 < script.length) i += 2;
+            else i++;
+          }
+          if (i < script.length) i++;
+        } else if (ch === "\\") {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (i === start) return null;
+      return { word: script.slice(start, i), nextIndex: i };
+    };
+
+    const getEnvVal = (name: string): string | undefined => {
+      if (this.#options?.env && name in this.#options.env) {
+        return this.#options.env[name];
+      }
+      if (this.#options?.clearEnv) {
+        return undefined;
+      }
+      return Deno.env.get(name);
+    };
+
+    const resolveStringWithVars = (str: string, cIdx: number): string => {
+      let res = "";
+      let j = 0;
+      while (j < str.length) {
+        if (str[j] === "$") {
+          const exp = expandVariable(str.slice(j), cIdx);
+          if (exp) {
+            res += exp.text;
+            j += exp.length;
+          } else {
+            res += "$";
+            j++;
+          }
+        } else {
+          res += str[j]!;
+          j++;
+        }
+      }
+      return res;
+    };
+
+    const expandVariable = (
+      remainder: string,
+      cIdx: number,
+    ): { text: string; length: number } | null => {
+      // 1. ${...} parameter expansion
+      if (remainder.startsWith("${")) {
+        let depth = 0;
+        let closeBrace = -1;
+        for (let k = 0; k < remainder.length; k++) {
+          if (remainder[k] === "{" && k > 0 && remainder[k - 1] === "$") {
+            depth++;
+          } else if (remainder[k] === "}" && depth > 0) {
+            depth--;
+            if (depth === 0) {
+              closeBrace = k;
+              break;
+            }
+          }
+        }
+        if (closeBrace !== -1) {
+          const inner = remainder.slice(2, closeBrace);
+          // Positional: ${1}
+          if (/^[0-9]+$/.test(inner)) {
+            const num = parseInt(inner, 10);
+            return {
+              text: args[cIdx + 2 + num] ?? "",
+              length: closeBrace + 1,
+            };
+          }
+          // Default/alternate value: ${VAR:-fallback}, ${VAR-fallback}, ${VAR:+alternate}, ${VAR+alternate}
+          const defMatch = inner.match(
+            /^([a-zA-Z_][a-zA-Z0-9_]*)(:?-|:\+|\+)(.*)$/,
+          );
+          if (defMatch) {
+            const varName = defMatch[1]!;
+            const op = defMatch[2]!;
+            const fallback = defMatch[3]!;
+            const val = getEnvVal(varName);
+            let selected = "";
+            if (op === ":-") {
+              selected = (val !== undefined && val !== "")
+                ? val
+                : resolveStringWithVars(fallback, cIdx);
+            } else if (op === "-") {
+              selected = val !== undefined ? val : resolveStringWithVars(fallback, cIdx);
+            } else if (op === ":+") {
+              selected = (val !== undefined && val !== "")
+                ? resolveStringWithVars(fallback, cIdx)
+                : "";
+            } else if (op === "+") {
+              selected = val !== undefined ? resolveStringWithVars(fallback, cIdx) : "";
+            }
+            return { text: selected, length: closeBrace + 1 };
+          }
+          // Simple ${VAR}
+          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(inner)) {
+            const val = getEnvVal(inner);
+            return {
+              text: val ?? "",
+              length: closeBrace + 1,
+            };
+          }
+        }
+      }
+      // 2. Simple $1..$9
+      const numMatch = remainder.match(/^\$([0-9]+)/);
+      if (numMatch) {
+        const num = parseInt(numMatch[1]!, 10);
+        return {
+          text: args[cIdx + 2 + num] ?? "",
+          length: numMatch[0].length,
+        };
+      }
+      // 3. Simple $VAR
+      const varMatch = remainder.match(/^\$([a-zA-Z_][a-zA-Z0-9_]*)/);
+      if (varMatch) {
+        const varName = varMatch[1]!;
+        const val = getEnvVal(varName);
+        return {
+          text: val ?? "",
+          length: varMatch[0].length,
+        };
+      }
+      return null;
+    };
+
+    const resolveShellWord = (
+      word: string,
+      cIdx: number,
+    ): string | null => {
+      let result = "";
+      let i = 0;
+
+      while (i < word.length) {
+        const ch = word[i]!;
+        if (ch === "'") {
+          // Single-quoted: strictly literal, no variable expansion
+          i++;
+          const start = i;
+          while (i < word.length && word[i] !== "'") i++;
+          result += word.slice(start, i);
+          if (i < word.length) i++;
+        } else if (ch === '"') {
+          // Double-quoted: expand variables and handle POSIX escape rules:
+          // backslash retains escape meaning only before $, `, ", \, and newline
+          i++;
+          while (i < word.length && word[i] !== '"') {
+            if (word[i] === "\\" && i + 1 < word.length) {
+              const next = word[i + 1]!;
+              if (next === "\n") {
+                // POSIX: backslash followed by newline is removed entirely
+                i += 2;
+              } else if (
+                next === "$" || next === "`" || next === '"' || next === "\\"
+              ) {
+                result += next;
+                i += 2;
+              } else {
+                result += "\\" + next;
+                i += 2;
+              }
+            } else if (word[i] === "$") {
+              const exp = expandVariable(word.slice(i), cIdx);
+              if (exp) {
+                result += exp.text;
+                i += exp.length;
+              } else {
+                result += "$";
+                i++;
+              }
+            } else {
+              result += word[i]!;
+              i++;
+            }
+          }
+          if (i < word.length) i++;
+        } else if (ch === "\\") {
+          if (i + 1 < word.length) {
+            const next = word[i + 1]!;
+            if (next === "\n") {
+              i += 2;
+            } else {
+              result += next;
+              i += 2;
+            }
+          } else {
+            result += "\\";
+            i++;
+          }
+        } else if (ch === "$") {
+          const exp = expandVariable(word.slice(i), cIdx);
+          if (exp) {
+            result += exp.text;
+            i += exp.length;
+          } else {
+            result += "$";
+            i++;
+          }
+        } else {
+          result += ch;
+          i++;
+        }
+      }
+
+      if (!result) return null;
+      return result;
+    };
+
+    // 1. Shell commands: inspect scripts for output redirects, tees, and format prefixes
+    if (cmdName.endsWith("sh") || cmdName.endsWith("bash")) {
+      const cIdx = args.indexOf("-c");
+      if (cIdx !== -1 && cIdx + 1 < args.length) {
+        const script = args[cIdx + 1]!;
+        // Redirects: > or >> followed by target shell word
+        const redirectRegex = />+(?!>)/g;
+        let match: RegExpExecArray | null;
+        while ((match = redirectRegex.exec(script)) !== null) {
+          const wordInfo = extractShellWord(
+            script,
+            match.index + match[0].length,
+          );
+          if (wordInfo) {
+            const target = resolveShellWord(wordInfo.word, cIdx);
+            if (target) {
+              this.#snapshotCandidate(target, runState, active, baseDir);
+            }
+          }
+        }
+        // Tee targets: tee [-a] word
+        const teeRegex = /\btee(?:\s+-[a-zA-Z]+)*\s+/g;
+        while ((match = teeRegex.exec(script)) !== null) {
+          const wordInfo = extractShellWord(
+            script,
+            match.index + match[0].length,
+          );
+          if (wordInfo) {
+            const target = resolveShellWord(wordInfo.word, cIdx);
+            if (target) {
+              this.#snapshotCandidate(target, runState, active, baseDir);
+            }
+          }
+        }
+        // Format prefixes like png8:word
+        const prefixRegex = /\b([a-zA-Z0-9]+):(?=[^\s;&|<>])/g;
+        while ((match = prefixRegex.exec(script)) !== null) {
+          const prefix = match[1]!;
+          if (prefix === "http" || prefix === "https" || prefix === "file") {
+            continue;
+          }
+          const wordInfo = extractShellWord(
+            script,
+            match.index + match[0].length,
+          );
+          if (wordInfo) {
+            const target = resolveShellWord(wordInfo.word, cIdx);
+            if (target) {
+              this.#snapshotCandidate(target, runState, active, baseDir);
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Direct arguments: flags specifying output or format prefixes (direct argv without shell expansion)
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (arg === "-o" || arg === "--output" || arg === "--out") {
+        if (i + 1 < args.length) {
+          this.#snapshotCandidate(args[i + 1]!, runState, active, baseDir);
+        }
+      } else if (
+        arg.startsWith("-o=") || arg.startsWith("--output=") ||
+        arg.startsWith("--out=")
+      ) {
+        const val = arg.split("=").slice(1).join("=");
+        this.#snapshotCandidate(val, runState, active, baseDir);
+      } else if (
+        /^[A-Za-z0-9]+:/.test(arg) && !arg.startsWith("http:") &&
+        !arg.startsWith("https:") &&
+        !arg.startsWith("file:")
+      ) {
+        this.#snapshotCandidate(arg, runState, active, baseDir);
+      }
+    }
+
+    // 3. Command specific: for convert, magick, cp:
+    if (cmdName.endsWith("convert") || cmdName.endsWith("magick")) {
+      for (let i = args.length - 1; i >= 0; i--) {
+        const arg = args[i]!;
+        if (!arg.startsWith("-")) {
+          this.#snapshotCandidate(arg, runState, active, baseDir);
+          break;
+        }
+      }
+    } else if (cmdName.endsWith("cp")) {
+      let targetDir: string | null = null;
+      let noTargetDir = false;
+      const sourceArgs: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i]!;
+        if (arg === "-t" || arg === "--target-directory") {
+          if (i + 1 < args.length) {
+            targetDir = args[i + 1]!;
+            i++; // skip dest directory operand
+          }
+        } else if (arg.startsWith("--target-directory=")) {
+          targetDir = arg.split("=").slice(1).join("=");
+        } else if (arg === "-T" || arg === "--no-target-directory") {
+          noTargetDir = true;
+        } else if (arg.startsWith("-") && !arg.startsWith("--")) {
+          if (arg.includes("T")) {
+            noTargetDir = true;
+          }
+        } else if (!arg.startsWith("-")) {
+          sourceArgs.push(arg);
+        }
+      }
+
+      if (noTargetDir && sourceArgs.length >= 2) {
+        const src = sourceArgs[0]!;
+        const dest = sourceArgs[sourceArgs.length - 1]!;
+        const resolvedSrc = normalizeFilePath(src, baseDir);
+        const resolvedDest = normalizeFilePath(dest, baseDir);
+        let srcIsDir = false;
+        try {
+          srcIsDir = Deno.lstatSync(resolvedSrc).isDirectory;
+        } catch { /* proceed */ }
+        if (srcIsDir) {
+          let destExistsAsDir = false;
+          try {
+            destExistsAsDir = Deno.lstatSync(resolvedDest).isDirectory;
+          } catch {
+            destExistsAsDir = false;
+          }
+          if (!destExistsAsDir) {
+            this.#snapshotCandidate(resolvedDest, runState, active, baseDir);
+          }
+          this.#snapshotCopiedTree(
+            resolvedSrc,
+            resolvedDest,
+            runState,
+            active,
+            baseDir,
+          );
+        } else {
+          this.#snapshotCandidate(resolvedDest, runState, active, baseDir);
+        }
+      } else if (targetDir) {
+        const resolvedTargetDir = normalizeFilePath(targetDir, baseDir);
+        for (const src of sourceArgs) {
+          const childName = basename(src);
+          const effectiveDest = join(resolvedTargetDir, childName);
+          const resolvedSrc = normalizeFilePath(src, baseDir);
+          let srcIsDir = false;
+          try {
+            srcIsDir = Deno.lstatSync(resolvedSrc).isDirectory;
+          } catch { /* proceed */ }
+          if (srcIsDir) {
+            let effectiveDestExistsAsDir = false;
+            try {
+              effectiveDestExistsAsDir = Deno.lstatSync(effectiveDest).isDirectory;
+            } catch {
+              effectiveDestExistsAsDir = false;
+            }
+            if (!effectiveDestExistsAsDir) {
+              this.#snapshotCandidate(
+                effectiveDest,
+                runState,
+                active,
+                baseDir,
+              );
+            }
+            this.#snapshotCopiedTree(
+              resolvedSrc,
+              effectiveDest,
+              runState,
+              active,
+              baseDir,
+            );
+          } else {
+            this.#snapshotCandidate(
+              effectiveDest,
+              runState,
+              active,
+              baseDir,
+            );
+          }
+        }
+      } else if (sourceArgs.length >= 2) {
+        const lastArg = sourceArgs[sourceArgs.length - 1]!;
+        const resolvedLast = normalizeFilePath(lastArg, baseDir);
+        let isDir = false;
+        try {
+          isDir = Deno.lstatSync(resolvedLast).isDirectory;
+        } catch {
+          isDir = lastArg.endsWith("/") || lastArg.endsWith("\\");
+        }
+        if (isDir) {
+          const sources = sourceArgs.slice(0, sourceArgs.length - 1);
+          for (const src of sources) {
+            const childName = basename(src);
+            const effectiveDest = join(resolvedLast, childName);
+            const resolvedSrc = normalizeFilePath(src, baseDir);
+            let srcIsDir = false;
+            try {
+              srcIsDir = Deno.lstatSync(resolvedSrc).isDirectory;
+            } catch { /* proceed */ }
+            if (srcIsDir) {
+              let effectiveDestExistsAsDir = false;
+              try {
+                effectiveDestExistsAsDir = Deno.lstatSync(effectiveDest).isDirectory;
+              } catch {
+                effectiveDestExistsAsDir = false;
+              }
+              if (!effectiveDestExistsAsDir) {
+                this.#snapshotCandidate(
+                  effectiveDest,
+                  runState,
+                  active,
+                  baseDir,
+                );
+              }
+              this.#snapshotCopiedTree(
+                resolvedSrc,
+                effectiveDest,
+                runState,
+                active,
+                baseDir,
+              );
+            } else {
+              this.#snapshotCandidate(
+                effectiveDest,
+                runState,
+                active,
+                baseDir,
+              );
+            }
+          }
+        } else {
+          const src = sourceArgs[0]!;
+          const resolvedSrc = normalizeFilePath(src, baseDir);
+          let srcIsDir = false;
+          try {
+            srcIsDir = Deno.lstatSync(resolvedSrc).isDirectory;
+          } catch { /* proceed */ }
+          if (srcIsDir) {
+            let destExistsAsDir = false;
+            try {
+              destExistsAsDir = Deno.lstatSync(resolvedLast).isDirectory;
+            } catch {
+              destExistsAsDir = false;
+            }
+            if (!destExistsAsDir) {
+              this.#snapshotCandidate(resolvedLast, runState, active, baseDir);
+            }
+            this.#snapshotCopiedTree(
+              resolvedSrc,
+              resolvedLast,
+              runState,
+              active,
+              baseDir,
+            );
+          } else {
+            this.#snapshotCandidate(resolvedLast, runState, active, baseDir);
+          }
+        }
+      } else if (sourceArgs.length === 1) {
+        this.#snapshotCandidate(
+          sourceArgs[0]!,
+          runState,
+          active,
+          baseDir,
+        );
+      }
+    }
+
+    return runState;
+  }
+
+  override async output(): Promise<Deno.CommandOutput> {
+    const runState = this.#prepareOutputs();
+    try {
+      const res = await super.output();
+      this.#captureOutputs(runState);
+      return res;
+    } catch (err) {
+      this.#captureOutputs(runState);
+      throw err;
+    }
+  }
+
+  override outputSync(): Deno.CommandOutput {
+    const runState = this.#prepareOutputs();
+    try {
+      const res = super.outputSync();
+      this.#captureOutputs(runState);
+      return res;
+    } catch (err) {
+      this.#captureOutputs(runState);
+      throw err;
+    }
+  }
+
+  override spawn(): Deno.ChildProcess {
+    const runState = this.#prepareOutputs();
+    const child = super.spawn();
+    const active = activeProofStorage.getStore();
+    if (active) {
+      active.trackedChildProcesses.push(child);
+      child.status.then(() => {
+        this.#captureOutputs(runState);
+      }).catch(() => {});
+    }
+    return child;
+  }
+};
+
+Deno.remove = async function (
+  path: string | URL,
+  options?: Deno.RemoveOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active && !isChromeProfilePath(path)) {
+    const targetPath = await resolveTargetPath(path);
+    return await proofPathLocks.withLock(targetPath, async () => {
+      registerInFlightWrite(active, targetPath);
+      const addedSnapshots: string[] = [];
+      const isRecursive = Boolean(options?.recursive);
+      let targetStat: Deno.FileInfo | null = null;
+      try {
+        targetStat = await Deno.lstat(targetPath);
+      } catch { /* proceed */ }
+
+      if (targetStat?.isDirectory && !isRecursive) {
+        // Non-recursive removal can only succeed on an empty directory; do not snapshot descendants!
+        if (!active.snapshots.has(targetPath)) {
+          active.snapshots.set(targetPath, { isDirectory: true });
+          active.snapshotSeq.set(targetPath, ++globalCommitSeq);
+          recordPathSnapshot(targetPath, active.id, { isDirectory: true });
+          addedSnapshots.push(targetPath);
+        }
+      } else {
+        const prevSnapKeys = new Set(active.snapshots.keys());
+        await snapshotPath(active.snapshots, targetPath);
+        for (const k of active.snapshots.keys()) {
+          if (!prevSnapKeys.has(k)) {
+            addedSnapshots.push(k);
+          }
+        }
+      }
+
+      try {
+        const res = await originalRemove(targetPath, options);
+        active.lastWrittenBytes.set(targetPath, null);
+        for (const key of active.snapshots.keys()) {
+          if (key.startsWith(targetPath + "/")) {
+            active.lastWrittenBytes.set(key, null);
+          }
+        }
+        for (const key of active.lastWrittenBytes.keys()) {
+          if (key.startsWith(targetPath + "/")) {
+            active.lastWrittenBytes.set(key, null);
+          }
+        }
+        return res;
+      } catch (err) {
+        // Discard snapshots only for paths that were NOT removed by this attempt.
+        // Paths that were actually deleted before a partial recursive removal failed
+        // (existed before and absent afterward) retain their snapshots and record deletion.
+        // Paths that were already absent before this attempt must NOT record false deletion!
+        for (const k of addedSnapshots) {
+          let stillExists = false;
+          try {
+            stillExists = Boolean(await Deno.lstat(k));
+          } catch {
+            stillExists = false;
+          }
+          const existedBefore = active.snapshots.has(k) &&
+            active.snapshots.get(k) !== null;
+          if (!stillExists && existedBefore) {
+            active.lastWrittenBytes.set(k, null);
+          } else {
+            active.snapshots.delete(k);
+            active.snapshotSeq.delete(k);
+            const chain = pathSnapshotChains.get(k);
+            if (
+              chain && chain.length > 0 &&
+              chain[chain.length - 1]?.proofId === active.id
+            ) {
+              chain.pop();
+              if (chain.length === 0) pathSnapshotChains.delete(k);
+            }
+          }
+        }
+        throw err;
+      }
+    });
+  }
+  return await originalRemove(path, options);
+};
+
+Deno.removeSync = function (path: string | URL, options?: Deno.RemoveOptions) {
+  const active = activeProofStorage.getStore();
+  if (active && !isChromeProfilePath(path)) {
+    const targetPath = resolveTargetPathSync(path);
+    if (proofPathLocks.isLocked(targetPath)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous removal of '${targetPath}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    const addedSnapshots: string[] = [];
+    const isRecursive = Boolean(options?.recursive);
+    let targetStat: Deno.FileInfo | null = null;
+    try {
+      targetStat = Deno.lstatSync(targetPath);
+    } catch { /* proceed */ }
+
+    if (targetStat?.isDirectory && !isRecursive) {
+      // Non-recursive removal can only succeed on an empty directory; do not snapshot descendants!
+      if (!active.snapshots.has(targetPath)) {
+        active.snapshots.set(targetPath, { isDirectory: true });
+        active.snapshotSeq.set(targetPath, ++globalCommitSeq);
+        recordPathSnapshot(targetPath, active.id, { isDirectory: true });
+        addedSnapshots.push(targetPath);
+      }
+    } else {
+      const prevSnapKeys = new Set(active.snapshots.keys());
+      snapshotPathSync(active.snapshots, targetPath);
+      for (const k of active.snapshots.keys()) {
+        if (!prevSnapKeys.has(k)) {
+          addedSnapshots.push(k);
+        }
+      }
+    }
+
+    try {
+      const res = originalRemoveSync(targetPath, options);
+      active.lastWrittenBytes.set(targetPath, null);
+      for (const key of active.snapshots.keys()) {
+        if (key.startsWith(targetPath + "/")) {
+          active.lastWrittenBytes.set(key, null);
+        }
+      }
+      for (const key of active.lastWrittenBytes.keys()) {
+        if (key.startsWith(targetPath + "/")) {
+          active.lastWrittenBytes.set(key, null);
+        }
+      }
+      return res;
+    } catch (err) {
+      // Discard snapshots only for paths that were NOT removed by this attempt.
+      // Paths that were actually deleted before a partial recursive removal failed
+      // (existed before and absent afterward) retain their snapshots and record deletion.
+      // Paths that were already absent before this attempt must NOT record false deletion!
+      for (const k of addedSnapshots) {
+        let stillExists = false;
+        try {
+          stillExists = Boolean(Deno.lstatSync(k));
+        } catch {
+          stillExists = false;
+        }
+        const existedBefore = active.snapshots.has(k) &&
+          active.snapshots.get(k) !== null;
+        if (!stillExists && existedBefore) {
+          active.lastWrittenBytes.set(k, null);
+        } else {
+          active.snapshots.delete(k);
+          active.snapshotSeq.delete(k);
+          const chain = pathSnapshotChains.get(k);
+          if (
+            chain && chain.length > 0 &&
+            chain[chain.length - 1]?.proofId === active.id
+          ) {
+            chain.pop();
+            if (chain.length === 0) pathSnapshotChains.delete(k);
+          }
+        }
+      }
+      throw err;
+    }
+  }
+  return originalRemoveSync(path, options);
+};
+
+Deno.copyFile = async function (fromPath: string | URL, toPath: string | URL) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const writeTarget = await resolveWritePath(toPath);
+    return await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      const hadPriorSnapshot = active.snapshots.has(writeTarget);
+      await snapshotPath(active.snapshots, writeTarget, {
+        followSymlinkTarget: true,
+      });
+      const preEntry = active.snapshots.get(writeTarget);
+      try {
+        const res = await originalCopyFile(fromPath, writeTarget);
+        try {
+          active.lastWrittenBytes.set(
+            writeTarget,
+            await Deno.readFile(writeTarget),
+          );
+        } catch { /* ignore */ }
+        return res;
+      } catch (err) {
+        // Inspect current disk state to check if destination was modified (e.g. partial copy before error)
+        let modified = false;
+        let currentBytes: Uint8Array | null = null;
+        let currentExists = false;
+        try {
+          currentBytes = await Deno.readFile(writeTarget);
+          currentExists = true;
+        } catch {
+          try {
+            await Deno.lstat(writeTarget);
+            currentExists = true;
+          } catch {
+            currentExists = false;
+          }
+        }
+
+        if (preEntry === null) {
+          modified = currentExists;
+        } else if (preEntry instanceof Uint8Array) {
+          modified = !currentExists || !currentBytes ||
+            !bytesEqual(currentBytes, preEntry);
+        } else {
+          modified = true;
+        }
+
+        if (modified) {
+          // Destination was modified before the error: retain the snapshot and record current written bytes
+          if (currentExists && currentBytes) {
+            active.lastWrittenBytes.set(writeTarget, currentBytes);
+          } else if (!currentExists) {
+            active.lastWrittenBytes.set(writeTarget, null);
+          }
+        } else {
+          // Destination was untouched: discard snapshot introduced solely by this attempt
+          if (!hadPriorSnapshot) {
+            active.snapshots.delete(writeTarget);
+            active.snapshotSeq.delete(writeTarget);
+            const chain = pathSnapshotChains.get(writeTarget);
+            if (
+              chain && chain.length > 0 &&
+              chain[chain.length - 1]?.proofId === active.id
+            ) {
+              chain.pop();
+              if (chain.length === 0) pathSnapshotChains.delete(writeTarget);
+            }
+          }
+        }
+        throw err;
+      }
+    });
+  }
+  return await originalCopyFile(fromPath, toPath);
+};
+
+Deno.copyFileSync = function (fromPath: string | URL, toPath: string | URL) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const writeTarget = resolveWritePathSync(toPath);
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous copy to '${writeTarget}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    const hadPriorSnapshot = active.snapshots.has(writeTarget);
+    snapshotPathSync(active.snapshots, writeTarget, {
+      followSymlinkTarget: true,
+    });
+    const preEntry = active.snapshots.get(writeTarget);
+    try {
+      const res = originalCopyFileSync(fromPath, writeTarget);
+      try {
+        active.lastWrittenBytes.set(
+          writeTarget,
+          Deno.readFileSync(writeTarget),
+        );
+      } catch { /* ignore */ }
+      return res;
+    } catch (err) {
+      // Inspect current disk state to check if destination was modified (e.g. partial copy before error)
+      let modified = false;
+      let currentBytes: Uint8Array | null = null;
+      let currentExists = false;
+      try {
+        currentBytes = Deno.readFileSync(writeTarget);
+        currentExists = true;
+      } catch {
+        try {
+          Deno.lstatSync(writeTarget);
+          currentExists = true;
+        } catch {
+          currentExists = false;
+        }
+      }
+
+      if (preEntry === null) {
+        modified = currentExists;
+      } else if (preEntry instanceof Uint8Array) {
+        modified = !currentExists || !currentBytes ||
+          !bytesEqual(currentBytes, preEntry);
+      } else {
+        modified = true;
+      }
+
+      if (modified) {
+        // Destination was modified before the error: retain the snapshot and record current written bytes
+        if (currentExists && currentBytes) {
+          active.lastWrittenBytes.set(writeTarget, currentBytes);
+        } else if (!currentExists) {
+          active.lastWrittenBytes.set(writeTarget, null);
+        }
+      } else {
+        // Destination was untouched: discard snapshot introduced solely by this attempt
+        if (!hadPriorSnapshot) {
+          active.snapshots.delete(writeTarget);
+          active.snapshotSeq.delete(writeTarget);
+          const chain = pathSnapshotChains.get(writeTarget);
+          if (
+            chain && chain.length > 0 &&
+            chain[chain.length - 1]?.proofId === active.id
+          ) {
+            chain.pop();
+            if (chain.length === 0) pathSnapshotChains.delete(writeTarget);
+          }
+        }
+      }
+      throw err;
+    }
+  }
+  return originalCopyFileSync(fromPath, toPath);
+};
+
+function trackMissingAncestors(snapshots: Map<string, SnapshotEntry>, target: string) {
+  let curr = target;
+  const toAdd: string[] = [];
+  while (true) {
+    const parent = dirname(curr);
+    if (!parent || parent === curr) break;
+    if (snapshots.has(curr)) {
+      curr = parent;
+      continue;
+    }
+    try {
+      Deno.lstatSync(curr);
+      break;
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) {
+        toAdd.push(curr);
+        curr = parent;
+      } else {
+        break;
+      }
+    }
+  }
+  const active = activeProofStorage.getStore();
+  for (const p of toAdd) {
+    if (!snapshots.has(p)) {
+      snapshots.set(p, null);
+      if (active) {
+        active.snapshotSeq.set(p, ++globalCommitSeq);
+        recordPathSnapshot(p, active.id, null);
+      }
+    }
+  }
+}
+
+Deno.mkdir = async function (path: string | URL, options?: Deno.MkdirOptions) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const targetPath = await resolveTargetPath(path);
+    return await proofPathLocks.withLock(targetPath, async () => {
+      registerInFlightWrite(active, targetPath);
+      let existedBefore = false;
+      try {
+        existedBefore = Boolean(await Deno.lstat(targetPath));
+      } catch { /* proceed */ }
+      trackMissingAncestors(active.snapshots, targetPath);
+      const res = await originalMkdir(targetPath, options);
+      if (!existedBefore) {
+        active.lastWrittenBytes.set(targetPath, { isDirectory: true });
+      }
+      return res;
+    });
+  }
+  return await originalMkdir(path, options);
+};
+
+Deno.mkdirSync = function (path: string | URL, options?: Deno.MkdirOptions) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const targetPath = resolveTargetPathSync(path);
+    if (proofPathLocks.isLocked(targetPath)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous mkdir of '${targetPath}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    let existedBefore = false;
+    try {
+      existedBefore = Boolean(Deno.lstatSync(targetPath));
+    } catch { /* proceed */ }
+    trackMissingAncestors(active.snapshots, targetPath);
+    const res = originalMkdirSync(targetPath, options);
+    if (!existedBefore) {
+      active.lastWrittenBytes.set(targetPath, { isDirectory: true });
+    }
+    return res;
+  }
+  return originalMkdirSync(path, options);
+};
+
+Deno.symlink = async function (
+  oldPath: string | URL,
+  newPath: string | URL,
+  options?: Deno.SymlinkOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const targetNewPath = await resolveTargetPath(newPath);
+    return await proofPathLocks.withLock(targetNewPath, async () => {
+      registerInFlightWrite(active, targetNewPath);
+      await snapshotPath(active.snapshots, targetNewPath);
+      const res = await originalSymlink(oldPath, targetNewPath, options);
+      active.lastWrittenBytes.set(targetNewPath, { isSymlink: true, target: String(oldPath) });
+      return res;
+    });
+  }
+  return await originalSymlink(oldPath, newPath, options);
+};
+
+Deno.symlinkSync = function (
+  oldPath: string | URL,
+  newPath: string | URL,
+  options?: Deno.SymlinkOptions,
+) {
+  const active = activeProofStorage.getStore();
+  if (active) {
+    const targetNewPath = resolveTargetPathSync(newPath);
+    if (proofPathLocks.isLocked(targetNewPath)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous symlink at '${targetNewPath}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    snapshotPathSync(active.snapshots, targetNewPath);
+    const res = originalSymlinkSync(oldPath, targetNewPath, options);
+    active.lastWrittenBytes.set(targetNewPath, { isSymlink: true, target: String(oldPath) });
+    return res;
+  }
+  return originalSymlinkSync(oldPath, newPath, options);
+};
+
+function isWritableOpen(options?: Deno.OpenOptions): boolean {
+  if (!options) return false;
+  return Boolean(
+    options.write || options.append || options.truncate || options.createNew ||
+      (options.create && options.write),
+  );
+}
+
+function wrapFsFile(
+  handle: Deno.FsFile,
+  active: ActiveProofContext,
+  writeTarget: string,
+): Deno.FsFile {
+  const origWrite = handle.write.bind(handle);
+  const origWriteSync = handle.writeSync.bind(handle);
+  const origTruncate = handle.truncate.bind(handle);
+  const origTruncateSync = handle.truncateSync.bind(handle);
+  const origClose = handle.close.bind(handle);
+
+  const captureDisk = () => {
+    try {
+      active.lastWrittenBytes.set(writeTarget, Deno.readFileSync(writeTarget));
+    } catch { /* ignore */ }
+  };
+
+  handle.write = async function (p: Uint8Array): Promise<number> {
+    return await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      await snapshotPath(active.snapshots, writeTarget);
+      const res = await origWrite(p);
+      captureDisk();
+      return res;
+    });
+  };
+
+  handle.writeSync = function (p: Uint8Array): number {
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Path ${writeTarget} is currently locked by a proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    snapshotPathSync(active.snapshots, writeTarget);
+    const res = origWriteSync(p);
+    captureDisk();
+    return res;
+  };
+
+  handle.truncate = async function (len?: number): Promise<void> {
+    return await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      await snapshotPath(active.snapshots, writeTarget);
+      await origTruncate(len);
+      captureDisk();
+    });
+  };
+
+  handle.truncateSync = function (len?: number): void {
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Path ${writeTarget} is currently locked by a proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    snapshotPathSync(active.snapshots, writeTarget);
+    origTruncateSync(len);
+    captureDisk();
+  };
+
+  handle.close = function (): void {
+    origClose();
+  };
+
+  return handle;
+}
+
+Deno.open = async function (
+  path: string | URL,
+  options?: Deno.OpenOptions,
+): Promise<Deno.FsFile> {
+  const active = activeProofStorage.getStore();
+  if (active && isWritableOpen(options)) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = await Deno.lstat(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return await originalOpen(path, options);
+      }
+    }
+    const writeTarget = await resolveWritePath(path);
+    let beforeStat: Deno.FileInfo | null = null;
+    let afterStat: Deno.FileInfo | null = null;
+    const handle = await proofPathLocks.withLock(writeTarget, async () => {
+      registerInFlightWrite(active, writeTarget);
+      const capturedKeys = new Set<string>();
+      try {
+        try {
+          beforeStat = await Deno.lstat(writeTarget);
+        } catch { /* proceed */ }
+        await snapshotPath(active.snapshots, writeTarget, { capturedKeys });
+        const h = await originalOpen(writeTarget, options);
+        try {
+          afterStat = await Deno.lstat(writeTarget);
+        } catch { /* proceed */ }
+        if (!beforeStat && afterStat) {
+          try {
+            active.lastWrittenBytes.set(
+              writeTarget,
+              await Deno.readFile(writeTarget),
+            );
+          } catch { /* proceed */ }
+        } else if (
+          beforeStat && afterStat && options?.truncate && beforeStat.size > 0 &&
+          afterStat.size === 0
+        ) {
+          try {
+            active.lastWrittenBytes.set(
+              writeTarget,
+              await Deno.readFile(writeTarget),
+            );
+          } catch { /* proceed */ }
+        }
+        return h;
+      } catch (err) {
+        await discardFailedWriteSnapshots(active, capturedKeys, writeTarget);
+        throw err;
+      }
+    });
+    return wrapFsFile(handle, active, writeTarget);
+  }
+  return await originalOpen(path, options);
+};
+
+Deno.openSync = function (
+  path: string | URL,
+  options?: Deno.OpenOptions,
+): Deno.FsFile {
+  const active = activeProofStorage.getStore();
+  if (active && isWritableOpen(options)) {
+    if (options?.createNew) {
+      let exists = false;
+      try {
+        const lstat = Deno.lstatSync(normalizeFilePath(path));
+        exists = Boolean(lstat);
+      } catch { /* proceed */ }
+      if (exists) {
+        return originalOpenSync(path, options);
+      }
+    }
+    const writeTarget = resolveWritePathSync(path);
+    if (proofPathLocks.isLocked(writeTarget)) {
+      throw new Deno.errors.Busy(
+        `Resource busy: synchronous open of '${writeTarget}' is excluded while path is locked by conflicting proof transaction or rollback`,
+      );
+    }
+    registerInFlightWrite(active, writeTarget);
+    const capturedKeys = new Set<string>();
+    try {
+      let beforeStat: Deno.FileInfo | null = null;
+      try {
+        beforeStat = Deno.lstatSync(writeTarget);
+      } catch { /* proceed */ }
+      snapshotPathSync(active.snapshots, writeTarget, { capturedKeys });
+      const handle = originalOpenSync(writeTarget, options);
+      let afterStat: Deno.FileInfo | null = null;
+      try {
+        afterStat = Deno.lstatSync(writeTarget);
+      } catch { /* proceed */ }
+      if (!beforeStat && afterStat) {
+        try {
+          active.lastWrittenBytes.set(
+            writeTarget,
+            Deno.readFileSync(writeTarget),
+          );
+        } catch { /* proceed */ }
+      } else if (
+        beforeStat && afterStat && options?.truncate && beforeStat.size > 0 &&
+        afterStat.size === 0
+      ) {
+        try {
+          active.lastWrittenBytes.set(
+            writeTarget,
+            Deno.readFileSync(writeTarget),
+          );
+        } catch { /* proceed */ }
+      }
+      return wrapFsFile(handle, active, writeTarget);
+    } catch (err) {
+      discardFailedWriteSnapshotsSync(active, capturedKeys, writeTarget);
+      throw err;
+    }
+  }
+  return originalOpenSync(path, options);
+};
+
 export async function runProof(
   name: string,
   body: (checker: Checker) => Promise<void> | void,
   options?: RunProofOptions | CheckLogger,
 ): Promise<void> {
-  const logger = typeof options === "function" ? options : options?.logger;
+  const runOptions: RunProofOptions | undefined = typeof options === "function"
+    ? { logger: options }
+    : options;
+  const logger = runOptions?.logger;
   const checker = createCheckerInternal(true, logger);
-  let bodyError: unknown = null;
-  try {
-    await activeProofStorage.run({ name, checker }, async () => {
-      await body(checker);
-    });
-  } catch (err) {
-    bodyError = err;
-  }
+  const snapshots = new Map<string, SnapshotEntry>();
+  const snapshotSeq = new Map<string, number>();
+  let resolveProofDone!: () => void;
+  const completionPromise = new Promise<void>((r) => {
+    resolveProofDone = r;
+  });
+  const startTime = Date.now();
+  const proofId = ++globalProofSeq;
+  activeProofCount++;
+  const activeContext: ActiveProofContext = {
+    id: proofId,
+    name,
+    checker,
+    startTime,
+    snapshots,
+    snapshotSeq,
+    completionPromise,
+    trackedChildProcesses: [],
+    lastWrittenBytes: new Map<string, SnapshotEntry>(),
+  };
 
-  let finishError: unknown = null;
-  try {
-    checker.finish();
-  } catch (err) {
-    finishError = err;
-  }
+  return await activeProofStorage.run(activeContext, async () => {
+    try {
+      let bodyError: unknown = null;
+      try {
+        await body(checker);
+      } catch (err) {
+        bodyError = err;
+      }
 
-  if (bodyError && finishError) {
-    console.error(`Proof '${name}' failed with error:`, bodyError);
-    console.error(`Checker also reported failures:`, finishError);
-    if (bodyError instanceof Error && !bodyError.cause) {
-      bodyError.cause = finishError;
+      // Await all tracked spawned child processes so their writes complete before commit or rollback
+      if (activeContext.trackedChildProcesses.length > 0) {
+        try {
+          await Promise.all(activeContext.trackedChildProcesses.map((cp) => cp.status));
+        } catch (err) {
+          if (!bodyError) bodyError = err;
+        }
+      }
+
+      let finishError: unknown = null;
+      try {
+        checker.finish();
+      } catch (err) {
+        finishError = err;
+      }
+
+      if (bodyError || finishError) {
+        let rollbackError: unknown = null;
+        if (runOptions?.rollbackHook) {
+          try {
+            await runOptions.rollbackHook("start");
+          } catch (err) {
+            rollbackError = err;
+          }
+        }
+        failedProofs.add(proofId);
+        const isCommittedByLaterProof = (p: string) => {
+          const record = committedPathRecords.get(p);
+          if (
+            record &&
+            record.proofId > proofId &&
+            record.commitSeq > (snapshotSeq.get(p) ?? 0)
+          ) {
+            return true;
+          }
+          return false;
+        };
+        const getRollbackEntry = (filePath: string, fallback: SnapshotEntry): SnapshotEntry => {
+          const record = committedPathRecords.get(filePath);
+          if (record && record.commitSeq <= (snapshotSeq.get(filePath) ?? 0)) {
+            return fallback;
+          }
+          if (record) {
+            return record.entry;
+          }
+          return getSafeRestoreContent(filePath, proofId, fallback);
+        };
+        const waitForInFlightWrite = async (filePath: string) => {
+          const inFlight = inFlightProofWrites.get(filePath);
+          if (inFlight && inFlight.proofId !== proofId) {
+            if (!wouldDeadlock(proofId, inFlight.proofId)) {
+              proofWaitGraph.set(proofId, inFlight.proofId);
+              try {
+                await inFlight.done;
+              } finally {
+                proofWaitGraph.delete(proofId);
+              }
+            }
+          }
+        };
+
+        // Helper to safely remove null entries while preserving directories that contain untracked children
+        const safelyRemoveNullEntry = async (targetPath: string) => {
+          try {
+            const stat = await Deno.lstat(targetPath);
+            if (stat.isDirectory) {
+              let hasUntrackedChildren = false;
+              try {
+                for await (const entry of Deno.readDir(targetPath)) {
+                  const childPath = `${targetPath}/${entry.name}`;
+                  if (
+                    !snapshots.has(childPath) || snapshots.get(childPath) !== null ||
+                    isCommittedByLaterProof(childPath)
+                  ) {
+                    hasUntrackedChildren = true;
+                    break;
+                  }
+                }
+              } catch { /* ignore */ }
+              if (!hasUntrackedChildren) {
+                await originalRemove(targetPath);
+              }
+            } else {
+              await originalRemove(targetPath);
+            }
+          } catch (err) {
+            if (!(err instanceof Deno.errors.NotFound)) {
+              if (!rollbackError) rollbackError = err;
+            }
+          }
+        };
+
+        // Roll back only files/directories/symlinks touched/created during this proof transaction
+        // 1. First remove newly created paths (null entries), sorting children before parents
+        const nullEntries = Array.from(snapshots.entries())
+          .filter(([_, content]) => content === null)
+          .sort((a, b) => b[0].length - a[0].length);
+        for (const [filePath] of nullEntries) {
+          await waitForInFlightWrite(filePath);
+          await proofPathLocks.withLock(filePath, async () => {
+            if (runOptions?.rollbackHook) {
+              try {
+                await runOptions.rollbackHook("lock-acquired", filePath);
+              } catch (hookErr) {
+                if (!rollbackError) rollbackError = hookErr;
+              }
+            }
+            if (isCommittedByLaterProof(filePath)) return;
+            const baseline = getRollbackEntry(filePath, null);
+            if (baseline === null) {
+              await safelyRemoveNullEntry(filePath);
+            }
+          });
+        }
+        // 2. Then restore pre-existing directories, files, and symlinks
+        for (const [filePath, originalContent] of snapshots.entries()) {
+          const restoreContent = getRollbackEntry(filePath, originalContent);
+          if (restoreContent === null) continue;
+          await waitForInFlightWrite(filePath);
+          await proofPathLocks.withLock(filePath, async () => {
+            if (runOptions?.rollbackHook) {
+              try {
+                await runOptions.rollbackHook("lock-acquired", filePath);
+              } catch (hookErr) {
+                if (!rollbackError) rollbackError = hookErr;
+              }
+            }
+            if (isCommittedByLaterProof(filePath)) return;
+            try {
+              if (restoreContent instanceof Uint8Array) {
+                const dir = dirname(filePath);
+                try {
+                  const currentStat = await Deno.lstat(filePath);
+                  if (currentStat.isDirectory) {
+                    let hasUntracked = false;
+                    for await (const entry of Deno.readDir(filePath)) {
+                      const child = `${filePath}/${entry.name}`;
+                      if (
+                        !snapshots.has(child) || snapshots.get(child) !== null ||
+                        isCommittedByLaterProof(child)
+                      ) {
+                        hasUntracked = true;
+                        break;
+                      }
+                    }
+                    if (hasUntracked) {
+                      // Relocate replacement directory to preserve another actor's untracked files with collision-safe name
+                      let relocated = false;
+                      for (let attempt = 0; attempt < 5; attempt++) {
+                        const backup = `${filePath}.untracked-${Date.now()}-${crypto.randomUUID()}`;
+                        try {
+                          await originalRename(filePath, backup);
+                          relocated = true;
+                          break;
+                        } catch { /* retry */ }
+                      }
+                      if (!relocated) {
+                        throw new Error(
+                          `Failed to relocate untracked directory at ${filePath} during rollback`,
+                        );
+                      }
+                    } else {
+                      await originalRemove(filePath, { recursive: true });
+                    }
+                  } else if (currentStat.isSymlink) {
+                    await originalRemove(filePath);
+                  }
+                } catch { /* does not exist */ }
+                await originalMkdir(dir, { recursive: true });
+                await originalWriteFile(filePath, restoreContent);
+              } else if ("isDirectory" in restoreContent) {
+                try {
+                  const currentStat = await Deno.lstat(filePath);
+                  if (!currentStat.isDirectory) {
+                    await originalRemove(filePath, { recursive: true });
+                  }
+                } catch { /* does not exist */ }
+                await originalMkdir(filePath, { recursive: true });
+              } else if ("isSymlink" in restoreContent) {
+                try {
+                  await originalRemove(filePath);
+                } catch (err) {
+                  if (!(err instanceof Deno.errors.NotFound)) throw err;
+                }
+                await Deno.symlink(restoreContent.target, filePath);
+              }
+            } catch (err) {
+              if (!rollbackError) rollbackError = err;
+            }
+          });
+        }
+
+        if (rollbackError) {
+          console.error(`Proof '${name}' rollback failed:`, rollbackError);
+          if (bodyError instanceof Error) {
+            if (!bodyError.cause) {
+              bodyError.cause = rollbackError;
+            } else {
+              bodyError.cause = new AggregateError(
+                [bodyError.cause, rollbackError],
+                `Multiple failure causes during proof '${name}' (including rollback failure)`,
+              );
+            }
+          } else if (finishError instanceof Error) {
+            if (!finishError.cause) {
+              finishError.cause = rollbackError;
+            } else {
+              finishError.cause = new AggregateError(
+                [finishError.cause, rollbackError],
+                `Multiple failure causes during proof '${name}' (including rollback failure)`,
+              );
+            }
+          } else if (!bodyError && !finishError) {
+            throw rollbackError;
+          }
+        }
+
+        if (bodyError && finishError) {
+          console.error(`Proof '${name}' failed with error:`, bodyError);
+          console.error(`Checker also reported failures:`, finishError);
+          if (bodyError instanceof Error) {
+            if (!bodyError.cause) {
+              bodyError.cause = finishError;
+            } else {
+              bodyError.cause = new AggregateError(
+                [bodyError.cause, finishError],
+                `Body error and checker failure during proof '${name}'`,
+              );
+            }
+          }
+          throw bodyError;
+        }
+
+        if (bodyError) {
+          throw bodyError;
+        }
+
+        if (finishError) {
+          throw finishError;
+        }
+      } else {
+        // On success: mark ONLY actually mutated paths as committed with this proof's written bytes
+        for (
+          const [filePath, writtenEntry] of activeContext.lastWrittenBytes
+            .entries()
+        ) {
+          const newSeq = ++globalCommitSeq;
+          committedFileTimestamps.set(filePath, newSeq);
+          committedPathRecords.set(filePath, {
+            proofId,
+            commitSeq: newSeq,
+            entry: writtenEntry,
+          });
+        }
+        for (const [filePath] of snapshots.entries()) {
+          pathLastWriter.delete(filePath);
+          pathSnapshotChains.delete(filePath);
+        }
+      }
+    } finally {
+      for (const [filePath] of snapshots.entries()) {
+        if (inFlightProofWrites.get(filePath)?.proofId === proofId) {
+          inFlightProofWrites.delete(filePath);
+        }
+      }
+      resolveProofDone();
+      activeProofCount--;
+      if (activeProofCount === 0) {
+        failedProofs.clear();
+        pathSnapshotChains.clear();
+        pathLastWriter.clear();
+        committedPathRecords.clear();
+      }
     }
-    throw bodyError;
-  }
-
-  if (bodyError) {
-    throw bodyError;
-  }
-
-  if (finishError) {
-    throw finishError;
-  }
+  });
 }
 
 export function assertVisibleExpression(selector: string): string {
