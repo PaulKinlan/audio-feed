@@ -1,4 +1,3 @@
-const logDir = (t, s) => { if (t === 'dir') console.log('HINT dir added via:', s); };
 /**
  * audio-feed-es8y — ONE source of truth for "which test modules exist", so the fast gate's selection is a
  * PROVEN SUBSET of the full gate's instead of a second, hand-maintained list that can drift from it.
@@ -713,7 +712,7 @@ function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): 
     if (ch === "{") {
       const parent = stack[stack.length - 1]!;
       const scope: BindingScope = { start: i, end: code.length, bindings: new Map() };
-      const params = parameterSpan(code, i, Math.max(statementStart, parent.start)); if (code.slice(i-20, i+20).includes("walk(dir")) console.log("WALK PARAMS:", params, "statementStart:", statementStart, "code at statementStart:", code.slice(statementStart, statementStart+20));
+      const params = parameterSpan(code, i, Math.max(statementStart, parent.start));
       if (params.span) {
         // EVERY identifier in the list, not just the leading one: a destructured parameter (`{ profileDir }`),
         // a type name and a default expression all produce a binding here, and an extra binding only REFUSES
@@ -1079,11 +1078,11 @@ function staticPathHints(
       for (const token of text.split(/[\s"']+/).filter(Boolean)) {
         const wildcard = token.search(/\$\{/);
         if (wildcard < 0) {
-          logDir(token, "token"); hints.push(token);
+          hints.push(token);
           continue;
         }
         const head = token.slice(0, wildcard);
-        if (head.includes("/")) logDir(head.slice(0, head.lastIndexOf("/") + 1), "head"); hints.push(head.slice(0, head.lastIndexOf("/") + 1));
+        if (head.includes("/")) hints.push(head.slice(0, head.lastIndexOf("/") + 1));
         // audio-feed-lkvz: an interpolation can also PRECEDE the path, and the old code threw the whole token
         // away when it did - which made the detector BLIND to every runtime-assembled read (`${dir}/data/x.csv`
         // produced no hint at all, measured). The tail after the last interpolation is statically known, so it
@@ -1119,7 +1118,7 @@ function staticPathHints(
       }
       continue;
     }
-    logDir(text, "text"); hints.push(text);
+    hints.push(text);
   }
   return { paths: hints, tailCandidates };
 }
