@@ -1211,7 +1211,10 @@ Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecyc
   assertEquals(calls, 1, "failed episode must not be picked up again");
 });
 
-Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle and does not livelock", async () => {
+// audio-feed-l9y8: renamed from "does not livelock" to state what is actually observed.
+// The case asserts that a claim lease abort enters the failure lifecycle and marks the episode
+// failed; a failed episode is not pending, so it is not queued as work.
+Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle (failed episode is not pending)", async () => {
   const { ctx, stores } = await setupEnv();
   await stores.metadata.deleteEpisode("user-1", "episode-1");
 
