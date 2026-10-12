@@ -184,23 +184,24 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
 
   const check = (step: string, ok: boolean, detail: string) => {
     checks.push({ step, ok, detail });
-    const savedLog = console.log;
-    console.log = origConsoleLog;
-    try {
-      checker.check(step, ok, detail);
-    } finally {
-      console.log = savedLog;
+    checker.check(step, ok, detail);
+  };
+
+  checker.check = (name: string, pass: boolean, detail?: string) => {
+    const status = pass ? "PASS" : "FAIL";
+    const line = detail !== undefined ? `${status}  ${name}  ${detail}` : `${status}  ${name}`;
+    origConsoleLog(line);
+    if (!pass) {
+      checker.failures.push({ name, detail });
     }
+    return pass;
   };
 
   const capturedServerLogs: string[] = [];
   console.log = (...args: unknown[]) => {
-    const firstStr = typeof args[0] === "string" ? args[0] : "";
-    if (!firstStr.startsWith("PASS ") && !firstStr.startsWith("FAIL ")) {
-      capturedServerLogs.push(
-        args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
-      );
-    }
+    capturedServerLogs.push(
+      args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
+    );
     origConsoleLog(...args);
   };
   console.error = (...args: unknown[]) => {
@@ -696,11 +697,8 @@ ${checks.map((c) => `${c.ok ? "PASS" : "FAIL"} ${c.step}: ${c.detail}`).join("\n
         },
       ],
     });
-    console.log(`Saved report to ${OUT}README.md`);
+    origConsoleLog(`Saved report to ${OUT}README.md`);
   } finally {
-    console.log = origConsoleLog;
-    console.error = origConsoleError;
-    console.warn = origConsoleWarn;
     await server.shutdown();
   }
 });

@@ -31,7 +31,7 @@ PASS rejected outbox write failure is logged: logged failure via console.error
 PASS secret scanner anti-test detects injected token, authorization header, and admin secret: detected leaks: 5
 PASS poisoning anti-test permits playerUrl in notification but rejects capability URL in server logs and run history: permitted: clean=true; poisonedLog leaks: 1; poisonedHistory leaks: 1
 PASS no credentials, tokens, or admin secrets are echoed into server logs, run history, or notifications beyond subscriber player URL: 0 leaks detected
-PASS ack notification c946ba30-00f8-4d19-9643-e6024d22a057: status: 200
-PASS ack notification 8f0a3ebf-df47-4136-b2d4-54a7cc2178dc: status: 200
+PASS ack notification f231e01e-cac7-4594-a819-8a9876c894ff: status: 200
+PASS ack notification c0da5ff1-9b84-4027-b030-9cbdc18da483: status: 200
 PASS outbox is now empty after acking: 0 entries
 ```
