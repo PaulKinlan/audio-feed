@@ -142,3 +142,85 @@ Deno.test("audio-feed-4kl3: the execute relation is a UNION with the import grap
     "and the derived executor is added alongside it rather than instead of it",
   );
 });
+
+/**
+ * audio-feed-20c7: the relation must come from what a spawn can RUN, not from every string in its options
+ * object. rev-46's repro, verbatim in shape: `env: { NOTE: TOOL }` where TOOL names a TypeScript file.
+ *
+ * WHY THIS TEST HAS A POSITIVE CONTROL IN IT, and why that is the point rather than belt-and-braces: all six
+ * probes that validated 4kl3 asked "does this path resolve?" - and a FALSE POSITIVE answers yes exactly like a
+ * true one, so no arrangement of "does it resolve" probes can see this defect. The instrument for this
+ * direction is a call of the SAME SHAPE that must NOT produce a relation, next to one that MUST, so a
+ * narrowing that simply switched the feature off would fail the control rather than pass the negative.
+ */
+const PASSED_NOT_EXECUTED: Record<string, string> = {
+  "scripts/tool.ts": 'export const value = "correct";\n',
+  // The reviewer's repro: TOOL reaches the process as an environment variable, and `args` runs `eval 1`.
+  "tests/env_only_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("irrelevant", () => {\n  new Deno.Command("deno", { args: ["eval", "1"], env: { NOTE: TOOL } });\n});\n',
+  "tests/cwd_only_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("cwd", () => {\n  new Deno.Command("deno", { args: ["eval", "1"], cwd: TOOL });\n});\n',
+  "tests/windows_only_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("win", () => {\n  new Deno.Command("deno", { args: ["eval", "1"], windowsRawArguments: TOOL });\n});\n',
+  // The control: the same constant, the same file, but in the position that IS executed.
+  "tests/args_control_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("runs", () => {\n  new Deno.Command("deno", { args: ["run", TOOL] });\n});\n',
+  // The consumer that 4kl3's narrowing would have silenced: a READ of the script.
+  "tests/consumer_test.ts":
+    'Deno.test("real", async () => {\n  const text = await Deno.readTextFile("../scripts/tool.ts");\n  if (!text.includes("correct")) throw new Error("tool changed");\n});\n',
+};
+
+Deno.test("audio-feed-20c7: a path passed in env/cwd earns NO execute relation, and the control in args does", async () => {
+  await withTempTree(PASSED_NOT_EXECUTED, async (root) => {
+    const report = await deriveReadRelationReport(root, [
+      "tests/env_only_test.ts",
+      "tests/cwd_only_test.ts",
+      "tests/windows_only_test.ts",
+      "tests/args_control_test.ts",
+      "tests/consumer_test.ts",
+    ]);
+
+    assertEquals(
+      report.relations.get("scripts/tool.ts"),
+      ["tests/args_control_test.ts"],
+      "ONLY the args position earns the relation: env, cwd and windowsRawArguments pass a path TO a process " +
+        "and cannot name something that runs (audio-feed-20c7)",
+    );
+
+    // The narrowing consequence, asserted rather than described: with the false positive gone, nothing claims
+    // this file, so the empty-selection guard fail-closes into the full tier - which contains the real reader.
+    const plan = planTests(["scripts/tool.ts"], NO_MAP, NO_MAP, report.relations, [], []);
+    const selected = plan.testFiles ?? [];
+    assert(
+      !selected.includes("tests/env_only_test.ts"),
+      "the irrelevant suite must not be selected: selecting it is the false narrowing, and it REPLACES the " +
+        "fail-closed tier rather than adding to it",
+    );
+    assert(
+      selected.includes("tests/args_control_test.ts"),
+      "and the control still selects - the fix narrows the derivation, it does not disable it",
+    );
+  });
+});
+
+Deno.test("audio-feed-20c7: with only env/cwd mentions, the selection is EMPTY rather than narrowed", async () => {
+  const onlyPassed = { ...PASSED_NOT_EXECUTED } as Record<string, string>;
+  delete onlyPassed["tests/args_control_test.ts"];
+  await withTempTree(onlyPassed, async (root) => {
+    const report = await deriveReadRelationReport(root, [
+      "tests/env_only_test.ts",
+      "tests/cwd_only_test.ts",
+      "tests/windows_only_test.ts",
+      "tests/consumer_test.ts",
+    ]);
+    assertEquals(report.relations.get("scripts/tool.ts"), undefined);
+    const plan = planTests(["scripts/tool.ts"], NO_MAP, NO_MAP, report.relations, [], []);
+    assertEquals(
+      plan.testFiles ?? [],
+      [],
+      "an empty selection is the SAFE outcome: the gate then fail-closes into the full tier and runs the real " +
+        "consumer. A non-empty selection here is the defect - it looks like a mapping and it drops the suite " +
+        "that would have caught the change",
+    );
+  });
+});

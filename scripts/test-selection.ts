@@ -713,6 +713,89 @@ function interpolationBaseName(token: string): string {
  * A suffix is not the path the author wrote, so a miss from one is not evidence of a read that could not be
  * resolved - see the `unattributed` bucket on ReadRelationReport.
  */
+/**
+ * Split on top-level separators, respecting strings, templates and nesting (audio-feed-20c7).
+ */
+function splitTopLevel(text: string, separator = ","): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let quote: string | null = null;
+  let templateDepth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (quote) {
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (quote === "`" && ch === "$" && text[i + 1] === "{") {
+        templateDepth++;
+        i += 2;
+        continue;
+      }
+      if (quote === "`" && ch === "}" && templateDepth > 0) {
+        templateDepth--;
+        i++;
+        continue;
+      }
+      if (ch === quote && templateDepth === 0) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === separator && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+    i++;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/**
+ * WHAT AN EXECUTE CALL CAN ACTUALLY EXECUTE (audio-feed-20c7): the command argument and the value of `args`.
+ *
+ * The relation is derived from the call's text, and the text of a `Deno.Command` spans its whole options
+ * object - so a `.ts` path sitting in `env`, `cwd`, `clearEnv` or `windowsRawArguments` earned an EXECUTE
+ * relation. That is a FALSE POSITIVE, and it is worse than a missing relation because it REPLACES the
+ * fail-closed tier: `new Deno.Command("deno", { args: ["eval", "1"], env: { NOTE: TOOL } })` narrowed the gate
+ * to the one suite that mentions TOOL and dropped the suite that really reads tool.ts, which then failed when
+ * run. A path passed TO a process is data; only the command and its arguments can name something that runs.
+ *
+ * A NOTE ON WHY THE PROBES COULD NOT HAVE CAUGHT THIS: all six asked "does this resolve", and a false positive
+ * is the same shape of answer as a true one. The instrument for this direction is a NON-RELATION CONTROL for
+ * the same call shape - asserted in tests/spawn_relation_test.ts alongside the positive one.
+ */
+function executedText(argumentsText: string): string {
+  const parts = splitTopLevel(argumentsText);
+  const kept: string[] = [];
+  if (parts[0]) kept.push(parts[0]);
+  for (const part of parts.slice(1)) {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith("{")) continue;
+    const close = trimmed.lastIndexOf("}");
+    if (close < 0) continue;
+    for (const property of splitTopLevel(trimmed.slice(1, close))) {
+      const name = property.match(/^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/);
+      if (!name) continue;
+      const key = name[1] ?? name[2] ?? name[3] ?? "";
+      // ONLY `args`. `env`, `cwd`, `stdin`, `stdout`, `clearEnv`, `uid`, `gid` and the Windows raw-argument
+      // variant all describe the process rather than naming a program, so none of them can be an execute site.
+      if (key === "args") kept.push(property.slice(name[0].length));
+    }
+  }
+  return kept.join("\n");
+}
+
 function staticPathHints(
   call: string,
   moduleDir: string,
@@ -1290,8 +1373,13 @@ export async function deriveReadRelationReport(
           }
         }
         const callText = source.slice(at, end + 1);
+        // The narrowed text is what an EXECUTE call can actually run (audio-feed-20c7); a read keeps the whole
+        // call, because a read's path IS its argument.
+        const scanText = isExecuteCall
+          ? executedText(source.slice(at + match[0].length, end))
+          : callText;
         const { paths, tailCandidates } = staticPathHints(
-          callText,
+          scanText,
           dir,
           root,
           (name) => isOutOfRepoBase(name, at),
@@ -1319,12 +1407,12 @@ export async function deriveReadRelationReport(
         // Name candidates include known constants and namespace-derived destructured names.
         // Namespace accesses are not named imports; their member remains unresolved until that syntax is
         // supported, rather than attributing a value from another scope.
-        for (const member of callText.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) {
+        for (const member of scanText.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) {
           if (namespaceNames.has(member[1]!)) {
             (isExecuteCall ? executed : resolved).push(member[2]!);
           }
         }
-        for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
+        for (const identifier of scanText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
           const name = identifier[1]!;
           if (visible.has(name) || destructuredNames.has(name)) {
             // A NAME resolved inside an execute call is the spawn's argument, so it takes the same route as a
