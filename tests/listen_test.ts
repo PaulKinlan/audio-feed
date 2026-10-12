@@ -132,7 +132,7 @@ Deno.test("the player renders the subscriber's ready episodes (audio-feed-4xb)",
   );
   // The audio element and the enclosure URLs the player will fetch.
   assertStringIncludes(html, '<audio id="audio"');
-  assertStringIncludes(html, `${BASE}/audio/ep-ready-1.wav`);
+  assertStringIncludes(html, `${BASE}/audio/user-1/direct/ep-ready-1.wav`);
   // Installability and the feed the subscriber can still take to a podcast app.
   assertStringIncludes(html, 'rel="manifest" href="/manifest.json"');
   assertStringIncludes(html, `href="${BASE}/feed/${TOKEN}/master.xml"`);

@@ -113,6 +113,7 @@ import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { speculationRules } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
+import { enclosureUrl } from "../feed/adapter.ts";
 import {
   type AudioMode,
   type Episode,
@@ -694,7 +695,7 @@ export async function handleListen(
       mode: episode.mode,
       durationSeconds: episode.durationSeconds,
       byteLength: episode.byteLength,
-      audioUrl: `${origin.baseUrl}/audio/${episode.audioKey}`,
+      audioUrl: enclosureUrl(origin.baseUrl, episode),
       // A linkback only when the stored URL is a real web address: the value comes from a feed the
       // user subscribed to, and a link is not a place to trust it further than ingest did.
       articleUrl: /^https?:\/\//i.test(article?.url ?? "") ? article?.url : undefined,

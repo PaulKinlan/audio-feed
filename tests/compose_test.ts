@@ -228,8 +228,14 @@ Deno.test("an enclosure length comes from the store when the record lacks one", 
   await stores.blobs.put("episode-3.mp3", bytes(777), { contentType: "audio/mpeg" });
 
   const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
-  assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-2.mp3" length="999"`);
-  assertStringIncludes(xml, `<enclosure url="${BASE}/audio/episode-3.mp3" length="777"`);
+  assertStringIncludes(
+    xml,
+    `<enclosure url="${BASE}/audio/user-1/direct/episode-2.mp3" length="999"`,
+  );
+  assertStringIncludes(
+    xml,
+    `<enclosure url="${BASE}/audio/user-1/direct/episode-3.mp3" length="777"`,
+  );
   assertStringIncludes(
     xml,
     `<enclosure url="${BASE}/audio/user-1/direct/episode-1.mp3" length="${AUDIO.length}"`,

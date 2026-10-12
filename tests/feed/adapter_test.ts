@@ -76,10 +76,11 @@ Deno.test("pubDate prefers readyAt, because createdAt is when the job was queued
 Deno.test("audioKey becomes a stable proxy URL, never a store-signed URL", () => {
   // A signed URL expires (1h by default) while a podcast client polls the same
   // enclosure for months, so a signed enclosure is a feed that breaks quietly.
-  const projected = toFeedEpisode(ready({ audioKey: "nested/episode-1.wav" }), {
+  const canonicalEp = ready({ audioKey: "audio/user-1/direct/episode-1.wav" });
+  const projected = toFeedEpisode(canonicalEp, {
     publicBaseUrl: BASE,
   });
-  assertEquals(projected?.audioUrl, `${BASE}/audio/nested/episode-1.wav`);
+  assertEquals(projected?.audioUrl, `${BASE}/audio/user-1/direct/episode-1.wav`);
   assertEquals(enclosureUrl(`${BASE}/`, "x.wav"), `${BASE}/audio/x.wav`);
   assertEquals(
     enclosureUrl(`${BASE}/`, "audio/user-1/direct/x.wav"),
@@ -160,7 +161,7 @@ Deno.test("projected episodes render a playable, well-formed feed item", () => {
   assertStringIncludes(xml, '<guid isPermaLink="false">episode-1</guid>');
   assertStringIncludes(
     xml,
-    `<enclosure url="${BASE}/audio/episode-1.wav" length="524" type="audio/wav"/>`,
+    `<enclosure url="${BASE}/audio/user-1/direct/episode-1.wav" length="524" type="audio/wav"/>`,
   );
   assertStringIncludes(xml, "<itunes:duration>00:00:25</itunes:duration>");
   assertStringIncludes(xml, "<pubDate>Tue, 01 Sep 2026 00:05:00 +0000</pubDate>");
