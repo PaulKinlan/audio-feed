@@ -131,7 +131,9 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
       continue;
     }
     const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
-    const capture = /^- Capture:\s*\S/m.test(body);
+    // The capture hatch is an ADMISSION, not free text: it must be the literal sentence, otherwise a README can
+    // say "- Capture: fully tested and guaranteed", assert nothing and pass (audio-feed-6piu, found in review).
+    const capture = /^- Capture:\s*no assertions\s*$/m.test(body);
     const script = body.match(/^- Script:\s*(\S+)/m)?.[1];
     if (!asserts && !capture) {
       undeclared.push(`${dir}: needs a "- Asserts: <claims>" or "- Capture: no assertions" line`);

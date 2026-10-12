@@ -39,7 +39,7 @@ the evidence without reading the script:
 or, when the artifact only records state:
 
 ```
-- Capture: no assertions              # say it plainly rather than implying verification
+- Capture: no assertions              # this EXACT sentence, when the artifact only records state; put the reason in the prose below
 ```
 
 `tests/evidence_size_test.ts` enforces the presence and shape of those lines. It cannot check that
