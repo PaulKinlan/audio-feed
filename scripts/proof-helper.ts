@@ -26,14 +26,131 @@ export interface SupervisedHarness {
   kill: () => void;
 }
 
+/**
+ * HOW LONG AN ABANDONED PROFILE MAY SIT BEFORE THE NEXT RUN OF THE SAME PREFIX RECLAIMS IT
+ * (audio-feed-u8nv).
+ *
+ * THE MEASUREMENT THAT MAKES THIS A DEFECT RATHER THAN TIDINESS, taken on this VM: `/tmp` held
+ * **1926 `audiofeed-*` profile directories totalling 1.5 GB**, the oldest two days old. A leaked
+ * profile is not only disk: it is 50-150 MB that a gate then cannot write into, and the failure it
+ * produces appears in a tool nowhere near the cause.
+ *
+ * AND THE MECHANISM IS NOT A MISSING `finally`. Measured through the tool's own entry point: a
+ * browser test on the SUCCESS path left ZERO new directories, both `finally` blocks guard
+ * `chrome.kill()` and then run `await cleanup()`, and there were ZERO orphaned Chrome processes - the
+ * wrapper and the reaper own the process layer correctly. THE LEAK IS THAT A KILLED RUN EXECUTES NO
+ * `finally` AT ALL, so the directory outlives the process that would have removed it, and nothing
+ * sweeps what is left behind.
+ *
+ * THE BOUND IS THE REAPER'S OWN, AND THAT IS WHY IT IS PROVABLY SAFE RATHER THAN CONVENIENT: the
+ * reaper's documented rule on every fleet VM is "browsers older than 45 min (orphaned ones after 5)",
+ * so NO LIVE BROWSER CAN OWN A PROFILE OLDER THAN 45 MINUTES. Anything past that bound is therefore
+ * not merely probably abandoned, it CANNOT be running. The earlier 2-hour figure was empirical
+ * ("no legitimate run holds one for more than minutes") and that is a weaker argument for the same
+ * decision, so it is replaced by the derivation.
+ */
+export const STALE_PROFILE_AGE_MS = 45 * 60 * 1000;
+
+/**
+ * Reclaim abandoned profile directories for ONE PREFIX (audio-feed-u8nv).
+ *
+ * TWO GUARDS, AND BOTH ARE ASSERTED IN tests/proof_helper_profile_sweep_test.ts BECAUSE EACH IS A
+ * DIFFERENT WAY OF DESTROYING SOMETHING THAT IS IN USE:
+ *   - PREFIX SCOPING: every caller passes its own prefix, so this can never reach another proof's,
+ *     another lane's, or another prefix's directory. Only `makeTempDir`-created DIRECTORIES are
+ *     considered; a file that happens to share the name shape is not ours to delete.
+ *   - AGE BOUND: a young directory may be a LIVE run of the same prefix, so it is left alone. The
+ *     reclaim only ever removes what the declared bound has already ruled out as running.
+ *
+ * OPPORTUNISTIC BY CONSTRUCTION: every failure to read or remove is swallowed, because reclaiming
+ * disk must never break allocating a profile. Returns what it actually removed so a caller, or a
+ * test, can observe the work rather than trust it.
+ */
+/** Existence without throwing. */
+function exists(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `name` is a directory THIS prefix created, rather than a sibling that merely starts with it
+ * (audio-feed-3nit).
+ *
+ * `startsWith(prefix)` ALONE IS NOT OWNERSHIP, and the reviewer's counterexample is exact:
+ * `audiofeed-chrome-test-` starts with `audiofeed-chrome-`, so a sweep for the shorter prefix ate the
+ * longer prefix's directories. A guard whose job is "touch nothing that is not mine" cannot be built
+ * from a prefix comparison alone.
+ *
+ * THE BOUNDARY, AND WHY THIS ONE IS EXACT RATHER THAN HEURISTIC: `makeTempDir` appends its random
+ * characters DIRECTLY to the prefix, so an owned name is `<prefix>` plus a separator-free tail.
+ * MEASURED over the whole pile on this VM: 574 names, EVERY ONE with a separator-free tail, and ZERO
+ * with a `-` in the tail. So a `-` after the prefix does not mean "random characters"; it means a
+ * DIFFERENT prefix that happens to start with ours.
+ *
+ * DECLARED LIMIT, so the next reader does not have to infer it: this requires the caller's prefix to
+ * carry its own separator. Every prefix in this tree ends with `-` (measured: the nine literal ones
+ * plus the computed `audiofeed-proof-exww-`), and a prefix passed WITHOUT one would reclaim nothing
+ * rather than reclaim wrongly - the failure is in the safe direction.
+ */
+function isOwnProfileName(name: string, prefix: string): boolean {
+  if (!name.startsWith(prefix)) return false;
+  const tail = name.slice(prefix.length);
+  if (tail.length === 0) return false;
+  return !tail.includes("-");
+}
+
+export async function sweepStaleProfiles(
+  prefix: string,
+  nowMs: number = Date.now(),
+  ageMs: number = STALE_PROFILE_AGE_MS,
+): Promise<string[]> {
+  const swept: string[] = [];
+  // The SAME base directory makeTempDir uses, or the sweep would look somewhere the profiles are not.
+  const baseDir = Deno.env.get("TMPDIR") ?? "/tmp";
+  let entries: Iterable<Deno.DirEntry>;
+  try {
+    entries = Deno.readDirSync(baseDir);
+  } catch {
+    return swept;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory) continue;
+    if (!isOwnProfileName(entry.name, prefix)) continue;
+    const full = `${baseDir}/${entry.name}`;
+    // INSURANCE, NOT THE MATCHING RULE (audio-feed-u8nv, after coord measured the other /tmp piles as
+    // worktrees): a checkout is never a profile, so one that happens to sit under a profile prefix is
+    // left alone. This can only NARROW what is reclaimed. `.git` is tested by EXISTENCE because in a
+    // linked worktree it is a FILE, not a directory.
+    if (exists(`${full}/.git`)) continue;
+    try {
+      const info = await Deno.stat(full);
+      const age = nowMs - (info.mtime?.getTime() ?? nowMs);
+      if (age < ageMs) continue;
+      await Deno.remove(full, { recursive: true });
+      swept.push(full);
+    } catch {
+      // A live run, a concurrent reclaim, or a permission we do not have: leave it, never throw.
+    }
+  }
+  return swept;
+}
+
 export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
-): Promise<{ profileDir: string; cleanup: () => Promise<void> }> {
+): Promise<{ profileDir: string; cleanup: () => Promise<void>; sweptStale: number }> {
+  // Reclaim THIS prefix's abandoned directories before allocating another one, so a leak cannot
+  // accumulate across runs (audio-feed-u8nv).
+  const sweptStale = (await sweepStaleProfiles(prefix)).length;
   const profileDir = await Deno.makeTempDir({ prefix });
   let cleaned = false;
 
   return {
     profileDir,
+    sweptStale,
     cleanup: async () => {
       if (cleaned) return;
       const maxAttempts = 10;
