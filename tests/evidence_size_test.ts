@@ -110,7 +110,20 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
   }
 
   const declaredDebt: string[] = [];
+  const staleDebt: string[] = [];
   for (const name of EVIDENCE_UNDECLARED) {
+    // audio-feed-237f: the list is SHRINK-ONLY and its length is the debt number that gets quoted,
+    // so an entry naming a directory that does not exist is not harmless clutter - it is a
+    // directory that was removed and did not take its entry with it, which inflates the debt and
+    // hides that the list did not shrink. `checkEvidenceDeclaration` cannot see the difference: it
+    // reports "no README.md" for a missing directory and for a real directory that has no README
+    // alike, so the declared case below is the only one it can flag. Listed must imply EXISTS, and
+    // listed must imply NOT DECLARED (tp4x) - the two directions of one predicate.
+    const stat = await Deno.stat(`docs/evidence/${name}`).catch(() => null);
+    if (!stat?.isDirectory) {
+      staleDebt.push(name);
+      continue;
+    }
     const err = await checkEvidenceDeclaration(name);
     if (err === null) {
       declaredDebt.push(name);
@@ -129,5 +142,13 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
     [],
     "evidence directories listed in EVIDENCE_UNDECLARED already have valid declarations and must be removed from the debt list: " +
       declaredDebt.join(", "),
+  );
+  assertEquals(
+    staleDebt,
+    [],
+    "EVIDENCE_UNDECLARED may only name directories that EXIST (audio-feed-237f): the list is " +
+      "shrink-only and its length is the debt number, so an entry for a directory that has been " +
+      "removed inflates the debt and hides that the list did not shrink. Remove these entries: " +
+      staleDebt.join(", "),
   );
 });
