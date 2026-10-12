@@ -155,6 +155,79 @@ Deno.test("NEGATIVE CONTROL 2 (Walk Refusal): nested directory with declared REA
   }
 });
 
+Deno.test("puhh create-and-assert-refusal: symlinked nested evidence is refused", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "puhh-symlink-" });
+  try {
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    const target = join(tempDir, "outside-evidence");
+    await Deno.mkdir(join(evidenceRoot, "group"), { recursive: true });
+    await Deno.mkdir(target);
+    await Deno.writeTextFile(join(target, "README.md"), "# Linked evidence\n");
+    await Deno.symlink(target, join(evidenceRoot, "group", "linked"), { type: "dir" });
+    await Deno.mkdir(join(evidenceRoot, "valid"));
+    await Deno.mkdir(join(tempDir, "scripts"));
+    await Deno.writeTextFile(join(tempDir, "scripts", "proof.ts"), "console.log('PASS');\n");
+    await Deno.writeTextFile(
+      join(evidenceRoot, "valid", "README.md"),
+      "- Script: scripts/proof.ts\n- Asserts: claim\n",
+    );
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 1);
+    assertStringIncludes(
+      res.stderr,
+      "symlinked evidence path is forbidden: docs/evidence/group/linked",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("puhh: top-level symlink is refused rather than skipped", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "puhh-top-symlink-" });
+  try {
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    const target = join(tempDir, "outside-evidence");
+    await Deno.mkdir(evidenceRoot, { recursive: true });
+    await Deno.mkdir(target);
+    await Deno.symlink(target, join(evidenceRoot, "linked"), { type: "dir" });
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 1);
+    assertStringIncludes(res.stderr, "symlinked evidence path is forbidden: docs/evidence/linked");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("gzxr: nested refusal outranks declaration debt but reports both", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "gzxr-both-" });
+  try {
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(join(evidenceRoot, "debt"), { recursive: true });
+    await Deno.writeTextFile(join(evidenceRoot, "debt", "README.md"), "# No script\n");
+    await Deno.mkdir(join(evidenceRoot, "valid"));
+    await Deno.mkdir(join(tempDir, "scripts"));
+    await Deno.writeTextFile(join(tempDir, "scripts", "proof.ts"), "console.log('PASS');\n");
+    await Deno.writeTextFile(
+      join(evidenceRoot, "valid", "README.md"),
+      "- Script: scripts/proof.ts\n- Asserts: claim\n",
+    );
+    const nested = join(evidenceRoot, "valid", "nested");
+    await Deno.mkdir(nested);
+    await Deno.writeTextFile(join(nested, "README.md"), "# Nested\n");
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 1, "refusal is a failure; exit 2 requires every proof to pass");
+    assertStringIncludes(
+      res.stderr,
+      "nested evidence directory is forbidden: docs/evidence/valid/nested",
+    );
+    assertStringIncludes(res.stdout, "debt: docs/evidence/debt declares no proof");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 Deno.test("NEGATIVE CONTROL 3 (Zero Assertions): script exiting 0 with EMPTY output fails (exit 1)", async () => {
   const tempDir = await Deno.makeTempDir({ prefix: "c0ft-neg3-" });
   try {
@@ -202,7 +275,30 @@ Deno.test("NEGATIVE CONTROL 4 (Zero Assertions): script exiting 0 without PASS o
     const res = await runTier(tempDir);
     assertEquals(res.code, 1, "tier must fail when script produces no PASS or OK assertion marker");
     assertStringIncludes(res.stdout, "FAIL docs/evidence/audio-feed-noassert");
-    assertStringIncludes(res.stdout, "ZERO ASSERTIONS");
+    assertStringIncludes(
+      res.stdout,
+      "ZERO ASSERTIONS: declared Asserts requires a PASS or OK assertion marker",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("asyl: nonempty output without Asserts or Capture needs no assertion marker", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "asyl-no-asserts-" });
+  try {
+    const evidenceRoot = join(tempDir, "docs", "evidence", "plain");
+    await Deno.mkdir(evidenceRoot, { recursive: true });
+    await Deno.mkdir(join(tempDir, "scripts"));
+    await Deno.writeTextFile(
+      join(tempDir, "scripts", "plain.ts"),
+      "console.log('computed numbers');\n",
+    );
+    await Deno.writeTextFile(join(evidenceRoot, "README.md"), "- Script: scripts/plain.ts\n");
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 0);
+    assertStringIncludes(res.stdout, "ok   docs/evidence/plain");
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }

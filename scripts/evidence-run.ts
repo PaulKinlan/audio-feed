@@ -20,7 +20,8 @@
  *
  * EXIT CODES, because a silent non-zero is as useless as a silent skip:
  *     0  every declared proof passed, and every evidence directory declares something;
- *     1  at least one declared proof FAILED, or a declared script is not a file (UNRESOLVED);
+ *     1  at least one declared proof FAILED, a declared script is not a file (UNRESOLVED),
+ *        or the evidence tree is REFUSED (nested evidence or a symlink); debt is still reported;
  *     2  every declared proof passed, but the tree carries DECLARATION DEBT - a directory that
  *        declares nothing or has no README. Debt is not a proof failure and is not a pass either:
  *        a skip that is not printed is a test that stopped testing, so it is named and it is non-zero.
@@ -135,6 +136,8 @@ export function readDeclaration(readme: string): DeclarationInfo {
  * audio-feed-c0ft: Walk docs/evidence recursively to detect any nested evidence directories.
  * Evidence directories must be flat directly under docs/evidence/ (depth 1).
  * Any nested subdirectory (depth >= 2) carrying a README.md (declared or undeclared) is refused.
+ * Also return every symlink at any depth: following one can escape this tree or cycle, while
+ * skipping it can hide evidence. The caller reports these as symlink refusals, not nested folders.
  */
 export async function findNestedEvidence(evidenceRoot: string): Promise<string[]> {
   const nested: string[] = [];
@@ -146,8 +149,10 @@ export async function findNestedEvidence(evidenceRoot: string): Promise<string[]
       return;
     }
     for (const entry of entries) {
-      if (entry.isDirectory) {
-        const sub = join(dir, entry.name);
+      const sub = join(dir, entry.name);
+      if (entry.isSymlink) {
+        nested.push(sub);
+      } else if (entry.isDirectory) {
         if (depth >= 1) {
           // Inside docs/evidence/<top>/...
           // If this nested directory has a README.md (declared or undeclared), it is a nested evidence directory.
@@ -171,12 +176,14 @@ export async function collect(options: Options): Promise<{
   undeclared: string[];
   withoutReadme: string[];
   refused: string[];
+  symlinks: string[];
 }> {
   const evidenceRoot = join(options.root, "docs", "evidence");
   const declarations: Declaration[] = [];
   const undeclared: string[] = [];
   const withoutReadme: string[] = [];
   const refused: string[] = [];
+  const symlinks: string[] = [];
   const names: string[] = [];
   try {
     for await (const entry of Deno.readDir(evidenceRoot)) {
@@ -192,12 +199,13 @@ export async function collect(options: Options): Promise<{
     Deno.exit(1);
   }
 
-  // Refusal: fail-closed detection of nested evidence directories (audio-feed-c0ft).
-  // Evidence directories must be flat directly under docs/evidence/.
+  // Refuse nested evidence and any symlink within the evidence tree. A symlink must not
+  // disappear from the top-level inventory or bypass the nested walk.
   const nested = await findNestedEvidence(evidenceRoot);
   for (const n of nested) {
     const rel = relative(options.root, n);
-    refused.push(rel);
+    if ((await Deno.lstat(n)).isSymlink) symlinks.push(rel);
+    else refused.push(rel);
   }
 
   // Stable order so two runs of the inventory are comparable line by line.
@@ -231,7 +239,7 @@ export async function collect(options: Options): Promise<{
       asserts: info.asserts,
     });
   }
-  return { declarations, undeclared, withoutReadme, refused };
+  return { declarations, undeclared, withoutReadme, refused, symlinks };
 }
 
 export function stripAnsi(text: string): string {
@@ -320,10 +328,9 @@ export async function runProof(
       passed = false;
       failureReason =
         "EMPTY OUTPUT: script exited 0 without asserting anything or producing output";
-    } else if (!declaration.isCapture && !hasAssertionSignal) {
+    } else if (declaration.asserts !== null && !declaration.isCapture && !hasAssertionSignal) {
       passed = false;
-      failureReason =
-        "ZERO ASSERTIONS: declared Asserts but output contains no PASS or OK assertion marker";
+      failureReason = "ZERO ASSERTIONS: declared Asserts requires a PASS or OK assertion marker";
     }
   }
 
@@ -342,7 +349,7 @@ export async function runProof(
 
 export async function main(args: string[] = Deno.args): Promise<void> {
   const options = parseOptions(args);
-  const { declarations, undeclared, withoutReadme, refused } = await collect(options);
+  const { declarations, undeclared, withoutReadme, refused, symlinks } = await collect(options);
   const unresolved = declarations.filter((declaration) => !declaration.exists);
 
   /**
@@ -391,6 +398,9 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     for (const dir of refused) {
       console.log(`REFUSED    ${dir} (nested evidence directory)`);
     }
+    for (const dir of symlinks) {
+      console.log(`REFUSED    ${dir} (symlinked evidence path)`);
+    }
     for (const declaration of declarations) {
       console.log(
         `${
@@ -401,7 +411,9 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     console.log(
       `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
         `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
-        (refused.length > 0 ? `, ${refused.length} refused (nested)` : "") +
+        (refused.length + symlinks.length > 0
+          ? `, ${refused.length} refused (nested), ${symlinks.length} refused (symlink)`
+          : "") +
         (options.only ? ` (filtered to --only ${options.only})` : ""),
     );
     printDebt();
@@ -409,17 +421,26 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     Deno.exit(0);
   }
 
-  // Refusal: fail-closed if any nested evidence directory was found (audio-feed-c0ft).
-  if (refused.length > 0) {
+  // Refusal takes precedence over debt: exit 2 means every declared proof passed, but a
+  // refused tree has not been verified. Still print declaration debt before exiting.
+  if (refused.length > 0 || symlinks.length > 0) {
+    printDebt();
     for (const dir of refused) {
       console.error(
         `[evidence] FAIL: nested evidence directory is forbidden: ${dir} ` +
           `(evidence directories must be flat directly under docs/evidence/)`,
       );
     }
+    for (const dir of symlinks) {
+      console.error(
+        `[evidence] FAIL: symlinked evidence path is forbidden: ${dir} ` +
+          `(evidence paths under docs/evidence/ must not be symlinks)`,
+      );
+    }
     console.error(
-      `[evidence] RED: ${refused.length} nested evidence directory(ies) detected; refusing run - ` +
-        `an unexamined nested proof cannot be credited as green`,
+      `[evidence] RED: ${refused.length} nested evidence directory(ies), ` +
+        `${symlinks.length} symlink(s) detected; refusing run - ` +
+        `unexamined evidence cannot be credited as green`,
     );
     Deno.exit(1);
   }
