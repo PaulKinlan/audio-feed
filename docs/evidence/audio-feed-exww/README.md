@@ -75,11 +75,13 @@ section's rendered bottom so a capture that stops short also FAILS (audio-feed-u
 (2) the file is within the repository's 150KB budget, and the proof
 compresses its own output with the repository's own recipe (`convert -strip -colors 256 PNG8:`) so a
 replay does not write over-budget PNGs (audio-feed-vvo7); (3) the section shows what the README claims -
-the CONTRAST RANGE (maxima minus minima in greyscale) over the section's OWN rows is measured back out
-of the PNG and must exceed 0.5, which separates the committed clean captures (0.880) from washed-out
-captures (opacity 0.35 measures 0.312; opacity 0.15 measures 0.137) and flat clips (which measure zero),
-because fading scales contrast range proportionally while standard deviation allowed washed-out captures
-to pass (audio-feed-l11d); and (4) the text each
+two independent floors over the section's OWN rows and columns, measured back out of the PNG:
+the faded-section contrast-range floor 0.5 separates four clean captures (0.880095) from opacity
+0.35 (0.312) and 0.15 (0.137); the partial-content-loss normalized standard-deviation floor
+0.12 separates the least-distributed clean crop (0.167164) from an 85%-covered crop (0.0884)
+whose surviving ink still passes the range floor (0.8818). The latter floor is the geometric
+mean of the clean minimum and mutant value, rounded down (clean margin 0.0472; mutant margin
+0.0316). Neither floor alone catches both failure shapes (audio-feed-l11d); and (4) the text each
 claim names is in a PAINTED element inside that section - no `display:none`, `visibility:hidden`,
 `opacity:0` or empty box on that element or any ancestor up to the section - because hiding a section
 leaves textContent and layout intact while the image records background; (5) that painted text lies
@@ -89,8 +91,8 @@ something else FAILS; (6) the claim's OWN box is measured back out of the PNG an
 text is painted in the page's own background colour, and < 0.5 when washed out; threshold 0.5)
 (audio-feed-9zgi, audio-feed-l11d); and the pixel measurements (3)
 and (6) are refused outright when the section's or the claim's box is not inside the captured clip,
-rather than reporting someone else's pixels as this section's content. Not covered, and stated here
-rather than left to be discovered: content covered by an overlapping element.
+rather than reporting someone else's pixels as this section's content. A small overlay covering just the named claim may be caught by its own ink check; arbitrary
+local occlusions are not guaranteed to lower the whole-section distribution below its floor.
 
 - `01-live-lease-expiries-worker-healthy.png`: the lease table with a held upload and an expired
   upload (called out AND timed).
