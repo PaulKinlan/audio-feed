@@ -1037,7 +1037,9 @@ Deno.test("an exclusion justifies itself or it is reported (a reason, and a modu
  *
  * These four assertions used to pin the EXACT observer list for `docs/evidence/`, and that list
  * includes tests/evidence_census_test.ts - an over-selection their own comments already describe as
- * "the safe direction, a changed evidence PNG runs a 40ms census test". MEASURED while fixing a
+ * "the safe direction, a changed evidence PNG runs a 40ms census test" (and once character-level
+ * scanning accurately un-swallows scripts/evidence-run.ts, tests/evidence_run_test.ts and
+ * tests/evidence_selection_test.ts similarly observe docs/evidence/). MEASURED while fixing a
  * comma bug: rewriting CODE in scripts/evidence-census.ts that adds no read call at all FLIPPED that
  * membership (hunk 2 of that change alone flips it; the other two hunks alone do not), so the
  * membership is a function of unrelated script text rather than of what observes the directory.
@@ -1049,7 +1051,11 @@ Deno.test("an exclusion justifies itself or it is reported (a reason, and a modu
 function assertSelected(
   actual: readonly string[] | null | undefined,
   required: readonly string[],
-  overSelection: readonly string[] = ["tests/evidence_census_test.ts"],
+  overSelection: readonly string[] = [
+    "tests/evidence_census_test.ts",
+    "tests/evidence_run_test.ts",
+    "tests/evidence_selection_test.ts",
+  ],
 ): void {
   assert(
     actual !== null && actual !== undefined,

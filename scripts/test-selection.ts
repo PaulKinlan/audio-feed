@@ -341,15 +341,31 @@ function stripComments(source: string): string {
 
   let context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT" = "CODE";
   let stringQuote: string | null = null;
-  const stack: { context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT", braceDepth: number }[] = [];
+  const stack: {
+    context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT";
+    braceDepth: number;
+  }[] = [];
   let braceDepth = 0;
 
   const isRegexPrecedingChar = (ch: string) => {
     return /[=(:,;\[{}!&|?<>+\-*%^~]/.test(ch);
   };
-  
+
   const regexKeywords = new Set([
-    "return", "typeof", "yield", "await", "throw", "case", "do", "else", "in", "of", "instanceof", "new", "delete", "void"
+    "return",
+    "typeof",
+    "yield",
+    "await",
+    "throw",
+    "case",
+    "do",
+    "else",
+    "in",
+    "of",
+    "instanceof",
+    "new",
+    "delete",
+    "void",
   ]);
 
   let lastNonWsChar = "";
@@ -381,7 +397,8 @@ function stripComments(source: string): string {
           if (
             lastNonWsChar === "" ||
             isRegexPrecedingChar(lastNonWsChar) ||
-            (lastNonWsChar !== ")" && lastNonWsChar !== "]" && lastNonWsChar !== "}" && regexKeywords.has(lastWord))
+            (lastNonWsChar !== ")" && lastNonWsChar !== "]" && lastNonWsChar !== "}" &&
+              regexKeywords.has(lastWord))
           ) {
             context = "REGEX";
             result += source.slice(offset, i + 1);
@@ -407,7 +424,7 @@ function stripComments(source: string): string {
           }
           lastWord = "";
         } else if (/[a-zA-Z0-9_$]/.test(ch)) {
-          let start = i;
+          const start = i;
           while (i < source.length && /[a-zA-Z0-9_$]/.test(source[i]!)) {
             i++;
           }

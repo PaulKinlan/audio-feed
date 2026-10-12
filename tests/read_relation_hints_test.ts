@@ -895,15 +895,19 @@ Deno.test("audio-feed-kpua: multiline template literal does not swallow subseque
     "export async function readIt() {",
     '  return await Deno.readTextFile("../docs/present.md");',
     "}",
-    "/** */"
+    "/** */",
   ].join("\n");
-  
+
   await withTempTree({
     "docs/present.md": "present\n",
     [suite]: content,
   }, async (root) => {
     const report = await deriveReadRelationReport(root, [suite]);
-    assertEquals(report.relations.get("docs/present.md"), [suite], "The read site after a multiline template literal containing /* must not be swallowed");
+    assertEquals(
+      report.relations.get("docs/present.md"),
+      [suite],
+      "The read site after a multiline template literal containing /* must not be swallowed",
+    );
   });
 });
 
@@ -914,7 +918,7 @@ Deno.test("audio-feed-iz0j: regex literals and template interpolations do not in
     '/* hidden Deno.readTextFile("../docs/absent.html") */',
     "export async function readIt() {",
     '  return await Deno.readTextFile("../docs/present.md");',
-    "}"
+    "}",
   ].join("\n");
 
   const suite2 = "tests/iz0j_test2.ts";
@@ -923,7 +927,7 @@ Deno.test("audio-feed-iz0j: regex literals and template interpolations do not in
     '/* hidden Deno.readTextFile("../docs/absent.html") */',
     "export async function readIt() {",
     '  return await Deno.readTextFile("../docs/present.md");',
-    "}"
+    "}",
   ].join("\n");
 
   await withTempTree({
@@ -932,11 +936,129 @@ Deno.test("audio-feed-iz0j: regex literals and template interpolations do not in
     [suite2]: content2,
   }, async (root) => {
     const report1 = await deriveReadRelationReport(root, [suite1]);
-    assertEquals(report1.unresolved, [], "A regex literal containing a quote must not expose subsequent block comments");
+    assertEquals(
+      report1.unresolved,
+      [],
+      "A regex literal containing a quote must not expose subsequent block comments",
+    );
     assertEquals(report1.relations.get("docs/present.md"), [suite1]);
 
     const report2 = await deriveReadRelationReport(root, [suite2]);
-    assertEquals(report2.unresolved, [], "An interpolation containing a quote must not expose subsequent block comments");
+    assertEquals(
+      report2.unresolved,
+      [],
+      "An interpolation containing a quote must not expose subsequent block comments",
+    );
     assertEquals(report2.relations.get("docs/present.md"), [suite2]);
+  });
+});
+
+Deno.test("audio-feed-uiyv: / regex literal vs division disambiguation correctly tracks quote state", async (t) => {
+  const suites: Record<string, { content: string; desc: string }> = {
+    "tests/uiyv_regex_assign_test.ts": {
+      content: [
+        'const re = /"/;',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after assign (=)",
+    },
+    "tests/uiyv_regex_return_test.ts": {
+      content: [
+        'function f() { return /"/; }',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after keyword (return)",
+    },
+    "tests/uiyv_regex_paren_test.ts": {
+      content: [
+        'fn(/"/);',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after open paren (",
+    },
+    "tests/uiyv_regex_bracket_test.ts": {
+      content: [
+        'const arr = [/"/];',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after open bracket [",
+    },
+    "tests/uiyv_div_ident_test.ts": {
+      content: [
+        'const val = total / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after identifier",
+    },
+    "tests/uiyv_div_paren_test.ts": {
+      content: [
+        'const val = fn() / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after close paren )",
+    },
+    "tests/uiyv_div_bracket_test.ts": {
+      content: [
+        'const val = arr[0] / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after close bracket ]",
+    },
+    "tests/uiyv_div_num_test.ts": {
+      content: [
+        'const val = 42 / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after numeric literal",
+    },
+  };
+
+  const treeFiles: Record<string, string> = {
+    "docs/present.md": "present\n",
+  };
+  for (const [path, entry] of Object.entries(suites)) {
+    treeFiles[path] = entry.content;
+  }
+
+  await withTempTree(treeFiles, async (root) => {
+    for (const [path, entry] of Object.entries(suites)) {
+      await t.step(entry.desc, async () => {
+        const report = await deriveReadRelationReport(root, [path]);
+        assertEquals(
+          report.unresolved,
+          [],
+          `${entry.desc}: comment read must not leak as unresolved`,
+        );
+        assertEquals(
+          report.relations.get("docs/present.md"),
+          [path],
+          `${entry.desc}: real read site must be preserved`,
+        );
+      });
+    }
   });
 });
