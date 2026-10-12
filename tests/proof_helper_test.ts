@@ -747,3 +747,90 @@ Deno.test("proof-helper: error precedence: body throw propagates with teardown f
     }
   }
 });
+
+Deno.test("proof-helper: launchChrome rejects without creating profile when Chrome binary discovery fails", async () => {
+  const origBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
+  const origHome = Deno.env.get("HOME");
+  const testPrefix = "audiofeed-disc-fail-inproc-";
+  const fakeHome = "/tmp/nonexistent-audiofeed-inproc-home";
+  try {
+    Deno.env.delete("AUDIOFEED_CHROME_BIN");
+    Deno.env.set("HOME", fakeHome);
+
+    const err = await assertRejects(
+      async () => {
+        await launchChrome({ prefix: testPrefix });
+      },
+      Error,
+      `No Chrome binaries found under ${fakeHome}/.cache/puppeteer/chrome`,
+    );
+    assertStringIncludes(err.message, "No Chrome binaries found under");
+
+    const leftovers = [...Deno.readDirSync("/tmp")]
+      .filter((e) => e.name.startsWith(testPrefix));
+    assertEquals(
+      leftovers.length,
+      0,
+      `Expected 0 leftovers for prefix ${testPrefix}, found: ${
+        leftovers.map((e) => e.name).join(", ")
+      }`,
+    );
+  } finally {
+    if (origBin !== undefined) {
+      Deno.env.set("AUDIOFEED_CHROME_BIN", origBin);
+    } else {
+      Deno.env.delete("AUDIOFEED_CHROME_BIN");
+    }
+    if (origHome !== undefined) {
+      Deno.env.set("HOME", origHome);
+    } else {
+      Deno.env.delete("HOME");
+    }
+    for (const entry of Deno.readDirSync("/tmp")) {
+      if (entry.name.startsWith(testPrefix)) {
+        await Deno.remove(`/tmp/${entry.name}`, { recursive: true }).catch(() => {});
+      }
+    }
+  }
+});
+
+Deno.test("proof-helper: subprocess: binary discovery failure exits non-zero and leaves no profile", async () => {
+  const fixture = new URL("./fixtures/chrome_discovery_failure_child.ts", import.meta.url).pathname;
+  const testPrefix = "audiofeed-disc-fail-subp-";
+  const fakeHome = "/tmp/nonexistent-audiofeed-subp-home";
+  try {
+    const cmd = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--unstable-kv", fixture, testPrefix],
+      env: {
+        HOME: fakeHome,
+        AUDIOFEED_CHROME_BIN: "",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const output = await cmd.output();
+    assertEquals(output.success, false);
+    assertEquals(output.code !== 0, true);
+    const stderrText = new TextDecoder().decode(output.stderr);
+    assertStringIncludes(
+      stderrText,
+      `No Chrome binaries found under ${fakeHome}/.cache/puppeteer/chrome`,
+    );
+
+    const leftovers = [...Deno.readDirSync("/tmp")]
+      .filter((e) => e.name.startsWith(testPrefix));
+    assertEquals(
+      leftovers.length,
+      0,
+      `Expected 0 leftovers for prefix ${testPrefix}, found: ${
+        leftovers.map((e) => e.name).join(", ")
+      }`,
+    );
+  } finally {
+    for (const entry of Deno.readDirSync("/tmp")) {
+      if (entry.name.startsWith(testPrefix)) {
+        await Deno.remove(`/tmp/${entry.name}`, { recursive: true }).catch(() => {});
+      }
+    }
+  }
+});

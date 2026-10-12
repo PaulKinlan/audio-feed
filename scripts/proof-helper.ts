@@ -131,53 +131,74 @@ export interface ChromeHandle {
 export async function launchChrome(
   opts: ChromeLaunchOptions = {},
 ): Promise<ChromeHandle> {
-  const prefix = opts.prefix ?? "audiofeed-chrome-";
-  const { profileDir, cleanup } = await createTempChromeProfile(prefix);
   const binary = resolveChromeBinary(opts.binary);
+  const prefix = opts.prefix ?? "audiofeed-chrome-";
 
-  const defaultArgs = [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${profileDir}`,
-    "about:blank",
-  ];
+  let profile: { profileDir: string; cleanup: () => Promise<void> } | null = null;
+  let process: Deno.ChildProcess | null = null;
+  let closed = false;
+  let closePromise: Promise<void> | null = null;
 
-  const args = opts.args ? [...opts.args] : defaultArgs;
-  if (opts.args && !args.some((a) => a.startsWith("--user-data-dir="))) {
-    args.push(`--user-data-dir=${profileDir}`);
-  }
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      if (closed) return;
+      closed = true;
+      if (process) {
+        try {
+          process.kill();
+        } catch {
+          // ignore
+        }
+        await process.status.catch(() => {});
+      }
+      if (profile) {
+        await profile.cleanup();
+      }
+    })();
+    return closePromise;
+  };
 
-  let process: Deno.ChildProcess;
   try {
+    profile = await createTempChromeProfile(prefix);
+    const { profileDir } = profile;
+
+    const defaultArgs = [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profileDir}`,
+      "about:blank",
+    ];
+
+    const args = opts.args ? [...opts.args] : defaultArgs;
+    if (opts.args && !args.some((a) => a.startsWith("--user-data-dir="))) {
+      args.push(`--user-data-dir=${profileDir}`);
+    }
+
     const cmd = new Deno.Command(binary, {
       args,
       stdout: "null",
       stderr: "null",
     });
     process = cmd.spawn();
-  } catch (spawnErr) {
-    await cleanup();
-    throw spawnErr;
-  }
 
-  let exited = false;
-  let exitCode: number | null = null;
-  process.status.then((st) => {
-    exited = true;
-    exitCode = st.code;
-  }).catch(() => {});
+    let exited = false;
+    let exitCode: number | null = null;
+    process.status.then((st) => {
+      exited = true;
+      exitCode = st.code;
+    }).catch(() => {});
 
-  const portFile = `${profileDir}/DevToolsActivePort`;
-  const portTimeoutMs = opts.portTimeoutMs ?? 10_000;
-  const startTime = Date.now();
-  let port = 0;
+    const portFile = `${profileDir}/DevToolsActivePort`;
+    const portTimeoutMs = opts.portTimeoutMs ?? 10_000;
+    const startTime = Date.now();
+    let port = 0;
 
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  try {
     while (Date.now() - startTime < portTimeoutMs) {
       if (exited) {
         const content = await Deno.readTextFile(portFile).catch(() => "");
@@ -208,41 +229,23 @@ export async function launchChrome(
         `Timed out after ${portTimeoutMs}ms waiting for DevToolsActivePort in '${profileDir}'`,
       );
     }
-  } catch (readinessErr) {
+
+    return {
+      port,
+      profileDir,
+      process,
+      close,
+    };
+  } catch (err) {
     try {
-      process.kill();
-    } catch {
-      // ignore
-    }
-    await process.status.catch(() => {});
-    await cleanup();
-    throw readinessErr;
-  }
-
-  let closed = false;
-  let closePromise: Promise<void> | null = null;
-  const close = (): Promise<void> => {
-    if (closePromise) return closePromise;
-    closePromise = (async () => {
-      if (closed) return;
-      closed = true;
-      try {
-        process.kill();
-      } catch {
-        // ignore
+      await close();
+    } catch (cleanupErr) {
+      if (err instanceof Error && !err.cause) {
+        err.cause = cleanupErr;
       }
-      await process.status.catch(() => {});
-      await cleanup();
-    })();
-    return closePromise;
-  };
-
-  return {
-    port,
-    profileDir,
-    process,
-    close,
-  };
+    }
+    throw err;
+  }
 }
 
 export async function withChrome<T>(
