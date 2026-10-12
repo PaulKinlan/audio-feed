@@ -199,9 +199,13 @@ try {
   const acao = res.headers.get("access-control-allow-origin");
   if (acao !== "*") {
     // We explicitly assert exactly "*" (a wildcard).
-    // A wildcard is correct here because the player uses <audio crossorigin="anonymous">
-    // and the bytes are authorized by the unguessable URL capability, not by cookies,
-    // so credentials are not sent and a specific origin isn't required.
+    // A wildcard is safe here because audio bytes are authorized by an unguessable URL
+    // capability token (/audio/<key>), not by ambient credentials or session cookies.
+    // For standard playback, the web player uses a plain <audio> element without a
+    // crossorigin attribute (fetching in no-cors mode), so ACAO is not load-bearing for
+    // native playback itself. However, CORS headers are load-bearing for scripted consumers
+    // (e.g. Service Worker offline caching, Web Audio API, or cross-origin podcast tools)
+    // where credentials are not required and any origin holding the capability may read the stream.
     console.error(`FAIL: Expected access-control-allow-origin to be "*", got "${acao}"`);
     Deno.exit(1);
   }

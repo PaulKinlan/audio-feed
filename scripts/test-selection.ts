@@ -653,9 +653,14 @@ export interface NonTsClassification {
 }
 
 /**
- * Classify the non-TypeScript half of a change set against the DERIVED read relation. Callers handle non-.ts
- * files under src/ and tests/ themselves (those keep the conservative full-suite fallback: assets, fixtures)
- * and reach this for everything else.
+ * Classify every non-TypeScript path in a change set against the DERIVED read relation (audio-feed-40ch,
+ * audio-feed-q0kq).
+ *
+ * All non-.ts files (including assets and fixtures under src/ and tests/) are classified here:
+ * 1. Paths a suite is observed to read map to those suites (data, narrow selection).
+ * 2. Paths that are documentation (markdown) and not read by any suite are classified as inert.
+ * 3. Any path with no derived reader falls through to `unclassified`, causing planTests() to run
+ *    the conservative full-suite fallback.
  */
 export function classifyNonTsChanges(
   changed: readonly string[],
