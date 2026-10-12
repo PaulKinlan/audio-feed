@@ -1,0 +1,75 @@
+{
+  "gitSha": "3fd98e28e034cf3bc60b90ef345681d0deb78d38",
+  "gitTree": "fa4371042eb50e3b9e20447b66184de1c584d531",
+  "executedAt": "2026-10-12T19:28:44.156Z",
+  "port": 37589,
+  "baseUrl": "http://127.0.0.1:37589",
+  "canonicalUrlShape": {
+    "pattern": "http://127.0.0.1:37589/audio/<userId>/<mode>/<id>.<ext>",
+    "codeSource": "src/feed/adapter.ts (canonicalAudioKey, enclosureUrl), src/types.ts (audioBlobKey), src/routes/listen.ts",
+    "example": "http://127.0.0.1:37589/audio/user-canonical/direct/ep-canonical-1.wav"
+  },
+  "rows": {
+    "row1_canonicalFeedBytes": {
+      "status": "PASS",
+      "enclosureUrl": "http://127.0.0.1:37589/audio/user-canonical/direct/ep-canonical-1.wav",
+      "httpStatus": 200,
+      "contentType": "audio/wav",
+      "expectedByteLength": 160044,
+      "actualByteLength": 160044,
+      "payloadSha256": "5c74fc38e2c46425036fb4c47e4b433e815b83cf945a443160eb2ae8cd6b7579",
+      "exactByteMatch": true
+    },
+    "row2_alreadyCanonicalUnaffected": {
+      "status": "PASS",
+      "storedAudioKey": "audio/user-canonical/direct/ep-canonical-1.wav",
+      "canonicalDerivedKey": "audio/user-canonical/direct/ep-canonical-1.wav",
+      "keyMatchesStored": true,
+      "headStatus": 200,
+      "rangeStatus": 206,
+      "contentRangeHeader": "bytes 0-99/160044"
+    },
+    "row3_rssAndListenAgreement": {
+      "status": "PASS",
+      "canonicalEpisode": {
+        "rssEnclosureUrl": "http://127.0.0.1:37589/audio/user-canonical/direct/ep-canonical-1.wav",
+        "listenAudioUrl": "http://127.0.0.1:37589/audio/user-canonical/direct/ep-canonical-1.wav",
+        "agrees": true
+      },
+      "historicalLegacyEpisode": {
+        "storedFlatKey": "legacy-historical-audio.mp3",
+        "rssEnclosureUrl": "http://127.0.0.1:37589/audio/user-historical/direct/ep-hist-1.mp3",
+        "listenAudioUrl": "http://127.0.0.1:37589/audio/user-historical/direct/ep-hist-1.mp3",
+        "agrees": true
+      }
+    },
+    "row4_headlessBrowserPlayback": {
+      "status": "PASS",
+      "browserLoaded": true,
+      "listenPageTitle": "Canonical User — Audio Feed",
+      "audioSrcAttribute": "http://127.0.0.1:37589/audio/user-canonical/direct/ep-canonical-1.wav",
+      "audioPlayInitiated": true,
+      "currentTimeObserved": 0.401892,
+      "adoptScopedKeyVerified": true,
+      "screenshotPath": "docs/evidence/audio-feed-ieek/01-listen-canonical-playback.png",
+      "screenshotSizeBytes": 58215
+    }
+  },
+  "historicalFlatOnlyEpisode": {
+    "storedAudioKey": "legacy-historical-audio.mp3",
+    "directionA_canonicalUrl": {
+      "requestedUrl": "http://127.0.0.1:37589/audio/user-historical/direct/ep-hist-1.mp3",
+      "httpStatus": 404,
+      "statusDescription": "404 Not Found (Correct fail-closed)",
+      "isFailClosed": true,
+      "servedWrongBytes": false
+    },
+    "directionB_directFlatKey": {
+      "requestedUrl": "http://127.0.0.1:37589/audio/legacy-historical-audio.mp3",
+      "httpStatus": 404,
+      "statusDescription": "404 Not Found (Correct fail-closed)",
+      "isFailClosed": true
+    }
+  },
+  "unverified": []
+}
