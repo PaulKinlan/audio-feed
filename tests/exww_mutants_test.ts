@@ -37,6 +37,7 @@ import {
   buildScratch,
   interpretRun,
   MUTANTS,
+  PROOF,
   PROOF_REL,
   runProofIn,
 } from "../scripts/exww-mutants.ts";
@@ -76,10 +77,20 @@ Deno.test({
       new Deno.Command(Deno.execPath(), {
         args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
       });
+      // The literal above is what the gate's derivation reads; these two assertions are what make it a COUPLING
+      // rather than a decoration. PROOF is the constant runProofIn actually spawns (scripts/exww-mutants.ts:346),
+      // and PROOF_REL is the exported name the rest of the harness uses. An earlier revision asserted only against
+      // PROOF_REL and a reviewer proved the hole: PROOF could be pointed at a different script while the literal
+      // stayed correct and this test stayed GREEN. Both constants are pinned now, so diverging either one reddens.
       assertEquals(
         "scripts/exww-live-claims-browser-proof.ts",
+        PROOF,
+        "the mapping row must name the script runProofIn actually spawns - otherwise it describes an execution that no longer exists",
+      );
+      assertEquals(
+        PROOF,
         PROOF_REL,
-        "the mapping row must name the same proof runProofIn spawns - otherwise the mapping describes an execution that no longer exists",
+        "the spawn's constant and the exported relation must name the same script",
       );
       const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
