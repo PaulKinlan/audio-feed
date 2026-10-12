@@ -14,6 +14,7 @@
 
 import { openStores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
+import { createTempChromeProfile } from "./proof-helper.ts";
 
 const DEADLINE_MS = 90_000;
 const startedAt = Date.now();
@@ -35,7 +36,7 @@ const app = await bootstrap({
 });
 const serverAddr = app.server.addr as Deno.NetAddr;
 const pageUrl = `http://localhost:${serverAddr.port}/`;
-const profile = await Deno.makeTempDir();
+const { profileDir: profile, cleanup } = await createTempChromeProfile("audiofeed-s3uk-");
 let chrome: Deno.ChildProcess | undefined;
 let socket: WebSocket | undefined;
 
@@ -349,7 +350,7 @@ try {
     await chrome?.status;
   } catch { /* ignored */ }
   try {
-    await Deno.remove(profile, { recursive: true });
+    await cleanup();
   } catch { /* ignored */ }
   await app.server.shutdown();
 }

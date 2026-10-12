@@ -8,6 +8,7 @@
  * did not happen, not merely that nothing visibly failed.
  */
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
+import { createTempChromeProfile } from "../scripts/proof-helper.ts";
 import {
   BACKLOG_ALERT_HOURS,
   BACKLOG_FINGERPRINT,
@@ -139,11 +140,11 @@ function deps(
 }
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await Deno.makeTempDir({ prefix: "audiofeed-agent-test-" });
+  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-");
   try {
-    return await fn(dir);
+    return await fn(profileDir);
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await cleanup();
   }
 }
 
