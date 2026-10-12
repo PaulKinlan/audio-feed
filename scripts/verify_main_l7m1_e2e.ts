@@ -357,13 +357,18 @@ try {
         `violations: ${adminCspViolations.length}`,
       );
 
-      // Set viewport height to cover the retrying table with expanded claim history
+      // Set the viewport height to the FULL DOCUMENT height, not the first table's
+      // bottom (audio-feed-p3bv). The screened-error card and the limits card render
+      // ABOVE the retrying table, so a viewport sized to the table's bottom can never
+      // contain them: that crop was deterministic and made the screenshot caption a
+      // claim the image did not support. The 1275 floor keeps the layout from
+      // collapsing below the height the caption describes.
       const adminHeight = Math.ceil(
         Number(
           await js(
-            `(() => { const t = document.querySelector("table"); return t ? t.getBoundingClientRect().bottom + window.scrollY + 80 : 1300; })()`,
+            `Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0, 1275)`,
           ),
-        ) || 1300,
+        ) || 1275,
       );
       await cdp("Emulation.setDeviceMetricsOverride", {
         width: 1280,
@@ -381,12 +386,23 @@ try {
         Uint8Array.from(atob(shotAdmin.data), (c) => c.charCodeAt(0)),
       );
       try {
+        // This is a FULL-DOCUMENT capture (1280x~2900), the tallest screenshot in the
+        // tree. At the 256-colour palette `deno task evidence:compress` uses it lands at
+        // ~159KB, over the 150KB per-file budget in tests/evidence_size_test.ts, so it is
+        // quantised to 128 colours at max zlib compression instead (~144KB). The page is
+        // text on a flat background - measured RMSE against the 256-colour version is
+        // 0.17%, i.e. invisible at review scale, and the size class the 256-colour rule
+        // exists for (a dark gradient that bands) is not present here. The generator owns
+        // this so a regeneration cannot silently produce an over-budget file.
         const cmd = new Deno.Command("convert", {
           args: [
             `${OUT}01-admin-observability.png`,
+            "-strip",
             "-colors",
-            "256",
-            `png8:${OUT}01-admin-observability.png.tmp`,
+            "128",
+            "-define",
+            "png:compression-level=9",
+            `PNG8:${OUT}01-admin-observability.png.tmp`,
           ],
         });
         const out = await cmd.output();
@@ -688,8 +704,9 @@ try {
           {
             heading: "Methodology & Environment",
             body:
-              `- **Harness:** In-process application server initialized with \`bootstrap({ stores: memoryStores() })\` on a dynamic port (\`port: 0\`).
-- **Browser Execution:** Real headless Chrome launched via shared \`withChrome\` harness over CDP, ensuring sandbox isolation and automatic profile cleanup.
+              `- **Harness:** In-process application server initialized with \`bootstrap({ stores: memoryStores() })\` on a dynamic port (\`port: 0\`), so the proof never contends for a fixed port and a moved port cannot masquerade as a pass.
+- **Browser Execution:** Real headless Chrome driven over CDP by the shared \`withChrome\` harness at a 1280-wide desktop viewport, with an isolated user-data-dir and automatic profile cleanup. These are live-page assertions, not a DOM shim: the CSP counters, the \`<details>\` disclosures and the \`<audio>\` element are read out of a real browser.
+- **Capture method:** Screenshots are viewport grabs sized to the content each caption names - the admin grab is sized to the full document so the screened-error and limits cards are in frame, and the bookmarklet grab is taken after the box is scrolled into view and its disclosure opened. A caption describes only states that the accompanying image actually contains.
 - **Seeded Test Fixtures:**
   - Admin user with authenticated session cookie \`__Host-af_session\`.
   - Approved subscriber with feed token \`sub-feed-token-l7m1\`.
@@ -699,25 +716,33 @@ try {
           },
           {
             heading: "Verified Features and Behaviors",
-            body: `### 1. Admin Observability (/admin/observability)
-- Screened unhandled error messages (canary screened to SUPPRESSED_MESSAGE).
-- Limits card documents screened errors and upload retries.
-- Retrying queue table renders uploadRetry counter, reason, and expandable claim history.
-- Zero CSP console violations.
+            body: `### 1. Admin Observability (\`/admin/observability\`)
+- **Unhandled Error Screening (\`audio-feed-sw1r\`, \`audio-feed-nh18\`):**
+  - Injected an untrusted client canary (\`canary-client-token-998877\`) through a real throwing request (\`/__test/throw\`).
+  - Verified the server catches the unhandled error and screens it to \`message suppressed (not authored by this codebase)\`.
+  - Verified the raw client canary is completely absent from the rendered HTML failure card and from all durable logs.
+- **Limits Documentation:** the limits card explicitly states that unhandled request errors record their class and screened message, and that upload retries carry a distinct \`uploadRetry\` counter bounded by \`maxUploadRetries\`.
+- **Retrying Queue Table (\`audio-feed-lqd6\`, \`audio-feed-muio\`, \`audio-feed-yrg4\`):**
+  - Renders the durable \`uploadRetry\` counter (value: \`2\`).
+  - Renders the non-blank last recorded reason (\`Invocation budget exceeded during audio upload; claim yielded for retry\`).
+  - Renders an expandable \`Claim history\` \`<details>\` that opens on click to reveal the historical attempts.
+- **CSP Integrity:** zero Content Security Policy console violations on \`/admin/observability\`.
 
-### 2. Homepage Bookmarklet (/)
-- Renders bookmarklet anchor without duplicate class attributes.
-- Bookmarklet code disclosure fallback verified openable with matching source.
-- Zero CSP console violations.
+### 2. Homepage Bookmarklet (\`/\`)
+- Renders the draggable bookmarklet anchor with a \`javascript:\` URL and no duplicate class attributes.
+- **Bookmarklet Code Disclosure Fallback (\`audio-feed-3asd\`):**
+  - Verified that \`<details class="bookmarklet-code">\` exists under the bookmarklet box on main.
+  - Verified that clicking the summary expands the disclosure to reveal the copyable bookmarklet snippet.
+  - Verified that the snippet text exactly matches the anchor's \`javascript:\` URL (617 characters).
+- **CSP Integrity:** zero Content Security Policy console violations on the homepage.
 
-### 3. Audio, RSS, and Web Player (/listen/...)
-- RSS XML enclosure URL and HTTP 200 verification.
-- Direct audio streaming matches byte-for-byte (${audioBytes.byteLength} bytes).
-- Canonical URL for flat-key historical episode returns 404.
-- Access boundary checks: invalid/unauthorized keys return 404/403.
-- Web Player renders episode in playlist and audio element with zero CSP violations.
-- Playback position saves via pagehide event.
-- Account page bookmarklet disclosure verified openable and non-overflowing.`,
+### 3. RSS Feed, Audio Route, and Web Player (\`/listen/...\`)
+- **RSS Enclosure:** the master feed renders valid XML with an \`<enclosure>\` element pointing at the seeded episode with \`type="audio/wav"\`.
+- **Audio Streaming (\`audio-feed-7n3f\`):** a direct request to the enclosure URL returns \`200 OK\`, \`content-type: audio/wav\`, and a byte-for-byte exact payload matching the stored blob (${audioBytes.byteLength} bytes).
+- **Capability Isolation:** requests to unauthorized or invalid audio keys return 404/403, and a flat-key historical episode path fails closed with a canonical 404.
+- **Web Player:** real Chrome loaded the subscriber's \`/listen\` page and rendered the audio element and playlist; the playback position saved via the \`pagehide\` event.
+- **CSP Integrity:** zero Content Security Policy console violations on \`/listen\`.
+- **Account page:** the bookmarklet disclosure is verified openable and its snippet does not overflow its box.`,
           },
           {
             heading: "Execution Log",
@@ -730,7 +755,7 @@ try {
           {
             heading: "Screenshots",
             body:
-              `- 01-admin-observability.png: Full-page capture of admin observability console showing screened error message, limits card, and retrying queue table with expanded claim history.
+              `- 01-admin-observability.png: Full-page capture (1280 x document height) of the admin observability console, showing the screened error message, the limits card (the card headed "What this page cannot tell you"), and the retrying queue table with its claim history expanded.
 - 02-homepage-bookmarklet-main.png: Scrolled view of front door bookmarklet box showing draggable anchor and expanded bookmarklet-code disclosure fallback.
 - 03-listen-web-player.png: Web player at /listen rendering ready episode with audio controls.`,
           },
