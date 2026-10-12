@@ -226,120 +226,160 @@ await Deno.mkdir(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-await runProof("audio-feed-exww", async (checker) => {
-  const stores: Stores = memoryStores();
-  const config: AppConfig = {
-    port: 0,
-    adminToken: "harness-admin",
-    defaultDailyEpisodeBudget: 10,
-  };
+// The fixtures and server run in this process. Freeze only their wall clock; Chrome startup,
+// polling and teardown retain real time. Concurrent HTTP responses share the shim until all finish.
+const FROZEN_NOW_MS = Date.parse("2026-10-12T12:00:00.000Z");
+const realDate = Date;
+const frozenDate = new Proxy(realDate, {
+  construct(target, args, newTarget) {
+    return Reflect.construct(target, args.length ? args : [FROZEN_NOW_MS], newTarget);
+  },
+  get(target, property, receiver) {
+    return property === "now" ? () => FROZEN_NOW_MS : Reflect.get(target, property, receiver);
+  },
+});
+let clockUsers = 0;
+async function withFrozenClock<T>(work: () => Promise<T>): Promise<T> {
+  if (clockUsers++ === 0) globalThis.Date = frozenDate;
+  try {
+    return await work();
+  } finally {
+    if (--clockUsers === 0) globalThis.Date = realDate;
+  }
+}
+function assertClockRestored(): void {
+  const realNowMs = realDate.now();
+  const restored = clockUsers === 0 && Date === realDate &&
+    Math.abs(Date.now() - realNowMs) < 1_000;
+  globalThis.Date = realDate;
+  if (!restored) throw new Error("exww: proof clock leaked past fixture or response scope");
+  console.log(`exww: real clock restored (${new Date(realNowMs).toISOString()})`);
+}
+console.log(`exww: injected proof clock ${new Date(FROZEN_NOW_MS).toISOString()}`);
+console.log("exww: injected worker owner worker-proof");
 
-  const rawUser = await createUser(stores.metadata, {
-    email: "paul@example.com",
-    displayName: "Paul Kinlan",
-    isAdmin: true,
-  });
-  const user = await approveUser(stores.metadata, rawUser.id, "admin");
-  const sessionSecret = await createSession(stores.metadata, user.id);
-  await stores.metadata.putSource(makeSource({ id: "src-1", userId: user.id }));
-  await stores.metadata.putArticle(
-    makeArticle({
-      id: "art-failing",
-      userId: user.id,
-      sourceId: "src-1",
-      title: "An Article That Fails",
-      content: "First paragraph. Second paragraph.",
-      excerpt: "A short summary.",
-    }),
-  );
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: "ep-failing",
-      userId: user.id,
-      sourceId: "src-1",
-      articleId: "art-failing",
-      title: "An Article That Fails",
-      status: "pending",
-      audioKey: undefined,
-      mode: "direct",
-    }),
-  );
+const proof = runProof("audio-feed-exww", async (checker) => {
+  const { stores, config, sessionSecret, liveExpiryIso, liveExpiryDisplay, expiredExpiryIso } =
+    await withFrozenClock(async () => {
+      const stores: Stores = memoryStores();
+      const config: AppConfig = {
+        port: 0,
+        adminToken: "harness-admin",
+        defaultDailyEpisodeBudget: 10,
+      };
 
-  // (1) A REAL failure, through the REAL worker: the provider answers HTTP 500, which the worker
-  // classifies as a provider verdict and records on the episode and in the log store. This is the
-  // "real error" half of the acceptance - not a hand-written log line.
-  const failingSynthesizer: Synthesizer = () => {
-    const client = new GeminiTtsClient({
-      apiKey: "proof-key",
-      fetchFn: (() =>
-        Promise.resolve(
-          new Response(JSON.stringify({ error: { message: "quota" } }), { status: 500 }),
-        )) as typeof fetch,
-      retryOn: "none",
-      retryBaseDelayMs: 1,
+      const rawUser = await createUser(stores.metadata, {
+        email: "paul@example.com",
+        displayName: "Paul Kinlan",
+        isAdmin: true,
+      });
+      const user = await approveUser(stores.metadata, rawUser.id, "admin");
+      const sessionSecret = await createSession(stores.metadata, user.id);
+      await stores.metadata.putSource(makeSource({ id: "src-1", userId: user.id }));
+      await stores.metadata.putArticle(
+        makeArticle({
+          id: "art-failing",
+          userId: user.id,
+          sourceId: "src-1",
+          title: "An Article That Fails",
+          content: "First paragraph. Second paragraph.",
+          excerpt: "A short summary.",
+        }),
+      );
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: "ep-failing",
+          userId: user.id,
+          sourceId: "src-1",
+          articleId: "art-failing",
+          title: "An Article That Fails",
+          status: "pending",
+          audioKey: undefined,
+          mode: "direct",
+        }),
+      );
+
+      // (1) A REAL failure, through the REAL worker: the provider answers HTTP 500, which the worker
+      // classifies as a provider verdict and records on the episode and in the log store. This is the
+      // "real error" half of the acceptance - not a hand-written log line.
+      const failingSynthesizer: Synthesizer = () => {
+        const client = new GeminiTtsClient({
+          apiKey: "proof-key",
+          fetchFn: (() =>
+            Promise.resolve(
+              new Response(JSON.stringify({ error: { message: "quota" } }), { status: 500 }),
+            )) as typeof fetch,
+          retryOn: "none",
+          retryBaseDelayMs: 1,
+        });
+        return client.synthesizeNarration({ title: "An Article That Fails", body: "hello" });
+      };
+      await recordRun(
+        { config, stores },
+        "synthesis",
+        "cron",
+        () =>
+          runSynthesisBatch({ config, stores }, failingSynthesizer, {
+            maxAttempts: 1,
+            owner: "worker-proof",
+          }),
+        (result) => ({
+          ready: result.ready.length,
+          failed: result.failed.length,
+          deferred: result.deferred.length,
+          errors: result.failed.map((f) => `Episode ${f.episodeId}: ${f.error}`),
+        }),
+      );
+      const failedEpisode = await stores.metadata.getEpisode(user.id, "ep-failing");
+      checker.check(
+        "the worker recorded a REAL provider failure for ep-failing",
+        failedEpisode?.status === "failed" &&
+          (failedEpisode.error ?? "").includes("provider status 500"),
+        `status=${failedEpisode?.status} error=${failedEpisode?.error}`,
+      );
+
+      // (2) Two live claims, written through the REAL storage transitions (claimEpisode writes the
+      // claim, touchEpisodeClaim writes the phase). Neither worker is running: these are exactly the
+      // rows the page has to show while nobody is.
+      const liveClaimedAt = new Date(FROZEN_NOW_MS - 2 * 60_000).toISOString();
+      const leaseMs = 15 * 60_000;
+      const expiredClaimedAt = new Date(FROZEN_NOW_MS - 20 * 60_000).toISOString();
+
+      const liveClaim = async (episodeId: string, claimedAt: string, phase: string) => {
+        await stores.metadata.putEpisode(
+          makeEpisode({
+            id: episodeId,
+            userId: user.id,
+            sourceId: "src-1",
+            articleId: "art-failing",
+            title: `Held ${episodeId}`,
+            status: "pending",
+            audioKey: undefined,
+            mode: "direct",
+            createdAt: claimedAt,
+          }),
+        );
+        const claimed = await stores.metadata.claimEpisode(user.id, episodeId, {
+          owner: `worker-${episodeId}`,
+          now: claimedAt,
+          leaseMs,
+          maxClaims: 3,
+        });
+        if (!claimed) throw new Error(`the proof could not take the claim for ${episodeId}`);
+        await stores.metadata.touchEpisodeClaim(user.id, episodeId, `worker-${episodeId}`, {
+          phase,
+          now: claimedAt,
+        });
+      };
+
+      await liveClaim("ep-uploading", liveClaimedAt, "uploading_audio");
+      await liveClaim("ep-expired", expiredClaimedAt, "uploading_audio");
+
+      const liveExpiryIso = new Date(Date.parse(liveClaimedAt) + leaseMs).toISOString();
+      const liveExpiryDisplay = `${liveExpiryIso.replace("T", " ").slice(0, 19)}Z`;
+      const expiredExpiryIso = new Date(Date.parse(expiredClaimedAt) + leaseMs).toISOString();
+      return { stores, config, sessionSecret, liveExpiryIso, liveExpiryDisplay, expiredExpiryIso };
     });
-    return client.synthesizeNarration({ title: "An Article That Fails", body: "hello" });
-  };
-  await recordRun(
-    { config, stores },
-    "synthesis",
-    "cron",
-    () => runSynthesisBatch({ config, stores }, failingSynthesizer, { maxAttempts: 1 }),
-    (result) => ({
-      ready: result.ready.length,
-      failed: result.failed.length,
-      deferred: result.deferred.length,
-      errors: result.failed.map((f) => `Episode ${f.episodeId}: ${f.error}`),
-    }),
-  );
-  const failedEpisode = await stores.metadata.getEpisode(user.id, "ep-failing");
-  checker.check(
-    "the worker recorded a REAL provider failure for ep-failing",
-    failedEpisode?.status === "failed" &&
-      (failedEpisode.error ?? "").includes("provider status 500"),
-    `status=${failedEpisode?.status} error=${failedEpisode?.error}`,
-  );
-
-  // (2) Two live claims, written through the REAL storage transitions (claimEpisode writes the
-  // claim, touchEpisodeClaim writes the phase). Neither worker is running: these are exactly the
-  // rows the page has to show while nobody is.
-  const liveClaimedAt = new Date(Date.now() - 2 * 60_000).toISOString();
-  const leaseMs = 15 * 60_000;
-  const expiredClaimedAt = new Date(Date.now() - 20 * 60_000).toISOString();
-
-  const liveClaim = async (episodeId: string, claimedAt: string, phase: string) => {
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: episodeId,
-        userId: user.id,
-        sourceId: "src-1",
-        articleId: "art-failing",
-        title: `Held ${episodeId}`,
-        status: "pending",
-        audioKey: undefined,
-        mode: "direct",
-        createdAt: claimedAt,
-      }),
-    );
-    const claimed = await stores.metadata.claimEpisode(user.id, episodeId, {
-      owner: `worker-${episodeId}`,
-      now: claimedAt,
-      leaseMs,
-      maxClaims: 3,
-    });
-    if (!claimed) throw new Error(`the proof could not take the claim for ${episodeId}`);
-    await stores.metadata.touchEpisodeClaim(user.id, episodeId, `worker-${episodeId}`, {
-      phase,
-      now: claimedAt,
-    });
-  };
-
-  await liveClaim("ep-uploading", liveClaimedAt, "uploading_audio");
-  await liveClaim("ep-expired", expiredClaimedAt, "uploading_audio");
-
-  const liveExpiryIso = new Date(Date.parse(liveClaimedAt) + leaseMs).toISOString();
-  const liveExpiryDisplay = `${liveExpiryIso.replace("T", " ").slice(0, 19)}Z`;
-  const expiredExpiryIso = new Date(Date.parse(expiredClaimedAt) + leaseMs).toISOString();
 
   // (3) The store proxy that lets ONE server answer all three conditions. The unhealthy-worker
   // conditions are not different apps: they are the same app with the reads a dead worker breaks
@@ -386,7 +426,10 @@ await runProof("audio-feed-exww", async (checker) => {
   const handlers = createHandlers(ctx);
   const { fetch: appFetch } = createApp(ctx, handlers);
 
-  const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+  const server = Deno.serve(
+    { port: 0, onListen: () => {} },
+    (req, info) => withFrozenClock(() => appFetch(req, info)),
+  );
   const PORT = (server.addr as Deno.NetAddr).port;
   const BASE = `http://localhost:${PORT}`;
   config.port = PORT;
@@ -430,8 +473,8 @@ await runProof("audio-feed-exww", async (checker) => {
       }
 
       async function until(expr: string, desc = expr, timeout = 10_000) {
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
           if (await js(`Boolean(${expr})`)) return;
           await sleep(50);
         }
@@ -1034,7 +1077,10 @@ await runProof("audio-feed-exww", async (checker) => {
           {
             heading: "How the state was produced",
             body:
-              `- The **failure** is real, not hand-written: \`scripts/exww-live-claims-browser-proof.ts\` runs the actual
+              `- The proof **injects a frozen clock at 2026-10-12T12:00:00.000Z** for fixture writes and
+  page responses, so the committed captures show fixed lease/read instants and failure times.
+  The failed worker also uses the injected owner \`worker-proof\`, so its attempt history is stable.
+- The **failure** is real, not hand-written: \`scripts/exww-live-claims-browser-proof.ts\` runs the actual
   \`runSynthesisBatch\` against a \`GeminiTtsClient\` whose transport answers HTTP 500, and records the run
   through the real \`recordRun\`. The page then renders the provider failure the worker wrote.
 - The **live claims** are written by the REAL storage transitions (\`claimEpisode\` then
@@ -1153,3 +1199,8 @@ distributional statistic.
     await server.shutdown().catch(() => {});
   }
 });
+try {
+  await proof;
+} finally {
+  assertClockRestored();
+}
