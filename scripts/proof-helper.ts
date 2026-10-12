@@ -682,15 +682,23 @@ export async function writeEvidenceReadme(
   options: EvidenceReadmeOptions,
 ): Promise<string> {
   const activeProof = activeProofStorage.getStore();
-  const activeChecker = options.checker ?? activeProof?.checker;
-  if (activeChecker && activeChecker.failures.length > 0) {
-    const summary = activeChecker.failures
-      .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
-      .join("; ");
-    const proofLabel = activeProof?.name ? ` for proof '${activeProof.name}'` : "";
-    throw new Error(
-      `Refusing to write evidence README${proofLabel}: proof has ${activeChecker.failures.length} recorded failure(s): ${summary}`,
-    );
+  const checkers: Checker[] = [];
+  if (activeProof?.checker) {
+    checkers.push(activeProof.checker);
+  }
+  if (options.checker && options.checker !== activeProof?.checker) {
+    checkers.push(options.checker);
+  }
+  for (const checker of checkers) {
+    if (checker.failures.length > 0) {
+      const summary = checker.failures
+        .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
+        .join("; ");
+      const proofLabel = activeProof?.name ? ` for proof '${activeProof.name}'` : "";
+      throw new Error(
+        `Refusing to write evidence README${proofLabel}: proof has ${checker.failures.length} recorded failure(s): ${summary}`,
+      );
+    }
   }
 
   const isCapture = Boolean(options.capture);

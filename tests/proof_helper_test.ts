@@ -1166,6 +1166,140 @@ Deno.test("proof-helper: writeEvidenceReadme refuses to write when options.check
   }
 });
 
+Deno.test("proof-helper: writeEvidenceReadme refuses to write when active runProof has failures even if options.checker passes (audio-feed-nksl)", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "evidence-readme-bypass-" });
+  try {
+    const passingChecker = createChecker(() => {});
+    assertEquals(passingChecker.failures.length, 0);
+
+    const err = await assertRejects(
+      async () => {
+        await runProof(
+          "test-bypass-proof",
+          async (activeChecker) => {
+            activeChecker.check("failing active step", false, "active fail reason");
+
+            // Attempt to write evidence README with a clean/passing explicit checker
+            await writeEvidenceReadme({
+              dir,
+              title: "Bypass Attempt Report",
+              script: "scripts/test-bypass-proof.ts",
+              asserts: ["failing active step"],
+              checker: passingChecker,
+            });
+          },
+          { logger: () => {} },
+        );
+      },
+      Error,
+      "Refusing to write evidence README for proof 'test-bypass-proof': proof has 1 recorded failure(s): failing active step (active fail reason)",
+    );
+
+    assertStringIncludes(
+      err.message,
+      "Refusing to write evidence README for proof 'test-bypass-proof'",
+    );
+    assertStringIncludes(err.message, "failing active step (active fail reason)");
+
+    // Target evidence directory remains untouched / no README.md was created
+    const files = [...Deno.readDirSync(dir)];
+    assertEquals(
+      files.length,
+      0,
+      `Expected 0 files written to evidence dir on failure, found: ${
+        files.map((f) => f.name).join(", ")
+      }`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("proof-helper: writeEvidenceReadme refuses to write when active runProof passes but options.checker has failures", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "evidence-readme-explicit-fail-" });
+  try {
+    const failingChecker = createChecker(() => {});
+    try {
+      failingChecker.check("explicit failure", false, "explicit fail reason");
+    } catch {
+      // immediate throw caught
+    }
+    assertEquals(failingChecker.failures.length, 1);
+
+    const err = await assertRejects(
+      async () => {
+        await runProof(
+          "test-active-pass-explicit-fail-proof",
+          async (activeChecker) => {
+            activeChecker.check("passing active step", true);
+
+            await writeEvidenceReadme({
+              dir,
+              title: "Explicit Fail Report",
+              script: "scripts/test-proof.ts",
+              asserts: ["passing active step"],
+              checker: failingChecker,
+            });
+          },
+          { logger: () => {} },
+        );
+      },
+      Error,
+      "Refusing to write evidence README for proof 'test-active-pass-explicit-fail-proof': proof has 1 recorded failure(s): explicit failure (explicit fail reason)",
+    );
+
+    assertStringIncludes(
+      err.message,
+      "Refusing to write evidence README for proof 'test-active-pass-explicit-fail-proof'",
+    );
+    assertStringIncludes(err.message, "explicit failure (explicit fail reason)");
+
+    const files = [...Deno.readDirSync(dir)];
+    assertEquals(
+      files.length,
+      0,
+      `Expected 0 files written to evidence dir on failure, found: ${
+        files.map((f) => f.name).join(", ")
+      }`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("proof-helper: writeEvidenceReadme succeeds inside runProof when both active checker and options.checker pass", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "evidence-readme-both-pass-" });
+  try {
+    const passingChecker = createChecker(() => {});
+    passingChecker.check("passing explicit step", true);
+    assertEquals(passingChecker.failures.length, 0);
+
+    await runProof(
+      "test-both-pass-proof",
+      async (checker) => {
+        checker.check("passing active step 1", true);
+        checker.check("passing active step 2", true, "detail 2");
+
+        await writeEvidenceReadme({
+          dir,
+          title: "Both Passing Proof Report",
+          script: "scripts/test-both-pass-proof.ts",
+          asserts: ["passing active step 1", "passing active step 2"],
+          checker: passingChecker,
+        });
+      },
+      { logger: () => {} },
+    );
+
+    const readmeContent = await Deno.readTextFile(`${dir}/README.md`);
+    assertStringIncludes(readmeContent, "# Both Passing Proof Report");
+    assertStringIncludes(readmeContent, "- Script: scripts/test-both-pass-proof.ts");
+    assertStringIncludes(readmeContent, "- Asserts: passing active step 1; passing active step 2");
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test("proof-helper: writeEvidenceReadme succeeds inside runProof when all checks pass", async () => {
   const dir = await Deno.makeTempDir({ prefix: "evidence-readme-guard-pass-" });
   try {
