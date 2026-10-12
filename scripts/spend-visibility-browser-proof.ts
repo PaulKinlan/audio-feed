@@ -125,7 +125,7 @@ try {
   await until(`document.getElementById("bootstrapDetails")?.open === true`, "bootstrap open");
 
   await js(`
-    document.getElementById("bootstrapEmail").value = "paul@example.com";
+    document.getElementById("bootstrapEmail").value = "spendadmin@example.com";
     document.getElementById("bootstrapToken").value = "harness-admin";
     document.getElementById("bootstrapForm").requestSubmit();
   `);
