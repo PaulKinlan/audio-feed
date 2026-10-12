@@ -52,40 +52,36 @@ const BASE = `http://localhost:${PORT}`;
 config.port = PORT;
 config.publicBaseUrl = BASE;
 
-const chrome = new Deno.Command(newestChrome(), {
-  args: [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${PROFILE}`,
-    "about:blank",
-  ],
-  stdout: "null",
-  stderr: "null",
-}).spawn();
+const chromeArgs = [
+  "--headless=new",
+  "--no-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--remote-debugging-port=0",
+  `--user-data-dir=${PROFILE}`,
+  "about:blank",
+];
 
-let debugPort = "";
-for (let i = 0; i < 100 && !debugPort; i++) {
-  await sleep(100);
-  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
-    "\n",
-  )[0]!;
-}
-if (!debugPort) throw new Error("Chrome did not open a debug port");
-
-const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
-const page = targets.find((t: { type: string }) => t.type === "page");
-const ws = new WebSocket(page.webSocketDebuggerUrl);
-await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+/**
+ * audio-feed-90f0: the spawn, the debug-port wait, the target discovery and the websocket now all live
+ * INSIDE the try below, so a STARTUP failure - Chrome missing, refusing to start, or never writing
+ * DevToolsActivePort - is cleaned up exactly like a failed assertion. Before this, the throw at the
+ * debug-port check ran before the try/finally: it leaked the Chrome profile, a half-started Chrome
+ * process was never chrome.kill()ed, and the in-process server was never shut down. A verification
+ * script that can leave a browser and a server behind on its failure path is a hazard to every later
+ * lane on this VM, which is why rev-26 filed it as a finding rather than a nit.
+ */
+let chrome: Deno.ChildProcess | undefined;
+/** Assigned inside the try, once the DevTools websocket is open. */
+let ws: WebSocket | undefined;
 
 let nextId = 0;
 const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
 /** Console entries seen since the last navigation, so the click's own entry can be isolated. */
 const consoleEntries: string[] = [];
 
-ws.addEventListener("message", (e) => {
+/** Wired up inside the try, right after the websocket opens. */
+function onMessage(e: MessageEvent) {
   const msg = JSON.parse(e.data);
   if (msg.id && pending.has(msg.id)) {
     pending.get(msg.id)!(msg);
@@ -96,7 +92,7 @@ ws.addEventListener("message", (e) => {
     const entry = msg.params?.entry as { level?: string; text?: string };
     if (entry?.text) consoleEntries.push(`[${entry.level}] ${entry.text}`);
   }
-});
+}
 
 function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const id = ++nextId;
@@ -105,7 +101,7 @@ function cdp(method: string, params: Record<string, unknown> = {}): Promise<unkn
       if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
       else resolve(res.result);
     });
-    ws.send(JSON.stringify({ id, method, params }));
+    ws!.send(JSON.stringify({ id, method, params }));
   });
 }
 
@@ -139,6 +135,27 @@ function check(name: string, pass: boolean, detail?: string) {
 
 let exitCode = 0;
 try {
+  chrome = new Deno.Command(newestChrome(), {
+    args: chromeArgs,
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+
+  let debugPort = "";
+  for (let i = 0; i < 100 && !debugPort; i++) {
+    await sleep(100);
+    debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+      "\n",
+    )[0]!;
+  }
+  if (!debugPort) throw new Error("Chrome did not open a debug port");
+
+  const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
+  const page = targets.find((t: { type: string }) => t.type === "page");
+  ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((r) => ws!.addEventListener("open", r, { once: true }));
+  ws.addEventListener("message", onMessage);
+
   await cdp("Page.enable");
   await cdp("Runtime.enable");
   await cdp("Log.enable");
@@ -345,16 +362,33 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail ?? ""}`)
   console.error("Browser proof failed:", err);
   exitCode = 1;
 } finally {
+  // Every one of these is best-effort and independently guarded: on the startup-failure path most of
+  // them have nothing to clean, and a cleanup error must never mask the real failure (audio-feed-90f0).
   try {
-    chrome.kill();
+    chrome?.kill();
+    // Wait for the browser to actually exit before deleting its profile. Without this the remove below
+    // races Chrome's shutdown writes and fails with ENOTEMPTY - which is how this script left eight
+    // /tmp/audiofeed-proof-kvnw-* directories behind on its SUCCESS path (audio-feed-90f0).
+    if (chrome) {
+      await Promise.race([chrome.status, sleep(5_000)]);
+    }
+  } catch { /* ignore */ }
+  try {
+    ws?.close();
   } catch { /* ignore */ }
   try {
     await server.shutdown();
   } catch { /* ignore */ }
   try {
     await Deno.remove(PROFILE, { recursive: true });
+  } catch (err) {
+    // NOT silent: a leaked profile is exactly the defect this cleanup exists to prevent, so say so and
+    // say where it is. The exit code still follows the assertions, not the cleanup.
+    console.error(`cleanup: could not remove the Chrome profile ${PROFILE}: ${err}`);
+  }
+  try {
+    await stores.metadata.close();
   } catch { /* ignore */ }
-  await stores.metadata.close();
 }
 
 if (exitCode !== 0 || checks.some((c) => !c.pass)) {
