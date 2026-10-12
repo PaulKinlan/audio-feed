@@ -159,3 +159,16 @@ Deno.test("playback position: private mode / storage exceptions degrade safely (
   }
   assertEquals(threw, false, "storage exception must be caught and degraded safely");
 });
+
+Deno.test("playback position: client script uses pagehide and visibilitychange, not beforeunload (audio-feed-dfbu)", async () => {
+  const { fetch } = await setupApp();
+  const html = await (await fetch(new Request(`${BASE}/listen/${TOKEN_A}`))).text();
+  const client = await playerClient(fetch, BASE, html);
+
+  assertStringIncludes(client, 'addEventListener("pagehide"');
+  assertStringIncludes(client, 'addEventListener("visibilitychange"');
+  assert(
+    !client.includes('addEventListener("beforeunload"'),
+    "player script must not register beforeunload listener (audio-feed-dfbu)",
+  );
+});

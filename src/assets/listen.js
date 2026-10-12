@@ -1444,10 +1444,24 @@ audio.addEventListener("error", () => {
   );
 });
 
-window.addEventListener("beforeunload", () => {
+function saveCurrentPlaybackPosition() {
   if (current && audio.currentTime > 2 && !audio.ended) {
     savePosition(current.id, audio.currentTime);
   }
+}
+
+// audio-feed-dfbu: Use pagehide and visibilitychange instead of beforeunload.
+// beforeunload is unreliable on mobile, often restricted, and its registration
+// can disable the back/forward cache (bfcache). pagehide and visibilitychange (hidden)
+// reliably persist playback state without preventing bfcache restoration.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    saveCurrentPlaybackPosition();
+  }
+});
+
+window.addEventListener("pagehide", () => {
+  saveCurrentPlaybackPosition();
 });
 
 // ---- OS media controls --------------------------------------------------
