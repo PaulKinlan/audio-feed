@@ -298,10 +298,12 @@ await runProof("repro_tts_brittleness_9yu8", async (checker) => {
   const partB = report.partB_deadlineRetry as {
     outcome: Record<string, unknown>;
     httpCallsMade: number;
+    http: HttpObservation[];
   };
   const partC = report.partC_retryOptOut as {
     outcome: Record<string, unknown>;
     httpCallsMade: number;
+    http: HttpObservation[];
   };
   const partD = report.partD_providerVerdict as {
     outcome: Record<string, unknown>;
@@ -316,8 +318,13 @@ await runProof("repro_tts_brittleness_9yu8", async (checker) => {
   );
   checker.check(
     "forced timeout retries once on default policy",
-    partB.httpCallsMade === 2 && partB.outcome.result === "failure",
-    `calls: ${partB.httpCallsMade}, result: ${partB.outcome.result}`,
+    partB.httpCallsMade === 2 &&
+      partB.outcome.result === "failure" &&
+      partB.http.length === 2 &&
+      partB.http.every((h) => h.errorName === "TimeoutError"),
+    `calls: ${partB.httpCallsMade}, result: ${partB.outcome.result}, errors: ${
+      partB.http.map((h) => h.errorName).join(",")
+    }`,
   );
   checker.check(
     "timeout error surfaces as transient without provider HTTP status",
@@ -326,8 +333,11 @@ await runProof("repro_tts_brittleness_9yu8", async (checker) => {
   );
   checker.check(
     "forced timeout with retryOn none makes exactly one HTTP attempt",
-    partC.httpCallsMade === 1,
-    `calls: ${partC.httpCallsMade}`,
+    partC.httpCallsMade === 1 &&
+      partC.outcome.result !== "unexpected success" &&
+      partC.http.length === 1 &&
+      partC.http[0]?.errorName === "TimeoutError",
+    `calls: ${partC.httpCallsMade}, error: ${partC.http[0]?.errorName}`,
   );
   checker.check(
     "provider model rejection preserves provider 404 status and marks failure permanent",
