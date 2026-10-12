@@ -76,6 +76,23 @@ async function queued(userOverrides = {}, sourceOverrides = {}) {
   return { ctx, stores, fetch };
 }
 
+/** Bounded condition wait for asynchronous worker loops. */
+async function waitFor(
+  predicate: () => boolean,
+  describe: string | (() => string),
+  timeoutMs = 5000,
+  intervalMs = 5,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      const details = typeof describe === "function" ? describe() : describe;
+      throw new Error(`timed out waiting ${timeoutMs}ms for ${details}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 Deno.test("a queued episode is synthesised, stored and marked ready", async () => {
   const { ctx, stores } = await queued();
   let calls = 0;
@@ -369,7 +386,10 @@ Deno.test("the loop runs a tick, stops on abort, and never dies on a bad tick", 
       },
     },
   );
-  await new Promise((r) => setTimeout(r, 60));
+  await waitFor(
+    () => failTicks.n >= 2,
+    () => `failTicks.n >= 2, got ${failTicks.n}`,
+  );
   abort.abort();
   await fragile.stop();
   // The episode is marked failed on the first tick (correctly — no retry spend),
