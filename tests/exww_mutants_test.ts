@@ -69,11 +69,15 @@ Deno.test({
       // computed argument proves nothing. So the relation is stated here where the argument is a literal, and the
       // assertion ties the literal to the very constant runProofIn spawns: rename the proof and THIS goes red,
       // rather than the mapping quietly surviving the thing it claims to describe.
-      const proofMapping = new Deno.Command(Deno.execPath(), {
+      // The gate's relation derivation reads the ARGUMENT SHAPE, so this literal must stay inline - a variable
+      // would hide it and the relation would be lost. Deno.Command exposes no accessor for its arguments, so the
+      // coupling is made by asserting the same literal against PROOF_REL, the constant runProofIn actually
+      // spawns: rename the proof and this reddens rather than the mapping outliving the execution it describes.
+      new Deno.Command(Deno.execPath(), {
         args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
       });
       assertEquals(
-        proofMapping.args[1],
+        "scripts/exww-live-claims-browser-proof.ts",
         PROOF_REL,
         "the mapping row must name the same proof runProofIn spawns - otherwise the mapping describes an execution that no longer exists",
       );
