@@ -556,7 +556,7 @@ timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write sc
       {
         heading: "Verdict",
         body:
-          `**VERIFIED.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.`,
+          `**VERIFIED as of the 2026-10-08 run; NOTE: declared negative-control claims no longer hold against the live provider — see the live verification status section above.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose as observed on that run, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.`,
       },
     ],
   });

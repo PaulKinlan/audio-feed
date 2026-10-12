@@ -384,7 +384,7 @@ The largest segment is 1,372 tokens (16.75% of the published input cap), matchin
       {
         heading: "Verdict",
         body:
-          `**VERIFIED for bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED.** The harness enforces expected HTTP/filter behavior and real WAV validity, but not byte-for-byte identity of future generated audio.`,
+          `**VERIFIED as of the 2026-10-08 run (bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED); NOTE: one declared negative-control claim no longer holds against the live provider — see the live verification status section above.** The harness enforces expected HTTP/filter behavior as observed on that run and real WAV validity, but not byte-for-byte identity of future generated audio.`,
       },
     ],
   });
