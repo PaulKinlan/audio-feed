@@ -73,10 +73,7 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-9mp",
   "audio-feed-9vns",
   "audio-feed-9yu8",
-  "audio-feed-b75q",
   "audio-feed-bp6r",
-  "audio-feed-dc2y",
-  "audio-feed-fydf",
   "audio-feed-gueb",
   "audio-feed-i7vi",
   "audio-feed-icl4",
@@ -86,8 +83,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   // the same debt as the rest of this list. Its README also carries an ephemeral port and a commit sha in its
   // title line, which is the audio-feed-1zfv class recorded on that bead.
   "audio-feed-l7m1",
-  "audio-feed-ldsb",
-  "audio-feed-ls92",
   "audio-feed-m182",
   "audio-feed-np5",
   "audio-feed-o9kc",

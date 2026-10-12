@@ -1,5 +1,8 @@
 # audio-feed-fydf — the conformance split did not lose a case
 
+- Capture: no assertions
+- Reason: Static case-manifest comparison and historical test-run capture from splitting tests/conformance/metadata.ts into domain modules. No generating script writes to this directory; live conformance tests run in tests/storage_test.ts.
+
 `tests/conformance/metadata.ts` was one 2,108-line file holding 102 cases for both adapters. The
 split puts them in one module per domain (`tests/conformance/metadata/`) behind a shared harness.
 
