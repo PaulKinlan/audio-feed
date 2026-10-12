@@ -74,6 +74,7 @@ export const NEVER_WALKED: string[] = [".git", "node_modules", ".beads", "var"];
  * paths, sorted. This is the FULL gate's universe — the one thing the fast gate is allowed to narrow.
  */
 export async function discoverFullGateTestFiles(root: string = ROOT): Promise<string[]> {
+  root = root.replace(/\/+$/, "") + "/";
   const out: string[] = [];
   const walk = async (relative: string): Promise<void> => {
     const dir = relative ? `${root}${relative}` : root;
@@ -256,6 +257,7 @@ export const GRAPH_CONFIG_FILES =
  * which is the point: the family list above is reviewed against THIS, not against memory.
  */
 export async function resolverConfigInputs(root: string = ROOT): Promise<string[]> {
+  root = root.replace(/\/+$/, "") + "/";
   const inputs = new Set<string>();
   const readConfig = async (rel: string, depth: number): Promise<void> => {
     if (depth > 4 || inputs.has(rel)) return;
@@ -1211,6 +1213,7 @@ export async function deriveReadRelationReport(
   root: string = ROOT,
   suiteFiles?: readonly string[],
 ): Promise<ReadRelationReport> {
+  root = root.replace(/\/+$/, "") + "/";
   const suites = suiteFiles ?? (await discoverFullGateTestFiles(root)).filter(isFastGateSelectable);
   const sources = new Map<string, string>();
   const read = async (relPath: string): Promise<string | null> => {
