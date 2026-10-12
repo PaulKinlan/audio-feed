@@ -50,45 +50,21 @@ export interface SupervisedHarness {
 export const STALE_PROFILE_AGE_MS = 45 * 60 * 1000;
 
 /**
- * Reclaim ABANDONED CHROME PROFILES from the temp directory (audio-feed-u8nv).
+ * Reclaim abandoned profile directories for ONE PREFIX (audio-feed-u8nv).
  *
- * TWO CONDITIONS, AND BOTH ARE THE ANSWER TO "WHAT IF IT DELETES SOMETHING IN USE":
- *   - AGE: only directories older than `STALE_PROFILE_AGE_MS`, which is the reaper's own 45-minute
- *     browser rule - so anything it touches CANNOT be running, rather than being assumed not to be.
- *   - SIGNATURE: only directories that ARE a Chrome user-data-dir and are NOT a git checkout, which is
- *     what keeps an age rule from eating another lane's worktree (measured: see `isAbandonedProfile`).
- * The scope is deliberately NOT the caller's prefix: a prefix rule can be outlived by a rename, and on
- * this VM it already was, so the caller's prefix decides NOTHING about what may be reclaimed.
+ * TWO GUARDS, AND BOTH ARE ASSERTED IN tests/proof_helper_profile_sweep_test.ts BECAUSE EACH IS A
+ * DIFFERENT WAY OF DESTROYING SOMETHING THAT IS IN USE:
+ *   - PREFIX SCOPING: every caller passes its own prefix, so this can never reach another proof's,
+ *     another lane's, or another prefix's directory. Only `makeTempDir`-created DIRECTORIES are
+ *     considered; a file that happens to share the name shape is not ours to delete.
+ *   - AGE BOUND: a young directory may be a LIVE run of the same prefix, so it is left alone. The
+ *     reclaim only ever removes what the declared bound has already ruled out as running.
  *
  * OPPORTUNISTIC BY CONSTRUCTION: every failure to read or remove is swallowed, because reclaiming
  * disk must never break allocating a profile. Returns what it actually removed so a caller, or a
  * test, can observe the work rather than trust it.
  */
-/**
- * Whether `dir` is an ABANDONED CHROME PROFILE, decided by what is INSIDE it rather than by its name.
- *
- * WHY NOT THE NAME. An earlier version reclaimed only directories whose name started with the caller's
- * prefix. A prefix rule can be OUTLIVED BY A RENAME, and on this VM it already was: the newest pile is
- * `audiofeed-*` while older bulk sits under other names, so each hand sweep cleaned one pile and left
- * the others.
- *
- * WHY NOT AGE ALONE, WHICH IS OBVIOUS AND DANGEROUS. Measured on this VM, the `/tmp` directories that
- * are NOT profiles are OTHER LANES' GIT WORKTREES: of the newest 22 entries under `af-*` and
- * `audio-feed-*`, TEN were checkouts (`/tmp/af-coao` on `fleet/fix9f8n-coao`), so an age-only rule
- * deletes them - which is what a by-age sweep did tonight.
- *
- * SO THE DECISION IS TWO FACTS ABOUT THE CONTENTS, MEASURED: `Default/` is present in 20 of 20 sampled
- * profiles and 0 of 22 sampled non-profiles, and `.git` in 10 of those 22. A profile is `Default/` AND
- * NOT `.git` - PREFIX-AGNOSTIC (a rename cannot outlive it), MECHANISM-AGNOSTIC (it does not care which
- * pile is the leak), and it CANNOT REACH A CHECKOUT. The `.git` clause is belt-and-braces for a repo
- * that happens to contain a `Default/` directory.
- */
-const PROFILE_MARKER = "Default";
-const CHECKOUT_MARKER = ".git";
-
-/** Existence without throwing - `statSync` on a missing path raises, and a `catch` around a chain of
- * them would silently answer "not a profile" for EVERY directory, which is a no-op sweep wearing a
- * green test. This bug was in the first draft of this function and the suite caught it. */
+/** Existence without throwing. */
 function exists(path: string): boolean {
   try {
     Deno.statSync(path);
@@ -98,13 +74,35 @@ function exists(path: string): boolean {
   }
 }
 
-function isAbandonedProfile(dir: string): boolean {
-  if (!exists(dir)) return false;
-  if (exists(`${dir}/${CHECKOUT_MARKER}`)) return false;
-  return exists(`${dir}/${PROFILE_MARKER}`);
+/**
+ * Whether `name` is a directory THIS prefix created, rather than a sibling that merely starts with it
+ * (audio-feed-3nit).
+ *
+ * `startsWith(prefix)` ALONE IS NOT OWNERSHIP, and the reviewer's counterexample is exact:
+ * `audiofeed-chrome-test-` starts with `audiofeed-chrome-`, so a sweep for the shorter prefix ate the
+ * longer prefix's directories. A guard whose job is "touch nothing that is not mine" cannot be built
+ * from a prefix comparison alone.
+ *
+ * THE BOUNDARY, AND WHY THIS ONE IS EXACT RATHER THAN HEURISTIC: `makeTempDir` appends its random
+ * characters DIRECTLY to the prefix, so an owned name is `<prefix>` plus a separator-free tail.
+ * MEASURED over the whole pile on this VM: 574 names, EVERY ONE with a separator-free tail, and ZERO
+ * with a `-` in the tail. So a `-` after the prefix does not mean "random characters"; it means a
+ * DIFFERENT prefix that happens to start with ours.
+ *
+ * DECLARED LIMIT, so the next reader does not have to infer it: this requires the caller's prefix to
+ * carry its own separator. Every prefix in this tree ends with `-` (measured: the nine literal ones
+ * plus the computed `audiofeed-proof-exww-`), and a prefix passed WITHOUT one would reclaim nothing
+ * rather than reclaim wrongly - the failure is in the safe direction.
+ */
+function isOwnProfileName(name: string, prefix: string): boolean {
+  if (!name.startsWith(prefix)) return false;
+  const tail = name.slice(prefix.length);
+  if (tail.length === 0) return false;
+  return !tail.includes("-");
 }
 
 export async function sweepStaleProfiles(
+  prefix: string,
   nowMs: number = Date.now(),
   ageMs: number = STALE_PROFILE_AGE_MS,
 ): Promise<string[]> {
@@ -119,8 +117,13 @@ export async function sweepStaleProfiles(
   }
   for (const entry of entries) {
     if (!entry.isDirectory) continue;
+    if (!isOwnProfileName(entry.name, prefix)) continue;
     const full = `${baseDir}/${entry.name}`;
-    if (!isAbandonedProfile(full)) continue;
+    // INSURANCE, NOT THE MATCHING RULE (audio-feed-u8nv, after coord measured the other /tmp piles as
+    // worktrees): a checkout is never a profile, so one that happens to sit under a profile prefix is
+    // left alone. This can only NARROW what is reclaimed. `.git` is tested by EXISTENCE because in a
+    // linked worktree it is a FILE, not a directory.
+    if (exists(`${full}/.git`)) continue;
     try {
       const info = await Deno.stat(full);
       const age = nowMs - (info.mtime?.getTime() ?? nowMs);
@@ -137,9 +140,9 @@ export async function sweepStaleProfiles(
 export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
 ): Promise<{ profileDir: string; cleanup: () => Promise<void>; sweptStale: number }> {
-  // Reclaim the abandoned profiles this machine is holding before allocating another one, so a leak
-  // cannot accumulate across runs (audio-feed-u8nv). NOT scoped to `prefix`: see isAbandonedProfile.
-  const sweptStale = (await sweepStaleProfiles()).length;
+  // Reclaim THIS prefix's abandoned directories before allocating another one, so a leak cannot
+  // accumulate across runs (audio-feed-u8nv).
+  const sweptStale = (await sweepStaleProfiles(prefix)).length;
   const profileDir = await Deno.makeTempDir({ prefix });
   let cleaned = false;
 
