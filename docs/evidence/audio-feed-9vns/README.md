@@ -27,6 +27,26 @@ end-to-end because:
 
 This verification addresses both gaps using the REAL production `GeminiTtsClient`.
 
+## Live Verification Status & Provider Behavior (audio-feed-zrx9)
+
+Notice on asserted claim outcomes and execution bounds:
+
+- **Currently failing claims**: The negative control assertions
+  (`negative control: raw article segment fails closed on real client` and
+  `negative control: provider returns candidate finishReason OTHER`) currently FAIL against the live
+  provider: raw Wikipedia article segment 1 returns candidate finishReason `STOP` and
+  `failedClosed=false` instead of triggering the recitation filter (`OTHER`).
+- **Identical failure on main**: This negative control was already failing on `main` prior to
+  migration when tested against the live provider.
+- **Live provider behavior, not application code**: The failing assertion reflects upstream Gemini
+  3.8 Flash TTS model behavior at `https://gemini.int.exe.xyz/v1beta`, not local application code or
+  transport. The migration neither introduced nor hides this failure.
+- **Product tracking**: The architectural question of whether the system requires provider-side
+  copyright filtering for correctness versus defense-in-depth is tracked under `audio-feed-zrx9`
+  (P2).
+- **Execution bounds**: Fresh end-to-end synthesis of all 8 segments takes ~342 seconds and produces
+  ~129MB of WAV audio, exceeding standard bounded test timeouts (`timeout -k 30 150` exits 124).
+
 ## 1. Base-URL Override & Unit Tests
 
 - Modified `src/tts/gemini.ts` to introduce `getGeminiApiBaseUrl(override?)` and support

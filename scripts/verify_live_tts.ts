@@ -334,6 +334,14 @@ await runProof("verify_live_tts", async (checker) => {
           "The `live-validation.json` artifact in this directory was captured by hand from script stdout during the original verification pass, while the claims declared below are programmatically verified by `scripts/verify_live_tts.ts`.",
       },
       {
+        heading: "Live Verification Status & Provider Behavior (audio-feed-zrx9)",
+        body: `Notice on asserted claim outcome:
+- **Currently failing claim**: The assertion \`negative control: raw unsegmented article triggers copyright filter (200 OTHER)\` is currently FAILING against the live provider: observed HTTP status=200, tokens=10506, finishReason=STOP, failClosed=false.
+- **Identical failure on main**: This failure was already present and failing identically on \`main\` prior to this migration when run against the live provider.
+- **Live provider behavior, not application code**: The failing assertion tests the behavior of the external live Gemini TTS model at \`https://gemini.int.exe.xyz/v1beta\` on raw Wikipedia text, not our application code or transport. The migration neither introduced nor hides this failure.
+- **Product tracking**: The question of whether the application relies on provider-side copyright filtering for correctness versus defense-in-depth is tracked under \`audio-feed-zrx9\` (P2).`,
+      },
+      {
         heading: "Transport and scope",
         body:
           `The harness **reimplements HTTP transport against the proxy** rather than invoking \`GeminiTtsClient.sendRequest\`, whose production default remains \`https://generativelanguage.googleapis.com/v1beta\` and requires \`x-goog-api-key\`. It uses production \`formatNarrationPrompt\`, \`splitTextUnderByteBudget\`, \`buildSingleVoiceRequest\`, \`parseWavHeader\`, and \`decodeAudioResponse\`. Thus the provider/model behavior, production segmentation, request construction, and decoder are measured, but production auth, retries, and full end-to-end multi-segment synthesis/stitching are **not** live-verified here. The positive call synthesizes only an article excerpt, not all eight segments; listening quality is not assessed.`,
