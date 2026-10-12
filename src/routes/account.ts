@@ -286,6 +286,13 @@ ${
           <span aria-hidden="true">🎙️</span> Add to Audio Feed
         </a>
       </div>
+      <details class="bookmarklet-code u-mt-2">
+        <summary>Can’t drag it? Get the bookmarklet code</summary>
+        <p class="u-fs-sm u-mt-quarter">Browsers refuse <code>javascript:</code> links when clicked directly on a page protected by this app’s Content Security Policy. To install it manually, drag the button above to your bookmarks bar, or create a bookmark and paste this code as its URL:</p>
+        <pre class="bookmarklet-snippet u-break-all u-fs-xs"><code>${
+    esc(bookmarkletCode)
+  }</code></pre>
+      </details>
     </div>
   </section>`;
 
