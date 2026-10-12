@@ -44,7 +44,7 @@
  */
 import { join, resolve } from "@std/path";
 
-interface Mutant {
+export interface Mutant {
   /** Row name, as `--only` spells it. */
   name: string;
   /** The finding that produced this row. */
@@ -68,7 +68,7 @@ async function sha256(text: string): Promise<string> {
   );
 }
 
-interface Options {
+export interface Options {
   list: boolean;
   dryRun: boolean;
   only?: string;
@@ -77,7 +77,8 @@ interface Options {
 }
 
 const REPO = resolve(new URL("../", import.meta.url).pathname);
-const PROOF = "scripts/exww-live-claims-browser-proof.ts";
+export const PROOF_REL = "scripts/exww-live-claims-browser-proof.ts";
+const PROOF = PROOF_REL;
 const EVIDENCE_DIR = "docs/evidence/audio-feed-exww";
 /** Where the mutant matrix gets its results from; the tier's own contract (`scripts/proof-helper.ts`). */
 const FAIL_PREFIX = "FAIL";
@@ -286,7 +287,7 @@ function printMatrix(): void {
 }
 
 /** The scratch tree: only what the proof imports and writes, so the invoking worktree stays clean. */
-async function buildScratch(options: Options): Promise<string> {
+export async function buildScratch(options: Pick<Options, "keep"> = {}): Promise<string> {
   const dir = options.keep
     ? resolve(options.keep)
     : await Deno.makeTempDir({ prefix: "exww-mutants-" });
@@ -311,7 +312,7 @@ async function copyTree(from: string, to: string): Promise<void> {
   }
 }
 
-interface RunOutcome {
+export interface RunOutcome {
   code: number;
   seconds: number;
   timedOut: boolean;
@@ -320,8 +321,11 @@ interface RunOutcome {
   tail: string;
 }
 
-async function runProofIn(dir: string, options: Options): Promise<RunOutcome> {
-  const seconds = Math.max(1, Math.round(options.timeoutMs / 1000));
+export async function runProofIn(
+  dir: string,
+  timeoutMs = 240_000,
+): Promise<RunOutcome> {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1000));
   const started = performance.now();
   const child = new Deno.Command("timeout", {
     args: [
@@ -354,6 +358,16 @@ async function runProofIn(dir: string, options: Options): Promise<RunOutcome> {
     passCount: lines.filter((line) => line.startsWith("PASS ")).length,
     tail: lines.slice(-6).join("\n  "),
   };
+}
+
+/** Apply one named row to the proof's source. Shared by the matrix and the mapped test, so a row cannot
+ *  drift between the tier that runs all of them and the suite that runs one of them. */
+export function applyMutant(source: string, name: string): string {
+  const mutant = MUTANTS.find((m) => m.name === name);
+  if (!mutant) {
+    throw new Error(`no such row: ${name}; known: ${MUTANTS.map((m) => m.name).join(", ")}`);
+  }
+  return mutant.apply(source);
 }
 
 const options = parseOptions(Deno.args);
@@ -401,7 +415,7 @@ const results: Array<{ row: string; verdict: string; detail: string }> = [];
 
 try {
   // The BASELINE is not decoration: without it, a harness that reddens everything would look correct.
-  const baseline = await runProofIn(scratch, options);
+  const baseline = await runProofIn(scratch, options.timeoutMs);
   const baselineOk = baseline.code === 0 && baseline.failures.length === 0;
   console.log(
     `[mutants] BASELINE ${baselineOk ? "ok  " : "FAIL"} exit ${baseline.code}, ${
@@ -437,7 +451,7 @@ for (const mutant of rows) {
   }
   const digest = await sha256(mutated);
   await Deno.writeTextFile(join(scratch, PROOF), mutated);
-  const outcome = await runProofIn(scratch, options);
+  const outcome = await runProofIn(scratch, options.timeoutMs);
   const expectedSeen = mutant.expect.every((needle) =>
     outcome.failures.some((f) => f.includes(needle))
   );
