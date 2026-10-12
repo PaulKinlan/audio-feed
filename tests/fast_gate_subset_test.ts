@@ -1018,3 +1018,13 @@ Deno.test("reads", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("audio-feed-coao: the exww proof script maps to its mutant suite", async () => {
+  const root = new URL("../", import.meta.url).pathname;
+  const report = await deriveReadRelationReport(root);
+  const suites = report.relations.get("scripts/exww-live-claims-browser-proof.ts") || [];
+  assert(
+    suites.includes("tests/exww_mutants_test.ts"),
+    "the proof script must map to its executing test suite, not fail-close or select nothing",
+  );
+});

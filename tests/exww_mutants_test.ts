@@ -37,6 +37,7 @@ import {
   buildScratch,
   interpretRun,
   MUTANTS,
+  PROOF,
   PROOF_REL,
   runProofIn,
 } from "../scripts/exww-mutants.ts";
@@ -63,6 +64,34 @@ Deno.test({
       // the relation is what audio-feed-4kl3 adds, and until then the gate selects this suite because the
       // delta includes this file. A comment asserting a derivation that does not exist is how a proof-script
       // delta would look covered while it was not, which is the defect class this whole bead exists about.
+      // audio-feed-coao: the narrow mapping row, stated in the only form the gate's relation derivation can
+      // prove. runProofIn spawns the proof through `timeout` with a COMPUTED path (join(dir, PROOF)), and the
+      // semantics check from audio-feed-4kl3 will not read that as an execute edge - deliberately, because a
+      // computed argument proves nothing. So the relation is stated here where the argument is a literal, and the
+      // assertion ties the literal to the very constant runProofIn spawns: rename the proof and THIS goes red,
+      // rather than the mapping quietly surviving the thing it claims to describe.
+      // The gate's relation derivation reads the ARGUMENT SHAPE, so this literal must stay inline - a variable
+      // would hide it and the relation would be lost. Deno.Command exposes no accessor for its arguments, so the
+      // coupling is made by asserting the same literal against PROOF_REL, the constant runProofIn actually
+      // spawns: rename the proof and this reddens rather than the mapping outliving the execution it describes.
+      new Deno.Command(Deno.execPath(), {
+        args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
+      });
+      // The literal above is what the gate's derivation reads; these two assertions are what make it a COUPLING
+      // rather than a decoration. PROOF is the constant runProofIn actually spawns (scripts/exww-mutants.ts:346),
+      // and PROOF_REL is the exported name the rest of the harness uses. An earlier revision asserted only against
+      // PROOF_REL and a reviewer proved the hole: PROOF could be pointed at a different script while the literal
+      // stayed correct and this test stayed GREEN. Both constants are pinned now, so diverging either one reddens.
+      assertEquals(
+        "scripts/exww-live-claims-browser-proof.ts",
+        PROOF,
+        "the mapping row must name the script runProofIn actually spawns - otherwise it describes an execution that no longer exists",
+      );
+      assertEquals(
+        PROOF,
+        PROOF_REL,
+        "the spawn's constant and the exported relation must name the same script",
+      );
       const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
       // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
