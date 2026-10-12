@@ -1599,12 +1599,27 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
     // FAIL here is inherited by every lane that touches this tree.
     //
     // What the assertion is FOR is that the deadline PREEMPTS the stage instead of waiting for it,
-    // and that is observable without assuming how fast the box is: the stage's own work takes 200ms,
-    // so an abort observed WHILE IT IS STILL RUNNING - and therefore under 200ms - is the invariant.
-    // The old assertion had this backwards: it could pass while the wrapper waited for the stage
-    // (any elapsed under 80ms was accepted, and one over 200ms was only rejected by accident).
-    // The derivation itself is now pinned exactly, from the abort message, which nothing checked
-    // before: 45ms = 50ms budget - 5ms flush margin, and the machine cannot move that number.
+    // and that is observable without assuming how fast the box is: the abort must be observed WHILE
+    // THE STAGE'S OWN WORK IS STILL OUTSTANDING, which is what `stageCompleted` records. The old
+    // assertion had this backwards: it could pass while the wrapper waited for the stage (any elapsed
+    // under 80ms was accepted, and one over 200ms was only rejected by accident).
+    //
+    // NO NUMERIC BOUND ON THE ELAPSED TIME IS ASSERTED, and that is the correction from review
+    // (audio-feed-4qmm). The first version of this fix asserted `inFlightElapsed < 200`, on the
+    // argument that 200ms is the stage's own duration rather than a machine-speed figure. The
+    // argument was wrong: that sleep is a LOWER bound on how long the stage runs, NOT an upper bound
+    // on how long the abort may take to be OBSERVED. Starving the event loop for 260ms after both
+    // timers are armed makes the wrapper yield the correct 45ms deadline with the stage still
+    // running, and the elapsed wall clock exceeds 200ms purely because the thread was busy - so
+    // `elapsed < 200` failed a CORRECT abort, which is the very defect this bead exists to remove.
+    // The elapsed figure below is therefore REPORTED for diagnosis and never asserted on: the
+    // ordering plus the derived deadline are the two properties, and neither is a property of the
+    // scheduler. (How this was found, for the record: 200 iterations under fleet load never produced
+    // it - fleet load is not a stalled loop - and a reviewer constructing the hostile state found it
+    // immediately.)
+    //
+    // The derivation itself is pinned exactly, from the abort message, which nothing checked before:
+    // 45ms = 50ms budget - 5ms flush margin, and the machine cannot move that number.
     let stageCompleted = false;
     const inFlightStart = performance.now();
     const inFlightOutcome = await withInvocationBudget({
@@ -1622,12 +1637,8 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
     assert(
       !stageCompleted,
       `stage ${stageName} must abort while the stage is STILL RUNNING: the abort was observed only ` +
-        `after the stage's own 200ms of work had completed`,
-    );
-    assert(
-      inFlightElapsed < 200,
-      `stage ${stageName} must abort before the stage's own work (200ms) finishes, not wait for it ` +
-        `(${inFlightElapsed}ms)`,
+        `after the stage's own 200ms of work had completed (observed after ${inFlightElapsed}ms, ` +
+        `which is reported and never asserted on - audio-feed-4qmm)`,
     );
     assertEquals(inFlightOutcome.kind, "budget-yield");
     if (inFlightOutcome.kind === "budget-yield") {
