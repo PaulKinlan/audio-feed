@@ -1659,9 +1659,19 @@ export async function deriveReadRelationReport(
             // A NAME resolved inside an execute call is the spawn's argument, so it takes the same route as a
             // literal one - this is the branch probe B takes (a `.ts` path held in a module-local constant and
             // interpolated into a `Deno.Command` args array).
-            (isExecuteCall ? executed : resolved).push(
-              resolveReadName(scopes, name, at, own, visible),
-            );
+            const resolvedValue = resolveReadName(scopes, name, at, own, visible);
+            if (resolvedValue === name) {
+              const path = toRepoPath(name, dir, root);
+              if (path) {
+                (isExecuteCall ? executed : resolved).push(path);
+              } else if (unclassifiedTail(name)) {
+                unclassified.add(name);
+              } else {
+                outOfRepoHints.add(name);
+              }
+            } else {
+              (isExecuteCall ? executed : resolved).push(resolvedValue);
+            }
           }
         }
       }
