@@ -1,6 +1,6 @@
 {
   "bead": "audio-feed-9yu8",
-  "capturedAt": "2026-10-10T21:29:23.725Z",
+  "capturedAt": "2026-10-12T03:16:35.130Z",
   "capturedAgainst": "post-fix (the pre-fix capture is docs/evidence/audio-feed-bp6r/repro.json)",
   "provider": {
     "endpoint": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
@@ -15,9 +15,9 @@
     "description": "One real narration through the production client with the new 120s default deadline and default retry policy (no timeout retry is exercised: the call succeeds).",
     "outcome": {
       "result": "success",
-      "totalMs": 4716,
-      "durationSeconds": 10.92,
-      "bytes": 530276,
+      "totalMs": 5484,
+      "durationSeconds": 10.88,
+      "bytes": 528354,
       "finishReason": "STOP",
       "truncated": false
     },
@@ -26,7 +26,7 @@
       {
         "seq": 1,
         "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
-        "durationMs": 4429,
+        "durationMs": 5163,
         "status": 200,
         "statusText": "OK"
       }
@@ -37,7 +37,7 @@
     "segmentCount": 3,
     "outcome": {
       "result": "failure",
-      "totalMs": 3232,
+      "totalMs": 3177,
       "name": "GeminiTtsError",
       "message": "TTS turn failed (transient; the episode may be retried): Gemini TTS request timed out after 1500ms",
       "permanent": false,
@@ -51,14 +51,14 @@
       {
         "seq": 1,
         "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
-        "durationMs": 1502,
+        "durationMs": 1503,
         "errorName": "TimeoutError",
         "errorMessage": "The operation was aborted due to timeout"
       },
       {
         "seq": 2,
         "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
-        "durationMs": 1502,
+        "durationMs": 1501,
         "errorName": "TimeoutError",
         "errorMessage": "The operation was aborted due to timeout"
       }
@@ -80,7 +80,7 @@
       {
         "seq": 1,
         "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts:generateContent",
-        "durationMs": 1501,
+        "durationMs": 1502,
         "errorName": "TimeoutError",
         "errorMessage": "The operation was aborted due to timeout"
       }
@@ -104,7 +104,7 @@
       {
         "seq": 1,
         "url": "https://gemini.int.exe.xyz/v1beta/models/gemini-3.8-flash-tts-does-not-exist:generateContent",
-        "durationMs": 181,
+        "durationMs": 185,
         "status": 404,
         "statusText": "Not Found"
       }
