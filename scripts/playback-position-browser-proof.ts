@@ -203,8 +203,10 @@ try {
   // Open the second user's page while user-1 still has a saved position
   const tab2 = await cdp("Target.createTarget", { url: `${BASE}/listen/other-token` });
   const ws2 = new WebSocket(
+    // deno-lint-ignore no-explicit-any
     targets.find((t: any) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
       (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(
+        // deno-lint-ignore no-explicit-any
         (t: any) => t.id === tab2.targetId,
       ).webSocketDebuggerUrl,
   );
@@ -220,7 +222,7 @@ try {
     }
   });
   // deno-lint-ignore no-explicit-any
-  async function cdp2(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  const cdp2 = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
     const id = ++nextId2;
     return new Promise((resolve, reject) => {
       pending2.set(
@@ -232,7 +234,7 @@ try {
     });
   }
   // deno-lint-ignore no-explicit-any
-  async function js2(expression: string): Promise<any> {
+  const js2 = async (expression: string): Promise<any> => {
     const res = await cdp2("Runtime.evaluate", {
       expression,
       awaitPromise: true,
@@ -240,7 +242,7 @@ try {
     });
     return res.result.value;
   }
-  await new Promise((r) => setTimeout(r, 1000)); // wait for page load
+  await js2(`(() => { return new Promise(r => { const i = setInterval(() => { if (document.querySelector(\"li.episode[data-episode-id='ep-1']\")) { clearInterval(i); r(); } }, 50); }); })()`);
 
   const otherUserBadge = await js2(`
     document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume-badge')?.textContent || "none"
@@ -252,7 +254,7 @@ try {
   );
   try {
     ws2.close();
-  } catch {}
+  } catch { /* ignore */ }
 
   await js(`(() => {
     const audio = document.getElementById("audio");
