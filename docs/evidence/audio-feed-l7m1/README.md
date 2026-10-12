@@ -1,4 +1,4 @@
-# Live End-to-End Verification Report on origin/main (http://localhost:44529)
+# Live End-to-End Verification Report on origin/main (http://localhost:33107)
 
 **Git Commit:** `18b688f` (Merge fleet/churn-3asd into origin/main)
 **Date:** 2026-10-12
@@ -19,11 +19,11 @@
 
 ### 2. Homepage Bookmarklet (`/`)
 - Renders the draggable bookmarklet anchor with `javascript:` URL and unified `class="bookmarklet-link u-strong-link"`.
-- `audio-feed-3asd` (`18b688f`) is LANDED on main: clicking `<summary>` on `<details class="bookmarklet-code">` reveals the full bookmarklet code inside `<pre><code>` with zero inline scripts or CSP violations.
+- `audio-feed-3asd` (`18b688f`) is landed on main: `<details class="bookmarklet-code">` disclosure fallback is present; clicking `<summary>` expands the code snippet inside `<pre class="bookmarklet-snippet"><code>` without requiring any inline script or producing CSP violations.
 - Clicking the bookmarklet anchor itself is blocked by CSP `script-src 'self' 'nonce-...'`, which is why the fallback disclosure is provided.
 
 ### 3. RSS Feed, Audio Route, and Web Player (`/listen`)
-- **RSS Enclosure:** The user's master RSS feed (`/feed/:token/master.xml`) renders valid XML with a proper `<enclosure>` element pointing to `http://localhost:44529/audio/sub-l7m1/direct/ep-ready-1.wav` with `type="audio/wav"`.
+- **RSS Enclosure:** The user's master RSS feed (`/feed/:token/master.xml`) renders valid XML with a proper `<enclosure>` element pointing to `http://localhost:33107/audio/sub-l7m1/direct/ep-ready-1.wav` with `type="audio/wav"`.
 - **Audio Streaming:** Direct request to the enclosure URL fetches the audio with `200 OK`, `content-type: audio/wav`, and byte-for-byte exact payload matching the stored blob.
 - **Capability Isolation:** Requests to unauthorized audio paths return 404/403.
 - **Web Player:** Real Chrome loaded `/listen/sub-feed-token-l7m1`, rendered the audio player element, and displayed the synthesized episode title in the playlist.
@@ -39,6 +39,7 @@ PASS  retrying table renders durable uploadRetry counter  uploadRetry cell: '2'
 PASS  retrying table renders non-blank recorded reason  
 PASS  retrying table includes expandable claim history details  
 PASS  claim history expands on click  
+PASS  admin observability console has zero CSP violations  violations: 0
 PASS  front door renders draggable bookmarklet anchor with javascript: URL  
 PASS  bookmarklet anchor has unified class list without duplicate attributes  class: 'bookmarklet-link u-strong-link'
 PASS  details disclosure exists under bookmarklet box on main  
@@ -54,6 +55,7 @@ PASS  disallowed/unauthorized audio key is rejected (404/403)  status: 404
 PASS  web player loads for subscriber  
 PASS  web player renders <audio> element for listening  
 PASS  web player displays ready episode title  title in DOM: 'Advancements in Synthetic Media — Audio Edition'
+PASS  web player console has zero CSP violations  violations: 0
 ```
 
 ## Screenshots

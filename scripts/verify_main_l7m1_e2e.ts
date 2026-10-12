@@ -323,6 +323,15 @@ try {
   const detailsOpen = await js(`document.querySelector("table details")?.open`);
   check("claim history expands on click", detailsOpen === true);
 
+  const adminCspViolations = consoleEntries.filter(
+    (msg) => msg.includes("Content Security Policy") || msg.includes("violates"),
+  );
+  check(
+    "admin observability console has zero CSP violations",
+    adminCspViolations.length === 0,
+    `violations: ${adminCspViolations.length}`,
+  );
+
   const shotAdmin = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
   await Deno.writeFile(
     `${OUT}01-admin-observability.png`,
@@ -406,6 +415,7 @@ try {
   );
 
   // D. Navigate to Web Player (/listen/:feedToken) in Chrome
+  const listenStartIndex = consoleEntries.length;
   await cdp("Page.navigate", { url: `${BASE}/listen/${subscriber.feedToken}` });
   await until(`document.readyState === "complete"`, "listen page loaded");
   await until(`Boolean(document.querySelector(".ep-title"))`, "episodes rendered in playlist");
@@ -421,6 +431,15 @@ try {
     "web player displays ready episode title",
     episodeItemTitle.includes("Advancements in Synthetic Media — Audio Edition"),
     `title in DOM: '${episodeItemTitle}'`,
+  );
+
+  const listenCspViolations = consoleEntries.slice(listenStartIndex).filter(
+    (msg) => msg.includes("Content Security Policy") || msg.includes("violates"),
+  );
+  check(
+    "web player console has zero CSP violations",
+    listenCspViolations.length === 0,
+    `violations: ${listenCspViolations.length}`,
   );
 
   const shotListen = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
