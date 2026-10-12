@@ -573,6 +573,46 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
   }
 });
 
+Deno.test("audio-feed-q890: deriveReadRelationReport normalises root without trailing slash", async () => {
+  // A caller who passes a root without a trailing slash (e.g. from Deno.makeTempDir()) must not get an empty
+  // report with no diagnostic for a fixture that genuinely reads a file. Both forms must behave identically.
+  const dir = await Deno.makeTempDir({ prefix: "q890-slash-demo-" });
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/tests/read_test.ts`,
+      "const dir = import.meta.dirname;\nDeno.readTextFile(`${dir}/README`);\n",
+    );
+
+    // Call without trailing slash (as returned by Deno.makeTempDir()):
+    const withoutSlash = await deriveReadRelationReport(dir, ["tests/read_test.ts"]);
+    // Call with trailing slash:
+    const withSlash = await deriveReadRelationReport(`${dir}/`, ["tests/read_test.ts"]);
+
+    assertEquals(
+      withoutSlash.unclassified,
+      ["README"],
+      "a root without a trailing slash must derive relations identically to one with a trailing slash",
+    );
+    assertEquals(withoutSlash.unclassified, withSlash.unclassified);
+    assertEquals([...withoutSlash.relations.entries()], [...withSlash.relations.entries()]);
+
+    // Anti-vacuity: a genuinely empty fixture still reports empty rather than manufacturing a false read
+    const emptyDir = await Deno.makeTempDir({ prefix: "q890-empty-demo-" });
+    try {
+      await Deno.mkdir(`${emptyDir}/tests`, { recursive: true });
+      await Deno.writeTextFile(`${emptyDir}/tests/empty_test.ts`, "export const x = 1;\n");
+      const emptyReport = await deriveReadRelationReport(emptyDir, ["tests/empty_test.ts"]);
+      assertEquals(emptyReport.unclassified, []);
+      assertEquals(emptyReport.relations.size, 0);
+    } finally {
+      await Deno.remove(emptyDir, { recursive: true });
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in the relation, and no-reader ones still widen", async () => {
   // The property this bead adds, asserted against the REAL tree because that is where the two halves meet:
   // the detector must produce a relation for a non-TS file under src/ or tests/ that a suite reads, and the
