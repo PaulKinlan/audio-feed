@@ -20,8 +20,9 @@
  * Scratch TMPDIR isolation:
  * As mandated, never touches the live `/tmp/audiofeed-*` pile; all directory operations use scratch.
  */
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import { createTempChromeProfile } from "../scripts/proof-helper.ts";
+import { firstArgument, maskNonCode } from "../scripts/evidence-census.ts";
 
 export interface SiteAudit {
   file: string;
@@ -35,37 +36,77 @@ export interface SiteAudit {
 }
 
 export function auditSource(source: string, relativePath: string): SiteAudit {
-  // Match direct Deno.makeTempDir calls
+  // audio-feed-qmcf: Mask comments and string interiors before scanning.
+  // A helper call or import named inside a comment or string is not a call (lesson from
+  // scripts/evidence-census.ts: "a write call NAMED inside a comment or a string is not a call").
+  // Offsets are strictly preserved by maskNonCode so character ranges map 1:1 between masked and raw text.
+  const masked = maskNonCode(source);
+
+  /**
+   * Match direct Deno.makeTempDir calls.
+   *
+   * DECLARED LIMITATION (audio-feed-qmcf, following scripts/evidence-census.ts rule):
+   * This regex `/Deno\.makeTempDir\s*\(([^)]*)\)/g` stops at the FIRST close-paren `)`.
+   * Consequently:
+   * 1. A call with a nested paren, for example `Deno.makeTempDir({ prefix: f(x) })`, has its
+   *    argument text truncated at the first `)` (inside `f(x)`), reading `{ prefix: f(x` rather
+   *    than the full options object.
+   * 2. A call whose argument is spread across lines or formatted with interior expressions may be
+   *    read differently than expected.
+   *
+   * Shapes covered:
+   * - Standard direct invocations with flat literal options or no options:
+   *   `Deno.makeTempDir()`, `Deno.makeTempDir({})`, and `Deno.makeTempDir({ prefix: "..." })`.
+   * Shapes not covered:
+   * - Nested parentheses within the argument list (e.g. function calls, sub-expressions).
+   *
+   * This limitation is declared rather than left unstated, adhering to the census's rule
+   * (scripts/evidence-census.ts): an unstated hole in a scanner is worse than a stated one.
+   * In this repository's audited sites, all direct allocations follow flat literal shapes.
+   */
   const directMatches: string[] = [];
   const makeTempDirRegex = /Deno\.makeTempDir\s*\(([^)]*)\)/g;
   let m: RegExpExecArray | null;
-  while ((m = makeTempDirRegex.exec(source)) !== null) {
-    directMatches.push(m[0]);
+  while ((m = makeTempDirRegex.exec(masked)) !== null) {
+    // Read the corresponding raw slice for informative assertion error messages
+    directMatches.push(source.slice(m.index, m.index + m[0].length));
   }
 
-  // Check if it imports / calls createTempChromeProfile
-  const usesHelper = /createTempChromeProfile\s*\(/.test(source) &&
-    /import\s+[^;]*createTempChromeProfile[^;]*from/.test(source);
+  // Check if it imports / calls createTempChromeProfile in real code (masked text)
+  const usesHelper = /createTempChromeProfile\s*\(/.test(masked) &&
+    /import\s+[^;]*createTempChromeProfile[^;]*from/.test(masked);
 
-  // Extract prefix passed to createTempChromeProfile if any
+  // Extract prefix passed to createTempChromeProfile:
+  // Locate the call in MASKED text so that comments and string literals cannot supply it.
+  // Then read the argument literal at that offset using firstArgument (which balances parens).
   let prefix: string | null = null;
-  const helperCallMatch = source.match(/createTempChromeProfile\s*\(\s*(["'])([^"']+)\1\s*\)/);
-  if (helperCallMatch) {
-    prefix = helperCallMatch[2] ?? null;
+  const helperCallRegex = /createTempChromeProfile\s*\(/g;
+  let helperMatch: RegExpExecArray | null;
+  while ((helperMatch = helperCallRegex.exec(masked)) !== null) {
+    const openParenIndex = helperMatch.index + helperMatch[0].length - 1;
+    const rawArg = firstArgument(masked, source, openParenIndex);
+    if (rawArg) {
+      const trimmed = rawArg.trim();
+      const stringMatch = trimmed.match(/^["']([^"']+)["']$/);
+      if (stringMatch && prefix === null) {
+        prefix = stringMatch[1] ?? null;
+      }
+    }
   }
 
   // Detect un-prefixed makeTempDir: Deno.makeTempDir() or Deno.makeTempDir({}) without prefix
   const hasUnprefixedAllocation = directMatches.some((call) => {
     const inside = call.replace(/^Deno\.makeTempDir\s*\(/, "").replace(/\)$/, "").trim();
-    return inside.length === 0 || inside === "{}" || !inside.includes("prefix");
+    const maskedInside = maskNonCode(inside);
+    return maskedInside.length === 0 || maskedInside === "{}" || !maskedInside.includes("prefix");
   });
 
   const hasSeparatorTerminatedPrefix = prefix !== null && prefix.endsWith("-");
 
-  // Check if cleanup helper is wired into the finally block / teardown
-  const usesCleanupHelper = /await\s+cleanup\s*\(\s*\)/.test(source) ||
-    /await\s+active(?:Scratch)?Cleanup\s*\(\s*\)/.test(source) ||
-    /cleanupFn\s*\(/.test(source);
+  // Check if cleanup helper is wired into the finally block / teardown in real code (masked text)
+  const usesCleanupHelper = /await\s+cleanup\s*\(\s*\)/.test(masked) ||
+    /await\s+active(?:Scratch)?Cleanup\s*\(\s*\)/.test(masked) ||
+    /cleanupFn\s*\(/.test(masked);
 
   return {
     file: relativePath,
@@ -105,12 +146,11 @@ export function applyMutant(
   return { mutated, occurrences, applied: true };
 }
 
-// ---------------------------------------------------------------------------------------------
-// Call site property checks
-// ---------------------------------------------------------------------------------------------
-
-Deno.test("audio-feed-qmcf: (1) scripts/landing-tooltip-browser-proof.ts creates profile through helper", async () => {
-  const audit = await auditCallSite("scripts/landing-tooltip-browser-proof.ts");
+/**
+ * Run the standard suite of site property assertions on an audit.
+ * Used by call site checks and negative tests to assert conformance / failure.
+ */
+export function assertSiteConforms(audit: SiteAudit): void {
   assert(
     audit.usesHelper,
     `${audit.file} must allocate Chrome profile through createTempChromeProfile, found direct calls: ${
@@ -130,6 +170,19 @@ Deno.test("audio-feed-qmcf: (1) scripts/landing-tooltip-browser-proof.ts creates
     0,
     `${audit.file} must not call raw Deno.makeTempDir directly`,
   );
+  assertFalse(
+    audit.hasUnprefixedAllocation,
+    `${audit.file} has un-prefixed Deno.makeTempDir allocation; no prefix-scoped rule can sweep un-prefixed profiles!`,
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Call site property checks
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("audio-feed-qmcf: (1) scripts/landing-tooltip-browser-proof.ts creates profile through helper", async () => {
+  const audit = await auditCallSite("scripts/landing-tooltip-browser-proof.ts");
+  assertSiteConforms(audit);
 });
 
 Deno.test("audio-feed-qmcf: (2) tests/observability_agent_poll_test.ts creates suite temp dir through helper", async () => {
@@ -154,44 +207,112 @@ Deno.test("audio-feed-qmcf: (2) tests/observability_agent_poll_test.ts creates s
 
 Deno.test("audio-feed-qmcf: (3) scripts/exww-mutants.ts buildScratch creates scratch dir through helper", async () => {
   const audit = await auditCallSite("scripts/exww-mutants.ts");
-  assert(
-    audit.usesHelper,
-    `${audit.file} buildScratch must allocate scratch tree through createTempChromeProfile to enable stale sweep`,
-  );
-  assert(
-    audit.hasSeparatorTerminatedPrefix,
-    `${audit.file} prefix '${audit.prefix}' must be separator-terminated ('-')`,
-  );
-  assertEquals(
-    audit.directMakeTempDirMatches.length,
-    0,
-    `${audit.file} must not call raw Deno.makeTempDir directly`,
-  );
+  assertSiteConforms(audit);
 });
 
 Deno.test("audio-feed-qmcf: (4) scripts/verify_s3uk_real_browser.ts eliminates un-prefixed profile and uses helper", async () => {
   const audit = await auditCallSite("scripts/verify_s3uk_real_browser.ts");
+  assertSiteConforms(audit);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Negative tests proving that comments and string literals cannot satisfy the audit (masking)
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("audio-feed-qmcf: negative: helper mention inside COMMENT fails check", () => {
+  const commentSource = `
+// import { createTempChromeProfile } from "../scripts/proof-helper.ts";
+// const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-comment-");
+// await cleanup();
+
+export async function run() {
+  const profileDir = await Deno.makeTempDir({ prefix: "audiofeed-comment-" });
+  return profileDir;
+}
+`;
+  // Without masking, unmasked scanning would falsely satisfy usesHelper and extract prefix
+  const rawUsesHelper = /createTempChromeProfile\s*\(/.test(commentSource) &&
+    /import\s+[^;]*createTempChromeProfile[^;]*from/.test(commentSource);
+  assert(rawUsesHelper, "confirms the unmasked defect: raw source falsely satisfied usesHelper");
+
+  const audit = auditSource(commentSource, "synthetic-comment-site.ts");
+  assertFalse(audit.usesHelper, "helper in comment must NOT satisfy usesHelper");
+  assertEquals(audit.prefix, null, "helper in comment must NOT supply prefix");
   assertFalse(
-    audit.hasUnprefixedAllocation,
-    `${audit.file} has un-prefixed Deno.makeTempDir allocation; no prefix-scoped rule can sweep un-prefixed profiles!`,
-  );
-  assert(
-    audit.usesHelper,
-    `${audit.file} must allocate Chrome profile through createTempChromeProfile`,
-  );
-  assert(
     audit.hasSeparatorTerminatedPrefix,
-    `${audit.file} prefix '${audit.prefix}' must be separator-terminated ('-') conforming to sweep boundary`,
+    "prefix in comment cannot be separator-terminated",
   );
-  assert(
-    audit.usesCleanupHelper,
-    `${audit.file} must use cleanup() on teardown for retry-safe profile removal`,
+  assertEquals(audit.directMakeTempDirMatches.length, 1);
+
+  // Load-bearing failure assertion: proves it reddens specifically on usesHelper
+  const expectedMsg =
+    'synthetic-comment-site.ts must allocate Chrome profile through createTempChromeProfile, found direct calls: ["Deno.makeTempDir({ prefix: \\"audiofeed-comment-\\" })"]';
+  const err = assertThrows(
+    () => assertSiteConforms(audit),
+    Error,
+    expectedMsg,
   );
-  assertEquals(
-    audit.directMakeTempDirMatches.length,
-    0,
-    `${audit.file} must not call raw Deno.makeTempDir directly`,
+  assertEquals(err.message, expectedMsg);
+});
+
+Deno.test("audio-feed-qmcf: negative: helper call inside STRING literal fails check", () => {
+  const stringSource = `
+const example = 'import { createTempChromeProfile } from "../scripts/proof-helper.ts"; const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-string-"); await cleanup();';
+
+export async function run() {
+  const profileDir = await Deno.makeTempDir({ prefix: "audiofeed-string-" });
+  return profileDir;
+}
+`;
+  // Without masking, unmasked scanning would falsely satisfy usesHelper and extract prefix
+  const rawUsesHelper = /createTempChromeProfile\s*\(/.test(stringSource) &&
+    /import\s+[^;]*createTempChromeProfile[^;]*from/.test(stringSource);
+  assert(rawUsesHelper, "confirms the unmasked defect: raw source falsely satisfied usesHelper");
+
+  const audit = auditSource(stringSource, "synthetic-string-site.ts");
+  assertFalse(audit.usesHelper, "helper in string literal must NOT satisfy usesHelper");
+  assertEquals(audit.prefix, null, "helper in string literal must NOT supply prefix");
+  assertFalse(audit.hasSeparatorTerminatedPrefix, "prefix in string literal cannot supply prefix");
+  assertEquals(audit.directMakeTempDirMatches.length, 1);
+
+  // Load-bearing failure assertion: proves it reddens specifically on usesHelper
+  const expectedMsg =
+    'synthetic-string-site.ts must allocate Chrome profile through createTempChromeProfile, found direct calls: ["Deno.makeTempDir({ prefix: \\"audiofeed-string-\\" })"]';
+  const err = assertThrows(
+    () => assertSiteConforms(audit),
+    Error,
+    expectedMsg,
   );
+  assertEquals(err.message, expectedMsg);
+});
+
+Deno.test("audio-feed-qmcf: negative: landing-tooltip with helper in comment fails check", async () => {
+  const fileUrl = new URL("../scripts/landing-tooltip-browser-proof.ts", import.meta.url);
+  const source = await Deno.readTextFile(fileUrl);
+  const anchor =
+    'const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-proof-3xq-4c-");';
+  const mutant = applyMutant(
+    source,
+    anchor,
+    '// const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-proof-3xq-4c-");\nconst PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-3xq-4c-" });',
+  );
+  assertEquals(mutant.occurrences, 1, "mutant anchor must appear exactly once");
+  assertEquals(mutant.applied, true, "mutant must prove it applied");
+
+  const audit = auditSource(mutant.mutated, "scripts/landing-tooltip-browser-proof.ts");
+  assertFalse(audit.usesHelper, "commented-out helper must NOT satisfy usesHelper");
+  assertEquals(audit.prefix, null, "commented-out helper must NOT supply prefix");
+  assertFalse(audit.hasSeparatorTerminatedPrefix, "prefix must be null");
+  assertEquals(audit.directMakeTempDirMatches.length, 1);
+
+  const expectedMsg =
+    'scripts/landing-tooltip-browser-proof.ts must allocate Chrome profile through createTempChromeProfile, found direct calls: ["Deno.makeTempDir({ prefix: \\"audiofeed-proof-3xq-4c-\\" })"]';
+  const err = assertThrows(
+    () => assertSiteConforms(audit),
+    Error,
+    expectedMsg,
+  );
+  assertEquals(err.message, expectedMsg);
 });
 
 // ---------------------------------------------------------------------------------------------
