@@ -38,68 +38,36 @@ Deno.test({
     try {
       const source = await Deno.readTextFile(new URL(`../${PROOF_REL}`, import.meta.url));
       const proofInScratch = `${scratch}/${PROOF_REL}`;
-      // The proof is EXECUTED here, through this path: the read/execute relation the fast gate derives for
-      // scripts/exww-live-claims-browser-proof.ts is earned by this call rather than declared beside it.
-      const child = new Deno.Command("timeout", {
-        args: [
-          "-k",
-          "5",
-          `${RUN_TIMEOUT_MS / 1000}`,
-          Deno.execPath(),
-          "run",
-          "--allow-all",
-          "--unstable-kv",
-          proofInScratch,
-        ],
-        cwd: scratch,
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
-      const baselineOutput = await child.output();
-      const baseline = `${new TextDecoder().decode(baselineOutput.stdout)}\n${
-        new TextDecoder().decode(baselineOutput.stderr)
-      }`;
-      const baselineFailures = baseline.split("\n").filter((line) => line.startsWith("FAIL "));
+      // The proof is EXECUTED here, through the harness's own runner: the read/execute relation the fast
+      // gate derives for scripts/exww-live-claims-browser-proof.ts is earned by this call - and the row and
+      // the seven-row matrix share one runner as well as one row definition, so a bound or a failure parser
+      // cannot drift between them either.
+      const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
       assertEquals(
-        baselineOutput.code,
+        baseline.code,
         0,
-        `the UNMUTATED proof must pass before any mutant can mean anything: exit ${baselineOutput.code}\n` +
-          baselineFailures.slice(0, 4).join("\n"),
+        `the UNMUTATED proof must pass before any mutant can mean anything: exit ${baseline.code}${
+          baseline.timedOut ? " (TIMED OUT - a bound, not a proof failure)" : ""
+        }\n${baseline.failures.slice(0, 4).join("\n")}`,
       );
-      assertEquals(baselineFailures, [], "the unmutated proof must report no FAIL line");
+      assertEquals(baseline.failures, [], "the unmutated proof must report no FAIL line");
 
       await Deno.writeTextFile(proofInScratch, applyMutant(source, ROW));
-      const mutatedChild = new Deno.Command("timeout", {
-        args: [
-          "-k",
-          "5",
-          `${RUN_TIMEOUT_MS / 1000}`,
-          Deno.execPath(),
-          "run",
-          "--allow-all",
-          "--unstable-kv",
-          proofInScratch,
-        ],
-        cwd: scratch,
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
-      const mutatedOutput = await mutatedChild.output();
-      const mutated = `${new TextDecoder().decode(mutatedOutput.stdout)}\n${
-        new TextDecoder().decode(mutatedOutput.stderr)
-      }`;
-      const mutatedFailures = mutated.split("\n").filter((line) => line.startsWith("FAIL "));
+      const mutated = await runProofIn(scratch, RUN_TIMEOUT_MS);
+      // A bound killing the run and the mutant reddening it are DIFFERENT outcomes: 124/137/143 is unknown,
+      // never a pass and never a fail, so the timeout is asserted out before the mutant's red is believed.
       assert(
-        mutatedOutput.code !== 0,
-        `the ${ROW} mutant must fail the proof run (exit ${mutatedOutput.code})`,
+        mutated.code !== 0 && !mutated.timedOut,
+        `the ${ROW} mutant must fail the proof run, not time out (exit ${mutated.code}, timedOut=${mutated.timedOut})`,
       );
       // The mutated value must appear in the red, so the failure is attributable to the predicate: a spawn
       // error, a missing browser or a crash would produce no such line.
       assertStringIncludes(
-        mutatedFailures.join("\n"),
+        mutated.failures.join("\n"),
         "image is 640x473 for a clip of 1280x946",
         `the ${ROW} mutant reddened something else: ${
-          mutatedFailures.slice(0, 4).map((f) => f.slice(0, 120)).join(" | ")
+          mutated.failures.slice(0, 4).map((f) => f.slice(0, 120)).join(" | ") ||
+          mutated.tail.slice(-300)
         }`,
       );
     } finally {
