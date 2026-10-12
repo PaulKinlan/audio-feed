@@ -1,24 +1,24 @@
 {
   "bead": "audio-feed-b6nr",
-  "measuredAt": "2026-10-11T00:32:15.780Z",
-  "token": "jrxg24cqil51qoc67che1lwm4cozhqfe",
+  "measuredAt": "2026-10-12T01:57:45.467Z",
+  "token": "cny7qinrbv6w5m61bb28c2mg5u14opkp",
   "expectation": "no capability at rest",
   "beforeUsingPlayer": {
     "entries": {
-      "audio-feed-token": "jrxg24cqil51qoc67che1lwm4cozhqfe",
-      "audio-feed-played:jrxg24cqil51qoc67che1lwm4cozhqfe": "[]",
-      "audio-feed-positions:jrxg24cqil51qoc67che1lwm4cozhqfe": "[{\"id\":\"ep-1\",\"position\":42,\"updatedAt\":1}]"
+      "audio-feed-positions:cny7qinrbv6w5m61bb28c2mg5u14opkp": "[{\"id\":\"ep-1\",\"position\":42,\"updatedAt\":1}]",
+      "audio-feed-token": "cny7qinrbv6w5m61bb28c2mg5u14opkp",
+      "audio-feed-played:cny7qinrbv6w5m61bb28c2mg5u14opkp": "[]"
     },
     "keysNamingTheToken": [
+      "audio-feed-positions:cny7qinrbv6w5m61bb28c2mg5u14opkp",
       "audio-feed-token",
-      "audio-feed-played:jrxg24cqil51qoc67che1lwm4cozhqfe",
-      "audio-feed-positions:jrxg24cqil51qoc67che1lwm4cozhqfe"
+      "audio-feed-played:cny7qinrbv6w5m61bb28c2mg5u14opkp"
     ]
   },
   "afterUsingPlayer": {
     "entries": {
-      "audio-feed-positions:54f6bfa8-930d-493c-bf9b-a99977dfbe8a": "[{\"id\":\"ep-1\",\"position\":42,\"updatedAt\":1}]",
-      "audio-feed-played:54f6bfa8-930d-493c-bf9b-a99977dfbe8a": "[]"
+      "audio-feed-positions:18b1322b-7683-4596-b96b-2d0ddf855e91": "[{\"id\":\"ep-1\",\"position\":42,\"updatedAt\":1}]",
+      "audio-feed-played:18b1322b-7683-4596-b96b-2d0ddf855e91": "[]"
     },
     "keysNamingTheToken": [],
     "legacyKeysRemoved": true,
@@ -26,6 +26,6 @@
   },
   "homeScreenLaunch": {
     "storageCleared": true,
-    "landedOn": "/listen/jrxg24cqil51qoc67che1lwm4cozhqfe"
+    "landedOn": "/listen/cny7qinrbv6w5m61bb28c2mg5u14opkp"
   }
 }
