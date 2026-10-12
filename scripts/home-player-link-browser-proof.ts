@@ -25,13 +25,13 @@ const ASSERTS = [
   "hero lede links to /listen",
   "/listen landing page explains how to listen",
   "returning subscriber banner is visible on /",
-  "feed token field auto-filled from storage",
+  "feed token field remains empty (privacy invariant)",
   "/listen with stored token restores directly to /listen/:token",
   "submission success state offers 'Open in Web Player →'",
   "mobile layout has zero horizontal overflow at 390px",
 ];
 
-const harness = await spawnHarness("scripts/listen-harness.ts");
+const harness = await spawnHarness("scripts/account-harness.ts");
 const BASE = harness.base;
 const OUT = new URL("../docs/evidence/audio-feed-ytg/", import.meta.url).pathname;
 
@@ -131,16 +131,35 @@ try {
         `heading: '${landingHeader}'`,
       );
 
-      // Set stored token and visit homepage again
-      const sessionSecret = harness.getLogs().stdout.match(/sessionSecret=([^ \n]+)/)?.[1] || "";
-      await cdp("Network.setCookie", {
-        url: BASE,
-        name: "__Host-af_session",
-        value: sessionSecret,
-        secure: true,
-        httpOnly: true,
-        sameSite: "Lax",
+      // Obtain a real test session using WebAuthn via the account harness (audio-feed-zmxo)
+      await cdp("WebAuthn.enable");
+      await cdp("WebAuthn.addVirtualAuthenticator", {
+        options: {
+          protocol: "ctap2",
+          transport: "internal",
+          hasResidentKey: true,
+          hasUserVerification: true,
+          isUserVerified: true,
+          automaticPresenceSimulation: true,
+        },
       });
+
+      const users = await (await fetch(`${BASE}/api/admin/users`, {
+        headers: { "x-admin-token": "harness-admin" },
+      })).json();
+      const user = users.users.find((u: { email: string }) => u.email === "paul@example.com");
+      const setupRes = await fetch(`${BASE}/api/admin/users/${user.id}/setup-link`, {
+        method: "POST",
+        headers: { "x-admin-token": "harness-admin" },
+      });
+      const setupUrl = (await setupRes.json()).url;
+
+      await cdp("Page.navigate", { url: setupUrl });
+      await until(`!document.getElementById("createPasskey")?.disabled`, "setup options");
+      await js(`document.getElementById("createPasskey").click()`);
+      await until(`location.pathname === "/account"`, "account after register");
+
+      // Visit homepage again as authenticated user
       await cdp("Page.navigate", { url: `${BASE}/` });
       await until(
         `!document.getElementById("returningSubscriber")?.hidden`,
@@ -156,31 +175,38 @@ try {
 
       const autoFilledToken = await js(`document.getElementById("token")?.value`);
       checker.check(
-        "feed token field auto-filled from storage",
-        autoFilledToken === "harness-token",
+        "feed token field remains empty (privacy invariant)",
+        autoFilledToken === "",
         `token: '${autoFilledToken}'`,
       );
 
+      // Visiting /listen with an active session restores directly to /listen/:token
       await cdp("Page.navigate", { url: `${BASE}/listen` });
       await until(
-        `location.pathname.startsWith("/listen/harness-token")`,
+        `location.pathname.startsWith("/listen/")`,
         "restored to /listen/:token",
       );
+      
+      const redirectedPath = await js(`location.pathname`);
       checker.check(
         "/listen with stored token restores directly to /listen/:token",
-        (await js(`location.pathname`)).includes("harness-token"),
+        redirectedPath.startsWith("/listen/") && redirectedPath !== "/listen/",
         "restored into player without pasting",
       );
 
+      const userToken = redirectedPath.replace("/listen/", "");
+      // Send an article on / and verify "Open in Web Player →"
       await cdp("Page.navigate", { url: `${BASE}/` });
       await until(`document.readyState === "complete"`, "homepage loaded again");
 
       await js(`
         document.getElementById("url").value = "https://example.com/front-door-article";
+        document.getElementById("token").value = "${userToken}";
         document.getElementById("ingest").requestSubmit();
       `);
+      
       await until(
-        `document.getElementById("result")?.classList.contains("ok")`,
+        `document.getElementById("result")?.classList.contains("ok") || document.getElementById("result")?.textContent.includes("Queued")`,
         "submission success",
       );
 
@@ -189,7 +215,7 @@ try {
       );
       checker.check(
         "submission success state offers 'Open in Web Player →'",
-        typeof playerLinkUrl === "string" && playerLinkUrl.includes("/listen/harness-token"),
+        typeof playerLinkUrl === "string" && playerLinkUrl.includes(`/listen/${userToken}`),
         `player link: '${playerLinkUrl}'`,
       );
 
