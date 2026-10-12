@@ -11,7 +11,8 @@
  *      - Clicks the disclosure to open it and asserts the bookmarklet code snippet is rendered
  *        inside <pre><code> and copyable/selectable.
  *      - Clicks the bookmarklet link.
- *      - Asserts zero unhandled page crashes, and captures screenshot evidence.
+ *      - Asserts browser console reports CSP refusal on javascript: click without page errors.
+ *      - Captures screenshot evidence.
  *
  *   deno run --allow-all --unstable-kv scripts/verify_3asd_bookmarklet_browser.ts
  */
@@ -223,9 +224,21 @@ try {
     `explanation: '${policyExplanation.slice(0, 60)}...'`,
   );
 
-  // 5. Click the bookmarklet anchor
+  // 5. Click the bookmarklet anchor and assert the expected CSP refusal in console
   await js(`document.querySelector("a.bookmarklet-link")?.click()`);
   await sleep(500);
+
+  const cspRefusalLogged = consoleMessages.some(
+    (msg) =>
+      msg.includes("violates the following Content Security Policy directive") ||
+      msg.includes("Refused to run the JavaScript URL") ||
+      msg.includes("script-src 'self'"),
+  );
+  check(
+    "browser console explicitly records CSP refusal for clicked javascript: link",
+    cspRefusalLogged,
+    `recorded ${consoleMessages.length} console/log message(s)`,
+  );
 
   // 6. Check that page state remains intact and disclosure is still copyable
   const stillOpen = await js(`document.querySelector("details.bookmarklet-code")?.open`);
@@ -254,7 +267,7 @@ ${checks.map((c) => `  - ${c.pass ? "✅" : "❌"} ${c.name}`).join("\n")}
 2. **Draggable Installation:** The anchor retains \`draggable="true"\` and the full \`javascript:(function()...\` payload for dragging to the bookmarks bar.
 3. **No-Script Disclosure Fallback:** A native HTML5 \`<details class="bookmarklet-code">\` disclosure provides the bookmarklet source inside a \`<pre class="bookmarklet-snippet"><code>\` element.
 4. **Honest CSP Explanation:** The disclosure explains that browsers refuse \`javascript:\` links when clicked directly on a CSP-protected page and directs the user to drag the link or copy the snippet.
-5. **Zero Inline Script:** Operates without any un-nonced inline scripts or click interception scripts, conforming strictly to the page's Content Security Policy.
+5. **Observed CSP Refusal & Zero Inline Script:** Clicking the bookmarklet link explicitly triggers browser CSP refusal logged in console, while the disclosure operates with zero inline scripts and produces no CSP errors.
 
 ## Execution Log
 \`\`\`

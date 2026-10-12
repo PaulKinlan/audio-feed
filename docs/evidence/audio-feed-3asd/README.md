@@ -16,14 +16,14 @@
 ## Test Environment
 - **Browser:** Headless Chrome (CDP)
 - **Viewport:** 1280x900
-- **URL:** `http://localhost:34013/`
+- **URL:** `http://localhost:35307/`
 
 ## Key Verifications
 1. **Unified Class Attribute:** The bookmarklet anchor carries `class="bookmarklet-link u-strong-link"` without duplicate HTML class attributes.
 2. **Draggable Installation:** The anchor retains `draggable="true"` and the full `javascript:(function()...` payload for dragging to the bookmarks bar.
 3. **No-Script Disclosure Fallback:** A native HTML5 `<details class="bookmarklet-code">` disclosure provides the bookmarklet source inside a `<pre class="bookmarklet-snippet"><code>` element.
 4. **Honest CSP Explanation:** The disclosure explains that browsers refuse `javascript:` links when clicked directly on a CSP-protected page and directs the user to drag the link or copy the snippet.
-5. **Zero Inline Script:** Operates without any un-nonced inline scripts or click interception scripts, conforming strictly to the page's Content Security Policy.
+5. **Observed CSP Refusal & Zero Inline Script:** Clicking the bookmarklet link explicitly triggers browser CSP refusal logged in console, while the disclosure operates with zero inline scripts and produces no CSP errors.
 
 ## Execution Log
 ```
@@ -36,6 +36,7 @@ PASS  details disclosure opens upon user interaction
 PASS  code snippet in disclosure contains matching bookmarklet source  snippet matches href (617 chars)
 PASS  disclosure code wraps and is fully visible (not horizontally clipped)  scrollWidth 623 vs clientWidth 623
 PASS  disclosure text plainly explains browser CSP refusal of javascript: links  explanation: 'Browsers refuse javascript: links when clicked directly on a...'
+PASS  browser console explicitly records CSP refusal for clicked javascript: link  recorded 1 console/log message(s)
 PASS  page and disclosure remain open and stable after link click  
 ```
 
