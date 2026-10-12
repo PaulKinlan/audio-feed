@@ -11,9 +11,7 @@
 
 import { openStores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
-
-const DEADLINE_MS = 90_000;
-const startedAt = Date.now();
+import { withChrome } from "./proof-helper.ts";
 
 let failures = 0;
 const check = (name: string, ok: boolean, detail = "") => {
@@ -31,8 +29,6 @@ const app = await bootstrap({
   inventory: false,
 });
 const pageUrl = `http://localhost:${(app.server.addr as Deno.NetAddr).port}/`;
-const profile = await Deno.makeTempDir();
-let chrome: Deno.ChildProcess | undefined;
 let socket: WebSocket | undefined;
 
 try {
@@ -43,207 +39,171 @@ try {
     html.includes("sendBeacon") && html.includes("largest-contentful-paint"),
   );
 
-  chrome = new Deno.Command("google-chrome", {
-    args: [
-      "--headless=new",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profile}`,
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "about:blank",
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
+  await withChrome(async (chrome) => {
+    const port = chrome.port;
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as {
+      type: string;
+      url: string;
+      webSocketDebuggerUrl?: string;
+    }[];
+    const target = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+    check("a page target is available to drive", Boolean(target));
+    if (!target?.webSocketDebuggerUrl) throw new Error("no page target");
 
-  // Chrome reports the debugging port it chose on stderr; no fixed port, so no collision with
-  // anything else on the VM.
-  const reader = chrome.stderr.getReader();
-  const decoder = new TextDecoder();
-  let port = 0;
-  let banner = "";
-  while (Date.now() - startedAt < DEADLINE_MS) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    banner += decoder.decode(value);
-    const match = banner.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/);
-    if (match) {
-      port = Number(match[1]);
-      break;
-    }
-  }
-  check("headless Chrome started and reported a debugging port", port > 0, `port ${port}`);
-  if (port === 0) throw new Error("no debugging port");
+    socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => {
+      socket!.onopen = () => resolve();
+      socket!.onerror = () => reject(new Error("websocket failed"));
+    });
 
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as {
-    type: string;
-    url: string;
-    webSocketDebuggerUrl?: string;
-  }[];
-  const target = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-  check("a page target is available to drive", Boolean(target));
-  if (!target?.webSocketDebuggerUrl) throw new Error("no page target");
-
-  socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise<void>((resolve, reject) => {
-    socket!.onopen = () => resolve();
-    socket!.onerror = () => reject(new Error("websocket failed"));
-  });
-
-  let seq = 0;
-  const cdp = (method: string, params: Record<string, unknown> = {}) =>
-    new Promise<Record<string, unknown>>((resolve) => {
-      const id = ++seq;
-      const onMessage = (event: MessageEvent) => {
-        const message = JSON.parse(String(event.data)) as {
-          id?: number;
-          result?: Record<string, unknown>;
+    let seq = 0;
+    const cdp = (method: string, params: Record<string, unknown> = {}) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const id = ++seq;
+        const onMessage = (event: MessageEvent) => {
+          const message = JSON.parse(String(event.data)) as {
+            id?: number;
+            result?: Record<string, unknown>;
+          };
+          if (message.id === id) {
+            socket!.removeEventListener("message", onMessage);
+            resolve(message.result ?? {});
+          }
         };
-        if (message.id === id) {
-          socket!.removeEventListener("message", onMessage);
-          resolve(message.result ?? {});
-        }
-      };
-      socket!.addEventListener("message", onMessage);
-      socket!.send(JSON.stringify({ id, method, params }));
-    });
+        socket!.addEventListener("message", onMessage);
+        socket!.send(JSON.stringify({ id, method, params }));
+      });
 
-  await cdp("Page.enable");
-  await cdp("Page.navigate", { url: pageUrl });
-  // Let it paint and settle: LCP is only final once the page stops producing candidates.
-  await wait(4000);
-  // KNOWN INTERACTIONS, so the count can be compared against what this run actually dispatched
-  // (audio-feed-dzgj). A mouse press and release is ONE interaction that emits several events
-  // (pointerdown, mousedown, pointerup, mouseup, click), which is exactly the case a naive counter
-  // gets wrong by counting events instead of interactions.
-  const press = (x: number, y: number) =>
-    cdp("Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x,
-      y,
-      button: "left",
-      clickCount: 1,
-    });
-  const release = (x: number, y: number) =>
-    cdp("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x,
-      y,
-      button: "left",
-      clickCount: 1,
-    });
-  // Which kinds to dispatch, so the count can be attributed to a KIND without any instrumentation
-  // inside the page: run the harness with CWV_INTERACTIONS=mouse and again with =key.
-  const kind = Deno.env.get("CWV_INTERACTIONS") ?? "both";
-  const MOUSE_INTERACTIONS = kind === "key" ? 0 : 3;
-  for (let i = 0; i < MOUSE_INTERACTIONS; i++) {
-    await press(40 + i * 20, 40);
-    await release(40 + i * 20, 40);
-    await wait(150);
-  }
-  // Keys after the mouse, because the click focuses the page and an unfocused page receives no
-  // keydown at all.
-  // An unfocused page receives no keydown at all, so bring it to the front and focus it first.
-  await cdp("Page.bringToFront");
-  await cdp("Runtime.evaluate", { expression: "document.body.focus()" });
-  const KEY_INTERACTIONS = kind === "mouse" ? 0 : 2;
-  for (let i = 0; i < KEY_INTERACTIONS; i++) {
-    await cdp("Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: "a",
-      code: "KeyA",
-      windowsVirtualKeyCode: 65,
-    });
-    await cdp("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: "a",
-      code: "KeyA",
-      windowsVirtualKeyCode: 65,
-    });
-    await wait(150);
-  }
-  await wait(1500);
+    await cdp("Page.enable");
+    await cdp("Page.navigate", { url: pageUrl });
+    // Let it paint and settle: LCP is only final once the page stops producing candidates.
+    await wait(4000);
+    // KNOWN INTERACTIONS, so the count can be compared against what this run actually dispatched
+    // (audio-feed-dzgj). A mouse press and release is ONE interaction that emits several events
+    // (pointerdown, mousedown, pointerup, mouseup, click), which is exactly the case a naive counter
+    // gets wrong by counting events instead of interactions.
+    const press = (x: number, y: number) =>
+      cdp("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+    const release = (x: number, y: number) =>
+      cdp("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+    // Which kinds to dispatch, so the count can be attributed to a KIND without any instrumentation
+    // inside the page: run the harness with CWV_INTERACTIONS=mouse and again with =key.
+    const kind = Deno.env.get("CWV_INTERACTIONS") ?? "both";
+    const MOUSE_INTERACTIONS = kind === "key" ? 0 : 3;
+    for (let i = 0; i < MOUSE_INTERACTIONS; i++) {
+      await press(40 + i * 20, 40);
+      await release(40 + i * 20, 40);
+      await wait(150);
+    }
+    // Keys after the mouse, because the click focuses the page and an unfocused page receives no
+    // keydown at all.
+    // An unfocused page receives no keydown at all, so bring it to the front and focus it first.
+    await cdp("Page.bringToFront");
+    await cdp("Runtime.evaluate", { expression: "document.body.focus()" });
+    const KEY_INTERACTIONS = kind === "mouse" ? 0 : 2;
+    for (let i = 0; i < KEY_INTERACTIONS; i++) {
+      await cdp("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+      });
+      await cdp("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+      });
+      await wait(150);
+    }
+    await wait(1500);
 
-  // What the PAGE counted, read out of it rather than assumed.
-  const state = await cdp("Runtime.evaluate", {
-    expression: "JSON.stringify(globalThis.cwvState ? { observed: cwvState.observed() } : null)",
-    returnByValue: true,
-  }) as { result?: { value?: string } };
-  const counted = JSON.parse(state.result?.value ?? "null") as
-    | { observed: number[] }
-    | null;
-  console.log(
-    `  OBSERVED: interaction durations the observer reported: ${
-      counted ? JSON.stringify(counted.observed) : "none"
-    }`,
-  );
-  // The invariant that matters: an OVERCOUNT understates INP, which is the dangerous direction. An
-  // undercount only degrades the value to the upper bound the interaction count exists to remove.
+    // What the PAGE counted, read out of it rather than assumed.
+    const state = await cdp("Runtime.evaluate", {
+      expression: "JSON.stringify(globalThis.cwvState ? { observed: cwvState.observed() } : null)",
+      returnByValue: true,
+    }) as { result?: { value?: string } };
+    const counted = JSON.parse(state.result?.value ?? "null") as
+      | { observed: number[] }
+      | null;
+    console.log(
+      `  OBSERVED: interaction durations the observer reported: ${
+        counted ? JSON.stringify(counted.observed) : "none"
+      }`,
+    );
+    // The invariant that matters: an OVERCOUNT understates INP, which is the dangerous direction. An
+    // undercount only degrades the value to the upper bound the interaction count exists to remove.
 
-  // The beacon fires on pagehide/visibilitychange, so navigating away IS the flush.
-  await cdp("Page.navigate", { url: "about:blank" });
-  await wait(2500);
+    // The beacon fires on pagehide/visibilitychange, so navigating away IS the flush.
+    await cdp("Page.navigate", { url: "about:blank" });
+    await wait(2500);
 
-  const records = await stores.metadata.listLogs();
-  const cwv = records.filter((r) => r.type === "cwv.report");
-  console.log(
-    `  records: ${
-      records.map((r) =>
-        `${r.type}(${r.context?.metric ?? "-"}=${JSON.stringify(r.context?.value ?? null)})`
-      ).join(" ") || "(none)"
-    }`,
-  );
-  check("a real browser sent at least one CWV report", cwv.length > 0, `${cwv.length} report(s)`);
+    const records = await stores.metadata.listLogs();
+    const cwv = records.filter((r) => r.type === "cwv.report");
+    console.log(
+      `  records: ${
+        records.map((r) =>
+          `${r.type}(${r.context?.metric ?? "-"}=${JSON.stringify(r.context?.value ?? null)})`
+        ).join(" ") || "(none)"
+      }`,
+    );
+    check("a real browser sent at least one CWV report", cwv.length > 0, `${cwv.length} report(s)`);
 
-  const lcp = cwv.find((r) => r.context?.metric === "lcp");
-  check(
-    "an LCP value arrived from the browser",
-    Boolean(lcp) && Number(lcp!.context?.value) > 0,
-    lcp ? `${lcp.context?.value}` : "absent",
-  );
-  // A page cannot take an hour to paint and still be a measurement; the range check is the same rule
-  // the endpoint enforces, asserted here on what really arrived.
-  const value = Number(lcp?.context?.value ?? -1);
-  check(
-    "the arrived value is inside the plausible range",
-    value > 0 && value <= 3_600_000,
-    `${value}ms`,
-  );
-  check(
-    "the beacon never became a request-log field",
-    !records.filter((r) => r.type === "http.request").some((r) =>
-      JSON.stringify(r).includes("cwv")
-    ),
-    `${
-      records.filter((r) => r.type === "http.request").length
-    } request record(s), none about cwv (the page loads themselves belong in the log)`,
-  );
-  check(
-    "a page label came with it",
-    typeof lcp?.context?.page === "string",
-    String(lcp?.context?.page),
-  );
-  const inp = cwv.find((r) => r.context?.metric === "inp");
-  console.log(
-    `  INP: ${
-      inp ? `${inp.context?.value}ms (warn/error band applied to it)` : "not observed in this run"
-    }`,
-  );
+    const lcp = cwv.find((r) => r.context?.metric === "lcp");
+    check(
+      "an LCP value arrived from the browser",
+      Boolean(lcp) && Number(lcp!.context?.value) > 0,
+      lcp ? `${lcp.context?.value}` : "absent",
+    );
+    // A page cannot take an hour to paint and still be a measurement; the range check is the same rule
+    // the endpoint enforces, asserted here on what really arrived.
+    const value = Number(lcp?.context?.value ?? -1);
+    check(
+      "the arrived value is inside the plausible range",
+      value > 0 && value <= 3_600_000,
+      `${value}ms`,
+    );
+    check(
+      "the beacon never became a request-log field",
+      !records.filter((r) => r.type === "http.request").some((r) =>
+        JSON.stringify(r).includes("cwv")
+      ),
+      `${
+        records.filter((r) => r.type === "http.request").length
+      } request record(s), none about cwv (the page loads themselves belong in the log)`,
+    );
+    check(
+      "a page label came with it",
+      typeof lcp?.context?.page === "string",
+      String(lcp?.context?.page),
+    );
+    const inp = cwv.find((r) => r.context?.metric === "inp");
+    console.log(
+      `  INP: ${
+        inp ? `${inp.context?.value}ms (warn/error band applied to it)` : "not observed in this run"
+      }`,
+    );
+
+    try {
+      socket?.close();
+    } catch { /* already gone */ }
+  }, { prefix: "audiofeed-i7vi-" });
 } catch (error) {
   failures++;
   console.error(`FAIL  the run did not complete: ${error}`);
 } finally {
-  try {
-    socket?.close();
-  } catch { /* already gone */ }
-  try {
-    chrome?.kill("SIGKILL");
-    await chrome?.status;
-  } catch { /* already gone */ }
-  try {
-    await Deno.remove(profile, { recursive: true });
-  } catch { /* best effort */ }
   await app.server.shutdown();
 }
 

@@ -68,7 +68,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-8oz",
   "audio-feed-9mp",
   "audio-feed-bp6r",
-  "audio-feed-i7vi",
   "audio-feed-icl4",
   "audio-feed-kzi",
   // Landed on main from another lane while fnrp was in review, i.e. before the rule existed: it belongs to
@@ -78,8 +77,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-m182",
   "audio-feed-np5",
   "audio-feed-r97",
-  "audio-feed-s2pi",
-  "audio-feed-u2ve",
   "audio-feed-ytg",
   "c5n-dock-reserve",
   "ct1-run-history",

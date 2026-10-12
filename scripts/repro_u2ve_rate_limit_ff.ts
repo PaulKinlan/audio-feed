@@ -254,6 +254,31 @@ if (report.rotatingForgedPrefix.evaded) {
   );
   Deno.exit(1);
 }
+if (report.singleHonestClient.first429AtAttempt !== MAX_REQUESTS + 1) {
+  console.error(
+    `FAIL: an honest client was not limited at attempt ${
+      MAX_REQUESTS + 1
+    } (first 429 at ${report.singleHonestClient.first429AtAttempt})`,
+  );
+  Deno.exit(1);
+}
+if (report.twoDistinctTrustedValues.secondClientStatus !== 200) {
+  console.error(
+    `FAIL: second client on a distinct trusted-hop address did not receive 200 (status: ${report.twoDistinctTrustedValues.secondClientStatus})`,
+  );
+  Deno.exit(1);
+}
+if (
+  report.twoDistinctTrustedValues.first.length !== MAX_REQUESTS ||
+  !report.twoDistinctTrustedValues.first.every((c) => c.status === 200)
+) {
+  console.error(
+    `FAIL: first client did not receive 200 for all initial ${MAX_REQUESTS} requests: ${
+      JSON.stringify(report.twoDistinctTrustedValues.first)
+    }`,
+  );
+  Deno.exit(1);
+}
 console.log(
   `rotating malformed cf-connecting-ip values (0: .. 13:): ${report.rotatingMalformedCfOnly.tooManyRequests} x 429, ${report.rotatingMalformedCfOnly.allowedThrough} allowed through`,
 );

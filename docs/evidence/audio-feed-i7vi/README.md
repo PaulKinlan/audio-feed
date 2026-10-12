@@ -1,5 +1,10 @@
 # Evidence: observability (4) — traces and real-user CWV
 
+- Script: scripts/verify_i7vi_browser.ts
+- Asserts: the collector is inlined in the served page; a real browser sent at least one CWV report;
+  an LCP value arrived from the browser; the arrived value is inside the plausible range; the beacon
+  never became a request-log field; a page label came with it
+
 `audio-feed-i7vi`. Branch `fleet/i7vi`.
 
 ## What was verified, and how
@@ -97,12 +102,21 @@ the beacon never becomes a request-log field, and the observed interaction durat
 
 ## Real-input INP verification under trusted user events (audio-feed-s3uk)
 
-`scripts/verify_s3uk_real_browser.ts` drives a real interacted browser session against the live home page (`/`), interacting directly with form inputs using CDP trusted events (`isTrusted: true`) for both pointer and keyboard actions.
-Transcript: `verify-browser-real-input.txt`.
+`scripts/verify_s3uk_real_browser.ts` drives a real interacted browser session against the live home
+page (`/`), interacting directly with form inputs using CDP trusted events (`isTrusted: true`) for
+both pointer and keyboard actions. Transcript: `verify-browser-real-input.txt`.
 
 Results:
-- **`isTrusted: true` established for all events**: all dispatched DOM events (`pointerdown`, `pointerup`, `click`, `keydown`, `keyup`) have `isTrusted === true`.
-- **Event Timing assigns distinct interactionIds**: Pointer and keyboard interactions receive valid, distinct `interactionId` values from Chromium's internal Event Timing implementation (e.g. 537, 6466, 6487).
-- **Multi-event grouping verified**: Events from a single interaction (`pointerdown`, `pointerup`, `click` or `keydown`, `keypress`) share the same `interactionId`.
-- **`cwvState.observed()` correctly groups by `interactionId`**: Excludes `interactionId: 0` (scroll/hover) and yields distinct per-interaction durations.
-- **End-to-end beacon persistence**: On page navigation (`pagehide`), the collector flushes `lcp` and `inp` metrics via `sendBeacon` to `/api/cwv`, and verified `cwv.report` records are persisted to the metadata store.
+
+- **`isTrusted: true` established for all events**: all dispatched DOM events (`pointerdown`,
+  `pointerup`, `click`, `keydown`, `keyup`) have `isTrusted === true`.
+- **Event Timing assigns distinct interactionIds**: Pointer and keyboard interactions receive valid,
+  distinct `interactionId` values from Chromium's internal Event Timing implementation (e.g. 537,
+  6466, 6487).
+- **Multi-event grouping verified**: Events from a single interaction (`pointerdown`, `pointerup`,
+  `click` or `keydown`, `keypress`) share the same `interactionId`.
+- **`cwvState.observed()` correctly groups by `interactionId`**: Excludes `interactionId: 0`
+  (scroll/hover) and yields distinct per-interaction durations.
+- **End-to-end beacon persistence**: On page navigation (`pagehide`), the collector flushes `lcp`
+  and `inp` metrics via `sendBeacon` to `/api/cwv`, and verified `cwv.report` records are persisted
+  to the metadata store.

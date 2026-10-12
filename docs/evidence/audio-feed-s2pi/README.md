@@ -1,5 +1,13 @@
 # audio-feed-s2pi — observability API verification
 
+- Script: scripts/verify_s2pi_errors_api.ts
+- Asserts: anonymous request is refused; and told how to authenticate; a wrong key is refused; the
+  cursor walk saw every seeded event exactly once, in order; and never moved backwards; a poll at
+  the cursor returns nothing and keeps the cursor; summary says nothing changed; summary counts what
+  did change; and reports something new afterwards; with a cursor that moved; a cursor retention has
+  passed is refused, not skipped; and the summary refuses it identically; the shared key is never
+  stored
+
 `verify-errors-api.txt` is a transcript of `scripts/verify_s2pi_errors_api.ts`, which drives the
 REAL server (`bootstrap`) with the key supplied through the environment — the way a deployment
 provides it. That matters because the unit tests inject a config object and build the app with
