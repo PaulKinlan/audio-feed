@@ -56,18 +56,20 @@ practice with a green suite and a passed review.
 
 ## Policy (audio-feed-39k1)
 
-1. **Compress before you commit.** Run `deno task evidence:compress <the bead directory you touched>` after
-   capturing screenshots — naming the path keeps the pass local, because a bare run recompresses every
-   committed PNG in the tree that it can shrink (measured 2026-10-12: eight other beads' directories in one
-   run). It recompresses to a 256-colour palette (PNG8 via ImageMagick) and keeps the result only when it is
-   smaller — typically ~3x smaller and indistinguishable at review scale (at 1:1, smooth gradients may show
-   faint banding; the UI under test is unaffected). **Re-running a proof undoes the compression**, because
-   screenshots are captured uncompressed (measured 2026-10-12 on audio-feed-8fc — 333KB/313KB/243KB fresh
-   against 131KB/118KB/82KB committed) — and since audio-feed-3teu that is REPORTED rather than failed:
-   `tests/evidence_size_test.ts` measures what GIT CARRIES (the staged blob, else `HEAD`), so a re-run's raw
-   screenshot is a note (`… over the 150KB budget in the WORKING TREE … not a size-gate failure`) and the
-   suite stays green. It fails the moment the oversized bytes are STAGED or committed, which is when they
-   would land in the tree. So reproduce freely, and compress before you `git add`.
+1. **Compress before you commit.** Run
+   `deno task evidence:compress <the bead directory you touched>` after capturing screenshots —
+   naming the path keeps the pass local, because a bare run recompresses every committed PNG in the
+   tree that it can shrink (measured 2026-10-12: eight other beads' directories in one run). It
+   recompresses to a 256-colour palette (PNG8 via ImageMagick) and keeps the result only when it is
+   smaller — typically ~3x smaller and indistinguishable at review scale (at 1:1, smooth gradients
+   may show faint banding; the UI under test is unaffected). **Re-running a proof undoes the
+   compression**, because screenshots are captured uncompressed (measured 2026-10-12 on
+   audio-feed-8fc — 333KB/313KB/243KB fresh against 131KB/118KB/82KB committed) — and since
+   audio-feed-3teu that is REPORTED rather than failed: `tests/evidence_size_test.ts` measures what
+   GIT CARRIES (the staged blob, else `HEAD`), so a re-run's raw screenshot is a note
+   (`… over the 150KB budget in the WORKING TREE … not a size-gate failure`) and the suite stays
+   green. It fails the moment the oversized bytes are STAGED or committed, which is when they would
+   land in the tree. So reproduce freely, and compress before you `git add`.
 2. **Budgets: 150KB per file, 8MB for the whole tree.** `tests/evidence_size_test.ts` fails the
    suite over either. If a compressed screenshot still exceeds the per-file budget, capture a
    smaller viewport or crop to the element under test — do not raise the budget to fit one file.
@@ -107,3 +109,23 @@ with no browser, and live-proxy checks, are not required to use the harness.
   pairing it with a guaranteed `finally` wrapper (`withChrome`): the harness owns the browser and
   profile lifecycle, so cleanup is unconditionally attempted before any assertion or body failure
   surfaces.
+
+## Checking a change to a proof script (audio-feed-coao)
+
+A delta that touches only a script in `scripts/` is **not** checked by the fast gate today, and the
+reason is measured rather than suspected: the gate's derived relations cover non-TypeScript paths,
+and `scripts/` is covered by the import graph instead — which a **spawned** script is invisible to.
+Such a delta derives no suite, so the empty-selection guard runs the whole fast tier (115 suites
+that never execute the proof, 132s on fjfh slice 3) and the gate passes anyway.
+
+The commands that DO execute proofs, so a reviewer has somewhere to go:
+
+- `deno task evidence` — runs every proof an evidence README declares (31 today) under a per-proof
+  bound, and reports which directory failed, with the script, the exit code and the seconds;
+- `deno task evidence:mutants` — runs the exww capture-identity mutant matrix, whose rows are what
+  prove those checks can fail at all.
+
+**These are checks you can run, not checks the gate runs.** Nothing invokes them automatically, so
+"a proof-script delta _should_ be checked this way" is a rule for a reviewer, not coverage: the
+difference between _should be checked_ and _is checked_ is the whole subject of audio-feed-coao, and
+making the gate red by derivation is audio-feed-4kl3.
