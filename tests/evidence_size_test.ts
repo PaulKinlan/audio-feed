@@ -44,3 +44,113 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
       "prune stale evidence (docs/evidence/README.md)",
   );
 });
+
+/**
+ * audio-feed-fnrp — every evidence directory declares what it asserts (docs/evidence/README.md, "Honesty").
+ *
+ * WHY: the audio-feed-q45b audit found nine proof scripts that fail on main, twelve that leak the browser they
+ * claim to clean up, and three whose `check()` could not fail the run — and every one of those was invisible to a
+ * reader who trusted the README. This check cannot verify that a claim is TRUE (only a mutation can, which is why
+ * the reviewer asks for the mutant); it makes the claim set explicit and keeps the pointer to the tool honest, so
+ * judging evidence is reading two lines instead of reading a script.
+ *
+ * THE GRANDFATHER LIST IS DEBT, NOT A POLICY. The 52 directories below predate the rule and are listed so the
+ * suite stays green while they are retrofitted; they must SHRINK. A new evidence directory goes on this list only
+ * over the author's dead body — the whole point is that new evidence complies from its first commit, and that an
+ * explicit diff adding an entry is what a reviewer sees when it does not. Retrofitting the existing ones is a
+ * separate pass (see the bead), because a claim has to come from the script that makes it, never from a guess.
+ */
+const EVIDENCE_UNDECLARED: string[] = [
+  "att-paging",
+  "audio-feed-0cmu",
+  "audio-feed-0jp",
+  "audio-feed-0r0s",
+  "audio-feed-0rmn",
+  "audio-feed-25t",
+  "audio-feed-3asd",
+  "audio-feed-3h1",
+  "audio-feed-3xq",
+  "audio-feed-6hw",
+  "audio-feed-6y9",
+  "audio-feed-7jsl",
+  "audio-feed-8eh",
+  "audio-feed-8fc",
+  "audio-feed-8oz",
+  "audio-feed-9mp",
+  "audio-feed-9vns",
+  "audio-feed-9yu8",
+  "audio-feed-b6nr",
+  "audio-feed-b75q",
+  "audio-feed-bp6r",
+  "audio-feed-dc2y",
+  "audio-feed-e1d",
+  "audio-feed-ep1",
+  "audio-feed-fydf",
+  "audio-feed-gueb",
+  "audio-feed-i7vi",
+  "audio-feed-icl4",
+  "audio-feed-khk3",
+  "audio-feed-kzi",
+  "audio-feed-ldsb",
+  "audio-feed-ls92",
+  "audio-feed-m182",
+  "audio-feed-msw",
+  "audio-feed-np5",
+  "audio-feed-o9kc",
+  "audio-feed-py5",
+  "audio-feed-r97",
+  "audio-feed-s2pi",
+  "audio-feed-sa4g",
+  "audio-feed-syhu",
+  "audio-feed-u2ve",
+  "audio-feed-u60a",
+  "audio-feed-vpw",
+  "audio-feed-wzv9",
+  "audio-feed-xw7",
+  "audio-feed-ytg",
+  "c5n-dock-reserve",
+  "ct1-run-history",
+  "ingest",
+  "linkbacks",
+];
+
+Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {
+  const undeclared: string[] = [];
+
+  for await (const entry of Deno.readDir("docs/evidence")) {
+    if (!entry.isDirectory || EVIDENCE_UNDECLARED.includes(entry.name)) continue;
+    const dir = `docs/evidence/${entry.name}`;
+    const readme = `${dir}/README.md`;
+    const body = await Deno.readTextFile(readme).catch(() => null);
+    if (body === null) {
+      undeclared.push(`${dir}: no README.md`);
+      continue;
+    }
+    const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
+    const capture = /^- Capture:\s*\S/m.test(body);
+    const script = body.match(/^- Script:\s*(\S+)/m)?.[1];
+    if (!asserts && !capture) {
+      undeclared.push(`${dir}: needs a "- Asserts: <claims>" or "- Capture: no assertions" line`);
+      continue;
+    }
+    if (asserts && !script) {
+      undeclared.push(
+        `${dir}: declares Asserts: with no "- Script: scripts/<proof>.ts" to attach them to`,
+      );
+      continue;
+    }
+    if (script) {
+      const stat = await Deno.stat(script.startsWith("scripts/") ? script : `scripts/${script}`)
+        .catch(() => null);
+      if (!stat?.isFile) undeclared.push(`${dir}: Script: names ${script}, which does not exist`);
+    }
+  }
+
+  assertEquals(
+    undeclared,
+    [],
+    "evidence must declare its own coverage in docs/evidence/<bead>/README.md (see docs/evidence/README.md, " +
+      '"Honesty"): add "- Script: scripts/<proof>.ts" plus "- Asserts: <the claims the script fails on>", or ' +
+      '"- Capture: no assertions" when the artifact only records state: ' + undeclared.join("; "),
+  );
+});

@@ -1,5 +1,13 @@
 # Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
+- Script: scripts/verify_kvnw_account_bookmarklet_browser.ts
+- Asserts: the draggable anchor keeps its class and stays draggable; the anchor still carries the
+  javascript: payload; the disclosure exists and opens on click; the snippet is the SAME payload as the anchor
+  href (one builder); the wording names the Content Security Policy; the code is fully visible in its box
+  (scrollWidth <= clientWidth); clicking the anchor is refused by the CSP, asserted from the console, not
+  collected; the refusal leaves the page and the disclosure intact; the same shared rule un-clips the front
+  door's disclosure (audio-feed-3asd surface)
+
 ## Test Environment
 - **Browser:** Headless Chrome (CDP), 1280x900
 - **Page:** `GET /account` on an in-process server with an ephemeral port (the port is deliberately not
