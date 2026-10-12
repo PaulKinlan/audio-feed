@@ -1,5 +1,8 @@
 # audio-feed-att — paging the uncapped episode scans
 
+- Capture: no assertions
+- Reason: Memory and latency benchmark measurements (`measure.ts`) recording peak resident objects and latency before and after paged episode scan implementation; behavioral regression assertions live in `tests/admin_management_test.ts` and `tests/conformance/metadata/episodes-queue.ts`.
+
 ## What changed
 
 `DELETE /api/admin/users/:id/sources/:sourceId` made four `listEpisodes` calls with

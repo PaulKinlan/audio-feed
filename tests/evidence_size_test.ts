@@ -61,7 +61,6 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
  * separate pass (see the bead), because a claim has to come from the script that makes it, never from a guess.
  */
 const EVIDENCE_UNDECLARED: string[] = [
-  "att-paging",
   "audio-feed-0cmu",
   "audio-feed-0rmn",
   "audio-feed-3h1",
@@ -78,10 +77,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-np5",
   "audio-feed-r97",
   "audio-feed-ytg",
-  "c5n-dock-reserve",
-  "ct1-run-history",
-  "ingest",
-  "linkbacks",
 ];
 
 Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {

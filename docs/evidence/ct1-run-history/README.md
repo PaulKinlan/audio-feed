@@ -1,5 +1,8 @@
 # audio-feed-ct1: each job keeps its own run history
 
+- Capture: no assertions
+- Reason: DOM state readings recorded from manual browser run against `scripts/admin-harness.ts` recording Operations card output before and after fix; automated regression assertions are in `tests/admin_stats_test.ts` and `tests/conformance/metadata/notifications.ts`.
+
 What the admin dashboard's Operations card said in Chrome, before and after the fix.
 
 Method: `scripts/admin-harness.ts` serves the real admin page with three hours of run
