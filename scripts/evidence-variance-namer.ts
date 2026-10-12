@@ -93,13 +93,6 @@ export function distinctRenders(hashes: string[]): number {
  */
 export function reading(v: Variance): string[] {
   const lines: string[] = [];
-  if (v.captures < 2) {
-    lines.push(
-      "ONE CAPTURE: a single capture cannot establish stability - it can only fail to detect " +
-        "instability. Supply at least two, and read N=3 as detection rather than proof.",
-    );
-    return lines;
-  }
   if (v.missing > 0) {
     lines.push(
       `${v.missing} run director(ies) had NO capture for this artefact, so this row ` +
@@ -107,6 +100,16 @@ export function reading(v: Variance): string[] {
           v.captures + v.missing
         } - reported rather than treated as identical.`,
     );
+  }
+  if (v.captures < 2) {
+    // FEWER THAN TWO CAPTURES IS NOT A MATCH (audio-feed-cfsg). One capture can fail to detect
+    // instability and cannot establish stability, so it must never be reported as consistent:
+    // that is the difference between "nothing to compare" and "compared and matched".
+    lines.push(
+      `${v.captures} capture(s): fewer than two cannot establish stability - one capture can only ` +
+        `fail to detect instability, it cannot show that a render repeats.`,
+    );
+    return lines;
   }
   if (v.distinctRenders <= 1) {
     lines.push("IDENTICAL: every capture supplied for this artefact has the same pixels.");
@@ -132,6 +135,15 @@ export function reading(v: Variance): string[] {
     `AXES: count ${v.differingPixels} px, max delta ${v.maxDelta}, ` +
       `box ${v.box ?? "none"} (area ${v.boxArea}) -> fill density ${v.fillDensity.toFixed(4)}`,
   );
+  if (v.boxArea === 0) {
+    // THE COUNT IS REAL AND THE BOX IS NOT USABLE, and printing "0x0 ... fill density 0.0000"
+    // beside a nonzero count reads as a contradiction rather than as tooling at its limit.
+    lines.push(
+      `NOTE: the difference box came back degenerate at this image size, so the density above is ` +
+        `not meaningful for this row - ${v.differingPixels} pixels do differ, and the count and the ` +
+        `maximum delta are still measured.`,
+    );
+  }
   if (!v.bestShift) {
     lines.push("No shift search was run.");
     return lines;
@@ -142,12 +154,24 @@ export function reading(v: Variance): string[] {
       `ZERO SHIFT IS BEST (mean ${sci(v.zeroShiftMean)}), so this is NOT a translation: ` +
         `shifting the image only makes the difference worse.`,
     );
-  } else {
+  } else if (mean < v.zeroShiftMean) {
     const ratio = mean > 0 ? v.zeroShiftMean / mean : Infinity;
     lines.push(
       `A shift of (dx ${dx}, dy ${dy}) reduces the mean from ${sci(v.zeroShiftMean)} to ` +
         `${sci(mean)}, a factor of ${ratio.toFixed(1)} - consistent with content MOVING by ` +
         `${Math.abs(dx) || Math.abs(dy)}px rather than changing.`,
+    );
+  } else {
+    // A BEST SHIFT THAT DOES NOT REDUCE THE MEAN IS NOT EVIDENCE OF MOVEMENT. The search returns a
+    // shift either way, and on a pair of small or uniform images the wrapped mean can come out
+    // equal, so this branch is what stops the tool asserting "content MOVING ... a factor of 1.0",
+    // which is a claim its own number contradicts. Found by this bead's own control.
+    lines.push(
+      `NO INTEGER SHIFT explains the difference: the best shift is (dx ${dx}, dy ${dy}) and it is ` +
+        `not better than zero (${sci(mean)} against ${
+          sci(v.zeroShiftMean)
+        }), which is what a CHANGE ` +
+        `in content looks like rather than a layout move.`,
     );
   }
   return lines;
@@ -363,21 +387,61 @@ if (import.meta.main) {
   await Deno.mkdir(out, { recursive: true });
   const runs: Map<string, string>[] = [];
   for (const dir of runDirs) runs.push(await pngsIn(dir));
-  const first = runs[0]!;
-  let unstable = 0;
-  for (const artefact of artefactNames(first)) {
+
+  // ENUMERATE THE UNION OF THE RUNS, NOT THE FIRST ONE (audio-feed-cfsg). An artefact present in a
+  // later run and absent from the first is exactly the missing-capture case, and enumerating
+  // runs[0] made it invisible: the CLI printed "0 unstable artefact(s) of 0" for a set it had
+  // never looked at. The count at the end is the number of artefacts FOUND, not the number the
+  // first directory happened to contain.
+  const found = [...new Set(runs.flatMap((dir) => [...dir.keys()]))].sort();
+
+  let differences = 0;
+  let gaps = 0;
+  let tooFew = 0;
+  let compared = 0;
+  for (const artefact of found) {
     const variance = await measure(artefact, runs, out);
-    if (variance.distinctRenders <= 1) continue;
-    unstable++;
-    console.log(`\n=== ${artefact}`);
+    // REPORT EVERY STATE THE FUNCTION CAN NAME, rather than filtering to differences here: the old
+    // filter skipped `distinctRenders <= 1`, which is exactly where a single capture and a missing
+    // capture live, so the guards inside `reading()` were unreachable from this path and the unit
+    // tests that exercised them proved nothing about the CLI (audio-feed-cfsg).
+    const hasDifference = variance.missing === 0 && variance.captures >= 2 &&
+      variance.distinctRenders > 1;
+    const isGap = variance.missing > 0;
+    const isTooFew = variance.captures < 2;
+    if (hasDifference) differences++;
+    if (isGap) gaps++;
+    if (isTooFew) tooFew++;
+    if (hasDifference || isGap || isTooFew) {
+      console.log(`\n=== ${artefact}`);
+      if (hasDifference) {
+        console.log(
+          `    box ${variance.box}  differing ${variance.differingPixels} px  max delta ${variance.maxDelta}`,
+        );
+      }
+      for (const line of reading(variance)) console.log(`    ${line}`);
+      for (const crop of variance.crops) console.log(`    crop: ${crop}`);
+    } else {
+      compared++;
+    }
+  }
+
+  // AND THE DEGENERATE RUN IS ITS OWN OUTCOME (audio-feed-cfsg): if nothing had two captures to
+  // compare against each other, this run MEASURED NOTHING. Printing a reassuring "0 unstable"
+  // there is the whole defect - it cannot tell "nothing to compare" from "compared and matched" -
+  // so the exit code says so instead of the summary pretending.
+  if (compared === 0) {
     console.log(
-      `    box ${variance.box}  differing ${variance.differingPixels} px  max delta ${variance.maxDelta}`,
+      `\nnothing to compare: none of the ${found.length} artefact(s) found across ${runs.length} ` +
+        `run(s) had two or more captures without a gap. A run with nothing to compare is not a run ` +
+        `that found nothing wrong.`,
     );
-    for (const line of reading(variance)) console.log(`    ${line}`);
-    for (const crop of variance.crops) console.log(`    crop: ${crop}`);
+    Deno.exit(2);
   }
   console.log(
-    `\n${unstable} unstable artefact(s) of ${first.size}; nothing here names a source - ` +
-      `the numbers discriminate, and the naming is a judgement recorded on a bead.`,
+    `\n${differences} with a difference, ${gaps} with a missing capture, ${tooFew} with fewer than ` +
+      `two captures, ${compared} compared and identical - of ${found.length} artefact(s) found ` +
+      `across ${runs.length} run(s). Nothing here names a source: the numbers discriminate, and ` +
+      `the naming is a judgement recorded on a bead.`,
   );
 }
