@@ -576,19 +576,62 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
 Deno.test("audio-feed-q890: deriveReadRelationReport normalises root without trailing slash", async () => {
   // A caller who passes a root without a trailing slash (e.g. from Deno.makeTempDir()) must not get an empty
   // report with no diagnostic for a fixture that genuinely reads a file. Both forms must behave identically.
+  //
+  // audio-feed-weg5: the fixture must carry a real file and declaratively read it, so the test asserts
+  // the positive derivation rather than an equality between two empty sets. The known-good with-slash
+  // case is asserted first so fixture issues fail loudly before comparing spellings.
   const dir = await Deno.makeTempDir({ prefix: "q890-slash-demo-" });
   try {
     await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/README.md`, "# Test repo\nDeclarative read fixture.\n");
     await Deno.writeTextFile(
       `${dir}/tests/read_test.ts`,
-      "const dir = import.meta.dirname;\nDeno.readTextFile(`${dir}/README`);\n",
+      "const dir = import.meta.dirname;\n" +
+        "Deno.readTextFile(`${dir}/README.md`);\n" +
+        "Deno.readTextFile(`${dir}/README`);\n",
     );
+
+    // Call with trailing slash first (the known-good baseline):
+    const withSlash = await deriveReadRelationReport(`${dir}/`, ["tests/read_test.ts"]);
+
+    // (1) POSITIVE FIXTURE: assert the known-good spelling derives the declarative relation first
+    assert(
+      withSlash.relations.has("README.md"),
+      "with-slash positive fixture must derive README.md relation",
+    );
+    const withSlashObservers = withSlash.relations.get("README.md") ?? [];
+    assert(
+      withSlashObservers.includes("tests/read_test.ts"),
+      "with-slash positive fixture must include tests/read_test.ts observer",
+    );
+    const allowedObservers = new Set(["tests/read_test.ts"]);
+    for (const observer of withSlashObservers) {
+      assert(
+        allowedObservers.has(observer),
+        `with-slash relation contained unexpected observer: ${observer}`,
+      );
+    }
+    assertEquals(withSlash.unclassified, ["README"]);
 
     // Call without trailing slash (as returned by Deno.makeTempDir()):
     const withoutSlash = await deriveReadRelationReport(dir, ["tests/read_test.ts"]);
-    // Call with trailing slash:
-    const withSlash = await deriveReadRelationReport(`${dir}/`, ["tests/read_test.ts"]);
 
+    // Assert without-slash derives the declarative relation identically:
+    assert(
+      withoutSlash.relations.has("README.md"),
+      "a root without a trailing slash must derive the README.md relation",
+    );
+    const withoutSlashObservers = withoutSlash.relations.get("README.md") ?? [];
+    assert(
+      withoutSlashObservers.includes("tests/read_test.ts"),
+      "without-slash relation must include tests/read_test.ts observer",
+    );
+    for (const observer of withoutSlashObservers) {
+      assert(
+        allowedObservers.has(observer),
+        `without-slash relation contained unexpected observer: ${observer}`,
+      );
+    }
     assertEquals(
       withoutSlash.unclassified,
       ["README"],
@@ -597,7 +640,7 @@ Deno.test("audio-feed-q890: deriveReadRelationReport normalises root without tra
     assertEquals(withoutSlash.unclassified, withSlash.unclassified);
     assertEquals([...withoutSlash.relations.entries()], [...withSlash.relations.entries()]);
 
-    // Anti-vacuity: a genuinely empty fixture still reports empty rather than manufacturing a false read
+    // (2) DEGENERATE FIXTURE: a genuinely empty fixture cannot derive the relation or manufactured reads
     const emptyDir = await Deno.makeTempDir({ prefix: "q890-empty-demo-" });
     try {
       await Deno.mkdir(`${emptyDir}/tests`, { recursive: true });
@@ -605,6 +648,10 @@ Deno.test("audio-feed-q890: deriveReadRelationReport normalises root without tra
       const emptyReport = await deriveReadRelationReport(emptyDir, ["tests/empty_test.ts"]);
       assertEquals(emptyReport.unclassified, []);
       assertEquals(emptyReport.relations.size, 0);
+      assert(
+        !emptyReport.relations.has("README.md"),
+        "degenerate fixture cannot derive README.md relation",
+      );
     } finally {
       await Deno.remove(emptyDir, { recursive: true });
     }
