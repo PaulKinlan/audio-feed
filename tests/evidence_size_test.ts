@@ -71,7 +71,8 @@ export async function checkEvidenceDeclaration(
   name: string,
   root: string = ROOT,
 ): Promise<string | null> {
-  const dir = `${root}docs/evidence/${name}`;
+  const dirRoot = root.endsWith("/") ? root : `${root}/`;
+  const dir = `${dirRoot}docs/evidence/${name}`;
   const readme = `${dir}/README.md`;
   let body = await Deno.readTextFile(readme).catch(() => null);
   if (body === null) {
@@ -100,15 +101,25 @@ export async function checkEvidenceDeclaration(
   }
   if (script) {
     const scriptRel = script.startsWith("scripts/") ? script : `scripts/${script}`;
-    const stat = await Deno.stat(`${root}${scriptRel}`).catch(() => null);
-    if (!stat?.isFile) {
-      const scriptCmd = await new Deno.Command("git", {
-        args: ["cat-file", "-e", `:${scriptRel}`],
-        cwd: root,
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
-      if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
+    const stat = await Deno.stat(`${dirRoot}${scriptRel}`).catch(() => null);
+    const existsOnDisk = stat?.isFile === true;
+    const scriptCmd = await new Deno.Command("git", {
+      args: ["cat-file", "-e", `:${scriptRel}`],
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const existsInIndex = scriptCmd.success;
+
+    // audio-feed-vaaj: Script is index-OR-disk so that an unstaged rm does not produce a false negative
+    // (audio-feed-npai, audio-feed-xr7v); the executor field below requires BOTH.
+    // If absent from BOTH, classic does not exist; if on disk but absent from index, untracked failure.
+    // A script present in the Git index passes whether or not the working-tree copy is present on disk.
+    if (!existsOnDisk && !existsInIndex) {
+      return `${dir}: Script: names ${script}, which does not exist`;
+    }
+    if (existsOnDisk && !existsInIndex) {
+      return `${dir}: Script: names ${script}, which exists on disk but is absent from the Git index`;
     }
   }
   const executedByMatch = body.match(/^[ \t]*-[ \t]*Executed by:[ \t]*(.+)$/m);
@@ -126,7 +137,7 @@ export async function checkEvidenceDeclaration(
     }
     for (const target of targets) {
       const execRel = target.startsWith("tests/") ? target : `tests/${target}`;
-      const stat = await Deno.stat(`${root}${execRel}`).catch(() => null);
+      const stat = await Deno.stat(`${dirRoot}${execRel}`).catch(() => null);
       const existsOnDisk = stat?.isFile === true;
       const execCmd = await new Deno.Command("git", {
         args: ["cat-file", "-e", `:${execRel}`],
@@ -1211,6 +1222,119 @@ Deno.test("audio-feed-rmhi mirror: committed executor present in Git index and o
       err,
       null,
       "an executor legitimately committed in the Git index and present on disk must pass the audit",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-vaaj: checkEvidenceDeclaration requires script in Git index and rejects untracked scripts", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "vaaj-script-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+
+    // Case 1 (audio-feed-vaaj defect / reason 2): script written to disk but NOT added to git index (untracked)
+    await Deno.mkdir(`${root}/docs/evidence/case-untracked-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-untracked-script/README.md`,
+      "- Script: scripts/untracked_proof.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/scripts/untracked_proof.ts`, "// untracked proof");
+
+    // Case 2 (audio-feed-npai asymmetry / unstaged rm): script committed in git index but deleted from disk -> PASSES
+    await Deno.mkdir(`${root}/docs/evidence/case-index-only-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-index-only-script/README.md`,
+      "- Script: scripts/deleted_proof.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/scripts/deleted_proof.ts`, "// deleted proof");
+
+    // Case 3 (control): script exists BOTH on disk AND in git index -> PASSES
+    await Deno.mkdir(`${root}/docs/evidence/case-both-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-both-script/README.md`,
+      "- Script: scripts/both_proof.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/scripts/both_proof.ts`, "// both proof");
+
+    // Case 4 (reason 1): script totally absent (neither on disk nor in git index) -> FAILS
+    await Deno.mkdir(`${root}/docs/evidence/case-neither-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-neither-script/README.md`,
+      "- Script: scripts/neither_proof.ts\n- Asserts: valid\n",
+    );
+
+    // Commit scripts/proof.ts, docs/evidence, deleted_proof.ts, both_proof.ts,
+    // but deliberately do NOT git add scripts/untracked_proof.ts.
+    await gitCmd([
+      "add",
+      "scripts/proof.ts",
+      "docs/evidence",
+      "scripts/deleted_proof.ts",
+      "scripts/both_proof.ts",
+    ], root);
+    await commitAll(root, "commit vaaj baseline");
+
+    // Now remove scripts/deleted_proof.ts from disk so it exists only in git index (simulating unstaged rm)
+    await Deno.remove(`${root}/scripts/deleted_proof.ts`);
+
+    // Case 1: untracked on disk -> MUST FAIL (reason 2)
+    const errUntracked = await checkEvidenceDeclaration("case-untracked-script", root);
+    assertEquals(
+      errUntracked?.includes(
+        "Script: names scripts/untracked_proof.ts, which exists on disk but is absent from the Git index",
+      ),
+      true,
+      `untracked script must fail with missing from index reason, got: ${errUntracked}`,
+    );
+
+    // Case 2: index-present script deleted from disk (unstaged rm) -> MUST PASS (npai contract)
+    const errIndexOnly = await checkEvidenceDeclaration("case-index-only-script", root);
+    assertEquals(
+      errIndexOnly,
+      null,
+      `index-present script deleted from disk must pass (audio-feed-npai contract), got: ${errIndexOnly}`,
+    );
+
+    // Case 3: both on disk and in index -> PASSES (null)
+    const errBoth = await checkEvidenceDeclaration("case-both-script", root);
+    assertEquals(errBoth, null, "script in both disk and index must pass");
+
+    // Case 4: neither on disk nor in index -> FAILS with classic does not exist (reason 1)
+    const errNeither = await checkEvidenceDeclaration("case-neither-script", root);
+    assertEquals(
+      errNeither?.includes("Script: names scripts/neither_proof.ts, which does not exist"),
+      true,
+      `absent script must fail with does not exist, got: ${errNeither}`,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-vaaj mirror: committed script present in Git index and on disk passes declaration check", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "vaaj-mirror-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-script-mirror`, { recursive: true });
+
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof script");
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-script-mirror/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: valid\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit mirror evidence case");
+
+    const err = await checkEvidenceDeclaration("audio-feed-script-mirror", root);
+    assertEquals(
+      err,
+      null,
+      "a script legitimately committed in the Git index and present on disk must pass the audit",
     );
   } finally {
     await Deno.remove(root, { recursive: true });
