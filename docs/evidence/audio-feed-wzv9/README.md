@@ -1,5 +1,8 @@
 # audio-feed-wzv9 — the structured log store: what a dead claim leaves behind
 
+- Capture: no assertions
+- Reason: Historical CLI transcripts (claim-forensics.txt, capability-leak-verify.txt) from structured log store verification. No generating script writes to this directory; behavioral invariants and failure forensic properties are tested by scripts/repro_wzv9_claim_forensics.ts and tests/synthesis_test.ts.
+
 Evidence for the foundation bead of the observability set. `claim-forensics.txt` is the output of
 `scripts/repro_wzv9_claim_forensics.ts`, which drives the **real** batch entry point the poll loop
 calls and the real store; every check in it exits non-zero if the property stops holding.

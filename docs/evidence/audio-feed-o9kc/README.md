@@ -1,5 +1,8 @@
 # audio-feed-o9kc — premise verdict: insertUser IS atomic on both stores
 
+- Capture: no assertions
+- Reason: Architectural record and concurrency investigation disproving the premise that insertUser is non-atomic. Contains no generating script or test assertions; live concurrency uniqueness invariants are tested in tests/conformance/metadata/.
+
 **Claim under test** (from the audio-feed-xw7 review): "email uniqueness is a
 check-then-create, not guaranteed atomic in the store layer — two concurrent
 requests for the same fresh email could both pass the existence check;
