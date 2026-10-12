@@ -94,7 +94,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-s2pi",
   "audio-feed-sa4g",
   "audio-feed-u2ve",
-  "audio-feed-u60a",
   "audio-feed-wzv9",
   "audio-feed-ytg",
   "c5n-dock-reserve",
