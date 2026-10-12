@@ -1,5 +1,8 @@
 # audio-feed-ls92: structured script output continuation
 
+- Capture: no assertions
+- Reason: Historical test execution logs (before.log, after.log) under mocked Gemini provider responses demonstrating structured script continuation. Behavioral invariants are asserted in tests/script_long_output_test.ts and tests/grounded_script_test.ts, not by an automated evidence runner script.
+
 **PROVIDER-UNVERIFIED:** All requests below use an injected mock `fetch`. There is no `GEMINI_API_KEY` in this lane. Real Gemini token counts, response schema acceptance, search grounding, latency, script quality and eventual TTS audio remain unverified; live validation is tracked by `audio-feed-u60a`.
 
 ## Before

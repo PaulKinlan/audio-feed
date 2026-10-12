@@ -1,5 +1,8 @@
 # audio-feed-dc2y — polish bundle: agent-annotated forms, a render expectation, dev-tooling perf triage
 
+- Capture: no assertions
+- Reason: Architectural record and triage decisions for WebMCP form annotations, view-transition render expectation, and dev-tooling perf findings. Contains no generating script or test assertions; behavioral coverage lives in tests/admin_ui_test.ts, tests/account_pages_test.ts, and tests/listen_landing_asset_test.ts.
+
 P4. Three unrelated small things, recorded here so the diff is reviewable as one pass rather than as
 three half-explained changes.
 

@@ -1,5 +1,8 @@
 # audio-feed-b75q — the episodes cases were moved, not rewritten
 
+- Capture: no assertions
+- Reason: Static case-manifest comparison and historical test-run capture from splitting tests/conformance/metadata/episodes.ts into three modules. No generating script writes to this directory; ongoing test assertions execute in tests/storage_test.ts.
+
 `tests/conformance/metadata/episodes.ts` held 44 of the suite's 102 cases in 929 lines. It is now
 three modules by concern — `episodes-queue.ts` (19: the record, cursor paging, the pending index),
 `episodes-claims.ts` (14: claims, leases, completion), `episodes-regeneration.ts` (11) — and the
