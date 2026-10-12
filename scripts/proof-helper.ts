@@ -80,6 +80,12 @@ export async function createTempChromeProfile(
 }
 
 export function newestChrome(chromeCacheRoot?: string): string {
+  if (!chromeCacheRoot) {
+    const envBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
+    if (envBin && envBin.trim().length > 0) {
+      return envBin.trim();
+    }
+  }
   const home = Deno.env.get("HOME") ?? "";
   const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`;
   let dirs: string[] = [];
@@ -95,6 +101,186 @@ export function newestChrome(chromeCacheRoot?: string): string {
     throw new Error(`No Chrome binaries found under ${root}`);
   }
   return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
+}
+
+export function resolveChromeBinary(override?: string): string {
+  if (override && override.trim().length > 0) {
+    return override.trim();
+  }
+  const envBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
+  if (envBin && envBin.trim().length > 0) {
+    return envBin.trim();
+  }
+  return newestChrome();
+}
+
+export interface ChromeLaunchOptions {
+  binary?: string;
+  prefix?: string;
+  args?: string[];
+  portTimeoutMs?: number;
+}
+
+export interface ChromeHandle {
+  port: number;
+  profileDir: string;
+  process: Deno.ChildProcess;
+  close: () => Promise<void>;
+}
+
+export async function launchChrome(
+  opts: ChromeLaunchOptions = {},
+): Promise<ChromeHandle> {
+  const prefix = opts.prefix ?? "audiofeed-chrome-";
+  const { profileDir, cleanup } = await createTempChromeProfile(prefix);
+  const binary = resolveChromeBinary(opts.binary);
+
+  const defaultArgs = [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profileDir}`,
+    "about:blank",
+  ];
+
+  const args = opts.args ? [...opts.args] : defaultArgs;
+  if (opts.args && !args.some((a) => a.startsWith("--user-data-dir="))) {
+    args.push(`--user-data-dir=${profileDir}`);
+  }
+
+  let process: Deno.ChildProcess;
+  try {
+    const cmd = new Deno.Command(binary, {
+      args,
+      stdout: "null",
+      stderr: "null",
+    });
+    process = cmd.spawn();
+  } catch (spawnErr) {
+    await cleanup();
+    throw spawnErr;
+  }
+
+  let exited = false;
+  let exitCode: number | null = null;
+  process.status.then((st) => {
+    exited = true;
+    exitCode = st.code;
+  }).catch(() => {});
+
+  const portFile = `${profileDir}/DevToolsActivePort`;
+  const portTimeoutMs = opts.portTimeoutMs ?? 10_000;
+  const startTime = Date.now();
+  let port = 0;
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  try {
+    while (Date.now() - startTime < portTimeoutMs) {
+      if (exited) {
+        const content = await Deno.readTextFile(portFile).catch(() => "");
+        const firstLine = content.split("\n")[0]?.trim();
+        if (firstLine && /^\d+$/.test(firstLine)) {
+          port = Number(firstLine);
+          break;
+        }
+        throw new Error(
+          `Chrome process '${binary}' exited prematurely with code ${
+            exitCode ?? -1
+          } before writing DevToolsActivePort in '${profileDir}'`,
+        );
+      }
+
+      const content = await Deno.readTextFile(portFile).catch(() => "");
+      const firstLine = content.split("\n")[0]?.trim();
+      if (firstLine && /^\d+$/.test(firstLine)) {
+        port = Number(firstLine);
+        break;
+      }
+
+      await sleep(50);
+    }
+
+    if (!port) {
+      throw new Error(
+        `Timed out after ${portTimeoutMs}ms waiting for DevToolsActivePort in '${profileDir}'`,
+      );
+    }
+  } catch (readinessErr) {
+    try {
+      process.kill();
+    } catch {
+      // ignore
+    }
+    await process.status.catch(() => {});
+    await cleanup();
+    throw readinessErr;
+  }
+
+  let closed = false;
+  let closePromise: Promise<void> | null = null;
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      if (closed) return;
+      closed = true;
+      try {
+        process.kill();
+      } catch {
+        // ignore
+      }
+      await process.status.catch(() => {});
+      await cleanup();
+    })();
+    return closePromise;
+  };
+
+  return {
+    port,
+    profileDir,
+    process,
+    close,
+  };
+}
+
+export async function withChrome<T>(
+  body: (chrome: ChromeHandle) => Promise<T> | T,
+  opts: ChromeLaunchOptions = {},
+): Promise<T> {
+  const chrome = await launchChrome(opts);
+  let bodyError: unknown = null;
+  let result: T;
+  try {
+    result = await body(chrome);
+  } catch (err) {
+    bodyError = err;
+  }
+
+  let teardownError: unknown = null;
+  try {
+    await chrome.close();
+  } catch (err) {
+    teardownError = err;
+  }
+
+  if (bodyError && teardownError) {
+    if (bodyError instanceof Error && !bodyError.cause) {
+      bodyError.cause = teardownError;
+    }
+    throw bodyError;
+  }
+
+  if (bodyError) {
+    throw bodyError;
+  }
+
+  if (teardownError) {
+    throw teardownError;
+  }
+
+  return result!;
 }
 
 export async function spawnHarness(

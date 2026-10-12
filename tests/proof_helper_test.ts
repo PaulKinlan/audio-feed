@@ -12,13 +12,17 @@ import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from 
 import {
   assertVisibleExpression,
   CheckFailureError,
+  ChromeHandle,
   createChecker,
   createTempChromeProfile,
   isVisible,
+  launchChrome,
   newestChrome,
+  resolveChromeBinary,
   runProof,
   spawnHarness,
   startInProcessServer,
+  withChrome,
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
 
@@ -540,5 +544,206 @@ Deno.test("proof-helper: startInProcessServer binds ephemeral ports and shutdown
     await s1.shutdown(); // second shutdown safe
     await s2.shutdown();
     await s2.shutdown(); // second shutdown safe
+  }
+});
+
+const fakeChromeStub = new URL("./fixtures/fake_chrome.sh", import.meta.url).pathname;
+
+Deno.test("proof-helper: launchChrome with stub exiting immediately rejects and removes profile", async () => {
+  await assertRejects(
+    async () => {
+      await launchChrome({
+        binary: fakeChromeStub,
+        args: ["--mode=exit_immediately"],
+        prefix: "audiofeed-stub-exit-",
+      });
+    },
+    Error,
+    "exited prematurely with code 0 before writing DevToolsActivePort",
+  );
+
+  const leftovers = [...Deno.readDirSync("/tmp")]
+    .filter((e) => e.name.startsWith("audiofeed-stub-exit-"));
+  assertEquals(leftovers.length, 0);
+});
+
+Deno.test("proof-helper: resolveChromeBinary supports explicit override and env var", () => {
+  assertEquals(resolveChromeBinary("/custom/chrome"), "/custom/chrome");
+  const originalEnv = Deno.env.get("AUDIOFEED_CHROME_BIN");
+  try {
+    Deno.env.set("AUDIOFEED_CHROME_BIN", "/env/chrome");
+    assertEquals(resolveChromeBinary(), "/env/chrome");
+    assertEquals(resolveChromeBinary("/override/chrome"), "/override/chrome");
+  } finally {
+    if (originalEnv !== undefined) {
+      Deno.env.set("AUDIOFEED_CHROME_BIN", originalEnv);
+    } else {
+      Deno.env.delete("AUDIOFEED_CHROME_BIN");
+    }
+  }
+});
+
+Deno.test("proof-helper: withChrome with stub writing port succeeds, close is idempotent, profile removed", async () => {
+  let capturedProfile = "";
+  let handleRef: ChromeHandle | null = null;
+  const result = await withChrome(
+    async (chrome) => {
+      capturedProfile = chrome.profileDir;
+      handleRef = chrome;
+      assertEquals(chrome.port, 9222);
+      const existsDuringBody = await Deno.stat(capturedProfile).then(() => true, () => false);
+      assertEquals(existsDuringBody, true);
+      return "success-result";
+    },
+    {
+      binary: fakeChromeStub,
+      args: ["--mode=write_port_and_exit"],
+      prefix: "audiofeed-stub-port-",
+    },
+  );
+
+  assertEquals(result, "success-result");
+  const existsAfter = await Deno.stat(capturedProfile).then(() => true, () => false);
+  assertEquals(existsAfter, false);
+
+  assertEquals(handleRef !== null, true);
+  await handleRef!.close();
+});
+
+Deno.test("proof-helper: launchChrome with hanging stub rejects on bounded timeout and removes profile", async () => {
+  await assertRejects(
+    async () => {
+      await launchChrome({
+        binary: fakeChromeStub,
+        args: ["--mode=hang"],
+        portTimeoutMs: 150,
+        prefix: "audiofeed-stub-hang-",
+      });
+    },
+    Error,
+    "Timed out after 150ms waiting for DevToolsActivePort",
+  );
+
+  const leftovers = [...Deno.readDirSync("/tmp")]
+    .filter((e) => e.name.startsWith("audiofeed-stub-hang-"));
+  assertEquals(leftovers.length, 0);
+});
+
+Deno.test("proof-helper: AUDIOFEED_CHROME_BIN env override redirects launch and cleans up on failure", async () => {
+  const originalEnv = Deno.env.get("AUDIOFEED_CHROME_BIN");
+  try {
+    Deno.env.set("AUDIOFEED_CHROME_BIN", "/bin/true");
+    await assertRejects(
+      async () => {
+        await withChrome(
+          async () => {},
+          { prefix: "audiofeed-stub-env-" },
+        );
+      },
+      Error,
+      "exited prematurely with code 0 before writing DevToolsActivePort",
+    );
+
+    const leftovers = [...Deno.readDirSync("/tmp")]
+      .filter((e) => e.name.startsWith("audiofeed-stub-env-"));
+    assertEquals(leftovers.length, 0);
+  } finally {
+    if (originalEnv !== undefined) {
+      Deno.env.set("AUDIOFEED_CHROME_BIN", originalEnv);
+    } else {
+      Deno.env.delete("AUDIOFEED_CHROME_BIN");
+    }
+  }
+});
+
+Deno.test("proof-helper: contract interlock: failing check or body throw in withChrome surfaces failure after guaranteed profile cleanup", async () => {
+  // Case 1: check() failure inside withChrome
+  let profileDir1 = "";
+  const checkErr = await assertRejects(
+    async () => {
+      const checker = createChecker();
+      await withChrome(
+        (chrome) => {
+          profileDir1 = chrome.profileDir;
+          checker.check("contract check", false, "deliberate fail");
+        },
+        {
+          binary: fakeChromeStub,
+          args: ["--mode=write_port_and_exit"],
+          prefix: "audiofeed-contract-check-",
+        },
+      );
+    },
+    CheckFailureError,
+    "Check failed: contract check (deliberate fail)",
+  );
+  assertEquals(checkErr.checkName, "contract check");
+  assertEquals(checkErr.detail, "deliberate fail");
+
+  const exists1 = await Deno.stat(profileDir1).then(() => true, () => false);
+  assertEquals(exists1, false);
+
+  // Case 2: arbitrary body throw inside withChrome
+  let profileDir2 = "";
+  await assertRejects(
+    async () => {
+      await withChrome(
+        (chrome) => {
+          profileDir2 = chrome.profileDir;
+          throw new Error("body crashed during proof");
+        },
+        {
+          binary: fakeChromeStub,
+          args: ["--mode=write_port_and_exit"],
+          prefix: "audiofeed-contract-throw-",
+        },
+      );
+    },
+    Error,
+    "body crashed during proof",
+  );
+
+  const exists2 = await Deno.stat(profileDir2).then(() => true, () => false);
+  assertEquals(exists2, false);
+});
+
+Deno.test("proof-helper: error precedence: body throw propagates with teardown failure attached as cause", async () => {
+  let profileDir = "";
+  let lockedSubdir = "";
+  try {
+    const err = await assertRejects(
+      async () => {
+        await withChrome(
+          async (chrome) => {
+            profileDir = chrome.profileDir;
+            lockedSubdir = `${profileDir}/locked-dir`;
+            await Deno.mkdir(lockedSubdir, { recursive: true });
+            await Deno.chmod(lockedSubdir, 0o000);
+            throw new Error("primary body failure");
+          },
+          {
+            binary: fakeChromeStub,
+            args: ["--mode=write_port_and_exit"],
+            prefix: "audiofeed-err-prec-",
+          },
+        );
+      },
+      Error,
+      "primary body failure",
+    );
+
+    assertEquals(err.message, "primary body failure");
+    assertEquals(err.cause instanceof Error, true);
+    assertStringIncludes(
+      (err.cause as Error).message,
+      "Failed to clean up temp Chrome profile",
+    );
+  } finally {
+    if (lockedSubdir) {
+      await Deno.chmod(lockedSubdir, 0o755).catch(() => {});
+    }
+    if (profileDir) {
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+    }
   }
 });
