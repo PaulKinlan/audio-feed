@@ -333,8 +333,13 @@ try {
     }
     const result = await runProof(options, declaration, (pid) => running = pid);
     results.push({ declaration, result });
-    const verdict = result.code === 0 ? "ok  " : "FAIL";
-    const note = result.timedOut ? ` TIMED OUT after ${options.timeoutMs / 1000}s` : "";
+    // A proof that exceeded the BOUND is UNKNOWN, not failed: 124/137/143 mean the bound killed it,
+    // which is the fleet's own rule and the same distinction the gate draws. It is still non-zero,
+    // because an unknown is not a pass - but calling it a failure would be this tier overclaiming.
+    const verdict = result.code === 0 ? "ok  " : result.timedOut ? "TIMEOUT" : "FAIL";
+    const note = result.timedOut
+      ? ` UNKNOWN (exceeded the ${options.timeoutMs / 1000}s bound; raise --timeout to decide it)`
+      : "";
     console.log(
       `[evidence] ${verdict} ${declaration.dir} -> ${declaration.declared} ` +
         `(exit ${result.code}, ${result.seconds.toFixed(1)}s)${note}`,
@@ -351,15 +356,24 @@ try {
 }
 
 const passed = results.filter((entry) => entry.result?.code === 0).length;
-const failed = results.length - passed;
+const unknown =
+  results.filter((entry) => entry.result !== undefined && entry.result.timedOut).length;
+const failed = results.length - passed - unknown;
 const seconds = results.reduce((total, entry) => total + (entry.result?.seconds ?? 0), 0);
 console.log(
-  `[evidence] ${passed} passed, ${failed} failed of ${declarations.length} declared ` +
+  `[evidence] ${passed} passed, ${failed} failed, ${unknown} unknown (exceeded the bound) of ` +
+    `${declarations.length} declared ` +
     `(${unresolved.length} unresolved, ${undeclared.length} declare nothing, ` +
     `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
 );
-if (failed > 0) {
-  console.log("[evidence] RED: at least one declared proof did not pass on this tree");
+if (failed > 0 || unknown > 0) {
+  console.log(
+    `[evidence] RED: ${failed} declared proof(s) failed` +
+      (unknown > 0
+        ? ` and ${unknown} stayed UNKNOWN inside the ${options.timeoutMs / 1000}s bound`
+        : "") +
+      " - an unknown is not a pass",
+  );
   Deno.exit(1);
 }
 if (debt > 0) {
