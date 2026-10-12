@@ -13,6 +13,7 @@ import { memoryStores } from "../src/config.ts";
 import { isHttpsRequest, sanitizeRequestUrl } from "../src/router.ts";
 import { isAllowedAudioKey } from "../src/routes/audio.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
+import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bytes, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
@@ -437,11 +438,11 @@ Deno.test("token redaction: Router 500 error logging redacts capability token an
       "Log line must contain redacted URL",
     );
 
-    // Error object / stack must be preserved
+    // Error object / stack must be preserved, with message screened to prevent client leaks (audio-feed-ahx5)
     assert(loggedException instanceof Error, "Logged second argument must be the Error object");
     assertEquals(
       (loggedException as Error).message,
-      "unexpected KV failure during feed generation",
+      SUPPRESSED_MESSAGE,
     );
   } finally {
     console.error = originalError;
@@ -527,11 +528,60 @@ Deno.test("token redaction: Router 500 error logging redacts audio capability to
       "Log line must contain redacted URL",
     );
 
-    // Error object / stack must be preserved
+    // Error object / stack must be preserved, with message screened to prevent client leaks (audio-feed-ahx5)
     assert(loggedException instanceof Error, "Logged second argument must be the Error object");
     assertEquals(
       (loggedException as Error).message,
-      "unexpected blob failure during audio fetch",
+      SUPPRESSED_MESSAGE,
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+Deno.test("token redaction: Router 500 error logging screens client canary in operational stderr (audio-feed-ahx5)", async () => {
+  const CLIENT_CANARY = "canary-client-token-998877";
+  const { fetch } = setupTestApp(undefined, {
+    masterFeed: () => {
+      // Error carrying canaries in message, custom name, dynamic stack frame, and stack location
+      const err = new Error(`test throw: ${CLIENT_CANARY}`);
+      err.name = `CanaryName_${CLIENT_CANARY}`;
+      err.stack = `CanaryName_${CLIENT_CANARY}: test throw: ${CLIENT_CANARY}
+        at Object.canaryDynamicFn_${CLIENT_CANARY} (file:///app/${CLIENT_CANARY}/server.ts:10:2)`;
+      const obj = {
+        [`canaryDynamicFn_${CLIENT_CANARY}`]() {
+          throw err;
+        },
+      };
+      obj[`canaryDynamicFn_${CLIENT_CANARY}`]();
+    },
+  });
+
+  const loggedErrors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  try {
+    const res = await fetch(new Request(`${BASE}/feed/some-token/master.xml`));
+    assertEquals(res.status, 500);
+
+    assertEquals(loggedErrors.length, 1);
+    const logLine = String(loggedErrors[0]?.[0]);
+    const loggedException = loggedErrors[0]?.[1];
+
+    assert(loggedException instanceof Error);
+    assertEquals((loggedException as Error).message, SUPPRESSED_MESSAGE);
+    assertEquals((loggedException as Error).name, "Error");
+
+    // Assert that the canary is completely absent from the logged Error message, name, and stack
+    const formatted = `${logLine} ${
+      (loggedException as Error).stack ?? (loggedException as Error).message
+    }`;
+    assert(
+      !formatted.includes(CLIENT_CANARY),
+      `Operational stderr must not contain client canary: ${formatted}`,
     );
   } finally {
     console.error = originalError;

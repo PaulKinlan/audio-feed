@@ -7,6 +7,7 @@
 
 import { UNMATCHED_ROUTE } from "./request_route.ts";
 import { HttpError, methodNotAllowed, notFound, problem } from "./http.ts";
+import { screenErrorForLogging } from "./observability/error_screen.ts";
 
 export type Params = Record<string, string | undefined>;
 
@@ -366,9 +367,13 @@ export class Router<Ctx> {
         return await this.handle(req, ctx, info);
       } catch (error) {
         await onUnhandledError?.(error, req);
+        // audio-feed-ahx5: Screen error before logging to operational stderr.
+        // A raw Error may contain client-supplied text in its message, custom name, or dynamic
+        // stack frames, which must not leak to server stderr. screenErrorForLogging sanitizes
+        // the message and name to closed sets, and strips dynamic function names from the stack.
         console.error(
           `[audio-feed] unhandled error for ${req.method} ${sanitizeRequestUrl(req.url)}:`,
-          error,
+          screenErrorForLogging(error),
         );
         return applySecurityHeaders(
           problem({ status: 500, title: "internal_error" }),
