@@ -12,6 +12,7 @@ import {
 } from "../src/tts/gemini.ts";
 import { splitTextUnderByteBudget } from "../src/synthesis/limits.ts";
 import { runProof, writeEvidenceReadme } from "./proof-helper.ts";
+import { describeSynthesis, observeSynthesis, usableSynthesis } from "./synthesis_observation.ts";
 
 const base = "https://gemini.int.exe.xyz/v1beta";
 const model = "gemini-3.8-flash-tts";
@@ -72,7 +73,13 @@ await runProof("verify_live_tts", async (checker) => {
         status,
         pass: tokenCapExceeded && statusMatches && errorMatches,
         detail: `status=${status}, tokens=${tokens}, error=${json.error?.message}`,
-        raw: { description, tokens, status, error: json.error },
+        raw: {
+          description,
+          tokens,
+          status,
+          error: json.error,
+          observation: observeSynthesis(status, json),
+        },
       };
     }
 
@@ -102,6 +109,7 @@ await runProof("verify_live_tts", async (checker) => {
         audioReturned: !failClosed,
         decoderFailedClosed: failClosed,
         usageMetadata: json.usageMetadata,
+        observation: observeSynthesis(status, json),
       },
     };
   }
@@ -162,25 +170,29 @@ await runProof("verify_live_tts", async (checker) => {
     ctrl2.detail,
   );
 
-  // audio-feed-zrx9 NARROWING. This control used to require the provider to recitation-filter
-  // raw Wikipedia prose (HTTP 200 + finishReason OTHER + finishMessage "copyrighted works" + no
-  // audio). Re-measured against the live provider on 2026-10-12: 200 + STOP + ordinary audio for
-  // the same 10,506-token input, so the old claim no longer describes the provider. The app does
-  // not depend on that refusal: it segments every paid call to <= MAX_TTS_INPUT_BYTES (asserted
-  // above) and decodeAudioResponse fails closed on a refused/part-less response (kept as a
-  // deterministic control in tests/tts_hardening_test.ts, "a copyright-recitation refusal fails
-  // closed through the decoder"). So the assertion is narrowed to the observation, and it STILL
-  // FAILS if the refusal comes back - which is the whole point of keeping it live.
+  // audio-feed-zrx9 NARROWING, AND audio-feed-fipl, WHICH CORRECTED IT. This control used to
+  // require the provider to recitation-filter raw Wikipedia prose (HTTP 200 + finishReason OTHER +
+  // finishMessage "copyrighted works" + no audio). Re-measured against the live provider on
+  // 2026-10-12: 200 + STOP + ordinary audio for the same 10,506-token input, so the old claim no
+  // longer describes the provider. The first narrowing then asserted the refusal's ABSENCE - which
+  // was itself a defect (audio-feed-fipl): `finishReason !== "OTHER"` is also true for a 500, an
+  // empty candidate list and a malformed body, so "we saw nothing" read as "there was nothing to
+  // see". A claim about a refusal is only testable after USABLE SPEECH has been observed: status
+  // 200, at least one candidate, finishReason STOP and non-empty audio. Those unguarded shapes are
+  // pinned as mutants in tests/synthesis_observation_test.ts, and a returned OTHER refusal is one
+  // of them, so the control still reddens if the refusal comes back.
   const ctrl3 = await runNegativeControl(
     "Raw unsegmented article",
     article,
     200,
   );
-  const rawArticleRefused = ctrl3.raw.finishReason === "OTHER";
+  const ctrl3Observation = ctrl3.raw.observation;
   checker.check(
-    "raw unsegmented article is NOT recitation-filtered (audio-feed-zrx9: narrowed, fails if the refusal returns)",
-    ctrl3.status === 200 && !rawArticleRefused,
-    `${ctrl3.detail}, refusalShape=${rawArticleRefused}`,
+    "raw unsegmented article returns usable speech: 200, candidate, STOP, non-empty audio (audio-feed-zrx9 narrowing, audio-feed-fipl)",
+    usableSynthesis(ctrl3Observation),
+    `${
+      describeSynthesis(ctrl3Observation)
+    } - a refusal's absence is only asserted after this shape is observed`,
   );
   const negativeControls = [ctrl1.raw, ctrl2.raw, ctrl3.raw];
 
@@ -328,7 +340,7 @@ await runProof("verify_live_tts", async (checker) => {
       "every segment stays within MAX_TTS_INPUT_BYTES budget",
       "negative control: synthetic repeated sentence exceeds input token limit (400)",
       "negative control: article with expanded preamble exceeds input token limit (400)",
-      "raw unsegmented article is NOT recitation-filtered (audio-feed-zrx9: narrowed, fails if the refusal returns)",
+      "raw unsegmented article returns usable speech: 200, candidate, STOP, non-empty audio (audio-feed-zrx9 narrowing, audio-feed-fipl)",
       "positive synthesis returns HTTP 200 with STOP finishReason",
       "positive synthesis returns audio/wav inline data",
       "positive audio contains valid RIFF header",
@@ -350,7 +362,7 @@ The \`live-validation.json\` artifact in this directory was captured by hand fro
         body:
           `The raw-article refusal control was **narrowed on 2026-10-12**, after re-measuring the live provider. What follows is the record of why, so the narrowing can be judged rather than trusted:
 - **What changed**: the old claim was \`negative control: raw unsegmented article triggers copyright filter (200 OTHER)\`. It required HTTP 200 + \`finishReason: "OTHER"\` + a \`finishMessage\` naming copyrighted works + no audio. Re-run on 2026-10-12 the same 10,506-token input returned **HTTP 200, \`finishReason: STOP\`, and ordinary audio** (\`failClosed=false\`), so the claim no longer describes the provider.
-- **Why this is not a silent deletion**: the narrowed claim is \`raw unsegmented article is NOT recitation-filtered\`, and it **fails if the refusal comes back** — a future run returning \`OTHER\` (or a new HTTP status) turns this red and names the reason in the failure detail. The two token-cap controls above it are unchanged and still fail on over-cap inputs.
+- **Why this is not a silent deletion, and why the first narrowing needed correcting**: the narrow claim is that the provider returns usable speech for the raw article (\`status 200\` + at least one candidate + \`finishReason STOP\` + non-empty audio), and the refusal's absence is concluded only AFTER that shape is observed. The first narrowing asserted the refusal's absence directly, which review caught as a defect (\`audio-feed-fipl\`): \`finishReason !== "OTHER"\` is also true for an HTTP 500, an empty candidate list and a malformed body, so "we saw nothing" was indistinguishable from "there was nothing to see". Those three shapes, plus a genuine \`OTHER\` refusal and a \`STOP\` candidate with no audio, are pinned as offline mutants in \`tests/synthesis_observation_test.ts\`, and every one of them keeps the control red. The two token-cap controls above are unchanged and still fail on over-cap inputs.
 - **What the app actually depends on** (so the property survives the narrowing): (1) every paid call is segmented to \`MAX_TTS_INPUT_BYTES\` = 6,000 bytes — asserted above for all eight production segments and enforced again inside \`synthesizeNarration\`; and (2) a refused or part-less provider response must produce no audio rather than a published episode, which \`decodeAudioResponse\` enforces and which is kept as a deterministic control in \`tests/tts_hardening_test.ts\` ("a copyright-recitation refusal fails closed through the decoder") because the live provider can no longer be made to produce that shape on demand.
 - **Not a product change**: \`PRODUCT.md\` specifies Direct Read of the full article text and \`src/worker/synthesis.ts\` has always sent the article body, segmented - the refusal was defence in depth against an unsegmented send, not a mechanism the pipeline relies on. If the operator treats provider-side recitation refusal as a compliance control rather than a backstop, that is a product decision above this script's pay grade and belongs on \`audio-feed-zrx9\`.`,
       },
@@ -395,7 +407,7 @@ The largest segment is 1,372 tokens (16.75% of the published input cap), matchin
       {
         heading: "Verdict",
         body:
-          `**VERIFIED as of the 2026-10-08 run (bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED); NARROWED 2026-10-12: the raw-article refusal control no longer describes the provider and is now asserted as its absence, which still fails if the refusal returns — see the live verification status section above.** The harness enforces expected HTTP/filter behavior as observed on that run and real WAV validity, but not byte-for-byte identity of future generated audio.`,
+          `**VERIFIED as of the 2026-10-08 run (bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED); NARROWED 2026-10-12 AND CORRECTED THE SAME DAY (audio-feed-fipl): the raw-article refusal control no longer describes the provider, so the claim is now that the call returned usable speech (status 200, candidate, finishReason STOP, non-empty audio) and only then that no refusal was seen; the unguarded shapes a bare absence check accepted are pinned as mutants in tests/synthesis_observation_test.ts — see the live verification status section above.** The harness enforces expected HTTP/filter behavior as observed on that run and real WAV validity, but not byte-for-byte identity of future generated audio.`,
       },
     ],
   });

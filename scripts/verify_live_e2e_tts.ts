@@ -25,6 +25,12 @@ import {
 } from "../src/tts/gemini.ts";
 import { assertTextSeams, splitTextUnderByteBudget } from "../src/synthesis/limits.ts";
 import { runProof, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  describeSynthesis,
+  observeSynthesis,
+  usableDecoded,
+  usableSynthesis,
+} from "./synthesis_observation.ts";
 
 await runProof("verify_live_e2e_tts", async (checker) => {
   // 1. Configure environment to point real client at the fleet proxy
@@ -59,11 +65,12 @@ await runProof("verify_live_e2e_tts", async (checker) => {
 
   let rawControlFailedClosed = false;
   let rawControlError: string | undefined;
+  let rawControlDecoded: DecodedAudioResult | null = null;
 
   try {
     const rawReq = buildSingleVoiceRequest(rawSegments[0]!, "Charon", 0.7);
     // Send via real client transport
-    await client.sendRequest(rawReq, { timeoutMs: 60_000 });
+    rawControlDecoded = await client.sendRequest(rawReq, { timeoutMs: 60_000 });
   } catch (err) {
     rawControlFailedClosed = true;
     rawControlError = err instanceof Error ? err.message : String(err);
@@ -83,21 +90,32 @@ await runProof("verify_live_e2e_tts", async (checker) => {
   const rawCandidateFinishReason: string | undefined = rawDirectJson.candidates?.[0]?.finishReason;
   const rawCandidateFinishMessage: string | undefined = rawDirectJson.candidates?.[0]
     ?.finishMessage;
+  const rawObservation = observeSynthesis(rawDirectRes.status, rawDirectJson);
 
   console.log(`[step 1/3] Raw segment 1 finishReason: ${rawCandidateFinishReason}`);
   console.log(`[step 1/3] Raw segment 1 finishMessage: ${rawCandidateFinishMessage}`);
   console.log(
     `[step 1/3] Real client failed closed: ${rawControlFailedClosed} (${rawControlError})`,
   );
+  // audio-feed-zrx9 narrowed these two, and audio-feed-fipl corrected the narrowing. They used to
+  // assert a POSITIVE provider refusal (finishReason OTHER + no audio); the provider stopped
+  // refusing, so the first narrowing asserted the refusal's ABSENCE - which is also true when the
+  // response was unusable (a 500, an empty candidate list, a malformed body, or a client call that
+  // never completed), i.e. "we saw nothing" read as "there was nothing to see". Each check now
+  // requires POSITIVE evidence that usable speech was received (status, candidate, STOP, audio)
+  // before anything is said about a refusal, and the unguarded shapes are pinned offline as mutants
+  // in tests/synthesis_observation_test.ts. A returned OTHER refusal is one of those mutants.
   checker.check(
-    "raw article segment is NOT refused by the provider (real client does not fail closed; audio-feed-zrx9 narrowing)",
-    !rawControlFailedClosed,
-    `failedClosed: ${rawControlFailedClosed}, error: ${rawControlError}`,
+    "raw article segment returns usable speech from the real client: decoded audio with finishReason STOP (audio-feed-zrx9 narrowing, audio-feed-fipl)",
+    rawControlDecoded !== null && usableDecoded(rawControlDecoded),
+    `decodedBytes=${
+      rawControlDecoded?.rawBytes.length ?? 0
+    }, finishReason=${rawControlDecoded?.finishReason}, failedClosed=${rawControlFailedClosed}, error=${rawControlError}`,
   );
   checker.check(
-    "provider does not return candidate finishReason OTHER for the raw article (audio-feed-zrx9 narrowing)",
-    rawCandidateFinishReason !== "OTHER",
-    `finishReason: ${rawCandidateFinishReason}`,
+    "provider returns usable speech for the raw article: status 200, candidate present, finishReason STOP, non-empty audio (audio-feed-zrx9 narrowing, audio-feed-fipl)",
+    usableSynthesis(rawObservation),
+    `${describeSynthesis(rawObservation)}, finishMessage=${rawCandidateFinishMessage}`,
   );
 
   // 3. Positive live synthesis of the 8-segment narration script via client.synthesizeNarration
@@ -434,8 +452,8 @@ await runProof("verify_live_e2e_tts", async (checker) => {
     asserts: [
       "GeminiTtsClient resolves baseUrl with /v1beta suffix",
       "raw article prompt splits into 8 segments under byte budget",
-      "raw article segment is NOT refused by the provider (real client does not fail closed; audio-feed-zrx9 narrowing)",
-      "provider does not return candidate finishReason OTHER for the raw article (audio-feed-zrx9 narrowing)",
+      "raw article segment returns usable speech from the real client: decoded audio with finishReason STOP (audio-feed-zrx9 narrowing, audio-feed-fipl)",
+      "provider returns usable speech for the raw article: status 200, candidate present, finishReason STOP, non-empty audio (audio-feed-zrx9 narrowing, audio-feed-fipl)",
       "narration prompt splits into 8 segments under byte budget",
       "narration segments have seamless text boundaries",
       "all 8 narration segments synthesized",
@@ -474,7 +492,7 @@ This verification addresses both gaps using the REAL production \`GeminiTtsClien
         body:
           `The two raw-article refusal claims were **narrowed on 2026-10-12**, after re-measuring the live provider through the real production client. The record of why, so the narrowing can be judged rather than trusted:
 - **What changed**: the old claims were \`negative control: raw article segment fails closed on real client\` and \`negative control: provider returns candidate finishReason OTHER\`. Re-run on 2026-10-12, raw segment 1 returned candidate \`finishReason: STOP\` and the real client did **not** fail closed, so the claims no longer describe the provider.
-- **Why this is not a silent deletion**: the narrowed claims assert the refusal's ABSENCE through the same real client, and they **fail if the refusal comes back** - a future run returning \`OTHER\` (and a client that fails closed on it) turns them red and prints the finishReason and error in the failure detail.
+- **Why this is not a silent deletion, and why the first narrowing needed correcting**: the checks now require POSITIVE evidence that usable speech was received - a client call that returned decoded audio with \`finishReason STOP\`, and a direct provider response with status 200, at least one candidate, \`finishReason STOP\` and non-empty audio - and only then conclude that no refusal was seen. The first narrowing asserted the refusal's absence directly, which review caught as a defect (\`audio-feed-fipl\`): \`finishReason !== "OTHER"\` is also true for an HTTP 500, an empty candidate list and a malformed body, so "we saw nothing" was indistinguishable from "there was nothing to see". Those three shapes, plus a genuine \`OTHER\` refusal and a \`STOP\` candidate with no audio, are pinned as offline mutants in \`tests/synthesis_observation_test.ts\`, and every one of them keeps these checks red.
 - **What the app actually depends on** (the property that survives the narrowing): every paid call is segmented to \`MAX_TTS_INPUT_BYTES\` = 6,000 bytes, asserted here and inside \`synthesizeNarration\`; and a refused or part-less provider response must produce no audio rather than a published episode, which is kept as a deterministic control in \`tests/tts_hardening_test.ts\` ("a copyright-recitation refusal fails closed through the decoder") because the live provider can no longer be made to produce that shape on demand.
 - **Not a product change**: \`PRODUCT.md\` specifies Direct Read of the full article text and the narration path has always sent the article body, segmented - the refusal was defence in depth against an unsegmented send, not a mechanism the pipeline relies on. If the operator treats provider-side recitation refusal as a compliance control rather than a backstop, that is a product decision above this script's pay grade and belongs on \`audio-feed-zrx9\`.
 - **Execution bounds**: Fresh end-to-end synthesis of all 8 segments takes ~342 seconds and produces ~129MB of WAV audio, exceeding standard bounded test timeouts (\`timeout -k 30 150\` exits 124).`,
@@ -502,7 +520,7 @@ Exercising \`client.sendRequest\` on raw segment 1 **as it behaved on the 2026-1
 - Candidate finishMessage: \`"The generated content was filtered because it may contain material that resembles existing copyrighted works. ..."\`
 - Production client threw \`GeminiTtsError: Gemini API candidate contained no content parts\`.
 
-**Re-measured 2026-10-12 (audio-feed-zrx9): the refusal no longer fires.** The same request returns a normal completion through the real client - the checks above now assert that absence, and they turn red if the refusal returns. The client-side fail-closed behaviour that the old control was really protecting is verified deterministically against constructed refusal responses in \`tests/tts_hardening_test.ts\` instead of depending on the live model to refuse on demand.`,
+**Re-measured 2026-10-12 (audio-feed-zrx9): the refusal no longer fires.** The same request returns a normal completion through the real client. The checks above therefore assert the positive observation - usable speech was returned - and only conclude from it that no refusal was seen; a returning refusal, a 500, an empty candidate list or a malformed body all keep them red (mutants in \`tests/synthesis_observation_test.ts\`). The client-side fail-closed behaviour that the old control was really protecting is verified deterministically against constructed refusal responses in \`tests/tts_hardening_test.ts\` instead of depending on the live model to refuse on demand.`,
       },
       {
         heading: "3. Production Narration Script & 8-Segment Synthesis",
@@ -559,7 +577,7 @@ timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write sc
       {
         heading: "Verdict",
         body:
-          `**VERIFIED as of the 2026-10-08 run; NARROWED 2026-10-12: the raw-article refusal claims no longer describe the provider and are now asserted as its absence, which still fails if the refusal returns - see the live verification status section above.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.`,
+          `**VERIFIED as of the 2026-10-08 run; NARROWED AND CORRECTED 2026-10-12 (audio-feed-zrx9 then audio-feed-fipl): the raw-article refusal claims no longer describe the provider, so they now assert that usable speech was returned (status, candidate, STOP, non-empty audio) before concluding that no refusal was seen, and the unusable shapes the first narrowing accepted are pinned as mutants in tests/synthesis_observation_test.ts - see the live verification status section above.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.`,
       },
     ],
   });
