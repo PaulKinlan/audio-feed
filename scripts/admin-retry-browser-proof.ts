@@ -353,4 +353,6 @@ ${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join(
   await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
 }
 
+if (checks.some((c) => !c.pass)) exitCode = 1;
+
 Deno.exit(exitCode);
