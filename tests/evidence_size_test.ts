@@ -59,6 +59,9 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
  * over the author's dead body — the whole point is that new evidence complies from its first commit, and that an
  * explicit diff adding an entry is what a reviewer sees when it does not. Retrofitting the existing ones is a
  * separate pass (see the bead), because a claim has to come from the script that makes it, never from a guess.
+ *
+ * The check is two-directional (audio-feed-tp4x): an undeclared and unlisted directory fails, and a directory
+ * that already has a valid declaration while remaining listed in EVIDENCE_UNDECLARED also fails.
  */
 const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-0cmu",
@@ -77,37 +80,46 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-ytg",
 ];
 
+async function checkEvidenceDeclaration(name: string): Promise<string | null> {
+  const dir = `docs/evidence/${name}`;
+  const readme = `${dir}/README.md`;
+  const body = await Deno.readTextFile(readme).catch(() => null);
+  if (body === null) {
+    return `${dir}: no README.md`;
+  }
+  const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
+  // The capture hatch is an ADMISSION, not free text: it must be the literal sentence, otherwise a README can
+  // say "- Capture: fully tested and guaranteed", assert nothing and pass (audio-feed-6piu, found in review).
+  const capture = /^- Capture:\s*no assertions\s*$/m.test(body);
+  const script = body.match(/^- Script:\s*(\S+)/m)?.[1];
+  if (!asserts && !capture) {
+    return `${dir}: needs a "- Asserts: <claims>" or "- Capture: no assertions" line`;
+  }
+  if (asserts && !script) {
+    return `${dir}: declares Asserts: with no "- Script: scripts/<proof>.ts" to attach them to`;
+  }
+  if (script) {
+    const stat = await Deno.stat(script.startsWith("scripts/") ? script : `scripts/${script}`)
+      .catch(() => null);
+    if (!stat?.isFile) return `${dir}: Script: names ${script}, which does not exist`;
+  }
+  return null;
+}
+
 Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {
   const undeclared: string[] = [];
 
   for await (const entry of Deno.readDir("docs/evidence")) {
     if (!entry.isDirectory || EVIDENCE_UNDECLARED.includes(entry.name)) continue;
-    const dir = `docs/evidence/${entry.name}`;
-    const readme = `${dir}/README.md`;
-    const body = await Deno.readTextFile(readme).catch(() => null);
-    if (body === null) {
-      undeclared.push(`${dir}: no README.md`);
-      continue;
-    }
-    const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
-    // The capture hatch is an ADMISSION, not free text: it must be the literal sentence, otherwise a README can
-    // say "- Capture: fully tested and guaranteed", assert nothing and pass (audio-feed-6piu, found in review).
-    const capture = /^- Capture:\s*no assertions\s*$/m.test(body);
-    const script = body.match(/^- Script:\s*(\S+)/m)?.[1];
-    if (!asserts && !capture) {
-      undeclared.push(`${dir}: needs a "- Asserts: <claims>" or "- Capture: no assertions" line`);
-      continue;
-    }
-    if (asserts && !script) {
-      undeclared.push(
-        `${dir}: declares Asserts: with no "- Script: scripts/<proof>.ts" to attach them to`,
-      );
-      continue;
-    }
-    if (script) {
-      const stat = await Deno.stat(script.startsWith("scripts/") ? script : `scripts/${script}`)
-        .catch(() => null);
-      if (!stat?.isFile) undeclared.push(`${dir}: Script: names ${script}, which does not exist`);
+    const err = await checkEvidenceDeclaration(entry.name);
+    if (err) undeclared.push(err);
+  }
+
+  const declaredDebt: string[] = [];
+  for (const name of EVIDENCE_UNDECLARED) {
+    const err = await checkEvidenceDeclaration(name);
+    if (err === null) {
+      declaredDebt.push(name);
     }
   }
 
@@ -117,5 +129,11 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
     "evidence must declare its own coverage in docs/evidence/<bead>/README.md (see docs/evidence/README.md, " +
       '"Honesty"): add "- Script: scripts/<proof>.ts" plus "- Asserts: <the claims the script fails on>", or ' +
       '"- Capture: no assertions" when the artifact only records state: ' + undeclared.join("; "),
+  );
+  assertEquals(
+    declaredDebt,
+    [],
+    "evidence directories listed in EVIDENCE_UNDECLARED already have valid declarations and must be removed from the debt list: " +
+      declaredDebt.join(", "),
   );
 });
