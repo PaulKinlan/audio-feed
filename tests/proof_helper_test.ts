@@ -633,6 +633,39 @@ Deno.test("proof-helper: writeEvidenceReadme generates valid README passing evid
   }
 });
 
+Deno.test("proof-helper: writeEvidenceReadme renders Executed by field when provided (audio-feed-4oe2)", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "evidence-readme-exec-" });
+  try {
+    const readmePath = await writeEvidenceReadme({
+      dir,
+      title: "Browser Proof: Audio Feed Verification (audio-feed-test)",
+      script: "scripts/test-browser-proof.ts",
+      executedBy: "tests/my_suite_test.ts",
+      asserts: ["audio route serves audio/wav"],
+    });
+    const content = await Deno.readTextFile(readmePath);
+    assertStringIncludes(content, "- Script: scripts/test-browser-proof.ts");
+    assertStringIncludes(content, "- Executed by: tests/my_suite_test.ts");
+    assertStringIncludes(content, "- Asserts: audio route serves audio/wav");
+
+    // Negative check: executedBy without script throws
+    await assertRejects(
+      () =>
+        writeEvidenceReadme({
+          dir,
+          title: "Invalid Readme",
+          executedBy: "tests/my_suite_test.ts",
+          capture: true,
+          captureReason: "no assertions",
+        }),
+      Error,
+      "writeEvidenceReadme with executedBy requires a script",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test("proof-helper: writeEvidenceReadme handles capture declarations and enforces reason", async () => {
   const dir = await Deno.makeTempDir({ prefix: "evidence-readme-capture-" });
   try {

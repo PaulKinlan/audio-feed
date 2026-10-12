@@ -659,6 +659,7 @@ export interface EvidenceReadmeOptions {
   captureReason?: string;
   sections?: EvidenceSection[];
   allowLocalhost?: boolean;
+  executedBy?: string;
 }
 
 export async function writeEvidenceReadme(
@@ -701,10 +702,20 @@ export async function writeEvidenceReadme(
     }
   }
 
+  if (options.executedBy?.trim() && !options.script?.trim()) {
+    throw new Error(
+      "writeEvidenceReadme with executedBy requires a script (e.g. 'scripts/my-proof.ts')",
+    );
+  }
+
   const lines: string[] = [`# ${options.title.trim()}`, ""];
 
   if (options.script?.trim()) {
     lines.push(`- Script: ${options.script.trim()}`);
+  }
+
+  if (options.executedBy?.trim()) {
+    lines.push(`- Executed by: ${options.executedBy.trim()}`);
   }
 
   if (isCapture) {

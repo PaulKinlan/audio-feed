@@ -51,6 +51,7 @@ Deno.test("readDeclaration parses Script, Asserts, and Capture admissions", () =
   assertEquals(info1.declared, "scripts/proof.ts");
   assertEquals(info1.isCapture, false);
   assertEquals(info1.asserts, "first claim; second claim");
+  assertEquals(info1.executedBy, null);
 
   const readmeCapture = `
 # Title
@@ -60,12 +61,53 @@ Deno.test("readDeclaration parses Script, Asserts, and Capture admissions", () =
   const info2 = readDeclaration(readmeCapture);
   assertEquals(info2.declared, "scripts/capture_proof.ts");
   assertEquals(info2.isCapture, true);
+  assertEquals(info2.executedBy, null);
 
   const readmeUndeclared = `
 # Title with no script
 `;
   const info3 = readDeclaration(readmeUndeclared);
   assertEquals(info3.declared, null);
+  assertEquals(info3.executedBy, null);
+});
+
+Deno.test("readDeclaration parses Executed by field (audio-feed-4oe2)", () => {
+  const readmePlain = `
+# Title
+- Script: scripts/proof.ts
+- Executed by: tests/outbox_proof_test.ts
+- Asserts: first claim
+`;
+  const infoPlain = readDeclaration(readmePlain);
+  assertEquals(infoPlain.declared, "scripts/proof.ts");
+  assertEquals(infoPlain.executedBy, "tests/outbox_proof_test.ts");
+
+  const readmeBackticks = `
+# Title
+- Script: scripts/proof.ts
+- Executed by: \`tests/outbox_proof_test.ts\`
+- Asserts: first claim
+`;
+  const infoBackticks = readDeclaration(readmeBackticks);
+  assertEquals(infoBackticks.executedBy, "tests/outbox_proof_test.ts");
+
+  const readmeQuotes = `
+# Title
+- Script: scripts/proof.ts
+- Executed by: "tests/outbox_proof_test.ts"
+- Asserts: first claim
+`;
+  const infoQuotes = readDeclaration(readmeQuotes);
+  assertEquals(infoQuotes.executedBy, "tests/outbox_proof_test.ts");
+
+  // Negative direction: absence leaves executedBy as null
+  const readmeNoExec = `
+# Title
+- Script: scripts/proof.ts
+- Asserts: first claim
+`;
+  const infoNoExec = readDeclaration(readmeNoExec);
+  assertEquals(infoNoExec.executedBy, null);
 });
 
 Deno.test("stripAnsi removes ANSI escape codes so \\bPASS\\b matches colored output", () => {
@@ -394,6 +436,97 @@ Deno.test("POSITIVE CONTROLS: passing proof scripts (PASS, OK, Capture, and ANSI
     assertStringIncludes(res.stdout, "ok   docs/evidence/audio-feed-ansi");
     assertStringIncludes(res.stdout, "ok   docs/evidence/audio-feed-capture");
     assertStringIncludes(res.stdout, "every declared proof passed on this tree (4 proof(s))");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("evidence-run --list shows [executed by: ...] for declared executor and flags unresolved executor (audio-feed-4oe2)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "4oe2-list-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const testsDir = join(tempDir, "tests");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(testsDir, { recursive: true });
+
+    await Deno.writeTextFile(join(scriptsDir, "proof.ts"), "console.log('PASS ok');\n");
+    await Deno.writeTextFile(join(testsDir, "my_suite_test.ts"), "// test\n");
+
+    // Valid executor
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-valid"), { recursive: true });
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-valid", "README.md"),
+      "- Script: scripts/proof.ts\n- Executed by: tests/my_suite_test.ts\n- Asserts: claim\n",
+    );
+
+    // Stale / missing executor
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-stale"), { recursive: true });
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-stale", "README.md"),
+      "- Script: scripts/proof.ts\n- Executed by: tests/ghost_test.ts\n- Asserts: claim\n",
+    );
+
+    // No executor declared (negative control)
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-no-exec"), { recursive: true });
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-no-exec", "README.md"),
+      "- Script: scripts/proof.ts\n- Asserts: claim\n",
+    );
+
+    const res = await runTier(tempDir, ["--list"]);
+    assertEquals(res.code, 0);
+
+    // Valid executor line
+    assertStringIncludes(
+      res.stdout,
+      "declared   docs/evidence/audio-feed-valid -> scripts/proof.ts [executed by: tests/my_suite_test.ts]",
+    );
+
+    // Stale executor line
+    assertStringIncludes(
+      res.stdout,
+      "declared   docs/evidence/audio-feed-stale -> scripts/proof.ts [UNRESOLVED EXECUTOR: tests/ghost_test.ts]",
+    );
+
+    // Negative control: no executor annotation
+    assertStringIncludes(
+      res.stdout,
+      "declared   docs/evidence/audio-feed-no-exec -> scripts/proof.ts\n",
+    );
+
+    // Inventory line notes unresolved executor
+    assertStringIncludes(res.stdout, "1 unresolved executor(s)");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("NEGATIVE CONTROL (Unresolved Executor): missing declared executor fails evidence-run (audio-feed-4oe2)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "4oe2-run-fail-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.writeTextFile(join(scriptsDir, "proof.ts"), "console.log('PASS claim');\n");
+
+    // Stale executor naming nonexistent test file
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-stale"), { recursive: true });
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-stale", "README.md"),
+      "- Script: scripts/proof.ts\n- Executed by: tests/ghost_test.ts\n- Asserts: claim\n",
+    );
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 1, "missing executor must fail the run");
+    assertStringIncludes(
+      res.stderr,
+      "[evidence] FAIL docs/evidence/audio-feed-stale -> executor tests/ghost_test.ts (UNRESOLVED EXECUTOR: not a file)",
+    );
+    assertStringIncludes(
+      res.stderr,
+      "[evidence] RED: 1 declared executor(s) do not exist; refusing run - stale executor declarations must be fixed",
+    );
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }

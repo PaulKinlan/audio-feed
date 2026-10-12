@@ -111,6 +111,35 @@ export async function checkEvidenceDeclaration(
       if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
     }
   }
+  const executedByMatch = body.match(/^[ \t]*-[ \t]*Executed by:[ \t]*(.+)$/m);
+  if (executedByMatch) {
+    const raw = executedByMatch[1]!.trim();
+    if (!raw) {
+      return `${dir}: Executed by: line is empty`;
+    }
+    if (!script) {
+      return `${dir}: declares Executed by: with no "- Script: scripts/<proof>.ts" to attach it to`;
+    }
+    const targets = raw.split(",").map((s) => s.replace(/[`"']/g, "").trim()).filter(Boolean);
+    if (targets.length === 0) {
+      return `${dir}: Executed by: line is empty`;
+    }
+    for (const target of targets) {
+      const execRel = target.startsWith("tests/") ? target : `tests/${target}`;
+      const stat = await Deno.stat(`${root}${execRel}`).catch(() => null);
+      if (!stat?.isFile) {
+        const execCmd = await new Deno.Command("git", {
+          args: ["cat-file", "-e", `:${execRel}`],
+          cwd: root,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        if (!execCmd.success) return `${dir}: Executed by: names ${target}, which does not exist`;
+      }
+    }
+  } else if (/^[ \t]*-[ \t]*Executed by:[ \t]*$/m.test(body)) {
+    return `${dir}: Executed by: line is empty`;
+  }
   return null;
 }
 
@@ -972,6 +1001,89 @@ Deno.test("audio-feed-01k7: the three rejection shapes redden the suite and repo
     assertEquals(
       (await deriveEvidenceDirectory("shape-ghost-script", root)).condition,
       "the README's Script line names a file that does not exist",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-4oe2: checkEvidenceDeclaration validates 'Executed by' field and catches stale executor", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "4oe2-exec-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.mkdir(`${root}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+    await Deno.writeTextFile(`${root}/tests/valid_test.ts`, "// test");
+
+    // Case 1: valid declaration with existing executor
+    await Deno.mkdir(`${root}/docs/evidence/case-valid-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-valid-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/valid_test.ts\n- Asserts: valid\n",
+    );
+
+    // Case 2: stale executor naming nonexistent test file
+    await Deno.mkdir(`${root}/docs/evidence/case-stale-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-stale-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/ghost_test.ts\n- Asserts: valid\n",
+    );
+
+    // Case 3: negative control - declaration without Executed by passes cleanly
+    await Deno.mkdir(`${root}/docs/evidence/case-no-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-no-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: valid\n",
+    );
+
+    // Case 4: Executed by without Script line
+    await Deno.mkdir(`${root}/docs/evidence/case-no-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-no-script/README.md`,
+      "- Executed by: tests/valid_test.ts\n- Capture: no assertions\n",
+    );
+
+    // Case 5: Executed by line is empty
+    await Deno.mkdir(`${root}/docs/evidence/case-empty-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-empty-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by:\n- Asserts: valid\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit 4oe2 cases");
+
+    // Case 1 passes
+    const errValid = await checkEvidenceDeclaration("case-valid-exec", root);
+    assertEquals(errValid, null, "valid Executed by must pass");
+
+    // Case 2 fails with detectable staleness error
+    const errStale = await checkEvidenceDeclaration("case-stale-exec", root);
+    assertEquals(
+      errStale?.includes("Executed by: names tests/ghost_test.ts, which does not exist"),
+      true,
+      "stale Executed by must produce detectable error",
+    );
+
+    // Case 3 passes (negative direction: absent field does not fail)
+    const errNoExec = await checkEvidenceDeclaration("case-no-exec", root);
+    assertEquals(errNoExec, null, "absent Executed by must pass");
+
+    // Case 4 fails (Executed by without Script)
+    const errNoScript = await checkEvidenceDeclaration("case-no-script", root);
+    assertEquals(
+      errNoScript?.includes('declares Executed by: with no "- Script: scripts/<proof>.ts"'),
+      true,
+      "Executed by without Script must fail",
+    );
+
+    // Case 5 fails (empty Executed by line)
+    const errEmpty = await checkEvidenceDeclaration("case-empty-exec", root);
+    assertEquals(
+      errEmpty?.includes("Executed by: line is empty"),
+      true,
+      "empty Executed by must fail",
     );
   } finally {
     await Deno.remove(root, { recursive: true });

@@ -63,6 +63,10 @@ export interface Declaration {
   isCapture: boolean;
   /** Asserts line if present in README. */
   asserts: string | null;
+  /** The test suite that executes this proof script, if declared. */
+  executedBy: string | null;
+  /** Whether the executedBy file exists under root, if declared. */
+  executorExists?: boolean;
 }
 
 export interface Options {
@@ -108,6 +112,7 @@ export interface DeclarationInfo {
   declared: string | null;
   isCapture: boolean;
   asserts: string | null;
+  executedBy: string | null;
 }
 
 /**
@@ -116,20 +121,24 @@ export interface DeclarationInfo {
  * is prose as often as it is a path.
  *
  * Also checks whether the directory admits no assertions (- Capture: no assertions) or carries
- * an explicit - Asserts: line (audio-feed-c0ft).
+ * an explicit - Asserts: line (audio-feed-c0ft), and parses - Executed by: line naming the test suite
+ * that executes the proof script (audio-feed-4oe2).
  */
 export function readDeclaration(readme: string): DeclarationInfo {
   let declared: string | null = null;
   let isCapture = false;
   let asserts: string | null = null;
+  let executedBy: string | null = null;
   for (const line of readme.split("\n")) {
     const scriptMatch = /^\s*-\s*Script:\s*(.+?)\s*$/.exec(line);
     if (scriptMatch) declared = scriptMatch[1]!.replace(/[`"']/g, "").trim();
     if (/^\s*-\s*Capture:\s*no assertions\b/.test(line)) isCapture = true;
     const assertsMatch = /^\s*-\s*Asserts:\s*(.+)$/.exec(line);
     if (assertsMatch) asserts = assertsMatch[1]!.trim();
+    const executedByMatch = /^\s*-\s*Executed by:\s*(.+?)\s*$/.exec(line);
+    if (executedByMatch) executedBy = executedByMatch[1]!.replace(/[`"']/g, "").trim();
   }
-  return { declared, isCapture, asserts };
+  return { declared, isCapture, asserts, executedBy };
 }
 
 /**
@@ -231,12 +240,32 @@ export async function collect(options: Options): Promise<{
     } catch {
       exists = false;
     }
+    let executorExists: boolean | undefined = undefined;
+    if (info.executedBy) {
+      const targets = info.executedBy.split(",").map((s) => s.trim()).filter(Boolean);
+      let allExist = targets.length > 0;
+      for (const target of targets) {
+        const targetRel = target.startsWith("tests/") ? target : `tests/${target}`;
+        try {
+          if (!(await Deno.stat(join(options.root, targetRel))).isFile) {
+            allExist = false;
+            break;
+          }
+        } catch {
+          allExist = false;
+          break;
+        }
+      }
+      executorExists = allExist;
+    }
     declarations.push({
       dir,
       declared: info.declared,
       exists,
       isCapture: info.isCapture,
       asserts: info.asserts,
+      executedBy: info.executedBy,
+      executorExists,
     });
   }
   return { declarations, undeclared, withoutReadme, refused, symlinks };
@@ -351,6 +380,9 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   const options = parseOptions(args);
   const { declarations, undeclared, withoutReadme, refused, symlinks } = await collect(options);
   const unresolved = declarations.filter((declaration) => !declaration.exists);
+  const unresolvedExecutors = declarations.filter(
+    (declaration) => declaration.executedBy !== null && declaration.executorExists === false,
+  );
 
   /**
    * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
@@ -402,15 +434,24 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       console.log(`REFUSED    ${dir} (symlinked evidence path)`);
     }
     for (const declaration of declarations) {
+      const execSuffix = declaration.executedBy
+        ? declaration.executorExists
+          ? ` [executed by: ${declaration.executedBy}]`
+          : ` [UNRESOLVED EXECUTOR: ${declaration.executedBy}]`
+        : "";
       console.log(
         `${
           declaration.exists ? "declared  " : "UNRESOLVED"
-        } ${declaration.dir} -> ${declaration.declared}`,
+        } ${declaration.dir} -> ${declaration.declared}${execSuffix}`,
       );
     }
+    const unresolvedExecNote = unresolvedExecutors.length > 0
+      ? `, ${unresolvedExecutors.length} unresolved executor(s)`
+      : "";
     console.log(
       `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
         `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
+        unresolvedExecNote +
         (refused.length + symlinks.length > 0
           ? `, ${refused.length} refused (nested), ${symlinks.length} refused (symlink)`
           : "") +
@@ -441,6 +482,21 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       `[evidence] RED: ${refused.length} nested evidence directory(ies), ` +
         `${symlinks.length} symlink(s) detected; refusing run - ` +
         `unexamined evidence cannot be credited as green`,
+    );
+    Deno.exit(1);
+  }
+
+  // A declared executor that is not a file is an UNRESOLVED failure.
+  if (unresolvedExecutors.length > 0) {
+    printDebt();
+    for (const declaration of unresolvedExecutors) {
+      console.error(
+        `[evidence] FAIL ${declaration.dir} -> executor ${declaration.executedBy} (UNRESOLVED EXECUTOR: not a file)`,
+      );
+    }
+    console.error(
+      `[evidence] RED: ${unresolvedExecutors.length} declared executor(s) do not exist; refusing run - ` +
+        `stale executor declarations must be fixed`,
     );
     Deno.exit(1);
   }

@@ -1,6 +1,7 @@
 # Outbox Notification Verification Report: audio-feed-np5
 
 - Script: scripts/outbox-proof.ts
+- Executed by: tests/outbox_proof_test.ts
 - Asserts: on-demand notification places exactly one outbox entry on synthesis completion; background feed polls emit none; permanent synthesis failures notify once with the specific reason and in-batch retries do not duplicate; a rejected outbox write does not abort episode completion and the failure is logged; no credentials, tokens, or admin secrets are echoed beyond subscriber player URL; outbox notification is opt-in only, default false
 
 ## Verified Criteria
