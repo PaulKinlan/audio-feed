@@ -31,6 +31,26 @@ const CAPTURE = new URL(
   import.meta.url,
 ).pathname;
 
+/**
+ * True when ImageMagick is runnable. DENO THROWS NotFound RATHER THAN RETURNING A FAILED STATUS when
+ * the binary is absent, so a status check alone never runs its failure branch - audio-feed-d7f6: the
+ * SKIPPED path this control advertised was unreachable for exactly that reason, and a reviewer
+ * proved it by running the suite with PATH=/tmp and getting a spawn error instead of the warning.
+ * The probe therefore has to catch, and the absence is then handled EXPLICITLY below.
+ */
+async function convertIsAvailable(): Promise<boolean> {
+  try {
+    const out = await new Deno.Command("convert", {
+      args: ["-version"],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return out.success;
+  } catch {
+    return false;
+  }
+}
+
 async function convert(args: string[]): Promise<{ ok: boolean; out: string }> {
   const result = await new Deno.Command("convert", {
     args,
@@ -41,9 +61,16 @@ async function convert(args: string[]): Promise<{ ok: boolean; out: string }> {
 }
 
 Deno.test("exww: the height-band floor catches a bottom-half occlusion the two old floors pass", async () => {
-  if (!(await convert(["-version"])).ok) {
-    console.warn("exww band-floor control SKIPPED: ImageMagick convert is not available");
-    return;
+  if (!(await convertIsAvailable())) {
+    // FAIL EXPLICITLY RATHER THAN SKIP. A skip would let a tree whose floor is unmeasured report
+    // green, which is the shape this floor exists to prevent; the absence has to be visible in the
+    // suite's own result. The message says what is missing and what to do about it.
+    throw new Error(
+      "the exww band-floor control needs ImageMagick `convert`, which is not runnable here. " +
+        "The floor cannot be measured without it, and an unmeasured floor must not pass silently - " +
+        "install ImageMagick, or remove this suite from the selection deliberately, rather than " +
+        "letting a run that measured nothing report success.",
+    );
   }
   const size = await convert([CAPTURE, "-format", "%wx%h", "info:"]);
   assert(size.ok, "could not read the committed capture's size");
