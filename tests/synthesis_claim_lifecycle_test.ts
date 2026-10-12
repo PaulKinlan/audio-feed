@@ -1589,6 +1589,38 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
     }
 
     // 2. In-flight deadline enforcement: timeout derived from remaining budget (50 - 5 = 45ms)
+    //
+    // audio-feed-flkk: this used to assert `inFlightElapsed < 80` - a wall-clock figure with 35ms of
+    // headroom over the derived 45ms deadline, which made the check a statement about the MACHINE
+    // rather than about the behaviour. MEASURED over 200 iterations of this exact race on a loaded
+    // 2-vCPU box (load average 3.4 while 110 suites were gating): p50 45.75ms, p90 99.92ms, max
+    // 110.78ms, and 35/200 (17.5%) at or above 80ms - so the suite failed up to 2 runs in 4 while the
+    // deadline enforcement it guards was working. Because gate verdicts are cached per tree, a false
+    // FAIL here is inherited by every lane that touches this tree.
+    //
+    // What the assertion is FOR is that the deadline PREEMPTS the stage instead of waiting for it,
+    // and that is observable without assuming how fast the box is: the abort must be observed WHILE
+    // THE STAGE'S OWN WORK IS STILL OUTSTANDING, which is what `stageCompleted` records. The old
+    // assertion had this backwards: it could pass while the wrapper waited for the stage (any elapsed
+    // under 80ms was accepted, and one over 200ms was only rejected by accident).
+    //
+    // NO NUMERIC BOUND ON THE ELAPSED TIME IS ASSERTED, and that is the correction from review
+    // (audio-feed-4qmm). The first version of this fix asserted `inFlightElapsed < 200`, on the
+    // argument that 200ms is the stage's own duration rather than a machine-speed figure. The
+    // argument was wrong: that sleep is a LOWER bound on how long the stage runs, NOT an upper bound
+    // on how long the abort may take to be OBSERVED. Starving the event loop for 260ms after both
+    // timers are armed makes the wrapper yield the correct 45ms deadline with the stage still
+    // running, and the elapsed wall clock exceeds 200ms purely because the thread was busy - so
+    // `elapsed < 200` failed a CORRECT abort, which is the very defect this bead exists to remove.
+    // The elapsed figure below is therefore REPORTED for diagnosis and never asserted on: the
+    // ordering plus the derived deadline are the two properties, and neither is a property of the
+    // scheduler. (How this was found, for the record: 200 iterations under fleet load never produced
+    // it - fleet load is not a stalled loop - and a reviewer constructing the hostile state found it
+    // immediately.)
+    //
+    // The derivation itself is pinned exactly, from the abort message, which nothing checked before:
+    // 45ms = 50ms budget - 5ms flush margin, and the machine cannot move that number.
+    let stageCompleted = false;
     const inFlightStart = performance.now();
     const inFlightOutcome = await withInvocationBudget({
       name: stageName,
@@ -1597,18 +1629,33 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
       worstCaseEstimateMs: 10,
       fn: async (_signal) => {
         await new Promise((r) => setTimeout(r, 200));
+        stageCompleted = true;
         return "too slow";
       },
     });
     const inFlightElapsed = performance.now() - inFlightStart;
     assert(
-      inFlightElapsed < 80,
-      `stage ${stageName} timeout must abort within budget (${inFlightElapsed}ms)`,
+      !stageCompleted,
+      `stage ${stageName} must abort while the stage is STILL RUNNING: the abort was observed only ` +
+        `after the stage's own 200ms of work had completed (observed after ${inFlightElapsed}ms, ` +
+        `which is reported and never asserted on - audio-feed-4qmm)`,
     );
     assertEquals(inFlightOutcome.kind, "budget-yield");
     if (inFlightOutcome.kind === "budget-yield") {
       assert(isInvocationBudgetAbort(inFlightOutcome.error));
       assertStringIncludes(inFlightOutcome.error.message, "deadline");
+      // THE DERIVATION, checked exactly. The lower bound is not machine speed: it allows up to 5ms of
+      // budget to have been spent entering the call (measured 0ms across 200 iterations - the
+      // reported value was 45 every time). A deadline taken from the wrong term - maxDurationMs, or
+      // the remaining budget without the flush margin - lands outside 40..45 and reddens.
+      const derivedDeadline = Number(
+        inFlightOutcome.error.message.match(/deadline \((\d+)ms\) exceeded/)?.[1] ?? NaN,
+      );
+      assert(
+        Number.isFinite(derivedDeadline) && derivedDeadline >= 40 && derivedDeadline <= 45,
+        `stage ${stageName} must derive its deadline from the remaining budget (50ms budget - 5ms ` +
+          `flush margin = 45ms): the abort reported ${derivedDeadline}ms`,
+      );
       assertStringIncludes(inFlightOutcome.error.message, stageName);
     }
 
