@@ -223,6 +223,192 @@ export async function undeclaredEvidenceDirs(root: string = ROOT): Promise<Set<s
   return undeclared;
 }
 
+/**
+ * audio-feed-01k7, audio-feed-t5gt — the condition of an evidence directory.
+ *
+ * For undeclared directories, the derivation reports WHICH condition failed:
+ *   - "the directory is not carried"
+ *   - "has no README"
+ *   - "the README declares nothing and admits nothing"
+ *   - "the README's Script line names a file that does not exist"
+ *   - "the README declares but the declaration is malformed"
+ *   - "it is admitted but something else is wrong"
+ * And for valid directories:
+ *   - "declared" (valid declaration)
+ *   - "admitted" (clean admitted legacy debt)
+ */
+export type EvidenceCondition =
+  | "the directory is not carried"
+  | "has no README"
+  | "the README declares nothing and admits nothing"
+  | "the README's Script line names a file that does not exist"
+  | "the README declares but the declaration is malformed"
+  | "it is admitted but something else is wrong"
+  | "declared"
+  | "admitted";
+
+export interface EvidenceDerivation {
+  name: string;
+  condition: EvidenceCondition;
+  carried: boolean;
+  hasReadme: boolean;
+  admitted: boolean;
+  declares: boolean;
+  detail: string | null;
+}
+
+/**
+ * audio-feed-01k7, audio-feed-t5gt — derive the condition of an evidence directory.
+ *
+ * Unlike raw error strings, this derivation distinguishes the exact cause of non-declaration
+ * or defect, including distinguishing clean admitted legacy debt from admitted debt with broken
+ * declarations (e.g. audio-feed-bp6r) or debt with valid declarations (t5gt).
+ */
+export async function deriveEvidenceDirectory(
+  name: string,
+  root: string = ROOT,
+): Promise<EvidenceDerivation> {
+  const dirRoot = root.endsWith("/") ? root : `${root}/`;
+  const carriedDirs = await carriedEvidenceDirs(dirRoot);
+  const isCarried = carriedDirs.has(name);
+  if (!isCarried) {
+    return {
+      name,
+      condition: "the directory is not carried",
+      carried: false,
+      hasReadme: false,
+      admitted: false,
+      declares: false,
+      detail: null,
+    };
+  }
+
+  const dir = `${dirRoot}docs/evidence/${name}`;
+  const readme = `${dir}/README.md`;
+  let body = await Deno.readTextFile(readme).catch(() => null);
+  if (body === null) {
+    const readmeRel = `docs/evidence/${name}/README.md`;
+    const readmeCmd = await new Deno.Command("git", {
+      args: ["show", `:${readmeRel}`],
+      cwd: dirRoot,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (readmeCmd.success) {
+      body = new TextDecoder().decode(readmeCmd.stdout);
+    }
+  }
+
+  if (body === null) {
+    return {
+      name,
+      condition: "has no README",
+      carried: true,
+      hasReadme: false,
+      admitted: false,
+      declares: false,
+      detail: `${dir}: no README.md`,
+    };
+  }
+
+  const isAdmitted = /^- Debt:\s*admitted\s*\(audio-feed-tgnu\)\s*$/m.test(body);
+  const hasAsserts = /^- Asserts:/m.test(body);
+  const hasCapture = /^- Capture:/m.test(body);
+  const hasScript = /^- Script:/m.test(body);
+  const declares = hasAsserts || hasCapture || hasScript;
+
+  if (!isAdmitted && !declares) {
+    return {
+      name,
+      condition: "the README declares nothing and admits nothing",
+      carried: true,
+      hasReadme: true,
+      admitted: false,
+      declares: false,
+      detail: `${dir}: needs a "- Asserts: <claims>" or "- Capture: no assertions" line`,
+    };
+  }
+
+  const declErr = await checkEvidenceDeclaration(name, dirRoot);
+
+  if (isAdmitted) {
+    if (!declares) {
+      return {
+        name,
+        condition: "admitted",
+        carried: true,
+        hasReadme: true,
+        admitted: true,
+        declares: false,
+        detail: null,
+      };
+    }
+    if (declErr === null) {
+      return {
+        name,
+        condition: "it is admitted but something else is wrong",
+        carried: true,
+        hasReadme: true,
+        admitted: true,
+        declares: true,
+        detail:
+          "carries a valid declaration while retaining debt admission; debt admission must be removed",
+      };
+    }
+    return {
+      name,
+      condition: "it is admitted but something else is wrong",
+      carried: true,
+      hasReadme: true,
+      admitted: true,
+      declares: true,
+      detail: declErr,
+    };
+  }
+
+  if (declErr === null) {
+    return {
+      name,
+      condition: "declared",
+      carried: true,
+      hasReadme: true,
+      admitted: false,
+      declares: true,
+      detail: null,
+    };
+  }
+
+  const isMissingScript = declErr.includes("Script: names") &&
+    declErr.includes("which does not exist");
+  return {
+    name,
+    condition: isMissingScript
+      ? "the README's Script line names a file that does not exist"
+      : "the README declares but the declaration is malformed",
+    carried: true,
+    hasReadme: true,
+    admitted: false,
+    declares: true,
+    detail: declErr,
+  };
+}
+
+/**
+ * audio-feed-01k7 — derive reasons for all undeclared evidence directories.
+ *
+ * For each undeclared directory, reports WHICH condition failed.
+ */
+export async function deriveUndeclaredEvidence(
+  root: string = ROOT,
+): Promise<Map<string, EvidenceDerivation>> {
+  const undeclared = await undeclaredEvidenceDirs(root);
+  const map = new Map<string, EvidenceDerivation>();
+  for (const name of undeclared) {
+    map.set(name, await deriveEvidenceDirectory(name, root));
+  }
+  return map;
+}
+
 Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)", async () => {
   // audio-feed-9qvz: asked of the INDEX, not of the working directory - see carriedEvidenceDirs.
   const carried = await carriedEvidenceDirs();
@@ -248,14 +434,20 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
       "these entries: " + staleDebt.join(", "),
   );
 
-  // audio-feed-tgnu FIX 1: assert the SET of undeclared is empty.
+  // audio-feed-tgnu FIX 1, audio-feed-01k7: assert the SET of undeclared is empty.
   // Undeclared directories are those that declare nothing AND admit nothing.
+  // When undeclared directories exist, the derivation reports WHICH condition failed per directory.
   const undeclared = await undeclaredEvidenceDirs();
+  const undeclaredReasons: string[] = [];
+  for (const name of undeclared) {
+    const d = await deriveEvidenceDirectory(name);
+    undeclaredReasons.push(`${name} [${d.condition}]: ${d.detail ?? d.condition}`);
+  }
   assertEquals(
     undeclared,
     new Set<string>(),
-    "undeclared evidence directories (carrying neither a declaration nor a debt admission) must be empty: " +
-      Array.from(undeclared).join(", "),
+    "undeclared evidence directories (carrying neither a declaration nor a debt admission) must be empty:\n" +
+      undeclaredReasons.join("\n"),
   );
 
   // audio-feed-tgnu FIX 2: non-circular check.
@@ -274,6 +466,38 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
     [],
     "declared evidence directories must have valid declarations: " + declaredErrors.join("; "),
   );
+
+  // audio-feed-t5gt: two-directional contract for admitted debt.
+  // An admitted directory carrying a VALID declaration has completed retrofit and must remove its
+  // debt admission; retaining both permanently inflates admitted debt (audio-feed-237f, audio-feed-tp4x).
+  const admittedWithValidDeclaration: string[] = [];
+  const admittedWithDefect: string[] = [];
+  for (const name of admitted) {
+    const err = await checkEvidenceDeclaration(name);
+    if (err === null) {
+      admittedWithValidDeclaration.push(name);
+    } else {
+      const d = await deriveEvidenceDirectory(name);
+      if (d.condition === "it is admitted but something else is wrong") {
+        admittedWithDefect.push(`${name} (${d.detail})`);
+      }
+    }
+  }
+
+  assertEquals(
+    admittedWithValidDeclaration,
+    [],
+    "admitted directories carrying a valid declaration must remove debt admission (audio-feed-t5gt): " +
+      admittedWithValidDeclaration.join(", "),
+  );
+
+  // Surface admitted directories with broken declarations (legacy debt):
+  if (admittedWithDefect.length > 0) {
+    console.log(
+      `note: ${admittedWithDefect.length} admitted evidence directory/directories carry broken declarations (legacy debt): ` +
+        admittedWithDefect.join("; "),
+    );
+  }
 });
 
 async function gitCmd(args: string[], cwd: string): Promise<void> {
@@ -534,6 +758,220 @@ Deno.test("audio-feed-tgnu: rogue directory with neither declaration nor admissi
       admitted,
       new Set(["audio-feed-admitted"]),
       "admitted set must contain exactly the admitted directory",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-01k7: derivation distinguishes all six conditions", async () => {
+  const root = await Deno.makeTempDir({ prefix: "derive-conditions-" });
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+
+    // Declared directory
+    await Deno.mkdir(`${root}/docs/evidence/case-declared`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-declared/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: test claim\n",
+    );
+
+    // Clean admitted directory
+    await Deno.mkdir(`${root}/docs/evidence/case-admitted`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-admitted/README.md`,
+      "- Debt: admitted (audio-feed-tgnu)\n",
+    );
+
+    // Condition 2: has no README
+    await Deno.mkdir(`${root}/docs/evidence/case-no-readme`, { recursive: true });
+    await Deno.writeTextFile(`${root}/docs/evidence/case-no-readme/evidence.png`, "bytes");
+
+    // Condition 3: declares nothing and admits nothing
+    await Deno.mkdir(`${root}/docs/evidence/case-empty`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-empty/README.md`,
+      "# Empty Evidence\n\nNo declarations or admissions.\n",
+    );
+
+    // Condition 4: script line names nonexistent file
+    await Deno.mkdir(`${root}/docs/evidence/case-bad-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-bad-script/README.md`,
+      "- Script: scripts/nonexistent.ts\n- Asserts: ghost claims\n",
+    );
+
+    // Condition 5: malformed declaration (asserts without script)
+    await Deno.mkdir(`${root}/docs/evidence/case-malformed`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-malformed/README.md`,
+      "- Asserts: claims with no script\n",
+    );
+
+    // Condition 6a: admitted with broken declaration
+    await Deno.mkdir(`${root}/docs/evidence/case-admitted-broken`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-admitted-broken/README.md`,
+      "- Debt: admitted (audio-feed-tgnu)\n- Script: scripts/nonexistent.ts\n- Asserts: claims\n",
+    );
+
+    // Condition 6b: admitted with valid declaration
+    await Deno.mkdir(`${root}/docs/evidence/case-admitted-valid`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-admitted-valid/README.md`,
+      "- Debt: admitted (audio-feed-tgnu)\n- Script: scripts/proof.ts\n- Asserts: valid claims\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit all cases");
+
+    // Condition 1: not carried
+    const dNotCarried = await deriveEvidenceDirectory("not-carried-dir", root);
+    assertEquals(dNotCarried.condition, "the directory is not carried");
+    assertEquals(dNotCarried.carried, false);
+
+    // Condition 2: has no README
+    const dNoReadme = await deriveEvidenceDirectory("case-no-readme", root);
+    assertEquals(dNoReadme.condition, "has no README");
+    assertEquals(dNoReadme.hasReadme, false);
+
+    // Condition 3: declares nothing and admits nothing
+    const dEmpty = await deriveEvidenceDirectory("case-empty", root);
+    assertEquals(dEmpty.condition, "the README declares nothing and admits nothing");
+
+    // Condition 4: script line names nonexistent file
+    const dBadScript = await deriveEvidenceDirectory("case-bad-script", root);
+    assertEquals(dBadScript.condition, "the README's Script line names a file that does not exist");
+
+    // Condition 5: malformed declaration
+    const dMalformed = await deriveEvidenceDirectory("case-malformed", root);
+    assertEquals(dMalformed.condition, "the README declares but the declaration is malformed");
+
+    // Condition 6a: admitted with broken declaration
+    const dAdmittedBroken = await deriveEvidenceDirectory("case-admitted-broken", root);
+    assertEquals(dAdmittedBroken.condition, "it is admitted but something else is wrong");
+    assertEquals(dAdmittedBroken.admitted, true);
+    assertEquals(dAdmittedBroken.declares, true);
+
+    // Condition 6b: admitted with valid declaration
+    const dAdmittedValid = await deriveEvidenceDirectory("case-admitted-valid", root);
+    assertEquals(dAdmittedValid.condition, "it is admitted but something else is wrong");
+    assertEquals(dAdmittedValid.admitted, true);
+    assertEquals(dAdmittedValid.declares, true);
+    assertEquals(dAdmittedValid.detail?.includes("debt admission must be removed"), true);
+
+    // Valid states
+    assertEquals((await deriveEvidenceDirectory("case-declared", root)).condition, "declared");
+    assertEquals((await deriveEvidenceDirectory("case-admitted", root)).condition, "admitted");
+
+    // deriveUndeclaredEvidence map check
+    const undeclaredMap = await deriveUndeclaredEvidence(root);
+    assertEquals(undeclaredMap.has("case-no-readme"), true);
+    assertEquals(undeclaredMap.has("case-empty"), true);
+    assertEquals(undeclaredMap.has("case-bad-script"), true);
+    assertEquals(undeclaredMap.has("case-malformed"), true);
+    assertEquals(undeclaredMap.has("case-declared"), false);
+    assertEquals(undeclaredMap.has("case-admitted"), false);
+    // Admitted directories are excluded from undeclared set
+    assertEquals(undeclaredMap.has("case-admitted-broken"), false);
+    assertEquals(undeclaredMap.has("case-admitted-valid"), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-t5gt: bp6r broken declaration is visible via derivation and does not red the tree", async () => {
+  // 1. bp6r is admitted and carries legacy debt
+  const admitted = await admittedEvidenceDirs();
+  assertEquals(admitted.has("audio-feed-bp6r"), true, "bp6r is admitted debt");
+
+  // 2. bp6r is excluded from undeclared set (does not red the tree)
+  const undeclared = await undeclaredEvidenceDirs();
+  assertEquals(undeclared.has("audio-feed-bp6r"), false, "bp6r does not enter undeclared set");
+
+  // 3. bp6r's broken declaration is VISIBLE via deriveEvidenceDirectory
+  const derivation = await deriveEvidenceDirectory("audio-feed-bp6r");
+  assertEquals(
+    derivation.condition,
+    "it is admitted but something else is wrong",
+    "bp6r defect is visible via derivation",
+  );
+  assertEquals(derivation.admitted, true);
+  assertEquals(derivation.declares, true);
+  assertEquals(typeof derivation.detail, "string");
+
+  // 4. Two-directional contract: in a temp repo, an admitted directory with valid declaration is rejected
+  const root = await Deno.makeTempDir({ prefix: "t5gt-twoway-" });
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-both`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-both/README.md`,
+      "- Debt: admitted (audio-feed-tgnu)\n- Script: scripts/proof.ts\n- Asserts: valid\n",
+    );
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit both admitted and declared");
+
+    const bothAdmitted = await admittedEvidenceDirs(root);
+    assertEquals(bothAdmitted.has("audio-feed-both"), true);
+    const declErr = await checkEvidenceDeclaration("audio-feed-both", root);
+    assertEquals(declErr, null, "declaration itself is valid");
+
+    // Derivation identifies it as admitted with defect
+    const dBoth = await deriveEvidenceDirectory("audio-feed-both", root);
+    assertEquals(dBoth.condition, "it is admitted but something else is wrong");
+    assertEquals(dBoth.detail?.includes("debt admission must be removed"), true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-01k7: the three rejection shapes redden the suite and report their conditions", async () => {
+  const root = await Deno.makeTempDir({ prefix: "rejection-shapes-" });
+  try {
+    await gitInit(root);
+
+    // Shape 1: no README at all
+    await Deno.mkdir(`${root}/docs/evidence/shape-no-readme`, { recursive: true });
+    await Deno.writeTextFile(`${root}/docs/evidence/shape-no-readme/capture.png`, "bytes");
+
+    // Shape 2: a README that neither declares nor admits
+    await Deno.mkdir(`${root}/docs/evidence/shape-empty-readme`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/shape-empty-readme/README.md`,
+      "# Shape 2\n\nNo assertions or admissions.\n",
+    );
+
+    // Shape 3: a README that declares a nonexistent script
+    await Deno.mkdir(`${root}/docs/evidence/shape-ghost-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/shape-ghost-script/README.md`,
+      "- Script: scripts/ghost.ts\n- Asserts: something\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit three rejection shapes");
+
+    const undeclared = await undeclaredEvidenceDirs(root);
+    assertEquals(undeclared.has("shape-no-readme"), true, "Shape 1 is undeclared");
+    assertEquals(undeclared.has("shape-empty-readme"), true, "Shape 2 is undeclared");
+    assertEquals(undeclared.has("shape-ghost-script"), true, "Shape 3 is undeclared");
+
+    assertEquals(
+      (await deriveEvidenceDirectory("shape-no-readme", root)).condition,
+      "has no README",
+    );
+    assertEquals(
+      (await deriveEvidenceDirectory("shape-empty-readme", root)).condition,
+      "the README declares nothing and admits nothing",
+    );
+    assertEquals(
+      (await deriveEvidenceDirectory("shape-ghost-script", root)).condition,
+      "the README's Script line names a file that does not exist",
     );
   } finally {
     await Deno.remove(root, { recursive: true });
