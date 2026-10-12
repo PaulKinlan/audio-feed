@@ -1043,6 +1043,30 @@ Deno.test("audio-feed-uiyv: / regex literal vs division disambiguation correctly
       ].join("\n"),
       desc: "regex after division operator with newline (audio-feed-aiiy)",
     },
+    "tests/aiiy_obj_test.ts": {
+      content: [
+        'const result={n:42} / "/".length;',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "division after object literal close (audio-feed-aiiy)",
+    },
+    "tests/aiiy_block_test.ts": {
+      content: [
+        'if (false) {} else {} /"/.test("x");',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "regex after block close (audio-feed-aiiy)",
+    },
+    "tests/aiiy_control_head_test.ts": {
+      content: [
+        'if (x) /"/.test("x");',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "regex after control head paren close (audio-feed-aiiy)",
+    },
   };
 
   const treeFiles: Record<string, string> = {

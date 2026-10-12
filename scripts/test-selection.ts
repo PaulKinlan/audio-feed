@@ -347,15 +347,13 @@ function stripComments(source: string): string {
   }[] = [];
   let braceDepth = 0;
 
-  const regexKeywords = new Set([
+  const expressionKeywords = new Set([
     "return",
     "typeof",
     "yield",
     "await",
     "throw",
     "case",
-    "do",
-    "else",
     "in",
     "of",
     "instanceof",
@@ -364,8 +362,26 @@ function stripComments(source: string): string {
     "void",
   ]);
 
+  const statementKeywords = new Set([
+    "else",
+    "do",
+    "default",
+  ]);
+
+  const controlHeadKeywords = new Set([
+    "if",
+    "for",
+    "while",
+    "with",
+    "switch",
+    "catch",
+  ]);
+
+  const bracketStack: ("OBJECT" | "BLOCK" | "CONTROL_HEAD" | "CALL_GROUP" | "ARRAY")[] = [];
+
   let expectOperand = true;
   let lastNonWsChar = "";
+  let lastWordClass: "EXPRESSION" | "STATEMENT" | "CONTROL_HEAD" | "OTHER" = "OTHER";
 
   while (i < source.length) {
     const ch = source[i]!;
@@ -400,18 +416,67 @@ function stripComments(source: string): string {
           }
           lastNonWsChar = ch;
         } else if (ch === "{") {
+          let kind: "OBJECT" | "BLOCK";
+          if (lastWordClass === "STATEMENT" || !expectOperand) {
+            kind = "BLOCK";
+          } else {
+            kind = "OBJECT";
+          }
+          bracketStack.push(kind);
+
           braceDepth++;
           expectOperand = true;
+          lastWordClass = "OTHER";
           lastNonWsChar = ch;
         } else if (ch === "}") {
           if (braceDepth > 0) {
             braceDepth--;
+            const poppedKind = bracketStack.pop();
+            if (poppedKind === "OBJECT") {
+              expectOperand = false;
+            } else {
+              expectOperand = true;
+            }
           } else if (stack.length > 0) {
             const popped = stack.pop()!;
             context = popped.context;
             braceDepth = popped.braceDepth;
+            expectOperand = true;
+          } else {
+            expectOperand = true;
           }
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "(") {
+          let kind: "CONTROL_HEAD" | "CALL_GROUP";
+          if (lastWordClass === "CONTROL_HEAD") {
+            kind = "CONTROL_HEAD";
+          } else {
+            kind = "CALL_GROUP";
+          }
+          bracketStack.push(kind);
+
           expectOperand = true;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === ")") {
+          const poppedKind = bracketStack.pop();
+          if (poppedKind === "CONTROL_HEAD") {
+            expectOperand = true;
+          } else {
+            expectOperand = false;
+          }
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "[") {
+          bracketStack.push("ARRAY");
+          expectOperand = true;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "]") {
+          bracketStack.pop();
+          expectOperand = false;
+          lastWordClass = "OTHER";
           lastNonWsChar = ch;
         } else if (/[a-zA-Z0-9_$]/.test(ch)) {
           const start = i;
@@ -419,19 +484,33 @@ function stripComments(source: string): string {
             i++;
           }
           const word = source.slice(start, i);
-          if (regexKeywords.has(word) && lastNonWsChar !== ".") {
-            expectOperand = true;
+          if (lastNonWsChar !== ".") {
+            if (expressionKeywords.has(word)) {
+              expectOperand = true;
+              lastWordClass = "EXPRESSION";
+            } else if (statementKeywords.has(word)) {
+              expectOperand = true;
+              lastWordClass = "STATEMENT";
+            } else if (controlHeadKeywords.has(word)) {
+              expectOperand = false;
+              lastWordClass = "CONTROL_HEAD";
+            } else {
+              expectOperand = false;
+              lastWordClass = "OTHER";
+            }
           } else {
             expectOperand = false;
+            lastWordClass = "OTHER";
           }
           lastNonWsChar = source[i - 1]!;
           i--;
         } else if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
-          if (/[=(:,;\[!&|?<>+\-*%^~]/.test(ch)) {
+          if (/[=(:,;!&|?<>+\-*%^~]/.test(ch)) {
             expectOperand = true;
           } else {
             expectOperand = false;
           }
+          lastWordClass = "OTHER";
           lastNonWsChar = ch;
         }
         break;
