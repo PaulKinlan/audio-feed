@@ -93,6 +93,9 @@ text is painted in the page's own background colour, and < 0.5 when washed out; 
 and (6) are refused outright when the section's or the claim's box is not inside the captured clip,
 rather than reporting someone else's pixels as this section's content. A small overlay covering just the named claim may be caught by its own ink check; arbitrary
 local occlusions are not guaranteed to lower the whole-section distribution below its floor.
+The partial-content-loss floor is evidence for the measured 85%-covered shape, NOT proof that every
+arbitrary local occlusion will fail - a smaller local occlusion can still evade a whole-section
+distributional statistic.
 
 - `01-live-lease-expiries-worker-healthy.png`: the lease table with a held upload and an expired
   upload (called out AND timed).
