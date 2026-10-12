@@ -224,26 +224,32 @@ try {
         `explanation: '${policyExplanation.slice(0, 60)}...'`,
       );
 
-      // 5. Click the bookmarklet anchor
+      // 5. Click the bookmarklet anchor and isolate click-induced console records
+      const logsBeforeClick = consoleLogs.length;
       await js(`document.querySelector("a.bookmarklet-link")?.click()`);
       await sleep(500);
 
-      const cspRefusal = consoleLogs.find((l) =>
-        l.text.includes("Refused to run the JavaScript URL") ||
-        l.text.includes("Content Security Policy") ||
-        l.text.includes("script-src")
+      const clickLogs = consoleLogs.slice(logsBeforeClick);
+      const cspRefusal = clickLogs.find(
+        (l) =>
+          (l.text.includes("JavaScript URL") || l.text.includes("javascript:")) &&
+          (l.text.includes("Content Security Policy") || l.text.includes("script-src")),
       );
       check(
-        "browser console explicitly records CSP refusal on bookmarklet click",
+        "browser console explicitly records JavaScript URL CSP refusal on bookmarklet click",
         Boolean(cspRefusal),
-        cspRefusal ? `refusal logged: '${cspRefusal.text.slice(0, 80)}...'` : "no CSP refusal seen",
+        cspRefusal
+          ? `refusal logged: '${cspRefusal.text.slice(0, 80)}...'`
+          : "no JavaScript URL CSP refusal seen",
       );
 
-      const unexpectedErrors = consoleLogs.filter((l) =>
-        l.level === "error" &&
-        !l.text.includes("Refused to run the JavaScript URL") &&
-        !l.text.includes("Content Security Policy") &&
-        !l.text.includes("script-src")
+      const unexpectedErrors = consoleLogs.filter(
+        (l) =>
+          l.level === "error" &&
+          !(
+            (l.text.includes("JavaScript URL") || l.text.includes("javascript:")) &&
+            (l.text.includes("Content Security Policy") || l.text.includes("script-src"))
+          ),
       );
       check(
         "zero unhandled page exceptions or unexpected console errors",
