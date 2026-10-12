@@ -240,6 +240,9 @@ try {
       awaitPromise: true,
       returnByValue: true,
     });
+    if (res.exceptionDetails) {
+      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
+    }
     return res.result.value;
   };
   await js2(
