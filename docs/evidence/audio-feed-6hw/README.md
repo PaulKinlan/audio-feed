@@ -1,15 +1,14 @@
-# Bookmarklet & Quick Add Verification Report: audio-feed-ep1
+# Unified Bookmarklet Card Verification Report: audio-feed-6hw
+
+- Script: scripts/bookmarklet-browser-proof.ts
+- Asserts: bookmarklet inspects alternate RSS/Atom feeds; bookmarklet also inspects plain feed links; without ?add= the plain send form is the only card; prefill renders exactly one unified card; prefill renders NO second send form; the one card offers Queue this single page; the one card offers Subscribe to the feed; queue single episode feedback succeeds; feed subscription feedback succeeds; no-feed prefill is still exactly one card; no-feed prefill has no second form; no-feed prefill has no duplicate input; a page with no declared feed answers with zero feeds; the discovered feed appears without a second card; the server found the page's declared feed and resolved it; the discovered feed keeps its title; a hostile feed candidate never reaches the page; subscribing to the discovered feed succeeds; mobile prefill stays one card with no second form; front door pre-fills #feed-url input from ?feed= query param
 
 ## Verified Criteria
-1. **Draggable Bookmarklet Button**: Available on `/account` and `/` with `draggable="true"` and accessible title, from ONE builder so both pages carry the same href.
-2. **Dynamic In-Browser Detection**: Bookmarklet grabs `location.href`, `document.title`, and queries `rel~=alternate` feeds (rss/atom/feed/json/xml) plus plain feed links.
-3. **ONE Unified Card (audio-feed-6hw)**: With `?add=<url>` the page renders exactly one card and NO second send form and no duplicate URL input; without a prefill the plain send form is the only card.
-4. **Feed Autodiscovery (audio-feed-6hw)**: With no `?feed=`, the page asks `/api/account/discover-feed`, which reads the page through the SSRF guard and offers the declared feed inside the same card; a page that declares nothing stays silent, and a `javascript:` candidate is dropped rather than rendered.
-5. **Intelligent Choice Architecture**: Queue this single page (with direct/deepdive radio choice) and Subscribe to the feed (one-click subscription to `/api/account/sources`) live in the same card.
-6. **Preserved Redirection**: Signed-out clicks preserve the full bookmarklet destination through passkey login via `safeNext`.
-7. **Convenience Route**: `/add?...` cleanly redirects to `/account?...`.
-8. **Security & Sanitization**: URL schemes are strictly validated for `http:` / `https:`; titles are escaped against reflected XSS.
-9. **Mobile Viewport**: Verified at 390x844 with zero horizontal overflow, still one card.
+1. Draggable Bookmarklet Button: Available on /account and / with draggable="true" and accessible title.
+2. In-Browser Feed Detection: Bookmarklet extracts links and queries rel~=alternate feeds.
+3. ONE Unified Card (audio-feed-6hw): Renders exactly one card and no duplicate send form on prefill.
+4. Feed Autodiscovery (audio-feed-6hw): Autodiscovery handles relative paths, quiet pages, and hostile candidate filtering.
+5. Mobile Viewport: 390x844 layout verified with zero horizontal overflow.
 
 ## Execution Log
 ```
@@ -41,16 +40,6 @@ PASS  front door pre-fills #feed-url input from ?feed= query param  feed: 'https
 ```
 
 ## Screenshots
-- `01-account-bookmarklet-desktop.png`: Account page with draggable bookmarklet widget (1280x900).
-- `02-quick-add-single-queued.png`: Quick-add panel with both options, single episode queued (1280x900).
-- `03-quick-add-subscribed.png`: RSS feed subscribed in one click from quick-add panel (1280x900).
-- `04-quick-add-mobile-390.png`: Mobile responsive layout of the unified card (390x844).
-- `05-front-door-prefilled.png`: Front door (`/`) with inputs prefilled from bookmarklet query params.
-
-The audio-feed-6hw legs are captured beside this report in
-`docs/evidence/audio-feed-6hw/`:
-- `01-unified-card-no-feed.png`: one card, subscribe half still hidden (nothing declared).
-- `02-unified-card-discovered-feed.png`: the discovered feed offered inside the same card.
-- `03-unified-card-subscribed.png`: subscribed from the discovered feed.
-
-Report version: audio-feed-ep1 + audio-feed-6hw.
+- 01-unified-card-no-feed.png: Unified card with quiet feed
+- 02-unified-card-discovered-feed.png: Discovered feed inside unified card
+- 03-unified-card-subscribed.png: Subscribed from discovered feed
