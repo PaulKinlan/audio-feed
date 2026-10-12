@@ -1,18 +1,28 @@
 # audio-feed-9vns: Live End-to-End GeminiTtsClient Verification & 8-Segment Stitched Playback
 
+- Script: scripts/verify_live_e2e_tts.ts
+- Asserts: GeminiTtsClient resolves baseUrl with /v1beta suffix; raw article prompt splits into 8 segments under byte budget; negative control: raw article segment fails closed on real client; negative control: provider returns candidate finishReason OTHER; narration prompt splits into 8 segments under byte budget; narration segments have seamless text boundaries; all 8 narration segments synthesized; captured segments are in narration order; stitched audio format is PCM; stitched audio is not marked as truncated; stitched WAV has valid length; stitched WAV has valid RIFF header; stitched WAV has valid WAVE format; production audio decoder accepts stitched WAV; WAV header specifies PCM audio format 1; WAV header specifies 24000 Hz sample rate; WAV header specifies 1 mono channel; WAV header specifies 16 bits per sample; WAV header has non-zero PCM data length; stitched duration matches sum of segment durations within 50ms; stitched PCM byte length matches sum of segment PCM bytes
+
+## Run Provenance
 Run on 2026-10-08 UTC against the live fleet proxy at `https://gemini.int.exe.xyz`.
 Complete machine-readable results are recorded in [`live-e2e-validation.json`](live-e2e-validation.json).
 
 ## Background & Scope
-
-Follow-up to `audio-feed-u60a` (landed `757ea14`). In `u60a`, live proxy controls, token bounds, and single-segment excerpts were verified, but the production `GeminiTtsClient` could not be tested end-to-end because:
+Follow-up to `audio-feed-u60a` (landed `commit-757ea14`). In `u60a`, live proxy controls, token bounds, and single-segment excerpts were verified, but the production `GeminiTtsClient` could not be tested end-to-end because:
 1. `src/tts/gemini.ts` hardcoded `GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"`, forcing u60a to reimplement transport.
 2. Full multi-segment synthesis (8 segments) and stitched audio assembly through `client.synthesizeNarration` remained unverified.
 
 This verification addresses both gaps using the REAL production `GeminiTtsClient`.
 
-## 1. Base-URL Override & Unit Tests
+## Live Verification Status & Provider Behavior (audio-feed-zrx9)
+Notice on asserted claim outcomes and execution bounds:
+- **Currently failing claims**: The negative control assertions (`negative control: raw article segment fails closed on real client` and `negative control: provider returns candidate finishReason OTHER`) currently FAIL against the live provider: raw Wikipedia article segment 1 returns candidate finishReason `STOP` and `failedClosed=false` instead of triggering the recitation filter (`OTHER`).
+- **Identical failure on main**: This negative control was already failing on `main` prior to migration when tested against the live provider.
+- **Live provider behavior, not application code**: The failing assertion reflects upstream Gemini 3.8 Flash TTS model behavior at `https://gemini.int.exe.xyz/v1beta`, not local application code or transport. The migration neither introduced nor hides this failure.
+- **Product tracking**: The architectural question of whether the system requires provider-side copyright filtering for correctness versus defense-in-depth is tracked under `audio-feed-zrx9` (P2).
+- **Execution bounds**: Fresh end-to-end synthesis of all 8 segments takes ~342 seconds and produces ~129MB of WAV audio, exceeding standard bounded test timeouts (`timeout -k 30 150` exits 124).
 
+## 1. Base-URL Override & Unit Tests
 - Modified `src/tts/gemini.ts` to introduce `getGeminiApiBaseUrl(override?)` and support `GEMINI_API_BASE_URL` env override while preserving the production literal `DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"` as the default.
 - Added host-only URL normalization: passing `https://gemini.int.exe.xyz` appends `/v1beta` so `/models/...` paths resolve correctly on the proxy.
 - Key handling remains untouched (`config.apiKey || envKey || ""`); the proxy injects `x-goog-api-key` server-side.
@@ -24,7 +34,6 @@ This verification addresses both gaps using the REAL production `GeminiTtsClient
   - `client.sendRequest` dispatches to the overridden base URL.
 
 ## 2. Negative Control: Raw Article Recitation Filter
-
 The raw 47k-character article from `docs/evidence/audio-feed-gueb/article.txt` (Wikipedia "History of the Internet") was segmented with production `splitTextUnderByteBudget(prompt, 6000)` into 8 segments (5,867 bytes in segment 1).
 
 Exercising `client.sendRequest` on raw segment 1 failed closed:
@@ -34,7 +43,6 @@ Exercising `client.sendRequest` on raw segment 1 failed closed:
 - Confirmed: raw verbatim Wikipedia text triggers the provider's copyright recitation filter, producing no audio.
 
 ## 3. Production Narration Script & 8-Segment Synthesis
-
 As required when raw text hits the copyright recitation filter, the production input path—a generated narration script—was tested using `docs/evidence/audio-feed-9vns/narration-script.txt` (44,626 characters / 44,710 prompt bytes).
 
 Production segmentation under `MAX_TTS_INPUT_BYTES = 6000` yielded EXACTLY 8 segments:
@@ -55,7 +63,6 @@ Production segmentation under `MAX_TTS_INPUT_BYTES = 6000` yielded EXACTLY 8 seg
 Fresh-run elapsed time across all 8 serial provider synthesis calls: **342,315 ms** (342.315 seconds). The cache was cleared before this run; `dataSource: fresh`, `freshRun: true`, and each segment's `source: fresh` in the JSON distinguish this measurement from a replay. On cache replay the harness omits unobserved finish reasons and truncation flags.
 
 ## 4. Stitched Output Audio Verification
-
 `client.synthesizeNarration` stitched all 8 segments via `joinTtsAudio`:
 
 - **PCM data bytes**: `129,081,600` (exactly equal to sum of segment PCM data bytes).
@@ -71,7 +78,6 @@ Fresh-run elapsed time across all 8 serial provider synthesis calls: **342,315 m
 - Decodable by the production `decodeAudioResponse` on the stitched WAV bytes (`format: "wav"`, `truncated: false`), non-empty, and valid.
 
 ## Exact Commands
-
 ```bash
 # 1. Run unit tests for base-URL override
 timeout -k 30 60 deno test --allow-env tests/gemini_base_url_test.ts
@@ -85,5 +91,4 @@ timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write sc
 ```
 
 ## Verdict
-
-**VERIFIED.** The production `GeminiTtsClient` resolves the proxy base URL via `GEMINI_API_BASE_URL`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.
+**VERIFIED as of the 2026-10-08 run; NOTE: declared negative-control claims no longer hold against the live provider — see the live verification status section above.** The production `GeminiTtsClient` resolves the proxy base URL via `GEMINI_API_BASE_URL`, correctly triggers and fails closed on the copyright recitation filter for raw Wikipedia prose as observed on that run, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.
