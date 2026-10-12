@@ -1,5 +1,9 @@
 # audio-feed-u2ve — the rate limit is keyed on an address the caller can choose
 
+- Script: scripts/repro_u2ve_rate_limit_ff.ts
+- Asserts: rate limit bound holds against rotating forged x-forwarded-for prefix; honest client rate limited at configured threshold; two distinct trusted clients receive independent rate limit buckets; rate limit bound holds against rotating forged cf-connecting-ip; well-formed cf-connecting-ip client rate limited at configured threshold; rate limit bound holds against rotating malformed cf-connecting-ip; rate limit bound holds against rotating dotted-tail cf-connecting-ip
+
+## Overview
 `before.json` and `repro.json` are the same probe (`scripts/repro_u2ve_rate_limit_ff.ts`) run
 against the unfixed and fixed trees, with the same limiter configuration **actually in effect** (5
 requests per 60s — the first run of this probe passed an option name the compose layer ignored, so
@@ -39,7 +43,6 @@ address), the `remoteAddr` fallbacks, and that a value too long to be an address
 unbounded store key.
 
 ## audio-feed-5vvw — the fallback header had the same two failures
-
 An independent review of the first fix (rev-u2ve) reproduced the rotated-header bypass on
 `cf-connecting-ip`: with no forwarded chain, ten rotated 200-byte values produced ten `200`s and
 zero `429`s, and those values became store keys verbatim. Bounding only `x-forwarded-for` had left
@@ -69,14 +72,13 @@ and a check that near-misses like `999.0.113.7`, `unknown` and a double `::` fal
 than becoming keys.
 
 ## audio-feed-hzg1 — the shape check constrained an alphabet, not a structure
-
 A second review of the shape rule found the obvious gap in it: `isIpv6` counted hex groups and
 ignored empty ones, so `0:` — one hex group and a trailing colon — was accepted as an address. A
 caller could rotate `0:` through `13:` in the fallback header and get a fresh bucket each time,
 which is the same bypass this rule exists to close, reached through the rule itself.
 
 Reproduced with the reviewer's reproducer as its own section of the probe, measured against the
-exact tip they reviewed (`c78ce8f`) and then against the fix:
+exact tip they reviewed (the unfixed review tip) and then against the fix:
 
 | malformed `cf-connecting-ip` values `0:` .. `13:`, bound 5/60s, 20 attempts | 429s   | allowed      |
 | --------------------------------------------------------------------------- | ------ | ------------ |
@@ -96,7 +98,6 @@ third round of "does this actually look like an address" had to add. Counting ch
 characters that happen to be legal is not the same as requiring a shape.
 
 ## audio-feed-jqmd — the class, not the example: the hand-rolled validator is gone
-
 The fourth finding in this guard was the one that named the pattern. A dotted-quad tail represents
 **two** IPv6 groups, so `1:2:3:4:5:6:7::192.0.2.1` writes seven groups plus a quad — nine, not eight
 — and my structure check counted the quad as one. Twenty rotating dotted-tail values bought twenty
