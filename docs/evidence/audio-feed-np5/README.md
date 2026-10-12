@@ -8,7 +8,7 @@
 2. **Feed Poll Silence**: Background feed polls synthesizing multiple episodes do NOT emit outbox entries.
 3. **Failure Reporting & Deduplication**: Permanent synthesis failures notify once with the specific error reason. In-batch retries are verified to occur and do not duplicate notifications.
 4. **Resilience**: Outbox write rejections do not abort episode completion; failure is logged.
-5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads or server logs beyond the subscriber's own player URL.
+5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads, server logs, or run history beyond the subscriber's own player URL.
 6. **Opt-in Only**: Outbox notifications are disabled by default (`notifyOutboxEnabled: false`).
 
 ## Execution Log
@@ -29,8 +29,9 @@ PASS in-batch retries do not duplicate failure notification: notifications for r
 PASS rejected outbox write does not abort episode completion: ready: 1, status: ready
 PASS rejected outbox write failure is logged: logged failure via console.error
 PASS secret scanner anti-test detects injected token, authorization header, and admin secret: detected leaks: 5
-PASS no credentials, tokens, or admin secrets are echoed beyond subscriber player URL: 0 leaks detected
-PASS ack notification efe344f0-a598-419b-8a0c-e478bf54dbaf: status: 200
-PASS ack notification 7687b0cc-d8ec-4184-825f-7f674df4dd59: status: 200
+PASS poisoning anti-test permits playerUrl in notification but rejects capability URL in server logs and run history: permitted: clean=true; poisonedLog leaks: 1; poisonedHistory leaks: 1
+PASS no credentials, tokens, or admin secrets are echoed into server logs, run history, or notifications beyond subscriber player URL: 0 leaks detected
+PASS ack notification c946ba30-00f8-4d19-9643-e6024d22a057: status: 200
+PASS ack notification 8f0a3ebf-df47-4136-b2d4-54a7cc2178dc: status: 200
 PASS outbox is now empty after acking: 0 entries
 ```

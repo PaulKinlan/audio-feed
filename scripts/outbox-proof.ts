@@ -15,9 +15,11 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
+import { recordRun } from "../src/stats.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
+import type { RunRecord } from "../src/storage/mod.ts";
 import { runProof, writeEvidenceReadme } from "./proof-helper.ts";
 
 const requestedPort = Number(Deno.args.find((a) => /^\d+$/.test(a)) ?? 0);
@@ -55,6 +57,7 @@ function scanForSecretLeaks(
   surface: {
     notifications: Array<Record<string, unknown>>;
     capturedLogs: string[];
+    runHistory?: Array<Record<string, unknown> | RunRecord>;
   },
   knownSecrets: {
     adminToken: string;
@@ -85,6 +88,7 @@ function scanForSecretLeaks(
         leaks.push(`notification.${key} matches tokenAssignmentPattern: ${val}`);
       }
 
+      // Whitelist subscriber token / capability URL ONLY in notification.playerUrl
       if (key !== "playerUrl" && val.includes(knownSecrets.subscriberToken)) {
         leaks.push(`notification.${key} leaks subscriberToken: ${val}`);
       }
@@ -105,14 +109,31 @@ function scanForSecretLeaks(
       leaks.push(`capturedLog matches tokenAssignmentPattern: ${logLine}`);
     }
 
+    // ANY subscriber capability URL or token appearing in server logs is forbidden (no sanitization)
     if (logLine.includes(knownSecrets.subscriberToken)) {
-      const sanitized = logLine
-        .replace(new RegExp(`https?://[^\\s"'/]+/listen/${knownSecrets.subscriberToken}`, "g"), "")
-        .replace(new RegExp(`/listen/${knownSecrets.subscriberToken}`, "g"), "")
-        .replace(new RegExp(`playerUrl=['"][^'"]*['"]`, "g"), "")
-        .replace(new RegExp(`playerUrl=[^\\s,]+`, "g"), "");
-      if (sanitized.includes(knownSecrets.subscriberToken)) {
-        leaks.push(`capturedLog contains subscriberToken outside playerUrl: ${logLine}`);
+      leaks.push(`capturedLog contains subscriber capability URL / token: ${logLine}`);
+    }
+  }
+
+  if (surface.runHistory) {
+    for (const record of surface.runHistory) {
+      const serialized = JSON.stringify(record);
+      if (serialized.includes(knownSecrets.adminToken)) {
+        leaks.push(`runHistory entry ${record.id ?? "unknown"} contains adminToken`);
+      }
+      if (serialized.includes(knownSecrets.subscriberToken)) {
+        leaks.push(
+          `runHistory entry ${record.id ?? "unknown"} contains subscriber capability URL / token`,
+        );
+      }
+      if (adminSecretPattern.test(serialized)) {
+        leaks.push(`runHistory entry ${record.id ?? "unknown"} matches adminSecretPattern`);
+      }
+      if (authHeaderPattern.test(serialized)) {
+        leaks.push(`runHistory entry ${record.id ?? "unknown"} matches authHeaderPattern`);
+      }
+      if (tokenAssignmentPattern.test(serialized)) {
+        leaks.push(`runHistory entry ${record.id ?? "unknown"} matches tokenAssignmentPattern`);
       }
     }
   }
@@ -157,14 +178,31 @@ const fetch = (input: RequestInfo | URL, init?: RequestInit) => app.fetch(new Re
 
 await runProof("audio-feed-np5 outbox proof", async (checker) => {
   const checks: { step: string; ok: boolean; detail: string }[] = [];
+  const origConsoleLog = console.log;
+  const origConsoleError = console.error;
+  const origConsoleWarn = console.warn;
+
   const check = (step: string, ok: boolean, detail: string) => {
     checks.push({ step, ok, detail });
-    checker.check(step, ok, detail);
+    const savedLog = console.log;
+    console.log = origConsoleLog;
+    try {
+      checker.check(step, ok, detail);
+    } finally {
+      console.log = savedLog;
+    }
   };
 
   const capturedServerLogs: string[] = [];
-  const origConsoleError = console.error;
-  const origConsoleWarn = console.warn;
+  console.log = (...args: unknown[]) => {
+    const firstStr = typeof args[0] === "string" ? args[0] : "";
+    if (!firstStr.startsWith("PASS ") && !firstStr.startsWith("FAIL ")) {
+      capturedServerLogs.push(
+        args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
+      );
+    }
+    origConsoleLog(...args);
+  };
   console.error = (...args: unknown[]) => {
     capturedServerLogs.push(
       args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
@@ -228,10 +266,21 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       `status: ${defaultIngestRes.status}`,
     );
 
-    const defaultRun = await runSynthesisBatch(
+    const defaultRun = await recordRun(
       defaultCtx,
-      () => Promise.resolve(fakeAudio()),
-      { batchSize: 1 },
+      "synthesis",
+      "manual",
+      () =>
+        runSynthesisBatch(
+          defaultCtx,
+          () => Promise.resolve(fakeAudio()),
+          { batchSize: 1 },
+        ),
+      (r) => ({
+        ready: r.ready.length,
+        failed: r.failed.length,
+        deferred: r.deferred.length,
+      }),
     );
     const defaultOutbox = await defaultStores.metadata.listOutbox();
     check(
@@ -265,7 +314,17 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
     check("POST /api/ingest returns 202", ingestRes.status === 202, `status: ${ingestRes.status}`);
 
     // 3. Run worker batch
-    const run1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+    const run1 = await recordRun(
+      ctx,
+      "synthesis",
+      "manual",
+      () => runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 }),
+      (r) => ({
+        ready: r.ready.length,
+        failed: r.failed.length,
+        deferred: r.deferred.length,
+      }),
+    );
     check(
       "synthesis batch completes 1 episode",
       run1.ready.length === 1,
@@ -325,9 +384,17 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       );
     }
 
-    const runFeed = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
-      batchSize: 5,
-    });
+    const runFeed = await recordRun(
+      ctx,
+      "synthesis",
+      "manual",
+      () => runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 }),
+      (r) => ({
+        ready: r.ready.length,
+        failed: r.failed.length,
+        deferred: r.deferred.length,
+      }),
+    );
     check(
       "synthesis batch completes 3 feed episodes",
       runFeed.ready.length === 3,
@@ -353,17 +420,35 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
     );
 
     let failAttempts = 0;
-    const runFail = await runSynthesisBatch(
+    const runFail = await recordRun(
       ctx,
-      () => {
-        failAttempts++;
-        return Promise.reject(new Error("Gemini quota exhausted"));
-      },
-      {
-        batchSize: 5,
-        maxAttempts: 2,
-        retryBaseDelayMs: 1,
-      },
+      "synthesis",
+      "manual",
+      () =>
+        runSynthesisBatch(
+          ctx,
+          () => {
+            failAttempts++;
+            return Promise.reject(new Error("Gemini quota exhausted"));
+          },
+          {
+            batchSize: 5,
+            maxAttempts: 2,
+            retryBaseDelayMs: 1,
+          },
+        ),
+      (r) => ({
+        ready: r.ready.length,
+        failed: r.failed.length,
+        deferred: r.deferred.length,
+        errors: r.failed.length > 0
+          ? r.failed.slice(0, 10).map((f) =>
+            f.title
+              ? `Episode ${f.episodeId} ("${f.title}"): ${f.error}`
+              : `Episode ${f.episodeId}: ${f.error}`
+          )
+          : undefined,
+      }),
     );
     check(
       "synthesis retries in-batch and executes 2 attempts",
@@ -420,9 +505,17 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
 
     let runRejection;
     try {
-      runRejection = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
-        batchSize: 1,
-      });
+      runRejection = await recordRun(
+        ctx,
+        "synthesis",
+        "manual",
+        () => runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 1 }),
+        (r) => ({
+          ready: r.ready.length,
+          failed: r.failed.length,
+          deferred: r.deferred.length,
+        }),
+      );
     } finally {
       stores.metadata.queueNotification = origQueueNotification;
     }
@@ -448,7 +541,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
     );
 
     // 8. Secret scan: verify no tokens/credentials/admin secrets leak into notification payloads or logs
-    // Anti-test: verify that the security scanner detects injected secret-shaped strings
+    // Anti-test 1: verify that the security scanner detects injected secret-shaped strings
     const antiTestResult = scanForSecretLeaks(
       {
         notifications: [
@@ -460,6 +553,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
           },
         ],
         capturedLogs: ["server log: x-admin-token: admin-secret-999"],
+        runHistory: [],
       },
       { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
     );
@@ -469,18 +563,90 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       `detected leaks: ${antiTestResult.leaks.length}`,
     );
 
-    // Live scan: inspect real outbox payloads and captured server logs
-    const liveScan = scanForSecretLeaks(
+    // Anti-test 2: poisoning anti-test distinguishing permitted notification playerUrl from forbidden log / run-history echo
+    const cleanPlayerUrl = `${BASE}/listen/${TOKEN}`;
+    const permittedAntiTest = scanForSecretLeaks(
       {
-        notifications: outboxAfterFail.notifications,
-        capturedLogs: capturedServerLogs,
+        notifications: [
+          {
+            id: "permitted-1",
+            title: "On-Demand Read Article",
+            playerUrl: cleanPlayerUrl,
+            status: "ready",
+          },
+        ],
+        capturedLogs: [],
+        runHistory: [],
+      },
+      { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
+    );
+    const poisonedLogAntiTest = scanForSecretLeaks(
+      {
+        notifications: [
+          {
+            id: "permitted-1",
+            title: "On-Demand Read Article",
+            playerUrl: cleanPlayerUrl,
+            status: "ready",
+          },
+        ],
+        capturedLogs: [`capability printed in server log: playerUrl=${cleanPlayerUrl}`],
+        runHistory: [],
+      },
+      { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
+    );
+    const poisonedHistoryAntiTest = scanForSecretLeaks(
+      {
+        notifications: [
+          {
+            id: "permitted-1",
+            title: "On-Demand Read Article",
+            playerUrl: cleanPlayerUrl,
+            status: "ready",
+          },
+        ],
+        capturedLogs: [],
+        runHistory: [
+          {
+            id: "run-poison",
+            kind: "synthesis",
+            trigger: "manual",
+            startedAt: new Date().toISOString(),
+            durationMs: 10,
+            error: `leaked subscriber URL: ${cleanPlayerUrl}`,
+          },
+        ],
       },
       { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
     );
     check(
-      "no credentials, tokens, or admin secrets are echoed beyond subscriber player URL",
+      "poisoning anti-test permits playerUrl in notification but rejects capability URL in server logs and run history",
+      permittedAntiTest.clean &&
+        !poisonedLogAntiTest.clean &&
+        poisonedLogAntiTest.leaks.some((l) => l.startsWith("capturedLog")) &&
+        !poisonedHistoryAntiTest.clean &&
+        poisonedHistoryAntiTest.leaks.some((l) => l.startsWith("runHistory")),
+      `permitted: clean=${permittedAntiTest.clean}; poisonedLog leaks: ${poisonedLogAntiTest.leaks.length}; poisonedHistory leaks: ${poisonedHistoryAntiTest.leaks.length}`,
+    );
+
+    // Live scan: inspect real outbox payloads, captured server logs, and persisted run history
+    const allRunHistory = [
+      ...await defaultStores.metadata.listRuns(),
+      ...await stores.metadata.listRuns(),
+    ];
+    const liveScan = scanForSecretLeaks(
+      {
+        notifications: outboxAfterFail.notifications,
+        capturedLogs: capturedServerLogs,
+        runHistory: allRunHistory,
+      },
+      { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
+    );
+    const sanitizePort = (s: string) => s.replace(new RegExp(`:${PORT}`, "g"), ":<ephemeral>");
+    check(
+      "no credentials, tokens, or admin secrets are echoed into server logs, run history, or notifications beyond subscriber player URL",
       liveScan.clean,
-      liveScan.clean ? "0 leaks detected" : `leaks: ${liveScan.leaks.join("; ")}`,
+      liveScan.clean ? "0 leaks detected" : `leaks: ${sanitizePort(liveScan.leaks.join("; "))}`,
     );
 
     // 9. Ack notifications
@@ -519,7 +685,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
 2. **Feed Poll Silence**: Background feed polls synthesizing multiple episodes do NOT emit outbox entries.
 3. **Failure Reporting & Deduplication**: Permanent synthesis failures notify once with the specific error reason. In-batch retries are verified to occur and do not duplicate notifications.
 4. **Resilience**: Outbox write rejections do not abort episode completion; failure is logged.
-5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads or server logs beyond the subscriber's own player URL.
+5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads, server logs, or run history beyond the subscriber's own player URL.
 6. **Opt-in Only**: Outbox notifications are disabled by default (\`notifyOutboxEnabled: false\`).`,
         },
         {
@@ -532,6 +698,7 @@ ${checks.map((c) => `${c.ok ? "PASS" : "FAIL"} ${c.step}: ${c.detail}`).join("\n
     });
     console.log(`Saved report to ${OUT}README.md`);
   } finally {
+    console.log = origConsoleLog;
     console.error = origConsoleError;
     console.warn = origConsoleWarn;
     await server.shutdown();
