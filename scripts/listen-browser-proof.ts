@@ -131,11 +131,18 @@ try {
 
       // Fetch the audio URL to verify it resolves with real wav bytes
       const audioRes = await fetch(audioSrc);
+      const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
+      const isRiffWav = audioBytes.length >= 12 &&
+        String.fromCharCode(...audioBytes.slice(0, 4)) === "RIFF" &&
+        String.fromCharCode(...audioBytes.slice(8, 12)) === "WAVE";
       check(
-        "enclosure audio URL returns 200 audio/wav bytes",
+        "enclosure audio URL returns 200 with non-empty RIFF/WAVE bytes",
         audioRes.status === 200 &&
-          audioRes.headers.get("content-type")?.includes("audio/wav") === true,
-        `status ${audioRes.status}, content-type: ${audioRes.headers.get("content-type")}`,
+          audioRes.headers.get("content-type")?.includes("audio/wav") === true &&
+          isRiffWav,
+        `status ${audioRes.status}, size ${audioBytes.length} bytes, format: ${
+          isRiffWav ? "RIFF/WAVE" : "invalid"
+        }`,
       );
 
       // Take screenshot

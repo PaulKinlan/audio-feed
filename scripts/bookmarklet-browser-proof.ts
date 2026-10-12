@@ -490,7 +490,8 @@ try {
         title: "Unified Bookmarklet Card Verification Report: audio-feed-6hw",
         script: "scripts/bookmarklet-browser-proof.ts",
         asserts: checks.filter((c) =>
-          c.name.includes("feed") || c.name.includes("card") || c.name.includes("form")
+          c.name.includes("feed") || c.name.includes("card") || c.name.includes("form") ||
+          c.name.includes("overflow")
         ).map((c) => c.name),
         sections: [
           ...commonSections,
