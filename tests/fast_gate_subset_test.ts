@@ -424,7 +424,11 @@ Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8
     NO_NAMED,
     RELATIONS,
   );
-  assertEquals(plan.testFiles, ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"], plan.reason);
+  assertEquals(
+    plan.testFiles,
+    ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"],
+    plan.reason,
+  );
 });
 
 Deno.test("a changed shell runner selects the suite that executes it (es8y)", () => {
@@ -717,7 +721,10 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
-  assertEquals(classified.suites, ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"]);
+  assertEquals(classified.suites, [
+    "tests/evidence_size_test.ts",
+    "tests/evidence_size_trap_test.ts",
+  ]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
 
