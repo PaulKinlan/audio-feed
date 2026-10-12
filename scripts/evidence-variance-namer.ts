@@ -58,6 +58,14 @@ export interface Variance {
   differingPixels: number;
   /** The largest channel difference found, 0-255. */
   maxDelta: number;
+  /** Area of the difference box in pixels. */
+  boxArea: number;
+  /**
+   * The third axis: changed pixels divided by the box area. Dense regional loss
+   * (an occluded block) fills its box; a rendering difference only outlines ink.
+   * READ IT WITH THE COUNT, NEVER ALONE - see `reading`.
+   */
+  fillDensity: number;
   /** Mean difference over the box at zero shift. */
   zeroShiftMean: number;
   /** The integer shift that minimises the mean, and that mean. */
@@ -107,6 +115,22 @@ export function reading(v: Variance): string[] {
   lines.push(
     `${v.distinctRenders} of ${v.captures} captures differ; ` +
       `${v.differingPixels} pixel(s) differ, by up to ${v.maxDelta} level(s).`,
+  );
+  // THE THREE AXES, PRINTED AS AXES RATHER THAN AS DECORATION. Each one has a
+  // counterexample in the measured rows, and the counterexamples are in the
+  // output because a reader who only sees the numbers will re-derive the mistake:
+  //   - count and magnitude alone cannot tell a benign re-render from a TEXT EDIT
+  //     (a row here differs in 1,329 pixels at 142 levels with identical words);
+  //   - density alone cannot tell dense loss from a handful of sub-quantisation
+  //     pixels (8 pixels in a 2x5 box is density 0.8);
+  //   - magnitude alone is the scalar that died: a benign font variant can exceed
+  //     the pixel count of a real loss.
+  // What survives is a conjuction with a scope limit: pixels may claim DENSE
+  // REGIONAL loss (a large count AND a full box) and may NEVER claim text
+  // fidelity, which needs a semantic comparison rather than a tolerance.
+  lines.push(
+    `AXES: count ${v.differingPixels} px, max delta ${v.maxDelta}, ` +
+      `box ${v.box ?? "none"} (area ${v.boxArea}) -> fill density ${v.fillDensity.toFixed(4)}`,
   );
   if (!v.bestShift) {
     lines.push("No shift search was run.");
@@ -197,6 +221,8 @@ export async function measure(
     box: null,
     differingPixels: 0,
     maxDelta: 0,
+    boxArea: 0,
+    fillDensity: 0,
     zeroShiftMean: 0,
     bestShift: null,
     missing: gaps,
@@ -254,6 +280,12 @@ export async function measure(
       "info:",
     ]),
   );
+  const measured = boxGeometry(variance.box);
+  if (measured) {
+    const [, w, h] = /^(\d+)x(\d+)/.exec(measured)!;
+    variance.boxArea = Number(w) * Number(h);
+    variance.fillDensity = fillDensity(variance.differingPixels, variance.boxArea);
+  }
   variance.zeroShiftMean = await meanDifference(a, b, 0, 0);
   // The translation search. Zero shift is included, so "not a translation" is
   // the search's own answer rather than an assumption of it.
@@ -283,6 +315,11 @@ export async function measure(
     variance.crops.push(crop);
   }
   return variance;
+}
+
+/** Changed pixels as a fraction of the difference box: the fill-density axis. */
+export function fillDensity(differingPixels: number, boxArea: number): number {
+  return boxArea > 0 ? differingPixels / boxArea : 0;
 }
 
 /** The box as a crop geometry, or null when the box is empty (0x0+0+0). */

@@ -18,6 +18,7 @@ import {
   artefactNames,
   boxGeometry,
   distinctRenders,
+  fillDensity,
   reading,
   type Variance,
 } from "../scripts/evidence-variance-namer.ts";
@@ -31,6 +32,8 @@ function variance(overrides: Partial<Variance>): Variance {
     box: "12x9+40+40",
     differingPixels: 12,
     maxDelta: 7,
+    boxArea: 332733,
+    fillDensity: 12 / 332733,
     zeroShiftMean: 1.4e-7,
     bestShift: { dx: 0, dy: 0, mean: 1.4e-7 },
     missing: 0,
@@ -38,6 +41,29 @@ function variance(overrides: Partial<Variance>): Variance {
     ...overrides,
   };
 }
+
+Deno.test("fill density is changed pixels over box area, and never divides by zero", () => {
+  assertEquals(fillDensity(1329, 18175), 1329 / 18175);
+  assertEquals(fillDensity(23736, 23736), 1);
+  assertEquals(fillDensity(8, 10), 0.8);
+  assertEquals(fillDensity(5, 0), 0);
+});
+
+Deno.test("a HIGH density at a tiny count is printed alongside the count it needs", () => {
+  // The counterexample to reading density alone: 8 sub-quantisation pixels in a
+  // 2x5 box is density 0.8, which is what a solid lost block also reports. The
+  // reading carries both numbers so the pair cannot be mistaken for dense loss.
+  const v = variance({ differingPixels: 8, maxDelta: 1, boxArea: 10, fillDensity: 0.8 });
+  const axes = reading(v).find((line) => line.startsWith("AXES"))!;
+  assertStringIncludes(axes, "count 8 px");
+  assertStringIncludes(axes, "fill density 0.8000");
+});
+
+Deno.test("the three axes are printed WITH their limits, not as decoration", () => {
+  const lines = reading(variance({}));
+  const axes = lines.filter((line) => line.startsWith("AXES"));
+  assertEquals(axes.length, 1);
+});
 
 Deno.test("an identical artefact is reported as identical and nothing else", () => {
   const lines = reading(variance({ distinctRenders: 1 }));
@@ -78,7 +104,10 @@ Deno.test("a difference quotes BOTH the pixel count and the maximum delta", () =
 });
 
 Deno.test("zero shift being best is stated as NOT a translation", () => {
-  const line = reading(variance({ bestShift: { dx: 0, dy: 0, mean: 1.4e-7 } }))[1]!;
+  // Selected by content, not by position: an index would bind this test to the
+  // number of lines the reading happens to print, which the AXES line changed.
+  const line = reading(variance({ bestShift: { dx: 0, dy: 0, mean: 1.4e-7 } }))
+    .find((entry) => entry.includes("ZERO SHIFT"))!;
   assertStringIncludes(line, "ZERO SHIFT IS BEST");
   assertStringIncludes(line, "NOT a translation");
 });
@@ -87,7 +116,7 @@ Deno.test("a better shift is stated as movement, with the factor and the size", 
   // The port row's shape: a real content change, and a shift that makes it worse.
   const line = reading(
     variance({ zeroShiftMean: 5.4e-5, bestShift: { dx: 0, dy: -1, mean: 1.7e-2 } }),
-  )[1]!;
+  ).find((entry) => entry.includes("content MOVING"))!;
   assertStringIncludes(line, "content MOVING");
   assertStringIncludes(line, "1px");
 });
