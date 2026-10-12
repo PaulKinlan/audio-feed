@@ -24,10 +24,12 @@ import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import {
   buildObservabilityReport,
   claimAttemptsFrom,
+  REPORT_CLAIM_CAP,
   REPORT_QUEUE_CAP,
 } from "../src/observability/admin_report.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { claimLifecycleEvent } from "../src/storage/episode_events.ts";
+import { DEFAULT_CLAIM_LEASE_MS } from "../src/types.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { LogRecord } from "../src/storage/mod.ts";
 
@@ -1064,4 +1066,334 @@ Deno.test("audio-feed-sw1r: the page renders the SCREENED message and says that 
     body.includes("Unhandled request errors record their class and a SCREENED message"),
     "the limits section must describe what is actually stored",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The live lease view (audio-feed-exww)
+// ---------------------------------------------------------------------------
+//
+// Paul's ask was a status page he can read without asking anyone, whose primary content is the
+// LIVE CLAIM-LEASE EXPIRIES. The cases below pin three things that make the view worth having, and
+// each of them can fail: the expiry is the one the CLAIM recorded (not a default the page invents),
+// the page still renders it while every worker-derived read is broken, and an unreadable episode
+// store is reported as unreadable rather than as "no worker holds a claim".
+
+/** A live claim in `uploading_audio`, driven through the REAL storage transitions that write it. */
+async function driveLiveUploadClaim(
+  stores: Stores,
+  opts: { episodeId: string; claimedAt: string; leaseMs: number; owner?: string },
+): Promise<void> {
+  const owner = opts.owner ?? "worker-live";
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: opts.episodeId,
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-1",
+      status: "pending",
+      title: `Uploading ${opts.episodeId}`,
+      audioKey: undefined,
+      createdAt: opts.claimedAt,
+    }),
+  );
+  const claimed = await stores.metadata.claimEpisode("user-1", opts.episodeId, {
+    owner,
+    now: opts.claimedAt,
+    leaseMs: opts.leaseMs,
+    maxClaims: 3,
+  });
+  assertEquals(claimed?.status, "synthesizing", "the fixture must actually take the claim");
+  await stores.metadata.touchEpisodeClaim("user-1", opts.episodeId, owner, {
+    phase: "uploading_audio",
+    now: opts.claimedAt,
+  });
+}
+
+Deno.test("audio-feed-exww: the page renders the real claim, its phase and its exact lease expiry", async () => {
+  const { stores, page } = await setup();
+  const claimedAt = "2026-10-12T09:00:00.000Z";
+  const leaseMs = 15 * 60_000;
+  await driveLiveUploadClaim(stores, { episodeId: "episode-live", claimedAt, leaseMs });
+  // A REAL failure record, written by the same log store production writes to.
+  await stores.metadata.appendLog({
+    time: claimedAt,
+    severity: "error",
+    type: "synthesis.failure",
+    process: "worker",
+    message: "TTS provider returned 503 after 3 attempts",
+    episodeId: "episode-live",
+    userId: "user-1",
+  });
+
+  const response = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const body = await response.text();
+  assertEquals(response.status, 200);
+
+  assertStringIncludes(body, "Live claims — lease expiries");
+  assertStringIncludes(body, "episode-live");
+  assertStringIncludes(body, "uploading_audio");
+  assertStringIncludes(body, "worker-live");
+  // The EXACT expiry the claim recorded: `claimedAt + the lease the claim was taken with`, rendered
+  // as the <time datetime> value. A page that guessed the expiry, or used a hard-coded lease, fails
+  // this line - which is the difference between reading the lease and describing one.
+  assertStringIncludes(body, "2026-10-12T09:15:00.000Z");
+  // And the real failure is on the page, so the two halves of Paul's ask are answered together.
+  assertStringIncludes(body, "TTS provider returned 503 after 3 attempts");
+});
+
+Deno.test("audio-feed-exww: the lease view still renders when the worker path is unavailable", async () => {
+  // THE CONDITION THE PAGE EXISTS FOR. No worker came back to report on itself, the log store cannot
+  // be read, and there is no run history at all. If the lease view were built on any of those, it
+  // would be empty exactly when an operator needs it.
+  const { stores } = await setup();
+  const claimedAt = "2026-10-12T09:00:00.000Z";
+  const leaseMs = 15 * 60_000;
+  await driveLiveUploadClaim(stores, { episodeId: "episode-stuck", claimedAt, leaseMs });
+
+  const broken = breakStore(stores, {
+    listLogs: () => Promise.reject(new Error("log store down")),
+    logBounds: () => Promise.reject(new Error("log store down")),
+    listRuns: () => Promise.reject(new Error("run history down")),
+  });
+
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200, "the page must render with the worker path unavailable");
+
+  // The page says which reads broke, and still answers the question it exists for.
+  assertStringIncludes(body, "log store down");
+  assertStringIncludes(body, "run history down");
+  assertStringIncludes(body, "episode-stuck");
+  assertStringIncludes(body, "uploading_audio");
+  assertStringIncludes(body, "2026-10-12T09:15:00.000Z");
+  assertEquals(
+    body.includes("No worker holds a claim right now"),
+    false,
+    "an unavailable worker path must never render as 'no worker holds a claim'",
+  );
+  // Without its claim record the page cannot know the claim's own lease, and it says the expiry is
+  // derived from the deployment default rather than presenting an assumption as the claim's terms.
+  assertStringIncludes(body, "deployment lease of 15 min");
+});
+
+Deno.test("audio-feed-exww: an unreadable episode store is UNREADABLE, never 'no worker holds a claim'", async () => {
+  const { stores } = await setup();
+  const broken = breakStore(stores, {
+    listSynthesizingEpisodes: () => Promise.reject(new Error("episode store down")),
+  });
+
+  const nowMs = Date.parse("2026-10-12T09:30:00.000Z");
+  const report = await buildObservabilityReport(broken, nowMs);
+  assertEquals(report.activeClaims, [], "a failed read yields no rows");
+  assertEquals(report.activeClaimsReadError?.includes("episode store down"), true);
+  assertEquals(report.readErrors.some((failure) => failure.store === "claims"), true);
+
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const response = await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}` },
+    }),
+  );
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, 'This is NOT "no worker holds a claim"');
+  assertStringIncludes(body, "episode store down");
+  assertEquals(
+    body.includes("No worker holds a claim right now"),
+    false,
+    "a failed read must not render as an empty lease set",
+  );
+});
+
+Deno.test("audio-feed-exww: the claim's OWN lease is used, and a default-derived expiry is labelled", async () => {
+  const { stores } = await setup();
+  const claimedAt = "2026-10-12T09:00:00.000Z";
+  // Deliberately NOT the 15-minute deployment default: a page that used the default would be wrong
+  // about this claim, and this is the line that catches it.
+  const leaseMs = 60_000;
+  await driveLiveUploadClaim(stores, { episodeId: "episode-short-lease", claimedAt, leaseMs });
+
+  const report = await buildObservabilityReport(stores, Date.parse("2026-10-12T09:00:30.000Z"));
+  const row = report.activeClaims.find((claim) => claim.episodeId === "episode-short-lease");
+  assert(row, "the live claim must be in the report");
+  assertEquals(row.leaseMs, leaseMs, "the lease from the claim record must be used");
+  assertEquals(row.leaseMsAssumed, false);
+  assertEquals(row.leaseExpiresAt, "2026-10-12T09:01:00.000Z");
+  assertEquals(row.leaseExpired, false);
+  assertEquals(row.remainingMs, 30_000);
+
+  // Anti-vacuity: 60 seconds later the SAME row is expired, so the assertions above observe the
+  // lease rather than a constant.
+  const later = await buildObservabilityReport(stores, Date.parse("2026-10-12T09:01:30.000Z"));
+  const expired = later.activeClaims.find((claim) => claim.episodeId === "episode-short-lease");
+  assert(expired);
+  assertEquals(expired.leaseExpired, true);
+  assertEquals(expired.remainingMs, -30_000);
+
+  // With the log store unreadable the claim record is gone, so the page falls back to the deployment
+  // default - and must SAY that, because that expiry is a derived assumption about the lease.
+  const noLogs = breakStore(stores, {
+    listLogs: () => Promise.reject(new Error("log store down")),
+    logBounds: () => Promise.reject(new Error("log store down")),
+  });
+  const assumed = await buildObservabilityReport(noLogs, Date.parse("2026-10-12T09:00:30.000Z"));
+  const assumedRow = assumed.activeClaims.find((claim) =>
+    claim.episodeId === "episode-short-lease"
+  );
+  assert(assumedRow);
+  assertEquals(assumedRow.leaseMs, DEFAULT_CLAIM_LEASE_MS);
+  assertEquals(assumedRow.leaseMsAssumed, true, "a default-derived expiry must be flagged");
+  assertEquals(assumedRow.leaseExpiresAt, "2026-10-12T09:15:00.000Z");
+});
+
+Deno.test("audio-feed-exww: a claim with no readable claimedAt reports an UNKNOWN expiry, never false", async () => {
+  const { stores } = await setup();
+  // A `synthesizing` episode whose claim predates the lease fields (or lost `claimedAt`): the store
+  // cannot say when the lease expires, and an expiry nobody can compute is unknown - rendering it as
+  // "not expired" would be an invented fact about a claim that may have died long ago.
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-legacy-claim",
+      userId: "user-1",
+      sourceId: "stratechery",
+      articleId: "article-1",
+      status: "synthesizing",
+      claimedBy: "worker-x",
+      claimedAt: undefined,
+      phase: "uploading_audio",
+      audioKey: undefined,
+    }),
+  );
+
+  const report = await buildObservabilityReport(stores, Date.parse("2026-10-12T09:00:00.000Z"));
+  const row = report.activeClaims.find((claim) => claim.episodeId === "episode-legacy-claim");
+  assert(row, "an expired-lease claim is still a live claim row");
+  assertEquals(row.leaseExpiresAt, undefined);
+  assertEquals(row.leaseExpired, null, "unknown is null, never false");
+  assertEquals(row.remainingMs, null);
+});
+
+Deno.test("audio-feed-exww: a truncated lease listing says it is truncated, never a silent total", async () => {
+  const { stores, page } = await setup();
+  const claimedAt = "2026-10-12T09:00:00.000Z";
+  for (let index = 0; index <= REPORT_CLAIM_CAP; index++) {
+    await driveLiveUploadClaim(stores, {
+      episodeId: `episode-cap-${index}`,
+      claimedAt,
+      leaseMs: 15 * 60_000,
+      owner: `worker-${index}`,
+    });
+  }
+
+  const report = await buildObservabilityReport(stores, Date.parse("2026-10-12T09:10:00.000Z"));
+  assertEquals(report.activeClaims.length, REPORT_CLAIM_CAP);
+  assertEquals(report.activeClaimsCapped, true);
+
+  const response = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const body = await response.text();
+  assertEquals(response.status, 200);
+  assertStringIncludes(body, "truncated listing");
+});
+
+Deno.test("audio-feed-exww: an expired row renders the elapsed TIME, and a live row does not", async () => {
+  // The regression test for the mutant that exposed a tautology: the expired-row check used to be
+  // `includes("LEASE EXPIRED with no terminal write") && includes("expired")`, and the FIRST clause
+  // contains the second, so a cell that dropped the duration still passed. This pins the RENDERED
+  // duration in the row itself, so a page that says only the word fails here.
+  //
+  // Two separate trees, so the two assertions cannot be satisfied by each other's row: the pattern
+  // must be present when the only claim is overdue, and absent when the only claim is live.
+  const TIMED = /expired \d+ (min|s) ago/;
+  const rowOf = (body: string, episodeId: string): string | undefined => {
+    // Scoped to ONE row: split on the row open tag, then cut at the close tag, so the pattern cannot
+    // be satisfied by text from elsewhere on the page.
+    const chunk = body.split("<tr>").find((candidate) =>
+      candidate.includes(episodeId) && candidate.includes("uploading_audio")
+    );
+    return chunk === undefined ? undefined : chunk.slice(0, chunk.indexOf("</tr>"));
+  };
+
+  const overdue = await setup();
+  await driveLiveUploadClaim(overdue.stores, {
+    episodeId: "ep-overdue",
+    claimedAt: "2026-01-01T00:00:00.000Z",
+    leaseMs: 15 * 60_000,
+  });
+  const overdueBody = await (await overdue.page(
+    `${SESSION_COOKIE}=${await sessionFor(overdue.stores, "admin-1")}`,
+  )).text();
+  const overdueRow = rowOf(overdueBody, "ep-overdue");
+  assert(overdueRow, "the overdue claim must have a rendered row");
+  assert(
+    TIMED.test(overdueRow),
+    `an expired lease must render HOW LONG AGO it expired, not just the word: ${overdueRow}`,
+  );
+  assertStringIncludes(overdueRow, "LEASE EXPIRED with no terminal write");
+
+  const live = await setup();
+  await driveLiveUploadClaim(live.stores, {
+    episodeId: "ep-current",
+    claimedAt: new Date().toISOString(),
+    leaseMs: 15 * 60_000,
+  });
+  const liveBody = await (await live.page(
+    `${SESSION_COOKIE}=${await sessionFor(live.stores, "admin-1")}`,
+  )).text();
+  const liveRow = rowOf(liveBody, "ep-current");
+  assert(liveRow, "the live claim must have a rendered row");
+  assertEquals(
+    TIMED.test(liveRow),
+    false,
+    `a live lease must NOT be rendered with an expired duration: ${liveRow}`,
+  );
+  assertStringIncludes(liveRow, "left");
+});
+
+Deno.test("audio-feed-exww: the default-lease label appears only when the claim's lease is unknown", async () => {
+  // Two-sided, because a label is a claim about the data: it must be RENDERED when the expiry is
+  // derived from the deployment lease (otherwise the fallback is invisible and the cell reads as the
+  // claim's own terms), and it must NOT be rendered when the claim's own lease was read (otherwise
+  // every row carries an assumption label and the one that matters is lost in the noise).
+  const known = await setup();
+  await driveLiveUploadClaim(known.stores, {
+    episodeId: "ep-lease-known",
+    claimedAt: new Date().toISOString(),
+    leaseMs: 15 * 60_000,
+  });
+  const knownBody = await (await known.page(
+    `${SESSION_COOKIE}=${await sessionFor(known.stores, "admin-1")}`,
+  )).text();
+  assertStringIncludes(knownBody, "ep-lease-known");
+  assertEquals(
+    knownBody.includes("computed from the deployment lease"),
+    false,
+    "the claim's own lease record IS readable here, so no assumption label may be rendered",
+  );
+
+  const unknown = await setup();
+  await driveLiveUploadClaim(unknown.stores, {
+    episodeId: "ep-lease-unknown",
+    claimedAt: new Date().toISOString(),
+    leaseMs: 15 * 60_000,
+  });
+  const broken = breakStore(unknown.stores, {
+    listLogs: () => Promise.reject(new Error("log store down")),
+    logBounds: () => Promise.reject(new Error("log store down")),
+  });
+  const ctx = { config, stores: broken };
+  const { fetch } = createApp(ctx, createHandlers(ctx));
+  const body = await (await fetch(
+    new Request(`${BASE}/admin/observability`, {
+      headers: { cookie: `${SESSION_COOKIE}=${await sessionFor(unknown.stores, "admin-1")}` },
+    }),
+  )).text();
+  assertStringIncludes(body, "ep-lease-unknown");
+  assertStringIncludes(body, "computed from the deployment lease");
 });

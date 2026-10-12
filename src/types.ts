@@ -396,6 +396,28 @@ export function isClaimExpired(
 }
 
 /**
+ * Order live claims by how soon their lease stops being honoured (audio-feed-exww).
+ *
+ * The admin lease view answers "what is about to expire", so the soonest-expiring claim is the
+ * one the operator must see first. A claim with no readable `claimedAt` sorts first rather than
+ * last: the store cannot say when it was taken, which is a reason to look at it, not to bury it.
+ *
+ * Shared by both storage adapters so their listing order cannot diverge — the conformance suite
+ * asserts the order against both, and two comparators would let that pass in memory and fail in KV.
+ */
+export function oldestClaimFirst(
+  a: Pick<Episode, "claimedAt">,
+  b: Pick<Episode, "claimedAt">,
+): number {
+  const at = a.claimedAt ? Date.parse(a.claimedAt) : NaN;
+  const bt = b.claimedAt ? Date.parse(b.claimedAt) : NaN;
+  const aMissing = !Number.isFinite(at);
+  const bMissing = !Number.isFinite(bt);
+  if (aMissing || bMissing) return aMissing === bMissing ? 0 : (aMissing ? -1 : 1);
+  return at - bt;
+}
+
+/**
  * An episode is publishable in a feed only when it has playable audio. A regenerating
  * episode keeps publishing its old audio until the new audio replaces it (audio-feed-8oz).
  */

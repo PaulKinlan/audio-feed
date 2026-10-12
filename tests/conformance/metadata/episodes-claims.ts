@@ -10,7 +10,7 @@ import type { MetadataHarness } from "./harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { unsynthesized } from "../../../src/types.ts";
 import { CLAIM } from "./harness.ts";
-import { queued } from "./harness.ts";
+import { published, queued } from "./harness.ts";
 
 export function registerEpisodesClaimsCases(suite: MetadataHarness) {
   const { test } = suite;
@@ -778,5 +778,153 @@ export function registerEpisodesClaimsCases(suite: MetadataHarness) {
     assertEquals(wrote, true, "the same completion with a recordable payload must succeed");
     assertEquals((await store.getEpisode("user-1", "e1"))?.status, "ready");
     assertEquals(await store.getDailySynthesisCount(today), 1, "exactly one charge");
+  });
+
+  // -- the live lease view (audio-feed-exww) -------------------------------
+  //
+  // The admin status page's primary content. It reads this listing instead of the log store because
+  // the page has to answer "who is holding what, and when does the lease run out" while the log
+  // store and the workers are the thing that is broken. These cases pin that the listing is the
+  // CLAIM SET and not a queue view, against both adapters, so the page cannot answer differently
+  // depending on which store the deployment runs.
+
+  test("listSynthesizingEpisodes returns live claims only, soonest lease expiry first", async (store) => {
+    await store.putEpisode(queued({ id: "e-live", createdAt: "2026-09-20T11:00:00.000Z" }));
+    await store.putEpisode(queued({ id: "e-pending", createdAt: "2026-09-20T11:05:00.000Z" }));
+    await store.putEpisode(published({ id: "e-ready" }));
+
+    // e-pending stays in the queue, e-ready is published: neither is a live claim.
+    await store.claimEpisode("user-1", "e-live", {
+      ...CLAIM,
+      now: "2026-09-20T12:00:00.000Z",
+      leaseMs: 15 * 60_000,
+    });
+
+    const { episodes, capped } = await store.listSynthesizingEpisodes();
+    assertEquals(episodes.map((e) => e.id), ["e-live"], "only the held episode is a live claim");
+    assertEquals(episodes[0]!.status, "synthesizing");
+    assertEquals(capped, false);
+
+    // The complement that makes the method necessary: a claim inside its lease is NOT in the
+    // pending listing, so the queue read cannot answer this question.
+    const pending = await store.listPendingEpisodes({
+      nowMs: Date.parse("2026-09-20T12:01:00.000Z"),
+    });
+    assertEquals(
+      pending.episodes.some((e) => e.id === "e-live"),
+      false,
+      "a live claim must not appear in the pending queue",
+    );
+    assertEquals(
+      pending.episodes.some((e) => e.id === "e-pending"),
+      true,
+      "the pending episode must still be in the pending queue (anti-vacuity for the line above)",
+    );
+  });
+
+  test("listSynthesizingEpisodes orders by claim instant, oldest first", async (store) => {
+    await store.putEpisode(queued({ id: "e-new", createdAt: "2026-09-20T11:00:00.000Z" }));
+    await store.putEpisode(queued({ id: "e-old", createdAt: "2026-09-20T11:01:00.000Z" }));
+    await store.claimEpisode("user-1", "e-new", { ...CLAIM, now: "2026-09-20T12:30:00.000Z" });
+    await store.claimEpisode("user-1", "e-old", { ...CLAIM, now: "2026-09-20T12:00:00.000Z" });
+
+    // Ordering is by OLDEST CLAIM, not by the episode's createdAt: e-new was created first but
+    // claimed last, so a listing ordered by createdAt would put the claim that expires soonest behind
+    // the one with the most lease left.
+    const { episodes } = await store.listSynthesizingEpisodes();
+    assertEquals(episodes.map((e) => e.id), ["e-old", "e-new"]);
+  });
+
+  test("listSynthesizingEpisodes says when it truncated, and empties when nothing is held", async (store) => {
+    await store.putEpisode(queued({ id: "e1", createdAt: "2026-09-20T11:00:00.000Z" }));
+    await store.putEpisode(queued({ id: "e2", createdAt: "2026-09-20T11:01:00.000Z" }));
+
+    const empty = await store.listSynthesizingEpisodes();
+    assertEquals(empty.episodes, [], "nothing claimed is an empty listing, not an error");
+    assertEquals(empty.capped, false);
+
+    await store.claimEpisode("user-1", "e1", { ...CLAIM, now: "2026-09-20T12:00:00.000Z" });
+    await store.claimEpisode("user-1", "e2", { ...CLAIM, now: "2026-09-20T12:01:00.000Z" });
+
+    const all = await store.listSynthesizingEpisodes({ limit: 5 });
+    assertEquals(all.episodes.length, 2);
+    assertEquals(all.capped, false, "a listing that returned everything is not capped");
+
+    const one = await store.listSynthesizingEpisodes({ limit: 1 });
+    assertEquals(one.episodes.map((e) => e.id), ["e1"], "the oldest claim is the one kept");
+    assertEquals(one.capped, true, "a truncated listing must SAY it is truncated");
+  });
+
+  test("a completed claim leaves the live listing", async (store) => {
+    await store.putEpisode(queued());
+    const claimed = await store.claimEpisode("user-1", "e1", CLAIM);
+    assert(claimed);
+    assertEquals((await store.listSynthesizingEpisodes()).episodes.length, 1);
+
+    await store.completeEpisode(
+      { ...claimed, status: "ready", audioKey: "e1.wav", contentType: "audio/wav" },
+      "worker-a",
+      { byteLength: 100 },
+    );
+    assertEquals(
+      (await store.listSynthesizingEpisodes()).episodes.length,
+      0,
+      "a released claim must not linger in the lease view",
+    );
+  });
+
+  test("a live claim with no readable claim instant sorts first, in both adapters", async (store) => {
+    // A `synthesizing` record whose `claimedAt` is absent or unreadable is exactly the stranded case
+    // the lease view has to show: the store cannot say when the lease started, which is a reason to
+    // look at the claim, not to bury it below the ones it can date. The comparator is shared
+    // (src/types.ts `oldestClaimFirst`), and this case is what stops the two adapters disagreeing.
+    await store.putEpisode(queued({ id: "e-timed", createdAt: "2026-09-20T11:00:00.000Z" }));
+    await store.putEpisode(
+      queued({
+        id: "e-undated",
+        status: "synthesizing",
+        claimedBy: "worker-x",
+        claimedAt: undefined,
+        phase: "uploading_audio",
+        createdAt: "2026-09-20T11:01:00.000Z",
+      }),
+    );
+    await store.claimEpisode("user-1", "e-timed", { ...CLAIM, now: "2026-09-20T12:00:00.000Z" });
+
+    const { episodes } = await store.listSynthesizingEpisodes();
+    assertEquals(
+      episodes.map((e) => e.id),
+      ["e-undated", "e-timed"],
+      "a claim with no readable claim instant sorts first",
+    );
+  });
+
+  test("the cap keeps the oldest CLAIM, not the oldest episode (audio-feed-kxhq)", async (store) => {
+    // The listing promises soonest-lease-expiry-first, and the index it reads iterates in episode
+    // `createdAt` order. Applying `limit` to the SCAN therefore truncates the wrong end, and the row
+    // it drops is whichever claim belongs to the most recently created episode - which on a busy
+    // deployment is exactly the stranded long upload the admin page exists to show. The assertions
+    // below are arranged so the two orderings DISAGREE: the newest claim belongs to the OLDEST
+    // episode, so a cap applied before the sort returns the wrong single row.
+    await store.putEpisode(queued({ id: "e-early", createdAt: "2026-09-20T11:00:00.000Z" }));
+    await store.putEpisode(queued({ id: "e-late", createdAt: "2026-09-20T11:02:00.000Z" }));
+    // e-early is created first but claimed LAST; e-late is created last but claimed FIRST.
+    await store.claimEpisode("user-1", "e-early", { ...CLAIM, now: "2026-09-20T12:30:00.000Z" });
+    await store.claimEpisode("user-1", "e-late", { ...CLAIM, now: "2026-09-20T12:00:00.000Z" });
+
+    const full = await store.listSynthesizingEpisodes();
+    assertEquals(
+      full.episodes.map((e) => e.id),
+      ["e-late", "e-early"],
+      "the oldest CLAIM comes first, even though its episode is the newest",
+    );
+
+    const capped = await store.listSynthesizingEpisodes({ limit: 1 });
+    assertEquals(
+      capped.episodes.map((e) => e.id),
+      ["e-late"],
+      "at the cap the OLDEST CLAIM must survive truncation, not the oldest episode",
+    );
+    assertEquals(capped.capped, true, "and the truncation must still be declared");
   });
 }
