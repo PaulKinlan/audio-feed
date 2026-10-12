@@ -12,7 +12,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { couldBeTheChangedFile, couldHideInertRead, planTests } from "../scripts/fast-check.ts";
-import { deriveReadRelationReport, ROOT } from "../scripts/test-selection.ts";
+import { deriveReadRelationReport, ROOT, unclassifiedTail } from "../scripts/test-selection.ts";
 
 const NO_MAP = new Map<string, string[]>();
 
@@ -468,4 +468,144 @@ Deno.test("audio-feed-i9ao: the eleven mis-parses stay corrected, so no known hi
     }`,
   );
   assertEquals(report.unresolved, [], "and nothing may be an unresolved PATH hint");
+});
+
+Deno.test("audio-feed-snww: a runtime-assembled name is REPORTED, and still cannot block", async (t) => {
+  // The silence this bead is about: a runtime-assembled read whose suffix is a bare name. `toRepoPath` cannot
+  // place a name with no directory part, and before this bucket that refusal went NOWHERE - not to unresolved,
+  // not to unattributed, not to outOfRepo - which is the one thing q0ky forbids. Reported and inert-neutral are
+  // BOTH required, so both are asserted here, and the steps below cover the two binding contexts a tail can
+  // have: a parameter (not provably out-of-repo, so the name cannot be placed) and a temp dir (provably so).
+  await t.step("it appears in unclassified, and in no other bucket", async () => {
+    await withTempTree({
+      "tests/profile_test.ts": [
+        "export async function readEntry(profileDir: string) {",
+        "  return await Deno.readTextFile(`${profileDir}/DevToolsActivePort`);",
+        "}",
+        "",
+      ].join("\n"),
+    }, async (root) => {
+      const report = await deriveReadRelationReport(root, ["tests/profile_test.ts"]);
+      assertEquals(
+        report.unclassified,
+        ["DevToolsActivePort"],
+        `a runtime-assembled bare name must be reported, not dropped in silence: ${
+          JSON.stringify(report)
+        }`,
+      );
+      for (const bucket of [report.unresolved, report.unattributed, report.outOfRepo]) {
+        assert(
+          !bucket.includes("DevToolsActivePort"),
+          `the bare-name class is its own answer, not one of the others: ${JSON.stringify(report)}`,
+        );
+      }
+    });
+  });
+
+  await t.step(
+    "the SAME name with a temp-dir base is reported in outOfRepo - never in neither",
+    async () => {
+      // The pair that makes the promise complete. When the base IS provably outside the repo (makeTempDir),
+      // suppression wins and the hint is printed in `outOfRepo` (audio-feed-lm4d); when it is only a parameter it
+      // is printed in `bareNames`. What this bead exists to prevent is the third case: a name that reaches NEITHER
+      // list and so leaves no trace.
+      await withTempTree({
+        "tests/profile_test.ts": [
+          "const stateDir = await Deno.makeTempDir();",
+          "export async function readEntry() {",
+          "  return await Deno.readTextFile(`${stateDir}/DevToolsActivePort`);",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/profile_test.ts"]);
+        assertEquals(
+          report.outOfRepo,
+          ["DevToolsActivePort"],
+          `a provably out-of-repo base reports it as such: ${JSON.stringify(report)}`,
+        );
+        assertEquals(report.unclassified, [], "and it is not also listed as an unplaceable name");
+      });
+    },
+  );
+
+  await t.step(
+    "and it cannot disable the inert class, because it cannot be the changed file",
+    () => {
+      // The other side of the same coin. `bareNameHint` accepts it, so it is printed; `couldHideInertRead` and
+      // `couldBeTheChangedFile` reject it - no extension, no directory - so no selection can depend on it. If
+      // this step ever fails, a bare name can widen a run and the speed the buckets exist to protect is gone.
+      assert(unclassifiedTail("DevToolsActivePort"), "the bucket must accept it");
+      assert(
+        !couldHideInertRead("DevToolsActivePort"),
+        "it is not markdown and not a directory of one",
+      );
+      assert(
+        !couldBeTheChangedFile("DevToolsActivePort", ["docs/ingest.md"]),
+        "and no docs change can be it",
+      );
+    },
+  );
+});
+
+Deno.test("audio-feed-snww: a LITERAL command name and its flags stay silent - the bucket is for reads", async () => {
+  // The boundary that keeps the bucket readable, and the reason it is collected in the tail-candidate loop
+  // rather than everywhere: `Deno.Command` is a read call in this detector, and its literals are a command
+  // name, a flag and an argument - not files. They are rejected before any tail candidate exists (`beads` has
+  // no slash and no extension either), so they must NOT appear as bare names.
+  await withTempTree({
+    "tests/command_test.ts": [
+      "export async function runIt() {",
+      '  const out = await new Deno.Command("beads", { args: ["--json", "list"] }).output();',
+      "  return new TextDecoder().decode(out.stdout);",
+      "}",
+      "",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/command_test.ts"]);
+    assertEquals(
+      report.unclassified,
+      [],
+      `a command name and its flags are not reads: ${JSON.stringify(report)}`,
+    );
+  });
+});
+
+Deno.test("audio-feed-3ttu: EVERY runtime-assembled name is accounted for, and reported WHOLE", async (t) => {
+  // rev-27's matrix, and the reason this bucket is defined by "unaccounted for" rather than by a shape. The shape
+  // test that used to gate this bucket (`^[\w@.-]+$`, no slash, no extension) excluded `+`, `#` and non-ASCII, so
+  // three of these four are REAL reads that landed in NO bucket at all - the silence the bead exists to remove.
+  // The fourth was WORSE than silent: the whitespace split cut it, so a bucket that looked like it worked would
+  // have reported `daily` for `${dir}/daily notes`.
+  const cases: Array<[string, string]> = [
+    ["plus", "notes+draft"],
+    ["hash", "draft#1"],
+    ["non-ascii", "déjà"],
+    ["space", "daily notes"],
+  ];
+  for (const [label, name] of cases) {
+    await t.step(`${label}: ${name}`, async () => {
+      await withTempTree({
+        "tests/reader_test.ts": [
+          "export async function readIt(dir: string) {",
+          `  return await Deno.readTextFile(\`\${dir}/${name}\`);`,
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/reader_test.ts"]);
+        assertEquals(
+          report.unclassified,
+          [name],
+          `${name} must be REPORTED (whole), never dropped in silence: ${JSON.stringify(report)}`,
+        );
+        for (const bucket of [report.unresolved, report.unattributed, report.outOfRepo]) {
+          assert(
+            bucket.length === 0,
+            `and it belongs to no other bucket: ${JSON.stringify(report)}`,
+          );
+        }
+      });
+    });
+  }
 });

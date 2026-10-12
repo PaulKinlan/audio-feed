@@ -125,7 +125,18 @@ detector could not resolve. The guard is NOT weakened by (3): `unresolved` hints
 class, and a fragment blocks only when it could hide an INERT-ELIGIBLE read AND could BE the file being
 changed - markdown, or an extension-less prefix that could be a directory of it, whose basename matches a
 changed file (`couldHideInertRead` and `couldBeTheChangedFile` in `scripts/fast-check.ts`). Both reasons are
-printed, so no fragment is dropped in silence. The relation itself is asserted UNCHANGED by the fix
+printed, so no fragment is dropped in silence. (4) A runtime-assembled suffix that NO OTHER BUCKET accounts for is printed in the `unclassified` bucket
+(audio-feed-snww, audio-feed-3ttu) and, like `outOfRepo`, it neither enters the relation nor disables the inert
+class: it is not a repo path, so the tree cannot be searched for it, and it has no extension, so it cannot be the
+markdown file a change touches. THE RULE IS "UNACCOUNTED FOR", NOT "MATCHES A SHAPE": the first version asked
+whether a candidate looked like a bare name (`[\w@.-]+`, no slash, no extension), and rev-27 measured its
+complement - a name containing `+`, `#`, an accent or a space - landing in NO bucket at all, which is exactly the
+silence q0ky forbids. A shape test always leaves a silent complement; "is this accounted for?" does not. The
+reported value is the WHOLE candidate, never a prefix the whitespace split cut, because a bucket that reports the
+wrong thing looks like a bucket that works. The boundary that keeps it readable is the CLASS, not a pattern - tail
+candidates are the text after an interpolation in a path-shaped token, so a literal argument (a command name, a
+CLI flag, an encoding, a URL) is rejected before a candidate exists and stays silent on purpose. Measured on this
+tree: one member (`DevToolsActivePort`) against eight out-of-repo and two fragments. The relation itself is asserted UNCHANGED by the fix
 (byte-identical on this tree, same 18 entries and observers), and `tests/read_relation_hints_test.ts` pins
 both directions: an inert change IS inert, and a change touching something a suite reads STILL selects it.
 If a lane ever sees a docs-only change pay the full suite again, READ THE AUDIT LINE - it names the hints
