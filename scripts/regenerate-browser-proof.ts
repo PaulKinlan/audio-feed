@@ -220,15 +220,19 @@ try {
   );
   dialogs.push(dialogMessage);
 
-  // Click the OK button and explicitly dispatch the close event if CDP drops it (audio-feed-ebyy)
+  // Click the OK button (native HTML dialogs are fixed to resolve askConfirm properly)
   await evaluate(
     admin,
     `
-    const dialog = document.getElementById("confirmDialog");
-    const okBtn = document.getElementById("confirmOkBtn");
-    okBtn.click();
-    
+    document.getElementById("confirmOkBtn").click();
   `,
+  );
+
+  await waitFor(admin, `!document.getElementById("confirmDialog")?.open`, 2000);
+  check(
+    "confirm dialog is properly closed",
+    !(await evaluate(admin, `document.getElementById("confirmDialog")?.open`)),
+    "dialog no longer open",
   );
 
   await waitFor(admin, `${episodeRow(OLD_TITLE)}?.cells[2].textContent === 'regenerating'`);
