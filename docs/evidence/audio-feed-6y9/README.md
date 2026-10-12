@@ -1,5 +1,8 @@
 # Admin and Player Failed Episode Retry Verification: audio-feed-6y9
 
+- Script: scripts/admin-retry-browser-proof.ts
+- Asserts: admin shows 'Retry failed (1)' button in header; failed episode row renders inline 'Retry' button; failed episode row displays error detail; player activity panel displays failed episode error detail; player activity panel renders 'Try again' button; account page shows 'Retry failed (1)' button in header; account page renders inline 'Retry' button on failed episode
+
 ## Observed Behavior
 1. **Admin Console (/admin)**:
    - Header provides a dedicated `#regenFailed` button: **"Retry failed (1)"**.
@@ -12,17 +15,6 @@
 3. **Subscriber Account (/account)**:
    - Header renders **"Retry failed (1)"** button.
    - Failed episode row renders inline **"Retry"** button and error detail.
-
-## Test Results
-```
-PASS  admin shows 'Retry failed (1)' button in header  got: 'Retry failed (1)'
-PASS  failed episode row renders inline 'Retry' button  Retry button present
-PASS  failed episode row displays error detail  error: 'Gemini API error: 429 Quota Exceeded for audio model'
-PASS  player activity panel displays failed episode error detail  activity error: 'Gemini API error: 429 Quota Exceeded for audio model'
-PASS  player activity panel renders 'Try again' button  Try again button present
-PASS  account page shows 'Retry failed (1)' button in header  got: 'Retry failed (1)'
-PASS  account page renders inline 'Retry' button on failed episode  Retry button present
-```
 
 ## Screenshots
 - `01-admin-retry-failed-episodes.png`: Admin console with "Retry failed (1)" and inline "Retry" button.
