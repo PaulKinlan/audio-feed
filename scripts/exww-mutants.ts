@@ -370,148 +370,155 @@ export function applyMutant(source: string, name: string): string {
   return mutant.apply(source);
 }
 
-const options = parseOptions(Deno.args);
-if (options.list) {
-  printMatrix();
-  Deno.exit(0);
-}
-
-const source = await Deno.readTextFile(join(REPO, PROOF));
-const rows = options.only ? MUTANTS.filter((m) => m.name === options.only) : MUTANTS;
-
-if (options.dryRun) {
-  let inapplicable = 0;
-  for (const mutant of rows) {
-    try {
-      const mutated = mutant.apply(source);
-      const digest = await sha256(mutated);
-      // NET LINE DELTA, not a positional comparison: an INSERTED line shifts every later line, so a
-      // positional diff reports the whole tail as touched - it printed "312 lines" for a one-line
-      // injection until I checked it. The application record is the anchor assertion plus the sha256;
-      // this number is only here to say whether the edit inserted anything.
-      const changed = mutated.split("\n").length - source.split("\n").length;
-      console.log(
-        `[mutants] APPLIES  ${mutant.name.padEnd(26)} sha256 ${digest} anchor x1, net ${
-          changed >= 0 ? "+" : ""
-        }${changed} line(s)`,
-      );
-    } catch (err) {
-      inapplicable++;
-      console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
-    }
+// THE MATRIX RUNS ONLY AS A SCRIPT (audio-feed-coao, found by the gate): this module is IMPORTED by
+// tests/exww_mutants_test.ts for its rows and its runner, and without this guard the import executed all
+// seven rows and called Deno.exit(1) from outside any test, which terminated the test isolate and turned a
+// mapped suite into "error: Test failed" before a single assertion ran. A module the gate imports must not
+// have side effects at import time; the CLI behaviour is unchanged under `deno task evidence:mutants`.
+if (import.meta.main) {
+  const options = parseOptions(Deno.args);
+  if (options.list) {
+    printMatrix();
+    Deno.exit(0);
   }
-  console.log(
-    `[mutants] --dry-run: ${
-      rows.length - inapplicable
-    } of ${rows.length} row(s) apply to the proof as it ` +
-      `stands; ${inapplicable} INAPPLICABLE (a moved anchor is a row that no longer tests anything)`,
-  );
-  Deno.exit(inapplicable > 0 ? 1 : 0);
-}
 
-const scratch = await buildScratch(options);
-console.log(`[mutants] scratch tree ${scratch} (the invoking worktree is not written to)`);
-const results: Array<{ row: string; verdict: string; detail: string }> = [];
+  const source = await Deno.readTextFile(join(REPO, PROOF));
+  const rows = options.only ? MUTANTS.filter((m) => m.name === options.only) : MUTANTS;
 
-try {
-  // The BASELINE is not decoration: without it, a harness that reddens everything would look correct.
-  const baseline = await runProofIn(scratch, options.timeoutMs);
-  const baselineOk = baseline.code === 0 && baseline.failures.length === 0;
-  console.log(
-    `[mutants] BASELINE ${baselineOk ? "ok  " : "FAIL"} exit ${baseline.code}, ${
-      baseline.seconds.toFixed(1)
-    }s, ` +
-      `${baseline.passCount} check(s) passed, ${baseline.failures.length} failed`,
-  );
-  if (!baselineOk) console.log(`  ${baseline.tail}`);
-  results.push({
-    row: "BASELINE (unmutated)",
-    verdict: baselineOk ? "as expected (green)" : "UNEXPECTED",
-    detail: baselineOk
-      ? `${baseline.passCount} checks passed`
-      : (baseline.failures[0] ?? baseline.tail),
-  });
-} catch (err) {
-  console.log(`[mutants] BASELINE could not run: ${(err as Error).message}`);
-  results.push({
-    row: "BASELINE (unmutated)",
-    verdict: "FAILED TO RUN",
-    detail: (err as Error).message,
-  });
-}
+  if (options.dryRun) {
+    let inapplicable = 0;
+    for (const mutant of rows) {
+      try {
+        const mutated = mutant.apply(source);
+        const digest = await sha256(mutated);
+        // NET LINE DELTA, not a positional comparison: an INSERTED line shifts every later line, so a
+        // positional diff reports the whole tail as touched - it printed "312 lines" for a one-line
+        // injection until I checked it. The application record is the anchor assertion plus the sha256;
+        // this number is only here to say whether the edit inserted anything.
+        const changed = mutated.split("\n").length - source.split("\n").length;
+        console.log(
+          `[mutants] APPLIES  ${mutant.name.padEnd(26)} sha256 ${digest} anchor x1, net ${
+            changed >= 0 ? "+" : ""
+          }${changed} line(s)`,
+        );
+      } catch (err) {
+        inapplicable++;
+        console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
+      }
+    }
+    console.log(
+      `[mutants] --dry-run: ${
+        rows.length - inapplicable
+      } of ${rows.length} row(s) apply to the proof as it ` +
+        `stands; ${inapplicable} INAPPLICABLE (a moved anchor is a row that no longer tests anything)`,
+    );
+    Deno.exit(inapplicable > 0 ? 1 : 0);
+  }
 
-for (const mutant of rows) {
-  let mutated: string;
+  const scratch = await buildScratch(options);
+  console.log(`[mutants] scratch tree ${scratch} (the invoking worktree is not written to)`);
+  const results: Array<{ row: string; verdict: string; detail: string }> = [];
+
   try {
-    mutated = mutant.apply(source);
+    // The BASELINE is not decoration: without it, a harness that reddens everything would look correct.
+    const baseline = await runProofIn(scratch, options.timeoutMs);
+    const baselineOk = baseline.code === 0 && baseline.failures.length === 0;
+    console.log(
+      `[mutants] BASELINE ${baselineOk ? "ok  " : "FAIL"} exit ${baseline.code}, ${
+        baseline.seconds.toFixed(1)
+      }s, ` +
+        `${baseline.passCount} check(s) passed, ${baseline.failures.length} failed`,
+    );
+    if (!baselineOk) console.log(`  ${baseline.tail}`);
+    results.push({
+      row: "BASELINE (unmutated)",
+      verdict: baselineOk ? "as expected (green)" : "UNEXPECTED",
+      detail: baselineOk
+        ? `${baseline.passCount} checks passed`
+        : (baseline.failures[0] ?? baseline.tail),
+    });
   } catch (err) {
-    console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
-    results.push({ row: mutant.name, verdict: "INAPPLICABLE", detail: (err as Error).message });
-    continue;
+    console.log(`[mutants] BASELINE could not run: ${(err as Error).message}`);
+    results.push({
+      row: "BASELINE (unmutated)",
+      verdict: "FAILED TO RUN",
+      detail: (err as Error).message,
+    });
   }
-  const digest = await sha256(mutated);
-  await Deno.writeTextFile(join(scratch, PROOF), mutated);
-  const outcome = await runProofIn(scratch, options.timeoutMs);
-  const expectedSeen = mutant.expect.every((needle) =>
-    outcome.failures.some((f) => f.includes(needle))
-  );
-  const soleRedOk = !mutant.soleRed ||
-    (outcome.failures.length === mutant.soleRed.length &&
-      outcome.failures.every((f) => mutant.soleRed!.some((needle) => f.includes(needle))));
-  const asExpected = outcome.code !== 0 && expectedSeen && soleRedOk;
-  console.log(
-    `[mutants] ${asExpected ? "ok  " : "UNEXPECTED"} ${
-      mutant.name.padEnd(26)
-    } modified-sha ${digest} ` +
-      `exit ${outcome.code}, ${
-        outcome.seconds.toFixed(1)
-      }s, ${outcome.failures.length} check(s) red` +
-      (outcome.timedOut ? " TIMEOUT (unknown, not a red)" : ""),
-  );
-  if (!asExpected) {
-    for (const failure of outcome.failures) console.log(`      red: ${failure.slice(0, 130)}`);
-    if (!expectedSeen) {
-      console.log(
-        `      MISSING the expected red: ${
-          mutant.expect.join(" | ")
-        } - the mutant applied and the ` +
-          `check did not react, which is the state this harness exists to make loud`,
-      );
-    }
-    if (!soleRedOk) {
-      console.log(`      SOLE-RED violated: expected only ${mutant.soleRed?.join(" | ")}`);
-    }
-  }
-  results.push({
-    row: mutant.name,
-    verdict: asExpected ? "as expected (red on the named check)" : "UNEXPECTED",
-    detail: asExpected
-      ? `${outcome.failures.length} check(s) red, sha256 ${digest}`
-      : `exit ${outcome.code}, ${outcome.failures.length} red`,
-  });
-  // Restore for the next row: every mutant starts from the pristine proof.
-  await Deno.writeTextFile(join(scratch, PROOF), source);
-}
 
-printMatrix();
-const unexpected = results.filter((r) =>
-  r.verdict !== "as expected (green)" && r.verdict !== "as expected (red on the named check)"
-);
-console.log(
-  `[mutants] ${
-    results.length - unexpected.length
-  } row(s) as expected, ${unexpected.length} unexpected`,
-);
-if (!options.keep) {
-  await Deno.remove(scratch, { recursive: true }).catch(() => {});
-} else {
-  console.log(`[mutants] scratch kept at ${scratch} (--keep)`);
+  for (const mutant of rows) {
+    let mutated: string;
+    try {
+      mutated = mutant.apply(source);
+    } catch (err) {
+      console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
+      results.push({ row: mutant.name, verdict: "INAPPLICABLE", detail: (err as Error).message });
+      continue;
+    }
+    const digest = await sha256(mutated);
+    await Deno.writeTextFile(join(scratch, PROOF), mutated);
+    const outcome = await runProofIn(scratch, options.timeoutMs);
+    const expectedSeen = mutant.expect.every((needle) =>
+      outcome.failures.some((f) => f.includes(needle))
+    );
+    const soleRedOk = !mutant.soleRed ||
+      (outcome.failures.length === mutant.soleRed.length &&
+        outcome.failures.every((f) => mutant.soleRed!.some((needle) => f.includes(needle))));
+    const asExpected = outcome.code !== 0 && expectedSeen && soleRedOk;
+    console.log(
+      `[mutants] ${asExpected ? "ok  " : "UNEXPECTED"} ${
+        mutant.name.padEnd(26)
+      } modified-sha ${digest} ` +
+        `exit ${outcome.code}, ${
+          outcome.seconds.toFixed(1)
+        }s, ${outcome.failures.length} check(s) red` +
+        (outcome.timedOut ? " TIMEOUT (unknown, not a red)" : ""),
+    );
+    if (!asExpected) {
+      for (const failure of outcome.failures) console.log(`      red: ${failure.slice(0, 130)}`);
+      if (!expectedSeen) {
+        console.log(
+          `      MISSING the expected red: ${
+            mutant.expect.join(" | ")
+          } - the mutant applied and the ` +
+            `check did not react, which is the state this harness exists to make loud`,
+        );
+      }
+      if (!soleRedOk) {
+        console.log(`      SOLE-RED violated: expected only ${mutant.soleRed?.join(" | ")}`);
+      }
+    }
+    results.push({
+      row: mutant.name,
+      verdict: asExpected ? "as expected (red on the named check)" : "UNEXPECTED",
+      detail: asExpected
+        ? `${outcome.failures.length} check(s) red, sha256 ${digest}`
+        : `exit ${outcome.code}, ${outcome.failures.length} red`,
+    });
+    // Restore for the next row: every mutant starts from the pristine proof.
+    await Deno.writeTextFile(join(scratch, PROOF), source);
+  }
+
+  printMatrix();
+  const unexpected = results.filter((r) =>
+    r.verdict !== "as expected (green)" && r.verdict !== "as expected (red on the named check)"
+  );
+  console.log(
+    `[mutants] ${
+      results.length - unexpected.length
+    } row(s) as expected, ${unexpected.length} unexpected`,
+  );
+  if (!options.keep) {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  } else {
+    console.log(`[mutants] scratch kept at ${scratch} (--keep)`);
+  }
+  if (unexpected.length > 0) {
+    console.log("[mutants] RED: a row did not behave as the matrix claims");
+    for (const row of unexpected) console.log(`  ${row.row}: ${row.verdict} - ${row.detail}`);
+    Deno.exit(1);
+  }
+  console.log(
+    "[mutants] every row behaved as the matrix claims, and the declared non-detectors are listed above",
+  );
 }
-if (unexpected.length > 0) {
-  console.log("[mutants] RED: a row did not behave as the matrix claims");
-  for (const row of unexpected) console.log(`  ${row.row}: ${row.verdict} - ${row.detail}`);
-  Deno.exit(1);
-}
-console.log(
-  "[mutants] every row behaved as the matrix claims, and the declared non-detectors are listed above",
-);
