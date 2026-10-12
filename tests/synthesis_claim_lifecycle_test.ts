@@ -1243,12 +1243,38 @@ Deno.test("audio-feed-zni7: (c) claim lease abort takes failure lifecycle and do
     scriptGenerator: null,
   });
 
-  // Short leaseMs triggers leaseSignal abort
-  const result = await runSynthesisBatch(ctx, synth, {
-    owner: "worker-lease-abort",
-    leaseMs: 60_050, // leaves ~50ms remainingMs before leaseExpiry minus 60s
-    maxAttempts: 1,
-  });
+  // A short lease makes the leaseSignal abort, which is what this case is about.
+  //
+  // WHY 60_050 IS THE RIGHT NUMBER AND WHAT IT IS NOT (audio-feed-0xzs): the margin is the DELAY
+  // BEFORE THE ABORT - the lease signal fires about 50ms after the claim - and it is NOT a tolerance
+  // for how fast this machine is. The synthesizer's preflight refuses a claim whose remaining lease
+  // time is <= 0 (src/worker/synthesis.ts, "synthesis claim has insufficient lease time"), and it
+  // derives that from two wall-clock reads: the claim's claimedAt and Date.now(). So the margin was
+  // also the budget for the batch's own overhead between those two reads, and under fleet load that
+  // overhead exceeded it: the case then took the OTHER failure branch and reported "insufficient
+  // lease time" instead of the lease abort it is named for. Measured on a loaded box: 1 failure in
+  // 24 runs, which because gate verdicts are cached per tree is a false FAIL every lane inherits.
+  //
+  // The race is removed BY CONSTRUCTION, not by widening the margin. claimEpisode stamps claimedAt
+  // from the real clock (new Date(), inside the batch) while the synthesizer reads Date.now(), so
+  // freezing Date.now() for the call makes the remaining time margin + real elapsed: any slowness
+  // only makes it LARGER, so the preflight cannot fire at any speed - and the property this case
+  // asserts (the lease abort takes the failure lifecycle) is then true for the same reason on a
+  // loaded box and on a hundred times faster one. The abort itself is still a real timer that the
+  // test waits for, which is a precondition wait rather than an assertion about speed.
+  const frozenNow = Date.now();
+  const realNow = Date.now;
+  Date.now = () => frozenNow;
+  let result: Awaited<ReturnType<typeof runSynthesisBatch>>;
+  try {
+    result = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-lease-abort",
+      leaseMs: 60_050,
+      maxAttempts: 1,
+    });
+  } finally {
+    Date.now = realNow;
+  }
 
   assertEquals(result.yielded.length, 0, "lease abort must NOT yield as budget");
   assertEquals(result.failed.length, 1, "lease abort must fail episode");
