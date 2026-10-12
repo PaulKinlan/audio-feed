@@ -149,6 +149,11 @@ await runProof("repro_khk3_unbounded_budget", async (checker) => {
     `spent: ${paidTtsCalls}, ceiling: ${ceiling}`,
   );
   checker.check(
+    "every paid call produced a ready episode",
+    report.readyTotal === paidTtsCalls,
+    `ready: ${report.readyTotal}, paid: ${paidTtsCalls}`,
+  );
+  checker.check(
     "excess episodes deferred past ceiling",
     report.readyTotal + report.deferredTotal === QUEUED,
     `ready: ${report.readyTotal}, deferred: ${report.deferredTotal}`,
@@ -235,6 +240,7 @@ await runProof("repro_khk3_unbounded_budget", async (checker) => {
     script: "scripts/repro_khk3_unbounded_budget.ts",
     asserts: [
       "cron batch clamps paid TTS calls to deployment default (50)",
+      "every paid call produced a ready episode",
       "excess episodes deferred past ceiling",
       "deferral reason cites deployment default ceiling",
       "store daily synthesis count matches ceiling",

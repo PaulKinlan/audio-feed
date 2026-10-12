@@ -1,7 +1,7 @@
 # audio-feed-khk3 — unbounded paid synthesis when no budget is configured
 
 - Script: scripts/repro_khk3_unbounded_budget.ts
-- Asserts: cron batch clamps paid TTS calls to deployment default (50); excess episodes deferred past ceiling; deferral reason cites deployment default ceiling; store daily synthesis count matches ceiling; manual route charges configured ceiling of 1; stats endpoint advertises configured ceiling of 1
+- Asserts: cron batch clamps paid TTS calls to deployment default (50); every paid call produced a ready episode; excess episodes deferred past ceiling; deferral reason cites deployment default ceiling; store daily synthesis count matches ceiling; manual route charges configured ceiling of 1; stats endpoint advertises configured ceiling of 1
 
 ## Overview
 `before.json` and `repro.json` are the same measurement run against the same script
