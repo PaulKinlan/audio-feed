@@ -230,3 +230,55 @@ Deno.test("GET /: front door renders bookmarklet link (audio-feed-ep1)", async (
   assertStringIncludes(html, "Add to Audio Feed");
   assertStringIncludes(html, "javascript:(function()");
 });
+
+/** The disclosure's code snippet, entities decoded (the same payload the anchor carries). */
+function bookmarkletSnippetIn(html: string): string {
+  const raw = html.match(
+    /<pre class="bookmarklet-snippet u-break-all u-fs-xs"><code>([\s\S]*?)<\/code><\/pre>/,
+  )?.[1] ?? "";
+  return raw
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+Deno.test("GET /account explains the CSP refusal and offers the bookmarklet code (audio-feed-kvnw)", async () => {
+  const { fetch, session } = await setup();
+
+  const res = await fetch(
+    new Request(`${BASE}/account`, {
+      headers: { cookie: `__Host-af_session=${session}` },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const html = await res.text();
+
+  // The draggable anchor is UNCHANGED: it is the intended install flow (audio-feed-ep1).
+  const anchorMatch = html.match(/<a[^>]+class="btn quiet small bookmarklet-btn"[^>]+>/i)?.[0];
+  assert(anchorMatch, "the account page must still render the bookmarklet anchor");
+  assertStringIncludes(anchorMatch, 'draggable="true"');
+  assertStringIncludes(anchorMatch, "javascript:(function()");
+
+  // The honest fallback: the same disclosure the front door got in audio-feed-3asd, because /account is
+  // served by the same htmlResponse CSP (src/routes/csp.ts:58) and its javascript: anchor is refused on
+  // click for exactly the same reason.
+  assertStringIncludes(html, '<details class="bookmarklet-code u-mt-2">');
+  assertStringIncludes(html, "<summary>Can’t drag it? Get the bookmarklet code</summary>");
+  assertStringIncludes(html, "Content Security Policy");
+  assertStringIncludes(html, "<code>javascript:</code>");
+
+  // The snippet must be the SAME payload as the anchor's href (one builder, audio-feed-6hw), or the
+  // fallback would install something the draggable button does not.
+  const href = bookmarkletHrefIn(html);
+  const snippet = bookmarkletSnippetIn(html);
+  assert(
+    snippet.startsWith("javascript:(function()"),
+    "the snippet must carry the bookmarklet source",
+  );
+  assertEquals(
+    snippet,
+    href,
+    "the disclosure's snippet and the anchor href must be the same payload",
+  );
+});

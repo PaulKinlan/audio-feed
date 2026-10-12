@@ -617,6 +617,11 @@ export const UTILITY_CSS = `
   .u-fs-092 { font-size: 0.92rem; }
   .u-fs-088 { font-size: 0.88rem; }
   .u-break-all { word-break: break-all; }
+  /* audio-feed-kvnw: the bookmarklet disclosure shows a single ~600-char javascript: token inside a <pre>.
+     word-break alone cannot wrap it, because a <pre> keeps white-space: pre - so the code rendered as ONE
+     4754px line clipped to a 1231px box on both surfaces (measured in headless Chrome). pre-wrap is what
+     lets the line break at all, and word-break is what lets it break INSIDE the token. */
+  .bookmarklet-snippet { white-space: pre-wrap; word-break: break-all; }
   .u-my-half { margin-block: 0.5rem; }
   .u-mt-quarter { margin-block-start: 0.25rem; }
   .u-legend { margin: 1.25rem 0 0.4rem; }
