@@ -24,14 +24,87 @@ export interface SupervisedHarness {
   kill: () => void;
 }
 
+/**
+ * HOW LONG AN ABANDONED PROFILE MAY SIT BEFORE THE NEXT RUN OF THE SAME PREFIX RECLAIMS IT
+ * (audio-feed-u8nv).
+ *
+ * THE MEASUREMENT THAT MAKES THIS A DEFECT RATHER THAN TIDINESS, taken on this VM: `/tmp` held
+ * **1926 `audiofeed-*` profile directories totalling 1.5 GB**, the oldest two days old. A leaked
+ * profile is not only disk: it is 50-150 MB that a gate then cannot write into, and the failure it
+ * produces appears in a tool nowhere near the cause.
+ *
+ * AND THE MECHANISM IS NOT A MISSING `finally`. Measured through the tool's own entry point: a
+ * browser test on the SUCCESS path left ZERO new directories, both `finally` blocks guard
+ * `chrome.kill()` and then run `await cleanup()`, and there were ZERO orphaned Chrome processes - the
+ * wrapper and the reaper own the process layer correctly. THE LEAK IS THAT A KILLED RUN EXECUTES NO
+ * `finally` AT ALL, so the directory outlives the process that would have removed it, and nothing
+ * sweeps what is left behind.
+ *
+ * SO THE BOUND IS DECLARED RATHER THAN CHOSEN FOR CONVENIENCE: no legitimate run holds one of these
+ * for more than minutes (the browser tests and proofs take seconds, and the gate bounds its jobs),
+ * while the evidence of abandonment is 511-minute-old orphans. TWO HOURS sits far above any live
+ * run and far below what has to be reclaimed, and it is what the assertion beside it exercises.
+ */
+export const STALE_PROFILE_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Reclaim abandoned profile directories for ONE PREFIX (audio-feed-u8nv).
+ *
+ * TWO GUARDS, AND BOTH ARE ASSERTED IN tests/proof_helper_profile_sweep_test.ts BECAUSE EACH IS A
+ * DIFFERENT WAY OF DESTROYING SOMETHING THAT IS IN USE:
+ *   - PREFIX SCOPING: every caller passes its own prefix, so this can never reach another proof's,
+ *     another lane's, or another prefix's directory. Only `makeTempDir`-created DIRECTORIES are
+ *     considered; a file that happens to share the name shape is not ours to delete.
+ *   - AGE BOUND: a young directory may be a LIVE run of the same prefix, so it is left alone. The
+ *     reclaim only ever removes what the declared bound has already ruled out as running.
+ *
+ * OPPORTUNISTIC BY CONSTRUCTION: every failure to read or remove is swallowed, because reclaiming
+ * disk must never break allocating a profile. Returns what it actually removed so a caller, or a
+ * test, can observe the work rather than trust it.
+ */
+export async function sweepStaleProfiles(
+  prefix: string,
+  nowMs: number = Date.now(),
+  ageMs: number = STALE_PROFILE_AGE_MS,
+): Promise<string[]> {
+  const swept: string[] = [];
+  // The SAME base directory makeTempDir uses, or the sweep would look somewhere the profiles are not.
+  const baseDir = Deno.env.get("TMPDIR") ?? "/tmp";
+  let entries: Iterable<Deno.DirEntry>;
+  try {
+    entries = Deno.readDirSync(baseDir);
+  } catch {
+    return swept;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory) continue;
+    if (!entry.name.startsWith(prefix)) continue;
+    const full = `${baseDir}/${entry.name}`;
+    try {
+      const info = await Deno.stat(full);
+      const age = nowMs - (info.mtime?.getTime() ?? nowMs);
+      if (age < ageMs) continue;
+      await Deno.remove(full, { recursive: true });
+      swept.push(full);
+    } catch {
+      // A live run, a concurrent reclaim, or a permission we do not have: leave it, never throw.
+    }
+  }
+  return swept;
+}
+
 export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
-): Promise<{ profileDir: string; cleanup: () => Promise<void> }> {
+): Promise<{ profileDir: string; cleanup: () => Promise<void>; sweptStale: number }> {
+  // Reclaim THIS prefix's abandoned directories before allocating another one, so a leak cannot
+  // accumulate across runs (audio-feed-u8nv).
+  const sweptStale = (await sweepStaleProfiles(prefix)).length;
   const profileDir = await Deno.makeTempDir({ prefix });
   let cleaned = false;
 
   return {
     profileDir,
+    sweptStale,
     cleanup: async () => {
       if (cleaned) return;
       const maxAttempts = 10;
