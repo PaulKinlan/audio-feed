@@ -25,6 +25,7 @@ const html = renderAccountPage({
   outdatedCount: 0,
   failedCount: 0,
   prefill: null,
+  nonce: "evidence-nonce",
 });
 
 // Slice the inline confirm fragment straight out of the rendered page, so the
