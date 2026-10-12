@@ -569,8 +569,12 @@ Deno.test("psjb: the uniform marker is emitted on EVERY path, not only the passi
   const emissions = source.match(/console\.log\(\s*coverageMarker\(/g) ?? [];
   assertEquals(
     emissions.length,
-    5,
-    "pass/fail for both paths, and the inert case",
+    9,
+    "pass/fail for both paths, the inert case, and four pre-harness stops",
+  );
+  assert(
+    source.includes("the gate stopped before the test harness"),
+    "the pre-harness UNKNOWN must name what stopped it",
   );
   // The consumed contract stays intact: passed:/ran: are still emitted where they always were.
   assertEquals((source.match(/console\.log\(\s*suiteMarker\("passed"/g) ?? []).length, 2);

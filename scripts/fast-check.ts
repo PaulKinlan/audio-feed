@@ -777,6 +777,9 @@ if (import.meta.main) {
   const selectionAudit = auditSelection(fullGateTestFiles);
   if (!selectionAudit.ok) {
     console.error(selectionAudit.message);
+    console.log(
+      coverageMarker("UNKNOWN - the gate stopped before the test harness: selection audit failed"),
+    );
     Deno.exit(1);
   }
   const drift = await (async () => {
@@ -791,6 +794,9 @@ if (import.meta.main) {
   })();
   if (drift) {
     console.error(drift);
+    console.log(
+      coverageMarker("UNKNOWN - the gate stopped before the test harness: universe drift"),
+    );
     Deno.exit(1);
   }
   // The audit line's two numbers are CHECKED, not merely printed (coord: "a printed-but-unchecked number is
@@ -800,6 +806,9 @@ if (import.meta.main) {
   if (auditUniverseDrift) {
     console.error(`fast-gate: AUDIT/RUN UNIVERSE MISMATCH (audio-feed-es8y):
 ${auditUniverseDrift}`);
+    console.log(
+      coverageMarker("UNKNOWN - the gate stopped before the test harness: audit mismatch"),
+    );
     Deno.exit(1);
   }
   // The read relation is derived once per run: which data files the suites read or execute. A detector that
@@ -891,6 +900,9 @@ ${auditUniverseDrift}`);
       `fast-gate: MODULE-GRAPH CONFIG NOT COVERED (audio-feed-es8y):\n  ${
         configProblems.join("\n  ")
       }`,
+    );
+    console.log(
+      coverageMarker("UNKNOWN - the gate stopped before the test harness: config problems"),
     );
     Deno.exit(1);
   }
