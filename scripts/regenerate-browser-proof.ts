@@ -183,8 +183,19 @@ try {
   const setupUrl = (await setupRes.json()).url;
 
   await send("Page.navigate", { url: setupUrl }, admin);
-  await waitFor(admin, `!document.getElementById("createPasskey")?.disabled`);
-  await evaluate(admin, `document.getElementById("createPasskey").click()`);
+  await waitFor(
+    admin,
+    `document.getElementById("createPasskey") && !document.getElementById("createPasskey").disabled`,
+  );
+
+  // Hydration race: click the button repeatedly until navigation occurs
+  const startWait = Date.now();
+  while (Date.now() - startWait < 10000) {
+    await evaluate(admin, `document.getElementById("createPasskey")?.click()`);
+    const isAccount = await evaluate(admin, `location.pathname === "/account"`);
+    if (isAccount) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
   await waitFor(admin, `location.pathname === "/account"`);
 
   await send("Page.navigate", { url: `${h.base}/admin` }, admin);
