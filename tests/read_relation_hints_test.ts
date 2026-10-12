@@ -867,3 +867,58 @@ Deno.test("audio-feed-3xla: determinism - relations are independent of import gr
     });
   });
 });
+
+Deno.test("audio-feed-kpua: multiline template literal does not swallow subsequent code", async () => {
+  const suite = "tests/kpua_test.ts";
+  const content = [
+    "const config = `",
+    "  tests/*",
+    "`;",
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+    "/** */"
+  ].join("\n");
+  
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite]: content,
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [suite]);
+    assertEquals(report.relations.get("docs/present.md"), [suite], "The read site after a multiline template literal containing /* must not be swallowed");
+  });
+});
+
+Deno.test("audio-feed-iz0j: regex literals and template interpolations do not incorrectly flip quote state", async () => {
+  const suite1 = "tests/iz0j_test1.ts";
+  const content1 = [
+    'const re = /"/;',
+    '/* hidden Deno.readTextFile("../docs/absent.html") */',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}"
+  ].join("\n");
+
+  const suite2 = "tests/iz0j_test2.ts";
+  const content2 = [
+    'const a = `foo ${fn("\`")} baz`;',
+    '/* hidden Deno.readTextFile("../docs/absent.html") */',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}"
+  ].join("\n");
+
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite1]: content1,
+    [suite2]: content2,
+  }, async (root) => {
+    const report1 = await deriveReadRelationReport(root, [suite1]);
+    assertEquals(report1.unresolved, [], "A regex literal containing a quote must not expose subsequent block comments");
+    assertEquals(report1.relations.get("docs/present.md"), [suite1]);
+
+    const report2 = await deriveReadRelationReport(root, [suite2]);
+    assertEquals(report2.unresolved, [], "An interpolation containing a quote must not expose subsequent block comments");
+    assertEquals(report2.relations.get("docs/present.md"), [suite2]);
+  });
+});

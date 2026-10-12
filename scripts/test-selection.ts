@@ -1,3 +1,4 @@
+const logDir = (t, s) => { if (t === 'dir') console.log('HINT dir added via:', s); };
 /**
  * audio-feed-es8y — ONE source of truth for "which test modules exist", so the fast gate's selection is a
  * PROVEN SUBSET of the full gate's instead of a second, hand-maintained list that can drift from it.
@@ -335,28 +336,156 @@ const READ_CALLS = [
  * alone because a colon or quote precedes the slashes there.
  */
 function stripComments(source: string): string {
-  const blocks = /\/\*[\s\S]*?\*\//g;
   let result = "";
+  let i = 0;
   let offset = 0;
-  for (let match = blocks.exec(source); match; match = blocks.exec(source)) {
-    const start = match.index;
-    // A glob inside a quoted source string ("tests/*_test.ts") is not a block opener.
-    const line = source.slice(source.lastIndexOf("\n", start - 1) + 1, start);
-    let quote: string | null = null;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === "\\" && quote) i++;
-      else if (quote === ch) quote = null;
-      else if (!quote && (ch === '"' || ch === "'" || ch === "`")) quote = ch;
+
+  let context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT" = "CODE";
+  let stringQuote: string | null = null;
+  const stack: { context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT", braceDepth: number }[] = [];
+  let braceDepth = 0;
+
+  const isRegexPrecedingChar = (ch: string) => {
+    return /[=(:,;\[{}!&|?<>+\-*%^~]/.test(ch);
+  };
+  
+  const regexKeywords = new Set([
+    "return", "typeof", "yield", "await", "throw", "case", "do", "else", "in", "of", "instanceof", "new", "delete", "void"
+  ]);
+
+  let lastNonWsChar = "";
+  let lastWord = "";
+
+  while (i < source.length) {
+    const ch = source[i]!;
+
+    switch (context) {
+      case "CODE":
+        if (ch === "/" && source[i + 1] === "/") {
+          result += source.slice(offset, i);
+          context = "LINE_COMMENT";
+          i++;
+        } else if (ch === "/" && source[i + 1] === "*") {
+          result += source.slice(offset, i) + " ";
+          context = "BLOCK_COMMENT";
+          i++;
+        } else if (ch === '"' || ch === "'") {
+          context = "STRING";
+          stringQuote = ch;
+          lastNonWsChar = ch;
+          lastWord = "";
+        } else if (ch === "`") {
+          context = "TEMPLATE";
+          lastNonWsChar = ch;
+          lastWord = "";
+        } else if (ch === "/") {
+          if (
+            lastNonWsChar === "" ||
+            isRegexPrecedingChar(lastNonWsChar) ||
+            (lastNonWsChar !== ")" && lastNonWsChar !== "]" && lastNonWsChar !== "}" && regexKeywords.has(lastWord))
+          ) {
+            context = "REGEX";
+            result += source.slice(offset, i + 1);
+            offset = i + 1;
+          }
+          lastNonWsChar = ch;
+          lastWord = "";
+        } else if (ch === "{") {
+          braceDepth++;
+          lastNonWsChar = ch;
+          lastWord = "";
+        } else if (ch === "}") {
+          if (braceDepth > 0) {
+            braceDepth--;
+            lastNonWsChar = ch;
+          } else if (stack.length > 0) {
+            const popped = stack.pop()!;
+            context = popped.context;
+            braceDepth = popped.braceDepth;
+            lastNonWsChar = ch;
+          } else {
+            lastNonWsChar = ch;
+          }
+          lastWord = "";
+        } else if (/[a-zA-Z0-9_$]/.test(ch)) {
+          let start = i;
+          while (i < source.length && /[a-zA-Z0-9_$]/.test(source[i]!)) {
+            i++;
+          }
+          lastWord = source.slice(start, i);
+          lastNonWsChar = source[i - 1]!;
+          i--;
+        } else if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
+          lastNonWsChar = ch;
+          lastWord = "";
+        }
+        break;
+
+      case "STRING":
+        if (ch === "\\") {
+          i++;
+        } else if (ch === stringQuote) {
+          context = "CODE";
+        }
+        break;
+
+      case "TEMPLATE":
+        if (ch === "\\") {
+          i++;
+        } else if (ch === "$" && source[i + 1] === "{") {
+          stack.push({ context: "TEMPLATE", braceDepth });
+          context = "CODE";
+          braceDepth = 0;
+          i++;
+          lastNonWsChar = "{";
+          lastWord = "";
+        } else if (ch === "`") {
+          context = "CODE";
+        }
+        break;
+
+      case "REGEX":
+        if (ch === "\\") {
+          result += "  ";
+          i++;
+        } else if (ch === "/") {
+          result += "/";
+          context = "CODE";
+          offset = i + 1;
+        } else if (ch === "\n") {
+          context = "CODE";
+          result += "\n";
+          offset = i + 1;
+        } else {
+          result += " ";
+        }
+        break;
+
+      case "LINE_COMMENT":
+        if (ch === "\n") {
+          context = "CODE";
+          offset = i;
+          lastNonWsChar = "";
+          lastWord = "";
+        }
+        break;
+
+      case "BLOCK_COMMENT":
+        if (ch === "*" && source[i + 1] === "/") {
+          context = "CODE";
+          i++;
+          offset = i + 1;
+        }
+        break;
     }
-    if (quote) {
-      blocks.lastIndex = start + 2;
-      continue;
-    }
-    result += source.slice(offset, start) + " ";
-    offset = blocks.lastIndex;
+    i++;
   }
-  return (result + source.slice(offset)).replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
+
+  if (context !== "LINE_COMMENT" && context !== "BLOCK_COMMENT") {
+    result += source.slice(offset, i);
+  }
+
+  return result;
 }
 
 /**
@@ -584,7 +713,7 @@ function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): 
     if (ch === "{") {
       const parent = stack[stack.length - 1]!;
       const scope: BindingScope = { start: i, end: code.length, bindings: new Map() };
-      const params = parameterSpan(code, i, Math.max(statementStart, parent.start));
+      const params = parameterSpan(code, i, Math.max(statementStart, parent.start)); if (code.slice(i-20, i+20).includes("walk(dir")) console.log("WALK PARAMS:", params, "statementStart:", statementStart, "code at statementStart:", code.slice(statementStart, statementStart+20));
       if (params.span) {
         // EVERY identifier in the list, not just the leading one: a destructured parameter (`{ profileDir }`),
         // a type name and a default expression all produce a binding here, and an extra binding only REFUSES
@@ -950,11 +1079,11 @@ function staticPathHints(
       for (const token of text.split(/[\s"']+/).filter(Boolean)) {
         const wildcard = token.search(/\$\{/);
         if (wildcard < 0) {
-          hints.push(token);
+          logDir(token, "token"); hints.push(token);
           continue;
         }
         const head = token.slice(0, wildcard);
-        if (head.includes("/")) hints.push(head.slice(0, head.lastIndexOf("/") + 1));
+        if (head.includes("/")) logDir(head.slice(0, head.lastIndexOf("/") + 1), "head"); hints.push(head.slice(0, head.lastIndexOf("/") + 1));
         // audio-feed-lkvz: an interpolation can also PRECEDE the path, and the old code threw the whole token
         // away when it did - which made the detector BLIND to every runtime-assembled read (`${dir}/data/x.csv`
         // produced no hint at all, measured). The tail after the last interpolation is statically known, so it
@@ -990,7 +1119,7 @@ function staticPathHints(
       }
       continue;
     }
-    hints.push(text);
+    logDir(text, "text"); hints.push(text);
   }
   return { paths: hints, tailCandidates };
 }
