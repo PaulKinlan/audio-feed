@@ -801,11 +801,14 @@ function pathConstants(
   root: string,
   isOutOfRepoBase: (name: string, offset: number) => boolean = () => false,
   suppressed: Set<string> = new Set(),
-): Map<string, string> {
+): { all: Map<string, string>; exported: Map<string, string> } {
   const constants = new Map<string, string>();
-  const declare = (name: string, resolved: string) => {
+  const exported = new Map<string, string>();
+  const declare = (name: string, resolved: string, isExported: boolean) => {
     const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
-    constants.set(name, isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved);
+    const value = isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved;
+    constants.set(name, value);
+    if (isExported) exported.set(name, value);
   };
   const resolve = (expr: string, offset: number): string | null => {
     const { paths, tailCandidates } = staticPathHints(
@@ -834,16 +837,16 @@ function pathConstants(
     // The offset of the declaration, so the out-of-repo question is asked AT the site (audio-feed-7l9m).
     const offset = lineStart + (raw.length - raw.trimStart().length);
     lineStart += raw.length + 1;
-    const match = /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
-    if (!match?.[1] || !match[2]) continue;
+    const match = /(?:(export)\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
+    if (!match?.[2] || !match[3]) continue;
     // audio-feed-lm4d: `const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" })` used to register
     // the file SUFFIX as this constant's path, so every `readTextFile(tempHtmlFile)` contributed `.html/` to
     // the relation. audio-feed-7l9m: the skip is now EVIDENCE ABOUT THE VALUE - this initializer IS a temp
     // path constructor - and NOT a name match. Skipping every binding of the name is exactly what dropped a
     // repo constant that an inner scope had shadowed, so a SHADOWED `home` bound to `docs/` now registers.
-    if (/Deno\.makeTemp(?:Dir|File)\s*\(/.test(match[2])) continue;
-    const resolved = resolve(match[2], offset) ?? constants.get(match[2].replace(/;$/, "").trim());
-    if (resolved) declare(match[1], resolved);
+    if (/Deno\.makeTemp(?:Dir|File)\s*\(/.test(match[3])) continue;
+    const resolved = resolve(match[3], offset) ?? constants.get(match[3].replace(/;$/, "").trim());
+    if (resolved) declare(match[2], resolved, Boolean(match[1]));
   }
   // Default parameter values: `evidencePngs(dir = EVIDENCE_DIR)` reads through `dir`, so the name that
   // appears at the read call site is the PARAMETER, not the constant.
@@ -857,10 +860,10 @@ function pathConstants(
       const [, name, referenced] = match;
       if (!name || !referenced) continue;
       const resolved = constants.get(referenced);
-      if (resolved) declare(name, resolved);
+      if (resolved) declare(name, resolved, false);
     }
   }
-  return constants;
+  return { all: constants, exported };
 }
 
 /**
@@ -1042,102 +1045,228 @@ export async function deriveReadRelationReport(
     relations.set(path, list);
   };
 
-  for (const suite of suites) {
-    const moduleDir = suite.split("/").slice(0, -1).join("/");
-    const queue: { relPath: string; dir: string; depth: number }[] = [
-      { relPath: suite, dir: moduleDir, depth: 0 },
-    ];
-    const seen = new Set<string>();
-    const constants = new Map<string, string>();
-    while (queue.length) {
-      const { relPath, dir, depth } = queue.pop()!;
-      if (seen.has(relPath)) continue;
-      seen.add(relPath);
-      const source = stripComments(await read(relPath) ?? "");
-      if (source === null) continue;
-      // Two classes of hint that are not repo-path evidence, computed once per scanned file (audio-feed-lm4d):
-      // the file's string CONTENT (fixture code-as-data), and its names bound outside the repository - the
-      // latter now asked PER SITE from the lexical scope rather than from a file-global set of names
-      // (audio-feed-7l9m), which is what makes a shadowed binding decide for itself.
-      const spans = stringContentSpans(source);
-      const scopes = bindingScopes(source, spans);
-      const isOutOfRepoBase = (name: string, offset: number) =>
-        baseIsOutOfRepo(scopes, name, offset);
+  // audio-feed-3xla: resolve a name against the file being scanned plus the modules it imports, never against
+  // an accumulated per-suite map (a visibility rule, not another shape test). To ensure structural order
+  // independence, we build per-file constant maps and each file's direct imports for the whole closure FIRST,
+  // then derive the relation using those maps.
+  const fileSources = new Map<string, string>();
+  const fileImports = new Map<string, string[]>();
+  const fileImportedSymbols = new Map<string, Map<string, Map<string, string>>>();
+  const fileConstants = new Map<
+    string,
+    { all: Map<string, string>; exported: Map<string, string> }
+  >();
+  const suiteClosures = new Map<string, Set<string>>();
 
-      for (
-        const [name, path] of pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints)
-      ) {
-        if (!constants.has(name)) constants.set(name, path);
+  const loadFile = async (relPath: string): Promise<string | null> => {
+    const existing = fileSources.get(relPath);
+    if (existing !== undefined) return existing;
+    const raw = await read(relPath);
+    if (raw === null) return null;
+    const source = stripComments(raw);
+    fileSources.set(relPath, source);
+
+    const dir = relPath.split("/").slice(0, -1).join("/");
+    const imports: string[] = [];
+    for (const spec of source.matchAll(/from\s*["'](\.[^"']+)["']/g)) {
+      const imported = normalisePath(`${dir}/${spec[1]}`);
+      if (imported && !imports.includes(imported)) {
+        imports.push(imported);
       }
+    }
+    fileImports.set(relPath, imports);
 
-      for (const call of READ_CALLS) {
-        for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
-          const at = match.index ?? 0;
-          // A read that exists only inside a string is data, not a read site: the suite that carries the
-          // detector's own fixtures was contributing ITS fixtures' reads as if they were its own.
-          if (insideSpans(spans, at)) continue;
-          if (!readCallAt(source, at)) continue;
-          // Scan to the matching close paren so the literals belong to this call.
-          let depthParen = 0;
-          let end = at + match[0].length - 1;
-          for (let i = end; i < source.length; i++) {
-            const ch = source[i];
-            if (ch === "(") depthParen++;
-            else if (ch === ")") {
-              depthParen--;
-              if (depthParen === 0) {
-                end = i;
-                break;
+    const importedSymbols = new Map<string, Map<string, string>>();
+    for (
+      const match of source.matchAll(
+        /(?:import|export)\s+(?:type\s+)?\{([^}]+)\}\s*from\s*["'](\.[^"']+)["']/g,
+      )
+    ) {
+      if (!match[1] || !match[2]) continue;
+      const imported = normalisePath(`${dir}/${match[2]}`);
+      if (!imported) continue;
+      const symbols = importedSymbols.get(imported) ?? new Map<string, string>();
+      for (const part of match[1].split(",")) {
+        const trimmed = part.trim();
+        if (!trimmed || trimmed.startsWith("type ")) continue;
+        const tokens = trimmed.split(/\s+as\s+/);
+        const [orig, alias] = tokens;
+        if (orig && alias) {
+          symbols.set(alias.trim(), orig.trim());
+        } else if (orig) {
+          const name = orig.trim();
+          symbols.set(name, name);
+        }
+      }
+      importedSymbols.set(imported, symbols);
+    }
+    fileImportedSymbols.set(relPath, importedSymbols);
+
+    const spans = stringContentSpans(source);
+    const scopes = bindingScopes(source, spans);
+    const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
+
+    const constants = pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints);
+    fileConstants.set(relPath, constants);
+    return source;
+  };
+
+  // Phase 1: Build the closure of files reached by each suite (up to depth 2) and their local constant maps.
+  for (const suite of suites) {
+    const closure = new Set<string>();
+    const queue: { relPath: string; depth: number }[] = [{ relPath: suite, depth: 0 }];
+    while (queue.length > 0) {
+      const { relPath, depth } = queue.shift()!;
+      if (closure.has(relPath)) continue;
+      closure.add(relPath);
+      const source = await loadFile(relPath);
+      if (source === null) continue;
+      if (depth < 2) {
+        const imports = fileImports.get(relPath) ?? [];
+        for (const imp of imports) {
+          if (!closure.has(imp)) {
+            queue.push({ relPath: imp, depth: depth + 1 });
+          }
+        }
+      }
+    }
+    suiteClosures.set(suite, closure);
+  }
+
+  // Phase 2: Compute constants visible to a file: its own constants plus exported constants from the modules it
+  // imports (transitively to the existing depth bound), never caller locals (audio-feed-3xla).
+  const visibleConstantsFor = (relPath: string): Map<string, string> => {
+    const visible = new Map<string, string>();
+    const own = fileConstants.get(relPath);
+    if (own) {
+      for (const [name, path] of own.all) {
+        visible.set(name, path);
+      }
+    }
+
+    // Direct and transitive imports: a file can only see exported constants from modules it imports.
+    const queue: { file: string; depth: number }[] = [{ file: relPath, depth: 0 }];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const { file, depth } = queue.shift()!;
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const importedMap = fileImportedSymbols.get(file);
+      if (importedMap) {
+        for (const [imp, symbols] of importedMap) {
+          const impConsts = fileConstants.get(imp)?.exported;
+          if (impConsts) {
+            for (const [localName, exportedName] of symbols) {
+              const path = impConsts.get(exportedName);
+              if (path && !visible.has(localName)) {
+                visible.set(localName, path);
               }
             }
           }
-          const callText = source.slice(at, end + 1);
-          const { paths, tailCandidates } = staticPathHints(
-            callText,
-            dir,
-            root,
-            (name) => isOutOfRepoBase(name, at),
-            outOfRepoHints,
-          );
-          for (const hint of paths) {
-            const path = toRepoPath(hint, dir, root);
-            if (path) {
-              authoredPaths.add(path);
-              add(path, suite);
-            }
-          }
-          // The suffix after an interpolation is a CANDIDATE: it resolves into the relation when it names a
-          // real file, and when it names nothing it is reported without being mistaken for a read we could
-          // not resolve (audio-feed-lm4d). `authoredPaths` wins on a path offered both ways.
-          for (const hint of tailCandidates) {
-            const path = toRepoPath(hint, dir, root);
-            if (path) {
-              tailPaths.add(path);
-              add(path, suite);
-            } else if (unclassifiedTail(hint)) {
-              // NOTHING FALLS THROUGH HERE (audio-feed-3ttu). This was `bareNameHint(hint)`, a shape test, and a
-              // shape test always leaves a silent complement: `notes+draft`, `draft#1`, `déjà` and a name with a
-              // space all fell through it. A candidate that no named bucket accounts for is reported here, so the
-              // outcome is either "reported under a reason" or "reported as unaccounted for" - never nothing.
-              unclassified.add(hint);
-            }
-          }
-          // An argument passed by NAME still resolves through the constants collected above.
-          for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
-            const path = constants.get(identifier[1]!);
-            if (path) add(path, suite);
+          if (depth < 2 && !seen.has(imp)) {
+            queue.push({ file: imp, depth: depth + 1 });
           }
         }
       }
+    }
+    return visible;
+  };
 
-      // One hop (two levels) into the modules this file imports, for path constants like EVIDENCE_DIR.
-      if (depth < 2) {
-        for (const spec of source.matchAll(/from\s*["'](\.[^"']+)["']/g)) {
-          const imported = normalisePath(`${dir}/${spec[1]}`);
-          if (!imported || seen.has(imported)) continue;
-          const importedDir = imported.split("/").slice(0, -1).join("/");
-          queue.push({ relPath: imported, dir: importedDir, depth: depth + 1 });
+  // Phase 3: Scan read calls for each file in the closure using its own visible constants.
+  interface FileReads {
+    authoredPaths: string[];
+    tailPaths: string[];
+    resolvedPaths: string[];
+  }
+  const fileReads = new Map<string, FileReads>();
+
+  for (const [relPath, source] of fileSources) {
+    const dir = relPath.split("/").slice(0, -1).join("/");
+    const spans = stringContentSpans(source);
+    const scopes = bindingScopes(source, spans);
+    const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
+    const visible = visibleConstantsFor(relPath);
+
+    const authored: string[] = [];
+    const tails: string[] = [];
+    const resolved: string[] = [];
+
+    for (const call of READ_CALLS) {
+      for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
+        const at = match.index ?? 0;
+        // A read that exists only inside a string is data, not a read site: the suite that carries the
+        // detector's own fixtures was contributing ITS fixtures' reads as if they were its own.
+        if (insideSpans(spans, at)) continue;
+        if (!readCallAt(source, at)) continue;
+        // Scan to the matching close paren so the literals belong to this call.
+        let depthParen = 0;
+        let end = at + match[0].length - 1;
+        for (let i = end; i < source.length; i++) {
+          const ch = source[i];
+          if (ch === "(") depthParen++;
+          else if (ch === ")") {
+            depthParen--;
+            if (depthParen === 0) {
+              end = i;
+              break;
+            }
+          }
         }
+        const callText = source.slice(at, end + 1);
+        const { paths, tailCandidates } = staticPathHints(
+          callText,
+          dir,
+          root,
+          (name) => isOutOfRepoBase(name, at),
+          outOfRepoHints,
+        );
+        for (const hint of paths) {
+          const path = toRepoPath(hint, dir, root);
+          if (path) authored.push(path);
+        }
+        // The suffix after an interpolation is a CANDIDATE: it resolves into the relation when it names a
+        // real file, and when it names nothing it is reported without being mistaken for a read we could
+        // not resolve (audio-feed-lm4d). `authoredPaths` wins on a path offered both ways.
+        for (const hint of tailCandidates) {
+          const path = toRepoPath(hint, dir, root);
+          if (path) {
+            tails.push(path);
+          } else if (unclassifiedTail(hint)) {
+            // NOTHING FALLS THROUGH HERE (audio-feed-3ttu). This was `bareNameHint(hint)`, a shape test, and a
+            // shape test always leaves a silent complement: `notes+draft`, `draft#1`, `déjà` and a name with a
+            // space all fell through it. A candidate that no named bucket accounts for is reported here, so the
+            // outcome is either "reported under a reason" or "reported as unaccounted for" - never nothing.
+            unclassified.add(hint);
+          }
+        }
+        // An argument passed by NAME still resolves through the constants visible to this file.
+        for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
+          const path = visible.get(identifier[1]!);
+          if (path) resolved.push(path);
+        }
+      }
+    }
+
+    fileReads.set(relPath, { authoredPaths: authored, tailPaths: tails, resolvedPaths: resolved });
+  }
+
+  // Phase 4: Attribute reads to each suite observing them.
+  for (const suite of suites) {
+    const closure = suiteClosures.get(suite);
+    if (!closure) continue;
+    for (const relPath of closure) {
+      const reads = fileReads.get(relPath);
+      if (!reads) continue;
+      for (const path of reads.authoredPaths) {
+        authoredPaths.add(path);
+        add(path, suite);
+      }
+      for (const path of reads.tailPaths) {
+        tailPaths.add(path);
+        add(path, suite);
+      }
+      for (const path of reads.resolvedPaths) {
+        add(path, suite);
       }
     }
   }
