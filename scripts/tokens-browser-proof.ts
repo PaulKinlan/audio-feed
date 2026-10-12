@@ -49,7 +49,7 @@ await stores.metadata.putArticle(
     id: "art-tokens-1",
     userId: user.id,
     title: "Design Tokens Verification Episode",
-    body: "Checking unified spacing, contrast, and theme variables across routes.",
+    content: "Checking unified spacing, contrast, and theme variables across routes.",
   }),
 );
 
