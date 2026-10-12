@@ -609,3 +609,236 @@ Deno.test("audio-feed-3ttu: EVERY runtime-assembled name is accounted for, and r
     });
   }
 });
+
+Deno.test("audio-feed-3xla: caller local constant does not leak into imported helper parameter", async () => {
+  // Acceptance row 1: one file declares a local path constant and reads through an IMPORTED helper whose
+  // parameter has the SAME name. The phantom path must NOT be produced as a hint, and genuine relations
+  // must remain intact.
+  await withTempTree({
+    "docs/present.md": "content\n",
+    "tests/helpers/leak_helper.ts": [
+      "export async function helperRead(rel: string) {",
+      "  return await Deno.readTextFile(rel);",
+      "}",
+      "",
+    ].join("\n"),
+    "tests/leak_caller_test.ts": [
+      'import { helperRead } from "./helpers/leak_helper.ts";',
+      'const rel = "docs/evidence/bead/01-phantom.png";',
+      'const genuine = "docs/present.md";',
+      "export async function run() {",
+      "  await Deno.readTextFile(genuine);",
+      '  await helperRead("docs/present.md");',
+      "}",
+      "",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/leak_caller_test.ts"]);
+    assertEquals(
+      report.unresolved,
+      [],
+      `the caller local constant must NOT leak into the helper parameter: ${
+        JSON.stringify(report.unresolved)
+      }`,
+    );
+    assertEquals(
+      report.relations.get("docs/present.md"),
+      ["tests/leak_caller_test.ts"],
+      "genuine read relation is unchanged",
+    );
+    assert(
+      !JSON.stringify(report).includes("01-phantom.png"),
+      `phantom path must appear in no bucket: ${JSON.stringify(report)}`,
+    );
+  });
+});
+
+Deno.test("audio-feed-axlt: own module constant cannot override its function parameter", async () => {
+  await withTempTree({
+    "docs/present.md": "present\n",
+    "docs/other.md": "other\n",
+    "tests/own_test.ts": [
+      'const FILE = "docs/present.md";',
+      "export function probe(FILE: string) { return Deno.readTextFile(FILE); }",
+      'probe("docs/other.md");',
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/own_test.ts"]);
+    assertEquals(
+      [...report.relations],
+      [],
+      "the outer constant must not stand in for the parameter",
+    );
+    assertEquals(report.unresolved, ["FILE"], "unknown parameter value must be reported");
+  });
+});
+
+Deno.test("audio-feed-axlt: unsupported destructured and namespace imports report unresolved reads", async () => {
+  await withTempTree({
+    "docs/present.md": "present\n",
+    "src/dep.ts": 'export const FILE = "docs/present.md";\n',
+    "tests/destructured_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      'const FILE = "docs/present.md";',
+      "function read() { const { FILE } = x; return Deno.readTextFile(FILE); }",
+      "read();",
+    ].join("\n"),
+    "tests/namespace_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      "function read(x: { FILE: string }) { return Deno.readTextFile(x.FILE); }",
+      'read({ FILE: "docs/other.md" });',
+    ].join("\n"),
+  }, async (root) => {
+    for (const suite of ["tests/destructured_test.ts", "tests/namespace_test.ts"]) {
+      const report = await deriveReadRelationReport(root, [suite]);
+      assertEquals([...report.relations], [], `${suite}: no scope may be guessed`);
+      assertEquals(report.unresolved, ["FILE"], `${suite}: an unsupported import must be reported`);
+    }
+  });
+});
+
+Deno.test("audio-feed-3xla: helper imported constant does not leak into caller parameter (outward leak)", async () => {
+  await withTempTree({
+    "docs/present/present.md": "content\n",
+    "src/dep.ts": 'export const FILE = "docs/present";\n',
+    "src/helper.ts": [
+      'import { FILE } from "./dep.ts";',
+      "export function probe(FILE: string) {",
+      "  return Deno.readTextFile(`${FILE}/present.md`);",
+      "}",
+    ].join("\n"),
+    "tests/caller_test.ts": [
+      'import { probe } from "../src/helper.ts";',
+      'Deno.test("helper param shadows import", async () => {',
+      '  await probe("helper-runtime-value");',
+      "});",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/caller_test.ts"]);
+    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unresolved.
+    assertEquals(report.unresolved, ["FILE"]);
+    // It must NOT silently attribute to docs/present/
+    assert(!report.relations.has("docs/present/"));
+  });
+});
+
+Deno.test("audio-feed-3xla: determinism - relations are independent of import graph reach order", async () => {
+  // Acceptance row 2: the same tree must derive the same relation INDEPENDENT of which suite the scan
+  // reaches a module through. Pinned with a fixture pair whose import graphs reach the shared module in
+  // opposite orders, asserting BYTE-IDENTICAL formatted relations, unresolved, outOfRepo, unattributed,
+  // and unclassified for both.
+  const formatRelations = (relations: Map<string, string[]>): string => {
+    const lines: string[] = [];
+    for (const [path, observers] of [...relations].sort()) {
+      lines.push(`  ${path} <- ${observers.join(", ")}`);
+    }
+    return lines.join("\n");
+  };
+
+  const sharedModule = [
+    "export async function sharedRead(rel: string) {",
+    "  return await Deno.readTextFile(rel);",
+    "}",
+    "",
+  ].join("\n");
+
+  const treeA = {
+    "docs/genuine.md": "shared\n",
+    "tests/shared.ts": sharedModule,
+    "tests/branch_a.ts": [
+      'import { sharedRead } from "./shared.ts";',
+      'export const callA = () => sharedRead("docs/genuine.md");',
+      "",
+    ].join("\n"),
+    "tests/branch_b.ts": [
+      'import { sharedRead } from "./shared.ts";',
+      'export const callB = () => sharedRead("docs/genuine.md");',
+      "",
+    ].join("\n"),
+    "tests/first_test.ts": [
+      'import { callA } from "./branch_a.ts";',
+      'import { callB } from "./branch_b.ts";',
+      'const rel = "docs/phantom_a.png";',
+      "export async function run() {",
+      '  await Deno.readTextFile("docs/genuine.md");',
+      "  await callA();",
+      "  await callB();",
+      "}",
+      "",
+    ].join("\n"),
+    "tests/second_test.ts": [
+      'import { callB } from "./branch_b.ts";',
+      'import { callA } from "./branch_a.ts";',
+      'const rel = "docs/phantom_b.png";',
+      "export async function run() {",
+      '  await Deno.readTextFile("docs/genuine.md");',
+      "  await callB();",
+      "  await callA();",
+      "}",
+      "",
+    ].join("\n"),
+  };
+
+  const treeB = {
+    "docs/genuine.md": "shared\n",
+    "tests/shared.ts": sharedModule,
+    "tests/branch_a.ts": [
+      'import { sharedRead } from "./shared.ts";',
+      'export const callA = () => sharedRead("docs/genuine.md");',
+      "",
+    ].join("\n"),
+    "tests/branch_b.ts": [
+      'import { sharedRead } from "./shared.ts";',
+      'export const callB = () => sharedRead("docs/genuine.md");',
+      "",
+    ].join("\n"),
+    "tests/first_test.ts": [
+      'import { callB } from "./branch_b.ts";',
+      'import { callA } from "./branch_a.ts";',
+      'const rel = "docs/phantom_a.png";',
+      "export async function run() {",
+      '  await Deno.readTextFile("docs/genuine.md");',
+      "  await callB();",
+      "  await callA();",
+      "}",
+      "",
+    ].join("\n"),
+    "tests/second_test.ts": [
+      'import { callA } from "./branch_a.ts";',
+      'import { callB } from "./branch_b.ts";',
+      'const rel = "docs/phantom_b.png";',
+      "export async function run() {",
+      '  await Deno.readTextFile("docs/genuine.md");',
+      "  await callA();",
+      "  await callB();",
+      "}",
+      "",
+    ].join("\n"),
+  };
+
+  await withTempTree(treeA, async (rootA) => {
+    await withTempTree(treeB, async (rootB) => {
+      const repA = await deriveReadRelationReport(rootA, [
+        "tests/first_test.ts",
+        "tests/second_test.ts",
+      ]);
+      const repB = await deriveReadRelationReport(rootB, [
+        "tests/second_test.ts",
+        "tests/first_test.ts",
+      ]);
+
+      assertEquals(
+        formatRelations(repA.relations),
+        formatRelations(repB.relations),
+        "relations must be byte-identical regardless of reach order",
+      );
+      assertEquals(repA.unresolved, repB.unresolved, "unresolved must be byte-identical");
+      assertEquals(repA.outOfRepo, repB.outOfRepo, "outOfRepo must be byte-identical");
+      assertEquals(repA.unattributed, repB.unattributed, "unattributed must be byte-identical");
+      assertEquals(repA.unclassified, repB.unclassified, "unclassified must be byte-identical");
+
+      assertEquals(repA.unresolved, [], "tree A must have no unresolved hints");
+      assertEquals(repB.unresolved, [], "tree B must have no unresolved hints");
+    });
+  });
+});
