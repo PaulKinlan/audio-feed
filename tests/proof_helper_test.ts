@@ -8,13 +8,21 @@
  * - Premature harness exit before /health is detected and fails fast
  */
 
-import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertMatch,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   assertVisibleExpression,
   CheckFailureError,
   ChromeHandle,
   createChecker,
   createTempChromeProfile,
+  type ElementMeasurement,
+  isFullyVisible,
   isVisible,
   launchChrome,
   newestChrome,
@@ -292,11 +300,17 @@ Deno.test("proof-helper: assertVisibleExpression produces evaluable JS expressio
   assertEquals(found.offsetHeight, 30);
   assertEquals(found.rectWidth, 100);
   assertEquals(found.rectHeight, 30);
+  assertEquals(found.rectTop, 20);
+  assertEquals(found.rectBottom, 50);
+  assertEquals(found.viewportHeight, 768);
   assertEquals(found.inViewport, true);
 
   const notFound = syntheticEval({ querySelector: () => null }, mockWin);
   assertEquals(notFound.found, false);
   assertEquals(notFound.inViewport, false);
+  assertEquals(notFound.rectTop, 0);
+  assertEquals(notFound.rectBottom, 0);
+  assertEquals(notFound.viewportHeight, 0);
 });
 
 Deno.test("proof-helper: isVisible validates element visibility, box size, clipping, and viewport presence", () => {
@@ -375,6 +389,161 @@ Deno.test("proof-helper: isVisible validates element visibility, box size, clipp
   });
   assertEquals(outsideViewport.visible, false);
   assertStringIncludes(outsideViewport.reason.toLowerCase(), "viewport");
+});
+
+Deno.test("proof-helper: isFullyVisible distinguishes strict vertical containment from partial intersection", () => {
+  // Reviewer's exact synthetic reproduction (audio-feed-ar6u):
+  // A 1231x100 card with rect top=-99, bottom=1 in a 1280x900 viewport.
+  // isVisible is true (partial intersection), but isFullyVisible is false.
+  const reproMeasurement: ElementMeasurement = {
+    found: true,
+    scrollWidth: 1231,
+    clientWidth: 1231,
+    offsetHeight: 100,
+    rectWidth: 1231,
+    rectHeight: 100,
+    rectTop: -99,
+    rectBottom: 1,
+    viewportHeight: 900,
+    inViewport: true,
+  };
+  assertEquals(isVisible(reproMeasurement).visible, true);
+  assertEquals(isFullyVisible(reproMeasurement).visible, false);
+  assertStringIncludes(
+    isFullyVisible(reproMeasurement).reason.toLowerCase(),
+    "not fully in viewport",
+  );
+
+  // Boundary case 1: fully-inside box (both true)
+  const fullyInside: ElementMeasurement = {
+    found: true,
+    scrollWidth: 1231,
+    clientWidth: 1231,
+    offsetHeight: 100,
+    rectWidth: 1231,
+    rectHeight: 100,
+    rectTop: 100,
+    rectBottom: 200,
+    viewportHeight: 900,
+    inViewport: true,
+  };
+  assertEquals(isVisible(fullyInside).visible, true);
+  assertEquals(isFullyVisible(fullyInside).visible, true);
+
+  // Boundary case 2: box that is 99% below bottom edge (top=850, bottom=950 in 900: partial true, full false)
+  const belowBottom: ElementMeasurement = {
+    found: true,
+    scrollWidth: 1231,
+    clientWidth: 1231,
+    offsetHeight: 100,
+    rectWidth: 1231,
+    rectHeight: 100,
+    rectTop: 850,
+    rectBottom: 950,
+    viewportHeight: 900,
+    inViewport: true,
+  };
+  assertEquals(isVisible(belowBottom).visible, true);
+  assertEquals(isFullyVisible(belowBottom).visible, false);
+  assertStringIncludes(isFullyVisible(belowBottom).reason.toLowerCase(), "not fully in viewport");
+
+  // Boundary exact edges: top=0, bottom=900 (both true)
+  const exactEdges: ElementMeasurement = {
+    found: true,
+    scrollWidth: 1231,
+    clientWidth: 1231,
+    offsetHeight: 900,
+    rectWidth: 1231,
+    rectHeight: 900,
+    rectTop: 0,
+    rectBottom: 900,
+    viewportHeight: 900,
+    inViewport: true,
+  };
+  assertEquals(isVisible(exactEdges).visible, true);
+  assertEquals(isFullyVisible(exactEdges).visible, true);
+
+  // Common guards inherited from isVisible:
+  // 1. Not found
+  assertEquals(
+    isFullyVisible({
+      found: false,
+      scrollWidth: 0,
+      clientWidth: 0,
+      offsetHeight: 0,
+      rectWidth: 0,
+      rectHeight: 0,
+      inViewport: false,
+      rectTop: 0,
+      rectBottom: 0,
+      viewportHeight: 900,
+    }).visible,
+    false,
+  );
+  // 2. Zero box
+  assertEquals(
+    isFullyVisible({
+      found: true,
+      scrollWidth: 0,
+      clientWidth: 0,
+      offsetHeight: 0,
+      rectWidth: 0,
+      rectHeight: 0,
+      inViewport: true,
+      rectTop: 0,
+      rectBottom: 0,
+      viewportHeight: 900,
+    }).visible,
+    false,
+  );
+  // 3. Clipped
+  assertEquals(
+    isFullyVisible({
+      found: true,
+      scrollWidth: 200,
+      clientWidth: 100,
+      offsetHeight: 30,
+      rectWidth: 100,
+      rectHeight: 30,
+      inViewport: true,
+      rectTop: 10,
+      rectBottom: 40,
+      viewportHeight: 900,
+    }).visible,
+    false,
+  );
+  // 4. Outside viewport
+  assertEquals(
+    isFullyVisible({
+      found: true,
+      scrollWidth: 100,
+      clientWidth: 100,
+      offsetHeight: 30,
+      rectWidth: 100,
+      rectHeight: 30,
+      inViewport: false,
+      rectTop: 1000,
+      rectBottom: 1030,
+      viewportHeight: 900,
+    }).visible,
+    false,
+  );
+});
+
+Deno.test("proof-helper: passkey provider browser proof desktop claim uses isFullyVisible", async () => {
+  const content = await Deno.readTextFile(
+    new URL("../scripts/passkey-provider-browser-proof.ts", import.meta.url),
+  );
+  assertMatch(
+    content,
+    /isFullyVisible\(desktopMeasurement\)/,
+    "desktop measurement must use isFullyVisible (strict containment) not isVisible (partial intersection)",
+  );
+  assertMatch(
+    content,
+    /isVisible\(mobileMeasurement\)/,
+    "mobile measurement preserves isVisible (partial intersection)",
+  );
 });
 
 Deno.test("proof-helper: writeEvidenceReadme generates valid README passing evidence declaration regexes", async () => {

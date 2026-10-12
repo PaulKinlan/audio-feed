@@ -19,6 +19,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import {
   assertVisibleExpression,
+  isFullyVisible,
   isVisible,
   runProof,
   withChrome,
@@ -201,10 +202,12 @@ await runProof("audio-feed-25t", async (checker) => {
       );
       await sleep(100);
 
+      // Desktop: the claim is "scrolled into view on desktop", which partial intersection
+      // does not support (requires strict vertical containment: rect.top >= 0 && rect.bottom <= window.innerHeight).
       const desktopMeasurement = (await js(
         assertVisibleExpression("[aria-labelledby='passkeys-h']"),
       )) as ElementMeasurement;
-      const desktopVis = isVisible(desktopMeasurement);
+      const desktopVis = isFullyVisible(desktopMeasurement);
       checker.check(
         "passkeys card is scrolled into view on desktop",
         desktopVis.visible,
@@ -243,6 +246,8 @@ await runProof("audio-feed-25t", async (checker) => {
       );
       await sleep(100);
 
+      // Mobile: the pre-migration predicate was already partial intersection
+      // (rect.top < window.innerHeight && rect.bottom > 0), so isVisible preserves that semantic.
       const mobileMeasurement = (await js(
         assertVisibleExpression("[aria-labelledby='passkeys-h']"),
       )) as ElementMeasurement;
