@@ -1,5 +1,7 @@
 # Request Access Front Door Verification Report: audio-feed-r97
 
+- Debt: admitted (audio-feed-tgnu)
+
 ## Verified Criteria
 1. **Public Front Door Onboarding**: Prospective subscribers can submit email + optional display name via `#request-access-form` on `/`.
 2. **Pending Queue Integration**: The applicant is placed in the admin pending approval queue with `status: "pending"` without operator intervention.

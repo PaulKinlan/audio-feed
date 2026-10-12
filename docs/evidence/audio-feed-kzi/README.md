@@ -1,5 +1,7 @@
 # Browser Acceptance Proof: audio-feed-kzi
 
+- Debt: admitted (audio-feed-tgnu)
+
 ## Feature
 Playback position persistence and resume in the web player:
 - Automatically tracks and saves playback position per episode locally.
