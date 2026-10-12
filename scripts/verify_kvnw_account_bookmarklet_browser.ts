@@ -27,10 +27,9 @@ import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
-import { newestChrome } from "./proof-helper.ts";
+import { withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-kvnw/", import.meta.url).pathname;
-const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-kvnw-" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
 
@@ -52,344 +51,331 @@ const BASE = `http://localhost:${PORT}`;
 config.port = PORT;
 config.publicBaseUrl = BASE;
 
-const chromeArgs = [
-  "--headless=new",
-  "--no-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-  "--remote-debugging-port=0",
-  `--user-data-dir=${PROFILE}`,
-  "about:blank",
-];
-
-/**
- * audio-feed-90f0: the spawn, the debug-port wait, the target discovery and the websocket now all live
- * INSIDE the try below, so a STARTUP failure - Chrome missing, refusing to start, or never writing
- * DevToolsActivePort - is cleaned up exactly like a failed assertion. Before this, the throw at the
- * debug-port check ran before the try/finally: it leaked the Chrome profile, a half-started Chrome
- * process was never chrome.kill()ed, and the in-process server was never shut down. A verification
- * script that can leave a browser and a server behind on its failure path is a hazard to every later
- * lane on this VM, which is why rev-26 filed it as a finding rather than a nit.
- */
-let chrome: Deno.ChildProcess | undefined;
-/** Assigned inside the try, once the DevTools websocket is open. */
-let ws: WebSocket | undefined;
-
-let nextId = 0;
-const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-/** Console entries seen since the last navigation, so the click's own entry can be isolated. */
-const consoleEntries: string[] = [];
-
-/** Wired up inside the try, right after the websocket opens. */
-function onMessage(e: MessageEvent) {
-  const msg = JSON.parse(e.data);
-  if (msg.id && pending.has(msg.id)) {
-    pending.get(msg.id)!(msg);
-    pending.delete(msg.id);
-    return;
-  }
-  if (msg.method === "Log.entryAdded") {
-    const entry = msg.params?.entry as { level?: string; text?: string };
-    if (entry?.text) consoleEntries.push(`[${entry.level}] ${entry.text}`);
-  }
-}
-
-function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  const id = ++nextId;
-  return new Promise((resolve, reject) => {
-    pending.set(id, (res) => {
-      if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
-      else resolve(res.result);
-    });
-    ws!.send(JSON.stringify({ id, method, params }));
-  });
-}
-
-async function js(expr: string): Promise<unknown> {
-  const res = (await cdp("Runtime.evaluate", {
-    expression: expr,
-    returnByValue: true,
-    awaitPromise: true,
-  })) as { result?: { value?: unknown } };
-  return res.result?.value;
-}
-
-async function until(expr: string, desc = expr, timeout = 15_000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      if (await js(expr)) return;
-    } catch {
-      // transient during navigation
-    }
-    await sleep(100);
-  }
-  throw new Error(`Timed out waiting for ${desc}`);
-}
-
+let exitCode = 0;
 const checks: Array<{ name: string; pass: boolean; detail?: string }> = [];
 function check(name: string, pass: boolean, detail?: string) {
   checks.push({ name, pass, detail });
   console.log(`${pass ? "PASS" : "FAIL"} ${name}${detail ? ` (${detail})` : ""}`);
 }
 
-let exitCode = 0;
 try {
-  chrome = new Deno.Command(newestChrome(), {
-    args: chromeArgs,
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
+  await withChrome(async (chrome) => {
+    const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
+    const page = targets.find((t: { type: string }) => t.type === "page");
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 
-  let debugPort = "";
-  for (let i = 0; i < 100 && !debugPort; i++) {
-    await sleep(100);
-    debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
-      "\n",
-    )[0]!;
-  }
-  if (!debugPort) throw new Error("Chrome did not open a debug port");
+    let nextId = 0;
+    const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
 
-  const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
-  const page = targets.find((t: { type: string }) => t.type === "page");
-  ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((r) => ws!.addEventListener("open", r, { once: true }));
-  ws.addEventListener("message", onMessage);
+    interface CdpLogEntry {
+      source?: string;
+      level?: string;
+      text?: string;
+      url?: string;
+    }
+    const consoleMessages: string[] = [];
 
-  await cdp("Page.enable");
-  await cdp("Runtime.enable");
-  await cdp("Log.enable");
-  await cdp("Network.enable");
-  await cdp("Emulation.setDeviceMetricsOverride", {
-    width: 1280,
-    height: 900,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
+    const onMessage = (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.id && pending.has(msg.id)) {
+          pending.get(msg.id)!(msg);
+          pending.delete(msg.id);
+        } else if (msg.method === "Log.entryAdded") {
+          const entry = msg.params?.entry as CdpLogEntry;
+          if (entry?.text) consoleMessages.push(`[${entry.level ?? "log"}] ${entry.text}`);
+        } else if (msg.method === "Runtime.consoleAPICalled") {
+          const type = msg.params?.type ?? "log";
+          const args = (msg.params?.args as Array<{ value?: unknown }>) ?? [];
+          consoleMessages.push(`[${type}] ${args.map((a) => String(a.value ?? "")).join(" ")}`);
+        }
+      } catch { /* malformed */ }
+    };
+    ws.addEventListener("message", onMessage);
 
-  // The account page needs a session; seed one exactly as tests/bookmarklet_test.ts does.
-  await cdp("Network.setCookie", {
-    name: "__Host-af_session",
-    value: sessionSecret,
-    url: `${BASE}/`,
-    secure: true,
-    httpOnly: true,
-    sameSite: "Lax",
-  });
+    function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      const id = ++nextId;
+      return new Promise((resolve, reject) => {
+        pending.set(id, (res) => {
+          if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
+          else resolve(res.result);
+        });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    }
 
-  await cdp("Page.navigate", { url: `${BASE}/account` });
-  await until(`document.readyState === "complete"`, "account page loaded");
-  const landedOn = String(await js(`location.pathname`));
-  check(
-    "the browser is ON /account with the seeded session (not redirected to /login)",
-    landedOn === "/account",
-    `pathname: ${landedOn}`,
-  );
+    async function js(expr: string): Promise<unknown> {
+      const res = (await cdp("Runtime.evaluate", {
+        expression: expr,
+        returnByValue: true,
+        awaitPromise: true,
+      })) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+      if (res.exceptionDetails) {
+        throw new Error(`${expr}: ${JSON.stringify(res.exceptionDetails)}`);
+      }
+      return res.result?.value;
+    }
 
-  // 1. The draggable anchor is unchanged.
-  const anchorClass = await js(
-    `document.querySelector("a.bookmarklet-btn")?.getAttribute("class")`,
-  );
-  check(
-    "bookmarklet anchor keeps its class and is still draggable",
-    anchorClass === "btn quiet small bookmarklet-btn" &&
-      (await js(`document.querySelector("a.bookmarklet-btn")?.getAttribute("draggable")`)) ===
-        "true",
-    `class: '${anchorClass}', draggable: '${await js(
-      `document.querySelector("a.bookmarklet-btn")?.getAttribute("draggable")`,
-    )}'`,
-  );
-  const href = String(
-    await js(`document.querySelector("a.bookmarklet-btn")?.getAttribute("href")`),
-  );
-  check(
-    "anchor still carries the javascript: bookmarklet payload",
-    href.startsWith("javascript:(function()"),
-    `href starts: '${href.slice(0, 28)}...'`,
-  );
+    async function until(expr: string, desc = expr, timeout = 15_000) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        try {
+          if (await js(expr)) return;
+        } catch {
+          // transient during navigation
+        }
+        await sleep(100);
+      }
+      throw new Error(`Timed out waiting for ${desc}`);
+    }
 
-  // 2. The disclosure opens on a real click and carries the same payload.
-  check(
-    "the disclosure exists on /account",
-    Boolean(await js(`Boolean(document.querySelector("details.bookmarklet-code"))`)),
-  );
-  const summary = String(
-    await js(`document.querySelector("details.bookmarklet-code summary")?.textContent?.trim()`),
-  );
-  check(
-    "the summary offers the code as the fallback",
-    summary === "Can’t drag it? Get the bookmarklet code",
-    `summary: '${summary}'`,
-  );
-  await js(`document.querySelector("details.bookmarklet-code summary")?.click()`);
-  await until(
-    `document.querySelector("details.bookmarklet-code")?.open === true`,
-    "disclosure open",
-  );
-  const snippet = String(
-    await js(`document.querySelector(".bookmarklet-snippet code")?.textContent`),
-  );
-  check(
-    "the open disclosure's snippet is the SAME payload as the anchor href (one builder)",
-    snippet.length > 0 && snippet === href,
-    `snippet matches href (${snippet.length} chars)`,
-  );
-  const wording = String(
-    await js(`document.querySelector("details.bookmarklet-code p")?.textContent`),
-  );
-  check(
-    "the wording names the Content Security Policy and tells the user to drag or paste",
-    wording.includes("Content Security Policy") && wording.includes("drag the button"),
-    `wording: '${wording.slice(0, 58)}...'`,
-  );
+    try {
+      await cdp("Page.enable");
+      await cdp("Runtime.enable");
+      await cdp("Log.enable");
+      await cdp("Network.enable");
+      await cdp("Emulation.setDeviceMetricsOverride", {
+        width: 1280,
+        height: 900,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
 
-  // A fallback whose code is cut off is not a fallback. A <pre> does not wrap unless white-space allows
-  // it, so this measures the rendered box rather than trusting the class name: audio-feed-kvnw.
-  const snippetBox = (await js(
-    `(() => { const p = document.querySelector(".bookmarklet-snippet");
-      if (!p) return null;
-      const cs = getComputedStyle(p);
-      return { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, whiteSpace: cs.whiteSpace,
-        height: Math.round(p.getBoundingClientRect().height) }; })()`,
-  )) as { scrollWidth: number; clientWidth: number; whiteSpace: string; height: number } | null;
-  check(
-    "the disclosure's code is fully visible inside its box (no horizontal clipping)",
-    Boolean(snippetBox) && snippetBox!.scrollWidth <= snippetBox!.clientWidth + 1,
-    snippetBox
-      ? `scrollWidth ${snippetBox.scrollWidth} vs clientWidth ${snippetBox.clientWidth}, white-space: ${snippetBox.whiteSpace}, rendered height ${snippetBox.height}px`
-      : "the snippet element was not found",
-  );
+      // Seed the session cookie before navigating to /account, so the request is signed in on first arrival.
+      await cdp("Network.setCookie", {
+        name: "__Host-af_session",
+        value: sessionSecret,
+        url: `${BASE}/`,
+        secure: true,
+        httpOnly: true,
+        sameSite: "Lax",
+        path: "/",
+      });
 
-  // 3. Click the anchor and ASSERT what the console says about it (audio-feed-1d0n).
-  const beforeClick = consoleEntries.length;
-  await js(`document.querySelector("a.bookmarklet-btn")?.click()`);
-  await sleep(700);
-  const clickEntries = consoleEntries.slice(beforeClick);
-  const refusal = clickEntries.find((e) =>
-    /content security policy/i.test(e) &&
-    /javascript/i.test(e)
-  );
-  check(
-    "clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected",
-    Boolean(refusal),
-    refusal ? `console: '${refusal.slice(0, 96)}...'` : "no CSP refusal logged for the click",
-  );
-  const stillThere = String(await js(`location.pathname`));
-  const stillOpen = Boolean(await js(`document.querySelector("details.bookmarklet-code")?.open`));
-  check(
-    "the refusal leaves the page and the open disclosure intact",
-    stillThere === "/account" && stillOpen,
-    `pathname: ${stillThere}, disclosure open: ${stillOpen}`,
-  );
+      // 1. Visit /account
+      await cdp("Page.navigate", { url: `${BASE}/account` });
+      await until(`document.readyState === "complete"`, "account page loaded");
+      const currentPath = String(await js(`window.location.pathname`));
+      check(
+        "the browser is ON /account with the seeded session (not redirected to /login)",
+        currentPath === "/account",
+        `pathname: ${currentPath}`,
+      );
 
-  // A clipped screenshot of the bookmarklet box: focused evidence, and a PNG that stays inside the
-  // evidence per-file budget (docs/evidence PNGs are capped by tests/evidence_size_test.ts).
-  const box = (await js(
-    `(() => { const r = document.querySelector(".bookmarklet-box")?.getBoundingClientRect();
-      return r ? { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8), width: r.width + 16, height: r.height + 16 } : null; })()`,
-  )) as { x: number; y: number; width: number; height: number } | null;
-  if (!box) throw new Error("the bookmarklet box was not found for the screenshot");
-  const shot = (await cdp("Page.captureScreenshot", {
-    format: "png",
-    clip: { ...box, scale: 1 },
-  })) as { data: string };
-  await Deno.writeFile(
-    `${OUT}01-account-bookmarklet-disclosure-open.png`,
-    Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-  );
+      // 2. The draggable bookmarklet button keeps its attributes
+      const anchor = (await js(
+        `(() => { const a = document.querySelector("a.bookmarklet-btn");
+          return a ? { class: a.getAttribute("class"), draggable: a.getAttribute("draggable"), href: a.getAttribute("href") } : null; })()`,
+      )) as { class: string; draggable: string; href: string } | null;
+      check(
+        "bookmarklet anchor keeps its class and is still draggable",
+        anchor !== null &&
+          anchor.class === "btn quiet small bookmarklet-btn" &&
+          anchor.draggable === "true",
+        anchor ? `class: '${anchor.class}', draggable: '${anchor.draggable}'` : "element not found",
+      );
 
-  // The rule that un-clips the snippet is SHARED (src/routes/shell.ts UTILITY_CSS), so the front door's
-  // disclosure - landed in audio-feed-3asd, and clipped by the same missing white-space rule - is checked
-  // here too, AFTER the screenshot above so the evidence stays the /account box: this branch must not fix
-  // one surface at the other's expense.
-  await cdp("Page.navigate", { url: `${BASE}/` });
-  await until(`document.readyState === "complete"`, "front door loaded");
-  await js(`document.querySelector("details.bookmarklet-code summary")?.click()`);
-  await until(
-    `document.querySelector("details.bookmarklet-code")?.open === true`,
-    "front-door disclosure open",
-  );
-  const frontBox = (await js(
-    `(() => { const p = document.querySelector(".bookmarklet-snippet");
-      if (!p) return null;
-      return { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, height: Math.round(p.getBoundingClientRect().height) }; })()`,
-  )) as { scrollWidth: number; clientWidth: number; height: number } | null;
-  check(
-    "the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)",
-    Boolean(frontBox) && frontBox!.scrollWidth <= frontBox!.clientWidth + 1,
-    frontBox
-      ? `scrollWidth ${frontBox.scrollWidth} vs clientWidth ${frontBox.clientWidth}, rendered height ${frontBox.height}px`
-      : "the front-door snippet element was not found",
-  );
+      const anchorHref = anchor?.href ?? "";
+      check(
+        "anchor still carries the javascript: bookmarklet payload",
+        anchorHref.startsWith("javascript:(function()"),
+        `href starts: '${anchorHref.slice(0, 30)}...'`,
+      );
 
-  const summaryText = `# Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
+      // 3. The fallback disclosure is present
+      const details = (await js(
+        `(() => { const d = document.querySelector("details.bookmarklet-code");
+          if (!d) return null;
+          const s = d.querySelector("summary");
+          const p = d.querySelector("p");
+          const code = d.querySelector("pre.bookmarklet-snippet code");
+          return { exists: true, open: d.open, summary: s?.textContent?.trim(), wording: p?.textContent?.trim(), code: code?.textContent }; })()`,
+      )) as {
+        exists: boolean;
+        open: boolean;
+        summary?: string;
+        wording?: string;
+        code?: string;
+      } | null;
+      check(
+        "the disclosure exists on /account",
+        details?.exists === true,
+      );
 
-- Script: scripts/verify_kvnw_account_bookmarklet_browser.ts
-- Asserts: every claim listed below is asserted by this script, and the run fails if any one of them is false.
-${checks.map((c) => `  - ${c.pass ? "✅" : "❌"} ${c.name}`).join("\n")}
+      check(
+        "the summary offers the code as the fallback",
+        details?.summary === "Can’t drag it? Get the bookmarklet code",
+        `summary: '${details?.summary}'`,
+      );
 
-## Test Environment
-- **Browser:** Headless Chrome (CDP), 1280x900
-- **Page:** \`GET /account\` on an in-process server with an ephemeral port (the port is deliberately not
-  recorded here: it changes every run, and a fixed number would make this file wrong from the next run on)
-- **Session:** a real seeded session cookie (\`__Host-af_session\`), the same way the unit tests sign in
+      // 4. Click the disclosure to open it
+      await js(`document.querySelector("details.bookmarklet-code summary")?.click()`);
+      await until(
+        `document.querySelector("details.bookmarklet-code")?.open === true`,
+        "details open",
+      );
 
-## Key Verifications
-1. **Draggable anchor unchanged:** the /account bookmarklet button keeps \`class="btn quiet small
-   bookmarklet-btn"\`, \`draggable="true"\` and its \`javascript:(function()...\` payload.
-2. **Disclosure added:** a native \`<details class="bookmarklet-code">\` under the button, whose
-   \`<pre class="bookmarklet-snippet"><code>\` carries the SAME payload as the anchor's href.
-3. **Honest wording:** the paragraph names the app's Content Security Policy and tells the user to drag the
-   button or paste the code as a bookmark's URL - it does not imply the click works.
-4. **The click is OBSERVED, not assumed:** Chrome logs the CSP refusal for the javascript: URL and the check
-   ASSERTS it (audio-feed-1d0n: a collected-and-dropped console array cannot fail, and this check fails if
-   the click ever starts silently working or silently doing nothing).
+      // 5. Assert the snippet text EQUALS the anchor href (the copy fallback must install the same script)
+      const snippetText = String(
+        await js(
+          `document.querySelector("details.bookmarklet-code pre.bookmarklet-snippet code")?.textContent`,
+        ),
+      );
+      check(
+        "the open disclosure's snippet is the SAME payload as the anchor href (one builder)",
+        snippetText === anchorHref,
+        snippetText === anchorHref
+          ? `snippet matches href (${snippetText.length} chars)`
+          : `snippet ${snippetText.length} != href ${anchorHref.length}`,
+      );
+
+      // 6. Assert the wording states the CSP refusal honestly (no "click to install" falsehoods)
+      const wording = String(
+        await js(`document.querySelector("details.bookmarklet-code p")?.textContent`),
+      );
+      check(
+        "the wording names the Content Security Policy and tells the user to drag or paste",
+        wording.includes("Content Security Policy") &&
+          wording.includes("drag the button above") &&
+          wording.includes("paste this code as its URL"),
+        `wording: '${wording.slice(0, 60)}...'`,
+      );
+
+      // 7. Assert the code snippet wraps and is NOT clipped inside the bookmarklet box
+      const snippetBox = (await js(
+        `(() => { const p = document.querySelector("details.bookmarklet-code pre.bookmarklet-snippet");
+          if (!p) return null;
+          const style = window.getComputedStyle(p);
+          const r = p.getBoundingClientRect();
+          return { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, whiteSpace: style.whiteSpace, height: Math.round(r.height) }; })()`,
+      )) as { scrollWidth: number; clientWidth: number; whiteSpace: string; height: number } | null;
+      check(
+        "the disclosure's code is fully visible inside its box (no horizontal clipping)",
+        Boolean(snippetBox) &&
+          snippetBox!.scrollWidth <= snippetBox!.clientWidth + 1 &&
+          snippetBox!.whiteSpace === "pre-wrap" &&
+          snippetBox!.height > 20,
+        snippetBox
+          ? `scrollWidth ${snippetBox.scrollWidth} vs clientWidth ${snippetBox.clientWidth}, white-space: ${snippetBox.whiteSpace}, rendered height ${snippetBox.height}px`
+          : "element not found",
+      );
+
+      // 8. THE OBSERVED CLICK: click the anchor, assert Chrome logs the CSP refusal
+      consoleMessages.length = 0;
+      await js(`document.querySelector("a.bookmarklet-btn")?.click()`);
+      await sleep(500);
+
+      const refusalLog = consoleMessages.find((m) =>
+        m.includes("violates the following Content Security Policy directive") &&
+        m.includes("script-src")
+      );
+      check(
+        "clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected",
+        refusalLog !== undefined,
+        refusalLog
+          ? `console: '${refusalLog.slice(0, 95)}...'`
+          : `no CSP log captured among: ${JSON.stringify(consoleMessages)}`,
+      );
+
+      // 9. Assert the refusal left the page in place and the disclosure still open
+      const stillThere = String(await js(`window.location.pathname`));
+      const stillOpen = Boolean(
+        await js(`document.querySelector("details.bookmarklet-code")?.open`),
+      );
+      check(
+        "the refusal leaves the page and the open disclosure intact",
+        stillThere === "/account" && stillOpen,
+        `pathname: ${stillThere}, disclosure open: ${stillOpen}`,
+      );
+
+      // Screenshot
+      const box = (await js(
+        `(() => { const r = document.querySelector(".bookmarklet-box")?.getBoundingClientRect();
+          return r ? { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8), width: r.width + 16, height: r.height + 16 } : null; })()`,
+      )) as { x: number; y: number; width: number; height: number } | null;
+      if (!box) throw new Error("the bookmarklet box was not found for the screenshot");
+      const shot = (await cdp("Page.captureScreenshot", {
+        format: "png",
+        clip: { ...box, scale: 1 },
+      })) as { data: string };
+      await Deno.writeFile(
+        `${OUT}01-account-bookmarklet-disclosure-open.png`,
+        Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
+      );
+
+      // The rule that un-clips the snippet is SHARED (src/routes/shell.ts UTILITY_CSS), so the front door's
+      // disclosure is checked here too.
+      await cdp("Page.navigate", { url: `${BASE}/` });
+      await until(`document.readyState === "complete"`, "front door loaded");
+      await js(`document.querySelector("details.bookmarklet-code summary")?.click()`);
+      await until(
+        `document.querySelector("details.bookmarklet-code")?.open === true`,
+        "front-door disclosure open",
+      );
+      const frontBox = (await js(
+        `(() => { const p = document.querySelector(".bookmarklet-snippet");
+          if (!p) return null;
+          return { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, height: Math.round(p.getBoundingClientRect().height) }; })()`,
+      )) as { scrollWidth: number; clientWidth: number; height: number } | null;
+      check(
+        "the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)",
+        Boolean(frontBox) && frontBox!.scrollWidth <= frontBox!.clientWidth + 1,
+        frontBox
+          ? `scrollWidth ${frontBox.scrollWidth} vs clientWidth ${frontBox.clientWidth}, rendered height ${frontBox.height}px`
+          : "the front-door snippet element was not found",
+      );
+
+      await writeEvidenceReadme({
+        dir: OUT,
+        title: "Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)",
+        script: "scripts/verify_kvnw_account_bookmarklet_browser.ts",
+        asserts: checks.map((c) => c.name),
+        sections: [
+          {
+            heading: "Test Environment",
+            body:
+              `- **Browser:** Headless Chrome (CDP), 1280x900\n- **Page:** \`GET /account\` on an in-process server with an ephemeral port\n- **Session:** a real seeded session cookie (\`__Host-af_session\`), the same way the unit tests sign in`,
+          },
+          {
+            heading: "Key Verifications",
+            body:
+              `1. **Draggable anchor unchanged:** the /account bookmarklet button keeps \`class="btn quiet small bookmarklet-btn"\`, \`draggable="true"\` and its \`javascript:(function()...\` payload.
+2. **Disclosure added:** a native \`<details class="bookmarklet-code">\` under the button, whose \`<pre class="bookmarklet-snippet"><code>\` carries the SAME payload as the anchor's href.
+3. **Honest wording:** the paragraph names the app's Content Security Policy and tells the user to drag the button or paste the code as a bookmark's URL - it does not imply the click works.
+4. **The click is OBSERVED, not assumed:** Chrome logs the CSP refusal for the javascript: URL and the check ASSERTS it (audio-feed-1d0n: a collected-and-dropped console array cannot fail, and this check fails if the click ever starts silently working or silently doing nothing).
 5. **No inline script:** no click interceptor, no nonced or un-nonced script was added for the fallback.
-6. **The code is legible, not merely present:** the snippet box is measured (scrollWidth vs clientWidth) and
-   wraps with \`white-space: pre-wrap\`. Before this branch's shared rule it rendered as ONE 4754px line inside
-   a 1231px box - so the front door's disclosure, landed in audio-feed-3asd, was clipped too; the same shared
-   rule is re-measured on \`/\` here so the fix is not applied to one surface at the other's expense.
-
-## Execution Log
-\`\`\`
-${checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail ?? ""}`).join("\n")}
-\`\`\`
-
-## Screenshot
-- \`01-account-bookmarklet-disclosure-open.png\`: the bookmarklet box with the disclosure expanded, clipped to
-  the box so the evidence is legible and the PNG stays inside the evidence size budget.
-`;
-
-  await Deno.writeTextFile(`${OUT}README.md`, summaryText);
-  console.log(`Saved proof report to ${OUT}README.md`);
+6. **The code is legible, not merely present:** the snippet box is measured (scrollWidth vs clientWidth) and wraps with \`white-space: pre-wrap\`. Before this branch's shared rule it rendered as ONE 4754px line inside a 1231px box - so the front door's disclosure, landed in audio-feed-3asd, was clipped too; the same shared rule is re-measured on \`/\` here so the fix is not applied to one surface at the other's expense.`,
+          },
+          {
+            heading: "Execution Log",
+            body: `\`\`\`\n${
+              checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail ?? ""}`).join(
+                "\n",
+              )
+            }\n\`\`\``,
+          },
+          {
+            heading: "Screenshot",
+            body:
+              `- \`01-account-bookmarklet-disclosure-open.png\`: the bookmarklet box with the disclosure expanded, clipped to the box so the evidence is legible and the PNG stays inside the evidence size budget.`,
+          },
+        ],
+      });
+      console.log(`Saved proof report to ${OUT}README.md`);
+    } finally {
+      try {
+        ws?.close();
+      } catch { /* ignore */ }
+    }
+  });
 } catch (err) {
   console.error("Browser proof failed:", err);
   exitCode = 1;
 } finally {
-  // Every one of these is best-effort and independently guarded: on the startup-failure path most of
-  // them have nothing to clean, and a cleanup error must never mask the real failure (audio-feed-90f0).
-  try {
-    chrome?.kill();
-    // Wait for the browser to actually exit before deleting its profile. Without this the remove below
-    // races Chrome's shutdown writes and fails with ENOTEMPTY - which is how this script left eight
-    // /tmp/audiofeed-proof-kvnw-* directories behind on its SUCCESS path (audio-feed-90f0).
-    if (chrome) {
-      await Promise.race([chrome.status, sleep(5_000)]);
-    }
-  } catch { /* ignore */ }
-  try {
-    ws?.close();
-  } catch { /* ignore */ }
   try {
     await server.shutdown();
   } catch { /* ignore */ }
-  try {
-    await Deno.remove(PROFILE, { recursive: true });
-  } catch (err) {
-    // NOT silent: a leaked profile is exactly the defect this cleanup exists to prevent, so say so and
-    // say where it is. The exit code still follows the assertions, not the cleanup.
-    console.error(`cleanup: could not remove the Chrome profile ${PROFILE}: ${err}`);
-  }
   try {
     await stores.metadata.close();
   } catch { /* ignore */ }
