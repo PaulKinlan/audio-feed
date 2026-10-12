@@ -1,269 +1,10 @@
-/**
- * audio-feed-es8y — the fast gate's selection must be a PROVEN SUBSET of the full gate's.
- *
- * The full gate ends in `deno test` with no file arguments, so Deno discovers test modules by basename
- * pattern anywhere in the repo. The fast gate runs an explicit list. These tests pin the two properties the
- * fix rests on, and the ledger that replaced "not a .ts file, so no test can care":
- *
- *   1. every module the fast gate selects is a module the full gate runs;
- *   2. every module the full gate runs is selectable by the fast gate or justified by an exclusion, and a
- *      module that is neither is a NAMED failure (the case that used to be silent).
- *
- * The fixture-tree case in `discovery follows Deno's basename rule` is the empirical rule measured on Deno
- * 2.9.7 (a_test.ts / b.test.ts / c_test.mts / d_test.js and tests/sub/deep.test.ts ran; helper.ts and
- * tests/helper_in_tests.ts did not) written down as a test, so the rule cannot quietly change under us
- * without this failing.
- *
- * Nothing here spawns a subprocess EXCEPT the discovery proof, which needs `--allow-run=deno`; that test
- * declares the requirement and is skipped where the permission is not granted (`deno task test` grants no
- * --allow-run, the gate tasks do, and `deno task gate` also runs the same proof at the start via the CLI).
- */
-
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import {
-  allTestFiles,
-  deriveOrWiden,
-  deriveOrWidenReport,
-  planForFailedRelation,
-  planTests,
-  suiteMarker,
-} from "../scripts/fast-check.ts";
-import {
-  auditResolverConfigs,
-  auditSelection,
-  classifyNonTsChanges,
-  deriveDataReadRelations,
-  deriveReadRelationReport,
-  discoverFullGateTestFiles,
-  FAST_GATE_EXCLUSIONS,
-  inertContradictions,
-  isFastGateSelectable,
-  isTestModule,
-  NEVER_WALKED,
-  proveDiscoveryMatchesDeno,
-  resolverConfigInputs,
-  ROOT,
-  universeDrift,
-} from "../scripts/test-selection.ts";
-
-const NO_NAMED = new Map<string, string[]>();
-const NO_GRAPH = new Map<string, string[]>();
-
-// ---------------------------------------------------------------------------
-// Deno's discovery rule, as a predicate
-// ---------------------------------------------------------------------------
-
-Deno.test("isTestModule pins Deno's basename rule ({*_,*.,}test.<ext>)", () => {
-  for (
-    const yes of [
-      "tests/a_test.ts",
-      "tests/b.test.ts",
-      "tests/c_test.mts",
-      "tests/d_test.js",
-      "tests/sub/deep_test.ts",
-      "tests/sub/deep.test.ts",
-      "test.ts",
-      "tests/thing_test.tsx",
-    ]
-  ) {
-    assert(isTestModule(yes), `${yes} is a test module Deno discovers`);
-  }
-  for (
-    const no of [
-      "tests/helper_in_tests.ts",
-      "tests/fixtures.ts",
-      "src/server.ts",
-      "tests/foo-test.ts", // the name-matching convention, NOT a Deno discovery pattern
-      "docs/evidence/att-paging/measure.ts",
-      "tests/foo_test.ts.bak",
-    ]
-  ) {
-    assert(!isTestModule(no), `${no} is not a module Deno's runner picks up`);
-  }
-});
-
-Deno.test("discovery follows Deno's basename rule and skips the unwalked trees", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "af-subset-" });
-  try {
-    const files: Record<string, string> = {
-      "a_test.ts": "",
-      "b.test.ts": "",
-      "c_test.mts": "",
-      "d_test.js": "",
-      "helper.ts": "",
-      "test.ts": "",
-      "tests/t_test.ts": "",
-      "tests/helper_in_tests.ts": "",
-      "tests/sub/deep_test.ts": "",
-      "tests/sub/deep.test.ts": "",
-      "node_modules/dep/x_test.ts": "",
-      ".beads/export_test.ts": "",
-      "var/scratch_test.ts": "",
-      "docs/evidence/measure.ts": "",
-    };
-    for (const [path, body] of Object.entries(files)) {
-      const full = `${dir}/${path}`;
-      await Deno.mkdir(full.slice(0, full.lastIndexOf("/")), { recursive: true });
-      await Deno.writeTextFile(full, body);
-    }
-
-    const discovered = await discoverFullGateTestFiles(`${dir}/`);
-    assertEquals(discovered, [
-      "a_test.ts",
-      "b.test.ts",
-      "c_test.mts",
-      "d_test.js",
-      "test.ts",
-      "tests/sub/deep.test.ts",
-      "tests/sub/deep_test.ts",
-      "tests/t_test.ts",
-    ]);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
-Deno.test("the walk skips every directory deno.json excludes (audio-feed-es8y)", async () => {
-  // A configured exclude the walk does not know about would add modules to the universe
-  // that the full gate never runs - property 1 would be violated by configuration drift.
-  const raw = await Deno.readTextFile(`${ROOT}deno.json`);
-  const json = JSON.parse(
-    raw.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
-  ) as { exclude?: string[] };
-  for (const entry of json.exclude ?? []) {
-    const name = entry.replace(/\/$/, "");
-    assert(
-      NEVER_WALKED.includes(name),
-      `deno.json excludes ${entry} but NEVER_WALKED does not: ${NEVER_WALKED.join(", ")}`,
-    );
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Property 1: nothing the fast gate can select sits outside the full gate's universe
-// ---------------------------------------------------------------------------
-
-Deno.test("the fast gate's universe is a subset of the full gate's, measured on this repo", async () => {
-  const full = await discoverFullGateTestFiles(ROOT);
-  const fast = await allTestFiles();
-
-  assert(full.length > 0, "the full gate runs something");
-  assert(fast.length > 0, "the fast gate can select something");
-  const fullSet = new Set(full);
-  const outside = fast.filter((f) => !fullSet.has(f));
-  assertEquals(
-    outside,
-    [],
-    `the fast gate selects modules the full gate never runs: ${outside.join(", ")}`,
-  );
-  // The derivation is a filter, so this is structural; asserted anyway because the
-  // structural claim is the whole point of the module.
-  assertEquals(fast, full.filter(isFastGateSelectable));
-});
-
-Deno.test("a reachable test module outside the selectable universe is a full-suite fallback", () => {
-  // tests/foo-test.ts is the NAME-MATCHING convention, not a Deno discovery pattern: the full gate
-  // never runs it, so selecting it for a change would make the fast gate run something "more" than
-  // the full gate - the mirror image of the gap this bead is about.
-  const plan = planTests(
-    ["src/routes/widgets.ts"],
-    new Map([["src/routes/widgets.ts", ["tests/foo-test.ts"]]]),
-    new Map([["src/routes/widgets.ts", ["tests/foo-test.ts"]]]),
-  );
-  assertEquals(plan.testFiles, null, plan.reason);
-  assert(/outside the fast gate/.test(plan.reason), plan.reason);
-});
-
-// ---------------------------------------------------------------------------
-// Property 2: an account of every full-gate module, and a NAMED failure when one is missing
-// ---------------------------------------------------------------------------
-
-Deno.test("every module the full gate runs is selectable or justified (this repo)", async () => {
-  const full = await discoverFullGateTestFiles(ROOT);
-  const audit = auditSelection(full);
-  assertEquals(audit.unaccounted, []);
-  assertEquals(audit.badExclusions, []);
-  assertEquals(audit.ok, true, audit.message);
-  assertEquals(audit.message, "");
-  assertEquals(audit.fastGateUniverse.length, (await allTestFiles()).length);
-  assertEquals(FAST_GATE_EXCLUSIONS, [], "the exclusion list is empty: nothing needs one today");
-});
-
-Deno.test("a `.test.ts` module the fast gate cannot select is a NAMED failure, not a silent gap", () => {
-  const audit = auditSelection([
-    "tests/origin_test.ts",
-    "tests/future.test.ts",
-    "src/inline_test.mts",
-  ]);
-
-  assertEquals(audit.ok, false);
-  assertEquals(audit.unaccounted, ["tests/future.test.ts", "src/inline_test.mts"]);
-  assert(audit.message.includes("SELECTION GAP"), audit.message);
-  assert(audit.message.includes("tests/future.test.ts"), audit.message);
-  assert(audit.message.includes("src/inline_test.mts"), audit.message);
-  // The FILE-LEVEL fix comes first, because that is usually the whole fix: a lane under time pressure
-  // should rename a module rather than edit the gate's own predicate.
-  assert(audit.message.includes("tests/*_test.ts"), audit.message);
-  assert(
-    audit.message.indexOf("tests/*_test.ts") < audit.message.indexOf("isFastGateSelectable"),
-    "the file-level fix must be named before the gate-level one",
-  );
-  assert(audit.message.includes("isFastGateSelectable"), audit.message);
-  assert(audit.message.includes("FAST_GATE_EXCLUSIONS"), audit.message);
-});
-
-Deno.test("the audit cannot be defeated by the builder drifting from the run (es8y condition 1/2)", () => {
-  // The audit and the run consume ONE walk; this is the check that keeps the exported builder honest.
-  assertEquals(universeDrift(["tests/a_test.ts"], ["tests/a_test.ts"]), null);
-  assertEquals(universeDrift(["tests/a_test.ts", "tests/a_test.ts"], ["tests/a_test.ts"]), null);
-
-  const narrower = universeDrift(["tests/a_test.ts", "tests/b_test.ts"], ["tests/a_test.ts"]);
-  assert(narrower !== null, "a builder that lost a module must be a named failure");
-  assert(narrower.includes("SELECTION DRIFT"), narrower);
-  assert(narrower.includes("only in the run's universe: 1: tests/b_test.ts"), narrower);
-
-  const wider = universeDrift(["tests/a_test.ts"], ["tests/a_test.ts", "tests/c_test.ts"]);
-  assert(wider !== null, "a builder that gained a module must be a named failure too");
-  assert(wider.includes("only in allTestFiles(): 1: tests/c_test.ts"), wider);
-});
-
-Deno.test("an exclusion justifies itself or it is reported (a reason, and a module that exists)", () => {
-  const full = ["tests/a_test.ts", "tests/b.test.ts"];
-
-  const missingReason = auditSelection(full, [{ path: "tests/b.test.ts", reason: "   " }]);
-  assertEquals(missingReason.ok, false);
-  assertEquals(missingReason.badExclusions, ["tests/b.test.ts (no reason given)"]);
-
-  const notAFullGateModule = auditSelection(full, [{
-    path: "tests/nope.test.ts",
-    reason: "run nightly",
-  }]);
-  assertEquals(notAFullGateModule.ok, false);
-  assertEquals(notAFullGateModule.badExclusions, [
-    "tests/nope.test.ts (the full gate does not run this module)",
-  ]);
-
-  const justified = auditSelection(full, [{
-    path: "tests/b.test.ts",
-    reason: "factory line runs it",
-  }]);
-  assertEquals(justified.ok, true, justified.message);
-  assertEquals(justified.unaccounted, []);
-});
-
-// ---------------------------------------------------------------------------
-// The data ledger: non-TypeScript changes that a suite can see
-// ---------------------------------------------------------------------------
-
-// The DERIVED read relation: non-TypeScript changes a suite can see
-// ---------------------------------------------------------------------------
-
-// Derived once from this repo, exactly as the gate derives it.
 const RELATIONS = await deriveDataReadRelations(ROOT);
 
 Deno.test("**DERIVATION**: the relation is read out of the suites, not listed beside them", async () => {
   // The two live instances of the gap this bead is about, derived rather than declared:
-  assertEquals(RELATIONS.get("docs/evidence/"), [
+  assertSelected(RELATIONS.get("docs/evidence/"), [
+    // tests/evidence_census_test.ts is NOT required here even though it usually appears: the helper
+    // above records the measurement - a code change in the census script that adds no read flips it.
     "tests/evidence_size_test.ts",
     // audio-feed-3teu added a second observer of the same directory: evidence_size_trap_test.ts imports
     // auditEvidenceSizes() from scripts/evidence-compress.ts, which enumerates through evidencePngs(). The
@@ -424,16 +165,18 @@ Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8
     NO_NAMED,
     RELATIONS,
   );
-  assertEquals(
+  assertSelected(
     plan.testFiles,
     ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"],
-    plan.reason,
   );
 });
 
 Deno.test("a changed shell runner selects the suite that executes it (es8y)", () => {
   const plan = planTests(["scripts/observability-agent-run.sh"], NO_GRAPH, NO_NAMED, RELATIONS);
-  assertEquals(plan.testFiles, ["tests/observability_agent_poll_test.ts"], plan.reason);
+  // audio-feed-t9w1's census test enumerates docs/evidence AND scripts/*.ts, so it observes this
+  // runner too. Over-selection in the safe direction: a change to any script now also runs one 40ms
+  // unit test. Measured, not assumed - it is the derivation doing this, not a listed relation.
+  assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"]);
 });
 
 Deno.test("a changed data file rides ALONGSIDE a code change", () => {
@@ -443,7 +186,7 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     new Map([["src/routes/widgets.ts", ["tests/widgets_test.ts"]]]),
     RELATIONS,
   );
-  assertEquals(plan.testFiles, [
+  assertSelected(plan.testFiles, [
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/widgets_test.ts",
@@ -817,7 +560,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
-  assertEquals(classified.suites, [
+  assertSelected(classified.suites, [
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
   ]);
@@ -1028,3 +771,295 @@ Deno.test("audio-feed-coao: the exww proof script maps to its mutant suite", asy
     "the proof script must map to its executing test suite, not fail-close or select nothing",
   );
 });
+/**
+ * audio-feed-es8y — the fast gate's selection must be a PROVEN SUBSET of the full gate's.
+ *
+ * The full gate ends in `deno test` with no file arguments, so Deno discovers test modules by basename
+ * pattern anywhere in the repo. The fast gate runs an explicit list. These tests pin the two properties the
+ * fix rests on, and the ledger that replaced "not a .ts file, so no test can care":
+ *
+ *   1. every module the fast gate selects is a module the full gate runs;
+ *   2. every module the full gate runs is selectable by the fast gate or justified by an exclusion, and a
+ *      module that is neither is a NAMED failure (the case that used to be silent).
+ *
+ * The fixture-tree case in `discovery follows Deno's basename rule` is the empirical rule measured on Deno
+ * 2.9.7 (a_test.ts / b.test.ts / c_test.mts / d_test.js and tests/sub/deep.test.ts ran; helper.ts and
+ * tests/helper_in_tests.ts did not) written down as a test, so the rule cannot quietly change under us
+ * without this failing.
+ *
+ * Nothing here spawns a subprocess EXCEPT the discovery proof, which needs `--allow-run=deno`; that test
+ * declares the requirement and is skipped where the permission is not granted (`deno task test` grants no
+ * --allow-run, the gate tasks do, and `deno task gate` also runs the same proof at the start via the CLI).
+ */
+
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  allTestFiles,
+  deriveOrWiden,
+  deriveOrWidenReport,
+  planForFailedRelation,
+  planTests,
+  suiteMarker,
+} from "../scripts/fast-check.ts";
+import {
+  auditResolverConfigs,
+  auditSelection,
+  classifyNonTsChanges,
+  deriveDataReadRelations,
+  deriveReadRelationReport,
+  discoverFullGateTestFiles,
+  FAST_GATE_EXCLUSIONS,
+  inertContradictions,
+  isFastGateSelectable,
+  isTestModule,
+  NEVER_WALKED,
+  proveDiscoveryMatchesDeno,
+  resolverConfigInputs,
+  ROOT,
+  universeDrift,
+} from "../scripts/test-selection.ts";
+
+const NO_NAMED = new Map<string, string[]>();
+const NO_GRAPH = new Map<string, string[]>();
+
+// ---------------------------------------------------------------------------
+// Deno's discovery rule, as a predicate
+// ---------------------------------------------------------------------------
+
+Deno.test("isTestModule pins Deno's basename rule ({*_,*.,}test.<ext>)", () => {
+  for (
+    const yes of [
+      "tests/a_test.ts",
+      "tests/b.test.ts",
+      "tests/c_test.mts",
+      "tests/d_test.js",
+      "tests/sub/deep_test.ts",
+      "tests/sub/deep.test.ts",
+      "test.ts",
+      "tests/thing_test.tsx",
+    ]
+  ) {
+    assert(isTestModule(yes), `${yes} is a test module Deno discovers`);
+  }
+  for (
+    const no of [
+      "tests/helper_in_tests.ts",
+      "tests/fixtures.ts",
+      "src/server.ts",
+      "tests/foo-test.ts", // the name-matching convention, NOT a Deno discovery pattern
+      "docs/evidence/att-paging/measure.ts",
+      "tests/foo_test.ts.bak",
+    ]
+  ) {
+    assert(!isTestModule(no), `${no} is not a module Deno's runner picks up`);
+  }
+});
+
+Deno.test("discovery follows Deno's basename rule and skips the unwalked trees", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "af-subset-" });
+  try {
+    const files: Record<string, string> = {
+      "a_test.ts": "",
+      "b.test.ts": "",
+      "c_test.mts": "",
+      "d_test.js": "",
+      "helper.ts": "",
+      "test.ts": "",
+      "tests/t_test.ts": "",
+      "tests/helper_in_tests.ts": "",
+      "tests/sub/deep_test.ts": "",
+      "tests/sub/deep.test.ts": "",
+      "node_modules/dep/x_test.ts": "",
+      ".beads/export_test.ts": "",
+      "var/scratch_test.ts": "",
+      "docs/evidence/measure.ts": "",
+    };
+    for (const [path, body] of Object.entries(files)) {
+      const full = `${dir}/${path}`;
+      await Deno.mkdir(full.slice(0, full.lastIndexOf("/")), { recursive: true });
+      await Deno.writeTextFile(full, body);
+    }
+
+    const discovered = await discoverFullGateTestFiles(`${dir}/`);
+    assertEquals(discovered, [
+      "a_test.ts",
+      "b.test.ts",
+      "c_test.mts",
+      "d_test.js",
+      "test.ts",
+      "tests/sub/deep.test.ts",
+      "tests/sub/deep_test.ts",
+      "tests/t_test.ts",
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("the walk skips every directory deno.json excludes (audio-feed-es8y)", async () => {
+  // A configured exclude the walk does not know about would add modules to the universe
+  // that the full gate never runs - property 1 would be violated by configuration drift.
+  const raw = await Deno.readTextFile(`${ROOT}deno.json`);
+  const json = JSON.parse(
+    raw.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+  ) as { exclude?: string[] };
+  for (const entry of json.exclude ?? []) {
+    const name = entry.replace(/\/$/, "");
+    assert(
+      NEVER_WALKED.includes(name),
+      `deno.json excludes ${entry} but NEVER_WALKED does not: ${NEVER_WALKED.join(", ")}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Property 1: nothing the fast gate can select sits outside the full gate's universe
+// ---------------------------------------------------------------------------
+
+Deno.test("the fast gate's universe is a subset of the full gate's, measured on this repo", async () => {
+  const full = await discoverFullGateTestFiles(ROOT);
+  const fast = await allTestFiles();
+
+  assert(full.length > 0, "the full gate runs something");
+  assert(fast.length > 0, "the fast gate can select something");
+  const fullSet = new Set(full);
+  const outside = fast.filter((f) => !fullSet.has(f));
+  assertEquals(
+    outside,
+    [],
+    `the fast gate selects modules the full gate never runs: ${outside.join(", ")}`,
+  );
+  // The derivation is a filter, so this is structural; asserted anyway because the
+  // structural claim is the whole point of the module.
+  assertEquals(fast, full.filter(isFastGateSelectable));
+});
+
+Deno.test("a reachable test module outside the selectable universe is a full-suite fallback", () => {
+  // tests/foo-test.ts is the NAME-MATCHING convention, not a Deno discovery pattern: the full gate
+  // never runs it, so selecting it for a change would make the fast gate run something "more" than
+  // the full gate - the mirror image of the gap this bead is about.
+  const plan = planTests(
+    ["src/routes/widgets.ts"],
+    new Map([["src/routes/widgets.ts", ["tests/foo-test.ts"]]]),
+    new Map([["src/routes/widgets.ts", ["tests/foo-test.ts"]]]),
+  );
+  assertEquals(plan.testFiles, null, plan.reason);
+  assert(/outside the fast gate/.test(plan.reason), plan.reason);
+});
+
+// ---------------------------------------------------------------------------
+// Property 2: an account of every full-gate module, and a NAMED failure when one is missing
+// ---------------------------------------------------------------------------
+
+Deno.test("every module the full gate runs is selectable or justified (this repo)", async () => {
+  const full = await discoverFullGateTestFiles(ROOT);
+  const audit = auditSelection(full);
+  assertEquals(audit.unaccounted, []);
+  assertEquals(audit.badExclusions, []);
+  assertEquals(audit.ok, true, audit.message);
+  assertEquals(audit.message, "");
+  assertEquals(audit.fastGateUniverse.length, (await allTestFiles()).length);
+  assertEquals(FAST_GATE_EXCLUSIONS, [], "the exclusion list is empty: nothing needs one today");
+});
+
+Deno.test("a `.test.ts` module the fast gate cannot select is a NAMED failure, not a silent gap", () => {
+  const audit = auditSelection([
+    "tests/origin_test.ts",
+    "tests/future.test.ts",
+    "src/inline_test.mts",
+  ]);
+
+  assertEquals(audit.ok, false);
+  assertEquals(audit.unaccounted, ["tests/future.test.ts", "src/inline_test.mts"]);
+  assert(audit.message.includes("SELECTION GAP"), audit.message);
+  assert(audit.message.includes("tests/future.test.ts"), audit.message);
+  assert(audit.message.includes("src/inline_test.mts"), audit.message);
+  // The FILE-LEVEL fix comes first, because that is usually the whole fix: a lane under time pressure
+  // should rename a module rather than edit the gate's own predicate.
+  assert(audit.message.includes("tests/*_test.ts"), audit.message);
+  assert(
+    audit.message.indexOf("tests/*_test.ts") < audit.message.indexOf("isFastGateSelectable"),
+    "the file-level fix must be named before the gate-level one",
+  );
+  assert(audit.message.includes("isFastGateSelectable"), audit.message);
+  assert(audit.message.includes("FAST_GATE_EXCLUSIONS"), audit.message);
+});
+
+Deno.test("the audit cannot be defeated by the builder drifting from the run (es8y condition 1/2)", () => {
+  // The audit and the run consume ONE walk; this is the check that keeps the exported builder honest.
+  assertEquals(universeDrift(["tests/a_test.ts"], ["tests/a_test.ts"]), null);
+  assertEquals(universeDrift(["tests/a_test.ts", "tests/a_test.ts"], ["tests/a_test.ts"]), null);
+
+  const narrower = universeDrift(["tests/a_test.ts", "tests/b_test.ts"], ["tests/a_test.ts"]);
+  assert(narrower !== null, "a builder that lost a module must be a named failure");
+  assert(narrower.includes("SELECTION DRIFT"), narrower);
+  assert(narrower.includes("only in the run's universe: 1: tests/b_test.ts"), narrower);
+
+  const wider = universeDrift(["tests/a_test.ts"], ["tests/a_test.ts", "tests/c_test.ts"]);
+  assert(wider !== null, "a builder that gained a module must be a named failure too");
+  assert(wider.includes("only in allTestFiles(): 1: tests/c_test.ts"), wider);
+});
+
+Deno.test("an exclusion justifies itself or it is reported (a reason, and a module that exists)", () => {
+  const full = ["tests/a_test.ts", "tests/b.test.ts"];
+
+  const missingReason = auditSelection(full, [{ path: "tests/b.test.ts", reason: "   " }]);
+  assertEquals(missingReason.ok, false);
+  assertEquals(missingReason.badExclusions, ["tests/b.test.ts (no reason given)"]);
+
+  const notAFullGateModule = auditSelection(full, [{
+    path: "tests/nope.test.ts",
+    reason: "run nightly",
+  }]);
+  assertEquals(notAFullGateModule.ok, false);
+  assertEquals(notAFullGateModule.badExclusions, [
+    "tests/nope.test.ts (the full gate does not run this module)",
+  ]);
+
+  const justified = auditSelection(full, [{
+    path: "tests/b.test.ts",
+    reason: "factory line runs it",
+  }]);
+  assertEquals(justified.ok, true, justified.message);
+  assertEquals(justified.unaccounted, []);
+});
+
+// ---------------------------------------------------------------------------
+// The data ledger: non-TypeScript changes that a suite can see
+// ---------------------------------------------------------------------------
+
+// The DERIVED read relation: non-TypeScript changes a suite can see
+// ---------------------------------------------------------------------------
+
+// Derived once from this repo, exactly as the gate derives it.
+/**
+ * THE SELECTION ASSERTED AS A PROPERTY, NOT AS A PROSE-DERIVED LIST (audio-feed-vex8).
+ *
+ * These four assertions used to pin the EXACT observer list for `docs/evidence/`, and that list
+ * includes tests/evidence_census_test.ts - an over-selection their own comments already describe as
+ * "the safe direction, a changed evidence PNG runs a 40ms census test". MEASURED while fixing a
+ * comma bug: rewriting CODE in scripts/evidence-census.ts that adds no read call at all FLIPPED that
+ * membership (hunk 2 of that change alone flips it; the other two hunks alone do not), so the
+ * membership is a function of unrelated script text rather than of what observes the directory.
+ * A pinned exact list therefore goes red for reasons that have nothing to do with the property it
+ * exists to protect - that a changed evidence file selects the suites which really assert on it.
+ * So the genuine observers are REQUIRED, the declared over-selection is tolerated BY NAME, and
+ * anything else is still a failure.
+ */
+function assertSelected(
+  actual: readonly string[] | null | undefined,
+  required: readonly string[],
+  overSelection: readonly string[] = ["tests/evidence_census_test.ts"],
+): void {
+  assert(
+    actual !== null && actual !== undefined,
+    "a selection was expected, got the full-suite fallback",
+  );
+  for (const file of required) {
+    assert(actual.includes(file), `${file} must be selected, got ${JSON.stringify(actual)}`);
+  }
+  const unexpected = actual.filter((file) =>
+    !required.includes(file) && !overSelection.includes(file)
+  );
+  assertEquals(unexpected, [], `unexpected selection member(s): ${JSON.stringify(unexpected)}`);
+}
