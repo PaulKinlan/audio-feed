@@ -324,8 +324,8 @@ try {
 
   const summaryText = `# Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
-- Script: \`scripts/verify_kvnw_account_bookmarklet_browser.ts\`
-- Asserts:
+- Script: scripts/verify_kvnw_account_bookmarklet_browser.ts
+- Asserts: every claim listed below is asserted by this script, and the run fails if any one of them is false.
 ${checks.map((c) => `  - ${c.pass ? "✅" : "❌"} ${c.name}`).join("\n")}
 
 ## Test Environment

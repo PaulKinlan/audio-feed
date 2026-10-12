@@ -1,7 +1,7 @@
 # Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
-- Script: `scripts/verify_kvnw_account_bookmarklet_browser.ts`
-- Asserts:
+- Script: scripts/verify_kvnw_account_bookmarklet_browser.ts
+- Asserts: every claim listed below is asserted by this script, and the run fails if any one of them is false.
   - ✅ the browser is ON /account with the seeded session (not redirected to /login)
   - ✅ bookmarklet anchor keeps its class and is still draggable
   - ✅ anchor still carries the javascript: bookmarklet payload
