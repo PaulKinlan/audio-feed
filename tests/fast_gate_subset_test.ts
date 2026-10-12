@@ -1055,6 +1055,19 @@ function assertSelected(
     "tests/evidence_census_test.ts",
     "tests/evidence_run_test.ts",
     "tests/evidence_selection_test.ts",
+    // audio-feed-qmcf: a suite that IMPORTS a pure utility from a module which also walks directories
+    // inherits that module's DIRECTORY relations, because the closure follows imports (depth 2) and a
+    // relation is recorded per suite. chrome_profile_sweep_sites_test.ts imports maskNonCode() and
+    // firstArgument() from scripts/evidence-census.ts - a string function with no filesystem behaviour of
+    // its own - so it is derived as an observer of docs/evidence/ and of scripts/ exactly as
+    // evidence_census_test.ts is (verified by deriving the relation for each suite alone: the two suites
+    // produce the SAME two keys, and the class controls below produce only their own concrete path).
+    // The consequence is over-selection in the SAFE direction - a docs/evidence or scripts/ change also
+    // runs one 40ms suite - which is the class this list exists to tolerate BY NAME, not a reason to
+    // loosen the assertion. Deliberately NOT fixed by editing the census module or by re-implementing the
+    // masker in the test: reuse is the point of the change, and moving the utility into its own module is
+    // a layering change that belongs in its own bead rather than in this re-cut.
+    "tests/chrome_profile_sweep_sites_test.ts",
   ],
 ): void {
   assert(
