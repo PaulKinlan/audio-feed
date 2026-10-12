@@ -164,9 +164,22 @@ Deno.test("planTests: docs-only runs nothing; an EMPTY change set runs the full 
   assertEquals(planTests([], GRAPH, NO_NAMED).testFiles, null);
 });
 
-Deno.test("planTests: a changed test file runs itself without the graph", () => {
+Deno.test("planTests: a changed test file runs itself and the relation-policing suite (audio-feed-x4kc)", () => {
   const plan = planTests(["tests/http_test.ts"], new Map(), NO_NAMED);
-  assertEquals(plan.testFiles, ["tests/http_test.ts"]);
+  assertEquals(plan.testFiles, ["tests/fast_gate_subset_test.ts", "tests/http_test.ts"]);
+});
+
+Deno.test("planTests: audio-feed-x4kc — a changed test file always selects tests/fast_gate_subset_test.ts", () => {
+  // A test-only change (like fnrp's edit to tests/evidence_size_test.ts) can alter what a suite reads,
+  // changing the derived read relation without touching test-selection.ts.
+  // Rule (a) guarantees that tests/fast_gate_subset_test.ts is always selected so the relation invariants
+  // are never blindly bypassed.
+  const plan = planTests(["tests/evidence_size_test.ts"], new Map(), NO_NAMED);
+  assertEquals(
+    plan.testFiles,
+    ["tests/evidence_size_test.ts", "tests/fast_gate_subset_test.ts"],
+    "Must select the changed test and the relation-policing suite fast_gate_subset_test.ts",
+  );
 });
 
 Deno.test("planTests: the bqd4 repro — changing the selection algorithm runs its own tests", () => {

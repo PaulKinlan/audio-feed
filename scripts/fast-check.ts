@@ -604,9 +604,13 @@ export function planTests(
 
   if (!codeChanged.length) {
     if (data.suites.length) {
+      const selected = new Set(data.suites);
+      if (changed.some((f) => f.startsWith("tests/"))) {
+        selected.add("tests/fast_gate_subset_test.ts");
+      }
       return {
-        testFiles: data.suites,
-        reason: `data file(s) observed by: ${data.suites.join(", ")}`,
+        testFiles: [...selected].sort(),
+        reason: `data file(s) observed by: ${[...selected].join(", ")}`,
       };
     }
     // audio-feed-es8y condition 2: an empty selection must never read like a pass. It is only allowed when
@@ -667,6 +671,14 @@ export function planTests(
   for (const list of named.values()) for (const f of list) tests.add(f);
   // A data change (a screenshot, a document the app serves) rides alongside the code change.
   for (const suite of data.suites) tests.add(suite);
+
+  // audio-feed-x4kc: Any change under tests/ can alter what a suite reads (or change test assertions/invariants
+  // that relation-policing suites depend on) without touching scripts/test-selection.ts.
+  // Rule (a): When any file under tests/ changes, always select tests/fast_gate_subset_test.ts so that
+  // changes to test read relations or test-suite discovery immediately verify the relation invariants.
+  if (changed.some((f) => f.startsWith("tests/"))) {
+    tests.add("tests/fast_gate_subset_test.ts");
+  }
 
   // Property 1 in the narrow case (audio-feed-es8y): a selected module that is NOT in the full gate's
   // universe would make the fast gate run something the full gate never runs - `tests/foo-test.ts` is the
