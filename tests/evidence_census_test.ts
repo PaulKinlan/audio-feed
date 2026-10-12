@@ -367,6 +367,12 @@ const TARGET_SAMPLES: Record<string, { source: string; expected: string }> = {
     source: 'Deno.mkdirSync("' + ev(dir("mks") + "/") + '");\n',
     expected: "mks",
   },
+  // `Deno.rename(old, new)` creates its SECOND argument. The source is where the bytes CAME FROM, so
+  // crediting it would credit the temp path instead of the slice.
+  "Deno.rename(": {
+    source: 'await Deno.rename("/tmp/scratch.png", "' + ev(dir("ren") + "/shot.png") + '");\n',
+    expected: "ren",
+  },
   "Deno.copyFileSync(": {
     source: 'Deno.copyFileSync("' + dir("src-sync") + '.png", "' + ev(dir("ds2") + "/s.png") +
       '");\n',
@@ -408,5 +414,27 @@ Deno.test("audio-feed-vex8: copyFile counts the DESTINATION and not the source i
     censusSource('await Deno.copyFile("' + dir("src-bean") + '.png", "/tmp/out.png");\n').writes,
     [],
     "copying an evidence file OUT to /tmp writes no evidence",
+  );
+});
+
+Deno.test("audio-feed-vex8: rename credits its DESTINATION, and a rename OUT of evidence writes no evidence", () => {
+  // The site rev-46 found: ten of eleven rename callers move INTO evidence, and the census credited none
+  // of those sites. The destination is the write; the source is where the bytes came from.
+  const intoEvidence = censusSource(
+    'await Deno.rename("/tmp/scratch.png", "' + ev(dir("ren2") + "/out.png") + '");\n',
+  );
+  assertEquals(intoEvidence.writes, [dir("ren2")], "rename creates its SECOND argument");
+  assert(
+    !intoEvidence.writes.includes("tmp/scratch.png") &&
+      !intoEvidence.writes.some((w) => w.includes("scratch")),
+    "the temp source is not a write target: crediting it credits the wrong path",
+  );
+  // ...and the mirror: a rename OUT of evidence is a write to the destination, not to the slice it left.
+  assertEquals(
+    censusSource(
+      'await Deno.rename("' + ev(dir("ren3") + "/out.png") + '", "/tmp/archive.png");\n',
+    ).writes,
+    [],
+    "moving an evidence file out to /tmp writes no evidence",
   );
 });

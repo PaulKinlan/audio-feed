@@ -61,11 +61,21 @@ export const WRITE_CALLS: readonly {
    * entry has a sample (tests/evidence_census_test.ts), so a call cannot be added
    * here without its target argument being stated and exercised.
    *
-   * DECLARED LIMIT, MEASURED: `Deno.rename(oldPath, newPath)` creates its second argument, and it
-   * is NOT in this set - a move into docs/evidence would be a write this predicate does not see.
-   * Measured on the tree at the time of writing: eleven files call rename and ZERO of their
-   * destinations are under the evidence prefix, so nothing is missed today; the shape is named
-   * rather than assumed away, and adding it is one table entry when a rename does move evidence.
+   * CORRECTED, AND THE CORRECTION IS KEPT BECAUSE THE ERROR IS INSTRUCTIVE (audio-feed-vex8,
+   * rev-46 retracted a PASS over this): this paragraph PREVIOUSLY declared `Deno.rename` out of
+   * the set, on the strength of a measurement that was WRONG - a four-line grep context window
+   * around each call, which CANNOT SEE a destination that arrives as a variable, a constant or an
+   * EVIDENCE_DIR-shaped helper. It reported "zero destinations in evidence"; the truth is ten of
+   * the eleven non-comment callers rename INTO evidence, and one of them rewrites a selected
+   * evidence PNG while the census credited it with no writer at all. A declared limit whose number
+   * is wrong is worse than no declaration, because it reads as considered - so rename is now IN the
+   * table with the same per-entry target argument as copyFile, and the wrong instrument is named
+   * here rather than quietly deleted.
+   *
+   * AND THE AGGREGATE COULD NOT HAVE CAUGHT IT: the writer-directory count was 36 before the fix
+   * and is 36 after it, because those proof scripts also write through other calls, so a headline
+   * number that "held" held while a defect was present. The per-site credit is the control; the
+   * total is not.
    */
   targetArgument: number;
 }[] = [
@@ -82,6 +92,9 @@ export const WRITE_CALLS: readonly {
   { pattern: /\bDeno\.writeFileSync\s*\(/g, evidenceHelper: false, targetArgument: 1 },
   { pattern: /\bDeno\.mkdirSync\s*\(/g, evidenceHelper: false, targetArgument: 1 },
   { pattern: /\bDeno\.copyFileSync\s*\(/g, evidenceHelper: false, targetArgument: 2 },
+  // `Deno.rename(oldPath, newPath)` CREATES ITS SECOND ARGUMENT, so it is a write with the same shape as
+  // copyFile - and it was previously declared OUT of this set on a wrong measurement (see above).
+  { pattern: /\bDeno\.rename\s*\(/g, evidenceHelper: false, targetArgument: 2 },
 ];
 
 /** The directory every evidence slice lives under. Required in a write target. */
