@@ -1,14 +1,15 @@
-# audio-feed-m182 — the ceiling on total TTS spend, not just on one subscriber
+# Global TTS Ceiling Proof (audio-feed-m182)
+
+- Script: scripts/repro_m182_global_ceiling.ts
+- Asserts: spent calls stayed within the global ceiling; the ceiling was reached exactly; deferred remaining episodes cleanly; the day counter agrees with paid calls; at least one deferral reason named the fleet ceiling
 
 ## The problem
-
 khk3 gave every subscriber a daily ceiling (default 50). That bounds one subscriber and leaves the
 total linear in the number of _approved_ subscribers — and approving one is a single button. Nothing
 else in the deployment bounded the sum: only the admin approval gate and the worker's own
 throughput, neither of which is a spending limit.
 
 ## What was measured
-
 `scripts/repro_m182_global_ceiling.ts` drives the real synthesis worker over three subscribers with
 three episodes each (nine paid calls available) and reports what was actually paid. The counter it
 depends on is written when an episode is really synthesised, so this is the only way to see the
@@ -28,7 +29,6 @@ and not _failed_, that the day counter agrees with the calls paid, and that some
 fleet ceiling.
 
 ## The shape, mirroring khk3
-
 - Resolved `explicit option -> deployment config -> constant`, **inside the worker** at both the
   gather pass and the spend gate, so no entry point that synthesises can forget it (the v2ym lesson:
   a call site that forgot was exactly how the per-subscriber ceiling leaked).
@@ -47,7 +47,6 @@ fleet ceiling.
   number.
 
 ## An interaction worth knowing (found by a failing test)
-
 The two ceilings interact, and the first version of the test got it wrong in an instructive way: a
 single subscriber on the shipped per-subscriber default stops at 50, so one subscriber can never
 reach a fleet ceiling of 500. Ten of them do. That is not a defect — it is the sizing rationale —

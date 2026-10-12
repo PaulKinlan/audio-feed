@@ -1,14 +1,16 @@
 # audio-feed-wzv9 — the structured log store: what a dead claim leaves behind
 
-- Capture: no assertions
-- Reason: Historical CLI transcripts (claim-forensics.txt, capability-leak-verify.txt) from structured log store verification. No generating script writes to this directory; behavioral invariants and failure forensic properties are tested by scripts/repro_wzv9_claim_forensics.ts and tests/synthesis_test.ts.
+- Script: scripts/repro_wzv9_claim_forensics.ts
+- Asserts: A: the claim was recorded; A: the phase it reached was recorded; A: a failed narration attempt recorded its reason; A: a terminal outcome recorded the reason; A: the terminal record carries a duration; A: every record for the episode shares one correlation id; B: the claim was taken; B: the claim is readable after the worker vanished; B: no terminal record exists, which is itself the finding; B: the episode alone would NOT tell you why — status is still synthesizing; C: no further claim was granted; C: the abandonment was recorded with a reason; C: the three dead claims are still visible as a timeline; C: the whole claim story uses ONE event type, and its phase is siv1's vocabulary; C: the reason names the mechanism, as an OBSERVATION and not a verdict; D: the newest seq matches the record count; D: nothing has been pruned, so the oldest retained seq is 1; D: every record is older than a future cutoff, so all are pruned; D: after pruning everything, bounds says so (oldest > newest) rather than lying
 
+## Artifacts & Scope
 Evidence for the foundation bead of the observability set. `claim-forensics.txt` is the output of
 `scripts/repro_wzv9_claim_forensics.ts`, which drives the **real** batch entry point the poll loop
-calls and the real store; every check in it exits non-zero if the property stops holding.
+calls and the real store; every check in it exits non-zero if the property stops holding. Historical
+CLI transcripts (`claim-forensics.txt`, `capability-leak-verify.txt`) record structured log store
+verification.
 
 ## A. A synthesis that fails inside TTS
-
 ```
 #1 info  synthesis.claim        phase=claimed         attempt=1
 #2 info  synthesis.phase        phase=article-loaded  attempt=1
@@ -21,7 +23,6 @@ how far the work got. Now the retry failure is a record of its own, so "it faile
 never reached TTS" are different facts.
 
 ## B. A claim that dies before its terminal write — the siv1 case
-
 ```
 #5 info  synthesis.claim        phase=claimed         attempt=1
 ```
@@ -31,7 +32,6 @@ the episode alone cannot explain it — the claim record is what says the work s
 _absence_ of a terminal partner is what says it died rather than never ran.
 
 ## C. An exhausted claim
-
 ```
 #6 info  synthesis.claim        phase=claimed    attempt=1
 #7 info  synthesis.claim        phase=claimed    attempt=2
@@ -47,14 +47,12 @@ the timeline. The log is authoritative for diagnosis; the episode sentence is no
 so nothing user-facing was rewritten for this bead.
 
 ## D. The cursor and the retention contract
-
 `newestSeq` matches the number of records; nothing pruned means `oldestSeq === 1`; after pruning
 everything, `oldestSeq === newestSeq + 1`. That last one is the honest empty state: the errors API
 has to be able to say "cursor too old" rather than skip, which it can only do if the store will
 state what it still holds.
 
 ## What is asserted where
-
 - `tests/conformance/metadata/logs.ts` — the record shape, the cursor, the window, the summary,
   retention, the caps and redaction, and the lifecycle records. Runs against **both** adapters,
   because KV gets its ordering from a sequenced key space and memory from an array and a counter.
@@ -65,7 +63,6 @@ state what it still holds.
   unconfigured, because pruning needs no provider credentials.
 
 ## Review round 1: two findings, both fixed at the class level
-
 ### audio-feed-pwu4 (P1) — a malformed path stored a raw capability
 
 `GET /feed/<token>/master.xml/<token>` reached the store and persisted the token. The cause was a
@@ -100,7 +97,6 @@ bytes. The conformance case reproduces the arithmetic of the mismatch first (byt
 while UTF-16 length is under it) and then asserts the refusal, on both adapters.
 
 ## Review round 2: the path is no longer sanitised at all
-
 ### audio-feed-pwu4 (P1, still leaking) — and why the second attempt failed
 
 The fail-closed sanitiser above still leaked: an uppercase prefix (`/AUDIO/abc`) kept the prefix
@@ -151,7 +147,6 @@ there and called the mismatch a leak — the script now labels a leak and a stal
 differently, since conflating them is how a real leak gets ignored.
 
 ## The claim-lifecycle event shape (converged with audio-feed-siv1)
-
 One event type carries the whole claim story: `claim.lifecycle`. Before this, the lifecycle was five
 types (`synthesis.claim`, `.phase`, `.ready`, `.failed`, `.abandoned`) — five names for one fact, so
 a reader had to know all five to answer "what happened to this episode", and the store and the
@@ -184,7 +179,6 @@ A heartbeat that repeats the current phase writes no record: one record per hear
 transitions in noise, and a repeated phase is not a change.
 
 ## Review round 5: no field derived from the request is logged raw
-
 ### audio-feed-ao4s (P1) — the raw HTTP method
 
 `req.method` was stored in the message and in `context.method`, so `Request(method: "<canary>")`

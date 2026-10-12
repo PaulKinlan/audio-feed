@@ -62,7 +62,6 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
  */
 const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-0cmu",
-  "audio-feed-0rmn",
   "audio-feed-3h1",
   "audio-feed-8oz",
   "audio-feed-9mp",
@@ -73,7 +72,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   // the same debt as the rest of this list. Its README also carries an ephemeral port and a commit sha in its
   // title line, which is the audio-feed-1zfv class recorded on that bead.
   "audio-feed-l7m1",
-  "audio-feed-m182",
   "audio-feed-np5",
   "audio-feed-r97",
   "audio-feed-ytg",
