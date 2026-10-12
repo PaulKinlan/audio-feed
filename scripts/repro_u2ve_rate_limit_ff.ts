@@ -254,6 +254,20 @@ if (report.rotatingForgedPrefix.evaded) {
   );
   Deno.exit(1);
 }
+if (report.singleHonestClient.first429AtAttempt !== MAX_REQUESTS + 1) {
+  console.error(
+    `FAIL: an honest client was not limited at attempt ${
+      MAX_REQUESTS + 1
+    } (first 429 at ${report.singleHonestClient.first429AtAttempt})`,
+  );
+  Deno.exit(1);
+}
+if (report.twoDistinctTrustedValues.secondClientStatus === 429) {
+  console.error(
+    "FAIL: two distinct trusted-hop values were collapsed into one bucket (second client received 429)",
+  );
+  Deno.exit(1);
+}
 console.log(
   `rotating malformed cf-connecting-ip values (0: .. 13:): ${report.rotatingMalformedCfOnly.tooManyRequests} x 429, ${report.rotatingMalformedCfOnly.allowedThrough} allowed through`,
 );
