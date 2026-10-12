@@ -59,7 +59,12 @@ practice with a green suite and a passed review.
 1. **Compress before you commit.** Run `deno task evidence:compress` after capturing screenshots. It
    recompresses every PNG to a 256-colour palette (PNG8 via ImageMagick) and keeps the result only
    when it is smaller — typically ~3x smaller and indistinguishable at review scale (at 1:1, smooth
-   gradients may show faint banding; the UI under test is unaffected).
+   gradients may show faint banding; the UI under test is unaffected). **Re-running a proof undoes
+   the compression**, because screenshots are captured uncompressed: `tests/evidence_size_test.ts`
+   goes red until `deno task evidence:compress` runs again. Measured 2026-10-12 on audio-feed-8fc -
+   the same three files are 333KB/313KB/243KB fresh against 131KB/118KB/82KB committed, and the
+   suite passes again after compressing. If you re-ran a proof to reproduce a behaviour, read that
+   red as the compression step, not as a defect in the branch.
 2. **Budgets: 150KB per file, 8MB for the whole tree.** `tests/evidence_size_test.ts` fails the
    suite over either. If a compressed screenshot still exceeds the per-file budget, capture a
    smaller viewport or crop to the element under test — do not raise the budget to fit one file.

@@ -1,12 +1,16 @@
 # audio-feed-khk3 — unbounded paid synthesis when no budget is configured
 
+- Script: scripts/repro_khk3_unbounded_budget.ts
+- Asserts: cron batch clamps paid TTS calls to deployment default (50); every paid call produced a ready episode; excess episodes deferred past ceiling; deferral reason cites deployment default ceiling; store daily synthesis count matches ceiling; manual route charges configured ceiling of 1; stats endpoint advertises configured ceiling of 1
+
+## Overview
 `before.json` and `repro.json` are the same measurement run against the same script
 (`scripts/repro_khk3_unbounded_budget.ts`): one approved subscriber with **no**
 `dailyEpisodeBudget`, 60 episodes queued, twelve worker ticks that all land in the same UTC day —
 the production shape, since the synthesis cron runs every two minutes. The synthesizer counts paid
 calls, so `paidTtsCalls` is money rather than a proxy for it.
 
-| | `before.json` (main 8ead370) | `repro.json` (fixed) |
+| | `before.json` (unfixed) | `repro.json` (fixed) |
 | --- | --- | --- |
 | `paidTtsCalls` | **60** | **50** |
 | `readyTotal` | 60 | 50 |
@@ -45,7 +49,6 @@ a finite number for every input combination, the log fires once per run, and
 `GET /api/admin/stats` reports each subscriber's ceiling and its source.
 
 ## audio-feed-v2ym — the ceiling on every path, not just cron
-
 `manual-path-v2ym.json` is the reviewer's reproducer, run against the fixed tree: a deployment
 ceiling of **1**, 60 episodes queued for one unbudgeted subscriber, and twelve requests to the real
 `POST /api/admin/synthesize-now` route. Result: **1 paid call**, and `/api/admin/stats` advertises 1.
