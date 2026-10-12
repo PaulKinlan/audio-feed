@@ -13,6 +13,7 @@
   - Real synthesized WAV audio blob (120044 bytes) stored at `audio/sub-l7m1/direct/ep-ready-1.wav`.
   - Historical flat-key episode seed `historical-flat-key.wav` verifying canonical redirect/404 handling.
   - Throwing canary route `/__test/throw?m=canary-client-token-998877` verifying server error screening into `SUPPRESSED_MESSAGE` and absence from logs.
+- **Reproduction:** `deno run --allow-all --unstable-kv scripts/verify_main_l7m1_e2e.ts`
 
 ## Verified Features and Behaviors
 ### 1. Admin Observability (`/admin/observability`)
