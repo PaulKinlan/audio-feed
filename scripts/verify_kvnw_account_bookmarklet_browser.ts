@@ -324,6 +324,10 @@ try {
 
   const summaryText = `# Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
+- Script: \`scripts/verify_kvnw_account_bookmarklet_browser.ts\`
+- Asserts:
+${checks.map((c) => `  - ${c.pass ? "✅" : "❌"} ${c.name}`).join("\n")}
+
 ## Test Environment
 - **Browser:** Headless Chrome (CDP), 1280x900
 - **Page:** \`GET /account\` on an in-process server with an ephemeral port (the port is deliberately not

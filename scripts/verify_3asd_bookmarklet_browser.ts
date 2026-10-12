@@ -200,6 +200,19 @@ try {
     `snippet matches href (${snippetCode.length} chars)`,
   );
 
+  const snippetBox = (await js(
+    `(() => { const p = document.querySelector(".bookmarklet-snippet");
+      if (!p) return null;
+      return { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth }; })()`,
+  )) as { scrollWidth: number; clientWidth: number } | null;
+  check(
+    "disclosure code wraps and is fully visible (not horizontally clipped)",
+    Boolean(snippetBox) && snippetBox!.scrollWidth <= snippetBox!.clientWidth + 1,
+    snippetBox
+      ? `scrollWidth ${snippetBox.scrollWidth} vs clientWidth ${snippetBox.clientWidth}`
+      : "element not found",
+  );
+
   const policyExplanation = String(
     await js(`document.querySelector("details.bookmarklet-code p")?.textContent`),
   );
@@ -226,6 +239,10 @@ try {
   );
 
   const summary = `# Browser Proof: Bookmarklet CSP Disclosure & Class Fix (audio-feed-3asd)
+
+- Script: \`scripts/verify_3asd_bookmarklet_browser.ts\`
+- Asserts:
+${checks.map((c) => `  - ${c.pass ? "✅" : "❌"} ${c.name}`).join("\n")}
 
 ## Test Environment
 - **Browser:** Headless Chrome (CDP)

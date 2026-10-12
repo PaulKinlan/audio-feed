@@ -146,7 +146,12 @@ stores.blobs = redirectingBlobs;
 // ---------------------------------------------------------------------------
 // The "object store" origin. Deliberately CORS-hostile, matching R2 exactly.
 // ---------------------------------------------------------------------------
-Deno.serve({ port: storePort, onListen: () => {} }, async (req) => {
+const abortController = new AbortController();
+const storeServer = Deno.serve({
+  port: storePort,
+  signal: abortController.signal,
+  onListen: () => {},
+}, async (req) => {
   // R2's S3 endpoint answers a preflight with 403. Reproduced, because a
   // friendlier 404 here would let a browser behave differently.
   if (req.method === "OPTIONS") return new Response("preflight refused", { status: 403 });
@@ -168,7 +173,51 @@ Deno.serve({ port: storePort, onListen: () => {} }, async (req) => {
 
 const ctx = { config: { port: appPort, publicBaseUrl: appBase, adminToken: "repro" }, stores };
 const { fetch } = createApp(ctx, createHandlers(ctx));
-Deno.serve({ port: appPort }, fetch);
+const appServer = Deno.serve(
+  { port: appPort, signal: abortController.signal, onListen: () => {} },
+  fetch,
+);
 
 console.log(`cors repro app:   ${appBase}/listen/repro-token`);
 console.log(`cors repro store: ${storeBase}/  (no CORS headers, OPTIONS -> 403)`);
+
+// ---------------------------------------------------------------------------
+// Observable outcome assertion (audio-feed-mpyf):
+// A fetch with Origin (CORS-constrained) should be proxied by the app
+// with CORS headers, rather than redirecting to the hostile object store.
+// ---------------------------------------------------------------------------
+try {
+  const audioKey = audioBlobKey({ userId: "user-1", id: "ep-1", mode: "direct" }, "wav");
+  const req = new Request(`${appBase}/audio/${audioKey}`, {
+    headers: { "Origin": appBase },
+  });
+  const res = await globalThis.fetch(req);
+  if (res.status !== 200) {
+    console.error(`FAIL: Expected 200 proxy response, got ${res.status}`);
+    Deno.exit(1);
+  }
+  const acao = res.headers.get("access-control-allow-origin");
+  if (acao !== "*") {
+    // We explicitly assert exactly "*" (a wildcard).
+    // A wildcard is correct here because the player uses <audio crossorigin="anonymous">
+    // and the bytes are authorized by the unguessable URL capability, not by cookies,
+    // so credentials are not sent and a specific origin isn't required.
+    console.error(`FAIL: Expected access-control-allow-origin to be "*", got "${acao}"`);
+    Deno.exit(1);
+  }
+  const bytes = await res.arrayBuffer();
+  if (bytes.byteLength !== wav(2).byteLength) {
+    console.error(`FAIL: Expected audio blob length ${wav(2).byteLength}, got ${bytes.byteLength}`);
+    Deno.exit(1);
+  }
+  console.log(
+    "PASS: The browser request that failed before now succeeds, with the CORS headers present.",
+  );
+} catch (err) {
+  console.error(err);
+  Deno.exit(1);
+} finally {
+  abortController.abort();
+  await appServer.finished;
+  await storeServer.finished;
+}

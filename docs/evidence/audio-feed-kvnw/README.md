@@ -1,5 +1,19 @@
 # Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
+- Script: `scripts/verify_kvnw_account_bookmarklet_browser.ts`
+- Asserts:
+  - ✅ the browser is ON /account with the seeded session (not redirected to /login)
+  - ✅ bookmarklet anchor keeps its class and is still draggable
+  - ✅ anchor still carries the javascript: bookmarklet payload
+  - ✅ the disclosure exists on /account
+  - ✅ the summary offers the code as the fallback
+  - ✅ the open disclosure's snippet is the SAME payload as the anchor href (one builder)
+  - ✅ the wording names the Content Security Policy and tells the user to drag or paste
+  - ✅ the disclosure's code is fully visible inside its box (no horizontal clipping)
+  - ✅ clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected
+  - ✅ the refusal leaves the page and the open disclosure intact
+  - ✅ the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)
+
 ## Test Environment
 - **Browser:** Headless Chrome (CDP), 1280x900
 - **Page:** `GET /account` on an in-process server with an ephemeral port (the port is deliberately not
