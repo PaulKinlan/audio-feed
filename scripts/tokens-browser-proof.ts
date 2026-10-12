@@ -100,7 +100,7 @@ const shot = async (name: string) => {
   await Deno.writeFile(`${OUT}${name}`, raw);
   try {
     const cmd = new Deno.Command("convert", {
-      args: [`${OUT}${name}`, "-colors", "256", `png8:${OUT}${name}.tmp`],
+      args: [`${OUT}${name}`, "-strip", "-colors", "256", `png8:${OUT}${name}.tmp`],
     });
     const out = await cmd.output();
     if (out.success) {

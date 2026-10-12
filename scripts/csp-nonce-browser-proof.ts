@@ -279,6 +279,7 @@ await runProof("audio-feed-syhu", async (checker) => {
             const cmd = new Deno.Command("convert", {
               args: [
                 `${OUT}${name}-1280x900.png`,
+                "-strip",
                 "-colors",
                 "256",
                 `png8:${OUT}${name}-1280x900.png.tmp`,

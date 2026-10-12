@@ -275,6 +275,7 @@ try {
         const cmd = new Deno.Command("convert", {
           args: [
             `${OUT}01-bookmarklet-disclosure-open.png`,
+            "-strip",
             "-colors",
             "256",
             `png8:${OUT}01-bookmarklet-disclosure-open.png.tmp`,

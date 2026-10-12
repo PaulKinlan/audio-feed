@@ -202,6 +202,7 @@ try {
       const cmd = new Deno.Command("convert", {
         args: [
           `${OUT}01-pagehide-visibilitychange-resume.png`,
+          "-strip",
           "-colors",
           "256",
           `png8:${OUT}01-pagehide-visibilitychange-resume.png.tmp`,

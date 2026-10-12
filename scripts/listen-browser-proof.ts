@@ -105,6 +105,7 @@ await runProof("audio-feed-py5", async (checker) => {
           const cmd = new Deno.Command("convert", {
             args: [
               `${OUT}01-listen-harness-5-episodes.png`,
+              "-strip",
               "-colors",
               "256",
               `png8:${OUT}01-listen-harness-5-episodes.png.tmp`,
