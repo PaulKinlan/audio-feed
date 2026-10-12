@@ -347,10 +347,6 @@ function stripComments(source: string): string {
   }[] = [];
   let braceDepth = 0;
 
-  const isRegexPrecedingChar = (ch: string) => {
-    return /[=(:,;\[{}!&|?<>+\-*%^~]/.test(ch);
-  };
-
   const regexKeywords = new Set([
     "return",
     "typeof",
@@ -368,8 +364,8 @@ function stripComments(source: string): string {
     "void",
   ]);
 
+  let expectOperand = true;
   let lastNonWsChar = "";
-  let lastWord = "";
 
   while (i < source.length) {
     const ch = source[i]!;
@@ -387,53 +383,56 @@ function stripComments(source: string): string {
         } else if (ch === '"' || ch === "'") {
           context = "STRING";
           stringQuote = ch;
+          expectOperand = false;
           lastNonWsChar = ch;
-          lastWord = "";
         } else if (ch === "`") {
           context = "TEMPLATE";
+          expectOperand = false;
           lastNonWsChar = ch;
-          lastWord = "";
         } else if (ch === "/") {
-          if (
-            lastNonWsChar === "" ||
-            isRegexPrecedingChar(lastNonWsChar) ||
-            (lastNonWsChar !== ")" && lastNonWsChar !== "]" && lastNonWsChar !== "}" &&
-              regexKeywords.has(lastWord))
-          ) {
+          if (expectOperand) {
             context = "REGEX";
             result += source.slice(offset, i + 1);
             offset = i + 1;
+            expectOperand = false;
+          } else {
+            expectOperand = true;
           }
           lastNonWsChar = ch;
-          lastWord = "";
         } else if (ch === "{") {
           braceDepth++;
+          expectOperand = true;
           lastNonWsChar = ch;
-          lastWord = "";
         } else if (ch === "}") {
           if (braceDepth > 0) {
             braceDepth--;
-            lastNonWsChar = ch;
           } else if (stack.length > 0) {
             const popped = stack.pop()!;
             context = popped.context;
             braceDepth = popped.braceDepth;
-            lastNonWsChar = ch;
-          } else {
-            lastNonWsChar = ch;
           }
-          lastWord = "";
+          expectOperand = true;
+          lastNonWsChar = ch;
         } else if (/[a-zA-Z0-9_$]/.test(ch)) {
           const start = i;
           while (i < source.length && /[a-zA-Z0-9_$]/.test(source[i]!)) {
             i++;
           }
-          lastWord = source.slice(start, i);
+          const word = source.slice(start, i);
+          if (regexKeywords.has(word) && lastNonWsChar !== ".") {
+            expectOperand = true;
+          } else {
+            expectOperand = false;
+          }
           lastNonWsChar = source[i - 1]!;
           i--;
         } else if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
+          if (/[=(:,;\[!&|?<>+\-*%^~]/.test(ch)) {
+            expectOperand = true;
+          } else {
+            expectOperand = false;
+          }
           lastNonWsChar = ch;
-          lastWord = "";
         }
         break;
 
@@ -453,8 +452,8 @@ function stripComments(source: string): string {
           context = "CODE";
           braceDepth = 0;
           i++;
+          expectOperand = true;
           lastNonWsChar = "{";
-          lastWord = "";
         } else if (ch === "`") {
           context = "CODE";
         }
@@ -481,8 +480,6 @@ function stripComments(source: string): string {
         if (ch === "\n") {
           context = "CODE";
           offset = i;
-          lastNonWsChar = "";
-          lastWord = "";
         }
         break;
 
