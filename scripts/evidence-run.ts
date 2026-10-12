@@ -31,6 +31,14 @@
  * anyway without breaking its budget, which requires that a docs-only change still select no suites.
  * scripts/fast-check.ts and scripts/test-selection.ts are not touched by this change.
  *
+ * WHERE TO RUN IT, which is not obvious and has already bitten this repo once: the proofs REWRITE
+ * their own committed artefacts under docs/evidence, so the tier is a WRITER and must not share a
+ * worktree with anything else that writes - a gate run in the same tree while a proof rewrites its
+ * PNGs fails for reasons that have nothing to do with the diff. Run it in its own worktree (or one no
+ * gate is using) and restore the artefacts afterwards. It is also bounded twice over, per proof and in
+ * total, which is what lets it run in the fleet's single heavy slot: `--timeout <s>` bounds each proof
+ * and the invocation itself is wrapped in a total bound.
+ *
  * WHAT IT DELIBERATELY DOES NOT DO, so nobody reads more into a green run than it says:
  * - it does not check that a proof asserts what its README CLAIMS (that is the declaration and
  *   evidence-size work);
