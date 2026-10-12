@@ -653,6 +653,31 @@ Deno.test("audio-feed-3xla: caller local constant does not leak into imported he
   });
 });
 
+Deno.test("audio-feed-3xla: helper imported constant does not leak into caller parameter (outward leak)", async () => {
+  await withTempTree({
+    "docs/present/present.md": "content\n",
+    "src/dep.ts": 'export const FILE = "docs/present";\n',
+    "src/helper.ts": [
+      'import { FILE } from "./dep.ts";',
+      "export function probe(FILE: string) {",
+      "  return Deno.readTextFile(`${FILE}/present.md`);",
+      "}",
+    ].join("\n"),
+    "tests/caller_test.ts": [
+      'import { probe } from "../src/helper.ts";',
+      'Deno.test("helper param shadows import", async () => {',
+      '  await probe("helper-runtime-value");',
+      "});",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/caller_test.ts"]);
+    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unresolved.
+    assertEquals(report.unresolved, ["FILE"]);
+    // It must NOT silently attribute to docs/present/
+    assert(!report.relations.has("docs/present/"));
+  });
+});
+
 Deno.test("audio-feed-3xla: determinism - relations are independent of import graph reach order", async () => {
   // Acceptance row 2: the same tree must derive the same relation INDEPENDENT of which suite the scan
   // reaches a module through. Pinned with a fixture pair whose import graphs reach the shared module in

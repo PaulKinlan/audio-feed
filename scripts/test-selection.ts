@@ -687,6 +687,21 @@ function baseIsOutOfRepo(
   return false;
 }
 
+function isShadowed(
+  scopes: ReadonlyArray<BindingScope>,
+  name: string,
+  offset: number,
+): boolean {
+  const containing = scopes
+    .filter((scope) => offset > scope.start && offset < scope.end)
+    .sort((a, b) => (a.end - a.start) - (b.end - b.start));
+  for (const scope of containing) {
+    if (scope.unparsedSignature) return true;
+    if (scope.bindings.has(name)) return true;
+  }
+  return false;
+}
+
 /** The last identifier of an interpolation, so `${stateDir}` and `${config.dir}` both yield a name. */
 function interpolationBaseName(token: string): string {
   const open = token.lastIndexOf("${");
@@ -1144,27 +1159,17 @@ export async function deriveReadRelationReport(
       }
     }
 
-    // Direct and transitive imports: a file can only see exported constants from modules it imports.
-    const queue: { file: string; depth: number }[] = [{ file: relPath, depth: 0 }];
-    const seen = new Set<string>();
-    while (queue.length > 0) {
-      const { file, depth } = queue.shift()!;
-      if (seen.has(file)) continue;
-      seen.add(file);
-      const importedMap = fileImportedSymbols.get(file);
-      if (importedMap) {
-        for (const [imp, symbols] of importedMap) {
-          const impConsts = fileConstants.get(imp)?.exported;
-          if (impConsts) {
-            for (const [localName, exportedName] of symbols) {
-              const path = impConsts.get(exportedName);
-              if (path && !visible.has(localName)) {
-                visible.set(localName, path);
-              }
+    // DIRECT imports only: a file can only see exported constants from modules it DIRECTLY imports.
+    const importedMap = fileImportedSymbols.get(relPath);
+    if (importedMap) {
+      for (const [imp, symbols] of importedMap) {
+        const impConsts = fileConstants.get(imp)?.exported;
+        if (impConsts) {
+          for (const [localName, exportedName] of symbols) {
+            const path = impConsts.get(exportedName);
+            if (path && !visible.has(localName)) {
+              visible.set(localName, path);
             }
-          }
-          if (depth < 2 && !seen.has(imp)) {
-            queue.push({ file: imp, depth: depth + 1 });
           }
         }
       }
@@ -1241,8 +1246,16 @@ export async function deriveReadRelationReport(
         }
         // An argument passed by NAME still resolves through the constants visible to this file.
         for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
-          const path = visible.get(identifier[1]!);
-          if (path) resolved.push(path);
+          const name = identifier[1]!;
+          const path = visible.get(name);
+          if (path) {
+            const isOwn = fileConstants.get(relPath)?.all.has(name) ?? false;
+            if (!isOwn && isShadowed(scopes, name, at)) {
+              resolved.push(name);
+            } else {
+              resolved.push(path);
+            }
+          }
         }
       }
     }
