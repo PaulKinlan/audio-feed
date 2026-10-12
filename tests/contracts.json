@@ -1,0 +1,35 @@
+{
+  "src/storage/kv.ts": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/kv/**": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/memory.ts": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/memory/**": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/mod.ts": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/log_shape.ts": [
+    "tests/storage_test.ts"
+  ],
+  "src/storage/s3.ts": [
+    "tests/s3_abort_socket_test.ts"
+  ],
+  "src/storage/legacy_audio.ts": [
+    "tests/legacy_audio_inventory_test.ts"
+  ],
+  "src/storage/episode_events.ts": [
+    "tests/admin_observability_test.ts"
+  ],
+  "src/storage/bounded.ts": [
+    "tests/synthesis_unsigned_write_test.ts"
+  ],
+  "tests/conformance/**": [
+    "tests/storage_test.ts"
+  ]
+}
