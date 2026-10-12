@@ -49,26 +49,57 @@ function pngSize(bytes: Uint8Array): { width: number; height: number } {
 }
 
 /**
- * How much visible STRUCTURE a written capture has in the section's own rows, read out of the PNG
- * itself (audio-feed-7yom).
+ * Contrast range (maxima minus minima in greyscale) of a captured crop, read out of the PNG
+ * itself (audio-feed-7yom, audio-feed-l11d).
  *
- * A blank clip satisfies every geometry assertion: it has exactly the requested width and height, so
- * `imageHeight >= height` and the byte budget both pass while the file says nothing. rev-27 proved it
- * by setting `style.opacity = "0"` on the failures section - textContent and layout untouched, the
- * clip's pixels all background - and the whole proof still exited 0 with a 1268-byte PNG that the
- * README described as carrying the provider error. So the artefact itself is measured.
- *
- * MEASURED AS STANDARD DEVIATION, and the first attempt at this is why: `1-mean` reads a LIGHT
- * BACKGROUND as ink. The page background is #f7f7f7, so a completely blank clip measures 0.033 by
- * `1-mean` - above the 0.005 threshold the first version used - and rev-27's blank capture PASSED the
- * assertion written to reject it. A clip whose section rows carry no rendered content is a single flat
- * colour, so its standard deviation is zero whatever colour that flat is: measured about 1e-8 for both
- * the blank #f7f7f7 clip and a pure white one, against 0.188-0.195 for the committed captures.
+ * A blank clip measures 0: a flat single-colour clip has maxima == minima.
+ * A faded clip at opacity 0.35 scales the contrast range proportionally down to 0.312 (and
+ * opacity 0.15 down to 0.137). Standard deviation scaled down too slowly (measuring ~0.067
+ * at opacity 0.35 against a 0.01 floor), passing washed-out captures that satisfied presence
+ * but failed legibility. Contrast range scales proportionally with opacity, so a floor of 0.5
+ * cleanly separates legible captures (0.880) from washed-out captures (0.312, 0.137).
  *
  * Cropped to the rectangle the caller names rather than to the whole clip: the clip deliberately
  * includes 8px of the PREVIOUS section above it, and those pixels are not the section's.
  */
-async function pixelVariation(
+async function pixelContrast(
+  path: string,
+  rect: { x: number; y: number; width: number; height: number },
+): Promise<number> {
+  const out = await new Deno.Command("convert", {
+    args: [
+      path,
+      "-crop",
+      `${Math.max(1, Math.round(rect.width))}x${Math.max(1, Math.round(rect.height))}+${
+        Math.max(0, Math.round(rect.x))
+      }+${Math.max(0, Math.round(rect.y))}`,
+      "+repage",
+      "-colorspace",
+      "gray",
+      "-format",
+      "%[fx:maxima-minima]",
+      "info:",
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!out.success) {
+    throw new Error(`convert could not measure ${path}: ${new TextDecoder().decode(out.stderr)}`);
+  }
+  const contrast = Number(new TextDecoder().decode(out.stdout).trim());
+  if (!Number.isFinite(contrast)) {
+    throw new Error(
+      `convert returned ${JSON.stringify(out.stdout)} as the pixel contrast of ${path}`,
+    );
+  }
+  return contrast;
+}
+
+/**
+ * Normalized greyscale standard deviation over exactly the same section rectangle as pixelContrast.
+ * Unlike extrema, this falls when most of a section is covered but some dark ink survives.
+ */
+async function pixelDistribution(
   path: string,
   rect: { x: number; y: number; width: number; height: number },
 ): Promise<number> {
@@ -92,26 +123,37 @@ async function pixelVariation(
   if (!out.success) {
     throw new Error(`convert could not measure ${path}: ${new TextDecoder().decode(out.stderr)}`);
   }
-  const variation = Number(new TextDecoder().decode(out.stdout).trim());
-  if (!Number.isFinite(variation)) {
+  const distribution = Number(new TextDecoder().decode(out.stdout).trim());
+  if (!Number.isFinite(distribution)) {
     throw new Error(
-      `convert returned ${JSON.stringify(out.stdout)} as the pixel variation of ${path}`,
+      `convert returned ${JSON.stringify(out.stdout)} as pixel distribution of ${path}`,
     );
   }
-  return variation;
+  return distribution;
 }
 
 /**
- * The minimum structure a capture of a rendered section shows (audio-feed-7yom).
- *
- * MEASURED, not chosen to make a failure stop: the four committed captures' own rows measure 0.188,
- * 0.191, 0.195 and 0.19 (standard deviation of grey), while a clip whose section rows are a single
- * flat fill measures about 1e-8 - zero, for a blank #f7f7f7 clip and for a pure white one alike. The
- * threshold sits an order of magnitude above "flat" and well below any real capture, so it separates
- * "this region has rendered content" from "this region is one colour", without saying how much text a
- * page ought to have.
+ * Faded-section floor: four committed section crops measure 0.880095 in contrast range;
+ * opacity 0.35 measures 0.312 and 0.15 measures 0.137. The 0.5 floor leaves
+ * 0.188 above the strongest fade and 0.380 below the clean captures.
  */
-const MIN_PIXEL_VARIATION = 0.01;
+const MIN_SECTION_FADE_LEGIBILITY = 0.5;
+
+/**
+ * Partial-content-loss floor: the four committed section crops have normalized standard
+ * deviations 0.191256, 0.193932, 0.200255, 0.167164. An 85%-covered crop of the first
+ * capture, retaining dark ink in its left 15%, measures 0.0884339 while still passing
+ * the fade floor (range 0.881773). The geometric mean of the lowest clean and the
+ * mutant is 0.1215852148, rounded DOWN to 0.12: clean margin >= 0.047164, mutant
+ * margin 0.0315661. This uses the separated distributions, not the old 0.01 floor.
+ */
+const MIN_SECTION_CONTENT_RETENTION = 0.12;
+
+/** Predicate for two independent failure modes of the section's own pixels. */
+function sectionShowsReadmeClaim(contrast: number, distribution: number): boolean {
+  return contrast >= MIN_SECTION_FADE_LEGIBILITY &&
+    distribution >= MIN_SECTION_CONTENT_RETENTION;
+}
 
 /**
  * The viewport the proof drives Chrome at, and the width every clip is bounded by.
@@ -142,16 +184,14 @@ function inImagePixels(
 }
 
 /**
- * The minimum structure the claim text's OWN box shows (audio-feed-9zgi).
+ * The minimum contrast the claim text's OWN box shows (audio-feed-9zgi, audio-feed-l11d).
  *
- * MEASURED, not chosen to make a failure stop: the four committed captures' claim boxes measure
- * 0.303373, 0.299339, 0.235022 and 0.352550 (standard deviation of grey over the text's own element),
- * while the same box with its text painted in the page's background colour measures about 1e-8 - one
- * flat colour, whatever that colour is. The threshold sits an order of magnitude below every real
- * claim box and orders of magnitude above flat, so it answers "does this box show ink" and not "how
- * much ink should this page have".
+ * MEASURED, not chosen to make a failure stop: the four committed clean captures' claim boxes
+ * all measure 0.880 contrast range, while a faded claim text at opacity 0.35 measures 0.312,
+ * and a background-coloured claim (text styled with background color) measures 0.00000000.
+ * A floor of 0.5 ensures the claim text itself is legibly rendered with ink, not washed out.
  */
-const MIN_CLAIM_INK_VARIATION = 0.01;
+const MIN_CLAIM_INK_LEGIBILITY = 0.5;
 
 /**
  * Compress a written capture in place, with the repository's own recipe (scripts/evidence-compress.ts:
@@ -646,17 +686,29 @@ await runProof("audio-feed-exww", async (checker) => {
         const sectionInClip = sectionRect.x >= 0 && sectionRect.y >= 0 &&
           sectionRect.x + sectionRect.width <= clip.width &&
           sectionRect.y + sectionRect.height <= clip.height;
-        const variation = sectionInClip
-          ? await pixelVariation(path, inImagePixels(sectionRect, clip.scale))
+        const contrast = sectionInClip
+          ? await pixelContrast(path, inImagePixels(sectionRect, clip.scale))
           : Number.NaN;
+        // ImageMagick reports -nan for the deviation of a perfectly flat crop; its
+        // distribution is zero, and the already-measured zero range proves that case.
+        const distribution = sectionInClip
+          ? contrast === 0
+            ? 0
+            : await pixelDistribution(path, inImagePixels(sectionRect, clip.scale))
+          : Number.NaN;
+        const failedFloor = contrast < MIN_SECTION_FADE_LEGIBILITY
+          ? "faded section"
+          : distribution < MIN_SECTION_CONTENT_RETENTION
+          ? "partial content loss"
+          : "none";
         checker.check(
-          `${name} is a capture of rendered content, not a flat single-colour clip`,
-          sectionInClip && variation > MIN_PIXEL_VARIATION,
+          `${name} shows what the README claims`,
+          sectionInClip && sectionShowsReadmeClaim(contrast, distribution),
           sectionInClip
-            ? `pixel variation ${
-              variation.toFixed(8)
-            } over the section's own rows and columns (a clip whose section renders nothing is ` +
-              `one flat colour and measures about 1e-8; the committed captures measure 0.167-0.199)`
+            ? `section's own rows and columns: contrast range ${contrast.toFixed(8)} ` +
+              `(faded section floor ${MIN_SECTION_FADE_LEGIBILITY}); normalized standard deviation ` +
+              `${distribution.toFixed(8)} (partial content loss floor ` +
+              `${MIN_SECTION_CONTENT_RETENTION}); failed floor: ${failedFloor}`
             : `the section's box x=${sectionRect.x}..${sectionRect.x + sectionRect.width} ` +
               `y=${sectionRect.y}..${
                 sectionRect.y + sectionRect.height
@@ -705,20 +757,22 @@ await runProof("audio-feed-exww", async (checker) => {
           claimRect.width > 0 && claimRect.height > 0 &&
           claimRect.x + claimRect.width <= clip.width &&
           claimRect.y + claimRect.height <= clip.height;
-        const claimInk = claimInClip
-          ? await pixelVariation(path, inImagePixels(claimRect, clip.scale))
+        const claimContrast = claimInClip
+          ? await pixelContrast(path, inImagePixels(claimRect, clip.scale))
           : Number.NaN;
         checker.check(
           `${name} shows ink where ${
             JSON.stringify(claimText)
           } is painted, not a background-coloured claim`,
-          Number.isFinite(claimInk) && claimInk > MIN_CLAIM_INK_VARIATION,
+          Number.isFinite(claimContrast) && claimContrast >= MIN_CLAIM_INK_LEGIBILITY,
           claimInClip
-            ? `pixel variation ${claimInk.toFixed(8)} over the claim's own text box at x=${
-              Math.round(claimRect.x)
-            },y=${Math.round(claimRect.y)} ${Math.round(claimRect.width)}x${
+            ? `pixel contrast range ${
+              claimContrast.toFixed(8)
+            } over the claim's own text box at x=${Math.round(claimRect.x)},y=${
+              Math.round(claimRect.y)
+            } ${Math.round(claimRect.width)}x${
               Math.round(claimRect.height)
-            } (rendered text varies; a box painted in one colour measures about 1e-8)`
+            } (rendered text varies; a box painted in one colour measures 0; floor is ${MIN_CLAIM_INK_LEGIBILITY})`
             : `the claim's box is not inside the captured pixels (${claim.reason})`,
         );
       };
@@ -967,10 +1021,10 @@ await runProof("audio-feed-exww", async (checker) => {
           "04-recent-failures-real-provider-error.png captured the section's own box, not another region of the page",
           '04-recent-failures-real-provider-error.png has "provider status 500" inside the captured pixels, not merely painted somewhere on the page',
           '04-recent-failures-real-provider-error.png shows ink where "provider status 500" is painted, not a background-coloured claim',
-          "01-live-lease-expiries-worker-healthy.png is a capture of rendered content, not a flat single-colour clip",
-          "02-live-lease-expiries-worker-unavailable.png is a capture of rendered content, not a flat single-colour clip",
-          "03-live-lease-expiries-store-unreachable.png is a capture of rendered content, not a flat single-colour clip",
-          "04-recent-failures-real-provider-error.png is a capture of rendered content, not a flat single-colour clip",
+          "01-live-lease-expiries-worker-healthy.png shows what the README claims",
+          "02-live-lease-expiries-worker-unavailable.png shows what the README claims",
+          "03-live-lease-expiries-store-unreachable.png shows what the README claims",
+          "04-recent-failures-real-provider-error.png shows what the README claims",
           '01-live-lease-expiries-worker-healthy.png shows "LEASE EXPIRED with no terminal write" actually rendered, not just present in the DOM',
           '02-live-lease-expiries-worker-unavailable.png shows "computed from the deployment lease" actually rendered, not just present in the DOM',
           '03-live-lease-expiries-store-unreachable.png shows "Unavailable — the episode store could not be read" actually rendered, not just present in the DOM',
@@ -1056,26 +1110,28 @@ WRONG SCALE FAILS rather than passing at a size no README entry describes, and t
 section's rendered bottom so a capture that stops short also FAILS (audio-feed-u3m1, audio-feed-9zgi);
 (2) the file is within the repository's 150KB budget, and the proof
 compresses its own output with the repository's own recipe (\`convert -strip -colors 256 PNG8:\`) so a
-replay does not write over-budget PNGs (audio-feed-vvo7); (3) the pixels carry rendered content - the
-STANDARD DEVIATION of grey over the section's OWN rows is measured back out of the PNG and must exceed
-0.01, which separates the committed captures (0.188-0.195) from a clip whose section rows render
-nothing, which is one flat colour and measures zero (about 1e-8, in whichever colour that flat fill
-happens to be), because a blank
-capture satisfies every geometry assertion (audio-feed-7yom). The metric is standard deviation rather
-than mean darkness because the page background is #f7f7f7: an entirely blank clip measures 0.033 by
-mean darkness, so the first version of this assertion passed on the very capture it was written to
-reject; and (4) the text each
+replay does not write over-budget PNGs (audio-feed-vvo7); (3) the section shows what the README claims -
+two independent floors over the section's OWN rows and columns, measured back out of the PNG:
+the faded-section contrast-range floor 0.5 separates four clean captures (0.880095) from opacity
+0.35 (0.312) and 0.15 (0.137); the partial-content-loss normalized standard-deviation floor
+0.12 separates the least-distributed clean crop (0.167164) from an 85%-covered crop (0.0884)
+whose surviving ink still passes the range floor (0.8818). The latter floor is the geometric
+mean of the clean minimum and mutant value, rounded down (clean margin 0.0472; mutant margin
+0.0316). Neither floor alone catches both failure shapes (audio-feed-l11d); and (4) the text each
 claim names is in a PAINTED element inside that section - no \`display:none\`, \`visibility:hidden\`,
 \`opacity:0\` or empty box on that element or any ancestor up to the section - because hiding a section
 leaves textContent and layout intact while the image records background; (5) that painted text lies
 INSIDE THE CAPTURED PIXELS ON BOTH AXES, so text painted in the right section while the image shows
 something else FAILS; (6) the claim's OWN box is measured back out of the PNG and must carry ink
-(STANDARD DEVIATION over the text's own element: 0.235-0.353 in the committed captures, about 1e-8 when
-that text is painted in the page's own background colour), which is the measurement that catches a claim
-painted invisibly - the computed-style check above cannot see a colour; and the pixel measurements (3)
+(CONTRAST RANGE over the text's own element: 0.880 in the committed clean captures, about 0 when that
+text is painted in the page's own background colour, and < 0.5 when washed out; threshold 0.5)
+(audio-feed-9zgi, audio-feed-l11d); and the pixel measurements (3)
 and (6) are refused outright when the section's or the claim's box is not inside the captured clip,
-rather than reporting someone else's pixels as this section's content. Not covered, and stated here
-rather than left to be discovered: content covered by an overlapping element.
+rather than reporting someone else's pixels as this section's content. A small overlay covering just the named claim may be caught by its own ink check; arbitrary
+local occlusions are not guaranteed to lower the whole-section distribution below its floor.
+The partial-content-loss floor is evidence for the measured 85%-covered shape, NOT proof that every
+arbitrary local occlusion will fail - a smaller local occlusion can still evade a whole-section
+distributional statistic.
 
 - \`01-live-lease-expiries-worker-healthy.png\`: the lease table with a held upload and an expired
   upload (called out AND timed).
