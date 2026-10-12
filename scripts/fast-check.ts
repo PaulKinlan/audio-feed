@@ -871,18 +871,12 @@ ${auditUniverseDrift}`);
   // The cheap whole-repo steps always run: together ~10s, and a type error in
   // an UNTOUCHED importer of a changed file is exactly what skipping them
   // would miss.
+  let cheapStepsFailed = false;
   for (const step of [["deno", "fmt", "--check"], ["deno", "lint"], ["deno", "task", "check"]]) {
     const res = await run(step);
     if (res.code !== 0) {
       console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
-      // The harness never ran, so the coverage note has NO INFORMATION rather than no coverage - say which,
-      // in the marker itself, so nobody has to infer it from an absent line (audio-feed-psjb).
-      console.log(
-        coverageMarker(
-          `UNKNOWN - the gate stopped before the test harness: ${step.slice(1).join(" ")}`,
-        ),
-      );
-      Deno.exit(1);
+      cheapStepsFailed = true;
     }
   }
 
@@ -961,5 +955,8 @@ ${auditUniverseDrift}`);
     console.log(coverageMarker(coverageRan(testFiles)));
   }
 
+  if (cheapStepsFailed) {
+    Deno.exit(1);
+  }
   console.log(`fast-check: ok in ${((performance.now() - started) / 1000).toFixed(1)}s`);
 }
