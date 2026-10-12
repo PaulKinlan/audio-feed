@@ -227,6 +227,54 @@ Deno.test("proof-helper: runProof collects all failures in deferred mode and thr
   );
 });
 
+Deno.test("proof-helper: createChecker accepts custom logger without writing to console.log", () => {
+  const loggedLines: string[] = [];
+  const origLog = console.log;
+  let consoleLogCalled = false;
+  console.log = (..._args: unknown[]) => {
+    consoleLogCalled = true;
+  };
+  try {
+    const checker = createChecker((line) => loggedLines.push(line));
+    checker.check("first check", true, "detail 1");
+    checker.check("second check", true);
+    assertEquals(consoleLogCalled, false);
+    assertEquals(loggedLines, [
+      "PASS  first check  detail 1",
+      "PASS  second check",
+    ]);
+    checker.finish();
+  } finally {
+    console.log = origLog;
+  }
+});
+
+Deno.test("proof-helper: runProof accepts custom logger in options object and routes output", async () => {
+  const loggedLines: string[] = [];
+  const origLog = console.log;
+  let consoleLogCalled = false;
+  console.log = (..._args: unknown[]) => {
+    consoleLogCalled = true;
+  };
+  try {
+    await runProof(
+      "custom-logger-test",
+      (checker) => {
+        checker.check("pass step", true, "ok detail");
+        checker.check("pass step no detail", true);
+      },
+      { logger: (line) => loggedLines.push(line) },
+    );
+    assertEquals(consoleLogCalled, false);
+    assertEquals(loggedLines, [
+      "PASS  pass step  ok detail",
+      "PASS  pass step no detail",
+    ]);
+  } finally {
+    console.log = origLog;
+  }
+});
+
 Deno.test("proof-helper: subprocess: fixture recording failing check without finish exits non-zero", async () => {
   const fixture = new URL("./fixtures/checker_fail_return_child.ts", import.meta.url).pathname;
   const cmd = new Deno.Command(Deno.execPath(), {

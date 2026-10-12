@@ -416,6 +416,14 @@ export interface CheckFailure {
   detail?: string;
 }
 
+export type CheckLogger = (line: string) => void;
+
+export interface CheckerOptions {
+  logger?: CheckLogger;
+}
+
+export type RunProofOptions = CheckerOptions;
+
 export interface Checker extends Disposable {
   check: (name: string, pass: boolean, detail?: string) => boolean;
   failures: CheckFailure[];
@@ -423,17 +431,22 @@ export interface Checker extends Disposable {
   [Symbol.dispose](): void;
 }
 
-export function createChecker(): Checker {
-  return createCheckerInternal(false);
+export function createChecker(options?: CheckerOptions | CheckLogger): Checker {
+  const logger = typeof options === "function" ? options : options?.logger;
+  return createCheckerInternal(false, logger);
 }
 
-function createCheckerInternal(deferred: boolean): Checker {
+function createCheckerInternal(deferred: boolean, logger?: CheckLogger): Checker {
   const failures: CheckFailure[] = [];
 
   const check = (name: string, pass: boolean, detail?: string): boolean => {
     const status = pass ? "PASS" : "FAIL";
     const line = detail !== undefined ? `${status}  ${name}  ${detail}` : `${status}  ${name}`;
-    console.log(line);
+    if (logger) {
+      logger(line);
+    } else {
+      console.log(line);
+    }
     if (!pass) {
       failures.push({ name, detail });
       if (!deferred) {
@@ -465,8 +478,10 @@ function createCheckerInternal(deferred: boolean): Checker {
 export async function runProof(
   name: string,
   body: (checker: Checker) => Promise<void> | void,
+  options?: RunProofOptions | CheckLogger,
 ): Promise<void> {
-  const checker = createCheckerInternal(true);
+  const logger = typeof options === "function" ? options : options?.logger;
+  const checker = createCheckerInternal(true, logger);
   let bodyError: unknown = null;
   try {
     await body(checker);
