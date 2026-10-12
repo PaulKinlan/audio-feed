@@ -224,3 +224,125 @@ Deno.test("audio-feed-20c7: with only env/cwd mentions, the selection is EMPTY r
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-9rer: the MIRROR direction. Every probe above asks "does this resolve";
+// these ask "does something resolve that should NOT", and then ask the second half
+// the reviewer insisted on - that removing the false relation must not suppress the
+// real consumer the fail-closed tier used to catch.
+// ---------------------------------------------------------------------------
+
+/** One tree where the SAME path is reached four legitimate ways and four illegitimate ones. */
+const SEMANTICS_TREE: Record<string, string> = {
+  "scripts/tool.ts": 'export const value = "correct";\n',
+  // PROVEN: the runtime itself, which is how every real child fixture in this repo is spawned.
+  "tests/execpath_test.ts":
+    'const FIXTURE = "scripts/tool.ts";\nDeno.test("execpath", () => {\n  new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--unstable-kv", FIXTURE] });\n});\n',
+  // PROVEN: a named runner, with flags to skip before the program.
+  "tests/node_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("node", () => {\n  new Deno.Command("node", { args: ["--experimental-strip-types", TOOL] });\n});\n',
+  // PROVEN: the path in the COMMAND position, which was already a relation before this bead.
+  "tests/commandpos_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("command", () => {\n  new Deno.Command(TOOL, { args: [] });\n});\n',
+  // DATA: echoed, not executed - the reviewer's counterexample.
+  "tests/echo_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("echo unrelated", () => {\n  new Deno.Command("echo", { args: [TOOL] });\n});\n',
+  // DATA: `deno eval` runs the CODE it is given, so a path near it is data.
+  "tests/eval_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("eval", () => {\n  new Deno.Command("deno", { args: ["eval", TOOL] });\n});\n',
+  // DATA: `deno task` resolves a name in deno.json, not a file path.
+  "tests/task_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("task", () => {\n  new Deno.Command("deno", { args: ["task", TOOL] });\n});\n',
+  // DATA: an unknown command proves nothing about its arguments.
+  "tests/unknown_test.ts":
+    'const TOOL = "scripts/tool.ts";\nDeno.test("unknown", () => {\n  new Deno.Command("mytool", { args: [TOOL] });\n});\n',
+  // The suite the fail-closed tier exists to protect: it READS the file the others mention.
+  "tests/consumer_test.ts":
+    'Deno.test("real", async () => {\n  const t = await Deno.readTextFile("scripts/tool.ts");\n  if (!t.includes("correct")) throw new Error("tool changed");\n});\n',
+};
+
+const ALL_SUITES = Object.keys(SEMANTICS_TREE).filter((path) => path.startsWith("tests/"));
+
+/** Every suite the relation maps TO, for a path - the direction a false positive shows up in. */
+function suitesMapping(
+  relations: Map<string, string[]>,
+  path: string,
+): string[] {
+  return [...relations.entries()]
+    .filter(([key]) => key === path)
+    .flatMap(([, suites]) => suites)
+    .sort();
+}
+
+Deno.test("audio-feed-9rer: only the command and the PROGRAM it proves earn a .ts execute relation", async () => {
+  await withTempTree(SEMANTICS_TREE, async (root) => {
+    const report = await deriveReadRelationReport(root, ALL_SUITES);
+    const mapped = suitesMapping(report.relations, "scripts/tool.ts");
+
+    // The four proven shapes must still derive. THIS IS THE POSITIVE CONTROL: a narrowing
+    // that switched the feature off would satisfy every exclusion below and fail here.
+    for (
+      const suite of [
+        "tests/execpath_test.ts",
+        "tests/node_test.ts",
+        "tests/commandpos_test.ts",
+      ]
+    ) {
+      assert(
+        mapped.includes(suite),
+        `${suite} spawns the file by a proven route and must keep its relation`,
+      );
+    }
+    // ...and the four DATA shapes must derive nothing at all. Each of these was a passing
+    // probe above: they ask "does this resolve", and every one of them answered yes.
+    for (
+      const suite of [
+        "tests/echo_test.ts",
+        "tests/eval_test.ts",
+        "tests/task_test.ts",
+        "tests/unknown_test.ts",
+      ]
+    ) {
+      assert(
+        !mapped.includes(suite),
+        `${suite} passes the path as DATA and must not earn an execute relation`,
+      );
+    }
+  });
+});
+
+Deno.test("audio-feed-9rer: the false relation is gone AND the plan stays FAIL-CLOSED, so the real consumer is not omitted", async () => {
+  await withTempTree(SEMANTICS_TREE, async (root) => {
+    // The reviewer's exact scenario: the echo suite and the reading consumer.
+    const report = await deriveReadRelationReport(root, [
+      "tests/echo_test.ts",
+      "tests/consumer_test.ts",
+    ]);
+    assertEquals(
+      report.relations.get("scripts/tool.ts"),
+      undefined,
+      "echo prints the path as data; a relation here is the false positive this bead is about",
+    );
+
+    const plan = planTests(
+      ["scripts/tool.ts"],
+      NO_MAP,
+      NO_MAP,
+      report.relations,
+      report.unresolved,
+      [],
+    );
+    // BOTH HALVES, AND THEY ARE NOT THE SAME PROPERTY: the relation is absent (above) and
+    // the outcome is fail-closed (here). `null` is how the gate says "run the FULL suite",
+    // which is what includes the consumer that a narrowed selection would have dropped.
+    assertEquals(
+      plan.testFiles,
+      null,
+      "with no relation the plan must fall back to the full tier rather than narrowing to the suite that mentions the path",
+    );
+    assert(
+      plan.reason.includes("no suite is mapped"),
+      `the full-tier reason must name the absence of a relation, got: ${plan.reason}`,
+    );
+  });
+});

@@ -769,15 +769,101 @@ function splitTopLevel(text: string, separator = ","): string[] {
  * relation. That is a FALSE POSITIVE, and it is worse than a missing relation because it REPLACES the
  * fail-closed tier: `new Deno.Command("deno", { args: ["eval", "1"], env: { NOTE: TOOL } })` narrowed the gate
  * to the one suite that mentions TOOL and dropped the suite that really reads tool.ts, which then failed when
- * run. A path passed TO a process is data; only the command and its arguments can name something that runs.
+ * run. A path passed TO a process is data; only the command and its arguments can name something that runs,
+ * and WHICH argument that is depends on the command's semantics - see `executedProgramArguments` below,
+ * added for audio-feed-9rer when `new Deno.Command("echo", { args: [TOOL] })` turned out to prove nothing.
  *
  * A NOTE ON WHY THE PROBES COULD NOT HAVE CAUGHT THIS: all six asked "does this resolve", and a false positive
  * is the same shape of answer as a true one. The instrument for this direction is a NON-RELATION CONTROL for
  * the same call shape - asserted in tests/spawn_relation_test.ts alongside the positive one.
  */
+/**
+ * COMMAND SEMANTICS: WHICH ARGUMENT A COMMAND ACTUALLY EXECUTES (audio-feed-9rer).
+ *
+ * Narrowing the scan to the command and its `args` was not enough, and the reviewer's counterexample is the
+ * reason: `new Deno.Command("echo", { args: [TOOL] })` has the path in `args`, but echo PRINTS it - the
+ * argument is DATA. Treating it as an execute site did two things, and the second is worse than the first: it
+ * invented a relation to an irrelevant suite, and by doing so it REPLACED the fail-closed full tier that used
+ * to include the suite which really reads tool.ts. A false positive that SUPPRESSES a true relation runs fewer
+ * suites while staying green, which is the direction that ships a defect.
+ *
+ * So an argument earns an execute relation only when the command's semantics PROVE it is the program: the
+ * command is the runtime itself (`Deno.execPath()`, which is how every real child fixture in this repo is
+ * spawned) or a known script runner by name, and then only the FIRST non-flag positional after any runner
+ * subcommand is executed. `deno eval`/`task`/`check` execute no file argument, so they prove nothing, and an
+ * unknown command (`echo`, a helper binary) proves nothing either - both fail closed to the full tier.
+ */
+const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([
+  "deno",
+  "node",
+  "bun",
+  "tsx",
+  "ts-node",
+  "bash",
+  "sh",
+  "zsh",
+  "python",
+  "python3",
+  "ruby",
+  "perl",
+]);
+
+/** Runners where the program follows a subcommand: `deno run <script>`, `deno test <suite>`. */
+const RUN_SUBCOMMANDS: ReadonlySet<string> = new Set(["run", "test"]);
+
+/**
+ * Subcommands that take no file to execute, so a path near them is data: `deno eval <code>` runs the code it
+ * is given, and `deno task <name>` resolves a name in deno.json. Neither can name a program by path.
+ */
+const NON_EXECUTING_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "eval",
+  "task",
+  "bundle",
+  "check",
+  "lint",
+  "fmt",
+  "cache",
+  "info",
+  "doc",
+  "repl",
+  "install",
+]);
+
+/** The runner a command expression names, or null when its semantics cannot be proven from the text. */
+export function runnerFor(commandText: string): string | null {
+  const text = commandText.trim();
+  if (/\bDeno\.execPath\s*\(/.test(text)) return "deno";
+  if (/\bprocess\.execPath\s*\(/.test(text)) return "deno";
+  const literal = /^["'`]([\s\S]*)["'`]$/.exec(text);
+  if (!literal) return null; // a binding or a call: the text does not prove what runs
+  const name = literal[1]!.split("/").pop() ?? "";
+  return SCRIPT_RUNNERS.has(name) ? name : null;
+}
+
+/**
+ * The arguments of an execute call that can carry a program, given the command expression and the text of the
+ * `args` value. Empty means "proves nothing", which is the fail-closed answer rather than the permissive one.
+ */
+export function executedProgramArguments(commandText: string, argsText: string): string[] {
+  if (runnerFor(commandText) === null) return [];
+  const body = argsText.replace(/^\s*\[/, "").replace(/\]\s*$/, "");
+  for (const item of splitTopLevel(body)) {
+    const value = item.trim();
+    if (!value) continue;
+    const bare = /^["'`]([\s\S]*)["'`]$/.exec(value)?.[1] ?? value;
+    if (bare.startsWith("-")) continue; // a flag is not the program
+    if (RUN_SUBCOMMANDS.has(bare)) continue; // `deno run <script>`: the program follows
+    if (NON_EXECUTING_SUBCOMMANDS.has(bare)) return []; // `deno eval <code>`: no file is executed
+    return [value]; // the first non-flag positional is the program, and it is the only one
+  }
+  return [];
+}
+
 function executedText(argumentsText: string): string {
   const parts = splitTopLevel(argumentsText);
   const kept: string[] = [];
+  // The command position is an execute site in its own right: a suite that spawns a repository path as the
+  // command is executing it (audio-feed-4kl3), and no argument semantics are needed to see that.
   if (parts[0]) kept.push(parts[0]);
   for (const part of parts.slice(1)) {
     const trimmed = part.trim();
@@ -790,7 +876,12 @@ function executedText(argumentsText: string): string {
       const key = name[1] ?? name[2] ?? name[3] ?? "";
       // ONLY `args`. `env`, `cwd`, `stdin`, `stdout`, `clearEnv`, `uid`, `gid` and the Windows raw-argument
       // variant all describe the process rather than naming a program, so none of them can be an execute site.
-      if (key === "args") kept.push(property.slice(name[0].length));
+      if (key !== "args") continue;
+      for (
+        const argument of executedProgramArguments(parts[0] ?? "", property.slice(name[0].length))
+      ) {
+        kept.push(argument);
+      }
     }
   }
   return kept.join("\n");
