@@ -1,5 +1,11 @@
 # audio-feed-u2ve — the rate limit is keyed on an address the caller can choose
 
+- Script: scripts/repro_u2ve_rate_limit_ff.ts
+- Asserts: bound holds against a rotating forged x-forwarded-for prefix; one honest client gets 429
+  at attempt 6; two distinct trusted-hop values land in separate buckets; bound holds against
+  rotating forged cf-connecting-ip; bound holds against rotating malformed cf-connecting-ip; bound
+  holds against rotating dotted-tail cf-connecting-ip
+
 `before.json` and `repro.json` are the same probe (`scripts/repro_u2ve_rate_limit_ff.ts`) run
 against the unfixed and fixed trees, with the same limiter configuration **actually in effect** (5
 requests per 60s — the first run of this probe passed an option name the compose layer ignored, so
