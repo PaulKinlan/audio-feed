@@ -263,7 +263,14 @@ const RELATIONS = await deriveDataReadRelations(ROOT);
 
 Deno.test("**DERIVATION**: the relation is read out of the suites, not listed beside them", async () => {
   // The two live instances of the gap this bead is about, derived rather than declared:
-  assertEquals(RELATIONS.get("docs/evidence/"), ["tests/evidence_size_test.ts"]);
+  assertEquals(RELATIONS.get("docs/evidence/"), [
+    "tests/evidence_size_test.ts",
+    // audio-feed-3teu added a second observer of the same directory: evidence_size_trap_test.ts imports
+    // auditEvidenceSizes() from scripts/evidence-compress.ts, which enumerates through evidencePngs(). The
+    // relation is per-SUITE, so a suite that uses the audit is an observer - over-selection, the safe
+    // direction, and the reason the gate still runs the size check when the tool itself changes.
+    "tests/evidence_size_trap_test.ts",
+  ]);
   assertEquals(RELATIONS.get("scripts/observability-agent-run.sh"), [
     "tests/observability_agent_poll_test.ts",
   ]);
@@ -281,11 +288,22 @@ Deno.test("the relation is derived through a path CONSTANT and a default paramet
   // Break that chain and the derivation test above fails, which is the point: the relation must come
   // from the code rather than from a list that agrees today.
   const suite = await Deno.readTextFile(`${ROOT}tests/evidence_size_test.ts`);
-  assert(suite.includes("evidencePngs"), "the suite must call evidencePngs()");
+  assert(
+    suite.includes("auditEvidenceSizes"),
+    "the suite must audit sizes through scripts/evidence-compress.ts (audio-feed-3teu), not walk the tree itself",
+  );
   const compress = await Deno.readTextFile(`${ROOT}scripts/evidence-compress.ts`);
   assert(
-    /EVIDENCE_DIR\s*=\s*`\$\{import\.meta\.dirname\}\/\.\.\/docs\/evidence`/.test(compress),
-    "EVIDENCE_DIR must still point at ../docs/evidence",
+    compress.includes("evidencePngs("),
+    "and that audit must be the one call site that enumerates through evidencePngs()",
+  );
+  // EVIDENCE_DIR's SPELLING changed in audio-feed-3teu (a `new URL("../docs/evidence", import.meta.url)` so
+  // git can read the same string as a path), so this asserts the OUTCOME the old regex was a proxy for: the
+  // constant must still be statically resolvable, which is what makes docs/evidence/ a derived relation. The
+  // DERIVATION test above asserts the same thing from the gate's own output.
+  assert(
+    RELATIONS.get("docs/evidence/")?.includes("tests/evidence_size_test.ts") === true,
+    "EVIDENCE_DIR must still resolve to ../docs/evidence derivably",
   );
   assert(/dir: string = EVIDENCE_DIR/.test(compress), "the read call must take it by default");
 });
@@ -406,7 +424,7 @@ Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8
     NO_NAMED,
     RELATIONS,
   );
-  assertEquals(plan.testFiles, ["tests/evidence_size_test.ts"], plan.reason);
+  assertEquals(plan.testFiles, ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"], plan.reason);
 });
 
 Deno.test("a changed shell runner selects the suite that executes it (es8y)", () => {
@@ -421,7 +439,11 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     new Map([["src/routes/widgets.ts", ["tests/widgets_test.ts"]]]),
     RELATIONS,
   );
-  assertEquals(plan.testFiles, ["tests/evidence_size_test.ts", "tests/widgets_test.ts"]);
+  assertEquals(plan.testFiles, [
+    "tests/evidence_size_test.ts",
+    "tests/evidence_size_trap_test.ts",
+    "tests/widgets_test.ts",
+  ]);
 });
 
 Deno.test("an undeclared non-TypeScript file runs the FULL suite and names itself", () => {
@@ -695,7 +717,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
-  assertEquals(classified.suites, ["tests/evidence_size_test.ts"]);
+  assertEquals(classified.suites, ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
 
