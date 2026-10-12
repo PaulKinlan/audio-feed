@@ -19,6 +19,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  exitCodeFor,
   interpretRun,
   isUnknownExit,
   runProofIn,
@@ -153,5 +154,59 @@ Deno.test("audio-feed-l6b6: the CLI's three-way summary counts by VERDICT, not b
     summarise([{ verdict: "inapplicable" }, { verdict: "failed to run" }]),
     { expected: 0, unknown: 0, unexpected: 2 },
     "a moved anchor and a row that never ran are both harness-RED, neither is a pass and neither is unknown",
+  );
+});
+
+Deno.test("audio-feed-2qcp: a CLI run with UNKNOWN rows exits NON-ZERO, and the WIRING that decides it is exercised end to end", async () => {
+  // THE RULE AND THE WIRING ARE DIFFERENT THINGS, and this finding was about the wiring: `interpretRun` and
+  // `summarise` were right and tested, and the line that reads the summary and decides the process's exit was
+  // outside every test, so deleting the UNKNOWN clause left all suites green while the CLI exited 0 with eight
+  // UNKNOWN rows. The fix extracts `exitCodeFor`, and the test below goes further than a unit test: it RUNS
+  // THE CLI with a bound tight enough that every row must be killed, then asserts the process's own exit code.
+  // A rule test here would still pass with the call site mutated - which is precisely how the defect survived.
+  assertEquals(
+    exitCodeFor({ expected: 8, unknown: 0, unexpected: 0 }),
+    0,
+    "all rows expected: exit 0",
+  );
+  assertEquals(
+    exitCodeFor({ expected: 7, unknown: 1, unexpected: 0 }),
+    1,
+    "one UNKNOWN row: exit non-zero",
+  );
+  assertEquals(
+    exitCodeFor({ expected: 7, unknown: 0, unexpected: 1 }),
+    1,
+    "one unexpected row: exit non-zero",
+  );
+
+  const root = new URL("..", import.meta.url).pathname;
+  const run = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--allow-all",
+      "--unstable-kv",
+      "scripts/exww-mutants.ts",
+      "--timeout",
+      "1",
+    ],
+    cwd: root,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = new TextDecoder().decode(run.stdout) + new TextDecoder().decode(run.stderr);
+  const summaryLine = out.split("\n").find((l) => l.includes("row(s) as expected")) ?? "";
+  // The bound kills every row, so the matrix MUST be red and the summary must say so in its own words.
+  assertEquals(
+    run.code,
+    1,
+    `a CLI run whose rows were all killed by the bound must exit 1, not 0: ${summaryLine}`,
+  );
+  assertStringIncludes(summaryLine, "UNKNOWN");
+  assertStringIncludes(summaryLine, "0 unexpected");
+  assertStringIncludes(
+    out,
+    "UNKNOWN rows: a bound killed the run, so the row proved nothing",
+    "the UNKNOWN rows must be reported as their own outcome, not folded into unexpected",
   );
 });

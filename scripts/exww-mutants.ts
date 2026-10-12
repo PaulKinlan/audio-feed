@@ -425,6 +425,17 @@ export function summarise(results: readonly { verdict: RowResultVerdict }[]): Su
   return summary;
 }
 
+/**
+ * The CLI's exit decision, as a function rather than a line inside `import.meta.main` (audio-feed-2qcp): the
+ * WIRING that reads the summary and decides the process's fate was exercised by no test, so deleting the
+ * UNKNOWN clause left every suite green while the CLI exited 0 with eight UNKNOWN rows - l6b6's own class
+ * (a bound kill reading as success, on the path a human runs) returning through the wiring rather than the
+ * rule. A rule test cannot see that: the rule was right and tested, and the call site was wrong.
+ */
+export function exitCodeFor(summary: Summary): number {
+  return summary.unexpected > 0 || summary.unknown > 0 ? 1 : 0;
+}
+
 /** What a caller expects of a run: the BASELINE must be green, a detector row must redden its named check. */
 export type Expectation =
   | { kind: "green" }
@@ -652,7 +663,7 @@ if (import.meta.main) {
       console.log(`  ${row.row}: ${describeVerdict(row.verdict)} - ${row.detail}`);
     }
   }
-  if (counts.unexpected > 0 || counts.unknown > 0) Deno.exit(1);
+  Deno.exit(exitCodeFor(counts));
   console.log(
     "[mutants] every row behaved as the matrix claims, and the declared non-detectors are listed above",
   );

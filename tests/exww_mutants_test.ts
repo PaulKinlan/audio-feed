@@ -1,10 +1,22 @@
 /**
- * audio-feed-coao — a proof script the gate maps to NOTHING must still be able to turn the gate red.
+ * audio-feed-coao — the proof-script delta must be able to turn the gate red, and THIS SUITE IS NOT YET THE
+ * DERIVATION THAT DOES IT (audio-feed-8dmo; corrected, because the earlier wording claimed a relation that
+ * does not exist at this tip and contradicted the README this same delta adds).
  *
- * THE PROBLEM THIS CLOSES, measured: for a delta that touches only scripts/exww-live-claims-browser-proof.ts,
- * nothing in the repo reads or executes that file, so the fast gate's derivation sees no relation, the
- * empty-selection guard fail-closes into the FULL 115-suite tier, and those suites do not exercise the
- * file: the gate is red-hot AND blind at the same time (audio-feed-coao; fjfh slice 3 measured 132s).
+ * WHAT IS TRUE AT THIS TIP, in three parts, because the difference between them is the whole finding:
+ *   1. A delta that touches only scripts/exww-live-claims-browser-proof.ts STILL maps to NOTHING: the derived
+ *      relation covers non-TypeScript data paths (`scripts/test-selection.ts`, the `--list-relations` output
+ *      names 17 data paths and no exww entry), so the empty-selection guard fail-closes into the full tier and
+ *      those suites never execute the proof - the gate is running and blind at once (audio-feed-coao; fjfh
+ *      slice 3 measured 132s of that).
+ *   2. THIS SUITE IS SELECTED FOR A DELTA THAT INCLUDES THIS FILE, because a changed test module is selected
+ *      directly, and `tests/fast_gate_subset_test.ts` by the x4kc rule. Measured on the branch: "fast-check:
+ *      2 test file(s) (affected by: scripts/exww-mutants.ts, tests/exww_mutants_test.ts)". That is why it
+ *      protects the harness TODAY and not the proof script.
+ *   3. MAKING THE PROOF-SCRIPT DELTA DERIVE THIS SUITE IS audio-feed-4kl3's CHANGE, not this one: a spawned
+ *      repo-relative .ts path has to become an observable relation. Until it lands, the honest statement is
+ *      "the gate runs this suite when the delta includes it" - and "should be checked" is still not "is
+ *      checked" (docs/evidence/README.md, the section this delta adds).
  *
  * WHAT THIS SUITE IS: the mapped row of the mutant matrix (audio-feed-dynb). It EXECUTES the proof - a real
  * execution, not a declared relationship, which is what audio-feed-k0jb requires - and asserts the two
@@ -45,10 +57,12 @@ Deno.test({
     try {
       const source = await Deno.readTextFile(new URL(`../${PROOF_REL}`, import.meta.url));
       const proofInScratch = `${scratch}/${PROOF_REL}`;
-      // The proof is EXECUTED here, through the harness's own runner: the read/execute relation the fast
-      // gate derives for scripts/exww-live-claims-browser-proof.ts is earned by this call - and the row and
-      // the seven-row matrix share one runner as well as one row definition, so a bound or a failure parser
-      // cannot drift between them either.
+      // The proof is EXECUTED here, through the harness's own runner - the row and the seven-row matrix share
+      // one runner and one row definition, so a bound or a failure parser cannot drift between them.
+      // NOTE THE CLAIM I REMOVED (audio-feed-8dmo): this call does NOT earn a derived relation at this tip -
+      // the relation is what audio-feed-4kl3 adds, and until then the gate selects this suite because the
+      // delta includes this file. A comment asserting a derivation that does not exist is how a proof-script
+      // delta would look covered while it was not, which is the defect class this whole bead exists about.
       const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
       // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
