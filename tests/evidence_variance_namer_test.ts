@@ -20,11 +20,25 @@ import {
   distinctRenders,
   fillDensity,
   reading,
+  signature,
   type Variance,
 } from "../scripts/evidence-variance-namer.ts";
 
-function variance(overrides: Partial<Variance>): Variance {
-  return {
+/**
+ * A fixture Variance, with the RUN COUNT explicit.
+ *
+ * audio-feed-cfsg: this helper used to build the struct from raw overrides, and the
+ * missing-capture test passed `{ distinctRenders: 2, missing: 2 }` while the default
+ * `captures: 3` read as three runs - two captures missing from three runs leaves ONE, so
+ * `distinctRenders: 2` was a state the TOOL CANNOT PRODUCE. The test proved the formatter
+ * handles an impossible input while the state the tool really produces (a lone capture that
+ * the loop was skipping) went unasserted. Passing `runs` makes the two counts derive from
+ * one number, and the guards below refuse an impossible state at construction, so the
+ * fixture cannot express it again rather than merely not doing so today.
+ */
+function variance(overrides: Partial<Variance> & { runs?: number } = {}): Variance {
+  const { runs, ...rest } = overrides;
+  const built: Variance = {
     artefact: "01-shot.png",
     distinctRenders: 2,
     captures: 3,
@@ -38,8 +52,35 @@ function variance(overrides: Partial<Variance>): Variance {
     bestShift: { dx: 0, dy: 0, mean: 1.4e-7 },
     missing: 0,
     crops: [],
-    ...overrides,
+    ...rest,
   };
+  if (runs !== undefined) built.missing = runs - built.captures;
+  // THE STATES THE TOOL CAN PRODUCE, asserted rather than assumed. An artefact is discovered
+  // from the UNION of the runs, so it is present in at least one capture; and no more distinct
+  // renders can exist than there are captures to hold them.
+  if (built.captures < 1) {
+    throw new Error(
+      `impossible fixture: ${built.captures} capture(s) - the tool finds an artefact in a run`,
+    );
+  }
+  if (built.distinctRenders < 1) {
+    throw new Error(`impossible fixture: ${built.distinctRenders} distinct render(s)`);
+  }
+  if (built.distinctRenders > built.captures) {
+    throw new Error(
+      `impossible fixture: ${built.distinctRenders} distinct render(s) among ${built.captures} capture(s)`,
+    );
+  }
+  if (built.missing < 0) {
+    throw new Error(`impossible fixture: ${built.missing} missing capture(s)`);
+  }
+  if (built.captures + built.missing < built.distinctRenders) {
+    throw new Error(
+      `impossible fixture: ${built.distinctRenders} distinct render(s) from ` +
+        `${built.captures + built.missing} run(s)`,
+    );
+  }
+  return built;
 }
 
 Deno.test("fill density is changed pixels over box area, and never divides by zero", () => {
@@ -82,12 +123,17 @@ Deno.test("audio-feed-cfsg: fewer than two captures is reported as unable to est
   );
 });
 
-Deno.test("a capture MISSING from a run directory is reported, not skipped", () => {
+Deno.test("audio-feed-cfsg: a capture MISSING from a run directory is reported, not skipped", () => {
   // The layout that produced a false green: each run directory named the artefact
   // differently, so one capture per artefact was compared and it looked stable.
-  const lines = reading(variance({ distinctRenders: 2, missing: 2 }));
+  //
+  // A PRODUCIBLE STATE, stated as the run count so it cannot drift: three runs, one of which
+  // held the artefact, so two directories have no capture and there is exactly one render to
+  // compare - which is also why the row must warn instead of claiming stability.
+  const lines = reading(variance({ runs: 3, captures: 1, distinctRenders: 1 }));
   assertStringIncludes(lines[0]!, "NO capture");
   assertStringIncludes(lines[0]!, "reported rather than treated as identical");
+  assertStringIncludes(lines.join(" "), "fewer than two cannot establish stability");
 });
 
 Deno.test("the artefact key strips a per-run suffix so runs can be compared", () => {
@@ -181,7 +227,9 @@ async function png(path: string, size: string, colour: string): Promise<void> {
 }
 
 /** Run the CLI for real, with the same permissions the gate grants it. */
-async function runCli(...dirs: string[]): Promise<{ code: number; stdout: string }> {
+async function runCli(
+  ...dirs: string[]
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const scratch = await Deno.makeTempDir({ prefix: "cfsg-cli-" });
   const out = `${scratch}/out`;
   const proc = await new Deno.Command(Deno.execPath(), {
@@ -198,7 +246,11 @@ async function runCli(...dirs: string[]): Promise<{ code: number; stdout: string
     stdout: "piped",
     stderr: "piped",
   }).output();
-  return { code: proc.code, stdout: new TextDecoder().decode(proc.stdout) };
+  return {
+    code: proc.code,
+    stdout: new TextDecoder().decode(proc.stdout),
+    stderr: new TextDecoder().decode(proc.stderr),
+  };
 }
 
 Deno.test("audio-feed-cfsg: a MISSING capture is reported by the CLI, which does not print '0 unstable'", async () => {
@@ -279,6 +331,139 @@ Deno.test("audio-feed-cfsg: CONTROL - a genuine difference still prints its numb
     assertStringIncludes(stdout, "differing");
     assertStringIncludes(stdout, "max delta");
     assertEquals(code, 0, "a healthy run with a measured difference is a normal exit");
+  } finally {
+    await Deno.remove(scratch, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-cfsg: a gap that still leaves TWO captures is reported WHILE the comparison happens", async () => {
+  // rev-46's impossible fixture was `distinctRenders: 2, missing: 2` - a state the tool cannot
+  // produce. THIS is its producible version, driven through the loop rather than through the
+  // formatter: three runs, one of which has no capture for the artefact, so two captures remain,
+  // they DO differ, and the row must state both facts instead of choosing one.
+  const scratch = await Deno.makeTempDir({ prefix: "cfsg-gap-" });
+  try {
+    await png(`${scratch}/run1/01-gapped.png`, "4x4", "white");
+    await Deno.mkdir(`${scratch}/run2`, { recursive: true }); // present, and it HAS no capture
+    await png(`${scratch}/run3/01-gapped.png`, "4x4", "black");
+    const { code, stdout } = await runCli(`${scratch}/run1`, `${scratch}/run2`, `${scratch}/run3`);
+
+    assertStringIncludes(stdout, "had NO capture"); // the gap is named...
+    assertStringIncludes(stdout, "compares 2 of 3"); // ...with the count it compares
+    assertStringIncludes(stdout, "2 of 2 captures differ"); // ...and the measurement still happens
+    assertStringIncludes(stdout, "with a missing capture");
+    assertEquals(code, 0, "a gap that still left two captures is a comparison, not a failure");
+  } finally {
+    await Deno.remove(scratch, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-cfsg: the signature hashes PIXELS, so a byte-path regression cannot go unnoticed", async () => {
+  // rev-46 confirmed the %# pixel path is safe and that NOTHING would catch its reintroduction.
+  // Version 1 hashed `convert -strip png:-` and read that binary through a TextDecoder, which is
+  // lossy: it reported "0 unstable artefacts of 4" over a set differing by 8 to 1,329 pixels. The
+  // guard therefore has to be a difference the tool must SEE, plus the control that the file's
+  // own bytes are not what is compared.
+  const scratch = await Deno.makeTempDir({ prefix: "cfsg-pixels-" });
+  try {
+    // ONE pixel, changed slightly: the case version 1 collapsed into "identical".
+    await png(`${scratch}/run1/01-tiny.png`, "8x8", "white");
+    await png(`${scratch}/run2/01-tiny.png`, "8x8", "white");
+    const onePixel = await new Deno.Command("convert", {
+      args: [
+        `${scratch}/run2/01-tiny.png`,
+        "-fill",
+        "#fefefe",
+        "-draw",
+        "point 3,3",
+        `${scratch}/run2/01-tiny.png`,
+      ],
+    }).output();
+    assertEquals(onePixel.code, 0);
+    const changed = await runCli(`${scratch}/run1`, `${scratch}/run2`);
+    assertStringIncludes(
+      changed.stdout,
+      "01-tiny.png",
+      "a ONE-PIXEL difference must be visible: this is the exact class version 1 reported as identical",
+    );
+    assertStringIncludes(changed.stdout, "with a difference");
+
+    // THE CONTROL: the same pixels with different METADATA are the same render. If the PNG file
+    // bytes - or a decoded stream - were being compared, a comment chunk would look like
+    // instability. (The color type is deliberately left alone: `%#` covers the pixel data
+    // INCLUDING its channel layout, so an RGB and an RGBA encoding of the same picture legitimately
+    // hash differently - a limit recorded in the tool's header rather than hidden here.)
+    await Deno.mkdir(`${scratch}/run3`, { recursive: true });
+    const reencoded = await new Deno.Command("convert", {
+      args: [
+        `${scratch}/run1/01-tiny.png`,
+        "-set",
+        "comment",
+        "metadata that must not count as a render",
+        `${scratch}/run3/01-tiny.png`,
+      ],
+    }).output();
+    assertEquals(reencoded.code, 0);
+    const commentChunk = await new Deno.Command("convert", {
+      args: [`${scratch}/run3/01-tiny.png`, "-format", "%c", "info:"],
+    }).output();
+    assert(
+      !new TextDecoder().decode(commentChunk.stdout).includes("no-comment"),
+      "the control file must really carry a metadata difference",
+    );
+    const control = await runCli(`${scratch}/run1`, `${scratch}/run3`);
+    assertStringIncludes(
+      control.stdout,
+      "1 compared and identical",
+      "identical pixels in a different container encoding are the same render, not a difference",
+    );
+    assertEquals(control.code, 0);
+  } finally {
+    await Deno.remove(scratch, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-cfsg: a run directory that is not there is named, not crashed into", async () => {
+  // The guard exists because my own gap test hit the crash: passing a mistyped path produced an
+  // unhandled stack trace and an empty stdout, which is the same confusion one step earlier.
+  const { code, stderr } = await runCli("/tmp/definitely-not-a-run-directory-cfsg", "/tmp");
+  assertStringIncludes(stderr, "run directory does not exist");
+  assertStringIncludes(stderr, "definitely-not-a-run-directory-cfsg");
+  assertEquals(code, 2, "usage errors exit 2, the same code as a run with nothing to compare");
+});
+
+Deno.test("audio-feed-cfsg: the render identity is a hex signature of the PIXELS, so a decoded stream cannot pass for one", async () => {
+  // THE GUARD THAT WOULD HAVE CAUGHT VERSION 1, and the reason it is a shape assertion rather than a
+  // value: version 1 hashed `convert -strip png:-` after a TextDecoder round-trip, and a decoded
+  // binary is an arbitrary string - it is NOT 64 (or 32) lowercase hex characters. Asserting the
+  // shape fails that reintroduction; asserting a hard-coded value would instead make this test red
+  // on any other ImageMagick build. Both arms are here: the shape, and the two pixel properties.
+  const scratch = await Deno.makeTempDir({ prefix: "cfsg-sig-" });
+  try {
+    await png(`${scratch}/a.png`, "4x4", "white");
+    await png(`${scratch}/b.png`, "4x4", "blue");
+    const meta = await new Deno.Command("convert", {
+      args: [`${scratch}/a.png`, "-set", "comment", "metadata only", `${scratch}/meta.png`],
+    }).output();
+    assertEquals(meta.code, 0);
+
+    const sig = await signature(`${scratch}/a.png`);
+    assert(
+      /^(?:[0-9a-f]{32}|[0-9a-f]{64})$/.test(sig),
+      `ImageMagick's %# is a hex digest of the pixels; a TextDecoder round-trip produces something ` +
+        `else entirely, and this test exists to fail if that comes back. Got: ${
+          JSON.stringify(sig.slice(0, 40))
+        }`,
+    );
+    assertEquals(
+      sig,
+      await signature(`${scratch}/meta.png`),
+      "a metadata chunk is not a render difference: the PIXELS are hashed, not the file",
+    );
+    assert(
+      sig !== await signature(`${scratch}/b.png`),
+      "different pixels must have different signatures",
+    );
   } finally {
     await Deno.remove(scratch, { recursive: true });
   }

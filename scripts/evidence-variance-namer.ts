@@ -211,8 +211,17 @@ async function run(command: string[], allowFailure = false): Promise<string> {
  * 1,329 pixels wide. A comparison that cannot see the thing it measures fails
  * silently in the safe-looking direction, which is why the hand measurements
  * disagreeing with the script is a test rather than a nuisance.
+ *
+ * DECLARED LIMIT (audio-feed-cfsg, found by that bead's own control): `%#` covers
+ * the pixel data INCLUDING its channel layout, so an RGB and an RGBA encoding of
+ * the SAME picture hash differently and this field counts them as two renders,
+ * while the pixel-difference metrics below report 0 differing pixels for that
+ * pair. Same-channel captures - which is what one browser produces run to run -
+ * are unaffected, and every row measured for this tool so far is of that kind.
+ * It is named here rather than fixed, because changing the identity function
+ * would change every number already recorded against it.
  */
-async function signature(path: string): Promise<string> {
+export async function signature(path: string): Promise<string> {
   return await run(["convert", path, "-format", "%#", "info:"]);
 }
 
@@ -384,6 +393,18 @@ if (import.meta.main) {
     console.error("usage: evidence-variance-namer.ts --out <dir> <run1> <run2> [run3 ...]");
     Deno.exit(2);
   }
+  // A RUN DIRECTORY THAT IS NOT THERE is reported as such rather than as a stack trace: the whole
+  // bead is about a tool telling "nothing to compare" apart from "compared and matched", and a
+  // crash on a mistyped path is the same confusion one step earlier (audio-feed-cfsg).
+  for (const dir of runDirs) {
+    try {
+      const info = await Deno.stat(dir);
+      if (!info.isDirectory) throw new Error("not a directory");
+    } catch {
+      console.error(`run directory does not exist: ${dir}`);
+      Deno.exit(2);
+    }
+  }
   await Deno.mkdir(out, { recursive: true });
   const runs: Map<string, string>[] = [];
   for (const dir of runDirs) runs.push(await pngsIn(dir));
@@ -396,33 +417,37 @@ if (import.meta.main) {
   const found = [...new Set(runs.flatMap((dir) => [...dir.keys()]))].sort();
 
   let differences = 0;
+  let identical = 0;
   let gaps = 0;
   let tooFew = 0;
-  let compared = 0;
+  // COMPARABLE, not PRINTED (audio-feed-cfsg): this counter decides whether the run measured
+  // anything, and the first version of it incremented only for rows that printed nothing, so a run
+  // where EVERY artefact differed was announced as "nothing to compare" and exited 2 - a false
+  // alarm about a comparison that had just happened, found by this bead's own CLI test.
+  let comparable = 0;
   for (const artefact of found) {
     const variance = await measure(artefact, runs, out);
     // REPORT EVERY STATE THE FUNCTION CAN NAME, rather than filtering to differences here: the old
     // filter skipped `distinctRenders <= 1`, which is exactly where a single capture and a missing
     // capture live, so the guards inside `reading()` were unreachable from this path and the unit
     // tests that exercised them proved nothing about the CLI (audio-feed-cfsg).
-    const hasDifference = variance.missing === 0 && variance.captures >= 2 &&
-      variance.distinctRenders > 1;
+    const differs = variance.captures >= 2 && variance.distinctRenders > 1;
     const isGap = variance.missing > 0;
     const isTooFew = variance.captures < 2;
-    if (hasDifference) differences++;
+    if (variance.captures >= 2) comparable++;
+    if (differs) differences++;
+    if (!differs && !isGap && !isTooFew) identical++;
     if (isGap) gaps++;
     if (isTooFew) tooFew++;
-    if (hasDifference || isGap || isTooFew) {
+    if (differs || isGap || isTooFew) {
       console.log(`\n=== ${artefact}`);
-      if (hasDifference) {
+      if (differs) {
         console.log(
           `    box ${variance.box}  differing ${variance.differingPixels} px  max delta ${variance.maxDelta}`,
         );
       }
       for (const line of reading(variance)) console.log(`    ${line}`);
       for (const crop of variance.crops) console.log(`    crop: ${crop}`);
-    } else {
-      compared++;
     }
   }
 
@@ -430,7 +455,7 @@ if (import.meta.main) {
   // compare against each other, this run MEASURED NOTHING. Printing a reassuring "0 unstable"
   // there is the whole defect - it cannot tell "nothing to compare" from "compared and matched" -
   // so the exit code says so instead of the summary pretending.
-  if (compared === 0) {
+  if (comparable === 0) {
     console.log(
       `\nnothing to compare: none of the ${found.length} artefact(s) found across ${runs.length} ` +
         `run(s) had two or more captures without a gap. A run with nothing to compare is not a run ` +
@@ -440,7 +465,7 @@ if (import.meta.main) {
   }
   console.log(
     `\n${differences} with a difference, ${gaps} with a missing capture, ${tooFew} with fewer than ` +
-      `two captures, ${compared} compared and identical - of ${found.length} artefact(s) found ` +
+      `two captures, ${identical} compared and identical - of ${found.length} artefact(s) found ` +
       `across ${runs.length} run(s). Nothing here names a source: the numbers discriminate, and ` +
       `the naming is a judgement recorded on a bead.`,
   );
