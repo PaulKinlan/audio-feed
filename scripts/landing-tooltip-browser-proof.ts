@@ -220,8 +220,18 @@ try {
     `pathname=${await js(`location.pathname`)}`,
   );
 
-  // restore path: a stored token redirects without any interaction
-  await js(`localStorage.setItem("audio-feed-token", ${JSON.stringify(TOKEN)})`);
+  // restore path: an active session redirects without any interaction (audio-feed-ufg9)
+  const { createSession } = await import("../src/auth/sessions.ts");
+  const sessionSecret = await createSession(stores.metadata, "user-1");
+  await cdp("Network.setCookie", {
+    url: BASE,
+    name: "__Host-af_session",
+    value: sessionSecret,
+    secure: true,
+    path: "/",
+    httpOnly: true,
+    sameSite: "Lax",
+  });
   await navigate(`${BASE}/listen`);
   await until(`location.pathname === "/listen/${TOKEN}"`, "stored token redirected to the player");
   check(
@@ -281,6 +291,7 @@ try {
   );
 
   // --- 390x844 ----------------------------------------------------------------
+  await cdp("Network.clearBrowserCookies");
   await cdp("Emulation.setDeviceMetricsOverride", {
     width: 390,
     height: 844,

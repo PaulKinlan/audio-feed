@@ -75,10 +75,33 @@ function askConfirm(message, options) {
   }
   if (cancelEl) cancelEl.textContent = opts.cancelText || "Cancel";
   return new Promise((resolve) => {
-    const onClose = () => {
+    const cleanup = () => {
       confirmDialog.removeEventListener("close", onClose);
+      if (okEl) okEl.removeEventListener("click", onOk);
+      if (cancelEl) cancelEl.removeEventListener("click", onCancel);
+    };
+    /** @param {Event} e */
+    const onOk = (e) => {
+      e.preventDefault();
+      confirmDialog.close("confirm");
+      cleanup();
+      resolve(true);
+    };
+    /** @param {Event} e */
+    const onCancel = (e) => {
+      e.preventDefault();
+      confirmDialog.close("cancel");
+      cleanup();
+      resolve(false);
+    };
+    // For light-dismiss (clicking outside the dialog via closedby="any") or Esc key
+    const onClose = () => {
+      cleanup();
       resolve(confirmDialog.returnValue === "confirm");
     };
+
+    if (okEl) okEl.addEventListener("click", onOk);
+    if (cancelEl) cancelEl.addEventListener("click", onCancel);
     confirmDialog.addEventListener("close", onClose);
     confirmDialog.showModal();
   });

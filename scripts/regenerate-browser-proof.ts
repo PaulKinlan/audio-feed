@@ -12,12 +12,7 @@
  *
  * Writes screenshots and evidence.json to <outDir>. Exits non-zero if a check fails.
  */
-import {
-  HARNESS_ADMIN_TOKEN,
-  HARNESS_FEED_TOKEN,
-  OLD_KEY,
-  startRegenerateHarness,
-} from "./regenerate-harness.ts";
+import { HARNESS_FEED_TOKEN, OLD_KEY, startRegenerateHarness } from "./regenerate-harness.ts";
 
 const [chromePath, profileDir, outDir] = Deno.args;
 if (!chromePath || !profileDir || !outDir) {
@@ -156,20 +151,43 @@ const OLD_TITLE = "Made with the old prompts";
 async function openManage(admin: string) {
   await evaluate(
     admin,
-    `[...document.querySelectorAll('#usersBody button')].find(b => b.textContent === 'Manage').click()`,
+    `[...document.querySelectorAll('#usersBody button')].find(b => b.textContent === 'Manage' && b.closest('tr').cells[0].textContent.includes('listener@')).click()`,
   );
   await waitFor(admin, `${episodeRow(OLD_TITLE)}`);
   await evaluate(admin, `document.getElementById('manageEpisodesHelp').scrollIntoView()`);
 }
 
 try {
-  // 1. Log in to the real console and open the subscriber.
-  const admin = await openTab(`${h.base}/admin`);
-  await evaluate(
-    admin,
-    `document.getElementById('adminToken').value = ${JSON.stringify(HARNESS_ADMIN_TOKEN)};
-     document.getElementById('saveToken').click();`,
-  );
+  // 1. Log in to the real console via WebAuthn and open the subscriber (audio-feed-ebyy).
+  const admin = await openTab(`${h.base}`);
+  await send("WebAuthn.enable", {}, admin);
+  await send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  }, admin);
+
+  const users = await (await fetch(`${h.base}/api/admin/users`, {
+    headers: { "x-admin-token": "harness-admin" },
+  })).json();
+  const user = users.users.find((u: { email: string }) => u.email === "paul@example.com");
+  const setupRes = await fetch(`${h.base}/api/admin/users/${user.id}/setup-link`, {
+    method: "POST",
+    headers: { "x-admin-token": "harness-admin" },
+  });
+  const setupUrl = (await setupRes.json()).url;
+
+  await send("Page.navigate", { url: setupUrl }, admin);
+  await waitFor(admin, `!document.getElementById("createPasskey")?.disabled`);
+  await evaluate(admin, `document.getElementById("createPasskey").click()`);
+  await waitFor(admin, `location.pathname === "/account"`);
+
+  await send("Page.navigate", { url: `${h.base}/admin` }, admin);
   await waitFor(
     admin,
     `[...document.querySelectorAll('#usersBody button')].some(b => b.textContent === 'Manage')`,
@@ -192,8 +210,27 @@ try {
   const feedTab = await openTab(feedUrl);
   await screenshot(feedTab, "02-feed-before");
 
-  // 2. Click Regenerate on the outdated episode; the confirm dialog is accepted.
+  // 2. Click Regenerate on the outdated episode; the HTML dialog is accepted.
   await evaluate(admin, `${episodeRow(OLD_TITLE)}.querySelector('button').click()`);
+  await waitFor(admin, `document.getElementById("confirmDialog")?.open`);
+
+  const dialogMessage = await evaluate(
+    admin,
+    `document.getElementById("confirmMessage")?.textContent`,
+  );
+  dialogs.push(dialogMessage);
+
+  // Click the OK button and explicitly dispatch the close event if CDP drops it (audio-feed-ebyy)
+  await evaluate(
+    admin,
+    `
+    const dialog = document.getElementById("confirmDialog");
+    const okBtn = document.getElementById("confirmOkBtn");
+    okBtn.click();
+    
+  `,
+  );
+
   await waitFor(admin, `${episodeRow(OLD_TITLE)}?.cells[2].textContent === 'regenerating'`);
   check(
     "confirm dialog raised and states the spend",
