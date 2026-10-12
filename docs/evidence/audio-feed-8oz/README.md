@@ -3,6 +3,28 @@
 - Capture: no assertions
 - Reason: Historical visual capture artifacts from regenerate button implementation (audio-feed-8oz). Generating script scripts/regenerate-browser-proof.ts is stale against current admin session/passkey auth and custom dialogs, crashing at removed admin-token inputs; script migration is held separately under fleet/ufg9 and blocked by audio-feed-ebyy.
 
+## What the historical run checked (not asserted now)
+
+The capture was produced once by a proof that ran ten checks, all of which passed on
+2026-10-11. They are listed here as the record of what the artifacts demonstrate, not as
+coverage: nothing checks them today, because the generating script is stale against the
+admin console's session/passkey auth and its custom dialogs.
+
+- before: counts
+- before: feed serves the old key
+- confirm dialog raised and states the spend
+- queued: feed still serves the old key, old audio plays
+- during synthesis: old audio still served
+- after: feed serves a NEW key, same GUID
+- after: old blob is gone
+- after: new audio plays
+- stub synthesizer called once
+- after: console shows it current
+
+Restoring these as live assertions requires the script work held under `fleet/ufg9` and
+the underlying blocker `audio-feed-ebyy`, not a change to this README.
+
+
 Historical capture artifacts from the original regenerate button implementation (audio-feed-8oz).
 The directory contains captured screenshots (`01-before.png` through `07-feed-after.png`) and
 historical `evidence.json`. It declares no live browser assertions because the generating proof script
