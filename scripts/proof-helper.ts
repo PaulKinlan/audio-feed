@@ -28,10 +28,53 @@ export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
 ): Promise<{ profileDir: string; cleanup: () => Promise<void> }> {
   const profileDir = await Deno.makeTempDir({ prefix });
+  let cleaned = false;
+
   return {
     profileDir,
     cleanup: async () => {
-      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+      if (cleaned) return;
+      const maxAttempts = 10;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          await Deno.remove(profileDir, { recursive: true });
+          cleaned = true;
+          return;
+        } catch (err) {
+          if (
+            err instanceof Deno.errors.NotFound ||
+            (err as Error)?.message?.includes("No such file or directory")
+          ) {
+            cleaned = true;
+            return;
+          }
+
+          lastError = err;
+          const msg = (err as Error)?.message ?? "";
+          const code = (err as { code?: string })?.code;
+          const isRetryable = err instanceof Deno.errors.Busy ||
+            code === "ENOTEMPTY" ||
+            code === "EBUSY" ||
+            msg.includes("Directory not empty") ||
+            msg.includes("os error 39") ||
+            msg.includes("os error 16") ||
+            msg.includes("Resource busy") ||
+            msg.includes("EBUSY");
+
+          if (!isRetryable || attempt === maxAttempts) {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+
+      throw new Error(
+        `Failed to clean up temp Chrome profile '${profileDir}': ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+      );
     },
   };
 }
@@ -161,4 +204,301 @@ export async function spawnHarness(
     `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}.\n` +
       `Assigned port: ${assignedPort}\nStdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
   );
+}
+
+export interface CheckFailure {
+  name: string;
+  detail?: string;
+}
+
+export interface Checker {
+  check: (name: string, pass: boolean, detail?: string) => boolean;
+  failures: CheckFailure[];
+  finish: () => void;
+}
+
+export function createChecker(): Checker {
+  const failures: CheckFailure[] = [];
+
+  const check = (name: string, pass: boolean, detail?: string): boolean => {
+    const status = pass ? "PASS" : "FAIL";
+    const line = detail !== undefined ? `${status}  ${name}  ${detail}` : `${status}  ${name}`;
+    console.log(line);
+    if (!pass) {
+      failures.push({ name, detail });
+    }
+    return pass;
+  };
+
+  const finish = (): void => {
+    if (failures.length > 0) {
+      const summary = failures
+        .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
+        .join("; ");
+      throw new Error(`Checker failed ${failures.length} check(s): ${summary}`);
+    }
+  };
+
+  return { check, failures, finish };
+}
+
+export function assertVisibleExpression(selector: string): string {
+  return `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  if (!el) {
+    return {
+      found: false,
+      scrollWidth: 0,
+      clientWidth: 0,
+      offsetHeight: 0,
+      rectWidth: 0,
+      rectHeight: 0,
+      inViewport: false,
+    };
+  }
+  const rect = el.getBoundingClientRect();
+  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const inViewport = (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.bottom > 0 &&
+    rect.right > 0 &&
+    rect.top < vh &&
+    rect.left < vw
+  );
+  return {
+    found: true,
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+    offsetHeight: el.offsetHeight,
+    rectWidth: rect.width,
+    rectHeight: rect.height,
+    inViewport,
+  };
+})()`;
+}
+
+export interface ElementMeasurement {
+  found: boolean;
+  scrollWidth: number;
+  clientWidth: number;
+  offsetHeight: number;
+  rectWidth: number;
+  rectHeight: number;
+  inViewport: boolean;
+}
+
+export function isVisible(
+  measurement: ElementMeasurement,
+): { visible: boolean; reason: string } {
+  if (!measurement.found) {
+    return { visible: false, reason: "Element not found" };
+  }
+  if (
+    measurement.rectWidth <= 0 ||
+    measurement.rectHeight <= 0 ||
+    measurement.offsetHeight <= 0
+  ) {
+    return { visible: false, reason: "Element has zero-size rendered box" };
+  }
+  if (measurement.scrollWidth > measurement.clientWidth + 1) {
+    return {
+      visible: false,
+      reason:
+        `Element content is clipped: scrollWidth (${measurement.scrollWidth}) > clientWidth + 1 (${
+          measurement.clientWidth + 1
+        })`,
+    };
+  }
+  if (!measurement.inViewport) {
+    return { visible: false, reason: "Element is outside viewport" };
+  }
+  return {
+    visible: true,
+    reason: "Element is rendered, visible in viewport, and not clipped",
+  };
+}
+
+export interface EvidenceSection {
+  heading: string;
+  body: string;
+}
+
+export interface EvidenceReadmeOptions {
+  dir: string;
+  title: string;
+  script?: string;
+  asserts?: string[];
+  capture?: boolean | string;
+  captureReason?: string;
+  sections?: EvidenceSection[];
+  allowLocalhost?: boolean;
+}
+
+export async function writeEvidenceReadme(
+  options: EvidenceReadmeOptions,
+): Promise<string> {
+  const isCapture = Boolean(options.capture);
+  let captureReason = "";
+  if (isCapture) {
+    if (typeof options.capture === "string" && options.capture.trim().length > 0) {
+      captureReason = options.capture.trim();
+    } else if (
+      typeof options.captureReason === "string" &&
+      options.captureReason.trim().length > 0
+    ) {
+      captureReason = options.captureReason.trim();
+    } else {
+      throw new Error("capture: true requires a mandatory one-line reason");
+    }
+
+    if (captureReason.includes("\n") || captureReason.includes("\r")) {
+      throw new Error("capture reason must be a single line");
+    }
+  }
+
+  let cleanedAsserts: string[] = [];
+  if (!isCapture) {
+    if (!options.asserts || !Array.isArray(options.asserts) || options.asserts.length === 0) {
+      throw new Error(
+        "writeEvidenceReadme requires either a non-empty asserts array or capture: true with a reason",
+      );
+    }
+    cleanedAsserts = options.asserts.map((a) => a.trim()).filter((a) => a.length > 0);
+    if (cleanedAsserts.length === 0) {
+      throw new Error("writeEvidenceReadme requires a non-empty asserts array");
+    }
+    if (!options.script || !options.script.trim()) {
+      throw new Error(
+        "writeEvidenceReadme with asserts requires a script (e.g. 'scripts/my-proof.ts')",
+      );
+    }
+  }
+
+  const lines: string[] = [`# ${options.title.trim()}`, ""];
+
+  if (options.script?.trim()) {
+    lines.push(`- Script: ${options.script.trim()}`);
+  }
+
+  if (isCapture) {
+    lines.push("- Capture: no assertions");
+    lines.push("");
+    lines.push(captureReason);
+  } else {
+    lines.push(`- Asserts: ${cleanedAsserts.join("; ")}`);
+  }
+
+  if (options.sections && options.sections.length > 0) {
+    for (const section of options.sections) {
+      lines.push("");
+      lines.push(`## ${section.heading.trim()}`);
+      lines.push(section.body.trim());
+    }
+  }
+  lines.push("");
+
+  const content = lines.join("\n");
+
+  if (!options.allowLocalhost) {
+    const localhostMatch = content.match(/(?:https?:\/\/)?(?:localhost|127\.0\.0\.1):\d+/i);
+    if (localhostMatch) {
+      throw new Error(
+        `Evidence README cannot contain ephemeral localhost URL '${
+          localhostMatch[0]
+        }'. Proof docs must not hardcode ephemeral ports. Pass allowLocalhost: true if strictly required.`,
+      );
+    }
+  }
+
+  const shaMatch = content.match(/(?<![\w-])([0-9a-fA-F]{7,40})(?![\w-])/);
+  if (shaMatch) {
+    throw new Error(
+      `Evidence README cannot contain bare commit SHA token '${
+        shaMatch[0]
+      }'. Docs must name the command that regenerates the artifact, not a sha that goes stale.`,
+    );
+  }
+
+  await Deno.mkdir(options.dir, { recursive: true });
+  const cleanDir = options.dir.replace(/\/+$/, "");
+  const readmePath = `${cleanDir}/README.md`;
+  await Deno.writeTextFile(readmePath, content);
+  return readmePath;
+}
+
+export interface InProcessServerOptions {
+  hostname?: string;
+  publicBaseUrl?: string;
+  allowedHosts?: string[];
+}
+
+export interface InProcessServer {
+  port: number;
+  base: string;
+  shutdown: () => Promise<void>;
+}
+
+export function startInProcessServer(
+  handler: (req: Request, info: Deno.ServeHandlerInfo) => Response | Promise<Response>,
+  options: InProcessServerOptions = {},
+): InProcessServer {
+  const hostname = options.hostname ?? "127.0.0.1";
+
+  const wrappedHandler = (
+    req: Request,
+    info: Deno.ServeHandlerInfo,
+  ): Response | Promise<Response> => {
+    if (options.allowedHosts && options.allowedHosts.length > 0) {
+      const url = new URL(req.url);
+      const host = url.hostname;
+      const reqHostHeader = req.headers.get("host")?.split(":")[0] ?? host;
+      const isAllowed = options.allowedHosts.some(
+        (h) => h === host || h === reqHostHeader || h === "*",
+      );
+      if (!isAllowed) {
+        return new Response("Forbidden: host not allowed", { status: 403 });
+      }
+    }
+    return handler(req, info);
+  };
+
+  const server = Deno.serve(
+    {
+      port: 0,
+      hostname,
+      onListen: () => {},
+    },
+    wrappedHandler,
+  );
+
+  const port = (server.addr as Deno.NetAddr).port;
+  let base: string;
+  if (options.publicBaseUrl) {
+    base = options.publicBaseUrl.includes(":0")
+      ? options.publicBaseUrl.replace(":0", `:${port}`)
+      : options.publicBaseUrl;
+  } else {
+    const baseHost = hostname === "0.0.0.0" ? "127.0.0.1" : hostname;
+    base = `http://${baseHost}:${port}`;
+  }
+
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (timeoutMs = 5000): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      try {
+        await Promise.race([
+          server.shutdown(),
+          new Promise((r) => setTimeout(r, timeoutMs)),
+        ]);
+      } catch {
+        // idempotent and safe
+      }
+    })();
+    return shutdownPromise;
+  };
+
+  return { port, base, shutdown };
 }

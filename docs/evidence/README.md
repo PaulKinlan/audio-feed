@@ -25,3 +25,12 @@ Storing evidence outside git (an R2 bucket with URLs recorded on the bead) would
 of the tree entirely, but it moves the Functional Verification Mandate's proof behind a bucket's
 availability and retention policy, and beads would point at URLs that can rot. That is a coordinator
 decision, not a lane decision — noted on audio-feed-39k1 for the architecture track.
+
+## Proof harness (audio-feed-lru1)
+
+New browser evidence is written on the shared proof harness (`scripts/proof-helper.ts`). Hand-rolled
+CDP proofs require a stated reason in their header that the independent reviewer checks. Profile
+teardown, the run-failing assertion helper (`createChecker()`), DOM visibility and clipping
+measurement (`assertVisibleExpression()`, `isVisible()`), and evidence README declarations
+(`writeEvidenceReadme()`) all come from the harness. Legitimate escape hatches remain: repro scripts
+with no browser, and live-proxy checks, are not required to use the harness.
