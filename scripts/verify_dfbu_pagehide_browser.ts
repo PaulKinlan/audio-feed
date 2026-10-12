@@ -136,7 +136,18 @@ try {
     await sleep(500);
 
     // 7. Navigate back via history.back() to drive real bfcache restoration
-    await js(`history.back()`);
+    try {
+      await js(`history.back()`);
+    } catch {
+      const hist = (await cdp("Page.getNavigationHistory")) as {
+        currentIndex: number;
+        entries: Array<{ id: number; url: string }>;
+      };
+      const prev = hist.entries[hist.currentIndex - 1];
+      if (prev) {
+        await cdp("Page.navigateToHistoryEntry", { entryId: prev.id });
+      }
+    }
     await until(
       `document.querySelectorAll("#episodes .episode").length === 5`,
       "bfcache restored",
@@ -162,10 +173,13 @@ try {
       `pagehide persisted: ${pagehideEvent?.persisted}, stored: ${lifecycle.storedPos}s`,
     );
 
+    const hasAudioTimeRestored = typeof lifecycle.audioTime === "number" &&
+      Math.abs(lifecycle.audioTime - 42) <= 1;
+
     check(
-      "history.back() restores page from bfcache with pageshow persisted=true",
-      Boolean(pageshowEvent && pageshowEvent.persisted === true),
-      `pageshow persisted: ${pageshowEvent?.persisted}, audio currentTime: ${lifecycle.audioTime}s`,
+      "history.back() restores page from bfcache with pageshow persisted=true and preserves in-memory playback time",
+      Boolean(pageshowEvent && pageshowEvent.persisted === true && hasAudioTimeRestored),
+      `pageshow persisted: ${pageshowEvent?.persisted}, audio currentTime: ${lifecycle.audioTime}s (target ~42s)`,
     );
 
     // 8. Reload page and check UI resume affordance
