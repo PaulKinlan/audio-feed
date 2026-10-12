@@ -28,8 +28,8 @@ obligations, each named after the defect it prevents:
 
 ### Declare it in the README
 
-Every `docs/evidence/<bead>/README.md` states its own coverage in two lines (or three when executed by a test suite), so a reviewer can judge
-the evidence without reading the script:
+Every `docs/evidence/<bead>/README.md` states its own coverage in two lines (or three when executed
+by a test suite), so a reviewer can judge the evidence without reading the script:
 
 ```
 - Script: scripts/<proof>.ts          # the tool, omitted only for evidence with no script
@@ -110,6 +110,36 @@ with no browser, and live-proxy checks, are not required to use the harness.
   pairing it with a guaranteed `finally` wrapper (`withChrome`): the harness owns the browser and
   profile lifecycle, so cleanup is unconditionally attempted before any assertion or body failure
   surfaces.
+
+## Determinism disposition per proof (audio-feed-959n)
+
+Some proofs capture a render that is not bit-reproducible. That is not automatically a defect, but
+pretending it does not happen is: a reviewer who cannot tell a correct capture from a lucky one
+cannot review it at all. So every proof gets ONE row here, and the row names its disposition AND the
+evidence for that disposition. This is deliberately not a survey - a survey cannot be checked, a row
+that carries its own measurement can.
+
+THREE DISPOSITIONS, AND NOTHING IN BETWEEN:
+
+- **deterministic** - re-running produces the same artifact, measured by capturing twice and
+  comparing.
+- **spread-declared** - the artifact varies, the variation is MEASURED, and the proof's own README
+  states the spread so a later reader knows what a re-run can and cannot reproduce.
+- **scaffolding** - the artifact is a capture of the harness itself rather than of product
+  behaviour, and is labelled as such. These are the ones to delete or fold into a real assertion,
+  not to keep.
+
+| proof            | disposition         | evidence                                                                                                                                                                                                                                                                                                                                |
+| ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `audio-feed-8eh` | **spread-declared** | THREE DISTINCT IMAGES IN FOUR CAPTURES AT ONE COMMIT (audio-feed-rxo1, filed after a reviewer could not re-derive the committed artifact). The spread is measured; what remains is for `audio-feed-8eh`'s own README to state "three of four captures differ", so the next reviewer reads this table's row instead of rediscovering it. |
+
+**NOT YET CLASSIFIED, AND THAT IS THE HONEST STATE OF THIS TABLE:** the remaining proofs have no row
+here yet, and every one of them needs its own measurement rather than an inference from the shape of
+its script. Rows are added when a proof is measured, never in bulk - a table filled in by inspection
+would be exactly the "satisfied by construction rather than observation" defect this section exists
+to prevent. `deno task evidence` runs every declared proof, so the measurement for a row is a run of
+that task twice and a comparison of the artifacts, which is a bounded and repeatable experiment
+rather than an argument.
 
 ## Checking a change to a proof script (audio-feed-coao)
 
