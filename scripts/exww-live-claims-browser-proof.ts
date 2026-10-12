@@ -35,6 +35,15 @@ import { recordRun } from "../src/stats.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { EVIDENCE_PNG_BUDGET_BYTES } from "./evidence-compress.ts";
+import {
+  MIN_SECTION_BAND_DISTRIBUTION,
+  MIN_SECTION_CONTENT_RETENTION,
+  MIN_SECTION_FADE_LEGIBILITY,
+  pixelBandDistributions,
+  pixelContrast,
+  pixelDistribution,
+  sectionRetainsInk,
+} from "./exww-section-measures.ts";
 
 /**
  * PNG pixel height, read from the IHDR chunk. Used to prove what a committed capture COVERS rather
@@ -46,113 +55,6 @@ function pngSize(bytes: Uint8Array): { width: number; height: number } {
     width: (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!,
     height: (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!,
   };
-}
-
-/**
- * Contrast range (maxima minus minima in greyscale) of a captured crop, read out of the PNG
- * itself (audio-feed-7yom, audio-feed-l11d).
- *
- * A blank clip measures 0: a flat single-colour clip has maxima == minima.
- * A faded clip at opacity 0.35 scales the contrast range proportionally down to 0.312 (and
- * opacity 0.15 down to 0.137). Standard deviation scaled down too slowly (measuring ~0.067
- * at opacity 0.35 against a 0.01 floor), passing washed-out captures that satisfied presence
- * but failed legibility. Contrast range scales proportionally with opacity, so a floor of 0.5
- * cleanly separates legible captures (0.880) from washed-out captures (0.312, 0.137).
- *
- * Cropped to the rectangle the caller names rather than to the whole clip: the clip deliberately
- * includes 8px of the PREVIOUS section above it, and those pixels are not the section's.
- */
-async function pixelContrast(
-  path: string,
-  rect: { x: number; y: number; width: number; height: number },
-): Promise<number> {
-  const out = await new Deno.Command("convert", {
-    args: [
-      path,
-      "-crop",
-      `${Math.max(1, Math.round(rect.width))}x${Math.max(1, Math.round(rect.height))}+${
-        Math.max(0, Math.round(rect.x))
-      }+${Math.max(0, Math.round(rect.y))}`,
-      "+repage",
-      "-colorspace",
-      "gray",
-      "-format",
-      "%[fx:maxima-minima]",
-      "info:",
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!out.success) {
-    throw new Error(`convert could not measure ${path}: ${new TextDecoder().decode(out.stderr)}`);
-  }
-  const contrast = Number(new TextDecoder().decode(out.stdout).trim());
-  if (!Number.isFinite(contrast)) {
-    throw new Error(
-      `convert returned ${JSON.stringify(out.stdout)} as the pixel contrast of ${path}`,
-    );
-  }
-  return contrast;
-}
-
-/**
- * Normalized greyscale standard deviation over exactly the same section rectangle as pixelContrast.
- * Unlike extrema, this falls when most of a section is covered but some dark ink survives.
- */
-async function pixelDistribution(
-  path: string,
-  rect: { x: number; y: number; width: number; height: number },
-): Promise<number> {
-  const out = await new Deno.Command("convert", {
-    args: [
-      path,
-      "-crop",
-      `${Math.max(1, Math.round(rect.width))}x${Math.max(1, Math.round(rect.height))}+${
-        Math.max(0, Math.round(rect.x))
-      }+${Math.max(0, Math.round(rect.y))}`,
-      "+repage",
-      "-colorspace",
-      "gray",
-      "-format",
-      "%[fx:standard_deviation]",
-      "info:",
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!out.success) {
-    throw new Error(`convert could not measure ${path}: ${new TextDecoder().decode(out.stderr)}`);
-  }
-  const distribution = Number(new TextDecoder().decode(out.stdout).trim());
-  if (!Number.isFinite(distribution)) {
-    throw new Error(
-      `convert returned ${JSON.stringify(out.stdout)} as pixel distribution of ${path}`,
-    );
-  }
-  return distribution;
-}
-
-/**
- * Faded-section floor: four committed section crops measure 0.880095 in contrast range;
- * opacity 0.35 measures 0.312 and 0.15 measures 0.137. The 0.5 floor leaves
- * 0.188 above the strongest fade and 0.380 below the clean captures.
- */
-const MIN_SECTION_FADE_LEGIBILITY = 0.5;
-
-/**
- * Partial-content-loss floor: the four committed section crops have normalized standard
- * deviations 0.191256, 0.193932, 0.200255, 0.167164. An 85%-covered crop of the first
- * capture, retaining dark ink in its left 15%, measures 0.0884339 while still passing
- * the fade floor (range 0.881773). The geometric mean of the lowest clean and the
- * mutant is 0.1215852148, rounded DOWN to 0.12: clean margin >= 0.047164, mutant
- * margin 0.0315661. This uses the separated distributions, not the old 0.01 floor.
- */
-const MIN_SECTION_CONTENT_RETENTION = 0.12;
-
-/** Predicate for two independent failure modes of the section's own pixels. */
-function sectionShowsReadmeClaim(contrast: number, distribution: number): boolean {
-  return contrast >= MIN_SECTION_FADE_LEGIBILITY &&
-    distribution >= MIN_SECTION_CONTENT_RETENTION;
 }
 
 /**
@@ -739,19 +641,26 @@ const proof = runProof("audio-feed-exww", async (checker) => {
             ? 0
             : await pixelDistribution(path, inImagePixels(sectionRect, clip.scale))
           : Number.NaN;
+        const bands = sectionInClip
+          ? await pixelBandDistributions(path, inImagePixels(sectionRect, clip.scale))
+          : [];
         const failedFloor = contrast < MIN_SECTION_FADE_LEGIBILITY
           ? "faded section"
           : distribution < MIN_SECTION_CONTENT_RETENTION
           ? "partial content loss"
+          : bands.some((band) => band < MIN_SECTION_BAND_DISTRIBUTION)
+          ? "height-band content loss"
           : "none";
         checker.check(
-          `${name} shows what the README claims`,
-          sectionInClip && sectionShowsReadmeClaim(contrast, distribution),
+          `${name} is not faded or mostly covered and has ink in each height band`,
+          sectionInClip && sectionRetainsInk(contrast, distribution, bands),
           sectionInClip
             ? `section's own rows and columns: contrast range ${contrast.toFixed(8)} ` +
               `(faded section floor ${MIN_SECTION_FADE_LEGIBILITY}); normalized standard deviation ` +
               `${distribution.toFixed(8)} (partial content loss floor ` +
-              `${MIN_SECTION_CONTENT_RETENTION}); failed floor: ${failedFloor}`
+              `${MIN_SECTION_CONTENT_RETENTION}); height-band standard deviations ` +
+              `${bands.map((band) => band.toFixed(8)).join(", ")} ` +
+              `(height-band floor ${MIN_SECTION_BAND_DISTRIBUTION}); failed floor: ${failedFloor}`
             : `the section's box x=${sectionRect.x}..${sectionRect.x + sectionRect.width} ` +
               `y=${sectionRect.y}..${
                 sectionRect.y + sectionRect.height
@@ -1064,10 +973,10 @@ const proof = runProof("audio-feed-exww", async (checker) => {
           "04-recent-failures-real-provider-error.png captured the section's own box, not another region of the page",
           '04-recent-failures-real-provider-error.png has "provider status 500" inside the captured pixels, not merely painted somewhere on the page',
           '04-recent-failures-real-provider-error.png shows ink where "provider status 500" is painted, not a background-coloured claim',
-          "01-live-lease-expiries-worker-healthy.png shows what the README claims",
-          "02-live-lease-expiries-worker-unavailable.png shows what the README claims",
-          "03-live-lease-expiries-store-unreachable.png shows what the README claims",
-          "04-recent-failures-real-provider-error.png shows what the README claims",
+          "01-live-lease-expiries-worker-healthy.png is not faded or mostly covered and has ink in each height band",
+          "02-live-lease-expiries-worker-unavailable.png is not faded or mostly covered and has ink in each height band",
+          "03-live-lease-expiries-store-unreachable.png is not faded or mostly covered and has ink in each height band",
+          "04-recent-failures-real-provider-error.png is not faded or mostly covered and has ink in each height band",
           '01-live-lease-expiries-worker-healthy.png shows "LEASE EXPIRED with no terminal write" actually rendered, not just present in the DOM',
           '02-live-lease-expiries-worker-unavailable.png shows "computed from the deployment lease" actually rendered, not just present in the DOM',
           '03-live-lease-expiries-store-unreachable.png shows "Unavailable — the episode store could not be read" actually rendered, not just present in the DOM',
@@ -1156,14 +1065,20 @@ WRONG SCALE FAILS rather than passing at a size no README entry describes, and t
 section's rendered bottom so a capture that stops short also FAILS (audio-feed-u3m1, audio-feed-9zgi);
 (2) the file is within the repository's 150KB budget, and the proof
 compresses its own output with the repository's own recipe (\`convert -strip -colors 256 PNG8:\`) so a
-replay does not write over-budget PNGs (audio-feed-vvo7); (3) the section shows what the README claims -
-two independent floors over the section's OWN rows and columns, measured back out of the PNG:
+replay does not write over-budget PNGs (audio-feed-vvo7); (3) the section is not faded or
+mostly covered and has ink in each height band - the original two independent floors over
+the section's OWN rows and columns are retained, measured back out of the PNG:
 the faded-section contrast-range floor 0.5 separates four clean captures (0.880095) from opacity
 0.35 (0.312) and 0.15 (0.137); the partial-content-loss normalized standard-deviation floor
 0.12 separates the least-distributed clean crop (0.167164) from an 85%-covered crop (0.0884)
 whose surviving ink still passes the range floor (0.8818). The latter floor is the geometric
 mean of the clean minimum and mutant value, rounded down (clean margin 0.0472; mutant margin
-0.0316). Neither floor alone catches both failure shapes (audio-feed-l11d); and (4) the text each
+0.0316). Neither floor alone catches both failure shapes (audio-feed-l11d). A third,
+height-band standard-deviation floor 0.04 splits that same section into four equal-height
+bands: the lowest committed band is about 0.09 (margin at least 0.05), while covering the
+bottom half of the healthy capture with background leaves two bands below 0.0004. This adds
+one ImageMagick invocation per capture; it does not prove ink identity or reject random
+noise, and localized losses that spare ink in every band may evade it; and (4) the text each
 claim names is in a PAINTED element inside that section - no \`display:none\`, \`visibility:hidden\`,
 \`opacity:0\` or empty box on that element or any ancestor up to the section - because hiding a section
 leaves textContent and layout intact while the image records background; (5) that painted text lies
@@ -1175,9 +1090,9 @@ text is painted in the page's own background colour, and < 0.5 when washed out; 
 and (6) are refused outright when the section's or the claim's box is not inside the captured clip,
 rather than reporting someone else's pixels as this section's content. A small overlay covering just the named claim may be caught by its own ink check; arbitrary
 local occlusions are not guaranteed to lower the whole-section distribution below its floor.
-The partial-content-loss floor is evidence for the measured 85%-covered shape, NOT proof that every
-arbitrary local occlusion will fail - a smaller local occlusion can still evade a whole-section
-distributional statistic.
+The partial-content-loss floor is evidence for the measured 85%-covered shape; the height-band
+floor catches the measured bottom-half occlusion, NOT every arbitrary local occlusion. A smaller
+occlusion or one leaving ink in every band can still evade the pixel statistics.
 
 - \`01-live-lease-expiries-worker-healthy.png\`: the lease table with a held upload and an expired
   upload (called out AND timed).
