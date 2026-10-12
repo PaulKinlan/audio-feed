@@ -1,5 +1,8 @@
 # linkbacks — read-along links (audio-feed-585)
 
+- Capture: no assertions
+- Reason: Visual viewport screenshot (`player-read-along.png`) driven manually via Chrome against `scripts/listen-harness.ts` recording linkback presence; URL validation and route behavior are asserted in `tests/listen_test.ts`.
+
 Driven in Chrome on the branch, not inferred from a route test.
 
 - Harness: `scripts/listen-harness.ts` on http://localhost:8177/listen/harness-token (5 episodes,

@@ -1,5 +1,8 @@
 # audio-feed-c5n item 1 — the dock reserve, measured
 
+- Capture: no assertions
+- Reason: Visual comparison screenshots (`dock-reserve-11.75rem-OLD.jpg`, `dock-reserve-13.5rem-NEW.jpg`) driven via Chrome DevTools Protocol against `scripts/listen-harness.ts` recording dock height reserve clearance when `ResizeObserver` is deleted.
+
 Method: `scripts/listen-harness.ts` served on `http://localhost:8155`, driven over the
 Chrome DevTools Protocol at 1280x900, 360x740 and 320x600. `window.ResizeObserver` was
 deleted before any page script ran, so the CSS fallback is what applies, and the episode
