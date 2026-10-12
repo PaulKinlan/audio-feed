@@ -88,6 +88,23 @@ export interface ListPendingResult {
   cursor?: string;
 }
 
+export interface ListSynthesizingOptions {
+  /** Maximum episodes returned. Deliberately a bound, not a cursor: the caller wants a snapshot. */
+  limit?: number;
+}
+
+export interface ListSynthesizingResult {
+  /** Live claims only, soonest lease expiry first (src/types.ts `oldestClaimFirst`). */
+  episodes: Episode[];
+  /**
+   * True when the store held MORE live claims than `limit` — never silently dropped.
+   *
+   * The truncation happens after the ordering, so the rows present are the ones with the least lease
+   * left and `capped` describes what was cut from the far end.
+   */
+  capped: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Operational stats (audio-feed-ndc)
 // ---------------------------------------------------------------------------
@@ -356,6 +373,27 @@ export interface EpisodeRepository {
    * queue key, so an idle new-work segment simply falls through to them.
    */
   listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult>;
+  /**
+   * Every episode a worker holds RIGHT NOW, soonest lease expiry first (audio-feed-exww).
+   *
+   * `listPendingEpisodes` deliberately EXCLUDES a live claim: it answers "what may be worked"
+   * (pending work, plus synthesizing episodes whose lease already expired), so a claim inside its
+   * lease is not in it. That leaves no way to answer "who is holding what, in which phase, and when
+   * does the lease stop being honoured" — the question the admin status page exists for, and the
+   * one that must still be answerable while the workers are unreachable.
+   *
+   * The read is the episode index the claim transitions already maintain, not the worker: a page
+   * that asked the worker what it held would be blank in exactly the incident it is for. Only
+   * `synthesizing` episodes with a claim are returned, so the listing cannot contain an episode the
+   * queue is still free to hand to another worker.
+   *
+   * THE CAP IS APPLIED AFTER THE ORDERING (audio-feed-kxhq): `limit` truncates the ordered listing,
+   * never the underlying index scan, so "soonest lease expiry first" is true of the rows returned at
+   * any `limit` and `capped` says whether anything was dropped. An implementation that truncated in
+   * index order would drop the most recently created episodes' claims, which is where a stranded
+   * long-running upload is most likely to be.
+   */
+  listSynthesizingEpisodes(opts?: ListSynthesizingOptions): Promise<ListSynthesizingResult>;
   /**
    * Take exclusive ownership of an episode for synthesis, atomically.
    *

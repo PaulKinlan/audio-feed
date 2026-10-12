@@ -20,6 +20,8 @@ import type {
   EpisodeRepository,
   ListPendingOptions,
   ListPendingResult,
+  ListSynthesizingOptions,
+  ListSynthesizingResult,
   MetadataStore,
 } from "../mod.ts";
 import type { KvCore } from "./core.ts";
@@ -27,6 +29,7 @@ import {
   DEFAULT_CLAIM_LEASE_MS,
   isClaimExpired,
   isPublishable,
+  oldestClaimFirst,
   unsynthesized,
   utcDayKey,
 } from "../../types.ts";
@@ -317,6 +320,47 @@ export function createEpisodesRepository(
       return {
         episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
         cursor: nextCursor,
+      };
+    },
+    /**
+     * The live lease rows (audio-feed-exww): every `synthesizing` episode a worker holds.
+     *
+     * The `synthesizing_episodes` index is written by the claim transitions themselves, so this is
+     * durable claim state and not a reconstruction: it answers "who holds what, in which phase"
+     * even when the log store is unreadable or no worker ever came back to report on itself.
+     *
+     * THE CAP IS APPLIED AFTER THE ORDERING (audio-feed-kxhq). The index iterates in episode
+     * `createdAt` order, and this listing promises OLDEST CLAIM FIRST, so truncating the scan before
+     * sorting would drop whichever claims happen to belong to the most recently created episodes —
+     * including, on a busy deployment, the stranded long-running upload the page exists to show. A
+     * status page that answers "nobody looks stuck" because it cut the list at the wrong end is
+     * worse than no page. So the whole live-claim set is read and ordered first, and only then
+     * truncated; `capped` says whether anything was dropped.
+     *
+     * The scan is unbounded by design: its size is the number of episodes a worker holds right now,
+     * which is the number of running workers, not the size of the queue or the catalogue.
+     */
+    async listSynthesizingEpisodes(
+      opts: ListSynthesizingOptions = {},
+    ): Promise<ListSynthesizingResult> {
+      const limit = opts.limit ?? 50;
+      const episodes: Episode[] = [];
+
+      for await (
+        const entry of core.kv.list<{ userId: string; id: string }>({
+          prefix: ["synthesizing_episodes"],
+        })
+      ) {
+        const { userId, id } = entry.value;
+        const episode = await host().getEpisode(userId, id);
+        if (!episode || episode.status !== "synthesizing") continue;
+        episodes.push(episode);
+      }
+
+      episodes.sort(oldestClaimFirst);
+      return {
+        episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
+        capped: Number.isFinite(limit) && episodes.length > limit,
       };
     },
     /**

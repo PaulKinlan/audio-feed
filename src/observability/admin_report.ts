@@ -39,6 +39,7 @@
  */
 
 import type { Episode } from "../types.ts";
+import { DEFAULT_CLAIM_LEASE_MS } from "../types.ts";
 import type { LogRecord, RunRecord } from "../storage/mod.ts";
 import type { Stores } from "../config.ts";
 import { CLAIM_LIFECYCLE_EVENT } from "../storage/episode_events.ts";
@@ -49,6 +50,11 @@ export const REPORT_WINDOW = 400;
 export const REPORT_FAILURE_LIMIT = 25;
 /** Claimable episodes counted before the count is reported as "at least this many". */
 export const REPORT_QUEUE_CAP = 100;
+/**
+ * Live claims listed before the listing says it is truncated (audio-feed-exww). A worker holds one
+ * episode at a time, so this bounds a pathological deployment rather than a normal one.
+ */
+export const REPORT_CLAIM_CAP = 50;
 /** Episode records fetched for the failures shown, so the page cannot fan out unboundedly. */
 const EPISODE_LOOKUPS = 20;
 /** How often the worker is expected to run, for the draining verdict. Cron is every 2 minutes. */
@@ -91,6 +97,42 @@ export interface ClaimAttempt {
   durationMs?: number;
   /** Terminal-upload retry count recorded by the worker when yielding (audio-feed-lqd6). */
   uploadRetry?: number;
+}
+
+/**
+ * One episode a worker holds RIGHT NOW, as a lease row (audio-feed-exww).
+ *
+ * This is the page's primary content: Paul's ask was to see job state without asking anyone, and the
+ * lease expiry in `uploading_audio` is the fact that says whether the audio upload is still moving
+ * or was left behind by a worker that never came back.
+ *
+ * EVERY field is read from the EPISODE RECORD — the durable write the claim transitions make — so a
+ * dead worker, an empty run history and an unreadable log store cannot empty this list. That is the
+ * whole design constraint: the page that reports broken workers must not be built on them.
+ */
+export interface LiveClaimRow {
+  episodeId: string;
+  userId: string;
+  title?: string;
+  /** The phase the worker last recorded. `uploading_audio` is the one an upload incident turns on. */
+  phase?: string;
+  claimedBy?: string;
+  claimedAt?: string;
+  lastHeartbeat?: string;
+  attempts?: number;
+  uploadRetry?: number;
+  /** The lease this claim was taken with, when its claim record was readable. */
+  leaseMs?: number;
+  /** True when `leaseMs` is the deployment DEFAULT rather than the claim's own recorded lease. */
+  leaseMsAssumed: boolean;
+  /** `claimedAt + leaseMs`. Absent only when `claimedAt` itself is unreadable. */
+  leaseExpiresAt?: string;
+  /** Has the lease stopped being honoured? `null` when it cannot be computed, never `false`. */
+  leaseExpired: boolean | null;
+  /** Milliseconds of lease left at report time; negative once expired. `null` when unknown. */
+  remainingMs: number | null;
+  /** `now - lastHeartbeat`, so a claim whose heartbeat stopped is visible even inside its lease. */
+  heartbeatAgeMs?: number;
 }
 
 /** One failure row, newest first. */
@@ -204,7 +246,7 @@ export interface ObservabilityReport {
    * statements, and a diagnostic page that confuses them sends the operator the wrong way
    * (audio-feed-ciuw). Empty means every read succeeded.
    */
-  readErrors: { store: "logs" | "queue" | "runs" | "episodes"; message: string }[];
+  readErrors: { store: "logs" | "queue" | "runs" | "episodes" | "claims"; message: string }[];
   window: {
     /** The oldest retained sequence in the store — what retention has NOT dropped. */
     oldestRetained: number;
@@ -214,6 +256,15 @@ export interface ObservabilityReport {
     recordsRead: number;
   };
   queue: QueueSnapshot;
+  /**
+   * The live lease rows, read from the EPISODE index (audio-feed-exww) — the page's primary
+   * content. Independent of the log store and of the worker: an empty array means every read
+   * succeeded and no worker holds a claim; `activeClaimsReadError` is how "I could not look" is
+   * told apart from "nobody holds one".
+   */
+  activeClaims: LiveClaimRow[];
+  activeClaimsCapped: boolean;
+  activeClaimsReadError?: string;
   /** Pending episodes deliberately requeued by a yielded claim — retrying, not failed (audio-feed-2sec). */
   retries: RetryingRow[];
   failures: FailureRow[];
@@ -495,6 +546,61 @@ export async function buildObservabilityReport(
     drain = "unknown";
   }
 
+  // audio-feed-exww: the live lease rows, read from the EPISODE index rather than from the log
+  // store or the worker. This is deliberately a SEPARATE read from the queue's: the queue asks a
+  // different question ("what may be worked") and returns only pending work and already-expired
+  // claims, so a claim inside its lease is invisible to it — exactly the claim the operator most
+  // needs to see while an upload sits in `uploading_audio`.
+  let liveClaimEpisodes: Episode[] | null = null;
+  let liveClaimsCapped = false;
+  let liveClaimsReadError: string | undefined;
+  try {
+    const live = await stores.metadata.listSynthesizingEpisodes({ limit: REPORT_CLAIM_CAP });
+    liveClaimEpisodes = live.episodes;
+    liveClaimsCapped = live.capped;
+  } catch (error) {
+    liveClaimsReadError = readFailure(error);
+    readErrors.push({ store: "claims", message: liveClaimsReadError });
+  }
+
+  const activeClaims: LiveClaimRow[] = (liveClaimEpisodes ?? []).map((episode) => {
+    // The claim's OWN recorded lease, when the claim record is still in the log window. The episode
+    // persists `claimedAt` but not the lease it was taken with (only one deployment lease exists in
+    // production), so the log record is the only place a non-default lease is recoverable — and when
+    // it is not recoverable the page says the expiry is computed from the default rather than
+    // presenting an assumption as the claim's own terms.
+    const attemptsForEpisode = attempts[episode.id] ?? [];
+    const current = attemptsForEpisode.find((row) => row.outcome === "in-flight") ??
+      attemptsForEpisode[attemptsForEpisode.length - 1];
+    const recordedLeaseMs = current?.leaseMs;
+    const leaseMs = recordedLeaseMs ?? DEFAULT_CLAIM_LEASE_MS;
+
+    const claimedAtMs = episode.claimedAt ? Date.parse(episode.claimedAt) : NaN;
+    const anchorKnown = Number.isFinite(claimedAtMs);
+    const expiryMs = anchorKnown ? claimedAtMs + leaseMs : NaN;
+    const heartbeatMs = episode.lastHeartbeat ? Date.parse(episode.lastHeartbeat) : NaN;
+
+    return {
+      episodeId: episode.id,
+      userId: episode.userId,
+      title: episode.title,
+      phase: episode.phase,
+      claimedBy: episode.claimedBy,
+      claimedAt: episode.claimedAt,
+      lastHeartbeat: episode.lastHeartbeat,
+      attempts: episode.attempts,
+      uploadRetry: episode.uploadRetry,
+      // No anchor means no expiry at all: reporting one from a date that cannot be parsed would be
+      // an invented fact about a lease.
+      leaseMs: anchorKnown ? leaseMs : undefined,
+      leaseMsAssumed: anchorKnown && recordedLeaseMs === undefined,
+      leaseExpiresAt: anchorKnown ? new Date(expiryMs).toISOString() : undefined,
+      leaseExpired: anchorKnown ? nowMs >= expiryMs : null,
+      remainingMs: anchorKnown ? expiryMs - nowMs : null,
+      heartbeatAgeMs: Number.isFinite(heartbeatMs) ? Math.max(0, nowMs - heartbeatMs) : undefined,
+    };
+  });
+
   return {
     generatedAt: new Date(nowMs).toISOString(),
     readErrors,
@@ -520,6 +626,9 @@ export async function buildObservabilityReport(
       drain,
     },
     retries,
+    activeClaims,
+    activeClaimsCapped: liveClaimsCapped,
+    activeClaimsReadError: liveClaimsReadError,
     failures,
     attempts,
     episodes,

@@ -22,6 +22,8 @@ import type {
   EpisodeQuery,
   ListPendingOptions,
   ListPendingResult,
+  ListSynthesizingOptions,
+  ListSynthesizingResult,
   LogBounds,
   LogQuery,
   LogRecord,
@@ -264,6 +266,11 @@ export class KvMetadataStore implements MetadataStore {
   }
   listPendingEpisodes(opts?: ListPendingOptions): Promise<ListPendingResult> {
     return this.repositories.episodes.listPendingEpisodes(opts);
+  }
+  listSynthesizingEpisodes(
+    opts?: ListSynthesizingOptions,
+  ): Promise<ListSynthesizingResult> {
+    return this.repositories.episodes.listSynthesizingEpisodes(opts);
   }
   claimEpisode(userId: string, episodeId: string, claim: EpisodeClaim): Promise<Episode | null> {
     return this.repositories.episodes.claimEpisode(userId, episodeId, claim);

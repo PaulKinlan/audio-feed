@@ -13,11 +13,13 @@ import {
 } from "../episode_events.ts";
 import type { Episode } from "../../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "../mod.ts";
+import type { ListSynthesizingOptions, ListSynthesizingResult } from "../mod.ts";
 import type { EpisodePage, EpisodePageResult } from "../mod.ts";
 import {
   DEFAULT_CLAIM_LEASE_MS,
   isClaimExpired,
   isPublishable,
+  oldestClaimFirst,
   unsynthesized,
 } from "../../types.ts";
 import {
@@ -178,6 +180,36 @@ export function createEpisodesRepository(
       }
 
       return { episodes, cursor: nextCursor };
+    },
+    /**
+     * The live lease rows (audio-feed-exww): every `synthesizing` episode a worker holds.
+     *
+     * Same contract as the KV adapter, and the conformance suite asserts the two agree on order and
+     * on `capped` — a listing that differed by adapter, or SELECTED a different subset at the cap,
+     * would make the admin page answer depending on which store the deployment happens to run.
+     *
+     * THE CAP IS APPLIED AFTER THE ORDERING (audio-feed-kxhq): the index iterates in episode
+     * `createdAt` order while the listing promises oldest CLAIM first, so the whole set is ordered
+     * before it is truncated. See the KV adapter for why this matters — truncating the wrong end can
+     * hide exactly the stranded upload the operator opened the page for.
+     */
+    async listSynthesizingEpisodes(
+      opts: ListSynthesizingOptions = {},
+    ): Promise<ListSynthesizingResult> {
+      const limit = opts.limit ?? 50;
+      const episodes: Episode[] = [];
+
+      for (const entry of state.synthesizingIndex) {
+        const ep = await host().getEpisode(entry.userId, entry.id);
+        if (!ep || ep.status !== "synthesizing") continue;
+        episodes.push(ep);
+      }
+
+      episodes.sort(oldestClaimFirst);
+      return {
+        episodes: Number.isFinite(limit) ? episodes.slice(0, limit) : episodes,
+        capped: Number.isFinite(limit) && episodes.length > limit,
+      };
     },
     /**
      * Single-threaded JS makes this trivially atomic: nothing can interleave

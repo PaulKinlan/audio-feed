@@ -32,6 +32,7 @@ import {
   buildObservabilityReport,
   type ClaimAttempt,
   type FailureRow,
+  type LiveClaimRow,
   type ObservabilityReport,
 } from "../observability/admin_report.ts";
 
@@ -275,6 +276,109 @@ export async function handleAdminObservability(
     : "no run recorded";
 
   const logsUnreadable = report.readErrors.some((failure) => failure.store === "logs");
+
+  // audio-feed-exww: the live lease rows. Read from the episode store, so this is the one section
+  // that is expected to keep rendering while the worker, the cron history and the log store are all
+  // unavailable.
+  const leaseExpiryCell = (claim: LiveClaimRow): string => {
+    if (!claim.leaseExpiresAt) {
+      return `<strong>Unknown</strong> <span class="muted">— this claim has no readable \`claimedAt\`, so no expiry can be computed</span>`;
+    }
+    const assumed = claim.leaseMsAssumed
+      ? ` <span class="muted">(computed from the deployment lease of ${
+        Math.round((claim.leaseMs ?? 0) / 60_000)
+      } min: this claim's own lease record is not in the retained log window)</span>`
+      : "";
+    return `${timeCell(claim.leaseExpiresAt)}${
+      claim.leaseExpired ? ` <strong>(expired)</strong>` : ""
+    }${assumed}`;
+  };
+
+  const remainingCell = (claim: LiveClaimRow): string => {
+    if (claim.remainingMs === null || claim.remainingMs === undefined) {
+      return `<span class="muted">—</span>`;
+    }
+    const magnitude = Math.abs(claim.remainingMs);
+    const amount = magnitude >= 60_000
+      ? `${Math.floor(magnitude / 60_000)} min`
+      : `${Math.round(magnitude / 1000)} s`;
+    return claim.remainingMs < 0 ? `<strong>expired ${amount} ago</strong>` : `${amount} left`;
+  };
+
+  const heartbeatCell = (claim: LiveClaimRow): string => {
+    if (!claim.lastHeartbeat) return `<span class="muted">—</span>`;
+    if (claim.heartbeatAgeMs === undefined) return timeCell(claim.lastHeartbeat);
+    const age = claim.heartbeatAgeMs >= 60_000
+      ? `${Math.floor(claim.heartbeatAgeMs / 60_000)} min ago`
+      : `${Math.round(claim.heartbeatAgeMs / 1000)} s ago`;
+    return `${timeCell(claim.lastHeartbeat)} <span class="muted">(${age})</span>`;
+  };
+
+  // `uploading_audio` is singled out because it is the phase whose heartbeat runs on a timer and
+  // whose work (the terminal audio PUT) cannot be resumed by a later invocation from scratch: a
+  // lease that expires here is an upload nobody is holding, which is the incident this view exists
+  // to make visible rather than something the operator has to infer from a phase string.
+  const phaseCell = (claim: LiveClaimRow): string => {
+    if (!claim.phase) return `<span class="muted">—</span>`;
+    if (claim.phase !== "uploading_audio") return esc(claim.phase);
+    return claim.leaseExpired
+      ? `<strong>uploading_audio — LEASE EXPIRED with no terminal write</strong>`
+      : `<strong>uploading_audio</strong>`;
+  };
+
+  const liveClaimsSection = `<section class="card" aria-labelledby="liveclaims-h">
+    <h2 id="liveclaims-h">Live claims — lease expiries</h2>
+    <p class="muted">Every episode a worker is holding right now, oldest claim first. Read from the
+    episode store the claim transitions themselves write — never from the worker — so this list is
+    still populated when no worker is running and the log store is unreadable. The lease expiry is
+    <code>claimedAt + the claim's lease</code>: a lease that has expired while the episode still says
+    <code>synthesizing</code> is a claim nobody finished, and the next worker may take it over.
+    The heartbeat is NOT the lease — a worker can be heartbeating while its lease has already run
+    out (audio-feed-siv1), which is exactly why both columns are here.</p>
+    <p class="muted">Claim state read at ${timeCell(report.generatedAt)}. "Time left" is each row's
+    lease expiry minus THAT instant — an expired lease reads as a negative amount — so every figure in
+    this table can be retraced against the two instants it was computed from.</p>
+    ${
+    report.activeClaimsReadError
+      ? `<p><strong>Unavailable — the episode store could not be read</strong> <span class="muted">(${
+        esc(report.activeClaimsReadError)
+      }). This is NOT "no worker holds a claim".</span></p>`
+      : report.activeClaims.length === 0
+      ? `<p>No worker holds a claim right now.</p>`
+      : `${
+        report.activeClaimsCapped
+          ? `<p class="muted">Showing the first ${report.activeClaims.length} claims; the store held
+        more, so this is a truncated listing rather than a total.</p>`
+          : ""
+      }<div class="table-wrap"><table>
+      <caption>Claims a worker holds at the instant this page was rendered</caption>
+      <thead><tr>
+        <th scope="col">Episode</th><th scope="col">Phase</th><th scope="col">Claimed by</th>
+        <th scope="col">Claimed at</th><th scope="col">Last heartbeat</th>
+        <th scope="col">Lease expires</th><th scope="col">Time left</th>
+        <th scope="col">Attempts</th><th scope="col">Upload retries</th>
+      </tr></thead>
+      <tbody>${
+        report.activeClaims.map((claim) =>
+          `<tr>
+        <td><code>${esc(claim.episodeId)}</code>${
+            claim.title ? `<br><span class="muted">${esc(claim.title)}</span>` : ""
+          }</td>
+        <td>${phaseCell(claim)}</td>
+        <td><code>${cell(claim.claimedBy)}</code></td>
+        <td>${timeCell(claim.claimedAt)}</td>
+        <td>${heartbeatCell(claim)}</td>
+        <td>${leaseExpiryCell(claim)}</td>
+        <td>${remainingCell(claim)}</td>
+        <td>${cell(claim.attempts)}</td>
+        <td>${cell(claim.uploadRetry)}</td>
+      </tr>`
+        ).join("")
+      }</tbody>
+    </table></div>`
+  }
+  </section>`;
+
   const main = `<div class="wrap">
   <p class="eyebrow">Admin</p>
   <h1>Observability</h1>
@@ -284,12 +388,14 @@ export async function handleAdminObservability(
 
   ${readFailureNotice}
 
+  ${liveClaimsSection}
+
   <section class="card" aria-labelledby="queue-h">
     <h2 id="queue-h">Queue</h2>
     <dl>
       <dt>Claimable now</dt><dd>${queueCell}</dd>
       <dt>Draining</dt><dd>${esc(drainNote)}</dd>
-      <dt>Live claims (retained window)</dt><dd>${
+      <dt>Live claims (from the log window)</dt><dd>${
     countCell(queue.liveClaims, "no live claims")
   }</dd>
       <dt>Abandoned attempts (retained window)</dt><dd>${
@@ -363,6 +469,11 @@ export async function handleAdminObservability(
     <ul>
       <li><strong>Counts are over the retained log window</strong>, not all time — the window above
       names the sequence range it read.</li>
+      <li><strong>The live-claims table is a snapshot of the instant the page was rendered</strong>,
+      taken from the episode store, and is capped (the cap is named above when it is hit). It is not
+      the same population as the "Live claims (from the log window)" COUNT in the Queue card: the
+      table lists claims that exist NOW, while the count lists in-flight claim ATTEMPTS whose records
+      are still retained, so the two can differ and their disagreement is not an error.</li>
       <li><strong>"Retrying" rows come from the pending queue snapshot</strong>, capped like the
       queue card, and name the episode's durable phase — a yielded attempt is never a terminal
       write. Upload retries carry a distinct uploadRetry counter bounded by maxUploadRetries (audio-feed-lqd6)
