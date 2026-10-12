@@ -335,9 +335,28 @@ const READ_CALLS = [
  * alone because a colon or quote precedes the slashes there.
  */
 function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
+  const blocks = /\/\*[\s\S]*?\*\//g;
+  let result = "";
+  let offset = 0;
+  for (let match = blocks.exec(source); match; match = blocks.exec(source)) {
+    const start = match.index;
+    // A glob inside a quoted source string ("tests/*_test.ts") is not a block opener.
+    const line = source.slice(source.lastIndexOf("\n", start - 1) + 1, start);
+    let quote: string | null = null;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === "\\" && quote) i++;
+      else if (quote === ch) quote = null;
+      else if (!quote && (ch === '"' || ch === "'" || ch === "`")) quote = ch;
+    }
+    if (quote) {
+      blocks.lastIndex = start + 2;
+      continue;
+    }
+    result += source.slice(offset, start) + " ";
+    offset = blocks.lastIndex;
+  }
+  return (result + source.slice(offset)).replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
 }
 
 /**

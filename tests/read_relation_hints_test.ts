@@ -34,6 +34,31 @@ async function withTempTree(
   }
 }
 
+Deno.test("audio-feed-70u4: a glob's /* does not swallow a later block comment", async () => {
+  const suite = "tests/comment_test.ts";
+  const before = [
+    'const pattern = "tests/*_test.ts";',
+    'const fixture = "Deno.readTextFile(\\"../docs/absent.html\\")";',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+  ];
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite]: before.join("\n"),
+  }, async (root) => {
+    const baseline = await deriveReadRelationReport(root, [suite]);
+    await Deno.writeTextFile(
+      `${root}${suite}`,
+      [...before.slice(0, 2), "/** */", ...before.slice(2)].join("\n"),
+    );
+    const commented = await deriveReadRelationReport(root, [suite]);
+    assertEquals(commented, baseline, "a block comment cannot turn a string fixture into a read");
+    assertEquals(commented.unresolved, []);
+    assertEquals(commented.relations.get("docs/present.md"), [suite]);
+  });
+});
+
 Deno.test("audio-feed-lm4d: a read call inside a string is DATA, a read inside an interpolation is CODE", async () => {
   // The detector scans text, so this suite's own fixtures look like read sites. They are not: string content
   // is data. Five of the eleven stale hints came from exactly this, because tests/fast_gate_subset_test.ts
