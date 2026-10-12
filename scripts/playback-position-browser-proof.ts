@@ -232,7 +232,7 @@ try {
       );
       ws2.send(JSON.stringify({ id, method, params }));
     });
-  }
+  };
   // deno-lint-ignore no-explicit-any
   const js2 = async (expression: string): Promise<any> => {
     const res = await cdp2("Runtime.evaluate", {
@@ -241,8 +241,10 @@ try {
       returnByValue: true,
     });
     return res.result.value;
-  }
-  await js2(`(() => { return new Promise(r => { const i = setInterval(() => { if (document.querySelector(\"li.episode[data-episode-id='ep-1']\")) { clearInterval(i); r(); } }, 50); }); })()`);
+  };
+  await js2(
+    `(() => { return new Promise((resolve, reject) => { const start = Date.now(); const i = setInterval(() => { if (document.querySelector("li.episode[data-episode-id='ep-1']")) { clearInterval(i); resolve(); } else if (Date.now() - start > 10000) { clearInterval(i); reject(new Error("timed out waiting for ep-1 row")); } }, 50); }); })()`,
+  );
 
   const otherUserBadge = await js2(`
     document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume-badge')?.textContent || "none"
