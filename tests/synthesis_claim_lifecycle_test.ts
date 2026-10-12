@@ -123,6 +123,23 @@ async function setupEnv() {
   return { ctx, stores };
 }
 
+/** Bounded condition wait for asynchronous operations (audio-feed-8det, audio-feed-zy3j). */
+async function waitFor(
+  predicate: () => boolean,
+  describe: string | (() => string),
+  timeoutMs = 5000,
+  intervalMs = 5,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      const details = typeof describe === "function" ? describe() : describe;
+      throw new Error(`timed out waiting ${timeoutMs}ms for ${details}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, reason, and attempt count across retries and abandonment", async () => {
   const { stores } = await setupEnv();
 
@@ -1854,17 +1871,22 @@ Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically befo
 Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal completion", async () => {
   const { ctx, stores } = await setupEnv();
   const put = stores.blobs.put.bind(stores.blobs);
+  let putEntered = false;
   stores.blobs.put = async (...args) => {
+    putEntered = true;
     await new Promise((resolve) => setTimeout(resolve, 45));
     return put(...args);
   };
-  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+  const batchPromise = runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-tail-skip",
     maxInvocationDurationMs: 45_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
+  await waitFor(() => putEntered, "put hook entered", 5000);
+  const result = await batchPromise;
+  assert(putEntered, "put hook must be entered");
   assertEquals(result.ready.length, 1, "episode must be completed ready");
   const today = new Date().toISOString().slice(0, 10);
   const count = await stores.metadata.getDailySynthesisCount(today);
@@ -1874,23 +1896,50 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
 Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)", async () => {
   const { ctx, stores } = await setupEnv();
   const put = stores.blobs.put.bind(stores.blobs);
-  let putPromise: Promise<unknown> | undefined;
+  let putEntered = false;
+  let putSignal: AbortSignal | undefined;
   stores.blobs.put = (...args) => {
-    const p = (async () => {
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      return put(...args);
-    })();
-    putPromise = p.catch(() => {});
-    return p;
+    putEntered = true;
+    const opts = args[2] as { contentType?: string; signal?: AbortSignal } | undefined;
+    putSignal = opts?.signal;
+    return new Promise((resolve, reject) => {
+      if (putSignal?.aborted) {
+        reject(putSignal.reason);
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(safetyTimer);
+        reject(putSignal?.reason);
+      };
+      putSignal?.addEventListener("abort", onAbort, { once: true });
+      // Generous safety timeout: if deadline abort never fires, complete upload after 5000ms
+      const safetyTimer = setTimeout(() => {
+        putSignal?.removeEventListener("abort", onAbort);
+        resolve(put(...args));
+      }, 5000);
+    });
   };
-  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+  const batchPromise = runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-tail-bound-fires",
-    maxInvocationDurationMs: 40,
+    maxInvocationDurationMs: 250,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
-  await putPromise;
+  await waitFor(() => putEntered, "put hook entered", 5000);
+  const result = await batchPromise;
+  assert(putEntered, "put hook must be entered");
+  assert(putSignal !== undefined, "put hook must receive an AbortSignal");
+  assert(putSignal.aborted, "invocation budget deadline must abort the in-flight put");
+  assert(
+    isInvocationBudgetAbort(putSignal.reason),
+    "abort reason must be an InvocationBudgetAbortError",
+  );
+  assertStringIncludes(
+    (putSignal.reason as Error)?.message ?? "",
+    "deadline",
+    "abort reason must be deadline expiry, not preflight refusal",
+  );
   assertEquals(result.ready.length, 0, "episode must not be completed ready when budget exceeded");
   assertEquals(result.yielded.length, 1, "episode must cleanly yield when budget exceeded");
   const today = new Date().toISOString().slice(0, 10);
