@@ -1052,10 +1052,20 @@ export async function deriveReadRelationReport(
   const unclassified = new Set<string>();
   const authoredPaths = new Set<string>();
   const tailPaths = new Set<string>();
-  const add = (path: string, suite: string) => {
+  const add = (path: string, suite: string, isExecute = false) => {
     // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
     // never be consulted, and it would bury the non-TS paths that matter.
-    if (path.endsWith(".ts")) return;
+    //
+    // THE EXCEPTION IS A SPAWN (audio-feed-4kl3, and the measurement that decided it): a suite that EXECUTES a
+    // repo script depends on it exactly as it depends on a file it reads, and the resolver already follows a
+    // spawn argument - a `Deno.Command` args array naming a non-.ts file derives a relation TODAY (measured
+    // with a non-.ts control for the same shape; the four earlier probes could not tell "the resolver cannot
+    // follow the argument" from "the .ts class is dropped after resolving", because a NO on a `.ts` key is
+    // produced identically by both). So a spawn is a relation and the only thing missing was the admission.
+    // The drop stays for READS: the import graph covers those, and admitting them here would bury the non-TS
+    // paths that matter. Note the drop is SILENT by design (resolved, then discarded, with no hint) - unlike
+    // an unresolvable namespace import, which raises one - so nothing should be expected to warn about it.
+    if (path.endsWith(".ts") && !isExecute) return;
     // audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are now in the relation too. They used to
     // be excluded here (audio-feed-es8y's scope note) on the argument that they keep the conservative
     // full-suite fallback - which was true, and cost every one of them the whole gate: a one-line change to
@@ -1221,6 +1231,8 @@ export async function deriveReadRelationReport(
     authoredPaths: string[];
     tailPaths: string[];
     resolvedPaths: string[];
+    /** Paths resolved at an EXECUTE call site: a spawn is a dependency, and a `.ts` one is a relation. */
+    executedPaths: string[];
   }
   const fileReads = new Map<string, FileReads>();
 
@@ -1249,8 +1261,14 @@ export async function deriveReadRelationReport(
     const authored: string[] = [];
     const tails: string[] = [];
     const resolved: string[] = [];
+    // Paths resolved at an EXECUTE call site (a spawn), kept apart because a `.ts` path is a relation here and
+    // not for a read (audio-feed-4kl3).
+    const executed: string[] = [];
 
     for (const call of READ_CALLS) {
+      // Which call this is decides whether a resolved `.ts` path is a RELATION (a spawn) or is dropped (a
+      // read, which the import graph covers). `Deno.Command`/`Command` are the execute calls.
+      const isExecuteCall = call === "Deno.Command" || call === "Command";
       for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
         const at = match.index ?? 0;
         // A read that exists only inside a string is data, not a read site: the suite that carries the
@@ -1281,7 +1299,7 @@ export async function deriveReadRelationReport(
         );
         for (const hint of paths) {
           const path = toRepoPath(hint, dir, root);
-          if (path) authored.push(path);
+          if (path) (isExecuteCall ? executed : authored).push(path);
         }
         // The suffix after an interpolation is a CANDIDATE: it resolves into the relation when it names a
         // real file, and when it names nothing it is reported without being mistaken for a read we could
@@ -1289,7 +1307,7 @@ export async function deriveReadRelationReport(
         for (const hint of tailCandidates) {
           const path = toRepoPath(hint, dir, root);
           if (path) {
-            tails.push(path);
+            (isExecuteCall ? executed : tails).push(path);
           } else if (unclassifiedTail(hint)) {
             // NOTHING FALLS THROUGH HERE (audio-feed-3ttu). This was `bareNameHint(hint)`, a shape test, and a
             // shape test always leaves a silent complement: `notes+draft`, `draft#1`, `déjà` and a name with a
@@ -1302,18 +1320,30 @@ export async function deriveReadRelationReport(
         // Namespace accesses are not named imports; their member remains unresolved until that syntax is
         // supported, rather than attributing a value from another scope.
         for (const member of callText.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) {
-          if (namespaceNames.has(member[1]!)) resolved.push(member[2]!);
+          if (namespaceNames.has(member[1]!)) {
+            (isExecuteCall ? executed : resolved).push(member[2]!);
+          }
         }
         for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
           const name = identifier[1]!;
           if (visible.has(name) || destructuredNames.has(name)) {
-            resolved.push(resolveReadName(scopes, name, at, own, visible));
+            // A NAME resolved inside an execute call is the spawn's argument, so it takes the same route as a
+            // literal one - this is the branch probe B takes (a `.ts` path held in a module-local constant and
+            // interpolated into a `Deno.Command` args array).
+            (isExecuteCall ? executed : resolved).push(
+              resolveReadName(scopes, name, at, own, visible),
+            );
           }
         }
       }
     }
 
-    fileReads.set(relPath, { authoredPaths: authored, tailPaths: tails, resolvedPaths: resolved });
+    fileReads.set(relPath, {
+      authoredPaths: authored,
+      tailPaths: tails,
+      resolvedPaths: resolved,
+      executedPaths: executed,
+    });
   }
 
   // Phase 4: Attribute reads to each suite observing them.
@@ -1333,6 +1363,9 @@ export async function deriveReadRelationReport(
       }
       for (const path of reads.resolvedPaths) {
         add(path, suite);
+      }
+      for (const path of reads.executedPaths) {
+        add(path, suite, true);
       }
     }
   }
@@ -1413,6 +1446,18 @@ export function classifyNonTsChanges(
   const suites = new Set<string>();
 
   for (const file of changed) {
+    // SITE 2 OF TWO (audio-feed-4kl3), AND BOTH SITES ARE INERT WITHOUT THE OTHER: site 1 records a relation
+    // for a `.ts` path a suite EXECUTES, and this is where it is consulted - before the `.ts` skip below,
+    // because a `.ts` path with a derived executor is a real input and a change to it must select that suite.
+    // A `.ts` path with NO derived executor keeps exactly today's behaviour: it is skipped here and the import
+    // graph decides, and if nothing at all is selected the empty-selection guard runs the full tier. It must
+    // NOT fall through to the branches below: documentation is not TypeScript, and the unclassified bucket
+    // widens to the FULL suite, which is the import graph's job for src/ files rather than this loop's.
+    const spawners = suitesObserving(file, relations);
+    if (spawners.length) {
+      for (const suite of spawners) suites.add(suite);
+      continue;
+    }
     if (file.endsWith(".ts")) continue;
     // THE DERIVED RELATION IS CHECKED FIRST (audio-feed-38sn, found in review of this delta): a markdown
     // file a suite READS is a real input, so classifying it as inert documentation before looking at the
