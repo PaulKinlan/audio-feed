@@ -66,7 +66,6 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
 const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-0cmu",
   "audio-feed-3h1",
-  "audio-feed-8oz",
   "audio-feed-9mp",
   "audio-feed-bp6r",
   "audio-feed-icl4",
