@@ -381,6 +381,22 @@ Deno.test("a derivation that cannot run WIDENS to the full suite and says why (e
   assert(former.reason.includes(".beads/issues.jsonl"), former.reason);
 });
 
+Deno.test("audio-feed-x4kc: any change under tests/ selects tests/fast_gate_subset_test.ts", () => {
+  // Altering what a test reads (or its assertions) can falsify read-relation invariants
+  // without touching scripts/test-selection.ts. Rule (a) closes this by always selecting
+  // the relation-policing suite whenever tests/ is touched.
+  const plan = planTests(["tests/evidence_size_test.ts"], NO_GRAPH, NO_NAMED, RELATIONS);
+  assert(plan.testFiles !== null);
+  assert(
+    plan.testFiles.includes("tests/fast_gate_subset_test.ts"),
+    `Must include fast_gate_subset_test.ts: ${plan.testFiles.join(", ")}`,
+  );
+  assert(
+    plan.testFiles.includes("tests/evidence_size_test.ts"),
+    `Must include the changed test itself: ${plan.testFiles.join(", ")}`,
+  );
+});
+
 Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8y)", () => {
   // Before this: planTests(["docs/evidence/x.png"]) returned [] and the gate said
   // "no tests to run" - a fast PASS on a tree where evidence_size_test.ts fails.
