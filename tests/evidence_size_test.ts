@@ -88,7 +88,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-gueb",
   "audio-feed-i7vi",
   "audio-feed-icl4",
-  "audio-feed-khk3",
   "audio-feed-kzi",
   // Landed on main from another lane while fnrp was in review, i.e. before the rule existed: it belongs to
   // the same debt as the rest of this list. Its README also carries an ephemeral port and a commit sha in its
