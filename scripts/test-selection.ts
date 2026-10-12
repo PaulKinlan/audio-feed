@@ -606,6 +606,18 @@ function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): 
       isOutOfRepoRhs(match[2] ?? "") ? "out-of-repo" : "other",
     );
   }
+  // Destructured locals are bindings too. A named outer constant cannot win merely because its inner
+  // binding used braces rather than a simple `const NAME = ...` declaration.
+  for (const match of source.matchAll(/(?:const|let|var)\s*\{([^}]+)\}\s*=/g)) {
+    const at = match.index ?? 0;
+    if (insideSpans(spans, at)) continue;
+    for (const part of match[1]!.split(",")) {
+      const name = part.trim().split(/\s*:\s*/).pop();
+      if (name && /^[A-Za-z_$][\w$]*$/.test(name)) {
+        record(innermostScope(scopes, at), name, "other");
+      }
+    }
+  }
   return scopes;
 }
 
@@ -683,21 +695,6 @@ function baseIsOutOfRepo(
     if (scope.unparsedSignature) return false;
     const kind = scope.bindings.get(name);
     if (kind !== undefined) return kind === "out-of-repo";
-  }
-  return false;
-}
-
-function isShadowed(
-  scopes: ReadonlyArray<BindingScope>,
-  name: string,
-  offset: number,
-): boolean {
-  const containing = scopes
-    .filter((scope) => offset > scope.start && offset < scope.end)
-    .sort((a, b) => (a.end - a.start) - (b.end - b.start));
-  for (const scope of containing) {
-    if (scope.unparsedSignature) return true;
-    if (scope.bindings.has(name)) return true;
   }
   return false;
 }
@@ -816,12 +813,18 @@ function pathConstants(
   root: string,
   isOutOfRepoBase: (name: string, offset: number) => boolean = () => false,
   suppressed: Set<string> = new Set(),
-): { all: Map<string, string>; exported: Map<string, string> } {
+): {
+  all: Map<string, string>;
+  exported: Map<string, string>;
+  declarations: Map<string, { offset: number; path: string }[]>;
+} {
   const constants = new Map<string, string>();
   const exported = new Map<string, string>();
-  const declare = (name: string, resolved: string, isExported: boolean) => {
+  const declarations = new Map<string, { offset: number; path: string }[]>();
+  const declare = (name: string, resolved: string, isExported: boolean, offset: number) => {
     const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
     const value = isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved;
+    declarations.set(name, [...(declarations.get(name) ?? []), { offset, path: value }]);
     constants.set(name, value);
     if (isExported) exported.set(name, value);
   };
@@ -861,10 +864,11 @@ function pathConstants(
     // repo constant that an inner scope had shadowed, so a SHADOWED `home` bound to `docs/` now registers.
     if (/Deno\.makeTemp(?:Dir|File)\s*\(/.test(match[3])) continue;
     const resolved = resolve(match[3], offset) ?? constants.get(match[3].replace(/;$/, "").trim());
-    if (resolved) declare(match[2], resolved, Boolean(match[1]));
+    if (resolved) declare(match[2], resolved, Boolean(match[1]), offset);
   }
   // Default parameter values: `evidencePngs(dir = EVIDENCE_DIR)` reads through `dir`, so the name that
   // appears at the read call site is the PARAMETER, not the constant.
+  lineStart = 0;
   for (const raw of rawLines) {
     const line = raw.trim();
     for (
@@ -875,10 +879,15 @@ function pathConstants(
       const [, name, referenced] = match;
       if (!name || !referenced) continue;
       const resolved = constants.get(referenced);
-      if (resolved) declare(name, resolved, false);
+      if (resolved) {
+        // A default belongs to the parameter's body scope, not the enclosing scope containing its signature.
+        const brace = source.indexOf("{", lineStart + raw.indexOf(name, match.index));
+        declare(name, resolved, false, brace < 0 ? lineStart : brace + 1);
+      }
     }
+    lineStart += raw.length + 1;
   }
-  return { all: constants, exported };
+  return { all: constants, exported, declarations };
 }
 
 /**
@@ -1069,7 +1078,11 @@ export async function deriveReadRelationReport(
   const fileImportedSymbols = new Map<string, Map<string, Map<string, string>>>();
   const fileConstants = new Map<
     string,
-    { all: Map<string, string>; exported: Map<string, string> }
+    {
+      all: Map<string, string>;
+      exported: Map<string, string>;
+      declarations: Map<string, { offset: number; path: string }[]>;
+    }
   >();
   const suiteClosures = new Map<string, Set<string>>();
 
@@ -1177,6 +1190,32 @@ export async function deriveReadRelationReport(
     return visible;
   };
 
+  // Every candidate goes through the same lexical lookup, whether its outer value came from this module or
+  // a direct import. An unknown inner binding (including an unparsed signature) is a reported unresolved hint,
+  // never permission to select an outer path. A pathConstant may have come from a sibling block; its declaration
+  // must belong to the binding at the read site before it can be used.
+  const resolveReadName = (
+    scopes: ReadonlyArray<BindingScope>,
+    name: string,
+    at: number,
+    own: ReturnType<typeof pathConstants> | undefined,
+    visible: ReadonlyMap<string, string>,
+  ): string => {
+    const containing = scopes.filter((scope) => at > scope.start && at < scope.end)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start));
+    for (const scope of containing) {
+      if (scope.unparsedSignature) return name;
+      const kind = scope.bindings.get(name);
+      if (kind !== undefined) {
+        const matching = (own?.declarations.get(name) ?? []).filter((declaration) =>
+          innermostScope(scopes, declaration.offset) === scope
+        );
+        return kind !== "ambiguous" && matching.length === 1 ? matching[0]!.path : name;
+      }
+    }
+    return visible.get(name) ?? name;
+  };
+
   // Phase 3: Scan read calls for each file in the closure using its own visible constants.
   interface FileReads {
     authoredPaths: string[];
@@ -1191,6 +1230,21 @@ export async function deriveReadRelationReport(
     const scopes = bindingScopes(source, spans);
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
     const visible = visibleConstantsFor(relPath);
+    const own = fileConstants.get(relPath);
+    // Namespace and destructured imports are not statically resolved by the direct named-import map. A use
+    // in a read must still be reported, not silently treated as if no read had been attempted.
+    const namespaceNames = new Set(
+      [...source.matchAll(/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["'][^"']+["']/g)]
+        .map((match) => match[1]!),
+    );
+    const destructuredNames = new Set<string>();
+    for (const match of source.matchAll(/(?:const|let)\s*\{([^}]+)\}\s*=\s*([A-Za-z_$][\w$]*)/g)) {
+      if (!namespaceNames.has(match[2]!)) continue;
+      for (const part of match[1]!.split(",")) {
+        const name = part.trim().split(/\s*:\s*/).pop();
+        if (name && /^[A-Za-z_$][\w$]*$/.test(name)) destructuredNames.add(name);
+      }
+    }
 
     const authored: string[] = [];
     const tails: string[] = [];
@@ -1244,17 +1298,16 @@ export async function deriveReadRelationReport(
             unclassified.add(hint);
           }
         }
-        // An argument passed by NAME still resolves through the constants visible to this file.
+        // Name candidates include known constants and namespace-derived destructured names.
+        // Namespace accesses are not named imports; their member remains unresolved until that syntax is
+        // supported, rather than attributing a value from another scope.
+        for (const member of callText.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) {
+          if (namespaceNames.has(member[1]!)) resolved.push(member[2]!);
+        }
         for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
           const name = identifier[1]!;
-          const path = visible.get(name);
-          if (path) {
-            const isOwn = fileConstants.get(relPath)?.all.has(name) ?? false;
-            if (!isOwn && isShadowed(scopes, name, at)) {
-              resolved.push(name);
-            } else {
-              resolved.push(path);
-            }
+          if (visible.has(name) || destructuredNames.has(name)) {
+            resolved.push(resolveReadName(scopes, name, at, own, visible));
           }
         }
       }

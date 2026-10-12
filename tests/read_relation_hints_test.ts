@@ -653,6 +653,50 @@ Deno.test("audio-feed-3xla: caller local constant does not leak into imported he
   });
 });
 
+Deno.test("audio-feed-axlt: own module constant cannot override its function parameter", async () => {
+  await withTempTree({
+    "docs/present.md": "present\n",
+    "docs/other.md": "other\n",
+    "tests/own_test.ts": [
+      'const FILE = "docs/present.md";',
+      "export function probe(FILE: string) { return Deno.readTextFile(FILE); }",
+      'probe("docs/other.md");',
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/own_test.ts"]);
+    assertEquals(
+      [...report.relations],
+      [],
+      "the outer constant must not stand in for the parameter",
+    );
+    assertEquals(report.unresolved, ["FILE"], "unknown parameter value must be reported");
+  });
+});
+
+Deno.test("audio-feed-axlt: unsupported destructured and namespace imports report unresolved reads", async () => {
+  await withTempTree({
+    "docs/present.md": "present\n",
+    "src/dep.ts": 'export const FILE = "docs/present.md";\n',
+    "tests/destructured_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      'const FILE = "docs/present.md";',
+      "function read() { const { FILE } = x; return Deno.readTextFile(FILE); }",
+      "read();",
+    ].join("\n"),
+    "tests/namespace_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      "function read(x: { FILE: string }) { return Deno.readTextFile(x.FILE); }",
+      'read({ FILE: "docs/other.md" });',
+    ].join("\n"),
+  }, async (root) => {
+    for (const suite of ["tests/destructured_test.ts", "tests/namespace_test.ts"]) {
+      const report = await deriveReadRelationReport(root, [suite]);
+      assertEquals([...report.relations], [], `${suite}: no scope may be guessed`);
+      assertEquals(report.unresolved, ["FILE"], `${suite}: an unsupported import must be reported`);
+    }
+  });
+});
+
 Deno.test("audio-feed-3xla: helper imported constant does not leak into caller parameter (outward leak)", async () => {
   await withTempTree({
     "docs/present/present.md": "content\n",
