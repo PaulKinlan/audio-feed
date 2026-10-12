@@ -186,7 +186,7 @@ try {
         `location.pathname.startsWith("/listen/")`,
         "restored to /listen/:token",
       );
-      
+
       const redirectedPath = await js(`location.pathname`);
       checker.check(
         "/listen with stored token restores directly to /listen/:token",
@@ -204,7 +204,7 @@ try {
         document.getElementById("token").value = "${userToken}";
         document.getElementById("ingest").requestSubmit();
       `);
-      
+
       await until(
         `document.getElementById("result")?.classList.contains("ok") || document.getElementById("result")?.textContent.includes("Queued")`,
         "submission success",
