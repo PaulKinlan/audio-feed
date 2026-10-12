@@ -326,3 +326,146 @@ Deno.test("audio-feed-7l9m: a PARAMETER shadows a module-level temp binding", as
     );
   });
 });
+
+/** The body of a reader whose parameter `home` shadows a module-level `home` from $HOME (audio-feed-i9ao). */
+function shadowReader(signature: string, body: string[]): string {
+  return ['const home = Deno.env.get("HOME") ?? "";', signature, ...body, "}", ""].join("\n");
+}
+
+Deno.test("audio-feed-i9ao: a PARAMETER never inherits the module-level out-of-repo binding, in ANY signature shape", async (t) => {
+  // Round 2 found this with a 301-character signature: the detector looked back a fixed 300 characters for the
+  // `(` of the parameter list, lost it, and let the read inherit `home` from $HOME - the same false green as
+  // 7l9m, one shape later. The fix matches parens inside the enclosing scope instead, so length is not a
+  // variable; these are the shapes that keep that honest, including the ones the reviewer did not construct.
+  const shapes: Array<[string, string]> = [
+    ["a short list", "export async function readIt(home: string) {"],
+    [
+      "a LONG list",
+      `export async function readIt(home: string, filler: string = "${"x".repeat(400)}") {`,
+    ],
+    ["a destructured parameter", "export async function readIt({ home }: { home: string }) {"],
+    [
+      "a default holding a string with a comma and a paren",
+      `export async function readIt(home = ["a","b"].join(",")) {`,
+    ],
+    [
+      "a return type carrying its own parens",
+      "export function readIt(home: string): (() => number) {",
+    ],
+    ["a bare arrow parameter", "const readIt = (home: string) => {"],
+    ["a bare arrow parameter with no parens", "const readIt = home => {"],
+  ];
+  for (const [name, signature] of shapes) {
+    await t.step(name, async () => {
+      await withTempTree({
+        "docs/notes.md": "actual repo data\n",
+        "tests/reader_test.ts": shadowReader(signature, [
+          "  return await Deno.readTextFile(`${home}/notes.md`);",
+        ]),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/reader_test.ts"]);
+        assert(
+          !report.outOfRepo.includes("notes.md"),
+          `${name}: a parameter must not inherit the module-level out-of-repo binding: ${
+            JSON.stringify(report)
+          }`,
+        );
+        assert(
+          report.unattributed.includes("notes.md") || report.unresolved.includes("notes.md"),
+          `${name}: the read must be OFFERED, never suppressed: ${JSON.stringify(report)}`,
+        );
+        const blocking = [
+          ...report.unresolved,
+          ...report.unattributed.filter((hint) =>
+            couldHideInertRead(hint) && couldBeTheChangedFile(hint, ["docs/notes.md"])
+          ),
+        ];
+        const plan = planTests(["docs/notes.md"], NO_MAP, NO_MAP, report.relations, [], blocking);
+        assert(
+          plan.testFiles === null || plan.testFiles.includes("tests/reader_test.ts"),
+          `${name}: a real markdown reader must not be declared inert: ${JSON.stringify(plan)}`,
+        );
+      });
+    });
+  }
+});
+
+Deno.test("audio-feed-i9ao: the INVERSE - a control-flow block is not a signature, so it still inherits", async () => {
+  // The net must not over-fire. `if (...) {` is a block, not a parameter list: the read inside it resolves to
+  // the module-level `home` from $HOME and IS suppressed, exactly as before. If this test fails, the detector
+  // will widen on every temp-directory read inside a branch, and the speed the bead exists to protect is gone.
+  await withTempTree({
+    "tests/branching_test.ts": shadowReader("export async function readIt() {", [
+      '  if (Deno.env.get("X")) {',
+      "    return await Deno.readTextFile(`${home}/state.json`);",
+      "  }",
+      '  return "";',
+    ]),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/branching_test.ts"]);
+    assert(
+      report.outOfRepo.includes("state.json"),
+      `a block inside a function is not a signature: ${JSON.stringify(report)}`,
+    );
+    assertEquals(report.unresolved, [], "and it must not be reported as a missing path");
+  });
+});
+
+Deno.test("audio-feed-i9ao: a signature that cannot be parsed makes the scope NON-SUPPRESSIBLE", async () => {
+  // The net under the paren matcher, and the reason this is a structural fix rather than a bigger number: a
+  // return type containing braces defeats the signature-tail test, so the parameter list cannot be
+  // established - and the scope then refuses to inherit instead of assuming it has no parameters.
+  await withTempTree({
+    "docs/notes.md": "actual repo data\n",
+    "tests/reader_test.ts": shadowReader(
+      "export async function readIt(home: string): Promise<{ b: string }> {",
+      ["  return { b: await Deno.readTextFile(`${home}/notes.md`) };"],
+    ),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/reader_test.ts"]);
+    assert(
+      !report.outOfRepo.includes("notes.md"),
+      `an unparsed signature must not inherit: ${JSON.stringify(report)}`,
+    );
+    assert(
+      report.unattributed.includes("notes.md") || report.unresolved.includes("notes.md"),
+      `and the read must be offered: ${JSON.stringify(report)}`,
+    );
+  });
+});
+
+Deno.test("audio-feed-i9ao: the eleven mis-parses stay corrected, so no known hint blocks", async () => {
+  // The speed anchor, stated as an invariant: every hint that was a mis-parse must be accounted for as
+  // out-of-repo or as a fragment - if one of them comes back as an unresolved PATH hint, the inert class is
+  // unreachable again for every change and a docs-only edit pays the full suite (125s, measured).
+  const report = await deriveReadRelationReport(ROOT);
+  // `beads` is deliberately absent from this list: it is one of the two hints `toRepoPath` drops for not being
+  // path-shaped, which is audio-feed-snww's subject (a hint dropped in silence). It cannot BLOCK - a hint with
+  // no slash and no extension is neither markdown nor a directory prefix (`couldHideInertRead` is false for it)
+  // - so the invariant this test exists for still holds, and the assertion below states it directly.
+  const known = [
+    ".cache/puppeteer/chrome",
+    "absent-puppeteer-chrome",
+    "empty-puppeteer-chrome",
+    "mock-cache/120.0.0",
+    "mock-cache/121.0.0",
+    "bd",
+    "digest.md",
+    "state.json",
+    "obs.kv",
+    "test.kv",
+  ];
+  const accounted = new Set([...report.outOfRepo, ...report.unattributed]);
+  const missing = known.filter((hint) => !accounted.has(hint));
+  assertEquals(
+    missing,
+    [],
+    `mis-parse hints that are neither out-of-repo nor fragments (they block): ${
+      JSON.stringify({
+        missing,
+        unresolved: report.unresolved,
+      })
+    }`,
+  );
+  assertEquals(report.unresolved, [], "and nothing may be an unresolved PATH hint");
+});

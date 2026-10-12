@@ -468,6 +468,13 @@ interface BindingScope {
   end: number;
   /** "ambiguous" = the same name bound two different ways in one scope. */
   bindings: Map<string, BindingKind | "ambiguous">;
+  /**
+   * A body brace whose parameter list could not be established (audio-feed-i9ao). Such a scope is
+   * NON-SUPPRESSIBLE: `baseIsOutOfRepo` refuses as soon as it reaches one, so a signature the detector does
+   * not understand can never let a read inside it INHERIT an outer out-of-repo binding. Unknown is answered
+   * conservatively rather than treated as "no parameters".
+   */
+  unparsedSignature?: boolean;
 }
 
 /** The smallest scope containing `offset`, which is the scope a declaration there belongs to. */
@@ -481,7 +488,38 @@ function innermostScope(scopes: ReadonlyArray<BindingScope>, offset: number): Bi
 }
 
 /**
- * The lexical scopes of one file, with each binding classified by its OWN right-hand side (audio-feed-7l9m).
+ * A copy of the source with string CONTENT blanked to spaces (audio-feed-i9ao).
+ *
+ * Scanning raw text for structure is what made the previous mechanism brittle: a `)`, `,` or identifier inside
+ * a literal could end a scan, split a parameter list, or be read as a binding. The spans are already known -
+ * they are what makes a read inside a string "data" - so the parens, braces and identifiers this pass sees are
+ * CODE. Interpolation CODE stays visible, which keeps a read inside `${...}` a read site.
+ */
+function maskedCode(source: string, spans: ReadonlyArray<[number, number]>): string {
+  let out = "";
+  let at = 0;
+  for (const [start, end] of spans) {
+    if (start > at) out += source.slice(at, start);
+    out += " ".repeat(Math.max(0, end - start));
+    at = Math.max(at, end);
+  }
+  return out + source.slice(at);
+}
+
+/** Control-flow parentheses are not a parameter list: `if (x) {`, `for await (y of z) {`, `catch (e) {`. */
+const CONTROL_FLOW = /(?:^|[^\w$.])(?:if|for|while|switch|catch)\s+(?:await\s+)?$/;
+
+/** What may sit between a parameter list and its body brace: nothing, `=>`, `: Type`, or `: Type =>`. */
+const SIGNATURE_TAIL = /^\s*(?::[^{;]*)?\s*(?:=>)?\s*$/;
+
+/** Every identifier in a slice. Used on a parameter list, where EVERY name must be treated as a binding. */
+function identifiersIn(text: string): string[] {
+  return [...text.matchAll(/[A-Za-z_$][\w$]*/g)].map((match) => match[0]!);
+}
+
+/**
+ * The lexical scopes of one file, each binding classified by its OWN right-hand side (audio-feed-7l9m), with
+ * parameter lists found by MATCHING PARENS INSIDE THE ENCLOSING SCOPE (audio-feed-i9ao).
  *
  * A NAME IS A PROXY FOR A BINDING, and a binding can be SHADOWED, so rev-27's fixture -
  *
@@ -491,41 +529,74 @@ function innermostScope(scopes: ReadonlyArray<BindingScope>, offset: number): Bi
  *       return await Deno.readTextFile(`${home}/notes.md`);
  *     }
  *
- * - had its real read of docs/notes.md suppressed, and `docs/notes.md` was declared INERT: a false-green
- * gate, which is the one failure mode a gate must not have. Suppression is now decided by the binding the
- * read actually resolves through, and it needs positive evidence at that site.
+ * - had its real read of docs/notes.md suppressed, and `docs/notes.md` was declared INERT: a false-green gate.
+ * Suppression is decided by the binding the read resolves through, and it needs positive evidence at that site.
  *
- * String CONTENT is skipped, so a fixture's code is not this file's binding. Parameters are recorded as
- * "other": `readIt(dir: string)` reads `${dir}/x.csv` through the parameter, and a module-level
- * `const dir = await Deno.makeTempDir()` must not suppress it.
+ * WHY NOT A BACKWARD WINDOW. The first version of this (round 1) looked back a fixed 300 characters for the
+ * `(` of the parameter list, so a long-but-valid signature lost it and the read inherited the module-level
+ * binding - the same false green, one shape later (round 2, audio-feed-i9ao). A fixed window answers "how far
+ * back was the last one?" when the question is "which `(` matches this `)`?", and those are different questions
+ * with different answers for every signature length. A parameter list always ends at the `)` closing its own
+ * `(`, and both sit inside the enclosing scope, so the match is found by DEPTH COUNTING BOUNDED BY THE SCOPE:
+ * length is not a variable in that search, so there is no length for which it silently stops working.
+ *
+ * AND THE NET UNDER IT. If a body brace follows a `)` (or an `=>`) within its own statement and no parameter
+ * list could be established - an unbalanced group, or a return type containing braces - the scope is marked
+ * `unparsedSignature` and becomes NON-SUPPRESSIBLE. That is the same rule as the guard: when the detector
+ * cannot establish the binding, it does not inherit one.
  */
 function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): BindingScope[] {
-  const scopes: BindingScope[] = [{ start: 0, end: source.length, bindings: new Map() }];
+  const code = maskedCode(source, spans);
+  const scopes: BindingScope[] = [{ start: 0, end: code.length, bindings: new Map() }];
   const stack: BindingScope[] = [scopes[0]!];
-  let si = 0;
-  for (let i = 0; i < source.length;) {
-    if (si < spans.length && i >= spans[si]![0]) {
-      i = Math.max(i, spans[si]![1]);
-      si++;
-      continue;
-    }
-    const ch = source[i]!;
-    if (ch === "{") {
-      const scope: BindingScope = { start: i, end: source.length, bindings: new Map() };
-      scopes.push(scope);
-      stack.push(scope);
-    } else if (ch === "}") {
-      const scope = stack.pop();
-      if (scope && scope !== scopes[0]) scope.end = i;
-    }
-    i++;
-  }
-
   const record = (scope: BindingScope, name: string, kind: BindingKind): void => {
     const seen = scope.bindings.get(name);
     scope.bindings.set(name, seen === undefined || seen === kind ? kind : "ambiguous");
   };
+  // The bound for the backward scan is the STATEMENT's start, clamped to the enclosing scope: structural and
+  // tight, with no distance involved. It is NOT updated at a brace - a brace may be a TYPE literal
+  // (`(): Promise<{ b: string }> {`), and resetting there would cut the scan off from the signature it has to
+  // see, which is precisely how the unparsed-signature net got defeated while this function was being written.
+  let statementStart = 0;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!;
+    if (ch === "{") {
+      const parent = stack[stack.length - 1]!;
+      const scope: BindingScope = { start: i, end: code.length, bindings: new Map() };
+      const params = parameterSpan(code, i, Math.max(statementStart, parent.start));
+      if (params.span) {
+        // EVERY identifier in the list, not just the leading one: a destructured parameter (`{ profileDir }`),
+        // a type name and a default expression all produce a binding here, and an extra binding only REFUSES
+        // suppression while a missed one lets a read inherit an outer name - the direction that has failed
+        // every round of this bead.
+        for (const name of identifiersIn(code.slice(params.span[0], params.span[1]))) {
+          record(scope, name, "other");
+        }
+      } else if (params.arrow) {
+        record(scope, params.arrow, "other");
+      } else if (params.sawParens) {
+        scope.unparsedSignature = true;
+      }
+      scopes.push(scope);
+      stack.push(scope);
+      continue;
+    }
+    if (ch === "}") {
+      // Never pop the ROOT: a `}` that no `{` opened - a regex literal such as `/\}/` is not string content -
+      // would otherwise empty the stack, and the next brace would then have no enclosing scope to clamp to.
+      const scope = stack[stack.length - 1];
+      if (scope !== undefined && scope !== scopes[0]) {
+        scope.end = i;
+        stack.pop();
+      }
+      continue;
+    }
+    if (ch === ";") statementStart = i + 1;
+  }
 
+  // The DECLARATIONS are read from the RAW source, not from the masked copy: the classification TEST is about
+  // the literal (`Deno.env.get("HOME")`), and masking blanks exactly that. String content is skipped by offset
+  // instead, which is what keeps a declaration inside a fixture from being this file's binding.
   for (const match of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
     const at = match.index ?? 0;
     if (insideSpans(spans, at)) continue;
@@ -535,42 +606,70 @@ function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): 
       isOutOfRepoRhs(match[2] ?? "") ? "out-of-repo" : "other",
     );
   }
-  // Parameters belong to the scope of the body they open, and they SHADOW a module-level binding of the same
-  // name - a read through the parameter must not inherit the module-level classification either.
-  for (const scope of scopes) {
-    if (scope === scopes[0]) continue;
-    const head = source.slice(Math.max(0, scope.start - 300), scope.start).replace(/\s*=>\s*$/, "");
-    const close = head.lastIndexOf(")");
-    if (close < 0) continue;
+  return scopes;
+}
+
+/**
+ * The parameter list (or single-identifier arrow parameter) of the body brace at `brace`, found by MATCHING.
+ *
+ * The rightmost `)` in the statement whose tail to the brace is a valid signature tail is the list's end; its
+ * `(` is found by counting depth down to `statementStart`, so the span comes from the pair and not from a
+ * distance. A return type may carry its own parens (`: (x: number) => void`) - those fail the tail test, and
+ * the scan simply continues to the group that satisfies it. A control-flow group is a BLOCK rather than a
+ * signature and is reported as neither. `sawParens` reports that a group was there but could not be shaped
+ * into a signature: the caller turns that into a non-suppressible scope.
+ */
+function parameterSpan(
+  code: string,
+  brace: number,
+  statementStart: number,
+): { span: [number, number] | null; arrow: string | null; sawParens: boolean } {
+  let sawParens = false;
+  for (let i = brace - 1; i >= statementStart; i--) {
+    if (code[i] !== ")") continue;
+    sawParens = true;
+    if (!SIGNATURE_TAIL.test(code.slice(i + 1, brace))) continue;
     let depth = 0;
     let open = -1;
-    for (let i = close; i >= 0; i--) {
-      const ch = head[i]!;
+    for (let j = i; j >= statementStart; j--) {
+      const ch = code[j]!;
       if (ch === ")") depth++;
       else if (ch === "(") {
         depth--;
         if (depth === 0) {
-          open = i;
+          open = j;
           break;
         }
       }
     }
     if (open < 0) continue;
-    for (const segment of head.slice(open + 1, close).split(",")) {
-      const name = /^\s*(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)\s*(?:[:?=]|$)/.exec(segment)?.[1];
-      if (name) record(scope, name, "other");
+    if (CONTROL_FLOW.test(code.slice(statementStart, open))) {
+      return { span: null, arrow: null, sawParens: false };
     }
+    // A `(` preceded by `:` opens a TYPE, not a parameter list: in `(home: string): (() => number) {` the
+    // rightmost `)` belongs to the return type and its match is that inner `(`, so this candidate pair is
+    // rejected and the scan moves left to the group that IS a signature. Structural, not a distance.
+    let before = open - 1;
+    while (before >= statementStart && /\s/.test(code[before]!)) before--;
+    if (before >= statementStart && code[before] === ":") continue;
+    return { span: [open + 1, i], arrow: null, sawParens };
   }
-  return scopes;
+  // `dir => {` needs no parens, and its binding must still be recorded or a read through it inherits an outer
+  // out-of-repo name.
+  const bare = /([A-Za-z_$][\w$]*)\s*=>\s*$/.exec(code.slice(statementStart, brace));
+  if (bare) return { span: null, arrow: bare[1]!, sawParens };
+  return { span: null, arrow: null, sawParens };
 }
 
 /**
  * Whether the binding a read at `offset` resolves `name` through is provably OUTSIDE the repository.
  *
  * The lookup walks from the innermost enclosing scope outwards and stops at the FIRST binding of the name -
- * that is what shadowing means. Anything else (no binding, an ambiguous one, or one whose value is not
- * provably out-of-repo) means DO NOT SUPPRESS: an extra relation costs a test run, a missing one costs a
- * skipped test. Same rule as the completeness guard, applied to the binding question.
+ * that is what shadowing means. A scope whose signature could not be parsed REFUSES before that walk continues
+ * (audio-feed-i9ao), so an unrecognised parameter list can never let the search reach an outer out-of-repo
+ * binding. Anything else (no binding, an ambiguous one, or one whose value is not provably out-of-repo) means
+ * DO NOT SUPPRESS: an extra relation costs a test run, a missing one costs a skipped test. Same rule as the
+ * completeness guard, applied to the binding question.
  */
 function baseIsOutOfRepo(
   scopes: ReadonlyArray<BindingScope>,
@@ -581,6 +680,7 @@ function baseIsOutOfRepo(
     .filter((scope) => offset > scope.start && offset < scope.end)
     .sort((a, b) => (a.end - a.start) - (b.end - b.start));
   for (const scope of containing) {
+    if (scope.unparsedSignature) return false;
     const kind = scope.bindings.get(name);
     if (kind !== undefined) return kind === "out-of-repo";
   }
