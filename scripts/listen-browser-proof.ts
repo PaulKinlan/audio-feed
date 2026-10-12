@@ -13,10 +13,10 @@
  */
 
 import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { connectCdp } from "./proof-cdp.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-py5/", import.meta.url).pathname;
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
 
 await runProof("audio-feed-py5", async (checker) => {
@@ -31,54 +31,7 @@ await runProof("audio-feed-py5", async (checker) => {
 
   try {
     await withChrome(async (chrome) => {
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
-
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
-      }
-
-      // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", {
-          expression,
-          awaitPromise: true,
-          returnByValue: true,
-          userGesture: true,
-        });
-        if (r.exceptionDetails) {
-          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
-        }
-        return r.result?.value;
-      }
-
-      async function until(expr: string, desc: string, timeoutMs = 8000) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < timeoutMs) {
-          if (await js(expr)) return;
-          await sleep(50);
-        }
-        throw new Error(`timed out waiting for: ${desc}`);
-      }
+      const { cdp, js, until, ws } = await connectCdp(chrome.port);
 
       try {
         await cdp("Page.enable");
