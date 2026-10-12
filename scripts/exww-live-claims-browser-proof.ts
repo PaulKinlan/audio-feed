@@ -144,7 +144,7 @@ const MIN_SECTION_FADE_LEGIBILITY = 0.5;
  * deviations 0.191256, 0.193932, 0.200255, 0.167164. An 85%-covered crop of the first
  * capture, retaining dark ink in its left 15%, measures 0.0884339 while still passing
  * the fade floor (range 0.881773). The geometric mean of the lowest clean and the
- * mutant is 0.121592..., rounded DOWN to 0.12: clean margin >= 0.047164, mutant
+ * mutant is 0.1215852148, rounded DOWN to 0.12: clean margin >= 0.047164, mutant
  * margin 0.0315661. This uses the separated distributions, not the old 0.01 floor.
  */
 const MIN_SECTION_CONTENT_RETENTION = 0.12;
