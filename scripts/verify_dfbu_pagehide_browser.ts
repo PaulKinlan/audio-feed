@@ -1,11 +1,12 @@
 /**
- * Browser verification proof for audio-feed-dfbu:
+ * Browser verification proof for audio-feed-dfbu (and lifecycle verification for audio-feed-sxlt):
  * Verifies that playback position is persisted via 'pagehide' and 'visibilitychange'
- * instead of 'beforeunload', and that bfcache-friendly events successfully persist state
- * to localStorage and allow playback resume on reload.
+ * instead of 'beforeunload', and that bfcache lifecycle restoration (pagehide and pageshow
+ * with persisted=true) operates correctly and preserves playback state on back navigation
+ * and reload.
  */
 
-import { spawnHarness, withChrome } from "./proof-helper.ts";
+import { spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 const harness = await spawnHarness("scripts/listen-harness.ts");
 const BASE = harness.base;
@@ -16,7 +17,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 await Deno.mkdir(OUT, { recursive: true });
 
+const checks: { name: string; pass: boolean; detail?: string }[] = [];
+
 function check(name: string, pass: boolean, detail = "") {
+  checks.push({ name, pass, detail });
   const tag = pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
   console.log(`${tag}  ${name}  ${detail}`);
   if (!pass) throw new Error(`step failed: ${name}`);
@@ -113,25 +117,72 @@ try {
       `stored ${storedPos1}s`,
     );
 
-    // 5. Advance currentTime to 42s and trigger pagehide
+    // 5. Advance currentTime to 42s and register lifecycle event listeners
     await js(`(() => {
       const audio = document.getElementById("audio");
       audio.currentTime = 42;
-      window.dispatchEvent(new Event("pagehide"));
+      window.__lifecycleEvents = [];
+      window.addEventListener("pagehide", (e) => {
+        window.__lifecycleEvents.push({ type: "pagehide", persisted: e.persisted });
+      });
+      window.addEventListener("pageshow", (e) => {
+        window.__lifecycleEvents.push({ type: "pageshow", persisted: e.persisted });
+      });
     })()`);
     await sleep(100);
 
-    // 6. Verify position 42s saved to scoped localStorage
-    const storedPos2 = await js(`
-      JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
-    `);
+    // 6. Real navigation away to about:blank (fires browser pagehide and enters bfcache)
+    await cdp("Page.navigate", { url: "about:blank" });
+    await sleep(500);
+
+    // 7. Navigate back via history.back() to drive real bfcache restoration
+    try {
+      await js(`history.back()`);
+    } catch {
+      const hist = (await cdp("Page.getNavigationHistory")) as {
+        currentIndex: number;
+        entries: Array<{ id: number; url: string }>;
+      };
+      const prev = hist.entries[hist.currentIndex - 1];
+      if (prev) {
+        await cdp("Page.navigateToHistoryEntry", { entryId: prev.id });
+      }
+    }
+    await until(
+      `document.querySelectorAll("#episodes .episode").length === 5`,
+      "bfcache restored",
+    );
+    await sleep(300);
+
+    const lifecycle = (await js(`({
+      events: window.__lifecycleEvents || [],
+      storedPos: JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position,
+      audioTime: document.getElementById("audio")?.currentTime,
+    })`)) as {
+      events: Array<{ type: string; persisted: boolean }>;
+      storedPos: number;
+      audioTime: number;
+    };
+
+    const pagehideEvent = lifecycle.events.find((e) => e.type === "pagehide");
+    const pageshowEvent = lifecycle.events.find((e) => e.type === "pageshow");
+
     check(
-      "pagehide event saved position 42s to localStorage",
-      storedPos2 === 42,
-      `stored ${storedPos2}s`,
+      "real navigation away fires pagehide with persisted=true and saves position 42s to localStorage",
+      Boolean(pagehideEvent && pagehideEvent.persisted === true && lifecycle.storedPos === 42),
+      `pagehide persisted: ${pagehideEvent?.persisted}, stored: ${lifecycle.storedPos}s`,
     );
 
-    // 7. Reload page and check UI resume affordance
+    const hasAudioTimeRestored = typeof lifecycle.audioTime === "number" &&
+      Math.abs(lifecycle.audioTime - 42) <= 1;
+
+    check(
+      "history.back() restores page from bfcache with pageshow persisted=true and preserves in-memory playback time",
+      Boolean(pageshowEvent && pageshowEvent.persisted === true && hasAudioTimeRestored),
+      `pageshow persisted: ${pageshowEvent?.persisted}, audio currentTime: ${lifecycle.audioTime}s (target ~42s)`,
+    );
+
+    // 8. Reload page and check UI resume affordance
     await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
     await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page reloaded");
 
@@ -143,15 +194,32 @@ try {
       `badge text: '${badgeText}'`,
     );
 
-    // 8. Capture screenshot
+    // 9. Capture screenshot
     const shot = await cdp("Page.captureScreenshot", { format: "png" });
-    await Deno.writeFile(
-      `${OUT}01-pagehide-visibilitychange-resume.png`,
-      Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-    );
+    const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
+    await Deno.writeFile(`${OUT}01-pagehide-visibilitychange-resume.png`, raw);
+    try {
+      const cmd = new Deno.Command("convert", {
+        args: [
+          `${OUT}01-pagehide-visibilitychange-resume.png`,
+          "-colors",
+          "256",
+          `png8:${OUT}01-pagehide-visibilitychange-resume.png.tmp`,
+        ],
+      });
+      const out = await cmd.output();
+      if (out.success) {
+        await Deno.rename(
+          `${OUT}01-pagehide-visibilitychange-resume.png.tmp`,
+          `${OUT}01-pagehide-visibilitychange-resume.png`,
+        );
+      }
+    } catch {
+      await Deno.remove(`${OUT}01-pagehide-visibilitychange-resume.png.tmp`).catch(() => {});
+    }
     console.log(`Saved screenshot to ${OUT}01-pagehide-visibilitychange-resume.png`);
 
-    // 9. Verify beforeunload is absent from window listeners
+    // 10. Verify beforeunload is absent from window listeners
     const hasBeforeUnload = await js(`
       "onbeforeunload" in window && window.onbeforeunload !== null
     `);
@@ -160,6 +228,34 @@ try {
       !hasBeforeUnload,
       `hasBeforeUnload: ${hasBeforeUnload}`,
     );
+
+    await writeEvidenceReadme({
+      dir: OUT,
+      title: "Evidence for audio-feed-dfbu & bfcache lifecycle (audio-feed-sxlt)",
+      script: "scripts/verify_dfbu_pagehide_browser.ts",
+      asserts: checks.map((c) => c.name),
+      sections: [
+        {
+          heading: "Overview",
+          body:
+            `Replaces the deprecated and bfcache-ineligible \`beforeunload\` listener with \`pagehide\` and \`visibilitychange\` (handling \`visibilityState === "hidden"\`) for playback position saving in \`src/assets/listen.js\`. Drives real browser navigation away and back to prove bfcache eligibility (\`persisted === true\`) and position persistence.`,
+        },
+        {
+          heading: "Verification",
+          body: `1. **Automated Unit Test (\`tests/playback_position_test.ts\`)**:
+   - Asserts client script registers \`pagehide\` and \`visibilitychange\` listeners.
+   - Asserts client script does NOT register any \`beforeunload\` listener.
+2. **Headless Chrome Browser Proof (\`scripts/verify_dfbu_pagehide_browser.ts\`)**:
+   - Drives real headless Chrome over CDP against \`scripts/listen-harness.ts\`.
+   - Starts playback, simulates tab backgrounding via \`visibilitychange\` (\`document.visibilityState === "hidden"\`), asserts position is stored to scoped \`localStorage\`.
+   - Advances playback, navigates away to \`about:blank\` (real browser navigation), asserts \`pagehide\` fires with \`persisted: true\` and saves updated position to \`localStorage\`.
+   - Navigates back via \`history.back()\`, asserts \`pageshow\` fires with \`persisted: true\` (restored from bfcache), preserving in-memory state.
+   - Reloads page, asserts row displays "Resume from 0:42" badge and button is wired to resume.
+   - Asserts \`window.onbeforeunload\` is not set.
+   - Captures screenshot: \`01-pagehide-visibilitychange-resume.png\`.`,
+        },
+      ],
+    });
 
     ws.close();
   }, { prefix: "audiofeed-dfbu-" });
