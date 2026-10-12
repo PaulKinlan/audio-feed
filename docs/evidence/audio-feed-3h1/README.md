@@ -1,5 +1,7 @@
 # Browser Acceptance Proof: audio-feed-3h1
 
+- Debt: admitted (audio-feed-tgnu)
+
 ## Feature
 Client-side source and text filtering over the player's loaded episode and activity list:
 - Source dropdown populated dynamically from unique subscribed sources across episodes and activity items.

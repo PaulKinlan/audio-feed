@@ -1,5 +1,7 @@
 # Browser Acceptance Proof: audio-feed-ytg
 
+- Debt: admitted (audio-feed-tgnu)
+
 ## Feature
 Front door links to the web player:
 - Links from homepage header navigation and hero copy directly to `/listen`.

@@ -1,5 +1,7 @@
 # Browser Acceptance Proof: audio-feed-9mp
 
+- Debt: admitted (audio-feed-tgnu)
+
 ## Feature
 Spend visibility and per-user daily episode budget:
 - Provides admin console container element for per-user synthesis statistics (`#synthesisBody`).
