@@ -31,6 +31,11 @@ interface Surface {
   /** Build a request carrying the canary on this surface, for a matched and an unmatched path. */
   build(path: string): Request;
   /**
+   * The HTTP status the application's router or handler must yield. Asserting this proves the request
+   * reached the expected path instead of being short-circuited by a host-gate refusal.
+   */
+  expectedStatus: (path: string) => number;
+  /**
    * True when the surface reaches the UNHANDLED-ERROR record. The router catches a handler throw and answers
    * 500, so this surface is answered rather than throwing out of the server - asserting a throw would assert
    * the wrong thing about this app (audio-feed-sw1r).
@@ -61,61 +66,75 @@ const SURFACES: Surface[] = [
     name: "query string inside an UNHANDLED error's message (/__test/throw)",
     build: () => new Request(`${BASE}/__test/throw?m=${CANARY}`),
     expectUnhandledError: true,
+    expectedStatus: () => 500,
   },
   {
     name: "method",
     build: (path) => new Request(`${BASE}${path}`, { method: CANARY }),
+    expectedStatus: (path) => path === "/account" ? 405 : 404,
   },
   {
     name: "method (lower-case spelling of a real one)",
     build: (path) => new Request(`${BASE}${path}`, { method: "get" }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "path segment (positional capability: /listen/<canary>)",
     build: () => new Request(`${BASE}/listen/${CANARY}`),
+    expectedStatus: () => 404,
   },
   {
     name: "path segment (unmatched tail)",
     build: () => new Request(`${BASE}/feed/${CANARY}/master.xml/${CANARY}`),
+    expectedStatus: () => 404,
   },
   {
     name: "path segment (mixed-case prefix)",
     build: () => new Request(`${BASE}/AUDIO/${CANARY}`),
+    expectedStatus: () => 404,
   },
   {
     name: "query string",
     build: (path) => new Request(`${BASE}${path}?token=${CANARY}&next=${CANARY}`),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: user-agent",
     build: (path) => new Request(`${BASE}${path}`, { headers: { "user-agent": CANARY } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: x-correlation-id (never adopted from a caller)",
     build: (path) => new Request(`${BASE}${path}`, { headers: { "x-correlation-id": CANARY } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: referer",
     build: (path) => new Request(`${BASE}${path}`, { headers: { referer: `${BASE}/${CANARY}` } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: cookie",
     build: (path) =>
       new Request(`${BASE}${path}`, { headers: { cookie: `audio-feed-token=${CANARY}` } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: x-forwarded-for",
     build: (path) => new Request(`${BASE}${path}`, { headers: { "x-forwarded-for": CANARY } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "header: content-type",
     build: (path) =>
       new Request(`${BASE}${path}`, { headers: { "content-type": `text/${CANARY}` } }),
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "client address (socket-level, arrives beside the request)",
     build: (path) => new Request(`${BASE}${path}`),
     info: { remoteAddr: { hostname: CANARY } },
+    expectedStatus: (path) => path === "/account" ? 303 : 404,
   },
   {
     name: "body",
@@ -125,6 +144,7 @@ const SURFACES: Surface[] = [
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email: `${CANARY}@example.com`, token: CANARY, note: CANARY }),
       }),
+    expectedStatus: (path) => path === "/account" ? 405 : 404,
   },
 ];
 
@@ -197,9 +217,22 @@ for (const surface of SURFACES) {
         // ANTI-VACUITY: the request must actually have been recorded, or the absence of the canary
         // below means nothing. This is the assertion that caught this very test driving an app with
         // no logging wrapper at all.
+        const reqRecord = records.find((r) => r.type === "http.request");
         assert(
-          records.some((r) => r.type === "http.request"),
+          reqRecord,
           `the request itself must be recorded (got ${records.length} record(s))`,
+        );
+
+        // ANTI-VACUITY (PATH): ensure we didn't just hit the host-gate refusal (which yields 500
+        // before any handler runs) or some other pre-handler abort. By asserting the exact status
+        // the target handler produces, we prove the request reached the expected handler, not just
+        // a side effect that a gate produced (audio-feed-cv6z).
+        assertEquals(
+          res.status,
+          surface.expectedStatus(path),
+          `Expected the handler to run and yield ${
+            surface.expectedStatus(path)
+          }, but got ${res.status}. Did the host-gate refusal short-circuit the path?`,
         );
         const serialised = JSON.stringify(records);
         assert(
@@ -248,7 +281,13 @@ Deno.test("a method this app cannot serve is recorded as a constant, not echoed 
   // record stays meaningful instead of merely safe.
   const first = await app();
   try {
-    await first.fetch(new Request(`${BASE}/account`, { method: CANARY }));
+    const res = await first.fetch(new Request(`${BASE}/account`, { method: CANARY }));
+    assertEquals(
+      res.status,
+      405,
+      "Expected path to be handled and yield 405, but got " + res.status +
+        " (did host-gate refusal run?)",
+    );
     const record = (await first.stores.metadata.listLogs()).find((r) => r.type === "http.request");
     assert(record, "the request was recorded");
     assertEquals(record.context?.method, "<other>");
@@ -263,7 +302,13 @@ Deno.test("a method this app cannot serve is recorded as a constant, not echoed 
   const second = await app();
   let postedContext: Record<string, unknown> | undefined;
   try {
-    await second.fetch(new Request(`${BASE}/account`, { method: "POST" }));
+    const res2 = await second.fetch(new Request(`${BASE}/account`, { method: "POST" }));
+    assertEquals(
+      res2.status,
+      405,
+      "Expected path to be handled and yield 405, but got " + res2.status +
+        " (did host-gate refusal run?)",
+    );
     postedContext = (await second.stores.metadata.listLogs())
       .find((r) => r.type === "http.request")?.context;
   } finally {
