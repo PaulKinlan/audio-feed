@@ -61,21 +61,31 @@ export const WRITE_CALLS: readonly {
    * entry has a sample (tests/evidence_census_test.ts), so a call cannot be added
    * here without its target argument being stated and exercised.
    *
-   * CORRECTED, AND THE CORRECTION IS KEPT BECAUSE THE ERROR IS INSTRUCTIVE (audio-feed-vex8,
-   * rev-46 retracted a PASS over this): this paragraph PREVIOUSLY declared `Deno.rename` out of
-   * the set, on the strength of a measurement that was WRONG - a four-line grep context window
-   * around each call, which CANNOT SEE a destination that arrives as a variable, a constant or an
-   * EVIDENCE_DIR-shaped helper. It reported "zero destinations in evidence"; the truth is ten of
-   * the eleven non-comment callers rename INTO evidence, and one of them rewrites a selected
-   * evidence PNG while the census credited it with no writer at all. A declared limit whose number
-   * is wrong is worse than no declaration, because it reads as considered - so rename is now IN the
-   * table with the same per-entry target argument as copyFile, and the wrong instrument is named
-   * here rather than quietly deleted.
+   * CORRECTED TWICE, AND THE SECOND CORRECTION IS WHY THIS PARAGRAPH IS KEPT AT ALL
+   * (audio-feed-vex8, after rev-46 retracted a PASS over it): this text first declared rename OUT
+   * of the set with "eleven files call rename and ZERO of their destinations are under the evidence
+   * prefix". That number came from a FOUR-LINE GREP CONTEXT WINDOW around each call, WHICH CANNOT
+   * SEE a destination that arrives as a constant, a variable or a helper.
    *
-   * AND THE AGGREGATE COULD NOT HAVE CAUGHT IT: the writer-directory count was 36 before the fix
-   * and is 36 after it, because those proof scripts also write through other calls, so a headline
-   * number that "held" held while a defect was present. The per-site credit is the control; the
-   * total is not.
+   * RE-DERIVED FROM THE CODE, WITH THE METHOD NAMED SO IT CAN BE REPEATED: for each script calling
+   * rename, take the second argument's raw text, substitute module-level constants defined in that
+   * same file ONE LEVEL, then test for the evidence prefix. MEASURED: 7 OF THE 11 CALLERS rename
+   * into evidence - csp-nonce-browser-proof, listen-browser-proof, tokens-browser-proof,
+   * verify_3asd_bookmarklet_browser, verify_dfbu_pagehide_browser, verify_main_l7m1_e2e and
+   * voice-audition-browser-proof. A twelfth file matches a textual scan and is THIS ONE: its own
+   * header prose spells a rename call, so a CALL IN A COMMENT IS INPUT TO A SCANNER - the same
+   * lesson as a path in a comment, and the thing that caught this paragraph being wrong.
+   *
+   * AND ONE CALLER IS AN EVIDENCE WRITER THE STATIC NUMBER DOES NOT COVER: the compressor renames
+   * to its own `path` parameter, fed by an evidence enumeration at runtime, so it is not among the 7
+   * and is a real rewriter all the same. THE HONEST SCOPE IS THEREFORE "AT LEAST 8 OF 11 RENAME
+   * INTO EVIDENCE, 7 OF THEM STATICALLY RESOLVABLE" - not zero, and not a number inherited from a
+   * review. rename is IN the table below with the same per-entry target argument as copyFile.
+   *
+   * AND THE AGGREGATE COULD NOT HAVE CAUGHT ANY OF IT AND CANNOT CONFIRM THE FIX: writer
+   * directories are 36 before and after, and the compressor is credited by nothing before and
+   * after, because those scripts also write through other calls. A number that holds while a defect
+   * is present is not a control - the per-site credit is.
    */
   targetArgument: number;
 }[] = [
