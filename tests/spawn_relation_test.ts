@@ -203,7 +203,7 @@ Deno.test("audio-feed-20c7: a path passed in env/cwd earns NO execute relation, 
   });
 });
 
-Deno.test("audio-feed-20c7: with only env/cwd mentions, the selection is EMPTY rather than narrowed", async () => {
+Deno.test("audio-feed-20c7: with only env/cwd mentions, the selection is the FAIL-CLOSED TIER, not an empty one", async () => {
   const onlyPassed = { ...PASSED_NOT_EXECUTED } as Record<string, string>;
   delete onlyPassed["tests/args_control_test.ts"];
   await withTempTree(onlyPassed, async (root) => {
@@ -215,12 +215,60 @@ Deno.test("audio-feed-20c7: with only env/cwd mentions, the selection is EMPTY r
     ]);
     assertEquals(report.relations.get("scripts/tool.ts"), undefined);
     const plan = planTests(["scripts/tool.ts"], NO_MAP, NO_MAP, report.relations, [], []);
+
+    // ⚠️ THIS ASSERTION USED TO READ `plan.testFiles ?? []` AND THAT COLLAPSE HID THE VERY OUTCOME ITS MESSAGE
+    // DESCRIBED. `null` means the FULL tier - the real consumer runs. `[]` means NO suite runs. `?? []` maps
+    // both to `[]`, so the assertion passed for the safe outcome and for the silent pass alike: it could not
+    // fire on the state it existed to catch, which is a stricter defect than a missing assertion, because the
+    // message claimed a fail-closed tier nothing observed. `null` is the safe state for a `.ts` change that
+    // nothing claims, and it is asserted as itself.
     assertEquals(
-      plan.testFiles ?? [],
+      plan.testFiles,
+      null,
+      "a `.ts` change with no derived executor must FAIL CLOSED into the full tier (audio-feed-20c7): null " +
+        "is the full suite, and an empty array would be a selection that runs nothing while looking like one. " +
+        `reason: ${plan.reason}`,
+    );
+    // AND THE ASSERTION ABOVE IS ONLY WORTH ANYTHING IF IT CAN TELL THE TWO STATES APART, so the other state
+    // is asserted in the same test, on the same plan function: a DECLARED-inert change is the only thing
+    // allowed to select nothing, and it must come back as the empty array rather than as null.
+    const inert = planTests(
+      ["docs/observability-api.md"],
+      NO_MAP,
+      NO_MAP,
+      report.relations,
       [],
-      "an empty selection is the SAFE outcome: the gate then fail-closes into the full tier and runs the real " +
-        "consumer. A non-empty selection here is the defect - it looks like a mapping and it drops the suite " +
-        "that would have caught the change",
+      [],
+    );
+    assertEquals(
+      inert.testFiles,
+      [],
+      "a declared-inert change is the OTHER state: it selects nothing on purpose, and it must be " +
+        "distinguishable from the fail-closed tier rather than equal to it",
+    );
+  });
+});
+
+Deno.test("audio-feed-20c7: stdout/stdin/clearEnv positions also earn no execute relation", async () => {
+  // The same axis as the env/cwd case, on the rest of the options object, so a future narrowing that only
+  // guards the three positions named in the reviewer's repro is not enough to pass this file.
+  await withTempTree({
+    "scripts/tool.ts": 'export const value = "correct";\n',
+    "tests/stdout_test.ts":
+      'const TOOL = "scripts/tool.ts";\nDeno.test("out", () => {\n  new Deno.Command("deno", ' +
+      '{ args: ["eval", "1"], stdout: "piped", stdin: "null", clearEnv: true, cwd: TOOL });\n});\n',
+    "tests/args_control_test.ts":
+      'const TOOL = "scripts/tool.ts";\nDeno.test("runs", () => {\n  new Deno.Command("deno", ' +
+      '{ args: ["run", TOOL] });\n});\n',
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [
+      "tests/stdout_test.ts",
+      "tests/args_control_test.ts",
+    ]);
+    assertEquals(
+      report.relations.get("scripts/tool.ts"),
+      ["tests/args_control_test.ts"],
+      "the args position earns the relation and NOTHING ELSE in the options object does",
     );
   });
 });
