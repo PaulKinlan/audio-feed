@@ -121,3 +121,73 @@ Deno.test("audio-feed-3teu: evidence:compress refuses to touch anything outside 
     true,
   );
 });
+
+Deno.test("audio-feed-a7e8: a STAGED oversized PNG deleted from the worktree is still enforced", async () => {
+  // THE FINDING. `git add` then `rm` leaves the staged oversized blob in the INDEX (git status `MD`), and the
+  // gate passed it: the audit enumerated only PNGs present ON DISK via evidencePngs(), so the blob that would
+  // land after a commit was never handed to gitCarriedSizes at all - `git cat-file -s :<path>` said 400KB while
+  // the audit said oversizedCarried=[] and totalCarried=0. That direction is the more serious of the two: a
+  // false FAIL costs a reviewer one confusing round, a false green ships an over-budget image into main.
+  const root = await Deno.makeTempDir({ prefix: "a7e8-md-" });
+  const rel = "docs/evidence/bead/01-shot.png";
+  try {
+    await git(["init", "-q"], root);
+    await git(["config", "user.email", "t@example.com"], root);
+    await git(["config", "user.name", "t"], root);
+    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
+    await Deno.writeFile(`${root}/${rel}`, new Uint8Array(1024));
+    await git(["add", rel], root);
+    await commitAll(root, "committed, 1KB evidence");
+
+    await Deno.writeFile(`${root}/${rel}`, new Uint8Array(OVER_BUDGET));
+    await git(["add", rel], root);
+    await Deno.remove(`${root}/${rel}`); // working-tree deletion ONLY: the index still carries 400KB
+    const status = await new Deno.Command("git", {
+      args: ["status", "--short"],
+      cwd: root,
+      stdout: "piped",
+    }).output();
+    assertEquals(
+      new TextDecoder().decode(status.stdout).trim().startsWith("MD"),
+      true,
+      "the reproduction is the MD state (modified in the index, deleted in the worktree)",
+    );
+
+    assertEquals((await gitCarriedSizes([rel], root)).get(rel), OVER_BUDGET);
+    const audit = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    assertEquals(audit.totalCarried, OVER_BUDGET, "the INDEX blob is counted");
+    assertEquals(
+      audit.oversizedCarried.length,
+      1,
+      "a staged oversized PNG that is gone from the worktree must still fail",
+    );
+    assertEquals(audit.oversizedCarried[0]!.includes(rel), true);
+    assertEquals(audit.regenerated, []);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-a7e8: a clean tree is green, and the carried total is the committed total", async () => {
+  // The fourth side of the matrix: nothing oversized anywhere. The union must not double-count a path that is
+  // both on disk and in the index, and a small file staged but not yet committed stays green.
+  const root = await Deno.makeTempDir({ prefix: "a7e8-clean-" });
+  try {
+    await git(["init", "-q"], root);
+    await git(["config", "user.email", "t@example.com"], root);
+    await git(["config", "user.name", "t"], root);
+    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
+    await Deno.writeFile(`${root}/docs/evidence/bead/01-shot.png`, new Uint8Array(120 * 1024));
+    await git(["add", "-A"], root);
+    await commitAll(root, "committed, compressed evidence");
+    await Deno.writeFile(`${root}/docs/evidence/bead/02-shot.png`, new Uint8Array(100 * 1024));
+    await git(["add", "-A"], root);
+
+    const audit = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    assertEquals(audit.oversizedCarried, []);
+    assertEquals(audit.regenerated, []);
+    assertEquals(audit.totalCarried, 220 * 1024, "each carried path is counted ONCE");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

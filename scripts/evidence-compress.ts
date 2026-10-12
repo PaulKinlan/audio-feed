@@ -114,6 +114,36 @@ export async function gitCarriedSizes(
 }
 
 /** The budget audit the suite and `--check` both use, so the gate and the tool cannot disagree. */
+/**
+ * PNG paths the INDEX carries under the evidence directory, including paths that are ABSENT from the working
+ * tree (audio-feed-a7e8).
+ *
+ * The audit used to enumerate what was ON DISK and nothing else, so `git add` followed by `rm` - a working-tree
+ * deletion that leaves the staged oversized blob in the index, `git status` showing `MD` - was invisible to it:
+ * `git cat-file -s :<path>` said 409600 while the audit said `oversizedCarried=[], totalCarried=0`, and the gate
+ * passed the exact blob that would land. A false green in a BUDGET gate is worse than the false FAIL this bead
+ * set out to remove: a false FAIL costs a reviewer one confusing round, a false green ships an over-budget
+ * image into main. A CI runner that checks out the branch sees the INDEX, so the index is the thing to measure.
+ */
+async function indexedEvidencePngs(dir: string, repoRoot: string): Promise<string[]> {
+  const rel = dir.startsWith(`${repoRoot}/`) ? dir.slice(repoRoot.length + 1) : dir;
+  const out = await new Deno.Command("git", {
+    args: ["-C", repoRoot, "ls-files", "-z", "--", rel],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!out.success) {
+    // Fail loudly: an audit that cannot read the index must not answer "nothing over budget".
+    throw new Error(
+      `git ls-files failed for ${rel}: ${new TextDecoder().decode(out.stderr).trim()}`,
+    );
+  }
+  return new TextDecoder().decode(out.stdout)
+    .split("\0")
+    .filter((path) => path.toLowerCase().endsWith(".png"))
+    .map((path) => `${repoRoot}/${path}`);
+}
+
 export async function auditEvidenceSizes(
   dir: string = EVIDENCE_DIR,
   repoRoot: string = REPO_ROOT,
@@ -124,6 +154,12 @@ export async function auditEvidenceSizes(
     paths.push(path);
     working.set(path, (await Deno.stat(path)).size);
   }
+  // WHAT GIT CARRIES IS THE UNION OF DISK AND INDEX (audio-feed-a7e8): a staged PNG deleted from the working
+  // tree is still carried, and enumerating disk paths alone missed exactly the blob that would land.
+  for (const path of await indexedEvidencePngs(dir, repoRoot)) {
+    if (!working.has(path)) paths.push(path);
+  }
+  paths.sort();
   const rel = paths.map((path) =>
     path.startsWith(`${repoRoot}/`) ? path.slice(repoRoot.length + 1) : path
   );
@@ -134,7 +170,8 @@ export async function auditEvidenceSizes(
   let totalCarried = 0;
   paths.forEach((path, i) => {
     const carriedSize = carried.get(rel[i]!) ?? null;
-    const workingSize = working.get(path) ?? 0;
+    // null when the path is in the INDEX but not on disk: there is no working-tree size to compare.
+    const workingSize = working.get(path) ?? null;
     if (carriedSize !== null) {
       totalCarried += carriedSize;
       if (carriedSize > EVIDENCE_PNG_BUDGET_BYTES) {
@@ -145,6 +182,7 @@ export async function auditEvidenceSizes(
     // NOT failed - and not reported either when the carried blob is already the failure, so one file cannot
     // appear in both buckets.
     if (
+      workingSize !== null &&
       workingSize > EVIDENCE_PNG_BUDGET_BYTES &&
       (carriedSize === null || carriedSize <= EVIDENCE_PNG_BUDGET_BYTES)
     ) {
