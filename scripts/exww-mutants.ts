@@ -79,7 +79,6 @@ export interface Options {
 const REPO = resolve(new URL("../", import.meta.url).pathname);
 export const PROOF_REL = "scripts/exww-live-claims-browser-proof.ts";
 const PROOF = PROOF_REL;
-const EVIDENCE_DIR = "docs/evidence/audio-feed-exww";
 /** Where the mutant matrix gets its results from; the tier's own contract (`scripts/proof-helper.ts`). */
 const FAIL_PREFIX = "FAIL";
 
