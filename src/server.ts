@@ -22,7 +22,7 @@ import { type FeedPollWorkerHandle, startFeedPollWorker } from "./ingest/feed.ts
 import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
-import { screenErrorMessage } from "./observability/error_screen.ts";
+import { screenErrorMessage, screenErrorName } from "./observability/error_screen.ts";
 import { createLogger, isHighVolumeRoute, isObservabilityRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
@@ -176,10 +176,9 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // during canonical-host handling (audio-feed-wzv9, audio-feed-pwu4).
   const router = app.router;
   const appLog = createLogger({ sink: stores.metadata, process: "app" });
-  // Only the class name of a throw, so an error message that quotes the request cannot reach a
-  // record (audio-feed-ao4s). The name comes from this codebase's own throw sites.
-  const errorName = (error: unknown): string =>
-    error instanceof Error && error.name ? error.name : "UnknownError";
+  // Only the class name of a throw, screened to KNOWN_ERROR_NAMES (audio-feed-z1gs), so an
+  // attacker-chosen custom error name cannot reach a record.
+  const errorName = (error: unknown): string => screenErrorName(error);
   const serverFetch = async (
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },

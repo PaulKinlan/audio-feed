@@ -10,7 +10,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { isHttpsRequest, sanitizeRequestUrl } from "../src/router.ts";
+import { isHttpsRequest, Router, sanitizeRequestUrl } from "../src/router.ts";
 import { isAllowedAudioKey } from "../src/routes/audio.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
@@ -434,8 +434,8 @@ Deno.test("token redaction: Router 500 error logging redacts capability token an
     );
     assertStringIncludes(
       logLine,
-      "/feed/[redacted]/master.xml",
-      "Log line must contain redacted URL",
+      "/feed/:token/master.xml",
+      "Log line must contain route pattern constant (audio-feed-067d)",
     );
 
     // Error object / stack must be preserved, with message screened to prevent client leaks (audio-feed-ahx5)
@@ -524,8 +524,8 @@ Deno.test("token redaction: Router 500 error logging redacts audio capability to
     );
     assertStringIncludes(
       logLine,
-      "/audio/[redacted]",
-      "Log line must contain redacted URL",
+      "/audio/:key+",
+      "Log line must contain route pattern constant (audio-feed-067d)",
     );
 
     // Error object / stack must be preserved, with message screened to prevent client leaks (audio-feed-ahx5)
@@ -539,21 +539,27 @@ Deno.test("token redaction: Router 500 error logging redacts audio capability to
   }
 });
 
-Deno.test("token redaction: Router 500 error logging screens client canary in operational stderr (audio-feed-ahx5)", async () => {
-  const CLIENT_CANARY = "canary-client-token-998877";
+Deno.test("token redaction: Router 500 error logging screens client canaries across all fields in operational stderr (audio-feed-ahx5, audio-feed-067d)", async () => {
+  const PATH_CANARY = "canary-path-segment-112233";
+  const QUERY_CANARY = "canary-query-param-445566";
+  const MSG_CANARY = "canary-error-message-778899";
+  const NAME_CANARY = "canary-error-name-001122";
+  const FN_CANARY = "canary-fn-name-334455";
+  const LOC_CANARY = "canary-stack-loc-667788";
+
   const { fetch } = setupTestApp(undefined, {
     masterFeed: () => {
       // Error carrying canaries in message, custom name, dynamic stack frame, and stack location
-      const err = new Error(`test throw: ${CLIENT_CANARY}`);
-      err.name = `CanaryName_${CLIENT_CANARY}`;
-      err.stack = `CanaryName_${CLIENT_CANARY}: test throw: ${CLIENT_CANARY}
-        at Object.canaryDynamicFn_${CLIENT_CANARY} (file:///app/${CLIENT_CANARY}/server.ts:10:2)`;
+      const err = new Error(`test throw: ${MSG_CANARY}`);
+      err.name = `Custom_${NAME_CANARY}`;
+      err.stack = `Custom_${NAME_CANARY}: test throw: ${MSG_CANARY}
+        at Object.canaryDynamicFn_${FN_CANARY} (file:///app/${LOC_CANARY}/server.ts:10:2)`;
       const obj = {
-        [`canaryDynamicFn_${CLIENT_CANARY}`]() {
+        [`canaryDynamicFn_${FN_CANARY}`]() {
           throw err;
         },
       };
-      obj[`canaryDynamicFn_${CLIENT_CANARY}`]();
+      obj[`canaryDynamicFn_${FN_CANARY}`]();
     },
   });
 
@@ -564,7 +570,9 @@ Deno.test("token redaction: Router 500 error logging screens client canary in op
   };
 
   try {
-    const res = await fetch(new Request(`${BASE}/feed/some-token/master.xml`));
+    const res = await fetch(
+      new Request(`${BASE}/feed/${PATH_CANARY}/master.xml?subscriber=${QUERY_CANARY}`),
+    );
     assertEquals(res.status, 500);
 
     assertEquals(loggedErrors.length, 1);
@@ -574,14 +582,62 @@ Deno.test("token redaction: Router 500 error logging screens client canary in op
     assert(loggedException instanceof Error);
     assertEquals((loggedException as Error).message, SUPPRESSED_MESSAGE);
     assertEquals((loggedException as Error).name, "Error");
+    assertEquals(
+      (loggedException as Error).stack,
+      `Error: ${SUPPRESSED_MESSAGE}`,
+    );
 
-    // Assert that the canary is completely absent from the logged Error message, name, and stack
-    const formatted = `${logLine} ${
+    // Assert that the logLine contains only the route pattern constant
+    assertStringIncludes(logLine, "/feed/:token/master.xml");
+
+    // Assert that NONE of the canaries reached stderr in either argument
+    const combinedStderr = `${logLine} ${
       (loggedException as Error).stack ?? (loggedException as Error).message
     }`;
     assert(
-      !formatted.includes(CLIENT_CANARY),
-      `Operational stderr must not contain client canary: ${formatted}`,
+      !combinedStderr.includes(PATH_CANARY),
+      `PATH_CANARY leaked to stderr: ${combinedStderr}`,
+    );
+    assert(
+      !combinedStderr.includes(QUERY_CANARY),
+      `QUERY_CANARY leaked to stderr: ${combinedStderr}`,
+    );
+    assert(!combinedStderr.includes(MSG_CANARY), `MSG_CANARY leaked to stderr: ${combinedStderr}`);
+    assert(
+      !combinedStderr.includes(NAME_CANARY),
+      `NAME_CANARY leaked to stderr: ${combinedStderr}`,
+    );
+    assert(!combinedStderr.includes(FN_CANARY), `FN_CANARY leaked to stderr: ${combinedStderr}`);
+    assert(!combinedStderr.includes(LOC_CANARY), `LOC_CANARY leaked to stderr: ${combinedStderr}`);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+Deno.test("token redaction: Router 500 logs constant route pattern without arbitrary request path (audio-feed-067d)", async () => {
+  const PATH_CANARY = "canary-probe-param-998877";
+  const router = new Router();
+  router.get("/probe/:name", () => {
+    throw new Error("unhandled probe error");
+  });
+
+  const loggedErrors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  try {
+    const handler = router.fetchHandler({});
+    const res = await handler(new Request(`https://example.com/probe/${PATH_CANARY}`));
+    assertEquals(res.status, 500);
+
+    assertEquals(loggedErrors.length, 1);
+    const logLine = String(loggedErrors[0]?.[0]);
+    assertStringIncludes(logLine, "/probe/:name");
+    assert(
+      !logLine.includes(PATH_CANARY),
+      `Operational stderr must not contain arbitrary request path segment: ${logLine}`,
     );
   } finally {
     console.error = originalError;

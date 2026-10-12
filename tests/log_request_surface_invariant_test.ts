@@ -69,6 +69,13 @@ const SURFACES: Surface[] = [
     expectedStatus: () => 500,
   },
   {
+    // A custom Error.name containing attacker-chosen text (audio-feed-z1gs).
+    name: "custom Error.name on an UNHANDLED error (/__test/throw?name=...)",
+    build: () => new Request(`${BASE}/__test/throw?m=harmless&name=${CANARY}`),
+    expectUnhandledError: true,
+    expectedStatus: () => 500,
+  },
+  {
     name: "method",
     build: (path) => new Request(`${BASE}${path}`, { method: CANARY }),
     expectedStatus: (path) => path === "/account" ? 405 : 404,
@@ -267,6 +274,11 @@ for (const surface of SURFACES) {
             recorded.context?.errorMessage,
             SUPPRESSED_MESSAGE,
             "the stored message must be the SCREENED value, not the thrown text",
+          );
+          assertEquals(
+            recorded.context?.error,
+            "Error",
+            "the stored error class must be screened to a closed set, not an arbitrary Error.name (audio-feed-z1gs)",
           );
         }
       } finally {
