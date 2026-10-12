@@ -331,7 +331,9 @@ await runProof("verify_live_tts", async (checker) => {
       {
         heading: "Artifact Provenance",
         body:
-          "The `live-validation.json` artifact in this directory was captured by hand from script stdout during the original verification pass, while the claims declared below are programmatically verified by `scripts/verify_live_tts.ts`.",
+          `Run on 2026-10-08 UTC: \`timeout -k 30 300 deno run -A scripts/verify_live_tts.ts\`. The **complete actual script output** is [\`live-validation.json\`](live-validation.json). Each provider fetch has an AbortSignal timeout (20 seconds for metadata/counts, 120 seconds for synthesis controls). The fleet proxy at \`https://gemini.int.exe.xyz/v1beta\` appends the API path and injects the key server-side; no credential is stored or transmitted by this script.
+
+The \`live-validation.json\` artifact in this directory was captured by hand from script stdout during the original verification pass, while the claims declared above are programmatically verified by \`scripts/verify_live_tts.ts\`.`,
       },
       {
         heading: "Live Verification Status & Provider Behavior (audio-feed-zrx9)",

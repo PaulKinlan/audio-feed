@@ -455,9 +455,14 @@ await runProof("verify_live_e2e_tts", async (checker) => {
     ],
     sections: [
       {
+        heading: "Run Provenance",
+        body: `Run on 2026-10-08 UTC against the live fleet proxy at \`https://gemini.int.exe.xyz\`.
+Complete machine-readable results are recorded in [\`live-e2e-validation.json\`](live-e2e-validation.json).`,
+      },
+      {
         heading: "Background & Scope",
         body:
-          `Follow-up to \`audio-feed-u60a\` (landed on main). In \`u60a\`, live proxy controls, token bounds, and single-segment excerpts were verified, but the production \`GeminiTtsClient\` could not be tested end-to-end because:
+          `Follow-up to \`audio-feed-u60a\` (landed \`commit-757ea14\`). In \`u60a\`, live proxy controls, token bounds, and single-segment excerpts were verified, but the production \`GeminiTtsClient\` could not be tested end-to-end because:
 1. \`src/tts/gemini.ts\` hardcoded \`GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"\`, forcing u60a to reimplement transport.
 2. Full multi-segment synthesis (8 segments) and stitched audio assembly through \`client.synthesizeNarration\` remained unverified.
 
