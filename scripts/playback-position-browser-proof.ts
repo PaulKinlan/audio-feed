@@ -126,7 +126,7 @@ try {
   await sleep(100);
 
   const storedPos = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]?.position
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `);
   check("playback position 45s saved to localStorage", storedPos === 45, `stored ${storedPos}s`);
 
@@ -176,7 +176,7 @@ try {
     "audio restarted to 0s",
   );
   const clearedStored = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
   check(
     "clicking 'Play from start' clears stored position",
@@ -194,7 +194,7 @@ try {
   check(
     "re-saved position 50s",
     (await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]?.position
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `)) === 50,
     "re-saved at 50s",
   );
@@ -205,7 +205,7 @@ try {
   })()`);
   await sleep(100);
   const endedStored = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
   check(
     "ended event clears stored position",
@@ -213,12 +213,12 @@ try {
     "position removed after ended",
   );
 
-  // 8. Per-token isolation: a different token does not see these positions
+  // 8. Per-user isolation: a different user does not see these positions
   const otherTokenStorage = await js(`
-    localStorage.getItem("audio-feed-positions:other-token")
+    localStorage.getItem("audio-feed-positions:other-user")
   `);
   check(
-    "other token has no stored positions (per-token isolation)",
+    "other user has no stored positions (per-user isolation)",
     otherTokenStorage === null,
     "isolated key",
   );
