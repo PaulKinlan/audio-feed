@@ -387,6 +387,61 @@ Deno.test("a SAFETY block is still an error, not a truncation", () => {
   if (!isSafety) throw new Error("SAFETY must stay a plain GeminiTtsError");
 });
 
+/**
+ * audio-feed-zrx9: the live provider stopped returning a copyright-recitation refusal for raw
+ * Wikipedia prose, so the two live negative controls that asserted that refusal were narrowed.
+ * THIS test is what keeps the property the app actually depends on, and it no longer needs the
+ * provider to cooperate: a recitation/copyright refusal must produce no audio and must throw,
+ * under every response shape the provider has been seen to use, and even for a caller that
+ * accepts truncation - a filter block must never become a published episode.
+ */
+Deno.test("a copyright-recitation refusal fails closed through the decoder", () => {
+  const refusal = (candidate: Record<string, unknown>) =>
+    JSON.stringify({ candidates: [candidate] });
+  const finishMessage =
+    "The generated content was filtered because it may contain material that resembles existing copyrighted works.";
+
+  const cases: Array<[string, string]> = [
+    ["no content at all", refusal({ finishReason: "OTHER", finishMessage })],
+    [
+      "content with empty parts",
+      refusal({
+        finishReason: "OTHER",
+        finishMessage,
+        content: { parts: [] },
+      }),
+    ],
+    [
+      "content whose only part is text",
+      refusal({
+        finishReason: "OTHER",
+        finishMessage,
+        content: { parts: [{ text: "I cannot read that aloud." }] },
+      }),
+    ],
+  ];
+
+  for (const [name, body] of cases) {
+    for (const allowTruncated of [false, true]) {
+      let thrown: Error | null = null;
+      try {
+        decodeAudioResponse(JSON.parse(body), 24000, { allowTruncated });
+      } catch (error) {
+        thrown = error as Error;
+      }
+      if (!thrown) {
+        throw new Error(`${name}: a refusal must throw, not return audio`);
+      }
+      if (thrown instanceof GeminiTtsTruncatedError) {
+        throw new Error(`${name}: a refusal is not truncation (allowTruncated=${allowTruncated})`);
+      }
+      if (!(thrown instanceof GeminiTtsError)) {
+        throw new Error(`${name}: expected GeminiTtsError, got ${thrown.name}`);
+      }
+    }
+  }
+});
+
 Deno.test("detectAudioFormat: an explicit hint beats the weak MPEG frame sync", () => {
   // Raw L16 PCM whose first sample starts 0xFF 0xE0.. — the exact case that was misread as mp3.
   const l16LooksLikeSync = new Uint8Array([0xff, 0xe0, 0x12, 0x34, 0x56, 0x78]);

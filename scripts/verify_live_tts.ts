@@ -99,7 +99,7 @@ await runProof("verify_live_tts", async (checker) => {
         status,
         finishReason: candidate?.finishReason,
         finishMessage: candidate?.finishMessage,
-        audioReturned: false,
+        audioReturned: !failClosed,
         decoderFailedClosed: failClosed,
         usageMetadata: json.usageMetadata,
       },
@@ -162,15 +162,25 @@ await runProof("verify_live_tts", async (checker) => {
     ctrl2.detail,
   );
 
+  // audio-feed-zrx9 NARROWING. This control used to require the provider to recitation-filter
+  // raw Wikipedia prose (HTTP 200 + finishReason OTHER + finishMessage "copyrighted works" + no
+  // audio). Re-measured against the live provider on 2026-10-12: 200 + STOP + ordinary audio for
+  // the same 10,506-token input, so the old claim no longer describes the provider. The app does
+  // not depend on that refusal: it segments every paid call to <= MAX_TTS_INPUT_BYTES (asserted
+  // above) and decodeAudioResponse fails closed on a refused/part-less response (kept as a
+  // deterministic control in tests/tts_hardening_test.ts, "a copyright-recitation refusal fails
+  // closed through the decoder"). So the assertion is narrowed to the observation, and it STILL
+  // FAILS if the refusal comes back - which is the whole point of keeping it live.
   const ctrl3 = await runNegativeControl(
     "Raw unsegmented article",
     article,
     200,
   );
+  const rawArticleRefused = ctrl3.raw.finishReason === "OTHER";
   checker.check(
-    "negative control: raw unsegmented article triggers copyright filter (200 OTHER)",
-    ctrl3.pass,
-    ctrl3.detail,
+    "raw unsegmented article is NOT recitation-filtered (audio-feed-zrx9: narrowed, fails if the refusal returns)",
+    ctrl3.status === 200 && !rawArticleRefused,
+    `${ctrl3.detail}, refusalShape=${rawArticleRefused}`,
   );
   const negativeControls = [ctrl1.raw, ctrl2.raw, ctrl3.raw];
 
@@ -318,7 +328,7 @@ await runProof("verify_live_tts", async (checker) => {
       "every segment stays within MAX_TTS_INPUT_BYTES budget",
       "negative control: synthetic repeated sentence exceeds input token limit (400)",
       "negative control: article with expanded preamble exceeds input token limit (400)",
-      "negative control: raw unsegmented article triggers copyright filter (200 OTHER)",
+      "raw unsegmented article is NOT recitation-filtered (audio-feed-zrx9: narrowed, fails if the refusal returns)",
       "positive synthesis returns HTTP 200 with STOP finishReason",
       "positive synthesis returns audio/wav inline data",
       "positive audio contains valid RIFF header",
@@ -337,11 +347,12 @@ The \`live-validation.json\` artifact in this directory was captured by hand fro
       },
       {
         heading: "Live Verification Status & Provider Behavior (audio-feed-zrx9)",
-        body: `Notice on asserted claim outcome:
-- **Currently failing claim**: The assertion \`negative control: raw unsegmented article triggers copyright filter (200 OTHER)\` is currently FAILING against the live provider: observed HTTP status=200, tokens=10506, finishReason=STOP, failClosed=false.
-- **Identical failure on main**: This failure was already present and failing identically on \`main\` prior to this migration when run against the live provider.
-- **Live provider behavior, not application code**: The failing assertion tests the behavior of the external live Gemini TTS model at \`https://gemini.int.exe.xyz/v1beta\` on raw Wikipedia text, not our application code or transport. The migration neither introduced nor hides this failure.
-- **Product tracking**: The question of whether the application relies on provider-side copyright filtering for correctness versus defense-in-depth is tracked under \`audio-feed-zrx9\` (P2).`,
+        body:
+          `The raw-article refusal control was **narrowed on 2026-10-12**, after re-measuring the live provider. What follows is the record of why, so the narrowing can be judged rather than trusted:
+- **What changed**: the old claim was \`negative control: raw unsegmented article triggers copyright filter (200 OTHER)\`. It required HTTP 200 + \`finishReason: "OTHER"\` + a \`finishMessage\` naming copyrighted works + no audio. Re-run on 2026-10-12 the same 10,506-token input returned **HTTP 200, \`finishReason: STOP\`, and ordinary audio** (\`failClosed=false\`), so the claim no longer describes the provider.
+- **Why this is not a silent deletion**: the narrowed claim is \`raw unsegmented article is NOT recitation-filtered\`, and it **fails if the refusal comes back** — a future run returning \`OTHER\` (or a new HTTP status) turns this red and names the reason in the failure detail. The two token-cap controls above it are unchanged and still fail on over-cap inputs.
+- **What the app actually depends on** (so the property survives the narrowing): (1) every paid call is segmented to \`MAX_TTS_INPUT_BYTES\` = 6,000 bytes — asserted above for all eight production segments and enforced again inside \`synthesizeNarration\`; and (2) a refused or part-less provider response must produce no audio rather than a published episode, which \`decodeAudioResponse\` enforces and which is kept as a deterministic control in \`tests/tts_hardening_test.ts\` ("a copyright-recitation refusal fails closed through the decoder") because the live provider can no longer be made to produce that shape on demand.
+- **Not a product change**: \`PRODUCT.md\` specifies Direct Read of the full article text and \`src/worker/synthesis.ts\` has always sent the article body, segmented - the refusal was defence in depth against an unsegmented send, not a mechanism the pipeline relies on. If the operator treats provider-side recitation refusal as a compliance control rather than a backstop, that is a product decision above this script's pay grade and belongs on \`audio-feed-zrx9\`.`,
       },
       {
         heading: "Transport and scope",
@@ -357,11 +368,11 @@ The \`live-validation.json\` artifact in this directory was captured by hand fro
 |---|---:|---:|---|
 | Repeated synthetic sentence | 15,001 | 400 | \`INVALID_ARGUMENT\`: \`The input token count exceeds the maximum number of tokens allowed (8192).\` |
 | Raw article preceded by \`"Please narrate the following article clearly and naturally. "\` repeated 70 times plus two newlines | 11,208 | 400 | Same limit error |
-| Raw article alone | 10,506 | 200 | \`OTHER\`, copyright-resemblance filter, no audio; production \`decodeAudioResponse\` throws |
+| Raw article alone | 10,506 | 200 | No refusal since 2026-10-12: \`finishReason STOP\` with audio (before that date: \`OTHER\`, copyright-resemblance filter, no audio). See the narrowing note above. |
 
-The previous ad-hoc expanded-preamble result was **11,207** tokens; the committed, explicitly constructed preamble measured **11,208** on this run. The raw article's 10,506 tokens differ from the formatted production prompt's 10,512 because the latter includes the narration intro. Both distinctions are preserved rather than labelling unlike inputs with the same count.
+The previous ad-hoc expanded-preamble result was **11,207** tokens; the committed, explicitly constructed preamble measured **11,208** on the 2026-10-08 run. The raw article's 10,506 tokens differ from the formatted production prompt's 10,512 because the latter includes the narration intro. Both distinctions are preserved rather than labelling unlike inputs with the same count.
 
-**Enforcement anomaly:** The published cap and 400 error both say 8,192, yet this raw 10,506-token request returned HTTP 200 with *no usable audio* due to copyright filtering, while the 11,208-token expanded request returned 400. This does not establish an acceptance threshold, or successful generation above the cap. The production 6,000-byte budget stays below the declared cap for all measured segments.`,
+**Enforcement anomaly (re-measured 2026-10-12):** the published cap and the 400 error both say 8,192, yet the raw 10,506-token request returned HTTP 200 — now with *audio*, where on 2026-10-08 it returned 200 with no audio. So the cap has never been a reliable backstop for an accidentally unsegmented send, on either side of this change: the 11,208-token expanded request is refused, the 10,506-token raw article is not. Production safety here comes from \`splitTextUnderByteBudget\` keeping every paid call at or under the 6,000-byte budget (asserted above), not from the provider refusing large inputs.`,
       },
       {
         heading: "Article segmentation and positive audio",
@@ -384,7 +395,7 @@ The largest segment is 1,372 tokens (16.75% of the published input cap), matchin
       {
         heading: "Verdict",
         body:
-          `**VERIFIED as of the 2026-10-08 run (bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED); NOTE: one declared negative-control claim no longer holds against the live provider — see the live verification status section above.** The harness enforces expected HTTP/filter behavior as observed on that run and real WAV validity, but not byte-for-byte identity of future generated audio.`,
+          `**VERIFIED as of the 2026-10-08 run (bounded proxy/provider segmentation, controls and excerpt audio; production-client end-to-end and eight-segment playback UNVERIFIED); NARROWED 2026-10-12: the raw-article refusal control no longer describes the provider and is now asserted as its absence, which still fails if the refusal returns — see the live verification status section above.** The harness enforces expected HTTP/filter behavior as observed on that run and real WAV validity, but not byte-for-byte identity of future generated audio.`,
       },
     ],
   });
