@@ -1,5 +1,8 @@
 # Outbox Notification Verification Report: audio-feed-np5
 
+- Script: scripts/outbox-proof.ts
+- Asserts: on-demand notification places exactly one outbox entry on synthesis completion; background feed polls emit none; permanent synthesis failures notify once with the specific reason and in-batch retries do not duplicate; a rejected outbox write does not abort episode completion and the failure is logged; no credentials/tokens/admin secrets are echoed; outbox notification is opt-in only, default false
+
 ## Verified Criteria
 1. **On-Demand Notification**: Submitting an article via `/api/ingest` places exactly 1 entry in the outbox upon synthesis completion, naming the episode title and player URL.
 2. **Feed Poll Silence**: Background feed polls synthesizing multiple episodes do NOT emit outbox entries.
@@ -18,8 +21,8 @@ PASS synthesis batch completes 3 feed episodes: ready: 3
 PASS feed poll episodes did NOT create outbox notifications: outbox count remains 1
 PASS failing episode marked failed: failed: 1
 PASS outbox now holds 2 entries (ready + failed): entries: 2
-PASS failed notification contains failure reason: error: 'Gemini quota exhausted'
-PASS ack notification 489cb29b-4616-4c5a-bdc8-eeab220d627a: status: 200
-PASS ack notification 22266ea3-fe4e-43e9-8fc1-34c2f578dc1a: status: 200
+PASS failed notification contains failure reason: error: 'Gemini quota exhausted [mode direct; claim 1/3]'
+PASS ack notification 9639f541-cabb-499f-a434-0b968995bb7a: status: 200
+PASS ack notification c8dba692-3c58-4ce0-997a-f8a6d591c01c: status: 200
 PASS outbox is now empty after acking: 0 entries
 ```

@@ -18,6 +18,7 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
+import { runProof, writeEvidenceReadme } from "./proof-helper.ts";
 
 const requestedPort = Number(Deno.args.find((a) => /^\d+$/.test(a)) ?? 0);
 const TOKEN = "subscriber-token-123";
@@ -80,184 +81,206 @@ config.port = PORT;
 config.publicBaseUrl = BASE;
 const fetch = (input: RequestInfo | URL, init?: RequestInit) => app.fetch(new Request(input, init));
 
-const checks: { step: string; ok: boolean; detail: string }[] = [];
-const check = (step: string, ok: boolean, detail: string) => {
-  checks.push({ step, ok, detail });
-  const tag = ok ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
-  console.log(`${tag}  ${step}  ${detail}`);
-  if (!ok) throw new Error(`step failed: ${step}`);
-};
+await runProof("audio-feed-np5 outbox proof", async (checker) => {
+  const checks: { step: string; ok: boolean; detail: string }[] = [];
+  const check = (step: string, ok: boolean, detail: string) => {
+    checks.push({ step, ok, detail });
+    checker.check(step, ok, detail);
+  };
 
-// 1. Seed approved subscriber
-const rawUser = await createUser(stores.metadata, {
-  email: "subscriber@example.com",
-  displayName: "Subscriber",
-});
-const user = await approveUser(stores.metadata, rawUser.id, "admin");
-await stores.metadata.putUser({ ...user, feedToken: TOKEN });
+  try {
+    // 1. Seed approved subscriber
+    const rawUser = await createUser(stores.metadata, {
+      email: "subscriber@example.com",
+      displayName: "Subscriber",
+    });
+    const user = await approveUser(stores.metadata, rawUser.id, "admin");
+    await stores.metadata.putUser({ ...user, feedToken: TOKEN });
 
-// 2. Send an article via /api/ingest
-const ingestRes = await fetch(
-  new Request(`${BASE}/api/ingest`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-feed-token": TOKEN,
-    },
-    body: JSON.stringify({
-      url: "https://example.com/on-demand-post",
-      mode: "direct",
-    }),
-  }),
-);
-check("POST /api/ingest returns 202", ingestRes.status === 202, `status: ${ingestRes.status}`);
+    // 2. Send an article via /api/ingest
+    const ingestRes = await fetch(
+      new Request(`${BASE}/api/ingest`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-feed-token": TOKEN,
+        },
+        body: JSON.stringify({
+          url: "https://example.com/on-demand-post",
+          mode: "direct",
+        }),
+      }),
+    );
+    check("POST /api/ingest returns 202", ingestRes.status === 202, `status: ${ingestRes.status}`);
 
-// 3. Run worker batch
-const run1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
-check(
-  "synthesis batch completes 1 episode",
-  run1.ready.length === 1,
-  `ready: ${run1.ready.length}`,
-);
+    // 3. Run worker batch
+    const run1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
+    check(
+      "synthesis batch completes 1 episode",
+      run1.ready.length === 1,
+      `ready: ${run1.ready.length}`,
+    );
 
-// 4. Check outbox
-const outboxRes = await fetch(
-  new Request(`${BASE}/api/admin/outbox`, {
-    headers: { "x-admin-token": ADMIN_TOKEN },
-  }),
-);
-const outboxData = await outboxRes.json();
-check(
-  "outbox holds 1 notification for on-demand article",
-  outboxData.notifications.length === 1,
-  `entries: ${outboxData.notifications.length}`,
-);
+    // 4. Check outbox
+    const outboxRes = await fetch(
+      new Request(`${BASE}/api/admin/outbox`, {
+        headers: { "x-admin-token": ADMIN_TOKEN },
+      }),
+    );
+    const outboxData = await outboxRes.json();
+    check(
+      "outbox holds 1 notification for on-demand article",
+      outboxData.notifications.length === 1,
+      `entries: ${outboxData.notifications.length}`,
+    );
 
-const n1 = outboxData.notifications[0];
-check(
-  "notification names episode title and player URL",
-  n1.title === "On-Demand Read Article" && n1.playerUrl === `${BASE}/listen/${TOKEN}` &&
-    n1.status === "ready",
-  `title='${n1.title}', playerUrl='http://localhost:<ephemeral>/listen/${TOKEN}', status='${n1.status}'`,
-);
+    const n1 = outboxData.notifications[0];
+    check(
+      "notification names episode title and player URL",
+      n1?.title === "On-Demand Read Article" && n1?.playerUrl === `${BASE}/listen/${TOKEN}` &&
+        n1?.status === "ready",
+      `title='${n1?.title}', playerUrl='http://localhost:<ephemeral>/listen/${TOKEN}', status='${n1?.status}'`,
+    );
 
-// 5. Feed poll: seed 3 feed episodes from an RSS source
-await stores.metadata.putSource({
-  id: "feed-source",
-  userId: user.id,
-  title: "Daily News Feed",
-  feedUrl: "https://example.com/feed.xml",
-  modes: ["direct"],
-  voices: {},
-  createdAt: new Date().toISOString(),
-});
-for (let i = 1; i <= 3; i++) {
-  const artId = `feed-art-${i}`;
-  await stores.metadata.putArticle(
-    makeArticle({ id: artId, userId: user.id, sourceId: "feed-source", title: `Feed Item ${i}` }),
-  );
-  await stores.metadata.putEpisode(
-    makeEpisode({
-      id: `feed-ep-${i}`,
+    // 5. Feed poll: seed 3 feed episodes from an RSS source
+    await stores.metadata.putSource({
+      id: "feed-source",
       userId: user.id,
-      sourceId: "feed-source",
-      articleId: artId,
-      title: `Feed Item ${i}`,
-      status: "pending",
-    }),
-  );
-}
+      title: "Daily News Feed",
+      feedUrl: "https://example.com/feed.xml",
+      modes: ["direct"],
+      voices: {},
+      createdAt: new Date().toISOString(),
+    });
+    for (let i = 1; i <= 3; i++) {
+      const artId = `feed-art-${i}`;
+      await stores.metadata.putArticle(
+        makeArticle({
+          id: artId,
+          userId: user.id,
+          sourceId: "feed-source",
+          title: `Feed Item ${i}`,
+        }),
+      );
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: `feed-ep-${i}`,
+          userId: user.id,
+          sourceId: "feed-source",
+          articleId: artId,
+          title: `Feed Item ${i}`,
+          status: "pending",
+        }),
+      );
+    }
 
-const runFeed = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), { batchSize: 5 });
-check(
-  "synthesis batch completes 3 feed episodes",
-  runFeed.ready.length === 3,
-  `ready: ${runFeed.ready.length}`,
-);
+    const runFeed = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+      batchSize: 5,
+    });
+    check(
+      "synthesis batch completes 3 feed episodes",
+      runFeed.ready.length === 3,
+      `ready: ${runFeed.ready.length}`,
+    );
 
-const outboxAfterFeed = await (await fetch(
-  new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
-)).json();
-check(
-  "feed poll episodes did NOT create outbox notifications",
-  outboxAfterFeed.notifications.length === 1,
-  `outbox count remains ${outboxAfterFeed.notifications.length}`,
-);
+    const outboxAfterFeed = await (await fetch(
+      new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
+    )).json();
+    check(
+      "feed poll episodes did NOT create outbox notifications",
+      outboxAfterFeed.notifications.length === 1,
+      `outbox count remains ${outboxAfterFeed.notifications.length}`,
+    );
 
-// 6. Failed on-demand episode notifies once with error reason
-await fetch(
-  new Request(`${BASE}/api/ingest`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-feed-token": TOKEN },
-    body: JSON.stringify({ url: "https://example.com/failing-post", mode: "direct" }),
-  }),
-);
+    // 6. Failed on-demand episode notifies once with error reason
+    await fetch(
+      new Request(`${BASE}/api/ingest`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-feed-token": TOKEN },
+        body: JSON.stringify({ url: "https://example.com/failing-post", mode: "direct" }),
+      }),
+    );
 
-const runFail = await runSynthesisBatch(
-  ctx,
-  () => Promise.reject(new Error("Gemini quota exhausted")),
-  {
-    batchSize: 5,
-    maxAttempts: 2,
-  },
-);
-check(
-  "failing episode marked failed",
-  runFail.failed.length === 1,
-  `failed: ${runFail.failed.length}`,
-);
+    const runFail = await runSynthesisBatch(
+      ctx,
+      () => Promise.reject(new Error("Gemini quota exhausted")),
+      {
+        batchSize: 5,
+        maxAttempts: 2,
+      },
+    );
+    check(
+      "failing episode marked failed",
+      runFail.failed.length === 1,
+      `failed: ${runFail.failed.length}`,
+    );
 
-const outboxAfterFail = await (await fetch(
-  new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
-)).json();
-check(
-  "outbox now holds 2 entries (ready + failed)",
-  outboxAfterFail.notifications.length === 2,
-  `entries: ${outboxAfterFail.notifications.length}`,
-);
-const failNotification = outboxAfterFail.notifications.find((n: { status: string }) =>
-  n.status === "failed"
-);
-check(
-  "failed notification contains failure reason",
-  failNotification && failNotification.error?.includes("Gemini quota exhausted"),
-  `error: '${failNotification?.error}'`,
-);
+    const outboxAfterFail = await (await fetch(
+      new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
+    )).json();
+    check(
+      "outbox now holds 2 entries (ready + failed)",
+      outboxAfterFail.notifications.length === 2,
+      `entries: ${outboxAfterFail.notifications.length}`,
+    );
+    const failNotification = outboxAfterFail.notifications.find((n: { status: string }) =>
+      n.status === "failed"
+    );
+    check(
+      "failed notification contains failure reason",
+      Boolean(failNotification && failNotification.error?.includes("Gemini quota exhausted")),
+      `error: '${failNotification?.error}'`,
+    );
 
-// 7. Ack notifications
-for (const n of outboxAfterFail.notifications) {
-  const ackRes = await fetch(
-    new Request(`${BASE}/api/admin/outbox/${n.id}/ack`, {
-      method: "POST",
-      headers: { "x-admin-token": ADMIN_TOKEN },
-    }),
-  );
-  check(`ack notification ${n.id}`, ackRes.status === 200, `status: ${ackRes.status}`);
-}
+    // 7. Ack notifications
+    for (const n of outboxAfterFail.notifications) {
+      const ackRes = await fetch(
+        new Request(`${BASE}/api/admin/outbox/${n.id}/ack`, {
+          method: "POST",
+          headers: { "x-admin-token": ADMIN_TOKEN },
+        }),
+      );
+      check(`ack notification ${n.id}`, ackRes.status === 200, `status: ${ackRes.status}`);
+    }
 
-const outboxEmpty = await (await fetch(
-  new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
-)).json();
-check("outbox is now empty after acking", outboxEmpty.notifications.length === 0, "0 entries");
+    const outboxEmpty = await (await fetch(
+      new Request(`${BASE}/api/admin/outbox`, { headers: { "x-admin-token": ADMIN_TOKEN } }),
+    )).json();
+    check("outbox is now empty after acking", outboxEmpty.notifications.length === 0, "0 entries");
 
-// Write markdown summary
-const summary = `# Outbox Notification Verification Report: audio-feed-np5
-
-## Verified Criteria
-1. **On-Demand Notification**: Submitting an article via \`/api/ingest\` places exactly 1 entry in the outbox upon synthesis completion, naming the episode title and player URL.
+    await writeEvidenceReadme({
+      dir: OUT,
+      title: "Outbox Notification Verification Report: audio-feed-np5",
+      script: "scripts/outbox-proof.ts",
+      asserts: [
+        "on-demand notification places exactly one outbox entry on synthesis completion",
+        "background feed polls emit none",
+        "permanent synthesis failures notify once with the specific reason and in-batch retries do not duplicate",
+        "a rejected outbox write does not abort episode completion and the failure is logged",
+        "no credentials/tokens/admin secrets are echoed",
+        "outbox notification is opt-in only, default false",
+      ],
+      sections: [
+        {
+          heading: "Verified Criteria",
+          body:
+            `1. **On-Demand Notification**: Submitting an article via \`/api/ingest\` places exactly 1 entry in the outbox upon synthesis completion, naming the episode title and player URL.
 2. **Feed Poll Silence**: Background feed polls synthesizing multiple episodes do NOT emit outbox entries.
 3. **Failure Reporting**: Permanent synthesis failures notify once with the specific error reason. In-batch retries do not duplicate notifications.
 4. **Resilience**: Outbox write rejections do not abort episode completion; failure is logged.
 5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads or server logs beyond the subscriber's own player URL.
-6. **Opt-in Only**: Outbox notifications are disabled by default (\`notifyOutboxEnabled: false\`).
-
-## Execution Log
-\`\`\`
+6. **Opt-in Only**: Outbox notifications are disabled by default (\`notifyOutboxEnabled: false\`).`,
+        },
+        {
+          heading: "Execution Log",
+          body: `\`\`\`
 ${checks.map((c) => `${c.ok ? "PASS" : "FAIL"} ${c.step}: ${c.detail}`).join("\n")}
-\`\`\`
-`;
-
-await Deno.writeTextFile(`${OUT}README.md`, summary);
-console.log(`Saved report to ${OUT}README.md`);
-
-await server.shutdown();
+\`\`\``,
+        },
+      ],
+    });
+    console.log(`Saved report to ${OUT}README.md`);
+  } finally {
+    await server.shutdown();
+  }
+});

@@ -72,7 +72,6 @@ const EVIDENCE_UNDECLARED: string[] = [
   // the same debt as the rest of this list. Its README also carries an ephemeral port and a commit sha in its
   // title line, which is the audio-feed-1zfv class recorded on that bead.
   "audio-feed-l7m1",
-  "audio-feed-np5",
   "audio-feed-r97",
   "audio-feed-ytg",
 ];
