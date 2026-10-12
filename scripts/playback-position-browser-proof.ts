@@ -126,7 +126,7 @@ try {
   await sleep(100);
 
   const storedPos = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]?.position
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `);
   check("playback position 45s saved to localStorage", storedPos === 45, `stored ${storedPos}s`);
 
@@ -176,7 +176,7 @@ try {
     "audio restarted to 0s",
   );
   const clearedStored = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
   check(
     "clicking 'Play from start' clears stored position",
@@ -194,10 +194,72 @@ try {
   check(
     "re-saved position 50s",
     (await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]?.position
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `)) === 50,
     "re-saved at 50s",
   );
+
+  // 8. Per-user isolation: a different user does not see these positions
+  // Open the second user's page while user-1 still has a saved position
+  const tab2 = await cdp("Target.createTarget", { url: `${BASE}/listen/other-token` });
+  const ws2 = new WebSocket(
+    // deno-lint-ignore no-explicit-any
+    targets.find((t: any) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
+      (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(
+        // deno-lint-ignore no-explicit-any
+        (t: any) => t.id === tab2.targetId,
+      ).webSocketDebuggerUrl,
+  );
+  await new Promise((r) => ws2.addEventListener("open", r, { once: true }));
+  let nextId2 = 0;
+  // deno-lint-ignore no-explicit-any
+  const pending2 = new Map<number, (v: any) => void>();
+  ws2.addEventListener("message", (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.id && pending2.has(msg.id)) {
+      pending2.get(msg.id)!(msg);
+      pending2.delete(msg.id);
+    }
+  });
+  // deno-lint-ignore no-explicit-any
+  const cdp2 = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+    const id = ++nextId2;
+    return new Promise((resolve, reject) => {
+      pending2.set(
+        id,
+        // deno-lint-ignore no-explicit-any
+        (msg: any) => msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result),
+      );
+      ws2.send(JSON.stringify({ id, method, params }));
+    });
+  };
+  // deno-lint-ignore no-explicit-any
+  const js2 = async (expression: string): Promise<any> => {
+    const res = await cdp2("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (res.exceptionDetails) {
+      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
+    }
+    return res.result.value;
+  };
+  await js2(
+    `(() => { return new Promise((resolve, reject) => { const start = Date.now(); const i = setInterval(() => { if (document.querySelector("li.episode[data-episode-id='ep-1']")) { clearInterval(i); resolve(); } else if (Date.now() - start > 10000) { clearInterval(i); reject(new Error("timed out waiting for ep-1 row")); } }, 50); }); })()`,
+  );
+
+  const otherUserBadge = await js2(`
+    document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume-badge')?.textContent || "none"
+  `);
+  check(
+    "other user cannot resume user-1's playback position (per-user isolation)",
+    otherUserBadge === "none",
+    `second user badge: ${otherUserBadge}`,
+  );
+  try {
+    ws2.close();
+  } catch { /* ignore */ }
 
   await js(`(() => {
     const audio = document.getElementById("audio");
@@ -205,22 +267,12 @@ try {
   })()`);
   await sleep(100);
   const endedStored = await js(`
-    JSON.parse(localStorage.getItem("audio-feed-positions:${TOKEN}") || "{}")["ep-1"]
+    JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
   check(
     "ended event clears stored position",
     endedStored === undefined,
     "position removed after ended",
-  );
-
-  // 8. Per-token isolation: a different token does not see these positions
-  const otherTokenStorage = await js(`
-    localStorage.getItem("audio-feed-positions:other-token")
-  `);
-  check(
-    "other token has no stored positions (per-token isolation)",
-    otherTokenStorage === null,
-    "isolated key",
   );
 } catch (error) {
   console.error(error);
