@@ -47,13 +47,18 @@ Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", as
 export const ROOT = import.meta.dirname!.replace(/\/tests$/, "") + "/";
 
 /**
- * audio-feed-fnrp, audio-feed-tgnu — every evidence directory declares what it asserts (docs/evidence/README.md, "Honesty").
+ * audio-feed-fnrp, audio-feed-tgnu, audio-feed-npai — every evidence directory declares what it asserts (docs/evidence/README.md, "Honesty").
  *
  * WHY: the audio-feed-q45b audit found nine proof scripts that fail on main, twelve that leak the browser they
  * claim to clean up, and three whose `check()` could not fail the run — and every one of those was invisible to a
  * reader who trusted the README. This check cannot verify that a claim is TRUE (only a mutation can, which is why
  * the reviewer asks for the mutant); it makes the claim set explicit and keeps the pointer to the tool honest, so
  * judging evidence is reading two lines instead of reading a script.
+ *
+ * ASK THE TREE (audio-feed-npai): README contents and Script: existence are answered from the same source as the
+ * carried set - the git index (`git show :<readme>`, `git cat-file -e :<script>`) - rather than the working
+ * directory. A directory git carries whose folder is deleted from the worktree (an unstaged `rm -rf`) reads its
+ * declaration from the index and stays green, rather than erroneously failing as "no README.md".
  *
  * THE GRANDFATHER LIST WAS DEBT, NOW DERIVED (audio-feed-tgnu). The grandfather list EVIDENCE_UNDECLARED was a
  * single hand-maintained array that every retrofit slice edited, causing retrofit landings to serialise and
@@ -67,11 +72,17 @@ export async function checkEvidenceDeclaration(
   root: string = ROOT,
 ): Promise<string | null> {
   const dir = `${root}docs/evidence/${name}`;
-  const readme = `${dir}/README.md`;
-  const body = await Deno.readTextFile(readme).catch(() => null);
-  if (body === null) {
+  const readmeRel = `docs/evidence/${name}/README.md`;
+  const readmeCmd = await new Deno.Command("git", {
+    args: ["show", `:${readmeRel}`],
+    cwd: root,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!readmeCmd.success) {
     return `${dir}: no README.md`;
   }
+  const body = new TextDecoder().decode(readmeCmd.stdout);
   const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
   // The capture hatch is an ADMISSION, not free text: it must be the literal sentence, otherwise a README can
   // say "- Capture: fully tested and guaranteed", assert nothing and pass (audio-feed-6piu, found in review).
@@ -84,9 +95,14 @@ export async function checkEvidenceDeclaration(
     return `${dir}: declares Asserts: with no "- Script: scripts/<proof>.ts" to attach them to`;
   }
   if (script) {
-    const stat = await Deno.stat(script.startsWith("scripts/") ? script : `scripts/${script}`)
-      .catch(() => null);
-    if (!stat?.isFile) return `${dir}: Script: names ${script}, which does not exist`;
+    const scriptRel = script.startsWith("scripts/") ? script : `scripts/${script}`;
+    const scriptCmd = await new Deno.Command("git", {
+      args: ["cat-file", "-e", `:${scriptRel}`],
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
   }
   return null;
 }
@@ -316,5 +332,43 @@ Deno.test("audio-feed-tgnu: derived undeclared set rejects unmerged, untracked, 
     } finally {
       await Deno.remove(root, { recursive: true });
     }
+  }
+});
+
+Deno.test("audio-feed-npai: carried directory whose worktree files are deleted passes declaration check", async () => {
+  const root = await Deno.makeTempDir({ prefix: "npai-deleted-worktree-" });
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-carried`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-carried/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: test claim\n",
+    );
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit carried evidence");
+
+    // Delete the evidence directory and script from the worktree (simulating deleted folder on disk)
+    await Deno.remove(`${root}/docs/evidence/audio-feed-carried`, { recursive: true });
+    await Deno.remove(`${root}/scripts/proof.ts`);
+
+    // checkEvidenceDeclaration must query git index, not the filesystem, so it succeeds (audio-feed-npai)
+    const err = await checkEvidenceDeclaration("audio-feed-carried", root + "/");
+    assertEquals(
+      err,
+      null,
+      "a directory carried in the index whose worktree folder is gone must pass declaration check",
+    );
+
+    // undeclaredEvidenceDirs must not flag it as undeclared
+    const derived = await undeclaredEvidenceDirs(root + "/");
+    assertEquals(
+      derived.has("audio-feed-carried"),
+      false,
+      "carried directory whose worktree folder is deleted must not be classified as undeclared",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
   }
 });
