@@ -61,7 +61,7 @@ leaves alone, so format files by name, never directories, unless the directory i
 
 ## Interaction with audio-feed-dc2y
 
-dc2y (in review) edits two of these files — `scripts/home-module-browser-proof.ts` and
+dc2y edited two of these files — `scripts/home-module-browser-proof.ts` and
 `scripts/landing-tooltip-browser-proof.ts` — and had already `deno fmt`-ed them by hand. Both
-branches sit on 76b96d1, so the formatting hunks are identical and the merge should be clean; if it
-is not, resolve it on the branch rather than by dropping the formatting.
+branches sat on 76b96d1, the formatting hunks were identical, and both branches have since landed
+cleanly on main (7jsl landed in 0ec6e9f; dc2y landed in 5303b51).
