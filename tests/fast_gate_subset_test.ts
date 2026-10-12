@@ -520,15 +520,22 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
   // The blindness this closes: `${dir}/data/table.csv` produced NO hint at all, because the interpolation came
   // FIRST in the token and every path fragment after it was discarded. A detector that answers "I saw nothing"
   // where it in fact saw a path suffix is the silent-absence shape this whole area keeps producing, and under
-  // audio-feed-q0ky's rule the fix has a second effect: a tail that names nothing becomes an UNRESOLVED hint,
-  // so the inert class is refused and the run widens instead of selecting nothing.
+  // audio-feed-q0ky's rule the fix has a second effect: a tail that names nothing is REPORTED, so an
+  // unreadable universe cannot be described as inert.
+  //
+  // audio-feed-lm4d refined WHERE it is reported: a suffix after an interpolation is a CANDIDATE (it resolves
+  // into the relation when it names a real file), so a miss from one is a fragment that names no file in the
+  // tree rather than a read the detector could not resolve. It is still reported - never silent - and the
+  // widening decision is what changed: a fragment that could hide an inert-eligible read still blocks
+  // (scripts/fast-check.ts, couldHideInertRead), and `data/table.csv` cannot, because a .csv change is
+  // unclassified and runs the full suite anyway.
   const root = (await Deno.makeTempDir({ prefix: "lkvz-relation-" })) + "/";
   try {
     await Deno.mkdir(`${root}tests`, { recursive: true });
     await Deno.mkdir(`${root}docs`, { recursive: true });
     await Deno.writeTextFile(`${root}docs/present.md`, "hello\n");
 
-    // The tail names nothing: the hint is produced AND reported unresolved (the widening case).
+    // The tail names nothing: the hint is produced AND reported as a fragment (the no-silence case).
     await Deno.writeTextFile(
       `${root}tests/absent_test.ts`,
       "export async function readIt(dir: string) {\n" +
@@ -536,9 +543,11 @@ Deno.test("audio-feed-lkvz: an INTERPOLATED path tail is a hint, not a blind spo
         "}\n",
     );
     const absent = await deriveReadRelationReport(root, ["tests/absent_test.ts"]);
-    assert(
-      absent.relations.size + absent.unresolved.length > 0,
-      "an interpolated path fragment must produce a hint, not silence",
+    assertEquals(absent.relations.size, 0);
+    assertEquals(
+      absent.unattributed,
+      ["data/table.csv"],
+      "an interpolated path fragment must be reported, not silent",
     );
 
     // An interpolation FIRST, with a tail that DOES name a real file: the relation over-selects the suite,

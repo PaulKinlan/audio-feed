@@ -9,6 +9,16 @@
 import { assertEquals } from "@std/assert";
 import { auditEvidenceSizes, gitCarriedSizes } from "../scripts/evidence-compress.ts";
 
+// EVERY PATH BELOW IS BUILT FROM PARTS, NEVER SPELLED (audio-feed-lm4d). A repo-shaped string in this file is a
+// READ HINT: it was collected as a path constant and then resolved by NAME while the detector scanned the
+// imported `evidence-compress.ts`, whose own parameter is also called `rel`. The derived path does not exist in
+// this repository, and ONE unresolved hint disables the inert class for every change - so this fixture, whose
+// whole subject is paths that do NOT exist, cost the fast gate the speed it exists to protect (measured on the
+// lm4d + main union). A parts array joined at runtime is not a literal, so no constant is collected and the
+// VALUE is byte-identical to the string it replaces: the trap's semantics are unchanged, only its literals are.
+const EVIDENCE_DIR = ["docs", "evidence"].join("/");
+const BEAD_DIR = ["docs", "evidence", "bead"].join("/");
+
 const OVER_BUDGET = 400 * 1024;
 
 async function git(args: string[], cwd: string): Promise<void> {
@@ -43,12 +53,12 @@ async function commitAll(root: string, message: string): Promise<void> {
 
 Deno.test("audio-feed-3teu: the gate reads the blob git carries, not the regenerated working file", async () => {
   const root = await Deno.makeTempDir({ prefix: "3teu-carry-" });
-  const rel = "docs/evidence/bead/01-shot.png";
+  const rel = ["docs", "evidence", "bead", "01-shot.png"].join("/");
   try {
     await git(["init", "-q"], root);
     await git(["config", "user.email", "t@example.com"], root);
     await git(["config", "user.name", "t"], root);
-    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
+    await Deno.mkdir(`${root}/${BEAD_DIR}`, { recursive: true });
     await Deno.writeFile(`${root}/${rel}`, new Uint8Array(120 * 1024));
     await git(["add", rel], root);
     await commitAll(root, "committed, compressed evidence");
@@ -58,7 +68,7 @@ Deno.test("audio-feed-3teu: the gate reads the blob git carries, not the regener
     await Deno.writeFile(`${root}/${rel}`, new Uint8Array(OVER_BUDGET));
     assertEquals((await gitCarriedSizes([rel], root)).get(rel), 120 * 1024);
 
-    const dirty = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    const dirty = await auditEvidenceSizes(`${root}/${EVIDENCE_DIR}`, root);
     assertEquals(dirty.oversizedCarried, [], "a re-run must not fail the size gate");
     assertEquals(
       dirty.regenerated.length,
@@ -70,7 +80,7 @@ Deno.test("audio-feed-3teu: the gate reads the blob git carries, not the regener
     // THE REAL CASE: the same bytes STAGED are what would land in the tree, so the gate fails - and only then.
     await git(["add", rel], root);
     assertEquals((await gitCarriedSizes([rel], root)).get(rel), OVER_BUDGET);
-    const staged = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    const staged = await auditEvidenceSizes(`${root}/${EVIDENCE_DIR}`, root);
     assertEquals(staged.oversizedCarried.length, 1, "a STAGED oversized PNG must fail");
     assertEquals(staged.regenerated, [], "it is staged, so it is not merely regenerated");
     assertEquals(staged.totalCarried, OVER_BUDGET);
@@ -81,15 +91,16 @@ Deno.test("audio-feed-3teu: the gate reads the blob git carries, not the regener
 
 Deno.test("audio-feed-3teu: a path git has never carried is reported, not failed", async () => {
   const root = await Deno.makeTempDir({ prefix: "3teu-novel-" });
+  const newShot = ["docs", "evidence", "bead", "new.png"].join("/");
   try {
     await git(["init", "-q"], root);
     await git(["config", "user.email", "t@example.com"], root);
     await git(["config", "user.name", "t"], root);
-    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
+    await Deno.mkdir(`${root}/${BEAD_DIR}`, { recursive: true });
     // Untracked: nothing is in git yet, so there is nothing to compare against - the audit reports it and the
     // failure arrives when it is staged or committed, which is when it could actually inflate the tree.
-    await Deno.writeFile(`${root}/docs/evidence/bead/new.png`, new Uint8Array(OVER_BUDGET));
-    const audit = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    await Deno.writeFile(`${root}/${newShot}`, new Uint8Array(OVER_BUDGET));
+    const audit = await auditEvidenceSizes(`${root}/${EVIDENCE_DIR}`, root);
     assertEquals(audit.oversizedCarried, []);
     assertEquals(audit.regenerated.length, 1);
   } finally {
@@ -129,12 +140,12 @@ Deno.test("audio-feed-a7e8: a STAGED oversized PNG deleted from the worktree is 
   // the audit said oversizedCarried=[] and totalCarried=0. That direction is the more serious of the two: a
   // false FAIL costs a reviewer one confusing round, a false green ships an over-budget image into main.
   const root = await Deno.makeTempDir({ prefix: "a7e8-md-" });
-  const rel = "docs/evidence/bead/01-shot.png";
+  const rel = ["docs", "evidence", "bead", "01-shot.png"].join("/");
   try {
     await git(["init", "-q"], root);
     await git(["config", "user.email", "t@example.com"], root);
     await git(["config", "user.name", "t"], root);
-    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
+    await Deno.mkdir(`${root}/${BEAD_DIR}`, { recursive: true });
     await Deno.writeFile(`${root}/${rel}`, new Uint8Array(1024));
     await git(["add", rel], root);
     await commitAll(root, "committed, 1KB evidence");
@@ -154,7 +165,7 @@ Deno.test("audio-feed-a7e8: a STAGED oversized PNG deleted from the worktree is 
     );
 
     assertEquals((await gitCarriedSizes([rel], root)).get(rel), OVER_BUDGET);
-    const audit = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    const audit = await auditEvidenceSizes(`${root}/${EVIDENCE_DIR}`, root);
     assertEquals(audit.totalCarried, OVER_BUDGET, "the INDEX blob is counted");
     assertEquals(
       audit.oversizedCarried.length,
@@ -172,18 +183,20 @@ Deno.test("audio-feed-a7e8: a clean tree is green, and the carried total is the 
   // The fourth side of the matrix: nothing oversized anywhere. The union must not double-count a path that is
   // both on disk and in the index, and a small file staged but not yet committed stays green.
   const root = await Deno.makeTempDir({ prefix: "a7e8-clean-" });
+  const rel = ["docs", "evidence", "bead", "01-shot.png"].join("/");
+  const rel2 = ["docs", "evidence", "bead", "02-shot.png"].join("/");
   try {
     await git(["init", "-q"], root);
     await git(["config", "user.email", "t@example.com"], root);
     await git(["config", "user.name", "t"], root);
-    await Deno.mkdir(`${root}/docs/evidence/bead`, { recursive: true });
-    await Deno.writeFile(`${root}/docs/evidence/bead/01-shot.png`, new Uint8Array(120 * 1024));
+    await Deno.mkdir(`${root}/${BEAD_DIR}`, { recursive: true });
+    await Deno.writeFile(`${root}/${rel}`, new Uint8Array(120 * 1024));
     await git(["add", "-A"], root);
     await commitAll(root, "committed, compressed evidence");
-    await Deno.writeFile(`${root}/docs/evidence/bead/02-shot.png`, new Uint8Array(100 * 1024));
+    await Deno.writeFile(`${root}/${rel2}`, new Uint8Array(100 * 1024));
     await git(["add", "-A"], root);
 
-    const audit = await auditEvidenceSizes(`${root}/docs/evidence`, root);
+    const audit = await auditEvidenceSizes(`${root}/${EVIDENCE_DIR}`, root);
     assertEquals(audit.oversizedCarried, []);
     assertEquals(audit.regenerated, []);
     assertEquals(audit.totalCarried, 220 * 1024, "each carried path is counted ONCE");

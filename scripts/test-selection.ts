@@ -338,9 +338,378 @@ function stripComments(source: string): string {
     .replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
 }
 
-/** Static path hints found inside one call expression. */
-function staticPathHints(call: string, moduleDir: string, root: string): string[] {
+/**
+ * Spans of `source` that are STRING CONTENT rather than code (audio-feed-lm4d).
+ *
+ * The scan is textual, so a read call that exists only inside a string literal looks exactly like a read
+ * site. It cannot be one - string content is data - and counting it as one put five paths into the
+ * unresolved list that no suite can ever read, because `tests/fast_gate_subset_test.ts` carries synthetic
+ * module sources as fixtures and those fixtures read things (`data/table.csv`, `fixtures.html`,
+ * `docs/absent.html`, `docs/present.md`). Under audio-feed-q0ky's rule those five are enough on their own to
+ * keep the inert class disabled for EVERY change, so a documentation-only edit paid the full suite.
+ *
+ * A template INTERPOLATION is code, not string content, so a read inside `${...}` is still a read: that is
+ * the boundary, and it is asserted in tests/read_relation_hints_test.ts.
+ */
+function stringContentSpans(source: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const scan = (from: number, to: number): void => {
+    let i = from;
+    while (i < to) {
+      const ch = source[i]!;
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < to && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < to && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        const start = i++;
+        while (i < to && source[i] !== ch) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        spans.push([start, Math.min(i, to)]);
+        continue;
+      }
+      if (ch === "`") {
+        i++;
+        let chunk = i;
+        while (i < to) {
+          const c = source[i]!;
+          if (c === "\\") {
+            i += 2;
+            continue;
+          }
+          if (c === "`") {
+            i++;
+            break;
+          }
+          if (c === "$" && source[i + 1] === "{") {
+            spans.push([chunk, i]);
+            i += 2;
+            const codeStart = i;
+            let depth = 1;
+            while (i < to && depth > 0) {
+              const d = source[i]!;
+              if (d === "{") {
+                depth++;
+              } else if (d === "}") {
+                depth--;
+                if (depth === 0) break;
+              } else if (d === '"' || d === "'" || d === "`") {
+                i++;
+                while (i < to && source[i] !== d) {
+                  if (source[i] === "\\") i++;
+                  i++;
+                }
+              }
+              i++;
+            }
+            scan(codeStart, i);
+            i++;
+            chunk = i;
+            continue;
+          }
+          i++;
+        }
+        spans.push([chunk, i]);
+        continue;
+      }
+      i++;
+    }
+  };
+  scan(0, source.length);
+  return spans;
+}
+
+/** Whether an index falls inside string content rather than code. */
+function insideSpans(spans: ReadonlyArray<[number, number]>, index: number): boolean {
+  for (const [start, end] of spans) {
+    if (index >= start && index < end) return true;
+  }
+  return false;
+}
+
+/**
+ * Read hints that name a path OUTSIDE the repository (audio-feed-lm4d): an OS temp directory or `$HOME`.
+ *
+ * `${dir}/state.json` with `dir = await Deno.makeTempDir()` was offered as the repo-relative path
+ * `state.json`, and `const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`` with
+ * `home = Deno.env.get("HOME")` as `.cache/puppeteer/chrome`. Neither can ever name a file a CHANGE can
+ * touch - the tree is the repository - so offering them as repo hints made the completeness check fire
+ * forever on reads of files that live outside it, which is what kept the inert class unreachable.
+ *
+ * The FIRST version classified NAMES: `outOfRepoNames(source)` returned {home} for any file binding `home`
+ * to $HOME, and then EVERY `home` in that file was out-of-repo. That is a false-green gate waiting to fire -
+ * audio-feed-7l9m - so the classification now belongs to a BINDING, resolved by lexical scope. See
+ * `bindingScopes` and `baseIsOutOfRepo` below.
+ */
+
+/** Positive evidence that a binding's VALUE is a path outside the repository. */
+function isOutOfRepoRhs(rhs: string): boolean {
+  return (
+    /Deno\.makeTemp(?:Dir|File)\s*\(/.test(rhs) ||
+    /Deno\.env\.get\(\s*["'](?:HOME|TMPDIR|TEMP|TMP)["']/.test(rhs) ||
+    /(?:os|platform)\.(?:homedir|tmpdir)\s*\(/.test(rhs)
+  );
+}
+
+type BindingKind = "out-of-repo" | "other";
+
+/** One lexical scope and the bindings made DIRECTLY in it. */
+interface BindingScope {
+  start: number;
+  end: number;
+  /** "ambiguous" = the same name bound two different ways in one scope. */
+  bindings: Map<string, BindingKind | "ambiguous">;
+  /**
+   * A body brace whose parameter list could not be established (audio-feed-i9ao). Such a scope is
+   * NON-SUPPRESSIBLE: `baseIsOutOfRepo` refuses as soon as it reaches one, so a signature the detector does
+   * not understand can never let a read inside it INHERIT an outer out-of-repo binding. Unknown is answered
+   * conservatively rather than treated as "no parameters".
+   */
+  unparsedSignature?: boolean;
+}
+
+/** The smallest scope containing `offset`, which is the scope a declaration there belongs to. */
+function innermostScope(scopes: ReadonlyArray<BindingScope>, offset: number): BindingScope {
+  let best: BindingScope = scopes[0]!;
+  for (const scope of scopes) {
+    if (offset <= scope.start || offset >= scope.end) continue;
+    if (scope.end - scope.start < best.end - best.start) best = scope;
+  }
+  return best;
+}
+
+/**
+ * A copy of the source with string CONTENT blanked to spaces (audio-feed-i9ao).
+ *
+ * Scanning raw text for structure is what made the previous mechanism brittle: a `)`, `,` or identifier inside
+ * a literal could end a scan, split a parameter list, or be read as a binding. The spans are already known -
+ * they are what makes a read inside a string "data" - so the parens, braces and identifiers this pass sees are
+ * CODE. Interpolation CODE stays visible, which keeps a read inside `${...}` a read site.
+ */
+function maskedCode(source: string, spans: ReadonlyArray<[number, number]>): string {
+  let out = "";
+  let at = 0;
+  for (const [start, end] of spans) {
+    if (start > at) out += source.slice(at, start);
+    out += " ".repeat(Math.max(0, end - start));
+    at = Math.max(at, end);
+  }
+  return out + source.slice(at);
+}
+
+/** Control-flow parentheses are not a parameter list: `if (x) {`, `for await (y of z) {`, `catch (e) {`. */
+const CONTROL_FLOW = /(?:^|[^\w$.])(?:if|for|while|switch|catch)\s+(?:await\s+)?$/;
+
+/** What may sit between a parameter list and its body brace: nothing, `=>`, `: Type`, or `: Type =>`. */
+const SIGNATURE_TAIL = /^\s*(?::[^{;]*)?\s*(?:=>)?\s*$/;
+
+/** Every identifier in a slice. Used on a parameter list, where EVERY name must be treated as a binding. */
+function identifiersIn(text: string): string[] {
+  return [...text.matchAll(/[A-Za-z_$][\w$]*/g)].map((match) => match[0]!);
+}
+
+/**
+ * The lexical scopes of one file, each binding classified by its OWN right-hand side (audio-feed-7l9m), with
+ * parameter lists found by MATCHING PARENS INSIDE THE ENCLOSING SCOPE (audio-feed-i9ao).
+ *
+ * A NAME IS A PROXY FOR A BINDING, and a binding can be SHADOWED, so rev-27's fixture -
+ *
+ *     const home = Deno.env.get("HOME");
+ *     export async function readIt() {
+ *       const home = new URL("../docs/", import.meta.url).pathname;
+ *       return await Deno.readTextFile(`${home}/notes.md`);
+ *     }
+ *
+ * - had its real read of docs/notes.md suppressed, and `docs/notes.md` was declared INERT: a false-green gate.
+ * Suppression is decided by the binding the read resolves through, and it needs positive evidence at that site.
+ *
+ * WHY NOT A BACKWARD WINDOW. The first version of this (round 1) looked back a fixed 300 characters for the
+ * `(` of the parameter list, so a long-but-valid signature lost it and the read inherited the module-level
+ * binding - the same false green, one shape later (round 2, audio-feed-i9ao). A fixed window answers "how far
+ * back was the last one?" when the question is "which `(` matches this `)`?", and those are different questions
+ * with different answers for every signature length. A parameter list always ends at the `)` closing its own
+ * `(`, and both sit inside the enclosing scope, so the match is found by DEPTH COUNTING BOUNDED BY THE SCOPE:
+ * length is not a variable in that search, so there is no length for which it silently stops working.
+ *
+ * AND THE NET UNDER IT. If a body brace follows a `)` (or an `=>`) within its own statement and no parameter
+ * list could be established - an unbalanced group, or a return type containing braces - the scope is marked
+ * `unparsedSignature` and becomes NON-SUPPRESSIBLE. That is the same rule as the guard: when the detector
+ * cannot establish the binding, it does not inherit one.
+ */
+function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): BindingScope[] {
+  const code = maskedCode(source, spans);
+  const scopes: BindingScope[] = [{ start: 0, end: code.length, bindings: new Map() }];
+  const stack: BindingScope[] = [scopes[0]!];
+  const record = (scope: BindingScope, name: string, kind: BindingKind): void => {
+    const seen = scope.bindings.get(name);
+    scope.bindings.set(name, seen === undefined || seen === kind ? kind : "ambiguous");
+  };
+  // The bound for the backward scan is the STATEMENT's start, clamped to the enclosing scope: structural and
+  // tight, with no distance involved. It is NOT updated at a brace - a brace may be a TYPE literal
+  // (`(): Promise<{ b: string }> {`), and resetting there would cut the scan off from the signature it has to
+  // see, which is precisely how the unparsed-signature net got defeated while this function was being written.
+  let statementStart = 0;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!;
+    if (ch === "{") {
+      const parent = stack[stack.length - 1]!;
+      const scope: BindingScope = { start: i, end: code.length, bindings: new Map() };
+      const params = parameterSpan(code, i, Math.max(statementStart, parent.start));
+      if (params.span) {
+        // EVERY identifier in the list, not just the leading one: a destructured parameter (`{ profileDir }`),
+        // a type name and a default expression all produce a binding here, and an extra binding only REFUSES
+        // suppression while a missed one lets a read inherit an outer name - the direction that has failed
+        // every round of this bead.
+        for (const name of identifiersIn(code.slice(params.span[0], params.span[1]))) {
+          record(scope, name, "other");
+        }
+      } else if (params.arrow) {
+        record(scope, params.arrow, "other");
+      } else if (params.sawParens) {
+        scope.unparsedSignature = true;
+      }
+      scopes.push(scope);
+      stack.push(scope);
+      continue;
+    }
+    if (ch === "}") {
+      // Never pop the ROOT: a `}` that no `{` opened - a regex literal such as `/\}/` is not string content -
+      // would otherwise empty the stack, and the next brace would then have no enclosing scope to clamp to.
+      const scope = stack[stack.length - 1];
+      if (scope !== undefined && scope !== scopes[0]) {
+        scope.end = i;
+        stack.pop();
+      }
+      continue;
+    }
+    if (ch === ";") statementStart = i + 1;
+  }
+
+  // The DECLARATIONS are read from the RAW source, not from the masked copy: the classification TEST is about
+  // the literal (`Deno.env.get("HOME")`), and masking blanks exactly that. String content is skipped by offset
+  // instead, which is what keeps a declaration inside a fixture from being this file's binding.
+  for (const match of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
+    const at = match.index ?? 0;
+    if (insideSpans(spans, at)) continue;
+    record(
+      innermostScope(scopes, at),
+      match[1]!,
+      isOutOfRepoRhs(match[2] ?? "") ? "out-of-repo" : "other",
+    );
+  }
+  return scopes;
+}
+
+/**
+ * The parameter list (or single-identifier arrow parameter) of the body brace at `brace`, found by MATCHING.
+ *
+ * The rightmost `)` in the statement whose tail to the brace is a valid signature tail is the list's end; its
+ * `(` is found by counting depth down to `statementStart`, so the span comes from the pair and not from a
+ * distance. A return type may carry its own parens (`: (x: number) => void`) - those fail the tail test, and
+ * the scan simply continues to the group that satisfies it. A control-flow group is a BLOCK rather than a
+ * signature and is reported as neither. `sawParens` reports that a group was there but could not be shaped
+ * into a signature: the caller turns that into a non-suppressible scope.
+ */
+function parameterSpan(
+  code: string,
+  brace: number,
+  statementStart: number,
+): { span: [number, number] | null; arrow: string | null; sawParens: boolean } {
+  let sawParens = false;
+  for (let i = brace - 1; i >= statementStart; i--) {
+    if (code[i] !== ")") continue;
+    sawParens = true;
+    if (!SIGNATURE_TAIL.test(code.slice(i + 1, brace))) continue;
+    let depth = 0;
+    let open = -1;
+    for (let j = i; j >= statementStart; j--) {
+      const ch = code[j]!;
+      if (ch === ")") depth++;
+      else if (ch === "(") {
+        depth--;
+        if (depth === 0) {
+          open = j;
+          break;
+        }
+      }
+    }
+    if (open < 0) continue;
+    if (CONTROL_FLOW.test(code.slice(statementStart, open))) {
+      return { span: null, arrow: null, sawParens: false };
+    }
+    // A `(` preceded by `:` opens a TYPE, not a parameter list: in `(home: string): (() => number) {` the
+    // rightmost `)` belongs to the return type and its match is that inner `(`, so this candidate pair is
+    // rejected and the scan moves left to the group that IS a signature. Structural, not a distance.
+    let before = open - 1;
+    while (before >= statementStart && /\s/.test(code[before]!)) before--;
+    if (before >= statementStart && code[before] === ":") continue;
+    return { span: [open + 1, i], arrow: null, sawParens };
+  }
+  // `dir => {` needs no parens, and its binding must still be recorded or a read through it inherits an outer
+  // out-of-repo name.
+  const bare = /([A-Za-z_$][\w$]*)\s*=>\s*$/.exec(code.slice(statementStart, brace));
+  if (bare) return { span: null, arrow: bare[1]!, sawParens };
+  return { span: null, arrow: null, sawParens };
+}
+
+/**
+ * Whether the binding a read at `offset` resolves `name` through is provably OUTSIDE the repository.
+ *
+ * The lookup walks from the innermost enclosing scope outwards and stops at the FIRST binding of the name -
+ * that is what shadowing means. A scope whose signature could not be parsed REFUSES before that walk continues
+ * (audio-feed-i9ao), so an unrecognised parameter list can never let the search reach an outer out-of-repo
+ * binding. Anything else (no binding, an ambiguous one, or one whose value is not provably out-of-repo) means
+ * DO NOT SUPPRESS: an extra relation costs a test run, a missing one costs a skipped test. Same rule as the
+ * completeness guard, applied to the binding question.
+ */
+function baseIsOutOfRepo(
+  scopes: ReadonlyArray<BindingScope>,
+  name: string,
+  offset: number,
+): boolean {
+  const containing = scopes
+    .filter((scope) => offset > scope.start && offset < scope.end)
+    .sort((a, b) => (a.end - a.start) - (b.end - b.start));
+  for (const scope of containing) {
+    if (scope.unparsedSignature) return false;
+    const kind = scope.bindings.get(name);
+    if (kind !== undefined) return kind === "out-of-repo";
+  }
+  return false;
+}
+
+/** The last identifier of an interpolation, so `${stateDir}` and `${config.dir}` both yield a name. */
+function interpolationBaseName(token: string): string {
+  const open = token.lastIndexOf("${");
+  if (open < 0) return "";
+  const expr = token.slice(open + 2, token.lastIndexOf("}"));
+  return /([A-Za-z_$][\w$]*)\s*$/.exec(expr)?.[1] ?? "";
+}
+
+/** Static path hints found inside one call expression. * Hints are returned in two lists, because they are not the same kind of evidence (audio-feed-lm4d):
+ * `paths` are path-shaped things an author wrote (a literal, or a directory prefix before an interpolation);
+ * `tailCandidates` are the SUFFIXES after an interpolation, offered so that a resolvable one over-selects.
+ * A suffix is not the path the author wrote, so a miss from one is not evidence of a read that could not be
+ * resolved - see the `unattributed` bucket on ReadRelationReport.
+ */
+function staticPathHints(
+  call: string,
+  moduleDir: string,
+  root: string,
+  isOutOfRepoBase: (name: string) => boolean = () => false,
+  suppressed: Set<string> = new Set(),
+): { paths: string[]; tailCandidates: string[] } {
   const hints: string[] = [];
+  const tailCandidates: string[] = [];
   const literals = [...call.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)];
   for (const match of literals) {
     let text = match[1] ?? match[2] ?? match[3] ?? "";
@@ -377,14 +746,24 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
         // is offered as a path candidate: if it names a real file, the relation over-selects that suite (the
         // safe direction), and if it names nothing it becomes an UNRESOLVED hint, which under audio-feed-q0ky's
         // rule makes the inert class unreachable and widens the run rather than selecting nothing.
+        //
+        // audio-feed-lm4d: that widening is only meaningful when the base COULD be a repository path. When
+        // the binding this read resolves through is outside the repo, the tail can never name a file a change
+        // touches, so it is reported as out-of-repo instead of being offered and then found missing forever.
+        // audio-feed-7l9m: that question is asked PER SITE (`isOutOfRepoBase`), because the classification
+        // belongs to a binding and a binding can be shadowed - the file-global answer suppressed a real read.
         const tail = token.slice(token.lastIndexOf("}") + 1);
-        if (/\/[^/]/.test(tail)) hints.push(tail.replace(/^\/+/, ""));
+        if (/\/[^/]/.test(tail)) {
+          const base = interpolationBaseName(token);
+          if (base && isOutOfRepoBase(base)) suppressed.add(tail.replace(/^\/+/, ""));
+          else tailCandidates.push(tail.replace(/^\/+/, ""));
+        }
       }
       continue;
     }
     hints.push(text);
   }
-  return hints;
+  return { paths: hints, tailCandidates };
 }
 
 /**
@@ -394,28 +773,60 @@ function staticPathHints(call: string, moduleDir: string, root: string): string[
  * A resolved constant with no file extension is recorded as a directory prefix, which over-selects rather
  * than under-selects - the trade this whole bead is about.
  */
-function pathConstants(source: string, moduleDir: string, root: string): Map<string, string> {
+function pathConstants(
+  source: string,
+  moduleDir: string,
+  root: string,
+  isOutOfRepoBase: (name: string, offset: number) => boolean = () => false,
+  suppressed: Set<string> = new Set(),
+): Map<string, string> {
   const constants = new Map<string, string>();
   const declare = (name: string, resolved: string) => {
     const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
     constants.set(name, isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved);
   };
-  const resolve = (expr: string): string | null => {
-    const hints = staticPathHints(expr, moduleDir, root);
-    if (hints.length !== 1) return null;
-    return toRepoPath(hints[0]!, moduleDir, root);
+  const resolve = (expr: string, offset: number): string | null => {
+    const { paths, tailCandidates } = staticPathHints(
+      expr,
+      moduleDir,
+      root,
+      (name) => isOutOfRepoBase(name, offset),
+      suppressed,
+    );
+    // A constant can be built from a suffix: `const readme = `${dir}/README.md`` is how tests/evidence_size_test
+    // reaches the root README, and dropping the tail here (audio-feed-lm4d, first attempt) DROPPED that
+    // relation - the under-selection direction. The tail is accepted as the constant's value; if the constant
+    // is then used at a read site and the path names nothing, it is reported as an unresolved hint, which is
+    // the conservative side of the fragment/vs-authored distinction.
+    if (paths.length === 1) return toRepoPath(paths[0]!, moduleDir, root);
+    if (paths.length === 0 && tailCandidates.length === 1) {
+      return toRepoPath(tailCandidates[0]!, moduleDir, root);
+    }
+    return null;
   };
 
-  const lines = source.split("\n").map((line) => line.trim());
-  for (const line of lines) {
+  const rawLines = source.split("\n");
+  let lineStart = 0;
+  for (const raw of rawLines) {
+    const line = raw.trim();
+    // The offset of the declaration, so the out-of-repo question is asked AT the site (audio-feed-7l9m).
+    const offset = lineStart + (raw.length - raw.trimStart().length);
+    lineStart += raw.length + 1;
     const match = /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
     if (!match?.[1] || !match[2]) continue;
-    const resolved = resolve(match[2]) ?? constants.get(match[2].replace(/;$/, "").trim());
+    // audio-feed-lm4d: `const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" })` used to register
+    // the file SUFFIX as this constant's path, so every `readTextFile(tempHtmlFile)` contributed `.html/` to
+    // the relation. audio-feed-7l9m: the skip is now EVIDENCE ABOUT THE VALUE - this initializer IS a temp
+    // path constructor - and NOT a name match. Skipping every binding of the name is exactly what dropped a
+    // repo constant that an inner scope had shadowed, so a SHADOWED `home` bound to `docs/` now registers.
+    if (/Deno\.makeTemp(?:Dir|File)\s*\(/.test(match[2])) continue;
+    const resolved = resolve(match[2], offset) ?? constants.get(match[2].replace(/;$/, "").trim());
     if (resolved) declare(match[1], resolved);
   }
   // Default parameter values: `evidencePngs(dir = EVIDENCE_DIR)` reads through `dir`, so the name that
   // appears at the read call site is the PARAMETER, not the constant.
-  for (const line of lines) {
+  for (const raw of rawLines) {
+    const line = raw.trim();
     for (
       const match of line.matchAll(
         /[([,]\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^=,)]+)?=\s*([A-Za-z_$][\w$]*)\s*[,)]/g,
@@ -504,6 +915,25 @@ export interface ReadRelationReport {
   relations: DataReadRelations;
   /** Hints that did not resolve to an existing path, sorted for a stable reason string. */
   unresolved: string[];
+  /**
+   * SUFFIXES of a runtime-assembled path (the text after an interpolation) that did not resolve
+   * (audio-feed-lm4d), sorted for a stable reason string.
+   *
+   * A suffix is not the path an author wrote: it is a candidate offered so that a resolvable one over-selects
+   * the suite. When it names nothing, the honest statement is "this fragment names no file in the tree", not
+   * "a suite reads something here and I could not resolve it" - and the difference decides whether the inert
+   * class is disabled for EVERY change. Reported, never silent (audio-feed-q0ky).
+   */
+  unattributed: string[];
+  /**
+   * Hints whose base is bound OUTSIDE the repository (audio-feed-lm4d), sorted for a stable reason string.
+   *
+   * They are not repo-path evidence and so they neither enter the relation nor the completeness signal -
+   * but they are REPORTED, because the q0ky lesson is that dropping a hint SILENTLY is what let an
+   * unreadable universe be described as inert. This bucket is the reason the `unresolved` list can be empty
+   * on this tree at all.
+   */
+  outOfRepo: string[];
 }
 
 /** The relation alone, for callers that do not need the incompleteness signal. */
@@ -529,6 +959,9 @@ export async function deriveReadRelationReport(
   };
 
   const relations: DataReadRelations = new Map();
+  const outOfRepoHints = new Set<string>();
+  const authoredPaths = new Set<string>();
+  const tailPaths = new Set<string>();
   const add = (path: string, suite: string) => {
     // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
     // never be consulted, and it would bury the non-TS paths that matter.
@@ -559,14 +992,27 @@ export async function deriveReadRelationReport(
       seen.add(relPath);
       const source = stripComments(await read(relPath) ?? "");
       if (source === null) continue;
+      // Two classes of hint that are not repo-path evidence, computed once per scanned file (audio-feed-lm4d):
+      // the file's string CONTENT (fixture code-as-data), and its names bound outside the repository - the
+      // latter now asked PER SITE from the lexical scope rather than from a file-global set of names
+      // (audio-feed-7l9m), which is what makes a shadowed binding decide for itself.
+      const spans = stringContentSpans(source);
+      const scopes = bindingScopes(source, spans);
+      const isOutOfRepoBase = (name: string, offset: number) =>
+        baseIsOutOfRepo(scopes, name, offset);
 
-      for (const [name, path] of pathConstants(source, dir, root)) {
+      for (
+        const [name, path] of pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints)
+      ) {
         if (!constants.has(name)) constants.set(name, path);
       }
 
       for (const call of READ_CALLS) {
         for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
           const at = match.index ?? 0;
+          // A read that exists only inside a string is data, not a read site: the suite that carries the
+          // detector's own fixtures was contributing ITS fixtures' reads as if they were its own.
+          if (insideSpans(spans, at)) continue;
           if (!readCallAt(source, at)) continue;
           // Scan to the matching close paren so the literals belong to this call.
           let depthParen = 0;
@@ -583,9 +1029,29 @@ export async function deriveReadRelationReport(
             }
           }
           const callText = source.slice(at, end + 1);
-          for (const hint of staticPathHints(callText, dir, root)) {
+          const { paths, tailCandidates } = staticPathHints(
+            callText,
+            dir,
+            root,
+            (name) => isOutOfRepoBase(name, at),
+            outOfRepoHints,
+          );
+          for (const hint of paths) {
             const path = toRepoPath(hint, dir, root);
-            if (path) add(path, suite);
+            if (path) {
+              authoredPaths.add(path);
+              add(path, suite);
+            }
+          }
+          // The suffix after an interpolation is a CANDIDATE: it resolves into the relation when it names a
+          // real file, and when it names nothing it is reported without being mistaken for a read we could
+          // not resolve (audio-feed-lm4d). `authoredPaths` wins on a path offered both ways.
+          for (const hint of tailCandidates) {
+            const path = toRepoPath(hint, dir, root);
+            if (path) {
+              tailPaths.add(path);
+              add(path, suite);
+            }
           }
           // An argument passed by NAME still resolves through the constants collected above.
           for (const identifier of callText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
@@ -612,13 +1078,16 @@ export async function deriveReadRelationReport(
   // changed file, and dropping it keeps the audit output readable.
   const existing: DataReadRelations = new Map();
   const unresolved: string[] = [];
+  const unattributed: string[] = [];
   for (const [path, observers] of relations) {
     const stat = await Deno.stat(`${root}${path.replace(/\/$/, "")}`).catch(() => null);
     if (stat) existing.set(path, observers);
+    else if (!authoredPaths.has(path) && tailPaths.has(path)) unattributed.push(path);
     else unresolved.push(path);
   }
   unresolved.sort();
-  return { relations: existing, unresolved };
+  unattributed.sort();
+  return { relations: existing, unresolved, unattributed, outOfRepo: [...outOfRepoHints].sort() };
 }
 
 /** The suites the derived relation says observe a changed path (exact match or directory prefix). */
