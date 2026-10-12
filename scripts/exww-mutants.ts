@@ -1,0 +1,503 @@
+/**
+ * audio-feed-dynb — the exww capture-identity mutant matrix, as a harness rather than a transcript.
+ *
+ * The seven mutants that prove the exww proof's capture checks CAN fail were applied by hand, over CDP,
+ * every time a predicate changed. That makes the evidence that the checks are load-bearing live in a
+ * transcript instead of in the tree: a refactor of the predicates can ship with the matrix quietly no
+ * longer applying, and nobody would see it. This harness is the sibling of `deno task evidence`
+ * (audio-feed-lyt1) and reuses its shape deliberately - structured records rather than parsed text, one
+ * named invokable command, `--only <mutant>` for a single row, a demonstrated red per row, and a bound
+ * on every run.
+ *
+ *     deno task evidence:mutants                 run the baseline and the whole matrix
+ *     deno task evidence:mutants --list          print the matrix, run nothing, launch no browser
+ *     deno task evidence:mutants --dry-run       apply every mutation and report how each one applied
+ *     deno task evidence:mutants --only x-shift  one row
+ *     deno task evidence:mutants --timeout 300   per-run bound (default 240)
+ *
+ * WHERE IT RUNS, AND WHY THAT IS THE DESIGN RATHER THAN AN IMPLEMENTATION DETAIL: the proof boots its own
+ * in-process server (`Deno.serve` + `appFetch`) and resolves its output from its own URL
+ * (`OUT = new URL("../docs/evidence/audio-feed-exww/", import.meta.url)`), so a scratch copy of
+ * scripts/, src/, deno.json and docs/evidence/audio-feed-exww/ is enough to run it and every write lands
+ * in the copy. THE WORKTREE THIS IS INVOKED FROM IS NEVER DIRTIED. The hand matrix did the opposite: it
+ * rewrote the committed PNGs in place on every row, which is exactly the tree-pollution that
+ * audio-feed-simp is about.
+ *
+ * HOW EACH ROW SHOWS IT APPLIED - the standard this fleet now holds, and it has two halves, both here:
+ *   1. the substitution asserts its anchor appears EXACTLY ONCE, so a moved anchor is INAPPLICABLE
+ *      rather than silently not applied (a mutant that did not apply looks exactly like a check that
+ *      does not work); and
+ *   2. the expected FAIL message must itself QUOTE the mutated value - "clip was x=1000..1280" for the
+ *      x-shift, "image is 640x473" for the wrong scale. Asserting that the text changed is necessary and
+ *      not sufficient; the message proves the mutated value reached the assertion.
+ * The md5 of every mutated file is printed as the third, independent record of what ran.
+ *
+ * ROWS THAT CANNOT GO RED ARE DECLARED, NOT COUNTED (NOT_DETECTORS below, printed on every run): the
+ * geometry branches that REFUSE to measure when the section or the claim box is not inside the clip are
+ * reachable only from a page state no single-text mutation produces, so they are named as non-detectors
+ * in this matrix rather than left to look covered.
+ *
+ * WHAT IT DOES NOT DO: it is not wired into the fast gate, and it does not map the proof script to a
+ * suite - audio-feed-k0jb forbids a relation that looks like coverage, and eight browser runs cannot go
+ * in a tier budgeted so that a docs-only change selects no suites. audio-feed-coao (the proof script
+ * being unmapped) is the bead that decides WHO invokes this; this file only makes invoking it possible.
+ */
+import { join, resolve } from "@std/path";
+
+interface Mutant {
+  /** Row name, as `--only` spells it. */
+  name: string;
+  /** The finding that produced this row. */
+  bead: string;
+  /** What the row proves about the predicates, in one line. */
+  why: string;
+  /** The exact-text substitution; throws when the anchor is not there exactly once. */
+  apply: (source: string) => string;
+  /** Substrings that MUST appear among the FAIL lines (mutated values included, deliberately). */
+  expect: string[];
+  /** When set, these are the ONLY failures allowed: the separation is enforced, not commented. */
+  soleRed?: string[];
+}
+
+/** The application record for a mutation: what actually ran, not what we meant to run. */
+async function sha256(text: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(
+    0,
+    16,
+  );
+}
+
+interface Options {
+  list: boolean;
+  dryRun: boolean;
+  only?: string;
+  timeoutMs: number;
+  keep?: string;
+}
+
+const REPO = resolve(new URL("../", import.meta.url).pathname);
+const PROOF = "scripts/exww-live-claims-browser-proof.ts";
+const EVIDENCE_DIR = "docs/evidence/audio-feed-exww";
+/** Where the mutant matrix gets its results from; the tier's own contract (`scripts/proof-helper.ts`). */
+const FAIL_PREFIX = "FAIL";
+
+/**
+ * One anchor, one substitution, and an assertion that it applied exactly once. `label` is what the
+ * failure message names when an anchor has moved, so an INAPPLICABLE row says which row and which text
+ * rather than "mutant failed".
+ */
+export function substitute(source: string, from: string, to: string, label: string): string {
+  const occurrences = source.split(from).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `anchor appears ${occurrences} time(s), expected exactly 1, so the mutation DID NOT APPLY as ` +
+        `written: ${label}`,
+    );
+  }
+  return source.replace(from, to);
+}
+
+/** Inject a statement into the proof's failure-section probe, the seam every hiding mutant uses. */
+function injectBeforeProbe(source: string, statement: string, label: string): string {
+  return substitute(
+    source,
+    "      const failuresText = await failuresSectionText();",
+    `      await js(\`(() => { const sec = document.querySelector('[aria-labelledby="failures-h"]'); ` +
+      `const wants = 'provider status 500'; const els = [...sec.querySelectorAll('*')]` +
+      `.filter((e) => (e.textContent ?? '').includes(wants)); ` +
+      `const el = els.find((e) => ![...e.children].some((c) => (c.textContent ?? '').includes(wants))) ` +
+      `?? els[els.length - 1]; ${statement}; return el.tagName; })()\`);\n` +
+      "      const failuresText = await failuresSectionText();",
+    label,
+  );
+}
+
+export const MUTANTS: Mutant[] = [
+  {
+    name: "x-shift",
+    bead: "audio-feed-9zgi / audio-feed-ehcu",
+    why: "a capture of the section's own ROWS but another COLUMN must not pass",
+    apply: (s) =>
+      substitute(
+        s,
+        "          x: Math.max(0, Math.floor(bounds.left) - 8),",
+        '          x: name.startsWith("04-") ? 1000 : Math.max(0, Math.floor(bounds.left) - 8),',
+        "04 clip x -> 1000",
+      ),
+    expect: [
+      "captured the section's own box, not another region of the page",
+      "clip was x=1000..1280",
+    ],
+  },
+  {
+    name: "y-shift",
+    bead: "audio-feed-g86r",
+    why: "a capture that starts at the top of the page must not pass",
+    apply: (s) =>
+      substitute(
+        s,
+        "          y: Math.max(0, Math.floor(bounds.top) - 8),",
+        '          y: name.startsWith("04-") ? 0 : Math.max(0, Math.floor(bounds.top) - 8),',
+        "04 clip y -> 0",
+      ),
+    expect: ["captured the section's own box, not another region of the page"],
+  },
+  {
+    name: "section-opacity-0",
+    bead: "audio-feed-7yom",
+    why:
+      "hiding the section leaves textContent and layout intact while the image records background",
+    apply: (s) =>
+      injectBeforeProbe(
+        s,
+        "el.closest('[aria-labelledby=\"failures-h\"]').style.opacity = '0'",
+        "failures section opacity:0",
+      ),
+    expect: [
+      "is a capture of rendered content, not a flat single-colour clip",
+      "actually rendered, not just present in the DOM",
+    ],
+  },
+  {
+    name: "card-opacity-0",
+    bead: "audio-feed-7yom",
+    why:
+      "hiding the CARD alone is a different red from hiding the section, which is why both rows exist",
+    apply: (s) => injectBeforeProbe(s, "el.style.opacity = '0'", "failure card opacity:0"),
+    expect: ["actually rendered, not just present in the DOM"],
+  },
+  {
+    name: "wrong-scale",
+    bead: "audio-feed-9zgi",
+    why: "a right-box, wrong-scale capture must fail on the image's own dimensions",
+    apply: (s) =>
+      substitute(
+        s,
+        "          scale: EVIDENCE_SCALE,",
+        '          scale: name.startsWith("04-") ? 0.5 : EVIDENCE_SCALE,',
+        "04 clip scale -> 0.5",
+      ),
+    expect: ["image is 640x473 for a clip of 1280x946"],
+  },
+  {
+    name: "background-coloured-claim",
+    bead: "audio-feed-9zgi",
+    why:
+      "the axis a computed-style check structurally cannot see: 'visible' to the style check, blank in " +
+      "the image - this row must fail the INK check ALONE",
+    apply: (s) =>
+      injectBeforeProbe(
+        s,
+        "el.style.color = 'rgb(247, 247, 247)'",
+        "claim painted in the page background",
+      ),
+    expect: ['shows ink where "provider status 500" is painted'],
+    soleRed: ['shows ink where "provider status 500" is painted'],
+  },
+  {
+    name: "different-text",
+    bead: "audio-feed-9zgi",
+    why: "the section must show the text the README's claim names, not merely something",
+    apply: (s) =>
+      substitute(
+        s,
+        "      const failuresText = await failuresSectionText();",
+        "      await js(`(() => { const sec = document.querySelector('[aria-labelledby=\"failures-h\"]'); sec.innerHTML = sec.innerHTML.split('provider status 500').join('provider status 404'); return true; })()`);\n" +
+          "      const failuresText = await failuresSectionText();",
+        "failures section paints 'provider status 404'",
+      ),
+    expect: ['has "provider status 500" inside the captured pixels'],
+  },
+];
+
+/**
+ * Named so nobody counts them as coverage: these rows exist in the predicates and no single-text
+ * mutation in this matrix reddens them. If a future mutation can reach one, move it up into MUTANTS.
+ */
+export const NOT_DETECTORS: Array<{ row: string; why: string }> = [
+  {
+    row:
+      "the refuse-to-measure branches (section or claim box not inside the clip -> NaN, so the check fails)",
+    why:
+      "reachable only from a page state no single-text mutation produces: they are the guard against " +
+      "reporting someone else's pixels as this section's content, and their reddening would need a " +
+      "capture-time geometry change, not a source edit",
+  },
+  {
+    row: "the faded-rendering band between flat (~1e-8) and the measured claim boxes (0.235-0.353)",
+    why:
+      "audio-feed-l11d's finding; a contrast floor is being designed on that bead, and this matrix " +
+      "should carry the row only once the floor's threshold exists to assert against",
+  },
+];
+
+function parseOptions(args: string[]): Options {
+  const options: Options = { list: false, dryRun: false, timeoutMs: 240_000 };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const value = args[i + 1];
+    if (arg === "--list") options.list = true;
+    else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--only" && value) {
+      options.only = value;
+      i++;
+    } else if (arg === "--timeout" && value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        throw new Error(`--timeout needs positive seconds, got ${JSON.stringify(value)}`);
+      }
+      options.timeoutMs = Math.round(seconds * 1000);
+      i++;
+    } else if (arg === "--keep" && value) {
+      options.keep = value;
+      i++;
+    } else {
+      throw new Error(
+        `unrecognised argument ${JSON.stringify(arg)}\n` +
+          "usage: deno task evidence:mutants [--list] [--dry-run] [--only <name>] [--timeout <s>] [--keep <dir>]",
+      );
+    }
+  }
+  if (options.only && !MUTANTS.some((m) => m.name === options.only)) {
+    throw new Error(
+      `--only ${options.only} matches no row; known rows: ${MUTANTS.map((m) => m.name).join(", ")}`,
+    );
+  }
+  return options;
+}
+
+function printMatrix(): void {
+  console.log(`[mutants] ${MUTANTS.length} row(s) against ${PROOF}`);
+  for (const mutant of MUTANTS) {
+    console.log(`  ${mutant.name.padEnd(26)} ${mutant.bead}`);
+    console.log(`      proves: ${mutant.why}`);
+    console.log(`      expects the run to redden: ${mutant.expect.join(" | ")}`);
+    if (mutant.soleRed) {
+      console.log(
+        `      and NOTHING else may fail (separation enforced): ${mutant.soleRed.join(" | ")}`,
+      );
+    }
+  }
+  console.log(
+    `[mutants] ${NOT_DETECTORS.length} DECLARED NON-DETECTOR(s) - rows this matrix does not redden:`,
+  );
+  for (const row of NOT_DETECTORS) console.log(`  NOT A DETECTOR: ${row.row}\n      ${row.why}`);
+}
+
+/** The scratch tree: only what the proof imports and writes, so the invoking worktree stays clean. */
+async function buildScratch(options: Options): Promise<string> {
+  const dir = options.keep
+    ? resolve(options.keep)
+    : await Deno.makeTempDir({ prefix: "exww-mutants-" });
+  for (const path of ["scripts", "src", EVIDENCE_DIR]) {
+    await copyTree(join(REPO, path), join(dir, path));
+  }
+  for (const file of ["deno.json", "deno.lock"]) {
+    try {
+      await Deno.copyFile(join(REPO, file), join(dir, file));
+    } catch { /* no lockfile: deno resolves from its own cache either way */ }
+  }
+  return dir;
+}
+
+async function copyTree(from: string, to: string): Promise<void> {
+  await Deno.mkdir(to, { recursive: true });
+  for await (const entry of Deno.readDir(from)) {
+    const src = join(from, entry.name);
+    const dst = join(to, entry.name);
+    if (entry.isDirectory) await copyTree(src, dst);
+    else if (entry.isFile) await Deno.copyFile(src, dst);
+  }
+}
+
+interface RunOutcome {
+  code: number;
+  seconds: number;
+  timedOut: boolean;
+  failures: string[];
+  passCount: number;
+  tail: string;
+}
+
+async function runProofIn(dir: string, options: Options): Promise<RunOutcome> {
+  const seconds = Math.max(1, Math.round(options.timeoutMs / 1000));
+  const started = performance.now();
+  const child = new Deno.Command("timeout", {
+    args: [
+      "-k",
+      "5",
+      `${seconds}`,
+      Deno.execPath(),
+      "run",
+      "--allow-all",
+      "--unstable-kv",
+      join(dir, PROOF),
+    ],
+    cwd: dir,
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const output = await child.output();
+  const text = `${new TextDecoder().decode(output.stdout)}\n${
+    new TextDecoder().decode(output.stderr)
+  }`;
+  const lines = text.split("\n").filter((line) => line.trim() !== "");
+  const failures = lines.filter((line) => line.startsWith(`${FAIL_PREFIX} `)).map((line) =>
+    line.slice(5)
+  );
+  return {
+    code: output.code,
+    seconds: (performance.now() - started) / 1000,
+    timedOut: output.code === 124 || output.code === 137,
+    failures,
+    passCount: lines.filter((line) => line.startsWith("PASS ")).length,
+    tail: lines.slice(-6).join("\n  "),
+  };
+}
+
+const options = parseOptions(Deno.args);
+if (options.list) {
+  printMatrix();
+  Deno.exit(0);
+}
+
+const source = await Deno.readTextFile(join(REPO, PROOF));
+const rows = options.only ? MUTANTS.filter((m) => m.name === options.only) : MUTANTS;
+
+if (options.dryRun) {
+  let inapplicable = 0;
+  for (const mutant of rows) {
+    try {
+      const mutated = mutant.apply(source);
+      const digest = await sha256(mutated);
+      // NET LINE DELTA, not a positional comparison: an INSERTED line shifts every later line, so a
+      // positional diff reports the whole tail as touched - it printed "312 lines" for a one-line
+      // injection until I checked it. The application record is the anchor assertion plus the sha256;
+      // this number is only here to say whether the edit inserted anything.
+      const changed = mutated.split("\n").length - source.split("\n").length;
+      console.log(
+        `[mutants] APPLIES  ${mutant.name.padEnd(26)} sha256 ${digest} anchor x1, net ${
+          changed >= 0 ? "+" : ""
+        }${changed} line(s)`,
+      );
+    } catch (err) {
+      inapplicable++;
+      console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
+    }
+  }
+  console.log(
+    `[mutants] --dry-run: ${
+      rows.length - inapplicable
+    } of ${rows.length} row(s) apply to the proof as it ` +
+      `stands; ${inapplicable} INAPPLICABLE (a moved anchor is a row that no longer tests anything)`,
+  );
+  Deno.exit(inapplicable > 0 ? 1 : 0);
+}
+
+const scratch = await buildScratch(options);
+console.log(`[mutants] scratch tree ${scratch} (the invoking worktree is not written to)`);
+const results: Array<{ row: string; verdict: string; detail: string }> = [];
+
+try {
+  // The BASELINE is not decoration: without it, a harness that reddens everything would look correct.
+  const baseline = await runProofIn(scratch, options);
+  const baselineOk = baseline.code === 0 && baseline.failures.length === 0;
+  console.log(
+    `[mutants] BASELINE ${baselineOk ? "ok  " : "FAIL"} exit ${baseline.code}, ${
+      baseline.seconds.toFixed(1)
+    }s, ` +
+      `${baseline.passCount} check(s) passed, ${baseline.failures.length} failed`,
+  );
+  if (!baselineOk) console.log(`  ${baseline.tail}`);
+  results.push({
+    row: "BASELINE (unmutated)",
+    verdict: baselineOk ? "as expected (green)" : "UNEXPECTED",
+    detail: baselineOk
+      ? `${baseline.passCount} checks passed`
+      : (baseline.failures[0] ?? baseline.tail),
+  });
+} catch (err) {
+  console.log(`[mutants] BASELINE could not run: ${(err as Error).message}`);
+  results.push({
+    row: "BASELINE (unmutated)",
+    verdict: "FAILED TO RUN",
+    detail: (err as Error).message,
+  });
+}
+
+for (const mutant of rows) {
+  let mutated: string;
+  try {
+    mutated = mutant.apply(source);
+  } catch (err) {
+    console.log(`[mutants] INAPPLICABLE ${mutant.name}: ${(err as Error).message}`);
+    results.push({ row: mutant.name, verdict: "INAPPLICABLE", detail: (err as Error).message });
+    continue;
+  }
+  const digest = await sha256(mutated);
+  await Deno.writeTextFile(join(scratch, PROOF), mutated);
+  const outcome = await runProofIn(scratch, options);
+  const expectedSeen = mutant.expect.every((needle) =>
+    outcome.failures.some((f) => f.includes(needle))
+  );
+  const soleRedOk = !mutant.soleRed ||
+    (outcome.failures.length === mutant.soleRed.length &&
+      outcome.failures.every((f) => mutant.soleRed!.some((needle) => f.includes(needle))));
+  const asExpected = outcome.code !== 0 && expectedSeen && soleRedOk;
+  console.log(
+    `[mutants] ${asExpected ? "ok  " : "UNEXPECTED"} ${
+      mutant.name.padEnd(26)
+    } modified-sha ${digest} ` +
+      `exit ${outcome.code}, ${
+        outcome.seconds.toFixed(1)
+      }s, ${outcome.failures.length} check(s) red` +
+      (outcome.timedOut ? " TIMEOUT (unknown, not a red)" : ""),
+  );
+  if (!asExpected) {
+    for (const failure of outcome.failures) console.log(`      red: ${failure.slice(0, 130)}`);
+    if (!expectedSeen) {
+      console.log(
+        `      MISSING the expected red: ${
+          mutant.expect.join(" | ")
+        } - the mutant applied and the ` +
+          `check did not react, which is the state this harness exists to make loud`,
+      );
+    }
+    if (!soleRedOk) {
+      console.log(`      SOLE-RED violated: expected only ${mutant.soleRed?.join(" | ")}`);
+    }
+  }
+  results.push({
+    row: mutant.name,
+    verdict: asExpected ? "as expected (red on the named check)" : "UNEXPECTED",
+    detail: asExpected
+      ? `${outcome.failures.length} check(s) red, sha256 ${digest}`
+      : `exit ${outcome.code}, ${outcome.failures.length} red`,
+  });
+  // Restore for the next row: every mutant starts from the pristine proof.
+  await Deno.writeTextFile(join(scratch, PROOF), source);
+}
+
+printMatrix();
+const unexpected = results.filter((r) =>
+  r.verdict !== "as expected (green)" && r.verdict !== "as expected (red on the named check)"
+);
+console.log(
+  `[mutants] ${
+    results.length - unexpected.length
+  } row(s) as expected, ${unexpected.length} unexpected`,
+);
+if (!options.keep) {
+  await Deno.remove(scratch, { recursive: true }).catch(() => {});
+} else {
+  console.log(`[mutants] scratch kept at ${scratch} (--keep)`);
+}
+if (unexpected.length > 0) {
+  console.log("[mutants] RED: a row did not behave as the matrix claims");
+  for (const row of unexpected) console.log(`  ${row.row}: ${row.verdict} - ${row.detail}`);
+  Deno.exit(1);
+}
+console.log(
+  "[mutants] every row behaved as the matrix claims, and the declared non-detectors are listed above",
+);

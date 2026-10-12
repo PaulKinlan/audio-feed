@@ -25,6 +25,7 @@
     "smoke": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/smoke.ts",
     "evidence:compress": "deno run --allow-read --allow-write --allow-run=convert,git scripts/evidence-compress.ts",
     "evidence": "deno run --allow-read --allow-run=deno,timeout --allow-env scripts/evidence-run.ts",
+    "evidence:mutants": "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env scripts/exww-mutants.ts",
     "proof": "deno run --allow-all --unstable-kv",
     "test:fast": "deno run --allow-read --allow-run=git,deno --allow-env scripts/fast-check.ts",
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
