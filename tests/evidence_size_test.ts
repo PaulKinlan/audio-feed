@@ -149,16 +149,60 @@ export async function carriedEvidenceDirs(root: string = ROOT): Promise<Set<stri
 }
 
 /**
- * audio-feed-tgnu — the undeclared evidence directories, derived from the git index and README declarations.
+ * audio-feed-tgnu — check whether a directory carries an explicit debt admission in its README.
  *
- * Replaces the hand-maintained EVIDENCE_UNDECLARED array that every retrofit slice had to edit.
- * Each directory's README declaration is the source of truth, and git index (carriedEvidenceDirs)
- * is the source of truth for what the tree carries (audio-feed-9qvz, audio-feed-a7e8).
+ * An admitted directory carries legacy debt that has not yet been retrofitted with assertions.
+ * Like declarations, admissions are read FROM THE GIT INDEX (`git show :<readme>`) rather than the
+ * working directory, so a worktree-deleted directory (an unstaged `rm -rf`) still reads correctly.
+ */
+export async function checkEvidenceAdmission(
+  name: string,
+  root: string = ROOT,
+): Promise<boolean> {
+  const readmeRel = `docs/evidence/${name}/README.md`;
+  const readmeCmd = await new Deno.Command("git", {
+    args: ["show", `:${readmeRel}`],
+    cwd: root,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!readmeCmd.success) {
+    return false;
+  }
+  const body = new TextDecoder().decode(readmeCmd.stdout);
+  return /^- Debt:\s*admitted\s*\(audio-feed-tgnu\)\s*$/m.test(body);
+}
+
+/**
+ * audio-feed-tgnu — the set of evidence directories that admit debt in their README.
+ *
+ * The debt meter is the set of READMEs that admit, rather than a hand-maintained list.
+ * A slice removing its debt edits ONLY its own README (removing the admission and adding a
+ * declaration), leaving shared test files untouched.
+ */
+export async function admittedEvidenceDirs(root: string = ROOT): Promise<Set<string>> {
+  const carried = await carriedEvidenceDirs(root);
+  const admitted = new Set<string>();
+  for (const name of carried) {
+    if (await checkEvidenceAdmission(name, root)) {
+      admitted.add(name);
+    }
+  }
+  return admitted;
+}
+
+/**
+ * audio-feed-tgnu — the undeclared evidence directories, derived from the git index and READMEs.
+ *
+ * `undeclared` is redefined as a carried directory that DECLARES NOTHING AND ADMITS NOTHING.
+ * Each directory's README is the source of truth for declarations and debt admissions, and the
+ * git index (carriedEvidenceDirs) is the source of truth for what the tree carries (audio-feed-9qvz, audio-feed-a7e8).
  */
 export async function undeclaredEvidenceDirs(root: string = ROOT): Promise<Set<string>> {
   const carried = await carriedEvidenceDirs(root);
   const undeclared = new Set<string>();
   for (const name of carried) {
+    if (await checkEvidenceAdmission(name, root)) continue;
     const err = await checkEvidenceDeclaration(name, root);
     if (err !== null) {
       undeclared.add(name);
@@ -192,13 +236,23 @@ Deno.test("every evidence directory declares what it asserts (audio-feed-fnrp)",
       "these entries: " + staleDebt.join(", "),
   );
 
-  // audio-feed-tgnu: the undeclared debt set is derived rather than enumerated.
+  // audio-feed-tgnu FIX 1: assert the SET of undeclared is empty.
+  // Undeclared directories are those that declare nothing AND admit nothing.
   const undeclared = await undeclaredEvidenceDirs();
+  assertEquals(
+    undeclared,
+    new Set<string>(),
+    "undeclared evidence directories (carrying neither a declaration nor a debt admission) must be empty: " +
+      Array.from(undeclared).join(", "),
+  );
 
+  // audio-feed-tgnu FIX 2: non-circular check.
+  // The declaration check runs over all carried directories that have not admitted legacy debt.
   // Any directory claiming to be declared must pass checkEvidenceDeclaration (audio-feed-fnrp).
+  const admitted = await admittedEvidenceDirs();
   const declaredErrors: string[] = [];
   for (const name of carried) {
-    if (undeclared.has(name)) continue;
+    if (admitted.has(name)) continue;
     const err = await checkEvidenceDeclaration(name);
     if (err) declaredErrors.push(err);
   }
@@ -367,6 +421,107 @@ Deno.test("audio-feed-npai: carried directory whose worktree files are deleted p
       derived.has("audio-feed-carried"),
       false,
       "carried directory whose worktree folder is deleted must not be classified as undeclared",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-tgnu: admitted directory is excluded from undeclared set and passes when worktree files are deleted", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tgnu-admitted-worktree-" });
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-admitted`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-admitted/README.md`,
+      "# Evidence: audio-feed-admitted\n\n- Debt: admitted (audio-feed-tgnu)\n",
+    );
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit admitted evidence");
+
+    // Admitted directory must be recognized as admitted
+    assertEquals(
+      await checkEvidenceAdmission("audio-feed-admitted", root + "/"),
+      true,
+      "admitted directory is detected as carrying debt admission",
+    );
+    const admittedBefore = await admittedEvidenceDirs(root + "/");
+    assertEquals(
+      admittedBefore.has("audio-feed-admitted"),
+      true,
+      "admitted directory is in admittedEvidenceDirs set",
+    );
+
+    // Admitted directory must NOT enter undeclared set
+    const derivedBefore = await undeclaredEvidenceDirs(root + "/");
+    assertEquals(
+      derivedBefore.has("audio-feed-admitted"),
+      false,
+      "admitted directory must not enter undeclared set",
+    );
+
+    // Delete worktree folder (simulating unstaged rm -rf)
+    await Deno.remove(`${root}/docs/evidence/audio-feed-admitted`, { recursive: true });
+
+    // checkEvidenceAdmission must read from index, not worktree
+    assertEquals(
+      await checkEvidenceAdmission("audio-feed-admitted", root + "/"),
+      true,
+      "admitted directory whose worktree folder is gone still passes admission check from index",
+    );
+    const derivedAfter = await undeclaredEvidenceDirs(root + "/");
+    assertEquals(
+      derivedAfter.has("audio-feed-admitted"),
+      false,
+      "admitted directory whose worktree folder is deleted must still be excluded from undeclared",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-tgnu: rogue directory with neither declaration nor admission is flagged in undeclared set", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tgnu-rogue-" });
+  try {
+    await gitInit(root);
+    // 1. Declared directory
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-declared`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-declared/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: test claim\n",
+    );
+
+    // 2. Admitted directory
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-admitted`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-admitted/README.md`,
+      "- Debt: admitted (audio-feed-tgnu)\n",
+    );
+
+    // 3. Rogue directory: carried in index, but neither declared nor admitted
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-rogue`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-rogue/evidence.png`,
+      "bytes",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit mixed evidence");
+
+    const undeclared = await undeclaredEvidenceDirs(root + "/");
+    assertEquals(
+      undeclared,
+      new Set(["audio-feed-rogue"]),
+      "undeclared set must contain exactly the rogue directory (declared and admitted are excluded)",
+    );
+
+    const admitted = await admittedEvidenceDirs(root + "/");
+    assertEquals(
+      admitted,
+      new Set(["audio-feed-admitted"]),
+      "admitted set must contain exactly the admitted directory",
     );
   } finally {
     await Deno.remove(root, { recursive: true });
