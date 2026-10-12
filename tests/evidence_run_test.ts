@@ -228,6 +228,47 @@ Deno.test("gzxr: nested refusal outranks declaration debt but reports both", asy
   }
 });
 
+Deno.test("01k7: declaration debt names the directory and why; a declared tree has no debt line", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "01k7-debt-" });
+  try {
+    const evidenceDir = join(tempDir, "docs", "evidence", "audio-feed-undeclared");
+    const readme = join(evidenceDir, "README.md");
+    const validDir = join(tempDir, "docs", "evidence", "audio-feed-valid");
+    await Deno.mkdir(evidenceDir, { recursive: true });
+    await Deno.mkdir(validDir);
+    await Deno.mkdir(join(tempDir, "scripts"));
+    await Deno.writeTextFile(join(tempDir, "scripts", "proof.ts"), "console.log('PASS proof');\n");
+    await Deno.writeTextFile(
+      join(tempDir, "scripts", "second.ts"),
+      "console.log('PASS second');\n",
+    );
+    await Deno.writeTextFile(join(validDir, "README.md"), "- Script: scripts/proof.ts\n");
+    await Deno.writeTextFile(readme, "# Evidence without a Script line\n");
+
+    const undeclared = await runTier(tempDir);
+    assertEquals(undeclared.code, 2, "a passing proof does not erase declaration debt");
+    assertEquals(
+      undeclared.stdout.split("\n").filter((line) => line.startsWith("[evidence] debt:")),
+      [
+        "[evidence] debt: docs/evidence/audio-feed-undeclared declares no proof " +
+        "(no '- Script:' line in its README)",
+      ],
+    );
+
+    await Deno.writeTextFile(readme, "- Script: scripts/second.ts\n- Asserts: proof passes\n");
+    const declared = await runTier(tempDir);
+    assertEquals(declared.code, 0, "the declared proof must run and pass");
+    assertStringIncludes(declared.stdout, "ok   docs/evidence/audio-feed-undeclared");
+    assertEquals(
+      declared.stdout.split("\n").filter((line) => line.startsWith("[evidence] debt:")),
+      [],
+      "a fully declared tree must not report declaration debt",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 Deno.test("NEGATIVE CONTROL 3 (Zero Assertions): script exiting 0 with EMPTY output fails (exit 1)", async () => {
   const tempDir = await Deno.makeTempDir({ prefix: "c0ft-neg3-" });
   try {
