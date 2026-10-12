@@ -1,13 +1,19 @@
 # Browser Acceptance Proof: audio-feed-py5
 
-## Problem
-`scripts/listen-harness.ts` was omitting `contentType` on its seeded episodes. Because `isPublishable()` in `src/types.ts` requires both `audioKey` and `contentType`, the listing logic filtered out all seeded episodes, rendering 0 episodes and showing the empty state ("No episodes yet") despite the harness claiming to serve 5 episodes.
+- Script: scripts/listen-browser-proof.ts
+- Asserts: rendered episode row count is 5; header count text displays '5 episodes'; empty state is hidden; play button loads audio URL into #audio element; enclosure audio URL returns 200 audio/wav bytes
 
-## Solution
-1. Added `contentType: "audio/wav"` to all seeded episodes in `scripts/listen-harness.ts`.
-2. Added harness startup self-verification: requests `/listen/:token`, parses `#player-data`, and asserts that the number of playable episodes matches the seeded count (`seeds.length`), failing loudly if 0 or mismatched.
-3. Verified blob existence for each seeded episode.
+## Problem & Solution
+listen-harness was omitting contentType on seeded episodes, filtering out episodes. Fixed by ensuring contentType: 'audio/wav', self-verifying harness startup, and asserting playlist rendering.
+
+## Execution Log
+```
+PASS  rendered episode row count is 5  found 5 rows
+PASS  header count text displays '5 episodes'  got '5 episodes'
+PASS  empty state is hidden  empty hidden: true
+PASS  play button loads audio URL into #audio element  audio src endpoint: /audio/user-1/direct/ep-1.wav
+PASS  enclosure audio URL returns 200 audio/wav bytes  status 200, content-type: audio/wav
+```
 
 ## Evidence Artifacts
-- `01-listen-harness-5-episodes.png`: Screenshot of `/listen/harness-token` rendered in real headless Chrome showing 5 episode rows, active duration, play controls, and hidden empty state.
-- Automated proof: `scripts/listen-browser-proof.ts`.
+- 01-listen-harness-5-episodes.png: Screenshot of /listen/harness-token rendered in real headless Chrome showing 5 episode rows.
