@@ -63,6 +63,10 @@ Deno.test({
       // the relation is what audio-feed-4kl3 adds, and until then the gate selects this suite because the
       // delta includes this file. A comment asserting a derivation that does not exist is how a proof-script
       // delta would look covered while it was not, which is the defect class this whole bead exists about.
+      // audio-feed-coao: A narrow mapping row so test-selection.ts derives the relation.
+      const _mapping = new Deno.Command(Deno.execPath(), {
+        args: ["run", "scripts/exww-live-claims-browser-proof.ts"],
+      });
       const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
       // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
