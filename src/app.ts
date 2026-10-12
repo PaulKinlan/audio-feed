@@ -138,9 +138,14 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // rather than through config because it must be impossible to enable by a config file alone.
   if (Deno.env.get("AUDIO_FEED_TEST_THROW") === "1") {
     router.get("/__test/throw", ({ url }) => {
-      // The message carries ATTACKER-CHOSEN text on purpose: this is the surface the invariant test fuzzes,
-      // and it is the exact shape the screen exists for - a request string inside an unhandled error's message.
-      throw new Error(`test throw: ${url.searchParams.get("m") ?? "no message"}`);
+      // audio-feed-sw1r / audio-feed-z1gs: The error message and name carry ATTACKER-CHOSEN text on purpose:
+      // this is the surface the invariant test fuzzes, and it is the exact shape the screen exists for -
+      // a request string inside an unhandled error's message or custom name.
+      const err = new Error(`test throw: ${url.searchParams.get("m") ?? "no message"}`);
+      if (url.searchParams.has("name")) {
+        err.name = url.searchParams.get("name")!;
+      }
+      throw err;
     });
   }
   router.get("/login", handleLogin);

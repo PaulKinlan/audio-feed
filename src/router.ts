@@ -7,6 +7,7 @@
 
 import { UNMATCHED_ROUTE } from "./request_route.ts";
 import { HttpError, methodNotAllowed, notFound, problem } from "./http.ts";
+import { screenErrorForLogging } from "./observability/error_screen.ts";
 
 export type Params = Record<string, string | undefined>;
 
@@ -366,9 +367,23 @@ export class Router<Ctx> {
         return await this.handle(req, ctx, info);
       } catch (error) {
         await onUnhandledError?.(error, req);
+        // audio-feed-ahx5 / audio-feed-067d: Screen error and route before logging to operational stderr.
+        // A request path is client-supplied and may contain arbitrary attacker-chosen tokens (audio-feed-067d).
+        // Logging this.routePatternFor(url) records a compile-time constant from the route table
+        // (or UNMATCHED_ROUTE) rather than user-controlled path segments. Method is validated against
+        // standard HTTP methods, and screenErrorForLogging sanitizes error name, message, and stack.
+        let route = UNMATCHED_ROUTE;
+        try {
+          route = this.routePatternFor(new URL(req.url));
+        } catch {
+          route = UNMATCHED_ROUTE;
+        }
+        const method = typeof req.method === "string" && /^[A-Z]{3,7}$/.test(req.method)
+          ? req.method
+          : "UNKNOWN";
         console.error(
-          `[audio-feed] unhandled error for ${req.method} ${sanitizeRequestUrl(req.url)}:`,
-          error,
+          `[audio-feed] unhandled error for ${method} ${route}:`,
+          screenErrorForLogging(error),
         );
         return applySecurityHeaders(
           problem({ status: 500, title: "internal_error" }),

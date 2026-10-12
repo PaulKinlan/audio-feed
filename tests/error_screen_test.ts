@@ -11,8 +11,11 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   isScreenOutput,
+  KNOWN_ERROR_NAMES,
   KNOWN_ERROR_PHRASES,
+  screenErrorForLogging,
   screenErrorMessage,
+  screenErrorName,
   SUPPRESSED_MESSAGE,
 } from "../src/observability/error_screen.ts";
 
@@ -88,4 +91,43 @@ Deno.test("audio-feed-sw1r: every phrase in the list has a throw site in this co
       `no throw site in src/ contains the phrase: ${phrase}`,
     );
   }
+});
+
+Deno.test("audio-feed-ahx5: error name is screened to a closed set", () => {
+  // A hostile custom name carrying a client token falls back to "Error"
+  const hostile = new Error("msg");
+  hostile.name = `CanaryName_${CANARY}`;
+  assertEquals(screenErrorName(hostile), "Error");
+  assertEquals(screenErrorName(new Error()), "Error");
+  assertEquals(screenErrorName(new TypeError()), "TypeError");
+  assertEquals(screenErrorName({ name: CANARY }), "Error");
+  assertEquals(screenErrorName(null), "Error");
+
+  // Standard and codebase error names survive
+  for (const name of KNOWN_ERROR_NAMES) {
+    const err = new Error("test");
+    err.name = name;
+    assertEquals(screenErrorName(err), name);
+  }
+});
+
+Deno.test("audio-feed-ahx5: screenErrorForLogging eliminates canaries from message, name, and stack frames/locations", () => {
+  // Error with client canaries in message, name, dynamic stack frame, and stack file location
+  const err = new Error(`test throw: ${CANARY}`);
+  err.name = `AttackerError_${CANARY}`;
+  err.stack = `AttackerError_${CANARY}: test throw: ${CANARY}
+    at Object.canaryDynamicFunction_${CANARY} (file:///app/${CANARY}/router.ts:100:20)
+    at async handler_${CANARY} (file:///app/src/${CANARY}.ts:200:15)
+    at ext:deno_http/00_serve.ts:1:500
+    at maliciousStackTextWithoutLocation_${CANARY}`;
+
+  const sanitized = screenErrorForLogging(err);
+
+  // Name and message are screened
+  assertEquals(sanitized.name, "Error");
+  assertEquals(sanitized.message, SUPPRESSED_MESSAGE);
+
+  // Stack contains only screened name and message; untrusted stack frames and locations are completely omitted
+  assertEquals(sanitized.stack, `Error: ${SUPPRESSED_MESSAGE}`);
+  assert(!String(sanitized.stack).includes(CANARY), `canary survived in stack: ${sanitized.stack}`);
 });

@@ -47,3 +47,57 @@ export function isScreenOutput(value: unknown): boolean {
   return typeof value === "string" &&
     (value === SUPPRESSED_MESSAGE || KNOWN_ERROR_PHRASES.includes(value));
 }
+
+/**
+ * Closed set of known error names either built into JavaScript or authored by this codebase.
+ * Any unhandled error whose .name is not in this closed set is screened to "Error".
+ */
+export const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "URIError",
+  "EvalError",
+  "HttpError",
+  "IngestError",
+  "GroundedScriptError",
+  "SynthesisYieldError",
+  "VoiceSampleError",
+  "GeminiTtsError",
+  "PasskeyError",
+  "IllegalTransitionError",
+  "UnknownUserError",
+  "NotAuthorizedError",
+  "DuplicateUserEmailError",
+  "CorruptArticleError",
+  "RangeNotSatisfiableError",
+  "UnsignedPutError",
+]);
+
+/** Returns a screened error name from KNOWN_ERROR_NAMES, or "Error". */
+export function screenErrorName(error: unknown): string {
+  if (
+    error instanceof Error && typeof error.name === "string" && KNOWN_ERROR_NAMES.has(error.name)
+  ) {
+    return error.name;
+  }
+  return "Error";
+}
+
+/**
+ * Builds a sanitized Error object for operational stderr logging (audio-feed-ahx5).
+ * - Replaces error message with screenErrorMessage (closed set of codebase phrases or SUPPRESSED_MESSAGE).
+ * - Screens error.name against KNOWN_ERROR_NAMES (closed set, falls back to "Error").
+ * - Omits caller-supplied stack trace locations and frames entirely so no attacker-chosen text
+ *   in source paths, URLs, or function names can enter server stderr.
+ */
+export function screenErrorForLogging(error: unknown): Error {
+  const screenedMessage = screenErrorMessage(error);
+  const errorName = screenErrorName(error);
+  const sanitized = new Error(screenedMessage);
+  sanitized.name = errorName;
+  sanitized.stack = `${errorName}: ${screenedMessage}`;
+  return sanitized;
+}
