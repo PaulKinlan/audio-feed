@@ -100,7 +100,7 @@ await runProof("account-browser-proof", async (checker) => {
             await sleep(120);
             const height = Math.min(
               await js(`document.documentElement.scrollHeight`),
-              2800,
+              6000,
             );
             await cdp("Emulation.setDeviceMetricsOverride", {
               width,
