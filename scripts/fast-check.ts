@@ -535,6 +535,26 @@ export function couldHideInertRead(hint: string): boolean {
   return hint.endsWith("/") || isDocumentation(hint);
 }
 
+/**
+ * Whether a fragment could BE the file being changed - the only way a fragment can make the inert class
+ * unsafe (audio-feed-7l9m).
+ *
+ * A fragment is the suffix after an interpolation: a path the detector could not resolve, `state.json` or
+ * `digest.md`. The question the guard asks is "could a change I am being told to classify as inert be the
+ * thing this read consumes?", and a change can only touch a file in the tree - so a markdown fragment blocks
+ * only when the change HAS that basename. A directory-shaped fragment (`docs/`) still blocks, because any
+ * file under it could be the change.
+ *
+ * This pairing is what keeps the correction from the other side honest. `digest.md` is a temp-directory read
+ * whose base is an arrow-callback PARAMETER (`withTempDir(async (dir) => ...)`), so the detector cannot prove
+ * it is out-of-repo and must not suppress it - and it must not pay the full suite for it either, because a
+ * change to `docs/ingest.md` cannot be that file.
+ */
+export function couldBeTheChangedFile(hint: string, changed: ReadonlyArray<string>): boolean {
+  if (hint.endsWith("/")) return true;
+  return changed.some((file) => file === hint || file.endsWith(`/${hint}`));
+}
+
 /** The same fail-safe for the REPORTING derivation, which carries the incompleteness signal with it. */
 export async function deriveOrWidenReport(
   derive: () => Promise<ReadRelationReport>,
@@ -782,16 +802,21 @@ ${auditUniverseDrift}`);
   );
   const readRelations = relationReport.relations;
   const unresolvedReads = relationReport.unresolved;
-  // What disables the inert class for this run: authored-path misses (all of them) plus the fragments that
-  // could still hide an inert-eligible read (couldHideInertRead above). Fragments that cannot are PRINTED
-  // below - dropping a hint silently is what let an unreadable universe be described as inert (audio-feed-q0ky)
-  // - but they do not widen every later change, which is what made a docs-only edit pay the full suite.
+  // The change set is resolved HERE, because what a fragment can hide depends on it (audio-feed-7l9m).
+  const changed = await changedFiles();
+  // What disables the inert class for this run: authored-path misses (ALL of them) plus the fragments that
+  // could still hide an inert-eligible read (couldHideInertRead above) AND could be the file being changed
+  // (couldBeTheChangedFile). Fragments that cannot are PRINTED below - dropping a hint silently is what let an
+  // unreadable universe be described as inert (audio-feed-q0ky) - but they do not widen every later change,
+  // which is what made a docs-only edit pay the full suite.
   const inertBlockingReads = [
     ...unresolvedReads,
-    ...relationReport.unattributed.filter(couldHideInertRead),
+    ...relationReport.unattributed.filter((hint) =>
+      couldHideInertRead(hint) && couldBeTheChangedFile(hint, changed ?? [])
+    ),
   ];
   const inertNeutralFragments = relationReport.unattributed.filter((hint) =>
-    !couldHideInertRead(hint)
+    !inertBlockingReads.includes(hint)
   );
   if (inertBlockingReads.length) {
     // SAID OUT LOUD, because this is what disables the inert class for this run: a reader who sees a FULL
@@ -817,7 +842,7 @@ ${auditUniverseDrift}`);
   }
   if (inertNeutralFragments.length) {
     console.log(
-      `fast-gate: read relation: ${inertNeutralFragments.length} path FRAGMENT(s) after an interpolation name nothing in the tree and cannot hide an inert-eligible file, so they do not widen: ${
+      `fast-gate: read relation: ${inertNeutralFragments.length} path FRAGMENT(s) after an interpolation name nothing in the tree and do not widen (not markdown, or not the file being changed): ${
         inertNeutralFragments.slice(0, 3).join(", ")
       }${inertNeutralFragments.length > 3 ? ", ..." : ""}`,
     );
@@ -857,7 +882,6 @@ ${auditUniverseDrift}`);
     Deno.exit(1);
   }
 
-  const changed = await changedFiles();
   let plan: { testFiles: string[] | null; reason: string };
   if (forceAll) {
     plan = { testFiles: null, reason: "--all given" };

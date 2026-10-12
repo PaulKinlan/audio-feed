@@ -437,25 +437,154 @@ function insideSpans(spans: ReadonlyArray<[number, number]>, index: number): boo
 }
 
 /**
- * Names bound to a path rooted OUTSIDE the repository (audio-feed-lm4d): an OS temp directory or `$HOME`.
+ * Read hints that name a path OUTSIDE the repository (audio-feed-lm4d): an OS temp directory or `$HOME`.
  *
  * `${dir}/state.json` with `dir = await Deno.makeTempDir()` was offered as the repo-relative path
  * `state.json`, and `const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`` with
  * `home = Deno.env.get("HOME")` as `.cache/puppeteer/chrome`. Neither can ever name a file a CHANGE can
  * touch - the tree is the repository - so offering them as repo hints made the completeness check fire
  * forever on reads of files that live outside it, which is what kept the inert class unreachable.
+ *
+ * The FIRST version classified NAMES: `outOfRepoNames(source)` returned {home} for any file binding `home`
+ * to $HOME, and then EVERY `home` in that file was out-of-repo. That is a false-green gate waiting to fire -
+ * audio-feed-7l9m - so the classification now belongs to a BINDING, resolved by lexical scope. See
+ * `bindingScopes` and `baseIsOutOfRepo` below.
  */
-function outOfRepoNames(source: string): Set<string> {
-  const names = new Set<string>();
-  for (const match of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
-    const name = match[1];
-    const rhs = match[2] ?? "";
-    if (name && /Deno\.makeTemp(?:Dir|File)\s*\(/.test(rhs)) names.add(name);
-    else if (name && /Deno\.env\.get\(\s*["'](?:HOME|TMPDIR|TEMP|TMP)["']/.test(rhs)) {
-      names.add(name);
-    } else if (name && /(?:os|platform)\.(?:homedir|tmpdir)\s*\(/.test(rhs)) names.add(name);
+
+/** Positive evidence that a binding's VALUE is a path outside the repository. */
+function isOutOfRepoRhs(rhs: string): boolean {
+  return (
+    /Deno\.makeTemp(?:Dir|File)\s*\(/.test(rhs) ||
+    /Deno\.env\.get\(\s*["'](?:HOME|TMPDIR|TEMP|TMP)["']/.test(rhs) ||
+    /(?:os|platform)\.(?:homedir|tmpdir)\s*\(/.test(rhs)
+  );
+}
+
+type BindingKind = "out-of-repo" | "other";
+
+/** One lexical scope and the bindings made DIRECTLY in it. */
+interface BindingScope {
+  start: number;
+  end: number;
+  /** "ambiguous" = the same name bound two different ways in one scope. */
+  bindings: Map<string, BindingKind | "ambiguous">;
+}
+
+/** The smallest scope containing `offset`, which is the scope a declaration there belongs to. */
+function innermostScope(scopes: ReadonlyArray<BindingScope>, offset: number): BindingScope {
+  let best: BindingScope = scopes[0]!;
+  for (const scope of scopes) {
+    if (offset <= scope.start || offset >= scope.end) continue;
+    if (scope.end - scope.start < best.end - best.start) best = scope;
   }
-  return names;
+  return best;
+}
+
+/**
+ * The lexical scopes of one file, with each binding classified by its OWN right-hand side (audio-feed-7l9m).
+ *
+ * A NAME IS A PROXY FOR A BINDING, and a binding can be SHADOWED, so rev-27's fixture -
+ *
+ *     const home = Deno.env.get("HOME");
+ *     export async function readIt() {
+ *       const home = new URL("../docs/", import.meta.url).pathname;
+ *       return await Deno.readTextFile(`${home}/notes.md`);
+ *     }
+ *
+ * - had its real read of docs/notes.md suppressed, and `docs/notes.md` was declared INERT: a false-green
+ * gate, which is the one failure mode a gate must not have. Suppression is now decided by the binding the
+ * read actually resolves through, and it needs positive evidence at that site.
+ *
+ * String CONTENT is skipped, so a fixture's code is not this file's binding. Parameters are recorded as
+ * "other": `readIt(dir: string)` reads `${dir}/x.csv` through the parameter, and a module-level
+ * `const dir = await Deno.makeTempDir()` must not suppress it.
+ */
+function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): BindingScope[] {
+  const scopes: BindingScope[] = [{ start: 0, end: source.length, bindings: new Map() }];
+  const stack: BindingScope[] = [scopes[0]!];
+  let si = 0;
+  for (let i = 0; i < source.length;) {
+    if (si < spans.length && i >= spans[si]![0]) {
+      i = Math.max(i, spans[si]![1]);
+      si++;
+      continue;
+    }
+    const ch = source[i]!;
+    if (ch === "{") {
+      const scope: BindingScope = { start: i, end: source.length, bindings: new Map() };
+      scopes.push(scope);
+      stack.push(scope);
+    } else if (ch === "}") {
+      const scope = stack.pop();
+      if (scope && scope !== scopes[0]) scope.end = i;
+    }
+    i++;
+  }
+
+  const record = (scope: BindingScope, name: string, kind: BindingKind): void => {
+    const seen = scope.bindings.get(name);
+    scope.bindings.set(name, seen === undefined || seen === kind ? kind : "ambiguous");
+  };
+
+  for (const match of source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]*)/g)) {
+    const at = match.index ?? 0;
+    if (insideSpans(spans, at)) continue;
+    record(
+      innermostScope(scopes, at),
+      match[1]!,
+      isOutOfRepoRhs(match[2] ?? "") ? "out-of-repo" : "other",
+    );
+  }
+  // Parameters belong to the scope of the body they open, and they SHADOW a module-level binding of the same
+  // name - a read through the parameter must not inherit the module-level classification either.
+  for (const scope of scopes) {
+    if (scope === scopes[0]) continue;
+    const head = source.slice(Math.max(0, scope.start - 300), scope.start).replace(/\s*=>\s*$/, "");
+    const close = head.lastIndexOf(")");
+    if (close < 0) continue;
+    let depth = 0;
+    let open = -1;
+    for (let i = close; i >= 0; i--) {
+      const ch = head[i]!;
+      if (ch === ")") depth++;
+      else if (ch === "(") {
+        depth--;
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+      }
+    }
+    if (open < 0) continue;
+    for (const segment of head.slice(open + 1, close).split(",")) {
+      const name = /^\s*(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)\s*(?:[:?=]|$)/.exec(segment)?.[1];
+      if (name) record(scope, name, "other");
+    }
+  }
+  return scopes;
+}
+
+/**
+ * Whether the binding a read at `offset` resolves `name` through is provably OUTSIDE the repository.
+ *
+ * The lookup walks from the innermost enclosing scope outwards and stops at the FIRST binding of the name -
+ * that is what shadowing means. Anything else (no binding, an ambiguous one, or one whose value is not
+ * provably out-of-repo) means DO NOT SUPPRESS: an extra relation costs a test run, a missing one costs a
+ * skipped test. Same rule as the completeness guard, applied to the binding question.
+ */
+function baseIsOutOfRepo(
+  scopes: ReadonlyArray<BindingScope>,
+  name: string,
+  offset: number,
+): boolean {
+  const containing = scopes
+    .filter((scope) => offset > scope.start && offset < scope.end)
+    .sort((a, b) => (a.end - a.start) - (b.end - b.start));
+  for (const scope of containing) {
+    const kind = scope.bindings.get(name);
+    if (kind !== undefined) return kind === "out-of-repo";
+  }
+  return false;
 }
 
 /** The last identifier of an interpolation, so `${stateDir}` and `${config.dir}` both yield a name. */
@@ -476,7 +605,7 @@ function staticPathHints(
   call: string,
   moduleDir: string,
   root: string,
-  outOfRepo: ReadonlySet<string> = new Set(),
+  isOutOfRepoBase: (name: string) => boolean = () => false,
   suppressed: Set<string> = new Set(),
 ): { paths: string[]; tailCandidates: string[] } {
   const hints: string[] = [];
@@ -519,12 +648,14 @@ function staticPathHints(
         // rule makes the inert class unreachable and widens the run rather than selecting nothing.
         //
         // audio-feed-lm4d: that widening is only meaningful when the base COULD be a repository path. When
-        // the base is bound outside the repo (outOfRepoNames above), the tail can never name a file a change
+        // the binding this read resolves through is outside the repo, the tail can never name a file a change
         // touches, so it is reported as out-of-repo instead of being offered and then found missing forever.
+        // audio-feed-7l9m: that question is asked PER SITE (`isOutOfRepoBase`), because the classification
+        // belongs to a binding and a binding can be shadowed - the file-global answer suppressed a real read.
         const tail = token.slice(token.lastIndexOf("}") + 1);
         if (/\/[^/]/.test(tail)) {
           const base = interpolationBaseName(token);
-          if (base && outOfRepo.has(base)) suppressed.add(tail.replace(/^\/+/, ""));
+          if (base && isOutOfRepoBase(base)) suppressed.add(tail.replace(/^\/+/, ""));
           else tailCandidates.push(tail.replace(/^\/+/, ""));
         }
       }
@@ -546,7 +677,7 @@ function pathConstants(
   source: string,
   moduleDir: string,
   root: string,
-  outOfRepo: ReadonlySet<string> = new Set(),
+  isOutOfRepoBase: (name: string, offset: number) => boolean = () => false,
   suppressed: Set<string> = new Set(),
 ): Map<string, string> {
   const constants = new Map<string, string>();
@@ -554,8 +685,14 @@ function pathConstants(
     const isDirectory = !/[^/]+\.[A-Za-z0-9]{1,5}$/.test(resolved);
     constants.set(name, isDirectory ? `${resolved.replace(/\/$/, "")}/` : resolved);
   };
-  const resolve = (expr: string): string | null => {
-    const { paths, tailCandidates } = staticPathHints(expr, moduleDir, root, outOfRepo, suppressed);
+  const resolve = (expr: string, offset: number): string | null => {
+    const { paths, tailCandidates } = staticPathHints(
+      expr,
+      moduleDir,
+      root,
+      (name) => isOutOfRepoBase(name, offset),
+      suppressed,
+    );
     // A constant can be built from a suffix: `const readme = `${dir}/README.md`` is how tests/evidence_size_test
     // reaches the root README, and dropping the tail here (audio-feed-lm4d, first attempt) DROPPED that
     // relation - the under-selection direction. The tail is accepted as the constant's value; if the constant
@@ -568,20 +705,28 @@ function pathConstants(
     return null;
   };
 
-  const lines = source.split("\n").map((line) => line.trim());
-  for (const line of lines) {
+  const rawLines = source.split("\n");
+  let lineStart = 0;
+  for (const raw of rawLines) {
+    const line = raw.trim();
+    // The offset of the declaration, so the out-of-repo question is asked AT the site (audio-feed-7l9m).
+    const offset = lineStart + (raw.length - raw.trimStart().length);
+    lineStart += raw.length + 1;
     const match = /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+)$/.exec(line);
     if (!match?.[1] || !match[2]) continue;
     // audio-feed-lm4d: `const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" })` used to register
     // the file SUFFIX as this constant's path, so every `readTextFile(tempHtmlFile)` contributed `.html/` to
-    // the relation. A name bound outside the repo is not a repo path and is not a constant to resolve.
-    if (outOfRepo.has(match[1])) continue;
-    const resolved = resolve(match[2]) ?? constants.get(match[2].replace(/;$/, "").trim());
+    // the relation. audio-feed-7l9m: the skip is now EVIDENCE ABOUT THE VALUE - this initializer IS a temp
+    // path constructor - and NOT a name match. Skipping every binding of the name is exactly what dropped a
+    // repo constant that an inner scope had shadowed, so a SHADOWED `home` bound to `docs/` now registers.
+    if (/Deno\.makeTemp(?:Dir|File)\s*\(/.test(match[2])) continue;
+    const resolved = resolve(match[2], offset) ?? constants.get(match[2].replace(/;$/, "").trim());
     if (resolved) declare(match[1], resolved);
   }
   // Default parameter values: `evidencePngs(dir = EVIDENCE_DIR)` reads through `dir`, so the name that
   // appears at the read call site is the PARAMETER, not the constant.
-  for (const line of lines) {
+  for (const raw of rawLines) {
+    const line = raw.trim();
     for (
       const match of line.matchAll(
         /[([,]\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^=,)]+)?=\s*([A-Za-z_$][\w$]*)\s*[,)]/g,
@@ -748,20 +893,19 @@ export async function deriveReadRelationReport(
       const source = stripComments(await read(relPath) ?? "");
       if (source === null) continue;
       // Two classes of hint that are not repo-path evidence, computed once per scanned file (audio-feed-lm4d):
-      // the file's string CONTENT (fixture code-as-data) and its names bound outside the repository.
+      // the file's string CONTENT (fixture code-as-data), and its names bound outside the repository - the
+      // latter now asked PER SITE from the lexical scope rather than from a file-global set of names
+      // (audio-feed-7l9m), which is what makes a shadowed binding decide for itself.
       const spans = stringContentSpans(source);
-      const outOfRepo = outOfRepoNames(source);
+      const scopes = bindingScopes(source, spans);
+      const isOutOfRepoBase = (name: string, offset: number) =>
+        baseIsOutOfRepo(scopes, name, offset);
 
-      for (const [name, path] of pathConstants(source, dir, root, outOfRepo, outOfRepoHints)) {
+      for (
+        const [name, path] of pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints)
+      ) {
         if (!constants.has(name)) constants.set(name, path);
       }
-      // A NAME CAN BE BOTH, and the repo-attributable binding wins (audio-feed-lm4d):
-      // tests/evidence_size_test.ts has a temp-dir local `dir` in one test and a `dir` parameter whose
-      // default is the repo's evidence directory in another. Reading the name only as out-of-repo dropped a
-      // REAL relation (`README.md <- tests/evidence_size_test.ts`, measured) - the under-selection direction,
-      // which is the one that must never happen. So a name the constant pass resolved stays a repo candidate:
-      // if its candidate resolves it over-selects (safe), and if it names nothing it is a reported fragment.
-      const outOfRepoEffective = new Set([...outOfRepo].filter((name) => !constants.has(name)));
 
       for (const call of READ_CALLS) {
         for (const match of source.matchAll(new RegExp(`${call}\\s*\\(`, "g"))) {
@@ -789,7 +933,7 @@ export async function deriveReadRelationReport(
             callText,
             dir,
             root,
-            outOfRepoEffective,
+            (name) => isOutOfRepoBase(name, at),
             outOfRepoHints,
           );
           for (const hint of paths) {
