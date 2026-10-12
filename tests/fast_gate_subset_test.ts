@@ -264,6 +264,10 @@ const RELATIONS = await deriveDataReadRelations(ROOT);
 Deno.test("**DERIVATION**: the relation is read out of the suites, not listed beside them", async () => {
   // The two live instances of the gap this bead is about, derived rather than declared:
   assertEquals(RELATIONS.get("docs/evidence/"), [
+    // audio-feed-t9w1 added a third observer: evidence_census_test.ts enumerates docs/evidence to
+    // assert the four mention-only scripts stay out of the census, so it reads that directory too.
+    // Over-selection in the safe direction - a changed evidence PNG runs a 40ms census test.
+    "tests/evidence_census_test.ts",
     "tests/evidence_size_test.ts",
     // audio-feed-3teu added a second observer of the same directory: evidence_size_trap_test.ts imports
     // auditEvidenceSizes() from scripts/evidence-compress.ts, which enumerates through evidencePngs(). The
@@ -426,14 +430,24 @@ Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8
   );
   assertEquals(
     plan.testFiles,
-    ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"],
+    [
+      "tests/evidence_census_test.ts",
+      "tests/evidence_size_test.ts",
+      "tests/evidence_size_trap_test.ts",
+    ],
     plan.reason,
   );
 });
 
 Deno.test("a changed shell runner selects the suite that executes it (es8y)", () => {
   const plan = planTests(["scripts/observability-agent-run.sh"], NO_GRAPH, NO_NAMED, RELATIONS);
-  assertEquals(plan.testFiles, ["tests/observability_agent_poll_test.ts"], plan.reason);
+  // audio-feed-t9w1's census test enumerates docs/evidence AND scripts/*.ts, so it observes this
+  // runner too. Over-selection in the safe direction: a change to any script now also runs one 40ms
+  // unit test. Measured, not assumed - it is the derivation doing this, not a listed relation.
+  assertEquals(plan.testFiles, [
+    "tests/evidence_census_test.ts",
+    "tests/observability_agent_poll_test.ts",
+  ], plan.reason);
 });
 
 Deno.test("a changed data file rides ALONGSIDE a code change", () => {
@@ -444,6 +458,7 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     RELATIONS,
   );
   assertEquals(plan.testFiles, [
+    "tests/evidence_census_test.ts",
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/widgets_test.ts",
@@ -771,6 +786,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
   assertEquals(classified.suites, [
+    "tests/evidence_census_test.ts",
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
   ]);

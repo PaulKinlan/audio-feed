@@ -14,7 +14,7 @@
  * negative control available: the four scripts named on the bead must come out
  * with a mention and no write.
  */
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals } from "@std/assert";
 import { census, censusSource, EVIDENCE_PREFIX } from "../scripts/evidence-census.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
