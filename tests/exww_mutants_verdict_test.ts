@@ -181,8 +181,14 @@ Deno.test("audio-feed-2qcp: a CLI run with UNKNOWN rows exits NON-ZERO, and the 
   );
 
   const root = new URL("..", import.meta.url).pathname;
-  const run = await new Deno.Command(Deno.execPath(), {
+  // IN ITS OWN SESSION, AND THE GROUP IS KILLED IN A FINALLY - because this test RUNS THE REAL CLI, whose rows
+  // launch Chrome: the first version left Chrome descendants alive after the job finished and the heavy-queue
+  // wrapper had to kill them to release the slot (measured on the eae1af1 gate: "descendants still held slot1
+  // after the job finished"). A test that leaks the fleet's scarcest resource is a worse test than the defect
+  // it pins, so `setsid` puts the whole CLI tree in one process group and the finally reaps the group.
+  const child = new Deno.Command("setsid", {
     args: [
+      Deno.execPath(),
       "run",
       "--allow-all",
       "--unstable-kv",
@@ -191,9 +197,20 @@ Deno.test("audio-feed-2qcp: a CLI run with UNKNOWN rows exits NON-ZERO, and the 
       "1",
     ],
     cwd: root,
+    stdin: "null",
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  }).spawn();
+  let run: { code: number; stdout: Uint8Array; stderr: Uint8Array };
+  try {
+    run = await child.output();
+  } finally {
+    // Negative pid = the process GROUP, so Chrome and the harness server die with the CLI rather than outliving
+    // the test. Errors are swallowed only because "already exited" is the normal case.
+    try {
+      Deno.kill(-child.pid, "SIGKILL");
+    } catch { /* the group is already gone */ }
+  }
   const out = new TextDecoder().decode(run.stdout) + new TextDecoder().decode(run.stderr);
   const summaryLine = out.split("\n").find((l) => l.includes("row(s) as expected")) ?? "";
   // The bound kills every row, so the matrix MUST be red and the summary must say so in its own words.
