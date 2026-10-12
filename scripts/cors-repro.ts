@@ -196,8 +196,13 @@ try {
     console.error(`FAIL: Expected 200 proxy response, got ${res.status}`);
     Deno.exit(1);
   }
-  if (!res.headers.has("access-control-allow-origin")) {
-    console.error("FAIL: Expected CORS headers on proxy response");
+  const acao = res.headers.get("access-control-allow-origin");
+  if (acao !== "*") {
+    // We explicitly assert exactly "*" (a wildcard).
+    // A wildcard is correct here because the player uses <audio crossorigin="anonymous">
+    // and the bytes are authorized by the unguessable URL capability, not by cookies,
+    // so credentials are not sent and a specific origin isn't required.
+    console.error(`FAIL: Expected access-control-allow-origin to be "*", got "${acao}"`);
     Deno.exit(1);
   }
   const bytes = await res.arrayBuffer();
