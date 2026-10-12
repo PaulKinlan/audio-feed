@@ -1,5 +1,8 @@
 # audio-feed-b6nr — the capability is not readable from browser storage
 
+- Script: scripts/repro_b6nr_token_storage.ts
+- Asserts: no key or value in localStorage contains feed token; legacy token-named keys removed; saved position adopted under subscriber ID; cold home-screen launch reaches player with empty storage
+
 ## The claim under test
 
 `GET /listen/:token` resolves the subscriber *by* the token (`resolveTokenValue` →
