@@ -2,7 +2,7 @@
 
 Driven in Chrome on the branch, not inferred from a route test.
 
-- Harness: `scripts/listen-harness.ts` on http://localhost:8177/listen/harness-token (5 episodes,
+- Harness: `scripts/listen-harness.ts` on `/listen/harness-token` (port 8177 in the recorded run was illustrative; the actual port is chosen dynamically at run time) (5 episodes,
   each article seeded with a source URL).
 - Result of the drive: **5/5 rows carry a "Read along" anchor**, and the dock link appears when an
   episode is selected:
