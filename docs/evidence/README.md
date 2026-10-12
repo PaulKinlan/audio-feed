@@ -28,11 +28,12 @@ obligations, each named after the defect it prevents:
 
 ### Declare it in the README
 
-Every `docs/evidence/<bead>/README.md` states its own coverage in two lines, so a reviewer can judge
+Every `docs/evidence/<bead>/README.md` states its own coverage in two lines (or three when executed by a test suite), so a reviewer can judge
 the evidence without reading the script:
 
 ```
 - Script: scripts/<proof>.ts          # the tool, omitted only for evidence with no script
+- Executed by: tests/<suite>_test.ts  # optional: the test suite that executes the proof script
 - Asserts: <the claims the script fails on, separated by ; >
 ```
 

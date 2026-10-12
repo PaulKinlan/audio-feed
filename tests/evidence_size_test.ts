@@ -111,6 +111,44 @@ export async function checkEvidenceDeclaration(
       if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
     }
   }
+  const executedByMatch = body.match(/^[ \t]*-[ \t]*Executed by:[ \t]*(.+)$/m);
+  if (executedByMatch) {
+    const raw = executedByMatch[1]!.trim();
+    if (!raw) {
+      return `${dir}: Executed by: line is empty`;
+    }
+    if (!script) {
+      return `${dir}: declares Executed by: with no "- Script: scripts/<proof>.ts" to attach it to`;
+    }
+    const targets = raw.split(",").map((s) => s.replace(/[`"']/g, "").trim()).filter(Boolean);
+    if (targets.length === 0) {
+      return `${dir}: Executed by: line is empty`;
+    }
+    for (const target of targets) {
+      const execRel = target.startsWith("tests/") ? target : `tests/${target}`;
+      const stat = await Deno.stat(`${root}${execRel}`).catch(() => null);
+      const existsOnDisk = stat?.isFile === true;
+      const execCmd = await new Deno.Command("git", {
+        args: ["cat-file", "-e", `:${execRel}`],
+        cwd: root,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const existsInIndex = execCmd.success;
+
+      if (!existsOnDisk && !existsInIndex) {
+        return `${dir}: Executed by: names ${target}, which does not exist`;
+      }
+      if (existsOnDisk && !existsInIndex) {
+        return `${dir}: Executed by: names ${target}, which exists on disk but is absent from the Git index`;
+      }
+      if (!existsOnDisk && existsInIndex) {
+        return `${dir}: Executed by: names ${target}, which exists in the Git index but is missing from disk`;
+      }
+    }
+  } else if (/^[ \t]*-[ \t]*Executed by:[ \t]*$/m.test(body)) {
+    return `${dir}: Executed by: line is empty`;
+  }
   return null;
 }
 
@@ -972,6 +1010,207 @@ Deno.test("audio-feed-01k7: the three rejection shapes redden the suite and repo
     assertEquals(
       (await deriveEvidenceDirectory("shape-ghost-script", root)).condition,
       "the README's Script line names a file that does not exist",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-4oe2: checkEvidenceDeclaration validates 'Executed by' field and catches stale executor", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "4oe2-exec-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.mkdir(`${root}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+    await Deno.writeTextFile(`${root}/tests/valid_test.ts`, "// test");
+
+    // Case 1: valid declaration with existing executor
+    await Deno.mkdir(`${root}/docs/evidence/case-valid-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-valid-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/valid_test.ts\n- Asserts: valid\n",
+    );
+
+    // Case 2: stale executor naming nonexistent test file
+    await Deno.mkdir(`${root}/docs/evidence/case-stale-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-stale-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/ghost_test.ts\n- Asserts: valid\n",
+    );
+
+    // Case 3: negative control - declaration without Executed by passes cleanly
+    await Deno.mkdir(`${root}/docs/evidence/case-no-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-no-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Asserts: valid\n",
+    );
+
+    // Case 4: Executed by without Script line
+    await Deno.mkdir(`${root}/docs/evidence/case-no-script`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-no-script/README.md`,
+      "- Executed by: tests/valid_test.ts\n- Capture: no assertions\n",
+    );
+
+    // Case 5: Executed by line is empty
+    await Deno.mkdir(`${root}/docs/evidence/case-empty-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-empty-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by:\n- Asserts: valid\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit 4oe2 cases");
+
+    // Case 1 passes
+    const errValid = await checkEvidenceDeclaration("case-valid-exec", root);
+    assertEquals(errValid, null, "valid Executed by must pass");
+
+    // Case 2 fails with detectable staleness error
+    const errStale = await checkEvidenceDeclaration("case-stale-exec", root);
+    assertEquals(
+      errStale?.includes("Executed by: names tests/ghost_test.ts, which does not exist"),
+      true,
+      "stale Executed by must produce detectable error",
+    );
+
+    // Case 3 passes (negative direction: absent field does not fail)
+    const errNoExec = await checkEvidenceDeclaration("case-no-exec", root);
+    assertEquals(errNoExec, null, "absent Executed by must pass");
+
+    // Case 4 fails (Executed by without Script)
+    const errNoScript = await checkEvidenceDeclaration("case-no-script", root);
+    assertEquals(
+      errNoScript?.includes('declares Executed by: with no "- Script: scripts/<proof>.ts"'),
+      true,
+      "Executed by without Script must fail",
+    );
+
+    // Case 5 fails (empty Executed by line)
+    const errEmpty = await checkEvidenceDeclaration("case-empty-exec", root);
+    assertEquals(
+      errEmpty?.includes("Executed by: line is empty"),
+      true,
+      "empty Executed by must fail",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-rmhi: checkEvidenceDeclaration requires executor to exist BOTH on disk AND in Git index", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "rmhi-exec-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.mkdir(`${root}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof");
+
+    // Case 1 (audio-feed-rmhi finding): executor written to disk but NOT added to git index (untracked)
+    await Deno.mkdir(`${root}/docs/evidence/case-untracked-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-untracked-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/untracked_test.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/tests/untracked_test.ts`, "// untracked test");
+
+    // Case 2 (deliberate index-only decision): executor committed in git index but deleted from disk
+    await Deno.mkdir(`${root}/docs/evidence/case-index-only-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-index-only-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/deleted_test.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/tests/deleted_test.ts`, "// deleted test");
+
+    // Case 3 (control): executor exists BOTH on disk AND in git index
+    await Deno.mkdir(`${root}/docs/evidence/case-both-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-both-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/both_test.ts\n- Asserts: valid\n",
+    );
+    await Deno.writeTextFile(`${root}/tests/both_test.ts`, "// both test");
+
+    // Case 4 (control): executor totally absent (neither on disk nor in git index)
+    await Deno.mkdir(`${root}/docs/evidence/case-neither-exec`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/case-neither-exec/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/neither_test.ts\n- Asserts: valid\n",
+    );
+
+    // Commit scripts/proof.ts, the READMEs, deleted_test.ts, and both_test.ts,
+    // but deliberately do NOT git add tests/untracked_test.ts.
+    await gitCmd([
+      "add",
+      "scripts/proof.ts",
+      "docs/evidence",
+      "tests/deleted_test.ts",
+      "tests/both_test.ts",
+    ], root);
+    await commitAll(root, "commit rmhi baseline");
+
+    // Now remove tests/deleted_test.ts from disk so it exists only in index
+    await Deno.remove(`${root}/tests/deleted_test.ts`);
+
+    // Case 1: untracked on disk -> MUST FAIL
+    const errUntracked = await checkEvidenceDeclaration("case-untracked-exec", root);
+    assertEquals(
+      errUntracked?.includes(
+        "Executed by: names tests/untracked_test.ts, which exists on disk but is absent from the Git index",
+      ),
+      true,
+      `untracked executor must fail with missing from index reason, got: ${errUntracked}`,
+    );
+
+    // Case 2: index only (missing on disk) -> MUST FAIL
+    const errIndexOnly = await checkEvidenceDeclaration("case-index-only-exec", root);
+    assertEquals(
+      errIndexOnly?.includes(
+        "Executed by: names tests/deleted_test.ts, which exists in the Git index but is missing from disk",
+      ),
+      true,
+      `deleted executor must fail with missing from disk reason, got: ${errIndexOnly}`,
+    );
+
+    // Case 3: both on disk and in index -> PASSES (null)
+    const errBoth = await checkEvidenceDeclaration("case-both-exec", root);
+    assertEquals(errBoth, null, "executor in both disk and index must pass");
+
+    // Case 4: neither on disk nor in index -> FAILS with classic does not exist
+    const errNeither = await checkEvidenceDeclaration("case-neither-exec", root);
+    assertEquals(
+      errNeither?.includes("Executed by: names tests/neither_test.ts, which does not exist"),
+      true,
+      `absent executor must fail with does not exist, got: ${errNeither}`,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-rmhi mirror: committed executor present in Git index and on disk passes declaration check", async () => {
+  const root = (await Deno.makeTempDir({ prefix: "rmhi-mirror-" })) + "/";
+  try {
+    await gitInit(root);
+    await Deno.mkdir(`${root}/scripts`, { recursive: true });
+    await Deno.mkdir(`${root}/tests`, { recursive: true });
+    await Deno.mkdir(`${root}/docs/evidence/audio-feed-mirror`, { recursive: true });
+
+    await Deno.writeTextFile(`${root}/scripts/proof.ts`, "// proof script");
+    await Deno.writeTextFile(`${root}/tests/mirror_suite_test.ts`, "// mirror suite");
+    await Deno.writeTextFile(
+      `${root}/docs/evidence/audio-feed-mirror/README.md`,
+      "- Script: scripts/proof.ts\n- Executed by: tests/mirror_suite_test.ts\n- Asserts: valid\n",
+    );
+
+    await gitCmd(["add", "."], root);
+    await commitAll(root, "commit mirror evidence case");
+
+    const err = await checkEvidenceDeclaration("audio-feed-mirror", root);
+    assertEquals(
+      err,
+      null,
+      "an executor legitimately committed in the Git index and present on disk must pass the audit",
     );
   } finally {
     await Deno.remove(root, { recursive: true });
