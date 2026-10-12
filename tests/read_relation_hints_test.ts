@@ -1037,9 +1037,9 @@ Deno.test("audio-feed-uiyv: / regex literal vs division disambiguation correctly
     },
     "tests/aiiy_bug_test.ts": {
       content: [
-        'const total=42; const result=total /',
+        "const total=42; const result=total /",
         ' /"/.test("x");',
-        "export function readIt(){return Deno.readTextFile(\"../docs/present.md\");}"
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
       ].join("\n"),
       desc: "regex after division operator with newline (audio-feed-aiiy)",
     },
