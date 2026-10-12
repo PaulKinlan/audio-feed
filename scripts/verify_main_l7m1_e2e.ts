@@ -800,7 +800,8 @@ try {
   - Approved subscriber with feed token \`sub-feed-token-l7m1\`.
   - Real synthesized WAV audio blob (${audioBytes.byteLength} bytes) stored at \`audio/sub-l7m1/direct/ep-ready-1.wav\`.
   - Historical flat-key episode seed \`historical-flat-key.wav\` verifying canonical redirect/404 handling.
-  - Throwing canary route \`/__test/throw?m=canary-client-token-998877\` verifying server error screening into \`SUPPRESSED_MESSAGE\` and absence from logs.`,
+  - Throwing canary route \`/__test/throw?m=canary-client-token-998877\` verifying server error screening into \`SUPPRESSED_MESSAGE\` and absence from logs.
+- **Reproduction:** \`deno run --allow-all --unstable-kv scripts/verify_main_l7m1_e2e.ts\``,
           },
           {
             heading: "Verified Features and Behaviors",
