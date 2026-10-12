@@ -732,6 +732,14 @@ function staticPathHints(
       text = text
         .replace(/\$\{import\.meta\.dirname\}/g, dir)
         .replace(/\$\{import\.meta\.url\}/g, `${dir}/index.ts`);
+      // The tail AFTER the LAST interpolation may be CUT by the whitespace split that separates tokens, and a
+      // runtime path may contain a space (`${dir}/daily notes`). Report the WHOLE candidate (audio-feed-3ttu):
+      // a bucket that reports a truncated prefix is worse than one that reports nothing, because it looks like
+      // it works. `wholeTail` is the tail in the unsplit template, so a token whose tail is a strict prefix of
+      // it was cut and is replaced by the whole thing below.
+      const wholeTail = text.slice(text.lastIndexOf("}") + 1).replace(/^\/+/, "");
+      const wholeIsText = isTailText(wholeTail);
+      let cutTail = "";
       for (const token of text.split(/[\s"']+/).filter(Boolean)) {
         const wildcard = token.search(/\$\{/);
         if (wildcard < 0) {
@@ -754,10 +762,24 @@ function staticPathHints(
         // belongs to a binding and a binding can be shadowed - the file-global answer suppressed a real read.
         const tail = token.slice(token.lastIndexOf("}") + 1);
         if (/\/[^/]/.test(tail)) {
+          const value = tail.replace(/^\/+/, "");
+          if (!isTailText(value)) continue;
+          if (wholeIsText && wholeTail.startsWith(value) && wholeTail !== value) {
+            // The whitespace split cut this one: report the WHOLE tail instead, once, below.
+            cutTail = token;
+            continue;
+          }
           const base = interpolationBaseName(token);
-          if (base && isOutOfRepoBase(base)) suppressed.add(tail.replace(/^\/+/, ""));
-          else tailCandidates.push(tail.replace(/^\/+/, ""));
+          if (base && isOutOfRepoBase(base)) suppressed.add(value);
+          else tailCandidates.push(value);
         }
+      }
+      if (cutTail) {
+        // Same classification question for the whole tail: an out-of-repo base suppresses it WHOLE, and anything
+        // else is offered as a candidate in its entirety.
+        const base = interpolationBaseName(cutTail);
+        if (base && isOutOfRepoBase(base)) suppressed.add(wholeTail);
+        else tailCandidates.push(wholeTail);
       }
       continue;
     }
@@ -839,6 +861,39 @@ function pathConstants(
     }
   }
   return constants;
+}
+
+/**
+ * A candidate must be TEXT at depth 0 of the template (audio-feed-3ttu). The token split can cut INSIDE an
+ * interpolation - `${path.replace(/\/$/, "")}` splits at its space - and the piece then reads as a candidate
+ * while actually being CODE. Those pieces are not names, so they are not candidates and are not reported: the
+ * inversion below is about never leaving a NAME unaccounted for, not about reporting split artefacts. A candidate
+ * with an interpolation or a closing brace in it did not come from a closed interpolation boundary.
+ */
+function isTailText(value: string): boolean {
+  return value.length > 0 && !value.includes("${") && !value.includes("}");
+}
+
+/**
+ * EVERY runtime-assembled candidate this derivation encounters is REPORTED (audio-feed-3ttu).
+ *
+ * The bucket used to be `bareNameHint(hint)`, a SHAPE test - a bare word with no slash, no extension and only
+ * `[\w@.-]` characters - and a shape test always has a complement that falls through it silently. Measured, with
+ * rev-27's matrix: `notes+draft`, `draft#1` and `déjà` are all real runtime-assembled reads and all three landed
+ * in NO bucket at all, which is exactly the silence the bead exists to remove.
+ *
+ * So the question is inverted, the same way `undeclared` was redefined as "declares nothing and admits nothing":
+ * a tail candidate that no other bucket accounts for is REPORTED here, whether or not it matches any shape. There
+ * is no third outcome. The boundary that keeps this readable is the CLASS, not a pattern: tail candidates are the
+ * suffixes of runtime-assembled paths - text after an interpolation in a path-shaped token - so a CLI flag, an
+ * argument in a command's args array, an encoding name or a URL cannot reach here (they are literals, rejected
+ * before a candidate exists, and stay silent on purpose).
+ *
+ * What this bucket cannot do is WIDEN: members are not repo paths, and one with no extension cannot be the
+ * markdown file a change touches, so `couldHideInertRead` is false for them and no selection depends on them.
+ */
+export function unclassifiedTail(hint: string): boolean {
+  return hint.length > 0;
 }
 
 /** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
@@ -934,6 +989,13 @@ export interface ReadRelationReport {
    * on this tree at all.
    */
   outOfRepo: string[];
+  /**
+   * Runtime-assembled read suffixes that NO OTHER BUCKET accounts for (audio-feed-3ttu, audio-feed-snww),
+   * sorted for a stable reason string: not a repo path, not a fragment, not out-of-repo. Reported for the same
+   * reason as `outOfRepo` and, like it, they neither enter the relation nor disable the inert class. The rule is
+   * "unaccounted for", not "matches a shape" - see `unclassifiedTail`.
+   */
+  unclassified: string[];
 }
 
 /** The relation alone, for callers that do not need the incompleteness signal. */
@@ -960,6 +1022,7 @@ export async function deriveReadRelationReport(
 
   const relations: DataReadRelations = new Map();
   const outOfRepoHints = new Set<string>();
+  const unclassified = new Set<string>();
   const authoredPaths = new Set<string>();
   const tailPaths = new Set<string>();
   const add = (path: string, suite: string) => {
@@ -1051,6 +1114,12 @@ export async function deriveReadRelationReport(
             if (path) {
               tailPaths.add(path);
               add(path, suite);
+            } else if (unclassifiedTail(hint)) {
+              // NOTHING FALLS THROUGH HERE (audio-feed-3ttu). This was `bareNameHint(hint)`, a shape test, and a
+              // shape test always leaves a silent complement: `notes+draft`, `draft#1`, `déjà` and a name with a
+              // space all fell through it. A candidate that no named bucket accounts for is reported here, so the
+              // outcome is either "reported under a reason" or "reported as unaccounted for" - never nothing.
+              unclassified.add(hint);
             }
           }
           // An argument passed by NAME still resolves through the constants collected above.
@@ -1087,7 +1156,13 @@ export async function deriveReadRelationReport(
   }
   unresolved.sort();
   unattributed.sort();
-  return { relations: existing, unresolved, unattributed, outOfRepo: [...outOfRepoHints].sort() };
+  return {
+    relations: existing,
+    unresolved,
+    unattributed,
+    outOfRepo: [...outOfRepoHints].sort(),
+    unclassified: [...unclassified].sort(),
+  };
 }
 
 /** The suites the derived relation says observe a changed path (exact match or directory prefix). */

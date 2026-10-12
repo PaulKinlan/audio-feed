@@ -563,7 +563,13 @@ export async function deriveOrWidenReport(
     return { report: await derive(), failure: null };
   } catch (error) {
     return {
-      report: { relations: new Map(), unresolved: [], unattributed: [], outOfRepo: [] },
+      report: {
+        relations: new Map(),
+        unresolved: [],
+        unattributed: [],
+        outOfRepo: [],
+        unclassified: [],
+      },
       failure: error instanceof Error ? error.message : String(error),
     };
   }
@@ -845,6 +851,18 @@ ${auditUniverseDrift}`);
       `fast-gate: read relation: ${inertNeutralFragments.length} path FRAGMENT(s) after an interpolation name nothing in the tree and do not widen (not markdown, or not the file being changed): ${
         inertNeutralFragments.slice(0, 3).join(", ")
       }${inertNeutralFragments.length > 3 ? ", ..." : ""}`,
+    );
+  }
+  // The third bucket (audio-feed-snww, audio-feed-3ttu): runtime-assembled read suffixes that NO OTHER BUCKET
+  // accounts for - not a repo path, not a fragment, not out-of-repo. It is defined by "unaccounted for" rather
+  // than by a shape, because a shape test always has a silent complement (`notes+draft`, `draft#1` and `déjà` were
+  // each in NO bucket at all). It neither enters the relation nor blocks the inert class - a member cannot be the
+  // markdown file a change touches - so this line is informational and the INCOMPLETE line above is not.
+  if (relationReport.unclassified.length) {
+    console.log(
+      `fast-gate: read relation: ${relationReport.unclassified.length} runtime-assembled read hint(s) are UNCLASSIFIED (not a repo path, not a fragment, not out-of-repo) and are reported rather than dropped in silence: ${
+        relationReport.unclassified.slice(0, 3).join(", ")
+      }${relationReport.unclassified.length > 3 ? ", ..." : ""}`,
     );
   }
   console.log(
