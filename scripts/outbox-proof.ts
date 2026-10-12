@@ -46,6 +46,80 @@ function fakeAudio(): DecodedAudioResult {
   };
 }
 
+interface SecretScanResult {
+  clean: boolean;
+  leaks: string[];
+}
+
+function scanForSecretLeaks(
+  surface: {
+    notifications: Array<Record<string, unknown>>;
+    capturedLogs: string[];
+  },
+  knownSecrets: {
+    adminToken: string;
+    subscriberToken: string;
+  },
+): SecretScanResult {
+  const leaks: string[] = [];
+
+  const authHeaderPattern = /(?:authorization|bearer)\s*[:=]\s*[^\s,;]+/i;
+  const adminSecretPattern = /admin[-_]?(?:secret|token)[-_]?[0-9]*/i;
+  const tokenAssignmentPattern =
+    /(?:api[-_]?key|secret[-_]?token|admin[-_]?key)\s*[:=]\s*[^\s,;]+/i;
+
+  for (const n of surface.notifications) {
+    for (const [key, val] of Object.entries(n)) {
+      if (typeof val !== "string") continue;
+
+      if (val.includes(knownSecrets.adminToken)) {
+        leaks.push(`notification.${key} contains adminToken`);
+      }
+      if (adminSecretPattern.test(val)) {
+        leaks.push(`notification.${key} matches adminSecretPattern: ${val}`);
+      }
+      if (authHeaderPattern.test(val)) {
+        leaks.push(`notification.${key} matches authHeaderPattern: ${val}`);
+      }
+      if (tokenAssignmentPattern.test(val)) {
+        leaks.push(`notification.${key} matches tokenAssignmentPattern: ${val}`);
+      }
+
+      if (key !== "playerUrl" && val.includes(knownSecrets.subscriberToken)) {
+        leaks.push(`notification.${key} leaks subscriberToken: ${val}`);
+      }
+    }
+  }
+
+  for (const logLine of surface.capturedLogs) {
+    if (logLine.includes(knownSecrets.adminToken)) {
+      leaks.push(`capturedLog contains adminToken: ${logLine}`);
+    }
+    if (authHeaderPattern.test(logLine)) {
+      leaks.push(`capturedLog matches authHeaderPattern: ${logLine}`);
+    }
+    if (adminSecretPattern.test(logLine)) {
+      leaks.push(`capturedLog matches adminSecretPattern: ${logLine}`);
+    }
+    if (tokenAssignmentPattern.test(logLine)) {
+      leaks.push(`capturedLog matches tokenAssignmentPattern: ${logLine}`);
+    }
+
+    if (logLine.includes(knownSecrets.subscriberToken)) {
+      const sanitized = logLine
+        .replace(new RegExp(`https?://[^\\s"'/]+/listen/${knownSecrets.subscriberToken}`, "g"), "")
+        .replace(new RegExp(`/listen/${knownSecrets.subscriberToken}`, "g"), "")
+        .replace(new RegExp(`playerUrl=['"][^'"]*['"]`, "g"), "")
+        .replace(new RegExp(`playerUrl=[^\\s,]+`, "g"), "");
+      if (sanitized.includes(knownSecrets.subscriberToken)) {
+        leaks.push(`capturedLog contains subscriberToken outside playerUrl: ${logLine}`);
+      }
+    }
+  }
+
+  return { clean: leaks.length === 0, leaks };
+}
+
 const config: AppConfig = {
   port: requestedPort,
   publicBaseUrl: requestedPort ? `http://localhost:${requestedPort}` : "http://localhost",
@@ -88,7 +162,84 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
     checker.check(step, ok, detail);
   };
 
+  const capturedServerLogs: string[] = [];
+  const origConsoleError = console.error;
+  const origConsoleWarn = console.warn;
+  console.error = (...args: unknown[]) => {
+    capturedServerLogs.push(
+      args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
+    );
+    origConsoleError(...args);
+  };
+  console.warn = (...args: unknown[]) => {
+    capturedServerLogs.push(
+      args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(" "),
+    );
+    origConsoleWarn(...args);
+  };
+
   try {
+    // 0. Opt-in default: when notifyOutboxEnabled is unset (default false), no outbox notification is queued
+    const defaultStores = memoryStores();
+    const defaultCtx = {
+      config: {
+        port: 0,
+        publicBaseUrl: "http://localhost",
+        adminToken: ADMIN_TOKEN,
+        // notifyOutboxEnabled is left unset (undefined -> defaults to false)
+      },
+      stores: defaultStores,
+    };
+    const defaultUserRaw = await createUser(defaultStores.metadata, {
+      email: "default-optin@example.com",
+      displayName: "Default OptIn",
+    });
+    const defaultUser = await approveUser(defaultStores.metadata, defaultUserRaw.id, "admin");
+    await defaultStores.metadata.putUser({ ...defaultUser, feedToken: "default-feed-tok" });
+
+    const defaultHandlers = createHandlers(defaultCtx, {
+      fetchArticle: (url) =>
+        Promise.resolve({
+          url,
+          title: "Default Config Article",
+          author: "Test Author",
+          publishedAt: new Date().toISOString(),
+          lead: "Default lead",
+          body: "Default body",
+        }),
+    });
+    const defaultApp = createApp(defaultCtx, defaultHandlers);
+    const defaultIngestRes = await defaultApp.fetch(
+      new Request("http://localhost/api/ingest", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-feed-token": "default-feed-tok",
+        },
+        body: JSON.stringify({
+          url: "https://example.com/default-post",
+          mode: "direct",
+        }),
+      }),
+    );
+    check(
+      "POST /api/ingest returns 202 under default config",
+      defaultIngestRes.status === 202,
+      `status: ${defaultIngestRes.status}`,
+    );
+
+    const defaultRun = await runSynthesisBatch(
+      defaultCtx,
+      () => Promise.resolve(fakeAudio()),
+      { batchSize: 1 },
+    );
+    const defaultOutbox = await defaultStores.metadata.listOutbox();
+    check(
+      "default config without notifyOutboxEnabled emits zero outbox notifications",
+      defaultRun.ready.length === 1 && defaultOutbox.length === 0,
+      `ready: ${defaultRun.ready.length}, outbox entries: ${defaultOutbox.length}`,
+    );
+
     // 1. Seed approved subscriber
     const rawUser = await createUser(stores.metadata, {
       email: "subscriber@example.com",
@@ -192,7 +343,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       `outbox count remains ${outboxAfterFeed.notifications.length}`,
     );
 
-    // 6. Failed on-demand episode notifies once with error reason
+    // 6. Failed on-demand episode notifies once with error reason, and in-batch retry is observed
     await fetch(
       new Request(`${BASE}/api/ingest`, {
         method: "POST",
@@ -201,13 +352,23 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       }),
     );
 
+    let failAttempts = 0;
     const runFail = await runSynthesisBatch(
       ctx,
-      () => Promise.reject(new Error("Gemini quota exhausted")),
+      () => {
+        failAttempts++;
+        return Promise.reject(new Error("Gemini quota exhausted"));
+      },
       {
         batchSize: 5,
         maxAttempts: 2,
+        retryBaseDelayMs: 1,
       },
+    );
+    check(
+      "synthesis retries in-batch and executes 2 attempts",
+      failAttempts === 2,
+      `attempts: ${failAttempts}`,
     );
     check(
       "failing episode marked failed",
@@ -232,7 +393,97 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
       `error: '${failNotification?.error}'`,
     );
 
-    // 7. Ack notifications
+    const failedEpisodeNotifications = outboxAfterFail.notifications.filter(
+      (n: { episodeId: string }) => n.episodeId === runFail.failed[0]?.episodeId,
+    );
+    check(
+      "in-batch retries do not duplicate failure notification",
+      failedEpisodeNotifications.length === 1,
+      `notifications for retried episode: ${failedEpisodeNotifications.length}`,
+    );
+
+    // 7. Rejected outbox write resilience & failure logging
+    await fetch(
+      new Request(`${BASE}/api/ingest`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-feed-token": TOKEN },
+        body: JSON.stringify({ url: "https://example.com/rejected-outbox-post", mode: "direct" }),
+      }),
+    );
+
+    const origQueueNotification = stores.metadata.queueNotification.bind(stores.metadata);
+    let queueRejectionCount = 0;
+    stores.metadata.queueNotification = () => {
+      queueRejectionCount++;
+      return Promise.reject(new Error("Simulated storage write failure"));
+    };
+
+    let runRejection;
+    try {
+      runRejection = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+        batchSize: 1,
+      });
+    } finally {
+      stores.metadata.queueNotification = origQueueNotification;
+    }
+
+    const rejEpId = runRejection?.ready[0]?.episodeId;
+    const rejStoredEp = rejEpId ? await stores.metadata.getEpisode(user.id, rejEpId) : null;
+    check(
+      "rejected outbox write does not abort episode completion",
+      runRejection?.ready.length === 1 && rejStoredEp?.status === "ready",
+      `ready: ${runRejection?.ready.length}, status: ${rejStoredEp?.status}`,
+    );
+
+    const rejectionLogged = capturedServerLogs.some((msg) =>
+      msg.includes(`failed to queue notification for episode ${rejEpId}`) &&
+      msg.includes("Simulated storage write failure")
+    );
+    check(
+      "rejected outbox write failure is logged",
+      rejectionLogged && queueRejectionCount === 1,
+      rejectionLogged
+        ? "logged failure via console.error"
+        : "no failure logged for rejected outbox write",
+    );
+
+    // 8. Secret scan: verify no tokens/credentials/admin secrets leak into notification payloads or logs
+    // Anti-test: verify that the security scanner detects injected secret-shaped strings
+    const antiTestResult = scanForSecretLeaks(
+      {
+        notifications: [
+          {
+            id: "poison-1",
+            title: "Article with Authorization: Bearer super-secret-token",
+            playerUrl: "http://localhost/listen/clean",
+            error: "admin-secret-999 leaked in error",
+          },
+        ],
+        capturedLogs: ["server log: x-admin-token: admin-secret-999"],
+      },
+      { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
+    );
+    check(
+      "secret scanner anti-test detects injected token, authorization header, and admin secret",
+      !antiTestResult.clean && antiTestResult.leaks.length >= 3,
+      `detected leaks: ${antiTestResult.leaks.length}`,
+    );
+
+    // Live scan: inspect real outbox payloads and captured server logs
+    const liveScan = scanForSecretLeaks(
+      {
+        notifications: outboxAfterFail.notifications,
+        capturedLogs: capturedServerLogs,
+      },
+      { adminToken: ADMIN_TOKEN, subscriberToken: TOKEN },
+    );
+    check(
+      "no credentials, tokens, or admin secrets are echoed beyond subscriber player URL",
+      liveScan.clean,
+      liveScan.clean ? "0 leaks detected" : `leaks: ${liveScan.leaks.join("; ")}`,
+    );
+
+    // 9. Ack notifications
     for (const n of outboxAfterFail.notifications) {
       const ackRes = await fetch(
         new Request(`${BASE}/api/admin/outbox/${n.id}/ack`, {
@@ -257,7 +508,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
         "background feed polls emit none",
         "permanent synthesis failures notify once with the specific reason and in-batch retries do not duplicate",
         "a rejected outbox write does not abort episode completion and the failure is logged",
-        "no credentials/tokens/admin secrets are echoed",
+        "no credentials, tokens, or admin secrets are echoed beyond subscriber player URL",
         "outbox notification is opt-in only, default false",
       ],
       sections: [
@@ -266,7 +517,7 @@ await runProof("audio-feed-np5 outbox proof", async (checker) => {
           body:
             `1. **On-Demand Notification**: Submitting an article via \`/api/ingest\` places exactly 1 entry in the outbox upon synthesis completion, naming the episode title and player URL.
 2. **Feed Poll Silence**: Background feed polls synthesizing multiple episodes do NOT emit outbox entries.
-3. **Failure Reporting**: Permanent synthesis failures notify once with the specific error reason. In-batch retries do not duplicate notifications.
+3. **Failure Reporting & Deduplication**: Permanent synthesis failures notify once with the specific error reason. In-batch retries are verified to occur and do not duplicate notifications.
 4. **Resilience**: Outbox write rejections do not abort episode completion; failure is logged.
 5. **Security**: Zero credentials, tokens, or admin secrets are echoed in notification payloads or server logs beyond the subscriber's own player URL.
 6. **Opt-in Only**: Outbox notifications are disabled by default (\`notifyOutboxEnabled: false\`).`,
@@ -281,6 +532,8 @@ ${checks.map((c) => `${c.ok ? "PASS" : "FAIL"} ${c.step}: ${c.detail}`).join("\n
     });
     console.log(`Saved report to ${OUT}README.md`);
   } finally {
+    console.error = origConsoleError;
+    console.warn = origConsoleWarn;
     await server.shutdown();
   }
 });
