@@ -107,8 +107,18 @@ async function collect(options: Options): Promise<{
   const undeclared: string[] = [];
   const withoutReadme: string[] = [];
   const names: string[] = [];
-  for await (const entry of Deno.readDir(evidenceRoot)) {
-    if (entry.isDirectory) names.push(entry.name);
+  try {
+    for await (const entry of Deno.readDir(evidenceRoot)) {
+      if (entry.isDirectory) names.push(entry.name);
+    }
+  } catch (err) {
+    // A missing tree is an unreadable run, not an empty one: reporting "nothing to run" as a pass is
+    // the same defect class as a check satisfied by construction. State it, and stay red.
+    console.error(
+      `[evidence] no readable docs/evidence under ${options.root} (${(err as Error).name}): ` +
+        `nothing was verified`,
+    );
+    Deno.exit(1);
   }
   // Stable order so two runs of the inventory are comparable line by line.
   names.sort();
@@ -239,6 +249,19 @@ console.log(
   }s ` +
     `bound each, from ${options.root}`,
 );
+// A run that exercised nothing is RED. Measured before a reviewer saw it: `--only` with a name that
+// matched nothing printed "every declared proof passed on this tree" and exited 0, so a typo in a
+// filter read as a clean bill of health.
+if (declarations.length === 0) {
+  console.error(
+    options.only
+      ? `[evidence] --only ${options.only} matched no evidence directory that declares a proof ` +
+        `(${undeclared.length} declare nothing, ${withoutReadme.length} have no README): ` +
+        `nothing was verified`
+      : `[evidence] no evidence directory declares a proof under ${options.root}: nothing was verified`,
+  );
+  Deno.exit(1);
+}
 const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
 let running: number | null = null;
 try {
@@ -281,4 +304,4 @@ if (failed > 0) {
   console.log("[evidence] RED: at least one declared proof did not pass on this tree");
   Deno.exit(1);
 }
-console.log("[evidence] every declared proof passed on this tree");
+console.log(`[evidence] every declared proof passed on this tree (${passed} proof(s))`);
