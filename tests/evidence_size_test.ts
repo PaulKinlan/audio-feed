@@ -72,17 +72,21 @@ export async function checkEvidenceDeclaration(
   root: string = ROOT,
 ): Promise<string | null> {
   const dir = `${root}docs/evidence/${name}`;
-  const readmeRel = `docs/evidence/${name}/README.md`;
-  const readmeCmd = await new Deno.Command("git", {
-    args: ["show", `:${readmeRel}`],
-    cwd: root,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!readmeCmd.success) {
-    return `${dir}: no README.md`;
+  const readme = `${dir}/README.md`;
+  let body = await Deno.readTextFile(readme).catch(() => null);
+  if (body === null) {
+    const readmeRel = `docs/evidence/${name}/README.md`;
+    const readmeCmd = await new Deno.Command("git", {
+      args: ["show", `:${readmeRel}`],
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (!readmeCmd.success) {
+      return `${dir}: no README.md`;
+    }
+    body = new TextDecoder().decode(readmeCmd.stdout);
   }
-  const body = new TextDecoder().decode(readmeCmd.stdout);
   const asserts = body.match(/^- Asserts:\s*(.+)$/m)?.[1]?.trim() ?? "";
   // The capture hatch is an ADMISSION, not free text: it must be the literal sentence, otherwise a README can
   // say "- Capture: fully tested and guaranteed", assert nothing and pass (audio-feed-6piu, found in review).
@@ -96,13 +100,16 @@ export async function checkEvidenceDeclaration(
   }
   if (script) {
     const scriptRel = script.startsWith("scripts/") ? script : `scripts/${script}`;
-    const scriptCmd = await new Deno.Command("git", {
-      args: ["cat-file", "-e", `:${scriptRel}`],
-      cwd: root,
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
+    const stat = await Deno.stat(`${root}${scriptRel}`).catch(() => null);
+    if (!stat?.isFile) {
+      const scriptCmd = await new Deno.Command("git", {
+        args: ["cat-file", "-e", `:${scriptRel}`],
+        cwd: root,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      if (!scriptCmd.success) return `${dir}: Script: names ${script}, which does not exist`;
+    }
   }
   return null;
 }
@@ -159,17 +166,22 @@ export async function checkEvidenceAdmission(
   name: string,
   root: string = ROOT,
 ): Promise<boolean> {
-  const readmeRel = `docs/evidence/${name}/README.md`;
-  const readmeCmd = await new Deno.Command("git", {
-    args: ["show", `:${readmeRel}`],
-    cwd: root,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!readmeCmd.success) {
-    return false;
+  const dir = `${root}docs/evidence/${name}`;
+  const readme = `${dir}/README.md`;
+  let body = await Deno.readTextFile(readme).catch(() => null);
+  if (body === null) {
+    const readmeRel = `docs/evidence/${name}/README.md`;
+    const readmeCmd = await new Deno.Command("git", {
+      args: ["show", `:${readmeRel}`],
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (!readmeCmd.success) {
+      return false;
+    }
+    body = new TextDecoder().decode(readmeCmd.stdout);
   }
-  const body = new TextDecoder().decode(readmeCmd.stdout);
   return /^- Debt:\s*admitted\s*\(audio-feed-tgnu\)\s*$/m.test(body);
 }
 
