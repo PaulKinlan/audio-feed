@@ -1,0 +1,284 @@
+/**
+ * audio-feed-lyt1 — NOTHING RAN THE PROOFS.
+ *
+ * The repo's founding evidence rule is "no evidence without a check that can fail, and no README
+ * claiming more than the check covers". Every evidence README already names the script that produces
+ * it, in a `- Script: <path>` line, and the debt list tracks which directories declare nothing. What
+ * was missing was that NOTHING EVER EXECUTED THE THING DECLARED: a proof could be unable to pass for
+ * days while its README and screenshots sat committed, and an app change could invalidate several
+ * proofs without any gate going red. Three examples in one night (audio-feed-8fc, 0cmu, and the
+ * migration that ran them by accident) — each found only because something happened to run the proof.
+ *
+ * This adds a NEW, EXPLICITLY-INVOKED TIER rather than widening an existing one:
+ *
+ *     deno task evidence                 run every declared proof, sequentially
+ *     deno task evidence --list          the inventory only: no browsers, no servers
+ *     deno task evidence --only <dir>    one evidence directory (its directory NAME)
+ *     deno task evidence --timeout <s>   per-proof bound (default 300)
+ *     deno task evidence --root <dir>    resolve declarations under another root (used to prove the
+ *                                        tier can go red, against a scratch evidence tree)
+ *
+ * WHY A NEW TIER AND NOT A MAPPING INTO fast-check: a mapping buys speed with a new suppression
+ * surface — a mapping that names the wrong suite suppresses a slice's gate while looking green
+ * (audio-feed-nxnf states exactly this risk) — and a browser proof cannot run inside the fast gate
+ * anyway without breaking its budget, which requires that a docs-only change still select no suites.
+ * scripts/fast-check.ts and scripts/test-selection.ts are not touched by this change.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO, so nobody reads more into a green run than it says:
+ * - it does not check that a proof asserts what its README CLAIMS (that is the declaration and
+ *   evidence-size work);
+ * - it does not run directories that declare nothing. It COUNTS them, because "there is no proof
+ *   here" is a different fact from "the proof here passes", and printing the count keeps the debt
+ *   visible instead of letting it read as coverage;
+ * - a declared script that is not a file is an UNRESOLVED FAILURE, never a skip: a tier that skips
+ *   quietly is satisfied by construction, which is the defect class this fleet has been closing all
+ *   evening.
+ */
+import { fromFileUrl, join, resolve } from "@std/path";
+
+interface Declaration {
+  /** `docs/evidence/<dir>` relative to the root. */
+  dir: string;
+  /** The path as written in the README. */
+  declared: string;
+  /** Whether that path is a file under the root. */
+  exists: boolean;
+}
+
+interface Options {
+  list: boolean;
+  only?: string;
+  timeoutMs: number;
+  root: string;
+}
+
+const USAGE =
+  `usage: deno task evidence [--list] [--only <evidence-dir>] [--timeout <seconds>] [--root <dir>]`;
+
+function parseOptions(args: string[]): Options {
+  const root = resolve(fromFileUrl(new URL("../", import.meta.url)));
+  const options: Options = { list: false, timeoutMs: 300_000, root };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const value = args[i + 1];
+    if (arg === "--list") options.list = true;
+    else if (arg === "--only" && value) {
+      options.only = value;
+      i++;
+    } else if (arg === "--timeout" && value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        throw new Error(
+          `--timeout needs a positive number of seconds, got ${JSON.stringify(value)}`,
+        );
+      }
+      options.timeoutMs = Math.round(seconds * 1000);
+      i++;
+    } else if (arg === "--root" && value) {
+      options.root = resolve(value);
+      i++;
+    } else {
+      throw new Error(`unrecognised argument ${JSON.stringify(arg)}\n${USAGE}`);
+    }
+  }
+  return options;
+}
+
+/**
+ * The declaration the READMEs already carry, rather than a new one: a `- Script:` line naming the
+ * proof that produces the directory's evidence. Backticks and quotes are stripped because the line
+ * is prose as often as it is a path.
+ */
+function readDeclaration(readme: string): string | null {
+  for (const line of readme.split("\n")) {
+    const match = /^\s*-\s*Script:\s*(.+?)\s*$/.exec(line);
+    if (match) return match[1]!.replace(/[`"']/g, "").trim();
+  }
+  return null;
+}
+
+async function collect(options: Options): Promise<{
+  declarations: Declaration[];
+  undeclared: string[];
+  withoutReadme: string[];
+}> {
+  const evidenceRoot = join(options.root, "docs", "evidence");
+  const declarations: Declaration[] = [];
+  const undeclared: string[] = [];
+  const withoutReadme: string[] = [];
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(evidenceRoot)) {
+    if (entry.isDirectory) names.push(entry.name);
+  }
+  // Stable order so two runs of the inventory are comparable line by line.
+  names.sort();
+  for (const name of names) {
+    if (options.only && options.only !== name) continue;
+    const dir = `docs/evidence/${name}`;
+    let readme: string;
+    try {
+      readme = await Deno.readTextFile(join(options.root, dir, "README.md"));
+    } catch {
+      withoutReadme.push(dir);
+      continue;
+    }
+    const declared = readDeclaration(readme);
+    if (!declared) {
+      undeclared.push(dir);
+      continue;
+    }
+    let exists = false;
+    try {
+      exists = (await Deno.stat(join(options.root, declared))).isFile;
+    } catch {
+      exists = false;
+    }
+    declarations.push({ dir, declared, exists });
+  }
+  return { declarations, undeclared, withoutReadme };
+}
+
+interface RunResult {
+  code: number;
+  seconds: number;
+  timedOut: boolean;
+  tail: string;
+}
+
+/**
+ * One proof, SEQUENTIALLY and under a hard bound.
+ *
+ * Never in parallel: these proofs drive a browser, and the fleet runs one headless browser at a time.
+ *
+ * The bound is GNU `timeout`, not a JavaScript timer, because `timeout` without `--foreground` puts
+ * the command in its own process group and signals the GROUP: that reaches the dev server and the
+ * browser the proof started, which a single-process kill leaves behind. (Measured while building
+ * this: Deno.kill(-pid) on a group is NotCapable under a least-privilege runner, setsid's fork
+ * behaviour depends on whether the child is already a group leader, and a failed group kill that is
+ * swallowed by a `catch {}` turns the bound into no bound at all - the first version of this file
+ * did exactly that and wedged, which row 3b caught. `timeout` is the mechanism the fleet already
+ * prescribes, and it has the exit code convention this tier reports: 124 means the bound was hit.)
+ *
+ * The JavaScript backstop at bound + 15s is for the one case `timeout` cannot cover: a proof that
+ * escapes its process group and keeps the output pipes open, which would otherwise leave the tier
+ * blocked in `output()` forever. It kills the direct child, which is always permitted to this
+ * process.
+ */
+async function runProof(
+  options: Options,
+  declaration: Declaration,
+  onChild: (pid: number | null) => void,
+): Promise<RunResult> {
+  const started = performance.now();
+  const seconds = Math.max(1, Math.round(options.timeoutMs / 1000));
+  const command = new Deno.Command("timeout", {
+    args: [
+      "-k",
+      "5",
+      `${seconds}`,
+      Deno.execPath(),
+      "run",
+      "--allow-all",
+      "--unstable-kv",
+      declaration.declared,
+    ],
+    cwd: options.root,
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const child = command.spawn();
+  onChild(child.pid);
+  const backstop = setTimeout(() => {
+    console.log(
+      `[evidence] ${declaration.dir} exceeded its bound by 15s and ignored it: killing pid ${child.pid}`,
+    );
+    try {
+      child.kill("SIGKILL");
+    } catch { /* already gone */ }
+  }, options.timeoutMs + 15_000);
+  // `output()` drains both pipes while it waits; not draining them is how a chatty proof deadlocks.
+  const output = await child.output();
+  clearTimeout(backstop);
+  onChild(null);
+  const text = `${new TextDecoder().decode(output.stdout)}\n${
+    new TextDecoder().decode(output.stderr)
+  }`;
+  const tail = text.split("\n").filter((line) => line.trim() !== "").slice(-6).join("\n  ");
+  return {
+    code: output.code,
+    seconds: (performance.now() - started) / 1000,
+    // GNU timeout reports 124 when the bound was hit, and 137 when the KILL grace expired.
+    timedOut: output.code === 124 || output.code === 137,
+    tail,
+  };
+}
+
+const options = parseOptions(Deno.args);
+const { declarations, undeclared, withoutReadme } = await collect(options);
+const unresolved = declarations.filter((declaration) => !declaration.exists);
+
+if (options.list) {
+  for (const declaration of declarations) {
+    console.log(
+      `${
+        declaration.exists ? "declared  " : "UNRESOLVED"
+      } ${declaration.dir} -> ${declaration.declared}`,
+    );
+  }
+  console.log(
+    `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
+      `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
+      (options.only ? ` (filtered to --only ${options.only})` : ""),
+  );
+  Deno.exit(0);
+}
+
+console.log(
+  `[evidence] running ${declarations.length} declared proof(s) sequentially, ${
+    options.timeoutMs / 1000
+  }s ` +
+    `bound each, from ${options.root}`,
+);
+const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
+let running: number | null = null;
+try {
+  for (const declaration of declarations) {
+    if (!declaration.exists) {
+      console.log(
+        `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (UNRESOLVED: not a file)`,
+      );
+      results.push({ declaration });
+      continue;
+    }
+    const result = await runProof(options, declaration, (pid) => running = pid);
+    results.push({ declaration, result });
+    const verdict = result.code === 0 ? "ok  " : "FAIL";
+    const note = result.timedOut ? ` TIMED OUT after ${options.timeoutMs / 1000}s` : "";
+    console.log(
+      `[evidence] ${verdict} ${declaration.dir} -> ${declaration.declared} ` +
+        `(exit ${result.code}, ${result.seconds.toFixed(1)}s)${note}`,
+    );
+    if (result.code !== 0 && result.tail) console.log(`  ${result.tail}`);
+  }
+} finally {
+  // Never leave a proof's server or browser running after the tier returns.
+  if (running) {
+    try {
+      Deno.kill(-running, "SIGKILL");
+    } catch { /* already gone */ }
+  }
+}
+
+const passed = results.filter((entry) => entry.result?.code === 0).length;
+const failed = results.length - passed;
+const seconds = results.reduce((total, entry) => total + (entry.result?.seconds ?? 0), 0);
+console.log(
+  `[evidence] ${passed} passed, ${failed} failed of ${declarations.length} declared ` +
+    `(${unresolved.length} unresolved, ${undeclared.length} declare nothing, ` +
+    `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
+);
+if (failed > 0) {
+  console.log("[evidence] RED: at least one declared proof did not pass on this tree");
+  Deno.exit(1);
+}
+console.log("[evidence] every declared proof passed on this tree");
