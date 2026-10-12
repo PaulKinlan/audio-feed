@@ -5,7 +5,7 @@
  * B), and a README the plan cannot read must not become a false failure. A check that turns every
  * undeclared proof red would fail 33 sites and would be reverted within the hour.
  */
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { evidenceReadmesAmong, findUnselectedExecutors } from "../scripts/evidence-selection.ts";
 
 const DECLARED =

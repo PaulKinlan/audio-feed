@@ -63,6 +63,7 @@ import {
   resolverConfigInputs,
   universeDrift,
 } from "./test-selection.ts";
+import { evidenceReadmesAmong, findUnselectedExecutors } from "./evidence-selection.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
 // (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
@@ -915,6 +916,47 @@ ${auditUniverseDrift}`);
     plan = planTests(changed, reverse, named, readRelations, resolverInputs, inertBlockingReads);
   }
   const { testFiles, reason } = plan;
+
+  // audio-feed-ruqh: A CHANGED PROOF THAT DECLARES ITS EXECUTOR MUST HAVE THAT SUITE SELECTED. The
+  // declaration existed (`scripts/evidence-run.ts`, audio-feed-4oe2) and nothing consumed it, so a proof
+  // could declare `- Executed by: tests/x_test.ts` while the gate selected some other suite, or none, and
+  // still report itself covered. Shape B: a README that declares NOTHING is left exactly as it was, since
+  // failing all 33 undeclared sites would be a tree-wide policy change rather than a selection fix.
+  // FREE ON THE COMMON PATH: `evidenceReadmesAmong` returns nothing unless a changed file is an evidence
+  // README, so a normal tip does no reads here at all. Placed before the run because the failure names the
+  // fix (select the suite, or declare the one that really runs it) and running suites first would only
+  // delay that.
+  const declaredProofs = evidenceReadmesAmong(changed ?? []);
+  if (declaredProofs.length) {
+    const selected = testFiles ?? fastUniverse;
+    const violations = findUnselectedExecutors(declaredProofs, selected, (path) => {
+      try {
+        return Deno.readTextFileSync(path);
+      } catch {
+        return null;
+      }
+    });
+    if (violations.length) {
+      console.log(
+        `fast-check: DECLARED EXECUTOR NOT SELECTED - ${violations.length} changed proof(s) declare a suite this plan does not run.`,
+      );
+      for (const v of violations) {
+        console.log(
+          `  ${v.readme} declares \`- Executed by: ${v.executedBy}\`, which is not selected.`,
+        );
+      }
+      console.log(
+        "  This is a SELECTION failure, not a test result: no suite in this plan executes the proof",
+      );
+      console.log(
+        "  that this README says produces its evidence. Either select that suite, or correct the",
+      );
+      console.log(
+        "  declaration so it names the suite that really runs the proof (audio-feed-ruqh).",
+      );
+      Deno.exit(1);
+    }
+  }
 
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
