@@ -195,3 +195,107 @@ Deno.test("audio-feed-ehon: a write PAYLOAD, a COMMENT example and a STRING exam
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-vex8: THE MIRROR DIRECTION AGAIN. ehon pinned the false positives
+// (payload, comment, string) and the helper's contract only with `dir` FIRST, so
+// the predicate's answer depended on an object's PROPERTY ORDER - a thing with no
+// runtime meaning. The firstArgument helper counted `(` and `)` alone, which makes
+// the comma BETWEEN PROPERTIES look like the argument separator. These are the
+// mirrors, and the pair that must AGREE is the one that proves the fix is
+// load-bearing: with comma splitting, `dir` first counts and `dir` second does not.
+// ---------------------------------------------------------------------------
+
+/** Every one of these has a comma at depth > 0 inside the FIRST argument. */
+const DEPTH_MIRRORS: Record<string, [string, string]> = {
+  "a nested call in an object value": [
+    'writeEvidenceReadme({ title: name.toUpperCase(), dir: "audio-feed-nested" });\n',
+    "nested",
+  ],
+  "a comma inside a STRING in the object": [
+    'writeEvidenceReadme({ note: "a, b", dir: "audio-feed-strcomma" });\n',
+    "strcomma",
+  ],
+  "an object in the SECOND argument": [
+    'await Deno.writeTextFile("docs/evidence/audio-feed-secondarg/x.txt", { a: 1, b: 2 });\n',
+    "secondarg",
+  ],
+  "an ARRAY literal as the first argument": [
+    'await Deno.writeTextFile(["docs/evidence/audio-feed-arr/x.txt"][0], "x");\n',
+    "arr",
+  ],
+  "a comma inside a template EXPRESSION": [
+    "await Deno.writeTextFile(`docs/evidence/audio-feed-tplc/x.txt`, `a, ${b}, c`);\n",
+    "tplc",
+  ],
+  "a nested call as the first argument": [
+    'await Deno.writeTextFile(path.join("docs/evidence", "audio-feed-nestedcall/x.txt"), "x");\n',
+    "nestedcall",
+  ],
+};
+
+Deno.test("audio-feed-vex8: property ORDER does not change whether an evidence helper writes", () => {
+  const dirFirst = censusSource(
+    'writeEvidenceReadme({ dir: "audio-feed-abcd", title: "hello" });\n',
+  );
+  const dirSecond = censusSource(
+    'writeEvidenceReadme({ title: "hello", dir: "audio-feed-abcd" });\n',
+  );
+
+  assertEquals(dirSecond.writes, ["audio-feed-abcd"], "dir SECOND is the finding: it is a write");
+  assertEquals(
+    dirFirst.writes,
+    ["audio-feed-abcd"],
+    "dir FIRST was the only shape the old tests covered",
+  );
+  // THE ASSERTION THAT MAKES THE FIX LOAD-BEARING: two calls that differ only in an object's property
+  // order must produce the SAME answer. Under comma splitting they disagree, so this goes red.
+  assertEquals(
+    dirSecond.writes,
+    dirFirst.writes,
+    "the same call with two properties swapped must not be classified differently",
+  );
+  assertEquals(
+    dirSecond.runtimeAssembled,
+    [],
+    "a helper that names its slice is a write, not unresolved",
+  );
+  assertEquals(dirSecond.mentions, [], "and it is not a mention");
+});
+
+Deno.test("audio-feed-vex8: a comma at depth > 0 is not an argument separator", () => {
+  for (const [name, [source, id]] of Object.entries(DEPTH_MIRRORS)) {
+    const result = censusSource(source);
+    assertEquals(result.writes, [dir(id)], `${name}: the write must survive its own commas`);
+    assertEquals(result.mentions, [], `${name}: a write is not a mention`);
+  }
+
+  // THE OTHER HALF OF THE FIX, AND THE REASON A DEPTH-AWARE COMMA SCAN ALONE IS NOT
+  // ENOUGH: once the WHOLE object is the first argument, its other properties are in
+  // scope, and they are PROSE - the helper's own option type is
+  // `{ dir: string; title: string; script?: string; ... }`. Measured on the real tree,
+  // scanning the whole object brought 26 directories back that the previous version had
+  // correctly excluded (audio-feed-0jp and audio-feed-ktn from a proof that writes
+  // audio-feed-8fc and lists them in `bead:`/`also:` fields, and 24 more of that shape).
+  const prose = censusSource(
+    'writeEvidenceReadme({ title: "hello", dir: "audio-feed-abcd", also: "audio-feed-sibling" });\n',
+  );
+  assertEquals(prose.writes, [dir("abcd")], "only the slice the helper is told to write");
+  assertEquals(prose.mentions, [dir("sibling")], "a sibling property is a mention, not a write");
+
+  // The target property also works quoted, and a first-argument object with NO target
+  // property falls back to the whole argument rather than to nothing - a MISS is the
+  // silent direction, and this bead's whole lineage is about silences.
+  assertEquals(
+    censusSource('writeEvidenceReadme({ "title": "x", "dir": "audio-feed-quoted" });\n').writes,
+    [dir("quoted")],
+    "a quoted target property names the slice just as a bare one does",
+  );
+  assertEquals(
+    censusSource(
+      'await Deno.writeTextFile({ path: "docs/evidence/audio-feed-fallback/x" }, "x");\n',
+    ).writes,
+    [dir("fallback")],
+    "an object with no target property falls back to the whole argument",
+  );
+});

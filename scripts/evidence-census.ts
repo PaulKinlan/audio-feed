@@ -72,6 +72,15 @@ export function idsIn(text: string): string[] {
  * names the evidence directory. Masked text is for FINDING calls and for
  * counting brackets; raw text is for reading the target.
  *
+ * DECLARED LIMIT, MEASURED (audio-feed-vex8), AND NOT FIXED HERE BECAUSE IT IS A
+ * DIFFERENT THRESHOLD: a write target assembled from SEPARATE string segments has
+ * no contiguous `docs/evidence` substring, so `path.join("docs", "evidence",
+ * "audio-feed-x/y.txt")` as a first argument resolves its id but reads as a
+ * MENTION rather than a write. Widening the prefix test to a concatenation of the
+ * argument's literals would change this predicate's published counts (36 writer
+ * directories on the tree at the time of writing), so it is a decision with its own
+ * before/after rather than a by-product of a comma fix.
+ *
  * DECLARED LIMITS, because a masker with unstated holes is worse than none: a
  * REGEX LITERAL is not masked (telling `/` as regex from division needs a
  * previous-token rule, and a wrong guess would mask real code and LOSE a write,
@@ -162,25 +171,108 @@ export function maskNonCode(source: string): string {
 
 /**
  * The text of the FIRST argument of the call whose `(` is at `open`, or null when
- * the parens never close. Masked text is used to count brackets (so a paren
- * inside a string cannot end the call early) and the RAW text is returned, so
- * the literal naming the target survives.
+ * the parens never close. Masked text is used to count DEPTH (so a paren or comma
+ * inside a string cannot end the call early) and the RAW text is returned, so the
+ * literal naming the target survives.
  *
  * ONLY THE FIRST ARGUMENT, because that is the one that names the target:
  * `Deno.writeTextFile("/tmp/report.txt", "docs/evidence/audio-feed-abcd")` writes
  * outside the tree and merely MENTIONS the id in its payload (audio-feed-ehon).
+ *
+ * A COMMA IS A SEPARATOR ONLY AT ARGUMENT-LIST DEPTH 0 (audio-feed-vex8). The first
+ * version counted `(` and `)` alone, so the comma BETWEEN PROPERTIES of an object
+ * literal was read as the argument separator and the first argument was truncated
+ * before the target: `writeEvidenceReadme({ title: "x", dir: "audio-feed-abcd" })`
+ * lost its write while the same call with `dir` first kept it, which means the
+ * predicate's answer depended on PROPERTY ORDER - a thing with no runtime meaning.
+ * Counting `{`/`}` and `[`/`]` as well closes the CLASS rather than the instance: an
+ * object, an array, a nested call and a nested object in the first argument all put
+ * their commas at depth > 0, so no list of known bad shapes is needed and none is
+ * used. Anything that is not a separator here is simply part of the target text.
+ *
+ * WHAT THIS STILL GETS WRONG, measured rather than assumed: a REGEX LITERAL is not
+ * masked (see maskNonCode's declared limit), so a comma inside one - `/a{1,3}/` -
+ * can still split an argument early; and an unterminated string literal stops at
+ * the newline, so a call written after it on that line is masked away rather than
+ * reported (a MISS, the silent direction, and it is why the masker's limits are
+ * stated at all). A template `${ ... }` containing a comma is handled correctly,
+ * because the masker leaves that expression as code and its braces are counted here.
  */
 export function firstArgument(masked: string, raw: string, open: number): string | null {
-  let depth = 0;
+  let parens = 0;
+  let braces = 0;
+  let brackets = 0;
   for (let i = open; i < masked.length; i++) {
     const ch = masked[i]!;
-    if (ch === "(") depth++;
+    if (ch === "(") parens++;
     else if (ch === ")") {
-      depth--;
-      if (depth === 0) return raw.slice(open + 1, i);
-    } else if (ch === "," && depth === 1) return raw.slice(open + 1, i);
+      parens--;
+      if (parens === 0) return raw.slice(open + 1, i);
+    } else if (ch === "{") braces++;
+    else if (ch === "}") braces--;
+    else if (ch === "[") brackets++;
+    else if (ch === "]") brackets--;
+    else if (ch === "," && parens === 1 && braces === 0 && brackets === 0) {
+      return raw.slice(open + 1, i);
+    }
   }
   return null;
+}
+
+/** The properties of an evidence helper that NAME THE SLICE, from its own option types. */
+const TARGET_PROPERTIES: readonly string[] = ["dir", "path"];
+
+/**
+ * THE PART OF A FIRST ARGUMENT THAT NAMES THE TARGET (audio-feed-vex8, and this is
+ * the half a depth-aware comma scan ALONE gets wrong).
+ *
+ * An object literal names the slice through ONE property - `dir` in this
+ * repository's helpers (`EvidenceReadmeOptions { dir: string; title: string;
+ * script?: string; ... }`) - and its OTHER properties are PROSE: titles, bead ids
+ * carried for cross-reference, notes. Scanning the whole object therefore credits a
+ * script with writing beads it merely mentions, and that is measured rather than
+ * argued: with the whole object as the target, 26 directories came back on the real
+ * tree that the previous version had correctly excluded (audio-feed-0jp and
+ * audio-feed-ktn from an account proof that writes audio-feed-8fc and merely lists
+ * those two in `bead:`/`also:` fields, and 24 more of the same shape).
+ *
+ * So: an object literal resolves to the value of its target property, and anything
+ * that is not an object literal is its own target. The list is the helpers' own
+ * option names rather than a guess about shapes, and an object with no such property
+ * falls back to the whole argument rather than to nothing - a MISS would be the
+ * silent direction.
+ */
+export function targetWithin(masked: string, raw: string, start: number, end: number): string {
+  const region = masked.slice(start, end);
+  if (!region.trimStart().startsWith("{")) return raw.slice(start, end);
+  const bodyStart = start + region.indexOf("{") + 1;
+  let depth = 0;
+  let propStart = bodyStart;
+  const consider = (a: number, b: number): string | null => {
+    const property = raw.slice(a, b);
+    const name = /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/.exec(property);
+    if (!name) return null;
+    const key = name[1] ?? name[2] ?? name[3] ?? "";
+    if (!TARGET_PROPERTIES.includes(key)) return null;
+    return property.slice(name[0].length);
+  };
+  for (let i = bodyStart; i <= end; i++) {
+    const ch = masked[i] ?? "}";
+    if (ch === "{" || ch === "(" || ch === "[") depth++;
+    else if (ch === "}" || ch === ")" || ch === "]") {
+      if (depth === 0) {
+        const found = consider(propStart, i);
+        if (found !== null) return found; // the object's own closing brace
+        break;
+      }
+      depth--;
+    } else if (ch === "," && depth === 0) {
+      const found = consider(propStart, i);
+      if (found !== null) return found;
+      propStart = i + 1;
+    }
+  }
+  return raw.slice(start, end);
 }
 
 /**
@@ -268,16 +360,20 @@ export function censusSource(source: string): ScriptCensus {
     for (const match of masked.matchAll(pattern)) {
       const open = match.index + match[0].length - 1;
       // ...and only the FIRST argument is the target. Every other argument is data, which is how a
-      // payload naming docs/evidence made a script that writes to /tmp look like a writer.
+      // payload naming docs/evidence made a script that writes to /tmp look like a writer. WITHIN
+      // that argument, an object literal names the slice through its target property and its other
+      // properties are prose (audio-feed-vex8) - see targetWithin.
+      const start = match.index + match[0].length;
       const args = firstArgument(masked, source, open);
       if (args === null) continue;
-      const target = resolveTarget(args, bindings);
+      const targetText = targetWithin(masked, source, start, start + args.length);
+      const target = resolveTarget(targetText, bindings);
       // A generic write must name docs/evidence. The evidence helpers may name
       // the slice directly, because naming it IS their contract.
       const inEvidence = target.text.includes(EVIDENCE_PREFIX) || evidenceHelper;
       if (!inEvidence) continue;
       if (target.ids.length === 0) {
-        if (args.includes(EVIDENCE_PREFIX) || evidenceHelper) {
+        if (targetText.includes(EVIDENCE_PREFIX) || evidenceHelper) {
           runtimeAssembled.push(match[0].replace(/\s*\($/, ""));
         }
         continue;
