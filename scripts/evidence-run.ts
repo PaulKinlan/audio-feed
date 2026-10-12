@@ -18,6 +18,13 @@
  *     deno task evidence --root <dir>    resolve declarations under another root (used to prove the
  *                                        tier can go red, against a scratch evidence tree)
  *
+ * EXIT CODES, because a silent non-zero is as useless as a silent skip:
+ *     0  every declared proof passed, and every evidence directory declares something;
+ *     1  at least one declared proof FAILED, or a declared script is not a file (UNRESOLVED);
+ *     2  every declared proof passed, but the tree carries DECLARATION DEBT - a directory that
+ *        declares nothing or has no README. Debt is not a proof failure and is not a pass either:
+ *        a skip that is not printed is a test that stopped testing, so it is named and it is non-zero.
+ *
  * WHY A NEW TIER AND NOT A MAPPING INTO fast-check: a mapping buys speed with a new suppression
  * surface — a mapping that names the wrong suite suppresses a slice's gate while looking green
  * (audio-feed-nxnf states exactly this risk) — and a browser proof cannot run inside the fast gate
@@ -227,6 +234,46 @@ const options = parseOptions(Deno.args);
 const { declarations, undeclared, withoutReadme } = await collect(options);
 const unresolved = declarations.filter((declaration) => !declaration.exists);
 
+/**
+ * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
+ * directory that declares nothing, a directory with no README, and one script declared by two
+ * directories - and every one of them is a skip in disguise if it is silent: a skip that is not
+ * printed is a test that stopped testing. They are named here, counted in the summary, and they make
+ * the tier exit 2 (no proof failed, but the evidence tree is not fully declared).
+ *
+ * Measured before deciding how to treat the duplicate: scripts/bookmarklet-browser-proof.ts is
+ * declared by audio-feed-6hw and audio-feed-ep1, and that is legitimate - one proof produces two
+ * evidence sets with different artefacts and different assertion lists. So a duplicate is reported
+ * rather than failed, because failing it would be a red that is not a defect.
+ */
+const byScript = new Map<string, string[]>();
+for (const declaration of declarations) {
+  const dirs = byScript.get(declaration.declared) ?? [];
+  dirs.push(declaration.dir);
+  byScript.set(declaration.declared, dirs);
+}
+const duplicates = [...byScript.entries()].filter(([, dirs]) => dirs.length > 1).sort((a, b) =>
+  a[0] < b[0] ? -1 : 1
+);
+
+function printDebt(): number {
+  for (const dir of undeclared) {
+    console.log(`[evidence] debt: ${dir} declares no proof (no '- Script:' line in its README)`);
+  }
+  for (const dir of withoutReadme) {
+    console.log(`[evidence] debt: ${dir} has no README, so nothing is declared or asserted there`);
+  }
+  for (const [script, dirs] of duplicates) {
+    console.log(
+      `[evidence] note: ${script} is declared by ${dirs.length} directories (${
+        dirs.join(", ")
+      }) - ` +
+        `one proof producing more than one evidence set; it will be run once per declaring directory`,
+    );
+  }
+  return undeclared.length + withoutReadme.length;
+}
+
 if (options.list) {
   for (const declaration of declarations) {
     console.log(
@@ -240,6 +287,8 @@ if (options.list) {
       `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
       (options.only ? ` (filtered to --only ${options.only})` : ""),
   );
+  printDebt();
+  console.log("[evidence] --list is an inventory, not a verdict: it exits 0 and runs nothing");
   Deno.exit(0);
 }
 
@@ -262,6 +311,7 @@ if (declarations.length === 0) {
   );
   Deno.exit(1);
 }
+const debt = printDebt();
 const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
 let running: number | null = null;
 try {
@@ -303,5 +353,12 @@ console.log(
 if (failed > 0) {
   console.log("[evidence] RED: at least one declared proof did not pass on this tree");
   Deno.exit(1);
+}
+if (debt > 0) {
+  console.log(
+    `[evidence] RED (declaration debt): every declared proof passed, but ${debt} directory(ies) ` +
+      `declare nothing and were therefore not run - the list is above, by name`,
+  );
+  Deno.exit(2);
 }
 console.log(`[evidence] every declared proof passed on this tree (${passed} proof(s))`);
