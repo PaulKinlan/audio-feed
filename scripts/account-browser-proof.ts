@@ -398,7 +398,12 @@ await runProof("account-browser-proof", async (checker) => {
             {
               heading: "Overview",
               body:
-                `Real headless Chrome for Testing, driven over CDP from a Deno script, with a CDP virtual authenticator (\`ctap2\`, \`internal\`, resident keys, user verification, verified user). The app is the real one, served by \`scripts/account-harness.ts\` on memory stores seeded with an admin (Paul), an approved reader (Rita), a pending invitee (Sam), two sources, four episodes and some run history. Feed and article fetches are stubbed, so nothing touches the network.
+                `Real headless Chrome for Testing, driven over CDP from a Deno script, with a CDP
+virtual authenticator (\`ctap2\`, \`internal\`, resident keys, user verification,
+verified user). The app is the real one, served by \`scripts/account-harness.ts\`
+on memory stores seeded with an admin (Paul), an approved reader (Rita), a
+pending invitee (Sam), two sources, four episodes and some run history.
+Feed and article fetches are stubbed, so nothing touches the network.
 
 Reproduce:
 
@@ -422,12 +427,15 @@ Reproduce:
 
 \`evidence.json\` records each step with its detail and the screenshot list.
 
-Re-run on the merged tree (origin/main merged into this branch, with the review fixes and audio-feed-ktn): 11/11 steps (the original 10 plus 7b). The harness now seeds its two ready episodes as published on older prompts, so there is something to regenerate.`,
+Re-run on the merged tree (origin/main commit-a0122f7 merged into this branch, with the
+review fixes and audio-feed-ktn): 11 of 11 steps (the original 10 plus step 7b, 11/11 steps).
+The harness now seeds its two ready episodes as published on older prompts, so
+there is something to regenerate.`,
             },
             {
               heading: "Screenshots",
-              body:
-                `Every page at 390px and 1280px, in light and dark (the shell supports both): \`<page>-<width>-<scheme>.png\`.
+              body: `Every page at 390px and 1280px, in light and dark (the shell supports both):
+\`<page>-<width>-<scheme>.png\`.
 
 - \`01-home-signed-out\`: home on the shared shell
 - \`02-login\`: sign in with a passkey
@@ -440,16 +448,23 @@ Re-run on the merged tree (origin/main merged into this branch, with the review 
             },
             {
               heading: "Review fixes shown here",
-              body:
-                `- \`07-admin-390-*\`: the background-runs table keeps a minimum width (\`table.runs { min-inline-size: 40rem; }\`) and scrolls inside its card. Before the fix, Result wrapped one character per line at 390px.
-- \`05-account-*\`: Regenerate per ready episode and "Regenerate outdated (N)" (audio-feed-ktn).`,
+              body: `- \`07-admin-390-*\`: the background-runs table keeps a minimum width
+  (\`table.runs { min-inline-size: 40rem; }\`) and scrolls inside its card. Before
+  the fix, Result wrapped one character per line at 390px.
+- \`05-account-*\`: Regenerate per ready episode and "Regenerate outdated (N)"
+  (audio-feed-ktn).`,
             },
             {
               heading: "Found by this run",
-              body:
-                `The first run failed at sign-out. The account, admin and login pages send \`Referrer-Policy: no-referrer\`, and a form POST from such a page carries \`Origin: null\`, so the Origin check refused the header's sign-out form. \`sameOrigin\` now also accepts \`Origin: null\` when the browser-set \`Sec-Fetch-Site: same-origin\` says the request is same-origin; pages cannot write that header. It has a route test, which was red before the fix and green after.
+              body: `The first run failed at sign-out. The account, admin and login pages send
+\`Referrer-Policy: no-referrer\`, and a form POST from such a page carries
+\`Origin: null\`, so the Origin check refused the header's sign-out form.
+\`sameOrigin\` now also accepts \`Origin: null\` when the browser-set
+\`Sec-Fetch-Site: same-origin\` says the request is same-origin; pages cannot write
+that header. It has a route test, which was red before the fix and green after.
 
-No setup secret is written here: every link the run issued was consumed by the run, on a memory store that ends with the harness.`,
+No setup secret is written here: every link the run issued was consumed by the
+run, on a memory store that ends with the harness.`,
             },
           ],
         });
