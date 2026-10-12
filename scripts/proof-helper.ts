@@ -206,18 +206,39 @@ export async function spawnHarness(
   );
 }
 
+export class CheckFailureError extends Error {
+  readonly checkName: string;
+  readonly detail?: string;
+
+  constructor(checkName: string, detail?: string) {
+    super(
+      detail !== undefined
+        ? `Check failed: ${checkName} (${detail})`
+        : `Check failed: ${checkName}`,
+    );
+    this.name = "CheckFailureError";
+    this.checkName = checkName;
+    this.detail = detail;
+  }
+}
+
 export interface CheckFailure {
   name: string;
   detail?: string;
 }
 
-export interface Checker {
+export interface Checker extends Disposable {
   check: (name: string, pass: boolean, detail?: string) => boolean;
   failures: CheckFailure[];
   finish: () => void;
+  [Symbol.dispose](): void;
 }
 
 export function createChecker(): Checker {
+  return createCheckerInternal(false);
+}
+
+function createCheckerInternal(deferred: boolean): Checker {
   const failures: CheckFailure[] = [];
 
   const check = (name: string, pass: boolean, detail?: string): boolean => {
@@ -226,6 +247,9 @@ export function createChecker(): Checker {
     console.log(line);
     if (!pass) {
       failures.push({ name, detail });
+      if (!deferred) {
+        throw new CheckFailureError(name, detail);
+      }
     }
     return pass;
   };
@@ -239,7 +263,51 @@ export function createChecker(): Checker {
     }
   };
 
-  return { check, failures, finish };
+  return {
+    check,
+    failures,
+    finish,
+    [Symbol.dispose]() {
+      finish();
+    },
+  };
+}
+
+export async function runProof(
+  name: string,
+  body: (checker: Checker) => Promise<void> | void,
+): Promise<void> {
+  const checker = createCheckerInternal(true);
+  let bodyError: unknown = null;
+  try {
+    await body(checker);
+  } catch (err) {
+    bodyError = err;
+  }
+
+  let finishError: unknown = null;
+  try {
+    checker.finish();
+  } catch (err) {
+    finishError = err;
+  }
+
+  if (bodyError && finishError) {
+    console.error(`Proof '${name}' failed with error:`, bodyError);
+    console.error(`Checker also reported failures:`, finishError);
+    if (bodyError instanceof Error && !bodyError.cause) {
+      bodyError.cause = finishError;
+    }
+    throw bodyError;
+  }
+
+  if (bodyError) {
+    throw bodyError;
+  }
+
+  if (finishError) {
+    throw finishError;
+  }
 }
 
 export function assertVisibleExpression(selector: string): string {

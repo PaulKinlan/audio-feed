@@ -34,3 +34,18 @@ teardown, the run-failing assertion helper (`createChecker()`), DOM visibility a
 measurement (`assertVisibleExpression()`, `isVisible()`), and evidence README declarations
 (`writeEvidenceReadme()`) all come from the harness. Legitimate escape hatches remain: repro scripts
 with no browser, and live-proxy checks, are not required to use the harness.
+
+### Deliberate trade-offs & lifecycle guarantees (audio-feed-ptid, audio-feed-pul6)
+
+- **Fail-fast assertions vs. deferred summary:** `check()` throws `CheckFailureError` on the first
+  failure rather than collecting all of them, ensuring an unhandled failure immediately ends the
+  process non-zero even if a script omits `finish()`. A proof that reports everything but can be
+  silently discarded on early return is the defect. Proofs that need to collect all failures must
+  use `runProof(name, body)`, which creates a deferred checker and enforces `finish()` in `finally`.
+  For scoped blocks, `using checker = createChecker()` guarantees disposal invocation of `finish()`.
+- **Loud cleanup throw with guaranteed finally:** `createTempChromeProfile`'s `cleanup()` throws
+  descriptive errors on persistent removal failure (measured across 12 scripts and 3 tests in the
+  audit) rather than silently swallowing leaks. Loud-over-silent teardown is justified only by
+  pairing it with a guaranteed `finally` wrapper (`withChrome`): the harness owns the browser and
+  profile lifecycle, so cleanup is unconditionally attempted before any assertion or body failure
+  surfaces.

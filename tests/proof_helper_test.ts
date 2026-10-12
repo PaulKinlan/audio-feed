@@ -11,10 +11,12 @@
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   assertVisibleExpression,
+  CheckFailureError,
   createChecker,
   createTempChromeProfile,
   isVisible,
   newestChrome,
+  runProof,
   spawnHarness,
   startInProcessServer,
   writeEvidenceReadme,
@@ -157,25 +159,99 @@ Deno.test("proof-helper: createChecker passes when all checks pass and finish() 
   checker.finish();
 });
 
-Deno.test("proof-helper: createChecker records failures and finish() throws naming each failure", () => {
+Deno.test("proof-helper: createChecker throws CheckFailureError immediately on false check", () => {
   const checker = createChecker();
   checker.check("passing check", true);
-  checker.check("failing check alpha", false, "reason A");
-  checker.check("failing check beta", false, "reason B");
-
-  assertEquals(checker.failures.length, 2);
+  const thrown = assertThrows(
+    () => checker.check("failing check alpha", false, "reason A"),
+    CheckFailureError,
+    "Check failed: failing check alpha (reason A)",
+  );
+  assertEquals(thrown.checkName, "failing check alpha");
+  assertEquals(thrown.detail, "reason A");
+  assertEquals(checker.failures.length, 1);
   assertEquals(checker.failures[0]?.name, "failing check alpha");
   assertEquals(checker.failures[0]?.detail, "reason A");
-  assertEquals(checker.failures[1]?.name, "failing check beta");
-  assertEquals(checker.failures[1]?.detail, "reason B");
 
-  const err = assertThrows(
+  const finishErr = assertThrows(
     () => checker.finish(),
     Error,
-    "Checker failed 2 check(s)",
+    "Checker failed 1 check(s)",
   );
-  assertStringIncludes(err.message, "failing check alpha (reason A)");
-  assertStringIncludes(err.message, "failing check beta (reason B)");
+  assertStringIncludes(finishErr.message, "failing check alpha (reason A)");
+});
+
+Deno.test("proof-helper: createChecker implements [Symbol.dispose] calling finish on scope exit", () => {
+  {
+    using checker = createChecker();
+    checker.check("passing scoped check", true);
+  }
+
+  assertThrows(
+    () => {
+      using checker = createChecker();
+      try {
+        checker.check("caught fail", false, "detail");
+      } catch {
+        // swallowed CheckFailureError
+      }
+    },
+    Error,
+    "Checker failed 1 check(s): caught fail (detail)",
+  );
+});
+
+Deno.test("proof-helper: runProof collects all failures in deferred mode and throws in finish", async () => {
+  await assertRejects(
+    async () => {
+      await runProof("deferred-test", (checker) => {
+        checker.check("passing check", true);
+        checker.check("failing check alpha", false, "reason A");
+        checker.check("failing check beta", false, "reason B");
+      });
+    },
+    Error,
+    "Checker failed 2 check(s): failing check alpha (reason A); failing check beta (reason B)",
+  );
+});
+
+Deno.test("proof-helper: subprocess: fixture recording failing check without finish exits non-zero", async () => {
+  const fixture = new URL("./fixtures/checker_fail_return_child.ts", import.meta.url).pathname;
+  const cmd = new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--unstable-kv", fixture],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const output = await cmd.output();
+  assertEquals(output.success, false);
+  assertEquals(output.code !== 0, true);
+});
+
+Deno.test("proof-helper: subprocess: fixture through runProof exits non-zero and stderr names failure", async () => {
+  const fixture = new URL("./fixtures/checker_run_proof_child.ts", import.meta.url).pathname;
+  const cmd = new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--unstable-kv", fixture],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const output = await cmd.output();
+  assertEquals(output.success, false);
+  assertEquals(output.code !== 0, true);
+  const stderrText = new TextDecoder().decode(output.stderr);
+  assertStringIncludes(stderrText, "failing check alpha");
+  assertStringIncludes(stderrText, "reason A");
+});
+
+Deno.test("proof-helper: subprocess: all-pass fixture exits zero", async () => {
+  const fixture = new URL("./fixtures/checker_pass_child.ts", import.meta.url).pathname;
+  const cmd = new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--unstable-kv", fixture],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const output = await cmd.output();
+  assertEquals(output.success, true);
+  assertEquals(output.code, 0);
 });
 
 Deno.test("proof-helper: assertVisibleExpression produces evaluable JS expression", () => {
