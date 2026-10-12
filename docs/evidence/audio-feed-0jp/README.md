@@ -1,5 +1,8 @@
 # Browser Acceptance Proof: audio-feed-0jp
 
+- Capture: no assertions
+- Reason: Static visual capture artifacts from token-paste removal. No generating script writes to this directory; the ongoing browser proof (scripts/account-browser-proof.ts) outputs to docs/evidence/audio-feed-8fc/.
+
 ## Goal
 Delete the paste-token UI path from the admin console script (`#adminToken`, `#saveToken`, `#rememberToken`, `#authFeedback`, `<details class="token-toggle">`), point the console at the passkey sign-in flow instead, and verify through real headless Chrome that:
 1. When signed out, the token-paste controls and toggles are completely gone, and the page offers a clear passkey sign-in action (`/login?next=%2Fadmin`).

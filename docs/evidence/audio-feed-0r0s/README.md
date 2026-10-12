@@ -1,5 +1,8 @@
 # audio-feed-0r0s — the confirm-dialog client has ONE source
 
+- Capture: no assertions
+- Reason: Static before/after shell fragment dumps and local comparison helper (capture.ts). Behavioral properties are asserted by tests/dialog_test.ts, not by an automated evidence runner script.
+
 Design A (coord decision 2026-10-06): the canonical confirm client — the
 `closedby` light-dismiss shim + `askConfirm` — is the region between the
 `// #confirm-shared-begin` / `// #confirm-shared-end` marker lines at the top of

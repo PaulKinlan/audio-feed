@@ -1,5 +1,8 @@
 # audio-feed-7jsl — the gate was green over a tree it never checked
 
+- Capture: no assertions
+- Reason: Historical CLI transcripts (fmt-check-clean.log, gate-fails-on-unformatted-script.log) demonstrating gate failure on unformatted scripts. Ongoing regression coverage is enforced by tests/deno-task-coverage_test.ts, not an evidence script.
+
 ## The gap, measured on main before the fix
 
 | command                                 | result                                              |
