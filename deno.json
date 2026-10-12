@@ -23,7 +23,7 @@
     "fmt": "deno fmt",
     "lint": "deno lint",
     "smoke": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/smoke.ts",
-    "evidence:compress": "deno run --allow-read --allow-write --allow-run=convert scripts/evidence-compress.ts",
+    "evidence:compress": "deno run --allow-read --allow-write --allow-run=convert,git scripts/evidence-compress.ts",
     "proof": "deno run --allow-all --unstable-kv",
     "test:fast": "deno run --allow-read --allow-run=git,deno --allow-env scripts/fast-check.ts",
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
