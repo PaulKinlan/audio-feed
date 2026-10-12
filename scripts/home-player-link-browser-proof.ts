@@ -18,13 +18,7 @@
  *   deno run --allow-all --unstable-kv scripts/home-player-link-browser-proof.ts
  */
 
-import {
-  createTempChromeProfile,
-  runProof,
-  withChrome,
-  writeEvidenceReadme,
-  spawnHarness,
-} from "./proof-helper.ts";
+import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 const ASSERTS = [
   "header navigation links to /listen",
@@ -37,7 +31,6 @@ const ASSERTS = [
   "mobile layout has zero horizontal overflow at 390px",
 ];
 
-const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-home-player-");
 const harness = await spawnHarness("scripts/listen-harness.ts");
 const BASE = harness.base;
 const OUT = new URL("../docs/evidence/audio-feed-ytg/", import.meta.url).pathname;
@@ -52,7 +45,7 @@ try {
     await withChrome(async (chrome) => {
       let nextId = 0;
       const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-      
+
       const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
       const page = targets.find((t: { type: string }) => t.type === "page");
       const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -70,7 +63,9 @@ try {
       async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
+          pending.set(id, r)
+        );
         if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
         return msg.result;
       }
@@ -83,7 +78,9 @@ try {
           returnByValue: true,
           userGesture: true,
         });
-        if (r.exceptionDetails) throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+        if (r.exceptionDetails) {
+          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+        }
         return r.result?.value;
       }
 
@@ -118,7 +115,11 @@ try {
       );
 
       const ledeLink = await js(`!!document.querySelector('.lede a[href="/listen"]')`);
-      checker.check("hero lede links to /listen", ledeLink === true, "Web Player link in lede present");
+      checker.check(
+        "hero lede links to /listen",
+        ledeLink === true,
+        "Web Player link in lede present",
+      );
 
       await js(`document.querySelector('.site-nav a[href="/listen"]').click()`);
       await until(`location.pathname === "/listen"`, "navigate to /listen");
@@ -138,7 +139,7 @@ try {
         value: sessionSecret,
         secure: true,
         httpOnly: true,
-        sameSite: "Lax"
+        sameSite: "Lax",
       });
       await cdp("Page.navigate", { url: `${BASE}/` });
       await until(
@@ -147,7 +148,11 @@ try {
       );
 
       const returningVisible = await js(`!document.getElementById("returningSubscriber")?.hidden`);
-      checker.check("returning subscriber banner is visible on /", returningVisible === true, "banner shown");
+      checker.check(
+        "returning subscriber banner is visible on /",
+        returningVisible === true,
+        "banner shown",
+      );
 
       const autoFilledToken = await js(`document.getElementById("token")?.value`);
       checker.check(
@@ -174,7 +179,10 @@ try {
         document.getElementById("url").value = "https://example.com/front-door-article";
         document.getElementById("ingest").requestSubmit();
       `);
-      await until(`document.getElementById("result")?.classList.contains("ok")`, "submission success");
+      await until(
+        `document.getElementById("result")?.classList.contains("ok")`,
+        "submission success",
+      );
 
       const playerLinkUrl = await js(
         `document.querySelector("#result .player-link")?.getAttribute("href")`,
@@ -218,17 +226,16 @@ try {
         Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
       );
       console.log(`Saved screenshot to ${OUT}02-home-player-link-mobile-390.png`);
-      
+
       ws.close();
-    }, { profileDir: PROFILE });
+    }, { prefix: "audiofeed-home-player-" });
   });
 } catch (error) {
   console.error(error);
   exitCode = 1;
 } finally {
   harness.kill();
-  await cleanup();
-  
+
   await writeEvidenceReadme({
     dir: OUT,
     title: "Front door player links",
