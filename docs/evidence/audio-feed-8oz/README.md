@@ -1,5 +1,8 @@
 # Evidence: regenerate button (audio-feed-8oz)
 
+- Script: scripts/regenerate-browser-proof.ts
+- Asserts: before: counts; before: feed serves the old key; confirm dialog raised and states the spend; queued: feed still serves the old key, old audio plays; during synthesis: old audio still served; after: feed serves a NEW key, same GUID; after: old blob is gone; after: new audio plays; stub synthesizer called once; after: console shows it current
+
 Real admin console, real feed and `/audio` routes, driven in headless Chrome for Testing
 (153.0.8010.36) over raw CDP. In-memory stores seeded with one approved subscriber and two
 ready episodes: one made by old prompts (`promptVersion` `0ld0ld0ld0ld`) and one made by the
