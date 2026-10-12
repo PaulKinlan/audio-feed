@@ -510,6 +510,9 @@ export function assertVisibleExpression(selector: string): string {
       offsetHeight: 0,
       rectWidth: 0,
       rectHeight: 0,
+      rectTop: 0,
+      rectBottom: 0,
+      viewportHeight: 0,
       inViewport: false,
     };
   }
@@ -531,6 +534,9 @@ export function assertVisibleExpression(selector: string): string {
     offsetHeight: el.offsetHeight,
     rectWidth: rect.width,
     rectHeight: rect.height,
+    rectTop: rect.top,
+    rectBottom: rect.bottom,
+    viewportHeight: vh,
     inViewport,
   };
 })()`;
@@ -544,6 +550,19 @@ export interface ElementMeasurement {
   rectWidth: number;
   rectHeight: number;
   inViewport: boolean;
+  rectTop?: number;
+  rectBottom?: number;
+  viewportHeight?: number;
+  top?: number;
+  bottom?: number;
+  rect?: {
+    top?: number;
+    bottom?: number;
+    left?: number;
+    right?: number;
+    width?: number;
+    height?: number;
+  };
 }
 
 export function isVisible(
@@ -574,6 +593,40 @@ export function isVisible(
   return {
     visible: true,
     reason: "Element is rendered, visible in viewport, and not clipped",
+  };
+}
+
+export function isFullyVisible(
+  measurement: ElementMeasurement,
+): { visible: boolean; reason: string } {
+  const base = isVisible(measurement);
+  if (!base.visible) {
+    return base;
+  }
+  const top = measurement.rectTop ?? measurement.top ?? measurement.rect?.top;
+  const bottom = measurement.rectBottom ?? measurement.bottom ?? measurement.rect?.bottom;
+  const vh = measurement.viewportHeight ??
+    (measurement as { innerHeight?: number }).innerHeight;
+
+  if (top === undefined || bottom === undefined || vh === undefined) {
+    return {
+      visible: false,
+      reason:
+        "Element measurement lacks vertical coordinates or viewport height for strict containment",
+    };
+  }
+
+  if (top < 0 || bottom > vh) {
+    return {
+      visible: false,
+      reason:
+        `Element is not fully in viewport: rect.top (${top}) >= 0 && rect.bottom (${bottom}) <= window.innerHeight (${vh}) is false`,
+    };
+  }
+
+  return {
+    visible: true,
+    reason: "Element is rendered, fully visible in viewport, and not clipped",
   };
 }
 

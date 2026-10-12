@@ -1,22 +1,14 @@
 # Passkey Provider Icon and Name Verification: audio-feed-25t
 
+- Script: scripts/passkey-provider-browser-proof.ts
+- Asserts: renders Google Password Manager with label; renders iCloud Keychain with label; renders generic Passkey fallback for unknown AAGUID; every passkey row renders an inline SVG provider icon; passkeys card is scrolled into view on desktop; mobile passkey list has zero horizontal overflow; passkeys card is scrolled into view on mobile
+
 ## Implementation Overview
 Implements WebAuthn AAGUID resolution per [web.dev/articles/passkey-management](https://web.dev/articles/passkey-management) and [web.dev/articles/webauthn-aaguid](https://web.dev/articles/webauthn-aaguid).
 - Authenticator AAGUID is extracted during WebAuthn registration (`verification.registrationInfo.aaguid`) and persisted on `PasskeyCredential.aaguid`.
 - `src/auth/aaguid.ts` maps known AAGUIDs across Google Password Manager, Apple iCloud Keychain, Windows Hello, 1Password, Bitwarden, Dashlane, and YubiKey to brand names and inline SVG icons.
 - If AAGUID is empty, unknown, or all-zeroes, it falls back to a clean generic Passkey icon.
 - `/account` UI displays the provider logo SVG and provider name alongside the passkey creation date, last used date, and user label.
-
-## Verification Results
-```
-PASS  renders Google Password Manager with label  Google Password Manager present
-PASS  renders iCloud Keychain with label  iCloud Keychain present
-PASS  renders generic Passkey fallback for unknown AAGUID  Passkey fallback present
-PASS  every passkey row renders an inline SVG provider icon  found 3 SVGs
-PASS  passkeys card is scrolled into view on desktop  passkeys card centered in desktop viewport
-PASS  mobile passkey list has zero horizontal overflow  no horizontal scroll at 390px
-PASS  passkeys card is scrolled into view on mobile  passkeys card visible in mobile viewport
-```
 
 ## Screenshots
 - `01-account-passkey-providers-desktop.png`: Desktop view of /account showing Google Password Manager, iCloud Keychain, and Passkey icons.
