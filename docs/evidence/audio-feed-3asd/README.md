@@ -1,7 +1,7 @@
 # Browser Proof: Bookmarklet CSP Disclosure & Class Fix (audio-feed-3asd)
 
 - Script: scripts/verify_3asd_bookmarklet_browser.ts
-- Asserts: bookmarklet anchor has unified class list without duplicate attributes; bookmarklet anchor is draggable for bookmark bar installation; bookmarklet anchor carries javascript: bookmarklet payload; details disclosure exists under bookmarklet box; summary explains code option when dragging is not possible; details disclosure opens upon user interaction; code snippet in disclosure contains matching bookmarklet source; disclosure code wraps and is fully visible (not horizontally clipped); disclosure text plainly explains browser CSP refusal of javascript: links; page and disclosure remain open and stable after link click
+- Asserts: bookmarklet anchor has unified class list without duplicate attributes; bookmarklet anchor is draggable for bookmark bar installation; bookmarklet anchor carries javascript: bookmarklet payload; details disclosure exists under bookmarklet box; summary explains code option when dragging is not possible; details disclosure opens upon user interaction; code snippet in disclosure contains matching bookmarklet source; disclosure code wraps and is fully visible (not horizontally clipped); disclosure text plainly explains browser CSP refusal of javascript: links; browser console explicitly records CSP refusal on bookmarklet click; zero unhandled page exceptions or unexpected console errors; page and disclosure remain open and stable after link click
 
 ## Key Verifications
 1. **Unified Class Attribute:** The bookmarklet anchor carries `class="bookmarklet-link u-strong-link"` without duplicate HTML class attributes.
@@ -19,8 +19,10 @@ PASS  details disclosure exists under bookmarklet box
 PASS  summary explains code option when dragging is not possible  summary: 'Can’t drag it? Get the bookmarklet code'
 PASS  details disclosure opens upon user interaction
 PASS  code snippet in disclosure contains matching bookmarklet source  snippet matches href (617 chars)
-PASS  disclosure code wraps and is fully visible (not horizontally clipped)  scrollWidth 0 vs clientWidth 0
+PASS  disclosure code wraps and is fully visible (not horizontally clipped)  scrollWidth 623 vs clientWidth 623
 PASS  disclosure text plainly explains browser CSP refusal of javascript: links  explanation: 'Browsers refuse javascript: links when clicked directly on a...'
+PASS  browser console explicitly records CSP refusal on bookmarklet click  refusal logged: 'Running the JavaScript URL violates the following Content Security Policy direct...'
+PASS  zero unhandled page exceptions or unexpected console errors  exceptions: 0, unexpected errors: 0
 PASS  page and disclosure remain open and stable after link click
 ```
 

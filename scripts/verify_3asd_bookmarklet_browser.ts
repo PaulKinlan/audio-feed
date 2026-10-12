@@ -54,9 +54,22 @@ try {
       url?: string;
     }
     const consoleLogs: CdpLogEntry[] = [];
+    const pageExceptions: Array<{ text: string; url?: string; line?: number }> = [];
 
     ws.addEventListener("message", (e) => {
       const msg = JSON.parse(e.data);
+      if (msg.method === "Runtime.exceptionThrown") {
+        pageExceptions.push({
+          text: msg.params.exceptionDetails?.text ??
+            msg.params.exceptionDetails?.exception?.description ?? "exception",
+          url: msg.params.exceptionDetails?.url,
+          line: msg.params.exceptionDetails?.lineNumber,
+        });
+      }
+      if (msg.method === "Log.entryAdded") {
+        const text = String(msg.params.entry?.text ?? "");
+        consoleLogs.push({ text, level: msg.params.entry?.level ?? "log" });
+      }
       if (msg.method === "Runtime.consoleAPICalled") {
         const text = msg.params.args?.map((a: { value?: unknown }) =>
           String(a.value ?? "")
@@ -104,6 +117,7 @@ try {
     try {
       await cdp("Page.enable");
       await cdp("Runtime.enable");
+      await cdp("Log.enable");
       await cdp("Emulation.setDeviceMetricsOverride", {
         width: 1280,
         height: 900,
@@ -176,19 +190,28 @@ try {
           : `snippet mismatch: snippet len ${codeSnippet?.length}, href len ${anchorHref?.length}`,
       );
 
-      const codeBox = (await js(`(() => {
-        const el = document.querySelector("details.bookmarklet-code pre.bookmarklet-snippet code");
+      const preBox = (await js(`(() => {
+        const el = document.querySelector("details.bookmarklet-code pre.bookmarklet-snippet");
         if (!el) return null;
         return {
           scrollWidth: el.scrollWidth,
           clientWidth: el.clientWidth,
           offsetWidth: el.offsetWidth,
+          clientHeight: el.clientHeight,
         };
-      })()`)) as { scrollWidth: number; clientWidth: number; offsetWidth: number } | null;
+      })()`)) as {
+        scrollWidth: number;
+        clientWidth: number;
+        offsetWidth: number;
+        clientHeight: number;
+      } | null;
       check(
         "disclosure code wraps and is fully visible (not horizontally clipped)",
-        Boolean(codeBox && codeBox.scrollWidth <= codeBox.clientWidth + 1),
-        `scrollWidth ${codeBox?.scrollWidth} vs clientWidth ${codeBox?.clientWidth}`,
+        Boolean(
+          preBox && preBox.clientWidth > 0 && preBox.clientHeight > 0 &&
+            preBox.scrollWidth <= preBox.clientWidth + 1,
+        ),
+        `scrollWidth ${preBox?.scrollWidth} vs clientWidth ${preBox?.clientWidth}`,
       );
 
       const policyExplanation = ((await js(
@@ -205,16 +228,62 @@ try {
       await js(`document.querySelector("a.bookmarklet-link")?.click()`);
       await sleep(500);
 
+      const cspRefusal = consoleLogs.find((l) =>
+        l.text.includes("Refused to run the JavaScript URL") ||
+        l.text.includes("Content Security Policy") ||
+        l.text.includes("script-src")
+      );
+      check(
+        "browser console explicitly records CSP refusal on bookmarklet click",
+        Boolean(cspRefusal),
+        cspRefusal ? `refusal logged: '${cspRefusal.text.slice(0, 80)}...'` : "no CSP refusal seen",
+      );
+
+      const unexpectedErrors = consoleLogs.filter((l) =>
+        l.level === "error" &&
+        !l.text.includes("Refused to run the JavaScript URL") &&
+        !l.text.includes("Content Security Policy") &&
+        !l.text.includes("script-src")
+      );
+      check(
+        "zero unhandled page exceptions or unexpected console errors",
+        pageExceptions.length === 0 && unexpectedErrors.length === 0,
+        `exceptions: ${pageExceptions.length}, unexpected errors: ${unexpectedErrors.length}`,
+      );
+
       // 6. Check that page state remains intact and disclosure is still copyable
       const stillOpen = await js(`document.querySelector("details.bookmarklet-code")?.open`);
       check("page and disclosure remain open and stable after link click", stillOpen === true);
 
+      // Scroll disclosure into view so screenshot captures the bookmarklet box and open code
+      await js(
+        `document.querySelector("details.bookmarklet-code")?.scrollIntoView({ block: "center" })`,
+      );
+      await sleep(300);
+
       // Capture screenshot of the open disclosure
       const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
-      await Deno.writeFile(
-        `${OUT}01-bookmarklet-disclosure-open.png`,
-        Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-      );
+      const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
+      await Deno.writeFile(`${OUT}01-bookmarklet-disclosure-open.png`, raw);
+      try {
+        const cmd = new Deno.Command("convert", {
+          args: [
+            `${OUT}01-bookmarklet-disclosure-open.png`,
+            "-colors",
+            "256",
+            `png8:${OUT}01-bookmarklet-disclosure-open.png.tmp`,
+          ],
+        });
+        const out = await cmd.output();
+        if (out.success) {
+          await Deno.rename(
+            `${OUT}01-bookmarklet-disclosure-open.png.tmp`,
+            `${OUT}01-bookmarklet-disclosure-open.png`,
+          );
+        }
+      } catch {
+        await Deno.remove(`${OUT}01-bookmarklet-disclosure-open.png.tmp`).catch(() => {});
+      }
 
       await writeEvidenceReadme({
         dir: OUT,
