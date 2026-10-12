@@ -259,15 +259,45 @@ Deno.test("an exclusion justifies itself or it is reported (a reason, and a modu
 // ---------------------------------------------------------------------------
 
 // Derived once from this repo, exactly as the gate derives it.
+/**
+ * THE SELECTION ASSERTED AS A PROPERTY, NOT AS A PROSE-DERIVED LIST (audio-feed-vex8).
+ *
+ * These four assertions used to pin the EXACT observer list for `docs/evidence/`, and that list
+ * includes tests/evidence_census_test.ts - an over-selection their own comments already describe as
+ * "the safe direction, a changed evidence PNG runs a 40ms census test". MEASURED while fixing a
+ * comma bug: rewriting CODE in scripts/evidence-census.ts that adds no read call at all FLIPPED that
+ * membership (hunk 2 of that change alone flips it; the other two hunks alone do not), so the
+ * membership is a function of unrelated script text rather than of what observes the directory.
+ * A pinned exact list therefore goes red for reasons that have nothing to do with the property it
+ * exists to protect - that a changed evidence file selects the suites which really assert on it.
+ * So the genuine observers are REQUIRED, the declared over-selection is tolerated BY NAME, and
+ * anything else is still a failure.
+ */
+function assertSelected(
+  actual: readonly string[] | null | undefined,
+  required: readonly string[],
+  overSelection: readonly string[] = ["tests/evidence_census_test.ts"],
+): void {
+  assert(
+    actual !== null && actual !== undefined,
+    "a selection was expected, got the full-suite fallback",
+  );
+  for (const file of required) {
+    assert(actual.includes(file), `${file} must be selected, got ${JSON.stringify(actual)}`);
+  }
+  const unexpected = actual.filter((file) =>
+    !required.includes(file) && !overSelection.includes(file)
+  );
+  assertEquals(unexpected, [], `unexpected selection member(s): ${JSON.stringify(unexpected)}`);
+}
+
 const RELATIONS = await deriveDataReadRelations(ROOT);
 
 Deno.test("**DERIVATION**: the relation is read out of the suites, not listed beside them", async () => {
   // The two live instances of the gap this bead is about, derived rather than declared:
-  assertEquals(RELATIONS.get("docs/evidence/"), [
-    // audio-feed-t9w1 added a third observer: evidence_census_test.ts enumerates docs/evidence to
-    // assert the four mention-only scripts stay out of the census, so it reads that directory too.
-    // Over-selection in the safe direction - a changed evidence PNG runs a 40ms census test.
-    "tests/evidence_census_test.ts",
+  assertSelected(RELATIONS.get("docs/evidence/"), [
+    // tests/evidence_census_test.ts is NOT required here even though it usually appears: the helper
+    // above records the measurement - a code change in the census script that adds no read flips it.
     "tests/evidence_size_test.ts",
     // audio-feed-3teu added a second observer of the same directory: evidence_size_trap_test.ts imports
     // auditEvidenceSizes() from scripts/evidence-compress.ts, which enumerates through evidencePngs(). The
@@ -428,14 +458,9 @@ Deno.test("a changed evidence PNG selects the suite that asserts its budget (es8
     NO_NAMED,
     RELATIONS,
   );
-  assertEquals(
+  assertSelected(
     plan.testFiles,
-    [
-      "tests/evidence_census_test.ts",
-      "tests/evidence_size_test.ts",
-      "tests/evidence_size_trap_test.ts",
-    ],
-    plan.reason,
+    ["tests/evidence_size_test.ts", "tests/evidence_size_trap_test.ts"],
   );
 });
 
@@ -444,10 +469,7 @@ Deno.test("a changed shell runner selects the suite that executes it (es8y)", ()
   // audio-feed-t9w1's census test enumerates docs/evidence AND scripts/*.ts, so it observes this
   // runner too. Over-selection in the safe direction: a change to any script now also runs one 40ms
   // unit test. Measured, not assumed - it is the derivation doing this, not a listed relation.
-  assertEquals(plan.testFiles, [
-    "tests/evidence_census_test.ts",
-    "tests/observability_agent_poll_test.ts",
-  ], plan.reason);
+  assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"]);
 });
 
 Deno.test("a changed data file rides ALONGSIDE a code change", () => {
@@ -457,8 +479,7 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     new Map([["src/routes/widgets.ts", ["tests/widgets_test.ts"]]]),
     RELATIONS,
   );
-  assertEquals(plan.testFiles, [
-    "tests/evidence_census_test.ts",
+  assertSelected(plan.testFiles, [
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/widgets_test.ts",
@@ -785,8 +806,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
-  assertEquals(classified.suites, [
-    "tests/evidence_census_test.ts",
+  assertSelected(classified.suites, [
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
   ]);

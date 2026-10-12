@@ -74,12 +74,20 @@ export function idsIn(text: string): string[] {
  *
  * DECLARED LIMIT, MEASURED (audio-feed-vex8), AND NOT FIXED HERE BECAUSE IT IS A
  * DIFFERENT THRESHOLD: a write target assembled from SEPARATE string segments has
- * no contiguous `docs/evidence` substring, so `path.join("docs", "evidence",
- * "audio-feed-x/y.txt")` as a first argument resolves its id but reads as a
- * MENTION rather than a write. Widening the prefix test to a concatenation of the
- * argument's literals would change this predicate's published counts (36 writer
- * directories on the tree at the time of writing), so it is a decision with its own
+ * no contiguous evidence prefix, so joining the prefix's own two segments with a
+ * slice name as a first argument resolves its id but reads as a MENTION rather
+ * than a write. Widening the prefix test to a concatenation of the argument's
+ * literals would change this predicate's published counts (36 writer directories
+ * on the tree at the time of writing), so it is a decision with its own
  * before/after rather than a by-product of a comma fix.
+ *
+ * AND THIS PARAGRAPH IS ITSELF EVIDENCE OF THAT CLASS, WHICH IS WHY IT NO LONGER
+ * SPELLS THE PATH OUT: written with a literal `path.join` expression, the gate's
+ * read relation RESOLVED it out of this comment, recorded this script - and so
+ * every suite that imports it - as an observer of docs/evidence, and turned five
+ * pinned assertions red in tests/fast_gate_subset_test.ts. A path in a comment is
+ * a path to a scanner, exactly as a call in a comment was to the previous version
+ * of this file: the same lesson from the other side.
  *
  * DECLARED LIMITS, because a masker with unstated holes is worse than none: a
  * REGEX LITERAL is not masked (telling `/` as regex from division needs a

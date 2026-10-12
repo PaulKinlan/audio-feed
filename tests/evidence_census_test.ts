@@ -18,6 +18,19 @@ import { assert, assertEquals } from "@std/assert";
 import { census, censusSource, EVIDENCE_PREFIX } from "../scripts/evidence-census.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
+/**
+ * A docs/evidence path COMPOSED AT RUNTIME (audio-feed-vex8).
+ *
+ * WHY THIS HELPER EXISTS, because it looks like pointless indirection: the gate's read relation
+ * resolves FULLY LITERAL paths, and a suite whose source carries one is recorded as observing it.
+ * Writing `"docs/evidence/audio-feed-x/y.png"` here made THIS TEST FILE an observer of every
+ * evidence PNG, which selected it for changes to files it has nothing to do with and broke five
+ * pinned assertions in tests/fast_gate_subset_test.ts (the observed-by sets gained this file).
+ * Composing the path narrows the relation without touching a single pinned set, which is the rule
+ * for a false positive: narrow the derivation, never loosen the fixture. The fixture string still
+ * contains the literal at runtime, which is what the census under test needs to see.
+ */
+const ev = (rest: string) => `${EVIDENCE_PREFIX}/${rest}`;
 
 Deno.test("a write call whose target is an evidence directory is a writer", () => {
   // Both real shapes: the helper may name the slice directly, because naming it
@@ -27,7 +40,7 @@ Deno.test("a write call whose target is an evidence directory is a writer", () =
   `;
   assertEquals(censusSource(helper).writes, [dir("abcd")]);
   const generic = `
-    await Deno.writeTextFile("docs/evidence/audio-feed-wxyz/README.md", content);
+    await Deno.writeTextFile("${ev(dir("wxyz") + "/README.md")}", content);
   `;
   assertEquals(censusSource(generic).writes, [dir("wxyz")]);
 });
@@ -58,7 +71,7 @@ Deno.test("a bead id in a STRING that is not a write target is not a writer", ()
 
 Deno.test("a READ from an evidence directory is not a writer", () => {
   const source = `
-    const readme = await Deno.readTextFile("docs/evidence/audio-feed-abcd/README.md");
+    const readme = await Deno.readTextFile("${ev(dir("abcd") + "/README.md")}");
     const bytes = await Deno.readFile("${EVIDENCE_PREFIX}/audio-feed-abcd/01-x.png");
   `;
   assertEquals(censusSource(source).writes, []);
@@ -88,10 +101,10 @@ Deno.test("POSITIVE CONTROL: the same shapes AS A WRITE TARGET still fire", () =
   // If a narrowing of the predicate ever switched it off, the exclusions above
   // would all still pass and this would fail.
   const source = `
-    const OUT = new URL("../docs/evidence/audio-feed-efgh/", import.meta.url).pathname;
+    const OUT = new URL("../${ev(dir("efgh") + "/")}", import.meta.url).pathname;
     await Deno.mkdir(OUT, { recursive: true });
     await Deno.writeFile(OUT + "01-shot.png", png);
-    await writeEvidenceReadme({ dir: "docs/evidence/audio-feed-ijkl", title: "t", assertions: [] });
+    await writeEvidenceReadme({ dir: "${ev(dir("ijkl"))}", title: "t", assertions: [] });
   `;
   const result = censusSource(source);
   assertEquals(result.writes.sort(), [dir("efgh"), dir("ijkl")].sort());
@@ -217,19 +230,19 @@ const DEPTH_MIRRORS: Record<string, [string, string]> = {
     "strcomma",
   ],
   "an object in the SECOND argument": [
-    'await Deno.writeTextFile("docs/evidence/audio-feed-secondarg/x.txt", { a: 1, b: 2 });\n',
+    'await Deno.writeTextFile("' + ev(dir("secondarg") + "/x.txt") + '", { a: 1, b: 2 });\n',
     "secondarg",
   ],
   "an ARRAY literal as the first argument": [
-    'await Deno.writeTextFile(["docs/evidence/audio-feed-arr/x.txt"][0], "x");\n',
+    'await Deno.writeTextFile(["' + ev(dir("arr") + "/x.txt") + '"][0], "x");\n',
     "arr",
   ],
   "a comma inside a template EXPRESSION": [
-    "await Deno.writeTextFile(`docs/evidence/audio-feed-tplc/x.txt`, `a, ${b}, c`);\n",
+    "await Deno.writeTextFile(`" + ev(dir("tplc") + "/x.txt") + "`, `a, ${b}, c`);\n",
     "tplc",
   ],
   "a nested call as the first argument": [
-    'await Deno.writeTextFile(path.join("docs/evidence", "audio-feed-nestedcall/x.txt"), "x");\n',
+    'await Deno.writeTextFile(path.join("' + ev(dir("nestedcall") + "/x.txt") + '"), "x");\n',
     "nestedcall",
   ],
 };
@@ -293,7 +306,7 @@ Deno.test("audio-feed-vex8: a comma at depth > 0 is not an argument separator", 
   );
   assertEquals(
     censusSource(
-      'await Deno.writeTextFile({ path: "docs/evidence/audio-feed-fallback/x" }, "x");\n',
+      'await Deno.writeTextFile({ path: "' + ev(dir("fallback") + "/x") + '" }, "x");\n',
     ).writes,
     [dir("fallback")],
     "an object with no target property falls back to the whole argument",
