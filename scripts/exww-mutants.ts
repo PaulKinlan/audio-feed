@@ -291,16 +291,24 @@ export async function buildScratch(options: Pick<Options, "keep"> = {}): Promise
   const dir = options.keep
     ? resolve(options.keep)
     : await Deno.makeTempDir({ prefix: "exww-mutants-" });
-  for (const path of ["scripts", "src", EVIDENCE_DIR]) {
-    await copyTree(join(REPO, path), join(dir, path));
-  }
-  for (const file of ["deno.json", "deno.lock"]) {
-    try {
-      await Deno.copyFile(join(REPO, file), join(dir, file));
-    } catch { /* no lockfile: deno resolves from its own cache either way */ }
+  // COPY WHAT THE TREE CARRIES RATHER THAN AN ENUMERATED LIST, because the enumeration went stale the moment a
+  // proof imported something outside it: the exww proof imports ../tests/fixtures.ts, so every run in a scratch
+  // that carried only scripts/src/deno.json died with "Module not found" in 0.1s - the baseline was never green
+  // and every row's "red" was a red for the wrong reason. A scratch that cannot run the unmutated proof makes
+  // the whole matrix meaningless, so this is a correctness fix.
+  // Excluded on purpose: .git and .beads (a scratch has no business copying a git dir or a possibly-locked Dolt
+  // DB), node_modules (installs are not inputs to a Deno proof), and .fleet (per-VM state).
+  for await (const entry of Deno.readDir(REPO)) {
+    if (SKIP_ENTRIES.has(entry.name)) continue;
+    const src = join(REPO, entry.name);
+    const dst = join(dir, entry.name);
+    if (entry.isDirectory) await copyTree(src, dst);
+    else if (entry.isFile) await Deno.copyFile(src, dst);
   }
   return dir;
 }
+
+const SKIP_ENTRIES = new Set([".git", ".beads", ".fleet", "node_modules"]);
 
 async function copyTree(from: string, to: string): Promise<void> {
   await Deno.mkdir(to, { recursive: true });

@@ -48,7 +48,7 @@ Deno.test({
         0,
         `the UNMUTATED proof must pass before any mutant can mean anything: exit ${baseline.code}${
           baseline.timedOut ? " (TIMED OUT - a bound, not a proof failure)" : ""
-        }\n${baseline.failures.slice(0, 4).join("\n")}`,
+        }\n${baseline.failures.slice(0, 4).join("\n")}\n${baseline.tail.slice(-800)}`,
       );
       assertEquals(baseline.failures, [], "the unmutated proof must report no FAIL line");
 
