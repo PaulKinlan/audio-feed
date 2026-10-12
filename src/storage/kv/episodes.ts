@@ -512,22 +512,6 @@ export function createEpisodesRepository(
       owner: string,
       billing?: EpisodeBilling,
     ): Promise<boolean> {
-      // Invariant enforcement (audio-feed-9gqs):
-      // A transition to "ready" requires a billing payload at the storage boundary.
-      // Unsynthesized/failed transitions (which carry episode.error) may omit billing.
-      if (
-        episode.status === "ready" &&
-        !episode.error &&
-        (!billing ||
-          typeof billing.byteLength !== "number" ||
-          !Number.isFinite(billing.byteLength) ||
-          !Number.isInteger(billing.byteLength) ||
-          billing.byteLength < 0)
-      ) {
-        throw new TypeError(
-          `completeEpisode requires a valid billing payload ({ byteLength: non-negative integer }) when completing with status "ready" (audio-feed-9gqs, audio-feed-do6b)`,
-        );
-      }
       const key: Deno.KvKey = ["episode", episode.userId, episode.id];
       const entry = await core.kv.get<Episode>(key);
       const current = entry.value;
@@ -543,6 +527,29 @@ export function createEpisodesRepository(
       // Writing anyway would overwrite the winner's audio with ours, silently.
       if (current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
+      }
+
+      // Invariant enforcement (audio-feed-9gqs, audio-feed-do6b, audio-feed-pr5v):
+      // A transition to "ready" requires a billing payload at the storage boundary.
+      // An unbilled ready transition is permitted ONLY for a genuine restore of previously
+      // ready audio (same durable audioKey, verified from current episode state, not caller claim).
+      const isGenuineRestore = episode.status === "ready" &&
+        Boolean(episode.error) &&
+        Boolean(current.audioKey) &&
+        current.audioKey === episode.audioKey;
+
+      if (
+        episode.status === "ready" &&
+        !isGenuineRestore &&
+        (!billing ||
+          typeof billing.byteLength !== "number" ||
+          !Number.isFinite(billing.byteLength) ||
+          !Number.isInteger(billing.byteLength) ||
+          billing.byteLength < 0)
+      ) {
+        throw new TypeError(
+          `completeEpisode requires a valid billing payload ({ byteLength: non-negative integer }) when completing with status "ready" (audio-feed-9gqs, audio-feed-do6b, audio-feed-pr5v)`,
+        );
       }
       const wrote = await atomicPutEpisode(core, { ...episode, claimedBy: owner }, entry, billing);
       if (wrote) {
