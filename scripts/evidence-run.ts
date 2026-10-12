@@ -49,18 +49,22 @@
  *   quietly is satisfied by construction, which is the defect class this fleet has been closing all
  *   evening.
  */
-import { fromFileUrl, join, resolve } from "@std/path";
+import { fromFileUrl, join, relative, resolve } from "@std/path";
 
-interface Declaration {
+export interface Declaration {
   /** `docs/evidence/<dir>` relative to the root. */
   dir: string;
   /** The path as written in the README. */
   declared: string;
   /** Whether that path is a file under the root. */
   exists: boolean;
+  /** Whether the README explicitly admits no assertions (- Capture: no assertions). */
+  isCapture: boolean;
+  /** Asserts line if present in README. */
+  asserts: string | null;
 }
 
-interface Options {
+export interface Options {
   list: boolean;
   only?: string;
   timeoutMs: number;
@@ -70,7 +74,7 @@ interface Options {
 const USAGE =
   `usage: deno task evidence [--list] [--only <evidence-dir>] [--timeout <seconds>] [--root <dir>]`;
 
-function parseOptions(args: string[]): Options {
+export function parseOptions(args: string[]): Options {
   const root = resolve(fromFileUrl(new URL("../", import.meta.url)));
   const options: Options = { list: false, timeoutMs: 300_000, root };
   for (let i = 0; i < args.length; i++) {
@@ -99,28 +103,80 @@ function parseOptions(args: string[]): Options {
   return options;
 }
 
+export interface DeclarationInfo {
+  declared: string | null;
+  isCapture: boolean;
+  asserts: string | null;
+}
+
 /**
  * The declaration the READMEs already carry, rather than a new one: a `- Script:` line naming the
  * proof that produces the directory's evidence. Backticks and quotes are stripped because the line
  * is prose as often as it is a path.
+ *
+ * Also checks whether the directory admits no assertions (- Capture: no assertions) or carries
+ * an explicit - Asserts: line (audio-feed-c0ft).
  */
-function readDeclaration(readme: string): string | null {
+export function readDeclaration(readme: string): DeclarationInfo {
+  let declared: string | null = null;
+  let isCapture = false;
+  let asserts: string | null = null;
   for (const line of readme.split("\n")) {
-    const match = /^\s*-\s*Script:\s*(.+?)\s*$/.exec(line);
-    if (match) return match[1]!.replace(/[`"']/g, "").trim();
+    const scriptMatch = /^\s*-\s*Script:\s*(.+?)\s*$/.exec(line);
+    if (scriptMatch) declared = scriptMatch[1]!.replace(/[`"']/g, "").trim();
+    if (/^\s*-\s*Capture:\s*no assertions\b/.test(line)) isCapture = true;
+    const assertsMatch = /^\s*-\s*Asserts:\s*(.+)$/.exec(line);
+    if (assertsMatch) asserts = assertsMatch[1]!.trim();
   }
-  return null;
+  return { declared, isCapture, asserts };
 }
 
-async function collect(options: Options): Promise<{
+/**
+ * audio-feed-c0ft: Walk docs/evidence recursively to detect any nested evidence directories.
+ * Evidence directories must be flat directly under docs/evidence/ (depth 1).
+ * Any nested subdirectory (depth >= 2) carrying a README.md (declared or undeclared) is refused.
+ */
+export async function findNestedEvidence(evidenceRoot: string): Promise<string[]> {
+  const nested: string[] = [];
+  async function walk(dir: string, depth: number) {
+    const entries: Deno.DirEntry[] = [];
+    try {
+      for await (const e of Deno.readDir(dir)) entries.push(e);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory) {
+        const sub = join(dir, entry.name);
+        if (depth >= 1) {
+          // Inside docs/evidence/<top>/...
+          // If this nested directory has a README.md (declared or undeclared), it is a nested evidence directory.
+          try {
+            await Deno.stat(join(sub, "README.md"));
+            nested.push(sub);
+          } catch {
+            // Check deeper subdirectories
+          }
+        }
+        await walk(sub, depth + 1);
+      }
+    }
+  }
+  await walk(evidenceRoot, 0);
+  return nested;
+}
+
+export async function collect(options: Options): Promise<{
   declarations: Declaration[];
   undeclared: string[];
   withoutReadme: string[];
+  refused: string[];
 }> {
   const evidenceRoot = join(options.root, "docs", "evidence");
   const declarations: Declaration[] = [];
   const undeclared: string[] = [];
   const withoutReadme: string[] = [];
+  const refused: string[] = [];
   const names: string[] = [];
   try {
     for await (const entry of Deno.readDir(evidenceRoot)) {
@@ -135,6 +191,15 @@ async function collect(options: Options): Promise<{
     );
     Deno.exit(1);
   }
+
+  // Refusal: fail-closed detection of nested evidence directories (audio-feed-c0ft).
+  // Evidence directories must be flat directly under docs/evidence/.
+  const nested = await findNestedEvidence(evidenceRoot);
+  for (const n of nested) {
+    const rel = relative(options.root, n);
+    refused.push(rel);
+  }
+
   // Stable order so two runs of the inventory are comparable line by line.
   names.sort();
   for (const name of names) {
@@ -147,27 +212,42 @@ async function collect(options: Options): Promise<{
       withoutReadme.push(dir);
       continue;
     }
-    const declared = readDeclaration(readme);
-    if (!declared) {
+    const info = readDeclaration(readme);
+    if (!info.declared) {
       undeclared.push(dir);
       continue;
     }
     let exists = false;
     try {
-      exists = (await Deno.stat(join(options.root, declared))).isFile;
+      exists = (await Deno.stat(join(options.root, info.declared))).isFile;
     } catch {
       exists = false;
     }
-    declarations.push({ dir, declared, exists });
+    declarations.push({
+      dir,
+      declared: info.declared,
+      exists,
+      isCapture: info.isCapture,
+      asserts: info.asserts,
+    });
   }
-  return { declarations, undeclared, withoutReadme };
+  return { declarations, undeclared, withoutReadme, refused };
 }
 
-interface RunResult {
+export function stripAnsi(text: string): string {
+  // deno-lint-ignore no-control-regex
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+export interface RunResult {
   code: number;
   seconds: number;
   timedOut: boolean;
   tail: string;
+  outputEmpty: boolean;
+  hasAssertionSignal: boolean;
+  passed: boolean;
+  failureReason?: string;
 }
 
 /**
@@ -189,7 +269,7 @@ interface RunResult {
  * blocked in `output()` forever. It kills the direct child, which is always permitted to this
  * process.
  */
-async function runProof(
+export async function runProof(
   options: Options,
   declaration: Declaration,
   onChild: (pid: number | null) => void,
@@ -225,162 +305,212 @@ async function runProof(
   const output = await child.output();
   clearTimeout(backstop);
   onChild(null);
-  const text = `${new TextDecoder().decode(output.stdout)}\n${
+  const rawText = `${new TextDecoder().decode(output.stdout)}\n${
     new TextDecoder().decode(output.stderr)
   }`;
-  const tail = text.split("\n").filter((line) => line.trim() !== "").slice(-6).join("\n  ");
+  const text = stripAnsi(rawText);
+  const outputEmpty = text.trim().length === 0;
+  const hasAssertionSignal = /\b(PASS|OK)\b/.test(text);
+  const tail = rawText.split("\n").filter((line) => line.trim() !== "").slice(-6).join("\n  ");
+
+  let passed = output.code === 0;
+  let failureReason: string | undefined;
+  if (output.code === 0) {
+    if (outputEmpty) {
+      passed = false;
+      failureReason =
+        "EMPTY OUTPUT: script exited 0 without asserting anything or producing output";
+    } else if (!declaration.isCapture && !hasAssertionSignal) {
+      passed = false;
+      failureReason =
+        "ZERO ASSERTIONS: declared Asserts but output contains no PASS or OK assertion marker";
+    }
+  }
+
   return {
     code: output.code,
     seconds: (performance.now() - started) / 1000,
     // GNU timeout reports 124 when the bound was hit, and 137 when the KILL grace expired.
     timedOut: output.code === 124 || output.code === 137,
     tail,
+    outputEmpty,
+    hasAssertionSignal,
+    passed,
+    failureReason,
   };
 }
 
-const options = parseOptions(Deno.args);
-const { declarations, undeclared, withoutReadme } = await collect(options);
-const unresolved = declarations.filter((declaration) => !declaration.exists);
+export async function main(args: string[] = Deno.args): Promise<void> {
+  const options = parseOptions(args);
+  const { declarations, undeclared, withoutReadme, refused } = await collect(options);
+  const unresolved = declarations.filter((declaration) => !declaration.exists);
 
-/**
- * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
- * directory that declares nothing, a directory with no README, and one script declared by two
- * directories - and every one of them is a skip in disguise if it is silent: a skip that is not
- * printed is a test that stopped testing. They are named here, counted in the summary, and they make
- * the tier exit 2 (no proof failed, but the evidence tree is not fully declared).
- *
- * Measured before deciding how to treat the duplicate: scripts/bookmarklet-browser-proof.ts is
- * declared by audio-feed-6hw and audio-feed-ep1, and that is legitimate - one proof produces two
- * evidence sets with different artefacts and different assertion lists. So a duplicate is reported
- * rather than failed, because failing it would be a red that is not a defect.
- */
-const byScript = new Map<string, string[]>();
-for (const declaration of declarations) {
-  const dirs = byScript.get(declaration.declared) ?? [];
-  dirs.push(declaration.dir);
-  byScript.set(declaration.declared, dirs);
-}
-const duplicates = [...byScript.entries()].filter(([, dirs]) => dirs.length > 1).sort((a, b) =>
-  a[0] < b[0] ? -1 : 1
-);
-
-function printDebt(): number {
-  for (const dir of undeclared) {
-    console.log(`[evidence] debt: ${dir} declares no proof (no '- Script:' line in its README)`);
-  }
-  for (const dir of withoutReadme) {
-    console.log(`[evidence] debt: ${dir} has no README, so nothing is declared or asserted there`);
-  }
-  for (const [script, dirs] of duplicates) {
-    console.log(
-      `[evidence] note: ${script} is declared by ${dirs.length} directories (${
-        dirs.join(", ")
-      }) - ` +
-        `one proof producing more than one evidence set; it will be run once per declaring directory`,
-    );
-  }
-  return undeclared.length + withoutReadme.length;
-}
-
-if (options.list) {
+  /**
+   * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
+   * directory that declares nothing, a directory with no README, and one script declared by two
+   * directories - and every one of them is a skip in disguise if it is silent: a skip that is not
+   * printed is a test that stopped testing. They are named here, counted in the summary, and they make
+   * the tier exit 2 (no proof failed, but the evidence tree is not fully declared).
+   *
+   * Measured before deciding how to treat the duplicate: scripts/bookmarklet-browser-proof.ts is
+   * declared by audio-feed-6hw and audio-feed-ep1, and that is legitimate - one proof produces two
+   * evidence sets with different artefacts and different assertion lists. So a duplicate is reported
+   * rather than failed, because failing it would be a red that is not a defect.
+   */
+  const byScript = new Map<string, string[]>();
   for (const declaration of declarations) {
-    console.log(
-      `${
-        declaration.exists ? "declared  " : "UNRESOLVED"
-      } ${declaration.dir} -> ${declaration.declared}`,
-    );
+    const dirs = byScript.get(declaration.declared) ?? [];
+    dirs.push(declaration.dir);
+    byScript.set(declaration.declared, dirs);
   }
-  console.log(
-    `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
-      `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
-      (options.only ? ` (filtered to --only ${options.only})` : ""),
+  const duplicates = [...byScript.entries()].filter(([, dirs]) => dirs.length > 1).sort((a, b) =>
+    a[0] < b[0] ? -1 : 1
   );
-  printDebt();
-  console.log("[evidence] --list is an inventory, not a verdict: it exits 0 and runs nothing");
-  Deno.exit(0);
-}
 
-console.log(
-  `[evidence] running ${declarations.length} declared proof(s) sequentially, ${
-    options.timeoutMs / 1000
-  }s ` +
-    `bound each, from ${options.root}`,
-);
-// A run that exercised nothing is RED. Measured before a reviewer saw it: `--only` with a name that
-// matched nothing printed "every declared proof passed on this tree" and exited 0, so a typo in a
-// filter read as a clean bill of health.
-if (declarations.length === 0) {
-  console.error(
-    options.only
-      ? `[evidence] --only ${options.only} matched no evidence directory that declares a proof ` +
-        `(${undeclared.length} declare nothing, ${withoutReadme.length} have no README): ` +
-        `nothing was verified`
-      : `[evidence] no evidence directory declares a proof under ${options.root}: nothing was verified`,
-  );
-  Deno.exit(1);
-}
-const debt = printDebt();
-const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
-let running: number | null = null;
-try {
-  for (const declaration of declarations) {
-    if (!declaration.exists) {
-      console.log(
-        `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (UNRESOLVED: not a file)`,
-      );
-      results.push({ declaration });
-      continue;
+  function printDebt(): number {
+    for (const dir of undeclared) {
+      console.log(`[evidence] debt: ${dir} declares no proof (no '- Script:' line in its README)`);
     }
-    const result = await runProof(options, declaration, (pid) => running = pid);
-    results.push({ declaration, result });
-    // A proof that exceeded the BOUND is UNKNOWN, not failed: 124/137/143 mean the bound killed it,
-    // which is the fleet's own rule and the same distinction the gate draws. It is still non-zero,
-    // because an unknown is not a pass - but calling it a failure would be this tier overclaiming.
-    const verdict = result.code === 0 ? "ok  " : result.timedOut ? "TIMEOUT" : "FAIL";
-    const note = result.timedOut
-      ? ` UNKNOWN (exceeded the ${options.timeoutMs / 1000}s bound; raise --timeout to decide it)`
-      : "";
+    for (const dir of withoutReadme) {
+      console.log(
+        `[evidence] debt: ${dir} has no README, so nothing is declared or asserted there`,
+      );
+    }
+    for (const [script, dirs] of duplicates) {
+      console.log(
+        `[evidence] note: ${script} is declared by ${dirs.length} directories (${
+          dirs.join(", ")
+        }) - ` +
+          `one proof producing more than one evidence set; it will be run once per declaring directory`,
+      );
+    }
+    return undeclared.length + withoutReadme.length;
+  }
+
+  if (options.list) {
+    for (const dir of refused) {
+      console.log(`REFUSED    ${dir} (nested evidence directory)`);
+    }
+    for (const declaration of declarations) {
+      console.log(
+        `${
+          declaration.exists ? "declared  " : "UNRESOLVED"
+        } ${declaration.dir} -> ${declaration.declared}`,
+      );
+    }
     console.log(
-      `[evidence] ${verdict} ${declaration.dir} -> ${declaration.declared} ` +
-        `(exit ${result.code}, ${result.seconds.toFixed(1)}s)${note}`,
+      `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
+        `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
+        (refused.length > 0 ? `, ${refused.length} refused (nested)` : "") +
+        (options.only ? ` (filtered to --only ${options.only})` : ""),
     );
-    if (result.code !== 0 && result.tail) console.log(`  ${result.tail}`);
+    printDebt();
+    console.log("[evidence] --list is an inventory, not a verdict: it exits 0 and runs nothing");
+    Deno.exit(0);
   }
-} finally {
-  // Never leave a proof's server or browser running after the tier returns.
-  if (running) {
-    try {
-      Deno.kill(-running, "SIGKILL");
-    } catch { /* already gone */ }
+
+  // Refusal: fail-closed if any nested evidence directory was found (audio-feed-c0ft).
+  if (refused.length > 0) {
+    for (const dir of refused) {
+      console.error(
+        `[evidence] FAIL: nested evidence directory is forbidden: ${dir} ` +
+          `(evidence directories must be flat directly under docs/evidence/)`,
+      );
+    }
+    console.error(
+      `[evidence] RED: ${refused.length} nested evidence directory(ies) detected; refusing run - ` +
+        `an unexamined nested proof cannot be credited as green`,
+    );
+    Deno.exit(1);
   }
+
+  console.log(
+    `[evidence] running ${declarations.length} declared proof(s) sequentially, ${
+      options.timeoutMs / 1000
+    }s ` +
+      `bound each, from ${options.root}`,
+  );
+  // A run that exercised nothing is RED. Measured before a reviewer saw it: `--only` with a name that
+  // matched nothing printed "every declared proof passed on this tree" and exited 0, so a typo in a
+  // filter read as a clean bill of health.
+  if (declarations.length === 0) {
+    console.error(
+      options.only
+        ? `[evidence] --only ${options.only} matched no evidence directory that declares a proof ` +
+          `(${undeclared.length} declare nothing, ${withoutReadme.length} have no README): ` +
+          `nothing was verified`
+        : `[evidence] no evidence directory declares a proof under ${options.root}: nothing was verified`,
+    );
+    Deno.exit(1);
+  }
+  const debt = printDebt();
+  const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
+  let running: number | null = null;
+  try {
+    for (const declaration of declarations) {
+      if (!declaration.exists) {
+        console.log(
+          `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (UNRESOLVED: not a file)`,
+        );
+        results.push({ declaration });
+        continue;
+      }
+      const result = await runProof(options, declaration, (pid) => running = pid);
+      results.push({ declaration, result });
+      // A proof that exceeded the BOUND is UNKNOWN, not failed: 124/137/143 mean the bound killed it,
+      // which is the fleet's own rule and the same distinction the gate draws. It is still non-zero,
+      // because an unknown is not a pass - but calling it a failure would be this tier overclaiming.
+      const verdict = result.passed ? "ok  " : result.timedOut ? "TIMEOUT" : "FAIL";
+      const reasonNote = result.failureReason ? ` (${result.failureReason})` : "";
+      const note = result.timedOut
+        ? ` UNKNOWN (exceeded the ${options.timeoutMs / 1000}s bound; raise --timeout to decide it)`
+        : reasonNote;
+      console.log(
+        `[evidence] ${verdict} ${declaration.dir} -> ${declaration.declared} ` +
+          `(exit ${result.code}, ${result.seconds.toFixed(1)}s)${note}`,
+      );
+      if (!result.passed && result.tail) console.log(`  ${result.tail}`);
+    }
+  } finally {
+    // Never leave a proof's server or browser running after the tier returns.
+    if (running) {
+      try {
+        Deno.kill(-running, "SIGKILL");
+      } catch { /* already gone */ }
+    }
+  }
+
+  const passed = results.filter((entry) => entry.result?.passed === true).length;
+  const unknown =
+    results.filter((entry) => entry.result !== undefined && entry.result.timedOut).length;
+  const failed = results.length - passed - unknown;
+  const seconds = results.reduce((total, entry) => total + (entry.result?.seconds ?? 0), 0);
+  console.log(
+    `[evidence] ${passed} passed, ${failed} failed, ${unknown} unknown (exceeded the bound) of ` +
+      `${declarations.length} declared ` +
+      `(${unresolved.length} unresolved, ${undeclared.length} declare nothing, ` +
+      `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
+  );
+  if (failed > 0 || unknown > 0) {
+    console.log(
+      `[evidence] RED: ${failed} declared proof(s) failed or asserted nothing` +
+        (unknown > 0
+          ? ` and ${unknown} stayed UNKNOWN inside the ${options.timeoutMs / 1000}s bound`
+          : "") +
+        " - an unknown is not a pass",
+    );
+    Deno.exit(1);
+  }
+  if (debt > 0) {
+    console.log(
+      `[evidence] RED (declaration debt): every declared proof passed, but ${debt} directory(ies) ` +
+        `declare nothing and were therefore not run - the list is above, by name`,
+    );
+    Deno.exit(2);
+  }
+  console.log(`[evidence] every declared proof passed on this tree (${passed} proof(s))`);
 }
 
-const passed = results.filter((entry) => entry.result?.code === 0).length;
-const unknown =
-  results.filter((entry) => entry.result !== undefined && entry.result.timedOut).length;
-const failed = results.length - passed - unknown;
-const seconds = results.reduce((total, entry) => total + (entry.result?.seconds ?? 0), 0);
-console.log(
-  `[evidence] ${passed} passed, ${failed} failed, ${unknown} unknown (exceeded the bound) of ` +
-    `${declarations.length} declared ` +
-    `(${unresolved.length} unresolved, ${undeclared.length} declare nothing, ` +
-    `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
-);
-if (failed > 0 || unknown > 0) {
-  console.log(
-    `[evidence] RED: ${failed} declared proof(s) failed` +
-      (unknown > 0
-        ? ` and ${unknown} stayed UNKNOWN inside the ${options.timeoutMs / 1000}s bound`
-        : "") +
-      " - an unknown is not a pass",
-  );
-  Deno.exit(1);
+if (import.meta.main) {
+  await main();
 }
-if (debt > 0) {
-  console.log(
-    `[evidence] RED (declaration debt): every declared proof passed, but ${debt} directory(ies) ` +
-      `declare nothing and were therefore not run - the list is above, by name`,
-  );
-  Deno.exit(2);
-}
-console.log(`[evidence] every declared proof passed on this tree (${passed} proof(s))`);
