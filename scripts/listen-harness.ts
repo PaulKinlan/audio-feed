@@ -122,6 +122,16 @@ export async function createListenHarness(port = 8131) {
     feedToken: TOKEN,
   });
 
+  await stores.metadata.putUser({
+    id: "user-2",
+    email: "other@example.com",
+    displayName: "Other User",
+    status: "approved",
+    isAdmin: false,
+    createdAt: now.toISOString(),
+    feedToken: "other-token",
+  });
+
   await stores.metadata.putSource({
     id: "stratechery",
     userId: "user-1",
