@@ -1,0 +1,29 @@
+# Browser Proof: Bookmarklet CSP Disclosure & Class Fix (audio-feed-3asd)
+
+## Test Environment
+- **Browser:** Headless Chrome (CDP)
+- **Viewport:** 1280x900
+- **URL:** `http://localhost:35033/`
+
+## Key Verifications
+1. **Unified Class Attribute:** The bookmarklet anchor carries `class="bookmarklet-link u-strong-link"` without duplicate HTML class attributes.
+2. **Draggable Installation:** The anchor retains `draggable="true"` and the full `javascript:(function()...` payload for dragging to the bookmarks bar.
+3. **No-Script Disclosure Fallback:** A native HTML5 `<details class="bookmarklet-code">` disclosure provides the bookmarklet source inside a `<pre class="bookmarklet-snippet"><code>` element.
+4. **Honest CSP Explanation:** The disclosure explains that browsers refuse `javascript:` links when clicked directly on a CSP-protected page and directs the user to drag the link or copy the snippet.
+5. **Zero Inline Script:** Operates without any un-nonced inline scripts or click interception scripts, conforming strictly to the page's Content Security Policy.
+
+## Execution Log
+```
+PASS  bookmarklet anchor has unified class list without duplicate attributes  class: 'bookmarklet-link u-strong-link'
+PASS  bookmarklet anchor is draggable for bookmark bar installation  draggable: 'true'
+PASS  bookmarklet anchor carries javascript: bookmarklet payload  href starts with: 'javascript:(function(){var u=l...'
+PASS  details disclosure exists under bookmarklet box  
+PASS  summary explains code option when dragging is not possible  summary: 'Can’t drag it? Get the bookmarklet code'
+PASS  details disclosure opens upon user interaction  
+PASS  code snippet in disclosure contains matching bookmarklet source  snippet matches href (617 chars)
+PASS  disclosure text plainly explains browser CSP refusal of javascript: links  explanation: 'Browsers refuse javascript: links when clicked directly on a...'
+PASS  page and disclosure remain open and stable after link click  
+```
+
+## Screenshots
+- `01-bookmarklet-disclosure-open.png`: Homepage with bookmarklet box and expanded fallback disclosure showing snippet code.
