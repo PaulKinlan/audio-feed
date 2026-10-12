@@ -1,15 +1,23 @@
 # Evidence: regenerate button (audio-feed-8oz)
 
-- Script: scripts/regenerate-browser-proof.ts
-- Asserts: before: counts; before: feed serves the old key; confirm dialog raised and states the spend; queued: feed still serves the old key, old audio plays; during synthesis: old audio still served; after: feed serves a NEW key, same GUID; after: old blob is gone; after: new audio plays; stub synthesizer called once; after: console shows it current
+- Capture: no assertions
+- Reason: Historical visual capture artifacts from regenerate button implementation (audio-feed-8oz). Generating script scripts/regenerate-browser-proof.ts is stale against current admin session/passkey auth and custom dialogs, crashing at removed admin-token inputs; script migration is held separately under fleet/ufg9 and blocked by audio-feed-ebyy.
 
-Real admin console, real feed and `/audio` routes, driven in headless Chrome for Testing
+Historical capture artifacts from the original regenerate button implementation (audio-feed-8oz).
+The directory contains captured screenshots (`01-before.png` through `07-feed-after.png`) and
+historical `evidence.json`. It declares no live browser assertions because the generating proof script
+is stale against subsequent admin console migrations: `/admin` removed `#adminToken` and `#saveToken`
+inputs in favor of session cookie authentication (audio-feed-0jp / audio-feed-8fc), and native
+confirm dialogs were replaced by custom HTML dialog elements (audio-feed-0r0s).
+Live script maintenance is tracked and held under `fleet/ufg9` (finding `audio-feed-ebyy`).
+
+The original capture drove the real admin console, feed and `/audio` routes in headless Chrome for Testing
 (153.0.8010.36) over raw CDP. In-memory stores seeded with one approved subscriber and two
 ready episodes: one made by old prompts (`promptVersion` `0ld0ld0ld0ld`) and one made by the
 current prompts. The synthesizer is a stub that blocks until released: no Gemini key, no
 spend.
 
-Reproduce:
+Historical reproduce command (stale against current auth):
 
 ```sh
 CHROME=$(ls -d $HOME/.cache/puppeteer/chrome/*/chrome-linux64/chrome | sort -V | tail -1)
