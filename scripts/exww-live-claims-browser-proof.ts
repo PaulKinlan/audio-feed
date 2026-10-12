@@ -436,17 +436,24 @@ await runProof("audio-feed-exww", async (checker) => {
       const claimVisibility = async (
         ariaLabelledby: string,
         text: string,
-      ): Promise<{ found: boolean; visible: boolean; reason: string }> =>
+      ): Promise<
+        {
+          found: boolean;
+          visible: boolean;
+          reason: string;
+          rect: { top: number; bottom: number; left: number; right: number } | null;
+        }
+      > =>
         JSON.parse(
           String(
             await js(`JSON.stringify((() => {
               const section = document.querySelector('[aria-labelledby="${ariaLabelledby}"]');
-              if (!section) return { found: false, visible: false, reason: "the section is not rendered" };
+              if (!section) return { found: false, visible: false, reason: "the section is not rendered", rect: null };
               const wanted = ${JSON.stringify(text)};
               const matches = [...section.querySelectorAll("*")].filter((el) =>
                 (el.textContent ?? "").includes(wanted));
               if (matches.length === 0) {
-                return { found: false, visible: false, reason: "the text is not inside the section" };
+                return { found: false, visible: false, reason: "the text is not inside the section", rect: null };
               }
               const el = matches.find((node) =>
                 ![...node.children].some((child) => (child.textContent ?? "").includes(wanted))
@@ -454,21 +461,32 @@ await runProof("audio-feed-exww", async (checker) => {
               for (let node = el; node; node = node.parentElement) {
                 const style = getComputedStyle(node);
                 if (style.display === "none") {
-                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has display:none" };
+                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has display:none", rect: null };
                 }
                 if (style.visibility === "hidden") {
-                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has visibility:hidden" };
+                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has visibility:hidden", rect: null };
                 }
                 if (style.opacity === "0") {
-                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has opacity:0" };
+                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has opacity:0", rect: null };
                 }
                 const r = node.getBoundingClientRect();
                 if (r.width === 0 || r.height === 0) {
-                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has an empty box" };
+                  return { found: true, visible: false, reason: node.tagName.toLowerCase() + " has an empty box", rect: null };
                 }
                 if (node === section) break;
               }
-              return { found: true, visible: true, reason: "painted inside the section" };
+              const rect = el.getBoundingClientRect();
+              return {
+                found: true,
+                visible: true,
+                reason: "painted inside the section",
+                rect: {
+                  top: rect.top + window.scrollY,
+                  bottom: rect.bottom + window.scrollY,
+                  left: rect.left,
+                  right: rect.right,
+                },
+              };
             })())`),
           ),
         );
@@ -494,8 +512,16 @@ await runProof("audio-feed-exww", async (checker) => {
       ): Promise<void> => {
         const bounds = await sectionBounds(ariaLabelledby);
         if (bounds.top < 0) throw new Error(`${name}: section ${ariaLabelledby} is not rendered`);
-        const fromY = Math.max(0, Math.floor(bounds.top) - 8);
-        const height = Math.ceil(bounds.bottom) - fromY + 8;
+        // ONE object, used both for the request and for the assertions about it (audio-feed-g86r):
+        // while the clip was a literal in the capture call, every assertion described what we MEANT to
+        // capture, so a clip moved to another part of the page still passed every check.
+        const clip = {
+          x: 0,
+          y: Math.max(0, Math.floor(bounds.top) - 8),
+          width: 1280,
+          height: Math.ceil(bounds.bottom) - Math.max(0, Math.floor(bounds.top) - 8) + 8,
+          scale: 1,
+        };
         await cdp("Emulation.setDeviceMetricsOverride", {
           width: 1280,
           height: Math.max(1400, Math.ceil(bounds.bottom) + 40),
@@ -506,7 +532,7 @@ await runProof("audio-feed-exww", async (checker) => {
         const shot = (await cdp("Page.captureScreenshot", {
           format: "png",
           captureBeyondViewport: true,
-          clip: { x: 0, y: fromY, width: 1280, height, scale: 1 },
+          clip,
         })) as { data: string };
         const path = `${OUT}${name}`;
         await Deno.writeFile(path, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
@@ -521,28 +547,47 @@ await runProof("audio-feed-exww", async (checker) => {
         );
         checker.check(
           `${name} covers ${coversLabel}`,
-          imageHeight >= height - 1,
+          imageHeight >= clip.height - 1,
           `image is ${imageHeight}px tall for a section spanning y=${Math.round(bounds.top)}..${
             Math.round(bounds.bottom)
           }`,
         );
-        // ...and the pixels carry something. Geometry alone is satisfied by a blank clip of the same
-        // size, which is how rev-27's opacity:0 mutant passed a check whose whole subject was what the
-        // image RECORDS (audio-feed-7yom).
-        const variation = await pixelVariation(
-          path,
-          Math.floor(bounds.top) - fromY,
-          Math.ceil(bounds.bottom) - Math.floor(bounds.top),
+        // BINDING THE IMAGE TO THE SECTION (audio-feed-g86r). The checks above are all satisfied by a
+        // capture of SOME nonflat region: the height check only confirms Chrome honoured the requested
+        // size. So the region we ASKED FOR is compared against the section's own box, re-read after the
+        // capture - `clip` above, not a variable of the same name computed from it.
+        const live = await sectionBounds(ariaLabelledby);
+        checker.check(
+          `${name} captured the section's own box, not another region of the page`,
+          Math.abs(live.top - clip.y) <= 16 && Math.abs(live.bottom - (clip.y + clip.height)) <= 16,
+          `clip was y=${clip.y}..${clip.y + clip.height} and the section is y=${
+            Math.round(live.top)
+          }..${Math.round(live.bottom)} (16px of deliberate padding around it)`,
         );
+        // ...and the section's own rows must lie INSIDE the clip, or the pixel measurement below would
+        // be measuring someone else's pixels and reporting them as this section's content.
+        const sectionRows = Math.ceil(bounds.bottom) - Math.floor(bounds.top);
+        const sectionOffset = Math.floor(bounds.top) - clip.y;
+        const sectionInClip = sectionOffset >= 0 && sectionOffset + sectionRows <= clip.height;
+        const variation = sectionInClip
+          ? await pixelVariation(path, sectionOffset, sectionRows)
+          : Number.NaN;
         checker.check(
           `${name} is a capture of rendered content, not a flat single-colour clip`,
-          variation > MIN_PIXEL_VARIATION,
-          `pixel variation ${
-            variation.toFixed(8)
-          } over the section's own rows (a clip whose section rows render nothing is ` +
-            `one flat colour and measures about 1e-8; the committed captures measure 0.188-0.195)`,
+          sectionInClip && variation > MIN_PIXEL_VARIATION,
+          sectionInClip
+            ? `pixel variation ${
+              variation.toFixed(8)
+            } over the section's own rows (a clip whose section rows render nothing is ` +
+              `one flat colour and measures about 1e-8; the committed captures measure 0.188-0.195)`
+            : `the section's rows y=${Math.floor(bounds.top)}..${
+              Math.ceil(bounds.bottom)
+            } are not inside the captured clip y=${clip.y}..${
+              clip.y + clip.height
+            }, so this image ` +
+              `cannot be the section`,
         );
-        // The claim text itself must be in a PAINTED element inside that section - the half the ink
+        // The claim text itself must be in a PAINTED element inside that section - the half the pixel
         // check cannot see, because a section can still render a heading around a hidden card.
         const claim = await claimVisibility(ariaLabelledby, claimText);
         checker.check(
@@ -551,6 +596,22 @@ await runProof("audio-feed-exww", async (checker) => {
           } actually rendered, not just present in the DOM`,
           claim.found && claim.visible,
           claim.reason,
+        );
+        // ...and that painted text must be INSIDE THE CAPTURED PIXELS. Without this the claim was
+        // satisfied by text painted anywhere in the section while the image could show anything at all
+        // - the two ends of the check were never tied together (audio-feed-g86r).
+        const inImage = claim.rect !== null && claim.rect.top >= clip.y &&
+          claim.rect.bottom <= clip.y + clip.height;
+        checker.check(
+          `${name} has ${
+            JSON.stringify(claimText)
+          } inside the captured pixels, not merely painted somewhere on the page`,
+          inImage,
+          claim.rect === null
+            ? `the text has no rendered box (${claim.reason})`
+            : `the text is at y=${Math.round(claim.rect.top)}..${
+              Math.round(claim.rect.bottom)
+            } and the image covers y=${clip.y}..${clip.y + clip.height}`,
         );
       };
 
@@ -780,12 +841,20 @@ await runProof("audio-feed-exww", async (checker) => {
           "no lease row is rendered when the store could not be read",
           "01-live-lease-expiries-worker-healthy.png is within the 150KB budget after a replay",
           "01-live-lease-expiries-worker-healthy.png covers the live-claims section with a live and an expired claim",
+          "01-live-lease-expiries-worker-healthy.png captured the section's own box, not another region of the page",
+          '01-live-lease-expiries-worker-healthy.png has "LEASE EXPIRED with no terminal write" inside the captured pixels, not merely painted somewhere on the page',
           "02-live-lease-expiries-worker-unavailable.png is within the 150KB budget after a replay",
           "02-live-lease-expiries-worker-unavailable.png covers the live-claims section with the worker path unavailable and the default-lease label",
+          "02-live-lease-expiries-worker-unavailable.png captured the section's own box, not another region of the page",
+          '02-live-lease-expiries-worker-unavailable.png has "computed from the deployment lease" inside the captured pixels, not merely painted somewhere on the page',
           "03-live-lease-expiries-store-unreachable.png is within the 150KB budget after a replay",
           "03-live-lease-expiries-store-unreachable.png covers the live-claims section reporting UNREADABLE",
+          "03-live-lease-expiries-store-unreachable.png captured the section's own box, not another region of the page",
+          '03-live-lease-expiries-store-unreachable.png has "Unavailable — the episode store could not be read" inside the captured pixels, not merely painted somewhere on the page',
           "04-recent-failures-real-provider-error.png is within the 150KB budget after a replay",
           "04-recent-failures-real-provider-error.png covers the Recent failures section carrying the provider error",
+          "04-recent-failures-real-provider-error.png captured the section's own box, not another region of the page",
+          '04-recent-failures-real-provider-error.png has "provider status 500" inside the captured pixels, not merely painted somewhere on the page',
           "01-live-lease-expiries-worker-healthy.png is a capture of rendered content, not a flat single-colour clip",
           "02-live-lease-expiries-worker-unavailable.png is a capture of rendered content, not a flat single-colour clip",
           "03-live-lease-expiries-store-unreachable.png is a capture of rendered content, not a flat single-colour clip",
@@ -864,10 +933,13 @@ confused in either direction.`,
             heading: "Screenshots, and what each one is proved to cover",
             body:
               `Every capture is clipped to the section its README entry describes (\`captureBeyondViewport\` plus a
-clip) and then has FOUR assertions, three of them about the written file rather than about the DOM that
-produced it: (1) the clip starts at or above the section's rendered top and the image's own IHDR pixel
-height reaches its rendered bottom, so a capture that stops short of the section the README describes
-FAILS the run (audio-feed-u3m1); (2) the file is within the repository's 150KB budget, and the proof
+clip) and then has SIX assertions, and the first two bind the image to the section rather than
+describing the intention: (0) the captured region is compared against the section's own box, re-read
+after the capture, so a clip moved anywhere else on the page FAILS (audio-feed-g86r) - the clip is one
+object used for both the request and the assertions about it, because while it was a literal in the
+capture call every check described what the proof MEANT to capture; (1) the image's own IHDR pixel
+height reaches the section's rendered bottom, so a capture that stops short FAILS the run
+(audio-feed-u3m1); (2) the file is within the repository's 150KB budget, and the proof
 compresses its own output with the repository's own recipe (\`convert -strip -colors 256 PNG8:\`) so a
 replay does not write over-budget PNGs (audio-feed-vvo7); (3) the pixels carry rendered content - the
 STANDARD DEVIATION of grey over the section's OWN rows is measured back out of the PNG and must exceed
@@ -880,7 +952,10 @@ mean darkness, so the first version of this assertion passed on the very capture
 reject; and (4) the text each
 claim names is in a PAINTED element inside that section - no \`display:none\`, \`visibility:hidden\`,
 \`opacity:0\` or empty box on that element or any ancestor up to the section - because hiding a section
-leaves textContent and layout intact while the image records background. Not covered, and stated here
+leaves textContent and layout intact while the image records background; (5) that painted text lies
+INSIDE THE CAPTURED PIXELS, so text painted in the right section while the image shows something else
+FAILS; and the pixel measurement (3) is refused outright when the section's rows are not inside the
+captured clip, rather than reporting someone else's pixels as this section's content. Not covered, and stated here
 rather than left to be discovered: text painted in the background colour, and content covered by an
 overlapping element.
 
