@@ -335,9 +335,249 @@ const READ_CALLS = [
  * alone because a colon or quote precedes the slashes there.
  */
 function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:"'`\w])\/\/[^\n]*/g, "$1");
+  let result = "";
+  let i = 0;
+  let offset = 0;
+
+  let context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT" = "CODE";
+  let stringQuote: string | null = null;
+  const stack: {
+    context: "CODE" | "STRING" | "TEMPLATE" | "REGEX" | "LINE_COMMENT" | "BLOCK_COMMENT";
+    braceDepth: number;
+  }[] = [];
+  let braceDepth = 0;
+
+  const expressionKeywords = new Set([
+    "return",
+    "typeof",
+    "yield",
+    "await",
+    "throw",
+    "case",
+    "in",
+    "of",
+    "instanceof",
+    "new",
+    "delete",
+    "void",
+  ]);
+
+  const statementKeywords = new Set([
+    "else",
+    "do",
+    "default",
+  ]);
+
+  const controlHeadKeywords = new Set([
+    "if",
+    "for",
+    "while",
+    "with",
+    "switch",
+    "catch",
+  ]);
+
+  const bracketStack: ("OBJECT" | "BLOCK" | "CONTROL_HEAD" | "CALL_GROUP" | "ARRAY")[] = [];
+
+  let expectOperand = true;
+  let lastNonWsChar = "";
+  let lastWordClass: "EXPRESSION" | "STATEMENT" | "CONTROL_HEAD" | "OTHER" = "OTHER";
+
+  while (i < source.length) {
+    const ch = source[i]!;
+
+    switch (context) {
+      case "CODE":
+        if (ch === "/" && source[i + 1] === "/") {
+          result += source.slice(offset, i);
+          context = "LINE_COMMENT";
+          i++;
+        } else if (ch === "/" && source[i + 1] === "*") {
+          result += source.slice(offset, i) + " ";
+          context = "BLOCK_COMMENT";
+          i++;
+        } else if (ch === '"' || ch === "'") {
+          context = "STRING";
+          stringQuote = ch;
+          expectOperand = false;
+          lastNonWsChar = ch;
+        } else if (ch === "`") {
+          context = "TEMPLATE";
+          expectOperand = false;
+          lastNonWsChar = ch;
+        } else if (ch === "/") {
+          if (expectOperand) {
+            context = "REGEX";
+            result += source.slice(offset, i + 1);
+            offset = i + 1;
+            expectOperand = false;
+          } else {
+            expectOperand = true;
+          }
+          lastNonWsChar = ch;
+        } else if (ch === "{") {
+          let kind: "OBJECT" | "BLOCK";
+          if (lastWordClass === "STATEMENT" || !expectOperand) {
+            kind = "BLOCK";
+          } else {
+            kind = "OBJECT";
+          }
+          bracketStack.push(kind);
+
+          braceDepth++;
+          expectOperand = true;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "}") {
+          if (braceDepth > 0) {
+            braceDepth--;
+            const poppedKind = bracketStack.pop();
+            if (poppedKind === "OBJECT") {
+              expectOperand = false;
+            } else {
+              expectOperand = true;
+            }
+          } else if (stack.length > 0) {
+            const popped = stack.pop()!;
+            context = popped.context;
+            braceDepth = popped.braceDepth;
+            expectOperand = true;
+          } else {
+            expectOperand = true;
+          }
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "(") {
+          let kind: "CONTROL_HEAD" | "CALL_GROUP";
+          if (lastWordClass === "CONTROL_HEAD") {
+            kind = "CONTROL_HEAD";
+          } else {
+            kind = "CALL_GROUP";
+          }
+          bracketStack.push(kind);
+
+          expectOperand = true;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === ")") {
+          const poppedKind = bracketStack.pop();
+          if (poppedKind === "CONTROL_HEAD") {
+            expectOperand = true;
+          } else {
+            expectOperand = false;
+          }
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "[") {
+          bracketStack.push("ARRAY");
+          expectOperand = true;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (ch === "]") {
+          bracketStack.pop();
+          expectOperand = false;
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        } else if (/[a-zA-Z0-9_$]/.test(ch)) {
+          const start = i;
+          while (i < source.length && /[a-zA-Z0-9_$]/.test(source[i]!)) {
+            i++;
+          }
+          const word = source.slice(start, i);
+          if (lastNonWsChar !== ".") {
+            if (expressionKeywords.has(word)) {
+              expectOperand = true;
+              lastWordClass = "EXPRESSION";
+            } else if (statementKeywords.has(word)) {
+              expectOperand = true;
+              lastWordClass = "STATEMENT";
+            } else if (controlHeadKeywords.has(word)) {
+              expectOperand = false;
+              lastWordClass = "CONTROL_HEAD";
+            } else {
+              expectOperand = false;
+              lastWordClass = "OTHER";
+            }
+          } else {
+            expectOperand = false;
+            lastWordClass = "OTHER";
+          }
+          lastNonWsChar = source[i - 1]!;
+          i--;
+        } else if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
+          if (/[=(:,;!&|?<>+\-*%^~]/.test(ch)) {
+            expectOperand = true;
+          } else {
+            expectOperand = false;
+          }
+          lastWordClass = "OTHER";
+          lastNonWsChar = ch;
+        }
+        break;
+
+      case "STRING":
+        if (ch === "\\") {
+          i++;
+        } else if (ch === stringQuote) {
+          context = "CODE";
+        }
+        break;
+
+      case "TEMPLATE":
+        if (ch === "\\") {
+          i++;
+        } else if (ch === "$" && source[i + 1] === "{") {
+          stack.push({ context: "TEMPLATE", braceDepth });
+          context = "CODE";
+          braceDepth = 0;
+          i++;
+          expectOperand = true;
+          lastNonWsChar = "{";
+        } else if (ch === "`") {
+          context = "CODE";
+        }
+        break;
+
+      case "REGEX":
+        if (ch === "\\") {
+          result += "  ";
+          i++;
+        } else if (ch === "/") {
+          result += "/";
+          context = "CODE";
+          offset = i + 1;
+        } else if (ch === "\n") {
+          context = "CODE";
+          result += "\n";
+          offset = i + 1;
+        } else {
+          result += " ";
+        }
+        break;
+
+      case "LINE_COMMENT":
+        if (ch === "\n") {
+          context = "CODE";
+          offset = i;
+        }
+        break;
+
+      case "BLOCK_COMMENT":
+        if (ch === "*" && source[i + 1] === "/") {
+          context = "CODE";
+          i++;
+          offset = i + 1;
+        }
+        break;
+    }
+    i++;
+  }
+
+  if (context !== "LINE_COMMENT" && context !== "BLOCK_COMMENT") {
+    result += source.slice(offset, i);
+  }
+
+  return result;
 }
 
 /**
@@ -1512,9 +1752,19 @@ export async function deriveReadRelationReport(
             // A NAME resolved inside an execute call is the spawn's argument, so it takes the same route as a
             // literal one - this is the branch probe B takes (a `.ts` path held in a module-local constant and
             // interpolated into a `Deno.Command` args array).
-            (isExecuteCall ? executed : resolved).push(
-              resolveReadName(scopes, name, at, own, visible),
-            );
+            const resolvedValue = resolveReadName(scopes, name, at, own, visible);
+            if (resolvedValue === name) {
+              const path = toRepoPath(name, dir, root);
+              if (path) {
+                (isExecuteCall ? executed : resolved).push(path);
+              } else if (unclassifiedTail(name)) {
+                unclassified.add(name);
+              } else {
+                outOfRepoHints.add(name);
+              }
+            } else {
+              (isExecuteCall ? executed : resolved).push(resolvedValue);
+            }
           }
         }
       }

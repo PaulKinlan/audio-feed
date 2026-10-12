@@ -34,6 +34,31 @@ async function withTempTree(
   }
 }
 
+Deno.test("audio-feed-70u4: a glob's /* does not swallow a later block comment", async () => {
+  const suite = "tests/comment_test.ts";
+  const before = [
+    'const pattern = "tests/*_test.ts";',
+    'const fixture = "Deno.readTextFile(\\"../docs/absent.html\\")";',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+  ];
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite]: before.join("\n"),
+  }, async (root) => {
+    const baseline = await deriveReadRelationReport(root, [suite]);
+    await Deno.writeTextFile(
+      `${root}${suite}`,
+      [...before.slice(0, 2), "/** */", ...before.slice(2)].join("\n"),
+    );
+    const commented = await deriveReadRelationReport(root, [suite]);
+    assertEquals(commented, baseline, "a block comment cannot turn a string fixture into a read");
+    assertEquals(commented.unresolved, []);
+    assertEquals(commented.relations.get("docs/present.md"), [suite]);
+  });
+});
+
 Deno.test("audio-feed-lm4d: a read call inside a string is DATA, a read inside an interpolation is CODE", async () => {
   // The detector scans text, so this suite's own fixtures look like read sites. They are not: string content
   // is data. Five of the eleven stale hints came from exactly this, because tests/fast_gate_subset_test.ts
@@ -669,7 +694,7 @@ Deno.test("audio-feed-axlt: own module constant cannot override its function par
       [],
       "the outer constant must not stand in for the parameter",
     );
-    assertEquals(report.unresolved, ["FILE"], "unknown parameter value must be reported");
+    assertEquals(report.unclassified, ["FILE"], "unknown parameter value must be reported");
   });
 });
 
@@ -689,11 +714,29 @@ Deno.test("audio-feed-axlt: unsupported destructured and namespace imports repor
       'read({ FILE: "docs/other.md" });',
     ].join("\n"),
   }, async (root) => {
-    for (const suite of ["tests/destructured_test.ts", "tests/namespace_test.ts"]) {
-      const report = await deriveReadRelationReport(root, [suite]);
-      assertEquals([...report.relations], [], `${suite}: no scope may be guessed`);
-      assertEquals(report.unresolved, ["FILE"], `${suite}: an unsupported import must be reported`);
-    }
+    const destructuredReport = await deriveReadRelationReport(root, ["tests/destructured_test.ts"]);
+    assertEquals(
+      [...destructuredReport.relations],
+      [],
+      "tests/destructured_test.ts: no scope may be guessed",
+    );
+    assertEquals(
+      destructuredReport.unclassified,
+      ["FILE"],
+      "tests/destructured_test.ts: an unsupported import must be reported",
+    );
+
+    const namespaceReport = await deriveReadRelationReport(root, ["tests/namespace_test.ts"]);
+    assertEquals(
+      [...namespaceReport.relations],
+      [],
+      "tests/namespace_test.ts: no scope may be guessed",
+    );
+    assertEquals(
+      namespaceReport.unresolved,
+      ["FILE"],
+      "tests/namespace_test.ts: an unsupported import must be reported",
+    );
   });
 });
 
@@ -715,8 +758,8 @@ Deno.test("audio-feed-3xla: helper imported constant does not leak into caller p
     ].join("\n"),
   }, async (root) => {
     const report = await deriveReadRelationReport(root, ["tests/caller_test.ts"]);
-    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unresolved.
-    assertEquals(report.unresolved, ["FILE"]);
+    // Since FILE is a parameter shadowing an imported constant, it MUST be reported as unclassified.
+    assertEquals(report.unclassified, ["FILE"]);
     // It must NOT silently attribute to docs/present/
     assert(!report.relations.has("docs/present/"));
   });
@@ -840,5 +883,214 @@ Deno.test("audio-feed-3xla: determinism - relations are independent of import gr
       assertEquals(repA.unresolved, [], "tree A must have no unresolved hints");
       assertEquals(repB.unresolved, [], "tree B must have no unresolved hints");
     });
+  });
+});
+
+Deno.test("audio-feed-kpua: multiline template literal does not swallow subsequent code", async () => {
+  const suite = "tests/kpua_test.ts";
+  const content = [
+    "const config = `",
+    "  tests/*",
+    "`;",
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+    "/** */",
+  ].join("\n");
+
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite]: content,
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [suite]);
+    assertEquals(
+      report.relations.get("docs/present.md"),
+      [suite],
+      "The read site after a multiline template literal containing /* must not be swallowed",
+    );
+  });
+});
+
+Deno.test("audio-feed-iz0j: regex literals and template interpolations do not incorrectly flip quote state", async () => {
+  const suite1 = "tests/iz0j_test1.ts";
+  const content1 = [
+    'const re = /"/;',
+    '/* hidden Deno.readTextFile("../docs/absent.html") */',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+  ].join("\n");
+
+  const suite2 = "tests/iz0j_test2.ts";
+  const content2 = [
+    'const a = `foo ${fn("\`")} baz`;',
+    '/* hidden Deno.readTextFile("../docs/absent.html") */',
+    "export async function readIt() {",
+    '  return await Deno.readTextFile("../docs/present.md");',
+    "}",
+  ].join("\n");
+
+  await withTempTree({
+    "docs/present.md": "present\n",
+    [suite1]: content1,
+    [suite2]: content2,
+  }, async (root) => {
+    const report1 = await deriveReadRelationReport(root, [suite1]);
+    assertEquals(
+      report1.unresolved,
+      [],
+      "A regex literal containing a quote must not expose subsequent block comments",
+    );
+    assertEquals(report1.relations.get("docs/present.md"), [suite1]);
+
+    const report2 = await deriveReadRelationReport(root, [suite2]);
+    assertEquals(
+      report2.unresolved,
+      [],
+      "An interpolation containing a quote must not expose subsequent block comments",
+    );
+    assertEquals(report2.relations.get("docs/present.md"), [suite2]);
+  });
+});
+
+Deno.test("audio-feed-uiyv: / regex literal vs division disambiguation correctly tracks quote state", async (t) => {
+  const suites: Record<string, { content: string; desc: string }> = {
+    "tests/uiyv_regex_assign_test.ts": {
+      content: [
+        'const re = /"/;',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after assign (=)",
+    },
+    "tests/uiyv_regex_return_test.ts": {
+      content: [
+        'function f() { return /"/; }',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after keyword (return)",
+    },
+    "tests/uiyv_regex_paren_test.ts": {
+      content: [
+        'fn(/"/);',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after open paren (",
+    },
+    "tests/uiyv_regex_bracket_test.ts": {
+      content: [
+        'const arr = [/"/];',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "regex after open bracket [",
+    },
+    "tests/uiyv_div_ident_test.ts": {
+      content: [
+        'const val = total / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after identifier",
+    },
+    "tests/uiyv_div_paren_test.ts": {
+      content: [
+        'const val = fn() / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after close paren )",
+    },
+    "tests/uiyv_div_bracket_test.ts": {
+      content: [
+        'const val = arr[0] / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after close bracket ]",
+    },
+    "tests/uiyv_div_num_test.ts": {
+      content: [
+        'const val = 42 / "/";',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        "export async function readIt() {",
+        '  return await Deno.readTextFile("../docs/present.md");',
+        "}",
+      ].join("\n"),
+      desc: "division after numeric literal",
+    },
+    "tests/aiiy_bug_test.ts": {
+      content: [
+        "const total=42; const result=total /",
+        ' /"/.test("x");',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "regex after division operator with newline (audio-feed-aiiy)",
+    },
+    "tests/aiiy_obj_test.ts": {
+      content: [
+        'const result={n:42} / "/".length;',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "division after object literal close (audio-feed-aiiy)",
+    },
+    "tests/aiiy_block_test.ts": {
+      content: [
+        'if (false) {} else {} /"/.test("x");',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "regex after block close (audio-feed-aiiy)",
+    },
+    "tests/aiiy_control_head_test.ts": {
+      content: [
+        'if (x) /"/.test("x");',
+        '/* hidden Deno.readTextFile("../docs/absent.html") */',
+        'export function readIt(){return Deno.readTextFile("../docs/present.md");}',
+      ].join("\n"),
+      desc: "regex after control head paren close (audio-feed-aiiy)",
+    },
+  };
+
+  const treeFiles: Record<string, string> = {
+    "docs/present.md": "present\n",
+  };
+  for (const [path, entry] of Object.entries(suites)) {
+    treeFiles[path] = entry.content;
+  }
+
+  await withTempTree(treeFiles, async (root) => {
+    for (const [path, entry] of Object.entries(suites)) {
+      await t.step(entry.desc, async () => {
+        const report = await deriveReadRelationReport(root, [path]);
+        assertEquals(
+          report.unresolved,
+          [],
+          `${entry.desc}: comment read must not leak as unresolved`,
+        );
+        assertEquals(
+          report.relations.get("docs/present.md"),
+          [path],
+          `${entry.desc}: real read site must be preserved`,
+        );
+      });
+    }
   });
 });
