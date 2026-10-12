@@ -40,6 +40,15 @@ export async function startRegenerateHarness(port = 0, autoReleaseMs?: number) {
   const now = "2026-09-20T09:00:00.000Z";
 
   await stores.metadata.putUser({
+    id: "admin-1",
+    email: "paul@example.com",
+    displayName: "Paul Kinlan",
+    status: "approved",
+    isAdmin: true,
+    feedToken: "admin-feed-token",
+    createdAt: now,
+  });
+  await stores.metadata.putUser({
     id: "sub-1",
     email: "listener@example.com",
     displayName: "Listener",
