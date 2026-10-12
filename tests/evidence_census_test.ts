@@ -15,7 +15,13 @@
  * with a mention and no write.
  */
 import { assert, assertEquals } from "@std/assert";
-import { census, censusSource, EVIDENCE_PREFIX, WRITE_CALLS } from "../scripts/evidence-census.ts";
+import {
+  census,
+  censusSource,
+  EVIDENCE_PREFIX,
+  splitCreditedWrites,
+  WRITE_CALLS,
+} from "../scripts/evidence-census.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
 /**
@@ -478,4 +484,46 @@ Deno.test("audio-feed-t5lb: a LITERAL destination that is not evidence stays sil
     [],
     "a literal path we CAN see is not unattributable - reporting it would make the row meaningless",
   );
+});
+
+/**
+ * audio-feed-t9w1: A PREDICATE VALIDATED ONLY ON POSITIVE EXAMPLES IS NOT VALIDATED.
+ *
+ * The census's cases all built REAL directories, so "an id named in source is an evidence directory" was
+ * only ever evaluated on its true branch. Measured on the real tree at `cd525ef`: 36 ids credited and 0
+ * without a directory - so the original red does NOT reproduce, and this case is built deliberately
+ * rather than reproduced. IT IS A DETECTOR FOR A REINTRODUCTION, which is what the bead is now about.
+ */
+Deno.test("audio-feed-t9w1: an id named in source with NO directory is NOT credited - and is reported", () => {
+  const named = { [dir("ghost-id")]: ["scripts/verify-thing.ts"] };
+  const { credited, writesWithoutDirectory } = splitCreditedWrites(named, new Set());
+  assertEquals(
+    credited,
+    {},
+    "an id with no directory must NOT be credited - this is the whole bead",
+  );
+  assertEquals(
+    writesWithoutDirectory,
+    named,
+    "and it is REPORTED rather than dropped in silence, so a proof that has not run yet stays visible",
+  );
+});
+
+Deno.test("audio-feed-t9w1 MIRROR: an id WITH a directory is still credited, and not also reported", () => {
+  const named = { [dir("real-id")]: ["scripts/proof.ts"] };
+  const { credited, writesWithoutDirectory } = splitCreditedWrites(
+    named,
+    new Set([dir("real-id")]),
+  );
+  assertEquals(credited, named, "the fix must not pass by crediting nothing");
+  assertEquals(writesWithoutDirectory, {}, "a backed write is not also reported as unbacked");
+});
+
+Deno.test("audio-feed-t9w1: mixed input splits exactly once, with no id in both buckets", () => {
+  const backed = dir("has-dir");
+  const unbacked = dir("no-dir");
+  const named = { [backed]: ["scripts/a.ts"], [unbacked]: ["scripts/b.ts"] };
+  const { credited, writesWithoutDirectory } = splitCreditedWrites(named, new Set([backed]));
+  assertEquals(Object.keys(credited), [backed]);
+  assertEquals(Object.keys(writesWithoutDirectory), [unbacked]);
 });
