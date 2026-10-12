@@ -55,7 +55,7 @@ state what it still holds.
 - `tests/conformance/metadata/logs.ts` — the record shape, the cursor, the window, the summary,
   retention, the caps and redaction, and the lifecycle records. Runs against **both** adapters,
   because KV gets its ordering from a sequenced key space and memory from an array and a counter.
-- `tests/log_route_redaction_test.ts` — that a capability in a request path (`/listen/<feedToken>`,
+- `tests/log_request_surface_invariant_test.ts` — that a capability in a request path (`/listen/<feedToken>`,
   `/audio/<key>`, `/feed/<token>/master.xml`) cannot reach the store, and that a query string is
   never logged at all.
 - `tests/cron_test.ts` — that retention is its own daily job and registers even when synthesis is
