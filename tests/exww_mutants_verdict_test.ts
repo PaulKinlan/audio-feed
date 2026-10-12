@@ -181,11 +181,14 @@ Deno.test("audio-feed-2qcp: a CLI run with UNKNOWN rows exits NON-ZERO, and the 
   );
 
   const root = new URL("..", import.meta.url).pathname;
-  // IN ITS OWN SESSION, AND THE GROUP IS KILLED IN A FINALLY - because this test RUNS THE REAL CLI, whose rows
-  // launch Chrome: the first version left Chrome descendants alive after the job finished and the heavy-queue
-  // wrapper had to kill them to release the slot (measured on the eae1af1 gate: "descendants still held slot1
-  // after the job finished"). A test that leaks the fleet's scarcest resource is a worse test than the defect
-  // it pins, so `setsid` puts the whole CLI tree in one process group and the finally reaps the group.
+  // IN ITS OWN SESSION, AND THE GROUP IS KILLED IN A FINALLY: this test RUNS THE REAL CLI, whose rows launch
+  // Chrome, so the whole tree is put in one process group and reaped rather than trusting the CLI's exit to
+  // take its descendants with it. That is hygiene for this test's OWN tree - NOT the fix for the heavy-queue
+  // "descendants still held slot" warning, which I first attributed to this test and then MEASURED AWAY from
+  // it: lane vac2's gate hit the same warning with the same four-descendant shape over 115 suites that do not
+  // include this file or tests/exww_mutants_test.ts at all, so the warning is pre-existing and independent of
+  // this change (audio-feed-b4x7 tracks attributing it). The correction is here because an unsupported
+  // attribution left in a comment is exactly the kind of claim this suite exists to police.
   const child = new Deno.Command("setsid", {
     args: [
       Deno.execPath(),
