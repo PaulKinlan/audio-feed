@@ -62,6 +62,33 @@ export const STALE_PROFILE_AGE_MS = 2 * 60 * 60 * 1000;
  * disk must never break allocating a profile. Returns what it actually removed so a caller, or a
  * test, can observe the work rather than trust it.
  */
+/**
+ * Whether `name` is a directory THIS prefix created, rather than a sibling that merely starts with it
+ * (audio-feed-3nit).
+ *
+ * `startsWith(prefix)` ALONE IS NOT OWNERSHIP, and the reviewer's counterexample is exact:
+ * `audiofeed-chrome-test-` starts with `audiofeed-chrome-`, so a sweep for the shorter prefix ate the
+ * longer prefix's directories. A guard whose job is "touch nothing that is not mine" cannot be built
+ * from a prefix comparison alone.
+ *
+ * THE BOUNDARY, AND WHY THIS ONE IS EXACT RATHER THAN HEURISTIC: `makeTempDir` appends its random
+ * characters DIRECTLY to the prefix, so an owned name is `<prefix>` plus a separator-free tail.
+ * MEASURED over the whole pile on this VM: 574 names, EVERY ONE with a separator-free tail, and ZERO
+ * with a `-` in the tail. So a `-` after the prefix does not mean "random characters"; it means a
+ * DIFFERENT prefix that happens to start with ours.
+ *
+ * DECLARED LIMIT, so the next reader does not have to infer it: this requires the caller's prefix to
+ * carry its own separator. Every prefix in this tree ends with `-` (measured: the nine literal ones
+ * plus the computed `audiofeed-proof-exww-`), and a prefix passed WITHOUT one would reclaim nothing
+ * rather than reclaim wrongly - the failure is in the safe direction.
+ */
+function isOwnProfileName(name: string, prefix: string): boolean {
+  if (!name.startsWith(prefix)) return false;
+  const tail = name.slice(prefix.length);
+  if (tail.length === 0) return false;
+  return !tail.includes("-");
+}
+
 export async function sweepStaleProfiles(
   prefix: string,
   nowMs: number = Date.now(),
@@ -78,7 +105,7 @@ export async function sweepStaleProfiles(
   }
   for (const entry of entries) {
     if (!entry.isDirectory) continue;
-    if (!entry.name.startsWith(prefix)) continue;
+    if (!isOwnProfileName(entry.name, prefix)) continue;
     const full = `${baseDir}/${entry.name}`;
     try {
       const info = await Deno.stat(full);

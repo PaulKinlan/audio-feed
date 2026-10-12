@@ -128,3 +128,50 @@ Deno.test("audio-feed-u8nv: createTempChromeProfile reclaims before it allocates
     await Deno.remove(profileDir, { recursive: true }).catch(() => {});
   });
 });
+
+/**
+ * audio-feed-3nit: THE OWN-PREFIX GUARD AGAINST A COUNTEREXAMPLE, WHICH IS THE CASE THE SUITE ABOVE
+ * COULD NOT SEE. Every prefix in the earlier tests is disjoint from every other, so `startsWith(prefix)`
+ * passed all of them - a predicate validated only on positive examples. The reviewer supplied the
+ * counterexample instead: `audiofeed-chrome-test-` STARTS WITH `audiofeed-chrome-`, so a sweep for the
+ * shorter prefix reclaimed a longer prefix's directories. One overlapping pair exists in this tree by
+ * construction, because the helper's own suite creates `audiofeed-chrome-test-` profiles under the
+ * helper's default `audiofeed-chrome-`.
+ *
+ * BOTH DIRECTIONS ARE ASSERTED, because they are different mistakes: the shorter prefix must not reach
+ * the longer one, and the longer prefix must still reclaim its own.
+ */
+Deno.test("audio-feed-3nit: a SIBLING prefix survives a sweep for the shorter prefix", async () => {
+  await withScratchTmp(async (scratch) => {
+    const own = await agedDir(scratch, "audiofeed-chrome-", STALE_PROFILE_AGE_MS + HOUR);
+    const sibling = await agedDir(scratch, "audiofeed-chrome-test-", STALE_PROFILE_AGE_MS + HOUR);
+    const swept = await sweepStaleProfiles("audiofeed-chrome-");
+    assertEquals(swept, [own], "only this prefix's OWN directory is in scope");
+    const info = await Deno.stat(sibling);
+    assert(info.isDirectory, "the overlapping sibling prefix is still there");
+  });
+});
+
+Deno.test("audio-feed-3nit: the LONGER prefix still reclaims its own, and not the shorter one's", async () => {
+  await withScratchTmp(async (scratch) => {
+    const shorter = await agedDir(scratch, "audiofeed-chrome-", STALE_PROFILE_AGE_MS + HOUR);
+    const longer = await agedDir(scratch, "audiofeed-chrome-test-", STALE_PROFILE_AGE_MS + HOUR);
+    const swept = await sweepStaleProfiles("audiofeed-chrome-test-");
+    assertEquals(swept, [longer], "the longer prefix reclaims its own");
+    const info = await Deno.stat(shorter);
+    assert(info.isDirectory, "and leaves the shorter prefix's directory alone");
+  });
+});
+
+/** The other half of the boundary: name === prefix is not an owned profile either. */
+Deno.test("audio-feed-3nit: a directory named EXACTLY the prefix was not made by makeTempDir", async () => {
+  await withScratchTmp(async (scratch) => {
+    const bare = `${scratch}/audiofeed-bare-`;
+    await Deno.mkdir(bare);
+    const when = new Date(Date.now() - (STALE_PROFILE_AGE_MS + HOUR));
+    await Deno.utime(bare, when, when);
+    const swept = await sweepStaleProfiles("audiofeed-bare-");
+    assertEquals(swept, [], "makeTempDir always appends a tail, so a bare prefix is not ours");
+    await Deno.stat(bare);
+  });
+});
