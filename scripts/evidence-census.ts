@@ -435,6 +435,33 @@ export interface ScriptCensus {
  * false positives this bead was filed about: a script that names a directory
  * and writes nothing is a probe, not an evidence slice.
  */
+/**
+ * audio-feed-t9w1: WHICH WRITES MAY BE CREDITED AS EVIDENCE DIRECTORIES.
+ *
+ * `writers` is built from ids found in source, so an id named in a write call but with NO directory on
+ * disk used to be credited as one - the false credit found on `verify_s3uk_real_browser.ts`. On the
+ * real tree that no longer reproduces (measured: 36 credited, 0 without a directory), but the CENSUS
+ * HAD NO CASE THAT WOULD DETECT THE FALSE CREDIT IF IT WERE REINTRODUCED - every one of its cases built
+ * a real directory, so the predicate's false branch was never evaluated. That gap is independent of
+ * whether the original red still fires, and it is what this function and its case close.
+ *
+ * Exported and pure so the decision can be tested WITHOUT a filesystem: the caller reads the disk, this
+ * decides. Reverting it (crediting everything, as the pre-fix code did) is the mutation that must
+ * redden the case - the mutant for this bead IS the old behaviour, so there is no edit to invent.
+ */
+export function splitCreditedWrites(
+  writers: Record<string, string[]>,
+  onDisk: Set<string>,
+): { credited: Record<string, string[]>; writesWithoutDirectory: Record<string, string[]> } {
+  const credited: Record<string, string[]> = {};
+  const writesWithoutDirectory: Record<string, string[]> = {};
+  for (const id of Object.keys(writers)) {
+    if (onDisk.has(id)) credited[id] = writers[id]!;
+    else writesWithoutDirectory[id] = writers[id]!;
+  }
+  return { credited, writesWithoutDirectory };
+}
+
 export function censusSource(source: string): ScriptCensus {
   const bindings = evidenceBindings(source);
   const writes: string[] = [];
@@ -514,6 +541,11 @@ export interface Census {
    *  unattributable write. Distinct from `namingButNotWriting`, which positively claims a script
    *  writes no evidence directory; a script here must NOT also be reported there. */
   unresolvedWrites: Record<string, string[]>;
+  /** audio-feed-t9w1: ids a script NAMES as an evidence write target for which NO directory exists.
+   *  These are NOT in `writers` - an id that is only ever named in source is not an evidence directory,
+   *  and crediting it was the false positive found on `verify_s3uk_real_browser.ts`. Reported rather
+   *  than dropped, because either it is a proof that has not run yet or a name that is not a directory. */
+  writesWithoutDirectory: Record<string, string[]>;
 }
 
 const SCRIPT_RE = /^[A-Za-z0-9_.-]+\.ts$/;
@@ -542,12 +574,34 @@ export async function census(root: string): Promise<Census> {
     if (result.runtimeAssembled.length > 0) runtimeAssembled[relative] = result.runtimeAssembled;
   }
 
+  // audio-feed-t9w1: `writers` IS BUILT FROM SOURCE, so an id that appears in a write call but has NO
+  // directory on disk was credited as an evidence directory. That is the false positive found on
+  // `verify_s3uk_real_browser.ts`, where a BEAD ID IN SOURCE read as a directory: `writers` said the
+  // repo had evidence `audio-feed-<id>` while nothing of the kind existed. The real set is read right
+  // here and was only ever used in the OPPOSITE direction (dirs with no writer), so the two were never
+  // intersected.
+  //
+  // THE FIX INTERSECTS AND THEN REPORTS, RATHER THAN FILTERING SILENTLY: a write naming an
+  // id with no directory is either a proof that has not been run yet or a name that is not a
+  // directory at all, and both are worth seeing. Dropping them quietly would fix the false
+  // positive by hiding the information - the failure mode this census already avoids in
+  // `unwritten` and `runtimeAssembled`, and the reason this bucket exists.
+  const onDisk = new Set<string>();
   const unwritten: string[] = [];
   for await (const entry of Deno.readDir(`${root}/${EVIDENCE_PREFIX}`)) {
     if (!entry.isDirectory || !entry.name.startsWith("audio-feed-")) continue;
+    onDisk.add(entry.name);
     if (!(entry.name in writers)) unwritten.push(entry.name);
   }
-  return { writers, unwritten, namingButNotWriting, runtimeAssembled, unresolvedWrites };
+  const { credited, writesWithoutDirectory } = splitCreditedWrites(writers, onDisk);
+  return {
+    writers: credited,
+    unwritten,
+    namingButNotWriting,
+    runtimeAssembled,
+    unresolvedWrites,
+    writesWithoutDirectory,
+  };
 }
 
 function summarise(result: Census): void {
@@ -570,6 +624,13 @@ function summarise(result: Census): void {
   );
   for (const script of unattributable) {
     console.log(`  UNATTRIBUTABLE  ${script}  ->  ${result.unresolvedWrites[script]!.join(", ")}`);
+  }
+  const phantom = Object.keys(result.writesWithoutDirectory).sort();
+  console.log(
+    `evidence ids NAMED as a write target with NO directory on disk: ${phantom.length}`,
+  );
+  for (const id of phantom) {
+    console.log(`  NOT-A-DIRECTORY  ${id}  <-  ${result.writesWithoutDirectory[id]!.join(", ")}`);
   }
   const unresolved = Object.keys(result.runtimeAssembled).sort();
   console.log(`scripts with a runtime-assembled evidence target: ${unresolved.length}`);
