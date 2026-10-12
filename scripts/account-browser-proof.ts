@@ -267,6 +267,10 @@ await runProof("account-browser-proof", async (checker) => {
         const offered = await js(
           `[document.getElementById("regenOutdated").textContent, document.querySelectorAll("[data-regenerate-episode]").length]`,
         );
+        // Deleting showModal drives askConfirm onto its window.confirm fallback
+        // (src/assets/confirm-shared.js:59 takes the native-confirm branch when showModal is not a
+        // function), which is what makes the confirm automatable here and at the retry below. The
+        // <dialog> modal path is therefore NOT covered by this proof (audio-feed-fjfh).
         await js(`
           window.__confirms = [];
           window.confirm = (m) => (window.__confirms.push(m), true);
