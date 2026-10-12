@@ -56,6 +56,7 @@ import {
   discoverFullGateTestFiles,
   GRAPH_CONFIG_FILES,
   inertContradictions,
+  isDocumentation,
   isFastGateSelectable,
   isProvablyInert,
   type ReadRelationReport,
@@ -520,6 +521,40 @@ export async function deriveOrWiden(
   }
 }
 
+/**
+ * Whether one unresolved hint could hide a read of an INERT-ELIGIBLE file (audio-feed-lm4d).
+ *
+ * The guard this feeds exists to protect the inert class, and the inert class is markdown (isDocumentation).
+ * A fragment (the suffix after an interpolation, ReadRelationReport.unattributed) that names nothing and has
+ * some other extension cannot hide an inert-eligible read: a change to a `.json`, `.kv` or `.html` file is
+ * never inert, it is `unclassified` and runs the full suite anyway. A fragment with NO extension is a possible
+ * directory prefix, which can contain markdown, so it still blocks - and a markdown fragment still blocks.
+ * The safe direction is kept exactly where it can still buy something.
+ */
+export function couldHideInertRead(hint: string): boolean {
+  return hint.endsWith("/") || isDocumentation(hint);
+}
+
+/**
+ * Whether a fragment could BE the file being changed - the only way a fragment can make the inert class
+ * unsafe (audio-feed-7l9m).
+ *
+ * A fragment is the suffix after an interpolation: a path the detector could not resolve, `state.json` or
+ * `digest.md`. The question the guard asks is "could a change I am being told to classify as inert be the
+ * thing this read consumes?", and a change can only touch a file in the tree - so a markdown fragment blocks
+ * only when the change HAS that basename. A directory-shaped fragment (`docs/`) still blocks, because any
+ * file under it could be the change.
+ *
+ * This pairing is what keeps the correction from the other side honest. `digest.md` is a temp-directory read
+ * whose base is an arrow-callback PARAMETER (`withTempDir(async (dir) => ...)`), so the detector cannot prove
+ * it is out-of-repo and must not suppress it - and it must not pay the full suite for it either, because a
+ * change to `docs/ingest.md` cannot be that file.
+ */
+export function couldBeTheChangedFile(hint: string, changed: ReadonlyArray<string>): boolean {
+  if (hint.endsWith("/")) return true;
+  return changed.some((file) => file === hint || file.endsWith(`/${hint}`));
+}
+
 /** The same fail-safe for the REPORTING derivation, which carries the incompleteness signal with it. */
 export async function deriveOrWidenReport(
   derive: () => Promise<ReadRelationReport>,
@@ -528,7 +563,7 @@ export async function deriveOrWidenReport(
     return { report: await derive(), failure: null };
   } catch (error) {
     return {
-      report: { relations: new Map(), unresolved: [] },
+      report: { relations: new Map(), unresolved: [], unattributed: [], outOfRepo: [] },
       failure: error instanceof Error ? error.message : String(error),
     };
   }
@@ -767,15 +802,49 @@ ${auditUniverseDrift}`);
   );
   const readRelations = relationReport.relations;
   const unresolvedReads = relationReport.unresolved;
-  if (unresolvedReads.length) {
+  // The change set is resolved HERE, because what a fragment can hide depends on it (audio-feed-7l9m).
+  const changed = await changedFiles();
+  // What disables the inert class for this run: authored-path misses (ALL of them) plus the fragments that
+  // could still hide an inert-eligible read (couldHideInertRead above) AND could be the file being changed
+  // (couldBeTheChangedFile). Fragments that cannot are PRINTED below - dropping a hint silently is what let an
+  // unreadable universe be described as inert (audio-feed-q0ky) - but they do not widen every later change,
+  // which is what made a docs-only edit pay the full suite.
+  const inertBlockingReads = [
+    ...unresolvedReads,
+    ...relationReport.unattributed.filter((hint) =>
+      couldHideInertRead(hint) && couldBeTheChangedFile(hint, changed ?? [])
+    ),
+  ];
+  const inertNeutralFragments = relationReport.unattributed.filter((hint) =>
+    !inertBlockingReads.includes(hint)
+  );
+  if (inertBlockingReads.length) {
     // SAID OUT LOUD, because this is what disables the inert class for this run: a reader who sees a FULL
     // suite on a docs-only change must be able to see WHY rather than infer it (audio-feed-q0ky).
     console.log(
-      `fast-gate: read relation INCOMPLETE: ${unresolvedReads.length} read path hint(s) do not name anything in the tree (${
-        unresolvedReads.slice(0, 3).join(", ")
+      `fast-gate: read relation INCOMPLETE: ${inertBlockingReads.length} read path hint(s) do not name anything in the tree (${
+        inertBlockingReads.slice(0, 3).join(", ")
       }${
-        unresolvedReads.length > 3 ? ", ..." : ""
+        inertBlockingReads.length > 3 ? ", ..." : ""
       }) - no file may be classified inert, so a change otherwise treated as inert widens to the FULL suite`,
+    );
+  }
+  // Reported for the same reason the INCOMPLETE line is (audio-feed-lm4d): these hints were dropped as
+  // out-of-repo, and a dropped hint that says nothing is how an unreadable universe got described as inert.
+  // They do NOT block the inert class - a hint based outside the repository cannot name a file a change
+  // touches - which is why this line is informational and the one above is not.
+  if (relationReport.outOfRepo.length) {
+    console.log(
+      `fast-gate: read relation: ${relationReport.outOfRepo.length} read path hint(s) sit outside the repository (OS temp or $HOME base) and are not repo paths: ${
+        relationReport.outOfRepo.slice(0, 3).join(", ")
+      }${relationReport.outOfRepo.length > 3 ? ", ..." : ""}`,
+    );
+  }
+  if (inertNeutralFragments.length) {
+    console.log(
+      `fast-gate: read relation: ${inertNeutralFragments.length} path FRAGMENT(s) after an interpolation name nothing in the tree and do not widen (not markdown, or not the file being changed): ${
+        inertNeutralFragments.slice(0, 3).join(", ")
+      }${inertNeutralFragments.length > 3 ? ", ..." : ""}`,
     );
   }
   console.log(
@@ -813,7 +882,6 @@ ${auditUniverseDrift}`);
     Deno.exit(1);
   }
 
-  const changed = await changedFiles();
   let plan: { testFiles: string[] | null; reason: string };
   if (forceAll) {
     plan = { testFiles: null, reason: "--all given" };
@@ -826,7 +894,7 @@ ${auditUniverseDrift}`);
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named, readRelations, resolverInputs, unresolvedReads);
+    plan = planTests(changed, reverse, named, readRelations, resolverInputs, inertBlockingReads);
   }
   const { testFiles, reason } = plan;
 

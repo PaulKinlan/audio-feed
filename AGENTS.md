@@ -100,11 +100,36 @@ AN INABILITY TO KNOW AS A FACT. So: while the detector has UNRESOLVED read hints
 produced that name nothing in the tree - NO file may be classified inert, and a change otherwise treated as
 inert widens to the FULL suite. The run says so twice, in words an operator can act on: the audit line
 `fast-gate: read relation INCOMPLETE: N read path hint(s) do not name anything in the tree (...)` and the
-plan's own reason (`the read relation is INCOMPLETE (...), so no file may be called inert: <files>`). It
-FIRES TODAY - this tree carries 4 such hints - so a docs-only change now costs a full suite; measured over
-the last 500 commits on main, 16 (3.2%) were markdown-only, which is the entire price of the rule. A
+plan's own reason (`the read relation is INCOMPLETE (...), so no file may be called inert: <files>`). A
 resolvable markdown read is still caught by the derived relation, and a COMPLETE relation still allows the
 inert class, so the rule keys on incompleteness rather than on markdown.
+
+THE HINTS THEREFORE HAVE TO BE ACCURATE, WHICH IS WHAT MAKES THE RULE USABLE (audio-feed-lm4d). The rule
+above was right and the hints were wrong: this tree carried ELEVEN hints that named nothing, so no change
+could ever be inert and a one-line docs edit paid the full suite (measured: 112 suites, 125s, for one line
+in `docs/ingest.md`). Each was a mis-parse, and each is now removed where it is produced, not by relaxing
+the rule: (1) a read call that exists only inside STRING CONTENT is data, not a read site - the detector's
+own fixture suite was contributing its fixtures' reads as its own; a read inside a `${}` interpolation is
+CODE and is still found. (2) A base bound OUTSIDE the repository (`Deno.makeTempDir()`, `$HOME`, `TMPDIR`) is not a repo path, so
+`${dir}/state.json` is no longer offered as `state.json`: it is REPORTED in the `outOfRepo` bucket (reported,
+never silent - q0ky's lesson), and does not disable the inert class, because a hint based outside the repo
+cannot name a file a change touches. That classification belongs to a BINDING and is resolved by LEXICAL
+SCOPE (audio-feed-7l9m): the read's INNERMOST binding of the name decides, so a SHADOWED name that holds a
+repo path keeps its relation (rev-27's fixture - a `home` bound to `$HOME` at module scope and to a repo path
+inside the reader - now selects that reader exactly), a PARAMETER is its own binding and never inherits an
+out-of-repo name, and when a value cannot be PROVED out-of-repo the hint is OFFERED as a fragment rather than
+suppressed: the same safe direction as the guard, because an extra relation costs a test run and a missing
+one costs a skipped test. (3) A SUFFIX after an interpolation is a candidate, not the path an author wrote,
+so when it names nothing it is reported in the `unattributed` bucket rather than counted as a read the
+detector could not resolve. The guard is NOT weakened by (3): `unresolved` hints still disable the inert
+class, and a fragment blocks only when it could hide an INERT-ELIGIBLE read AND could BE the file being
+changed - markdown, or an extension-less prefix that could be a directory of it, whose basename matches a
+changed file (`couldHideInertRead` and `couldBeTheChangedFile` in `scripts/fast-check.ts`). Both reasons are
+printed, so no fragment is dropped in silence. The relation itself is asserted UNCHANGED by the fix
+(byte-identical on this tree, same 18 entries and observers), and `tests/read_relation_hints_test.ts` pins
+both directions: an inert change IS inert, and a change touching something a suite reads STILL selects it.
+If a lane ever sees a docs-only change pay the full suite again, READ THE AUDIT LINE - it names the hints
+that did it, and they are now a signal about the tree rather than background noise.
 
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.
