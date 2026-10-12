@@ -13,33 +13,31 @@
 
 import { assertEquals } from "@std/assert";
 import {
+  auditEvidenceSizes,
   EVIDENCE_PNG_BUDGET_BYTES,
   EVIDENCE_TOTAL_BUDGET_BYTES,
-  evidencePngs,
+  reportEvidenceSizeAudit,
 } from "../scripts/evidence-compress.ts";
 
 Deno.test("docs/evidence PNGs stay under the per-file and aggregate budgets", async () => {
-  const oversized: string[] = [];
-  let total = 0;
-
-  for await (const path of evidencePngs()) {
-    const { size } = await Deno.stat(path);
-    total += size;
-    if (size > EVIDENCE_PNG_BUDGET_BYTES) {
-      oversized.push(`${path} (${(size / 1024).toFixed(0)}KB)`);
-    }
-  }
+  // audio-feed-3teu: the budget is measured on what GIT CARRIES (index, else HEAD), so re-running a proof - which
+  // writes a raw 250-500KB screenshot over a compressed committed one - does not redden this gate on a delta that
+  // has nothing to do with compression. Over-budget content that IS staged or committed still fails, with the
+  // remediation naming the SCOPED command (an unscoped `evidence:compress` rewrites other beads' artefacts).
+  const audit = await auditEvidenceSizes();
+  reportEvidenceSizeAudit(audit);
 
   assertEquals(
-    oversized,
+    audit.oversizedCarried,
     [],
-    `evidence PNGs exceed the ${(EVIDENCE_PNG_BUDGET_BYTES / 1024).toFixed(0)}KB budget — ` +
-      "run `deno task evidence:compress` (see docs/evidence/README.md): " + oversized.join(", "),
+    `evidence PNGs exceed the ${(EVIDENCE_PNG_BUDGET_BYTES / 1024).toFixed(0)}KB budget IN GIT — ` +
+      "run `deno task evidence:compress <the directory you changed>` (see docs/evidence/README.md): " +
+      audit.oversizedCarried.join(", "),
   );
   assertEquals(
-    total > EVIDENCE_TOTAL_BUDGET_BYTES,
+    audit.totalCarried > EVIDENCE_TOTAL_BUDGET_BYTES,
     false,
-    `evidence tree is ${(total / 1024 / 1024).toFixed(1)}MB, over the ` +
+    `committed evidence is ${(audit.totalCarried / 1024 / 1024).toFixed(1)}MB, over the ` +
       `${(EVIDENCE_TOTAL_BUDGET_BYTES / 1024 / 1024).toFixed(0)}MB aggregate budget — ` +
       "prune stale evidence (docs/evidence/README.md)",
   );
