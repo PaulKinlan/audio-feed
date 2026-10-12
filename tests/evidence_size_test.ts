@@ -91,6 +91,10 @@ const EVIDENCE_UNDECLARED: string[] = [
   "audio-feed-icl4",
   "audio-feed-khk3",
   "audio-feed-kzi",
+  // Landed on main from another lane while fnrp was in review, i.e. before the rule existed: it belongs to
+  // the same debt as the rest of this list. Its README also carries an ephemeral port and a commit sha in its
+  // title line, which is the audio-feed-1zfv class recorded on that bead.
+  "audio-feed-l7m1",
   "audio-feed-ldsb",
   "audio-feed-ls92",
   "audio-feed-m182",
