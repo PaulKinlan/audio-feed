@@ -133,3 +133,65 @@ Deno.test("THE REAL TREE: the four scripts named on the bead write nothing", asy
     `expected the real tree to have writers, got ${Object.keys(result.writers).length}`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-ehon: the RAW-source and WHOLE-argument-text holes. The tests above
+// all passed while the predicate still counted three shapes that write nothing, so
+// these are the reviewer's three cases, the same controls as above, and the
+// POSITIVE CONTROL in the same source set - because a narrowing that stopped the
+// predicate firing would satisfy every exclusion below and must fail that control.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-ehon: a write PAYLOAD, a COMMENT example and a STRING example are mentions, not writes", () => {
+  const sources: Record<string, string> = {
+    // Writes /tmp; the id is in the second argument, which is data.
+    payload: `await Deno.writeTextFile("/tmp/report.txt", "docs/evidence/${dir("abcd")}");\n`,
+    lineComment: `// await Deno.writeFile("docs/evidence/${dir("wxyz")}/shot.png", png);\n`,
+    blockComment: `/* await Deno.writeFile("docs/evidence/${dir("blk")}/shot.png", png); */\n`,
+    stringLiteral: `const example = 'Deno.writeFile("docs/evidence/${
+      dir("efgh")
+    }/shot.png", png)';\n`,
+    templateText: 'const t = `Deno.writeFile("docs/evidence/' + dir("tpl") + '/s.png")`;\n',
+  };
+  for (const [name, source] of Object.entries(sources)) {
+    const result = censusSource(source);
+    assertEquals(
+      result.writes,
+      [],
+      `${name} writes no evidence and must not be counted as a writer`,
+    );
+    assertEquals(
+      result.mentions.length,
+      1,
+      `${name} still MENTIONS the id, which is the honest word for it`,
+    );
+  }
+
+  // THE POSITIVE CONTROLS, same source set: a first argument that really is an
+  // evidence path, the module-scope `OUT + literal` shape the census resolves, the
+  // evidence helper's contract, and a write inside a template EXPRESSION (which is
+  // code, not template text - the masker must not blank it).
+  const positives: Record<string, [string, string]> = {
+    firstArgument: [
+      `await Deno.writeFile("docs/evidence/${dir("real")}/shot.png", png);\n`,
+      dir("real"),
+    ],
+    moduleScopeOut: [
+      `const OUT = new URL("../docs/evidence/${dir("ep1")}/", import.meta.url).pathname;\n` +
+      `await Deno.writeTextFile(OUT + "01-x.txt", "hi");\n`,
+      dir("ep1"),
+    ],
+    evidenceHelper: [`writeEvidenceReadme({ dir: "${dir("hlp1")}" });\n`, dir("hlp1")],
+    templateExpression: [
+      'const t = `${await Deno.writeFile("docs/evidence/' + dir("expr") + '/s.png", b)}`;\n',
+      dir("expr"),
+    ],
+  };
+  for (const [name, [source, id]] of Object.entries(positives)) {
+    assertEquals(
+      censusSource(source).writes,
+      [id],
+      `${name} really writes evidence and must keep its write`,
+    );
+  }
+});

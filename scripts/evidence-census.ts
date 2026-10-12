@@ -12,10 +12,18 @@
  * validated.
  *
  * SO THE PREDICATE'S INPUT IS NOT "the script names a docs/evidence directory"
- * but "the script WRITES one": an argument to a write call that resolves into
- * docs/evidence. A mention elsewhere in the file — a comment, a bead id, a
- * localStorage key, a route — is not evidence of a write, and a read is not a
- * write. An evidence slice is defined by what it COMMITS.
+ * but "the script WRITES one": the FIRST argument of a write call, IN CODE
+ * POSITION, that resolves into docs/evidence. A mention elsewhere in the file — a
+ * comment, a bead id, a localStorage key, a route — is not evidence of a write,
+ * and a read is not a write. An evidence slice is defined by what it COMMITS.
+ *
+ * audio-feed-ehon NARROWED THE DERIVATION TWICE, because the first version passed
+ * its tests while still counting three shapes that write nothing: the id in a
+ * write's PAYLOAD (`writeTextFile("/tmp/report.txt", "...docs/evidence/audio-feed-abcd")`),
+ * a call written inside a COMMENT, and a call written inside a STRING. The
+ * payload is now excluded by taking the first argument only, and the other two by
+ * scanning a masked copy of the source — maskNonCode() below. Each is pinned by a
+ * test, and each is a MENTION rather than a write, which is the honest word.
  *
  * DEPTH OF RESOLUTION, DECLARED RATHER THAN GLOSSED: one level of module-scope
  * literal substitution, which is the shape this repository actually uses —
@@ -50,6 +58,129 @@ const ID_RE = /audio-feed-[a-z0-9]+/g;
 /** Extract `audio-feed-<id>` tokens, or [] when the text carries none. */
 export function idsIn(text: string): string[] {
   return [...new Set(text.match(ID_RE) ?? [])];
+}
+
+/**
+ * The source with COMMENTS and the INTERIOR of string and template literals
+ * replaced by spaces, at identical offsets (newlines are kept so line numbers
+ * survive). audio-feed-ehon: a write call NAMED inside a comment or a string is
+ * not a call, and the census used to scan the raw source, so a comment example
+ * and a string example were both counted as writers.
+ *
+ * The offsets are preserved on purpose, because the argument text must be taken
+ * from the RAW source: masking the first argument would erase the literal that
+ * names the evidence directory. Masked text is for FINDING calls and for
+ * counting brackets; raw text is for reading the target.
+ *
+ * DECLARED LIMITS, because a masker with unstated holes is worse than none: a
+ * REGEX LITERAL is not masked (telling `/` as regex from division needs a
+ * previous-token rule, and a wrong guess would mask real code and LOSE a write,
+ * which is the silent direction), and a template literal nested inside another
+ * template's `${...}` is treated as code. Neither shape appears in this
+ * repository's scripts, and both are named here rather than assumed away.
+ */
+export function maskNonCode(source: string): string {
+  const out = source.split("");
+  const mask = (from: number, to: number) => {
+    for (let k = Math.max(0, from); k < Math.min(to, source.length); k++) {
+      if (out[k] !== "\n") out[k] = " ";
+    }
+  };
+  const endOfQuoted = (start: number, quote: string): number => {
+    for (let j = start + 1; j < source.length; j++) {
+      const ch = source[j]!;
+      if (ch === "\\") {
+        j++;
+        continue;
+      }
+      if (ch === quote || ch === "\n") return j; // an unterminated literal stops at the newline
+    }
+    return source.length;
+  };
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i]!;
+    if (ch === "/" && source[i + 1] === "/") {
+      const nl = source.indexOf("\n", i);
+      const stop = nl < 0 ? source.length : nl;
+      mask(i + 2, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      const close = source.indexOf("*/", i + 2);
+      const stop = close < 0 ? source.length : close + 2;
+      mask(i + 2, close < 0 ? source.length : close);
+      i = stop;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const stop = endOfQuoted(i, ch);
+      mask(i + 1, stop);
+      i = stop + 1;
+      continue;
+    }
+    if (ch === "`") {
+      // Template: the literal parts are masked, `${ ... }` is CODE and is left alone.
+      let j = i + 1;
+      let depth = 0;
+      while (j < source.length) {
+        const d = source[j]!;
+        if (d === "\\") {
+          mask(j, j + 1);
+          j += 2;
+          continue;
+        }
+        if (depth === 0 && d === "`") break;
+        if (depth === 0 && d === "$" && source[j + 1] === "{") {
+          j += 2;
+          depth = 1;
+          continue;
+        }
+        if (depth > 0) {
+          if (d === '"' || d === "'") {
+            const stop = endOfQuoted(j, d);
+            mask(j + 1, stop);
+            j = stop + 1;
+            continue;
+          }
+          if (d === "{") depth++;
+          else if (d === "}") depth--;
+          j++;
+          continue;
+        }
+        mask(j, j + 1);
+        j++;
+      }
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+/**
+ * The text of the FIRST argument of the call whose `(` is at `open`, or null when
+ * the parens never close. Masked text is used to count brackets (so a paren
+ * inside a string cannot end the call early) and the RAW text is returned, so
+ * the literal naming the target survives.
+ *
+ * ONLY THE FIRST ARGUMENT, because that is the one that names the target:
+ * `Deno.writeTextFile("/tmp/report.txt", "docs/evidence/audio-feed-abcd")` writes
+ * outside the tree and merely MENTIONS the id in its payload (audio-feed-ehon).
+ */
+export function firstArgument(masked: string, raw: string, open: number): string | null {
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    const ch = masked[i]!;
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return raw.slice(open + 1, i);
+    } else if (ch === "," && depth === 1) return raw.slice(open + 1, i);
+  }
+  return null;
 }
 
 /**
@@ -129,11 +260,16 @@ export function censusSource(source: string): ScriptCensus {
   const writes: string[] = [];
   const runtimeAssembled: string[] = [];
 
+  // THE MASKED SOURCE IS WHAT IS SCANNED (audio-feed-ehon): a call written inside a comment or a
+  // string is not a call site, and the raw source made both look like one.
+  const masked = maskNonCode(source);
   for (const { pattern, evidenceHelper } of WRITE_CALLS) {
     pattern.lastIndex = 0;
-    for (const match of source.matchAll(pattern)) {
+    for (const match of masked.matchAll(pattern)) {
       const open = match.index + match[0].length - 1;
-      const args = callArguments(source, open);
+      // ...and only the FIRST argument is the target. Every other argument is data, which is how a
+      // payload naming docs/evidence made a script that writes to /tmp look like a writer.
+      const args = firstArgument(masked, source, open);
       if (args === null) continue;
       const target = resolveTarget(args, bindings);
       // A generic write must name docs/evidence. The evidence helpers may name
