@@ -631,6 +631,94 @@ try {
         `violations: ${listenCspViolations.length}`,
       );
 
+      // Verify page identity at capture moment: must be at /listen/:feedToken (not /account or any other route)
+      // with subscriber identity heading, audio element, playlist, and playback controls.
+      //
+      // REVIEWER FINDING: The previous implementation computed controls via a selector list ending in 'audio',
+      // which was implied by hasAudio and passed even when all controls, buttons, and range inputs were removed.
+      //
+      // WHAT WOULD STILL MAKE THIS CHECK FAIL IF THE CONTROLS WERE REMOVED?
+      // Answer:
+      // 1. playPause requires a distinct play/pause button (#playPause, button[aria-label='Play']).
+      //    If the play/pause button is removed, hasPlayPause is false -> FAILS naming 'missing: play/pause button'.
+      // 2. seek requires an actual range slider input (#seek, input[type='range']#seek).
+      //    If the seek bar is removed, hasSeek is false -> FAILS naming 'missing: seek slider'.
+      // 3. dockButtons requires the dock transport button suite (.dock button, #back, #playPause, #fwd).
+      //    If transport buttons are removed, dockButtonCount < 3 -> FAILS naming 'missing: dock transport buttons (found: 0/3)'.
+      // 4. hasControls requires hasPlayPause && hasSeek && hasDockButtons (dockButtonCount >= 3).
+      // None of these can be satisfied by a bare audio element, container div, or unstyled text.
+      const captureIdentity = (await js(`(() => {
+        const path = window.location.pathname;
+        const heading = document.querySelector("h1, .player-title, header .identity")?.textContent?.trim() ?? "";
+        const audio = Boolean(document.querySelector("audio"));
+        const playlist = Boolean(document.querySelector(".ep-title"));
+
+        // Controls verification: require the real controls rendered by the web player.
+        // A bare audio element cannot satisfy any of these.
+        const playPauseBtn = document.querySelector("button#playPause, button[aria-label='Play'], button.t-main");
+        const hasPlayPause = Boolean(playPauseBtn);
+
+        const seekInput = document.querySelector("input[type='range']#seek, input[type='range']");
+        const hasSeek = Boolean(seekInput);
+
+        const dockButtons = document.querySelectorAll(".dock button, .transport button");
+        const dockButtonCount = dockButtons.length;
+        const hasDockButtons = dockButtonCount >= 3;
+
+        const missing = [];
+        if (!hasPlayPause) missing.push("play/pause button");
+        if (!hasSeek) missing.push("seek slider");
+        if (!hasDockButtons) missing.push(\`dock transport buttons (found: \${dockButtonCount}/3)\`);
+
+        const hasControls = hasPlayPause && hasSeek && hasDockButtons;
+        const isNotAccount = path !== "/account" && !heading.toLowerCase().includes("account");
+        const isListenPlayer = path.startsWith("/listen/") && audio && playlist && hasControls && isNotAccount;
+
+        return {
+          path,
+          heading,
+          hasAudio: audio,
+          hasPlaylist: playlist,
+          hasControls,
+          hasPlayPause,
+          hasSeek,
+          dockButtonCount,
+          missingControls: missing,
+          isNotAccount,
+          isListenPlayer,
+        };
+      })()`)) as {
+        path: string;
+        heading: string;
+        hasAudio: boolean;
+        hasPlaylist: boolean;
+        hasControls: boolean;
+        hasPlayPause: boolean;
+        hasSeek: boolean;
+        dockButtonCount: number;
+        missingControls: string[];
+        isNotAccount: boolean;
+        isListenPlayer: boolean;
+      };
+
+      const controlsDetail = captureIdentity.hasControls
+        ? `controls: true (play/pause: ${captureIdentity.hasPlayPause}, seek: ${captureIdentity.hasSeek}, dockButtons: ${captureIdentity.dockButtonCount})`
+        : `controls: false (missing: ${captureIdentity.missingControls.join(", ")})`;
+
+      check(
+        "web player capture asserts page identity at /listen with audio controls",
+        captureIdentity.isListenPlayer &&
+          captureIdentity.path === `/listen/${subscriber.feedToken}` &&
+          captureIdentity.hasAudio &&
+          captureIdentity.hasPlaylist &&
+          captureIdentity.hasControls &&
+          captureIdentity.hasPlayPause &&
+          captureIdentity.hasSeek &&
+          captureIdentity.dockButtonCount >= 3 &&
+          captureIdentity.isNotAccount,
+        `path: ${captureIdentity.path}, heading: '${captureIdentity.heading}', audio: ${captureIdentity.hasAudio}, playlist: ${captureIdentity.hasPlaylist}, ${controlsDetail}`,
+      );
+
       const shotListen = (await cdp("Page.captureScreenshot", { format: "png" })) as {
         data: string;
       };
@@ -740,7 +828,7 @@ try {
 - **RSS Enclosure:** the master feed renders valid XML with an \`<enclosure>\` element pointing at the seeded episode with \`type="audio/wav"\`.
 - **Audio Streaming (\`audio-feed-7n3f\`):** a direct request to the enclosure URL returns \`200 OK\`, \`content-type: audio/wav\`, and a byte-for-byte exact payload matching the stored blob (${audioBytes.byteLength} bytes).
 - **Capability Isolation:** requests to unauthorized or invalid audio keys return 404/403, and a flat-key historical episode path fails closed with a canonical 404.
-- **Web Player:** real Chrome loaded the subscriber's \`/listen\` page and rendered the audio element and playlist; the playback position saved via the \`pagehide\` event.
+- **Web Player:** real Chrome loaded the subscriber's \`/listen\` page and rendered the audio element, playlist, and audio controls (play/pause button, seek slider, and transport dock); the playback position saved via the \`pagehide\` event.
 - **CSP Integrity:** zero Content Security Policy console violations on \`/listen\`.
 - **Account page:** the bookmarklet disclosure is verified openable and its snippet does not overflow its box.`,
           },
@@ -757,7 +845,7 @@ try {
             body:
               `- 01-admin-observability.png: Full-page capture (1280 x document height) of the admin observability console, showing the screened error message, the limits card (the card headed "What this page cannot tell you"), and the retrying queue table with its claim history expanded.
 - 02-homepage-bookmarklet-main.png: Scrolled view of front door bookmarklet box showing draggable anchor and expanded bookmarklet-code disclosure fallback.
-- 03-listen-web-player.png: Web player at /listen rendering ready episode with audio controls.`,
+- 03-listen-web-player.png: Web player at /listen rendering ready episode with audio controls (play/pause button, seek slider, and transport dock).`,
           },
         ],
       });
