@@ -203,32 +203,36 @@ try {
   // Open the second user's page while user-1 still has a saved position
   const tab2 = await cdp("Target.createTarget", { url: `${BASE}/listen/other-token` });
   const ws2 = new WebSocket(
-    targets.find((t) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
+    targets.find((t: any) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
       (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(
-        (t) => t.id === tab2.targetId,
+        (t: any) => t.id === tab2.targetId,
       ).webSocketDebuggerUrl,
   );
   await new Promise((r) => ws2.addEventListener("open", r, { once: true }));
   let nextId2 = 0;
-  const pending2 = new Map();
+  // deno-lint-ignore no-explicit-any
+  const pending2 = new Map<number, (v: any) => void>();
   ws2.addEventListener("message", (e) => {
     const msg = JSON.parse(e.data);
     if (msg.id && pending2.has(msg.id)) {
-      pending2.get(msg.id)(msg);
+      pending2.get(msg.id)!(msg);
       pending2.delete(msg.id);
     }
   });
-  async function cdp2(method, params = {}) {
+  // deno-lint-ignore no-explicit-any
+  async function cdp2(method: string, params: Record<string, unknown> = {}): Promise<any> {
     const id = ++nextId2;
     return new Promise((resolve, reject) => {
       pending2.set(
         id,
-        (msg) => msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result),
+        // deno-lint-ignore no-explicit-any
+        (msg: any) => msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result),
       );
       ws2.send(JSON.stringify({ id, method, params }));
     });
   }
-  async function js2(expression) {
+  // deno-lint-ignore no-explicit-any
+  async function js2(expression: string): Promise<any> {
     const res = await cdp2("Runtime.evaluate", {
       expression,
       awaitPromise: true,
@@ -239,7 +243,7 @@ try {
   await new Promise((r) => setTimeout(r, 1000)); // wait for page load
 
   const otherUserBadge = await js2(`
-    document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume')?.textContent || "none"
+    document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume-badge')?.textContent || "none"
   `);
   check(
     "other user cannot resume user-1's playback position (per-user isolation)",

@@ -193,6 +193,26 @@ export async function createListenHarness(port = 8131) {
       createdAt: at,
       readyAt: at,
     });
+
+    const key2 = audioBlobKey({ userId: "user-2", id: seed.id, mode: seed.mode }, "wav");
+    await stores.blobs.put(key2, bytes, { contentType: "audio/wav" });
+    await stores.metadata.putEpisode({
+      id: seed.id,
+      userId: "user-2",
+      sourceId: seed.sourceId,
+      sourceTitle: seed.sourceId === "verge" ? "The Verge" : "Stratechery",
+      articleId,
+      mode: seed.mode,
+      status: "ready",
+      title: seed.title,
+      description: "A short lead for the harness.",
+      audioKey: key2,
+      contentType: "audio/wav",
+      durationSeconds: seed.minutes * 60,
+      byteLength: bytes.byteLength,
+      createdAt: at,
+      readyAt: at,
+    });
   }
 
   const { fetch } = createApp(
