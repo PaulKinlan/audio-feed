@@ -426,6 +426,8 @@ export interface ScriptCensus {
   mentions: string[];
   /** Write calls whose target is an evidence path with no literal id in reach. */
   runtimeAssembled: string[];
+  /** audio-feed-t5lb: write calls whose target could not be resolved at all. */
+  unresolvedWrites: string[];
 }
 
 /**
@@ -437,6 +439,13 @@ export function censusSource(source: string): ScriptCensus {
   const bindings = evidenceBindings(source);
   const writes: string[] = [];
   const runtimeAssembled: string[] = [];
+  // audio-feed-t5lb: a write call whose target is NOT RESOLVED AT ALL is not the same fact as one
+  // resolved to a non-evidence path, and the difference is the whole defect. `if (!inEvidence)` used
+  // to send both through the same door, so a script whose destination arrives through a parameter or
+  // helper was left with no write AND was then described as writing no evidence directory - a
+  // positive claim about a real writer, produced by an absence of resolution. `scripts/evidence-compress.ts`
+  // is that case (`compressOne` renames a palette-converted temp over its evidence PNG).
+  const unresolvedWrites: string[] = [];
 
   // THE MASKED SOURCE IS WHAT IS SCANNED (audio-feed-ehon): a call written inside a comment or a
   // string is not a call site, and the raw source made both look like one.
@@ -458,7 +467,15 @@ export function censusSource(source: string): ScriptCensus {
       // A generic write must name docs/evidence. The evidence helpers may name
       // the slice directly, because naming it IS their contract.
       const inEvidence = target.text.includes(EVIDENCE_PREFIX) || evidenceHelper;
-      if (!inEvidence) continue;
+      if (!inEvidence) {
+        // UNRESOLVED, NOT "ELSEWHERE": a bare identifier, or a template whose interpolation cannot
+        // be resolved, names nothing at all - so this call is a write we cannot attribute rather than
+        // a write to somewhere else. A literal path that simply is not under docs/evidence stays
+        // silent, which is the legitimate case this branch must not start reporting.
+        const bare = /^[A-Za-z_$][\w$]*$/.test(targetText.trim()) || targetText.includes("${");
+        if (bare && target.ids.length === 0) unresolvedWrites.push(match[0].replace(/\s*\($/, ""));
+        continue;
+      }
       if (target.ids.length === 0) {
         if (targetText.includes(EVIDENCE_PREFIX) || evidenceHelper) {
           runtimeAssembled.push(match[0].replace(/\s*\($/, ""));
@@ -477,7 +494,11 @@ export function censusSource(source: string): ScriptCensus {
     else for (const id of idsIn(line)) mentioned.add(id);
   }
   const mentions = [...mentioned].filter((id) => !writes.includes(id));
-  return { writes, mentions, runtimeAssembled };
+  // Only reports a script that is ABOUT evidence: an unattributable write in a file that never names
+  // an evidence directory is out of scope for this census, and saying so here keeps the bucket's
+  // meaning the same as the mention-only bucket's.
+  const unresolvedEvidenceWrites = mentions.length > 0 ? unresolvedWrites : [];
+  return { writes, mentions, runtimeAssembled, unresolvedWrites: unresolvedEvidenceWrites };
 }
 
 export interface Census {
@@ -489,6 +510,10 @@ export interface Census {
   namingButNotWriting: Record<string, string[]>;
   /** Every write call whose evidence target could not be resolved. */
   runtimeAssembled: Record<string, string[]>;
+  /** audio-feed-t5lb: scripts with a write call whose target could not be resolved AT ALL - an
+   *  unattributable write. Distinct from `namingButNotWriting`, which positively claims a script
+   *  writes no evidence directory; a script here must NOT also be reported there. */
+  unresolvedWrites: Record<string, string[]>;
 }
 
 const SCRIPT_RE = /^[A-Za-z0-9_.-]+\.ts$/;
@@ -497,6 +522,7 @@ const SCRIPT_RE = /^[A-Za-z0-9_.-]+\.ts$/;
 export async function census(root: string): Promise<Census> {
   const writers: Record<string, string[]> = {};
   const namingButNotWriting: Record<string, string[]> = {};
+  const unresolvedWrites: Record<string, string[]> = {};
   const runtimeAssembled: Record<string, string[]> = {};
 
   for await (const entry of Deno.readDir(`${root}/scripts`)) {
@@ -504,7 +530,15 @@ export async function census(root: string): Promise<Census> {
     const relative = `scripts/${entry.name}`;
     const result = censusSource(await Deno.readTextFile(`${root}/${relative}`));
     for (const id of result.writes) (writers[id] ??= []).push(relative);
-    if (result.mentions.length > 0) namingButNotWriting[relative] = result.mentions;
+    // THE EXCLUSION IS THE POINT OF THIS CHANGE, not the new field: a script with an unattributable
+    // WRITE must not be described as writing no evidence directory. Before this, `evidence-compress.ts`
+    // was printed as MENTION-ONLY - a positive claim about a real writer - because its rename target
+    // arrives through a function parameter and the resolver returned nothing.
+    const unattributable = result.unresolvedWrites.length > 0;
+    if (result.unresolvedWrites.length > 0) unresolvedWrites[relative] = result.unresolvedWrites;
+    if (result.mentions.length > 0 && !unattributable) {
+      namingButNotWriting[relative] = result.mentions;
+    }
     if (result.runtimeAssembled.length > 0) runtimeAssembled[relative] = result.runtimeAssembled;
   }
 
@@ -513,7 +547,7 @@ export async function census(root: string): Promise<Census> {
     if (!entry.isDirectory || !entry.name.startsWith("audio-feed-")) continue;
     if (!(entry.name in writers)) unwritten.push(entry.name);
   }
-  return { writers, unwritten, namingButNotWriting, runtimeAssembled };
+  return { writers, unwritten, namingButNotWriting, runtimeAssembled, unresolvedWrites };
 }
 
 function summarise(result: Census): void {
@@ -529,6 +563,13 @@ function summarise(result: Census): void {
   );
   for (const script of probes) {
     console.log(`  MENTION-ONLY  ${script}  ->  ${result.namingButNotWriting[script]!.join(", ")}`);
+  }
+  const unattributable = Object.keys(result.unresolvedWrites).sort();
+  console.log(
+    `scripts with a write call whose target could NOT be resolved (unattributable, not "elsewhere"): ${unattributable.length}`,
+  );
+  for (const script of unattributable) {
+    console.log(`  UNATTRIBUTABLE  ${script}  ->  ${result.unresolvedWrites[script]!.join(", ")}`);
   }
   const unresolved = Object.keys(result.runtimeAssembled).sort();
   console.log(`scripts with a runtime-assembled evidence target: ${unresolved.length}`);

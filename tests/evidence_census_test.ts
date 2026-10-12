@@ -438,3 +438,44 @@ Deno.test("audio-feed-vex8: rename credits its DESTINATION, and a rename OUT of 
     "moving an evidence file out to /tmp writes no evidence",
   );
 });
+
+/**
+ * audio-feed-t5lb: A TARGET THE RESOLVER CANNOT FIND IS NOT A TARGET ELSEWHERE, and collapsing the two
+ * made a real writer read as a non-writer: `scripts/evidence-compress.ts` renames over its evidence PNG
+ * through a function parameter, and the census described it as writing no evidence directory.
+ *
+ * TWO ROWS, BECAUSE ONLY THE PAIR IS EVIDENCE: an unattributable destination must be REPORTED, and a
+ * literal destination that is simply not under docs/evidence must stay SILENT - a change that reddened
+ * both would be a change that reports everything.
+ */
+Deno.test("audio-feed-t5lb: a destination arriving through a parameter is reported as unattributable", () => {
+  const source = [
+    "// mentions audio-feed-syhu in prose so this script is ABOUT evidence",
+    "async function compressOne(path: string) {",
+    "  const tmp = `${path}.png8.tmp`;",
+    "  await Deno.rename(tmp, path);",
+    "}",
+  ].join("\n");
+  const result = censusSource(source);
+  assertEquals(result.writes, [], "no write can be credited - the destination is unresolvable");
+  assertEquals(
+    result.unresolvedWrites,
+    ["Deno.rename"],
+    "and the call is REPORTED rather than dropped in silence",
+  );
+  assert(result.mentions.length > 0, "the file is about evidence, which is what puts it in scope");
+});
+
+Deno.test("audio-feed-t5lb: a LITERAL destination that is not evidence stays silent", () => {
+  const source = [
+    "// mentions audio-feed-syhu in prose",
+    'await Deno.writeTextFile("/tmp/not-evidence.txt", "x");',
+  ].join("\n");
+  const result = censusSource(source);
+  assertEquals(result.writes, [], "not an evidence write");
+  assertEquals(
+    result.unresolvedWrites,
+    [],
+    "a literal path we CAN see is not unattributable - reporting it would make the row meaningless",
+  );
+});
