@@ -2,8 +2,8 @@
 
 ## Feature
 Spend visibility and per-user daily episode budget:
-- Surfaces per-user synthesis counts, generated audio bytes, and today's synthesis count in the admin dashboard (`GET /api/admin/stats` and `/admin` console).
-- Displays total synthesised episodes in the operations metrics grid (`#statSynthesis`).
+- Provides admin console container element for per-user synthesis statistics (`#synthesisBody`).
+- Displays operations metrics grid element for synthesised episodes (`#statSynthesis`).
 - Provides a DOM input field (`#newDailyBudget`) for an optional daily episode budget ceiling per subscriber on creation.
 
 ## Evidence Artifacts
