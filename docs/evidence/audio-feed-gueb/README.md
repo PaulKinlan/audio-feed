@@ -1,5 +1,8 @@
 # audio-feed-gueb: long TTS input reproduction
 
+- Capture: no assertions
+- Reason: Input fixture (article.txt, consumed by 9yu8 and bp6r) and historical unit-test execution log (focused-test.log). Contains no generating script and asserts no live provider behavior.
+
 **PROVIDER-UNVERIFIED (labelled fallback):** request construction, deterministic segmentation, ordered PCM stitching and mock-exact HTTP 8192 refusal are verified in focused tests (35 tests on the first tree; 66 after generic input/continuation helper and lease-aware tests; see `focused-test.log`). Captured model ids, temperature and `maxOutputTokens` are local request parameters. Real provider token counts, actual API acceptance, generated audio and listening quality are **NOT verified**; `audio-feed-u60a` tracks credentialed live validation.
 
 - Source: [History of the Internet](https://en.wikipedia.org/wiki/History_of_the_Internet), Wikipedia, retrieved 2026-10-06; `article.txt` is the first 47,000 characters of prose from paragraph elements. Wikipedia content is CC BY-SA; attribution and license: https://en.wikipedia.org/wiki/Wikipedia:Text_of_the_Creative_Commons_Attribution-ShareAlike_4.0_International_License .
