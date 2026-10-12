@@ -64,6 +64,7 @@ import {
   DEFAULT_MAX_UPLOAD_RETRIES,
   DEFAULT_VOICES,
   INBOX_SOURCE_ID,
+  parseAudioBlobKey,
   segmentBlobKey,
   segmentTextHash,
   unsynthesized,
@@ -2158,28 +2159,7 @@ export async function runSynthesisBatch(
   return result;
 }
 
-/**
- * Split `audio/<userId>/<mode>/<id>[-<rev>].<ext>` (see `audioBlobKey`). Ids are
- * UUIDs and contain hyphens, so every hyphen-boundary prefix of the name is a
- * candidate id; a wrong candidate can only make a key look referenced, which
- * keeps a blob rather than deleting one.
- */
-export function parseAudioBlobKey(
-  key: string,
-): { userId: string; candidateIds: string[]; segmentEpisodeId?: string } | null {
-  // audio-feed-wr1u: segment blobs live under their own prefix and are referenced by
-  // segment RECORDS, not by episode.audioKey — the orphan sweeper checks them differently.
-  const segment = /^audio-segments\/([^/]+)\/([^/]+)\/[^/]+$/.exec(key);
-  if (segment?.[1] && segment[2]) {
-    return { userId: segment[1], candidateIds: [], segmentEpisodeId: segment[2] };
-  }
-  const match = /^audio\/([^/]+)\/[^/]+\/([^/]+)\.[^./]+$/.exec(key);
-  if (!match?.[1] || !match[2]) return null;
-  const userId = match[1];
-  const parts = match[2].split("-");
-  const candidateIds = parts.map((_, i) => parts.slice(0, parts.length - i).join("-"));
-  return { userId, candidateIds };
-}
+export { parseAudioBlobKey };
 
 export interface SynthesisWorkerHandle {
   /** Resolves when the current tick finishes; the loop stops after it. */

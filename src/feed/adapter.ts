@@ -27,7 +27,13 @@
  *
  * Do NOT widen either type to satisfy the other. This projection is the seam.
  */
-import { type Episode as StoredEpisode, isPublishable, type Source } from "../types.ts";
+import {
+  audioBlobKey,
+  type Episode as StoredEpisode,
+  isPublishable,
+  type Source,
+} from "../types.ts";
+import { isCanonicalAudioKey } from "../storage/legacy_audio.ts";
 import type { Episode as FeedEpisode, FeedSource } from "./types.ts";
 
 export interface FeedProjectionContext {
@@ -41,10 +47,40 @@ export interface FeedProjectionContext {
   byteLength?: number;
 }
 
+/**
+ * Resolves the canonical audio key for an episode (audio-feed-hav3).
+ * If the stored episode.audioKey is already canonical, returns it.
+ * If it is a legacy/flat key, derives the canonical key using audioBlobKey.
+ */
+export function canonicalAudioKey(
+  episode: Pick<StoredEpisode, "userId" | "id" | "mode" | "audioKey" | "contentType">,
+): string {
+  const key = episode.audioKey;
+  if (!key) return "";
+  if (isCanonicalAudioKey(key, episode)) {
+    return key;
+  }
+  const ext = key.toLowerCase().endsWith(".wav") || episode.contentType === "audio/wav"
+    ? "wav"
+    : "mp3";
+  return audioBlobKey(episode, ext);
+}
+
 /** The stable, non-expiring enclosure path served by `GET /audio/:key`. */
-export function enclosureUrl(publicBaseUrl: string, audioKey: string): string {
+export function enclosureUrl(
+  publicBaseUrl: string,
+  audioKeyOrEpisode:
+    | string
+    | Pick<StoredEpisode, "userId" | "id" | "mode" | "audioKey" | "contentType">,
+): string {
   const base = publicBaseUrl.replace(/\/+$/, "");
-  const trimmed = audioKey.startsWith("audio/") ? audioKey.slice(6) : audioKey;
+  let rawKey: string;
+  if (typeof audioKeyOrEpisode === "string") {
+    rawKey = audioKeyOrEpisode;
+  } else {
+    rawKey = canonicalAudioKey(audioKeyOrEpisode);
+  }
+  const trimmed = rawKey.startsWith("audio/") ? rawKey.slice(6) : rawKey;
   return `${base}/audio/${trimmed}`;
 }
 
@@ -64,7 +100,7 @@ export function toFeedEpisode(
     guid: episode.id,
     title: episode.title,
     pubDate: episode.readyAt ?? episode.createdAt,
-    audioUrl: enclosureUrl(context.publicBaseUrl, episode.audioKey),
+    audioUrl: enclosureUrl(context.publicBaseUrl, episode),
     description: episode.description,
     kind: episode.mode,
     sourceId: episode.sourceId,
