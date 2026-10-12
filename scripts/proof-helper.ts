@@ -16,6 +16,8 @@
  * automated CI gate (`deno task gate`), which only executes `tests/*_test.ts`.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export interface SupervisedHarness {
   port: number;
   base: string;
@@ -475,6 +477,17 @@ function createCheckerInternal(deferred: boolean, logger?: CheckLogger): Checker
   };
 }
 
+export interface ActiveProofContext {
+  name: string;
+  checker: Checker;
+}
+
+const activeProofStorage = new AsyncLocalStorage<ActiveProofContext>();
+
+export function getActiveProof(): ActiveProofContext | undefined {
+  return activeProofStorage.getStore();
+}
+
 export async function runProof(
   name: string,
   body: (checker: Checker) => Promise<void> | void,
@@ -484,7 +497,9 @@ export async function runProof(
   const checker = createCheckerInternal(true, logger);
   let bodyError: unknown = null;
   try {
-    await body(checker);
+    await activeProofStorage.run({ name, checker }, async () => {
+      await body(checker);
+    });
   } catch (err) {
     bodyError = err;
   }
@@ -660,11 +675,32 @@ export interface EvidenceReadmeOptions {
   sections?: EvidenceSection[];
   allowLocalhost?: boolean;
   executedBy?: string;
+  checker?: Checker;
 }
 
 export async function writeEvidenceReadme(
   options: EvidenceReadmeOptions,
 ): Promise<string> {
+  const activeProof = activeProofStorage.getStore();
+  const checkers: Checker[] = [];
+  if (activeProof?.checker) {
+    checkers.push(activeProof.checker);
+  }
+  if (options.checker && options.checker !== activeProof?.checker) {
+    checkers.push(options.checker);
+  }
+  for (const checker of checkers) {
+    if (checker.failures.length > 0) {
+      const summary = checker.failures
+        .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
+        .join("; ");
+      const proofLabel = activeProof?.name ? ` for proof '${activeProof.name}'` : "";
+      throw new Error(
+        `Refusing to write evidence README${proofLabel}: proof has ${checker.failures.length} recorded failure(s): ${summary}`,
+      );
+    }
+  }
+
   const isCapture = Boolean(options.capture);
   let captureReason = "";
   if (isCapture) {
