@@ -103,6 +103,13 @@ function askConfirm(message, options) {
     if (okEl) okEl.addEventListener("click", onOk);
     if (cancelEl) cancelEl.addEventListener("click", onCancel);
     confirmDialog.addEventListener("close", onClose);
+    // audio-feed-qz3x: a dialog closed by an EARLIER showModal() leaves its returnValue behind, and
+    // showModal() does not reset it. Escape and light-dismiss close with NO result, so they leave
+    // that stale value untouched - which made a later Escape resolve TRUE once any earlier confirm
+    // had been approved, i.e. the destructive action the user had just cancelled still ran. Clearing
+    // it here keeps all three routes honest: close("confirm") -> true, close("cancel") -> false, and
+    // a no-result close -> "" -> false.
+    confirmDialog.returnValue = "";
     confirmDialog.showModal();
   });
 }
