@@ -118,10 +118,22 @@ function exists(path: string): boolean {
 
 /**
  * Whether `dir` is an abandoned-profile CANDIDATE by shape: Chrome's marker inside, no checkout
- * inside. `exists` on the marker rather than `isDirectory`, because the marker's nature is Chrome's
- * business and the exclusion's job is only to never reach a checkout.
+ * inside. EXPORTED so a census or a dry run can ask the sweep's OWN question rather than re-deriving
+ * it - a count of what a reclaim would remove is only a measurement of this rule if it shares this
+ * predicate, and `deno eval` reproductions of a predicate drift from it (audio-feed-h62q).
+ *
+ * TWO DETAILS HERE THAT LOOK LIKE STYLE AND ARE NOT, because each one in its "obvious" form deletes
+ * something in use:
+ *   - `exists` on the PROFILE marker rather than `isDirectory`: the marker's nature is Chrome's
+ *     business, and its presence is evidence a profile was initialised whatever it is.
+ *   - `exists` on `.git` RATHER THAN `isDirectory`, and this is the lethal one: **in a LINKED WORKTREE
+ *     `.git` IS A REGULAR FILE containing `gitdir: ...`, NOT A DIRECTORY.** A directory test would
+ *     report "no checkout" for every linked worktree in this fleet, so a stale worktree that also
+ *     held a `Default/` would satisfy the whole conjunction and be DELETED - which is the class of
+ *     destruction the name rule's removal was meant to avoid, reintroduced by one character. The
+ *     suite's `CHECKOUT_MARKER as a file` row has a red case for it (audio-feed-h62q).
  */
-function isAbandonedProfile(dir: string): boolean {
+export function isAbandonedProfile(dir: string): boolean {
   if (!exists(dir)) return false;
   if (exists(`${dir}/${CHECKOUT_MARKER}`)) return false;
   return exists(`${dir}/${PROFILE_MARKER}`);
