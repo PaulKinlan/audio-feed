@@ -5,6 +5,7 @@ import { memoryStores, openStores, type Stores } from "../src/config.ts";
 import {
   detectOverdueInvocations,
   INVOCATION_SCAN_LIMIT,
+  MAX_INVOCATION_ATTEMPTS,
 } from "../src/observability/invocation_overdue.ts";
 
 const NOW = Date.parse("2026-10-13T20:00:00.000Z");
@@ -118,6 +119,146 @@ Deno.test("a7i0: two concurrent detector reads emit exactly one durable warning"
       assertEquals((await warningRecords(reopened)).length, 1, "dedupe survives restart");
     } finally {
       await reopened.metadata.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a7i0: the whole request stops at its cap and reports remaining work", async () => {
+  const stores = memoryStores();
+  for (let i = 0; i < 10; i++) {
+    await mark(stores, `capped-${i}`, "started", NOW - 360_001);
+  }
+  let reads = 0;
+  const list = stores.metadata.listLogs.bind(stores.metadata);
+  stores.metadata.listLogs = (...args) => {
+    reads++;
+    return list(...args);
+  };
+  const first = await detectOverdueInvocations(stores.metadata, NOW);
+  assertEquals(first.warningsWritten, 8);
+  assertEquals(first.moreDue, true, "the remaining two are visible as unfinished detector work");
+  assert(first.inspectedAttempts <= MAX_INVOCATION_ATTEMPTS);
+  assert(reads <= MAX_INVOCATION_ATTEMPTS + 1, "whole-request log reads have a bound");
+  const second = await detectOverdueInvocations(stores.metadata, NOW);
+  assertEquals(second.warningsWritten, 2);
+  assertEquals(second.moreDue, false);
+  assertEquals(
+    (await warningRecords(stores)).length,
+    10,
+    "repeated polls finish outstanding work but never duplicate earlier warnings",
+  );
+});
+
+Deno.test("a7i0: a repeatedly polled already-guarded set costs one scan, not a scan per start", async () => {
+  const stores = memoryStores();
+  for (let i = 0; i < 120; i++) {
+    const id = `previous-${i}`;
+    await mark(stores, id, "started", NOW - 360_001);
+    const bounds = await stores.metadata.logBounds();
+    assertEquals(
+      await stores.metadata.appendLogOnce(
+        {
+          time: new Date(NOW).toISOString(),
+          severity: "warn",
+          type: "synthesis.invocation.overdue",
+          message: "previously reported",
+          process: "worker",
+          correlationId: id,
+        },
+        `overdue:${id}`,
+        bounds.newestSeq,
+      ),
+      "written",
+    );
+  }
+  let reads = 0;
+  const list = stores.metadata.listLogs.bind(stores.metadata);
+  stores.metadata.listLogs = (...args) => {
+    reads++;
+    return list(...args);
+  };
+  for (let poll = 0; poll < 2; poll++) {
+    const result = await detectOverdueInvocations(stores.metadata, NOW + poll);
+    assertEquals(result.warningsWritten, 0);
+    assertEquals(result.moreDue, false, "the prior guard is recognized within the snapshot");
+    assertEquals(
+      result.inspectedAttempts,
+      0,
+      "a known warning does not trigger a redundant CAS or 500-record reread",
+    );
+  }
+  assertEquals(reads, 2, "one bounded scan per poll, not one per previously warned start");
+  assertEquals((await warningRecords(stores)).length, 120);
+});
+
+Deno.test("a7i0: repeated duplicate replies cannot exhaust the request without an unknown remainder", async () => {
+  const stores = memoryStores();
+  for (let i = 0; i < 20; i++) await mark(stores, `duplicate-${i}`, "started", NOW - 360_001);
+  // An adversarial/out-of-sync guard reports a duplicate without a visible warning.
+  // The detector must not loop forever or call this a complete inspection.
+  stores.metadata.appendLogOnce = () => Promise.resolve("duplicate");
+  let reads = 0;
+  const list = stores.metadata.listLogs.bind(stores.metadata);
+  stores.metadata.listLogs = (...args) => {
+    reads++;
+    return list(...args);
+  };
+  const result = await detectOverdueInvocations(stores.metadata, NOW);
+  assertEquals(
+    result.inspectedAttempts,
+    MAX_INVOCATION_ATTEMPTS,
+    "attempts stop at the WHOLE-REQUEST bound even without a new warning",
+  );
+  assertEquals(
+    result.moreDue,
+    true,
+    "remaining starts are not falsely classified as checked or healthy",
+  );
+  assertEquals(result.warningsWritten, 0);
+  assertEquals(
+    reads,
+    MAX_INVOCATION_ATTEMPTS + 1,
+    "the request makes no extra unbounded snapshot reads",
+  );
+});
+
+Deno.test("a7i0: pruning warning and guard together preserves retention honesty", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const stores = await openStores({ kvPath: `${dir}/retention.kv` });
+    try {
+      await mark(stores, "pruned", "started", NOW - 360_001);
+      assertEquals((await detectOverdueInvocations(stores.metadata, NOW)).warningsWritten, 1);
+      assertEquals(await stores.metadata.pruneLogs(new Date(NOW + 1)), 2);
+      const scan = await detectOverdueInvocations(stores.metadata, NOW + 2);
+      assertEquals(scan.warningsWritten, 0, "a pruned start must never be re-reported");
+      assertEquals(scan.retentionGap, true);
+      assertEquals(
+        scan.olderStartsUnknown,
+        true,
+        "pruned history cannot be treated as evidence that no overdue start existed",
+      );
+      const bounds = await stores.metadata.logBounds();
+      assertEquals(
+        await stores.metadata.appendLogOnce(
+          {
+            time: new Date(NOW + 2).toISOString(),
+            severity: "warn",
+            type: "synthesis.invocation.overdue",
+            process: "worker",
+            message: "guard probe",
+            correlationId: "pruned",
+          },
+          "overdue:pruned",
+          bounds.newestSeq,
+        ),
+        "written",
+        "prune removed the warning's unique guard in the same retained boundary",
+      );
+    } finally {
+      await stores.metadata.close();
     }
   } finally {
     await Deno.remove(dir, { recursive: true });

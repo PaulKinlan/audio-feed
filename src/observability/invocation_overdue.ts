@@ -1,8 +1,9 @@
 import type { LogRecord, LogRepository } from "../storage/mod.ts";
 import { LOG_READ_LIMIT } from "../storage/log_shape.ts";
 
-/** One bounded read; old starts outside it are explicitly NOT classified healthy. */
+/** Each request makes at most this many bounded reads and CAS attempts. */
 export const INVOCATION_SCAN_LIMIT = LOG_READ_LIMIT;
+export const MAX_INVOCATION_ATTEMPTS = 16;
 const MAX_WARNINGS_PER_READ = 8;
 const MAX_CHANGED_SNAPSHOTS = 3;
 
@@ -15,6 +16,7 @@ export interface InvocationScan {
   retentionGap: boolean;
   incompleteMarkers: number;
   warningsWritten: number;
+  inspectedAttempts: number;
   moreDue: boolean;
 }
 
@@ -31,15 +33,21 @@ export function invocationCandidates(records: LogRecord[], nowMs: number): {
 } {
   const starts = new Map<string, Candidate>();
   const terminals = new Set<string>();
+  const warned = new Set<string>();
   let incompleteMarkers = 0;
   for (const record of records) {
-    if (record.type !== "synthesis.invocation") continue;
+    if (
+      record.type !== "synthesis.invocation" &&
+      record.type !== "synthesis.invocation.overdue"
+    ) continue;
     const id = record.correlationId;
     if (!id) {
       incompleteMarkers++;
       continue;
     }
-    if (record.phase === "terminal") {
+    if (record.type === "synthesis.invocation.overdue") {
+      warned.add(id);
+    } else if (record.phase === "terminal") {
       terminals.add(id);
     } else if (record.phase === "started" && !starts.has(id)) {
       const budgetMs = record.context?.budgetMs;
@@ -55,7 +63,7 @@ export function invocationCandidates(records: LogRecord[], nowMs: number): {
     }
   }
   const due = [...starts.values()].filter((candidate) =>
-    !terminals.has(candidate.id) &&
+    !terminals.has(candidate.id) && !warned.has(candidate.id) &&
     nowMs - Date.parse(candidate.started.time) > 2 * candidate.budgetMs
   );
   due.sort((a, b) => a.started.seq - b.started.seq);
@@ -74,6 +82,7 @@ export async function detectOverdueInvocations(
 ): Promise<InvocationScan> {
   if (!Number.isFinite(nowMs)) throw new Error("invalid detector clock");
   let warningsWritten = 0;
+  let inspectedAttempts = 0;
   let changedSnapshots = 0;
   const alreadyHandled = new Set<string>();
   for (;;) {
@@ -103,9 +112,12 @@ export async function detectOverdueInvocations(
       retentionGap: bounds.oldestSeq > 1,
       incompleteMarkers,
       warningsWritten,
-      moreDue: remaining.length > 0 && warningsWritten >= MAX_WARNINGS_PER_READ,
+      inspectedAttempts,
+      moreDue: remaining.length > 0 &&
+        (warningsWritten >= MAX_WARNINGS_PER_READ ||
+          inspectedAttempts >= MAX_INVOCATION_ATTEMPTS),
     };
-    if (remaining.length === 0 || warningsWritten >= MAX_WARNINGS_PER_READ) return result;
+    if (remaining.length === 0 || result.moreDue) return result;
     const { id, started, budgetMs } = remaining[0]!;
     const thresholdMs = budgetMs * 2;
     const alert: Omit<LogRecord, "seq"> = {
@@ -126,6 +138,7 @@ export async function detectOverdueInvocations(
         startSeq: started.seq,
       },
     };
+    inspectedAttempts++;
     const state = await logs.appendLogOnce(alert, `overdue:${id}`, bounds.newestSeq);
     if (state === "unavailable") throw new Error("overdue warning could not be stored");
     if (state === "changed") {
