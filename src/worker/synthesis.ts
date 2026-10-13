@@ -37,6 +37,7 @@
  *   counter cannot see — it dies with the process.
  */
 import { assertAuthorizedForAudio, NotAuthorizedError } from "../auth/users.ts";
+import { MAX_ARTICLE_CONTENT_CHARS } from "../ingest/url.ts";
 import {
   DEFAULT_NARRATION_VOICE,
   DEFAULT_TIMEOUT_MS,
@@ -1497,14 +1498,42 @@ export async function runSynthesisBatch(
     // the text the client will SEGMENT rather than the raw article: code handling strips fenced
     // and <pre> blocks before segmentation, so counting raw bytes failed articles whose entire
     // overage was strippable code (audio-feed-n19w).
+    // audio-feed-cg8s: guard against article content exceeding the ingest content limit
+    // (MAX_ARTICLE_CONTENT_CHARS = 2,000,000 chars) before computing byte allocations or
+    // running any transformations. Note: this is the ingest ceiling, NOT the TTS byte budget,
+    // so this is adding an up-front sanity net rather than moving the TTS byte-budget guard.
+    if (article.content.length > MAX_ARTICLE_CONTENT_CHARS) {
+      const error =
+        `article content exceeds character limit (${article.content.length} > ${MAX_ARTICLE_CONTENT_CHARS} chars)`;
+      console.error(
+        `[audio-feed] synthesis failed for episode "${claimed.id}" ("${claimed.title}"): ${error}`,
+      );
+      const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
+      if (wrote) {
+        result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
+        await notifyOnDemand(claimed, "failed", error);
+      } else {
+        result.superseded.push(supersededEntry(claimed, opts.leaseMs));
+      }
+      continue;
+    }
+
     // No summarizer is passed, deliberately: none of the production call sites gives the
     // synthesizer one, so `formatCodeForTts` strips code here exactly as the client will, and the
     // guard can never admit more than the client is willing to speak. It stays an approximation
     // in ONE respect — the client segments the prompt (this body plus a title/author preamble) and
     // may cut at a sentence boundary before a segment is full — so the client is still the exact
     // gate.
+    // audio-feed-cg8s: fast-path articles without code fences or <pre> tags so we do not
+    // invoke code-formatting routines when no code blocks exist.
+    const hasPotentialCode = article.content.includes("```") ||
+      article.content.includes("~~~") ||
+      /<pre\b/i.test(article.content);
+
     const codeHandling = source?.codeHandling ?? DEFAULT_CODE_HANDLING;
-    const narrationInput = await formatCodeForTts(article.content, codeHandling);
+    const narrationInput = hasPotentialCode
+      ? await formatCodeForTts(article.content, codeHandling)
+      : article.content;
     const inputBytes = new TextEncoder().encode(narrationInput).length;
     if (opts.maxInputBytes && inputBytes > opts.maxInputBytes) {
       const error =
