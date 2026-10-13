@@ -2080,3 +2080,173 @@ Deno.test("audio-feed-g5bi: error in terminal_persistence after completeEpisode 
   const count = await stores.metadata.getDailySynthesisCount(today);
   assertEquals(count, 1, "atomic billing committed with completeEpisode");
 });
+
+Deno.test("audio-feed-jb99: (1) cached turns restore under low remaining budget without tripping preflight, and uncached turn yields with progress", async () => {
+  const { ctx, stores } = await setupEnv();
+  await stores.metadata.deleteEpisode("user-1", "episode-1");
+
+  const textChunk = (id: number) => `Segment ${id} `.repeat(250);
+  const mockScriptGenerator = () =>
+    Promise.resolve({
+      turns: [
+        { speaker: "Alex", text: textChunk(1) },
+        { speaker: "Sam", text: textChunk(2) },
+        { speaker: "Alex", text: textChunk(3) },
+      ],
+      sources: [],
+      counterarguments: [],
+      researchSummary: "",
+    });
+
+  let dialogueCalls = 0;
+  const mockClient = new GeminiTtsClient({
+    apiKey: "dummy-key",
+  });
+  mockClient.sendRequest = () => {
+    dialogueCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-jb99-resume",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      mode: "deepdive",
+      status: "pending",
+    }),
+  );
+
+  const synth = createGeminiSynthesizer(ctx, {
+    scriptGenerator: mockScriptGenerator,
+    client: mockClient,
+    estimatedTurnDurationMs: 25_000,
+    flushMarginMs: 5_000,
+  });
+
+  // --- TICK 1: budget of 1 segment per invocation ---
+  const batch1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-jb99-tick1",
+    maxClaims: 3,
+    maxSegmentsPerInvocation: 1,
+  });
+
+  assertEquals(batch1.ready.length, 0, "tick 1 should not complete episode");
+  assertEquals(batch1.yielded.length, 1, "tick 1 should yield");
+  assertEquals(batch1.yielded[0]?.episodeId, "ep-jb99-resume");
+  assertEquals(batch1.yielded[0]?.completedTurns, 1);
+  assertEquals(dialogueCalls, 1, "1 segment synthesized in tick 1");
+
+  const epAfterTick1 = await stores.metadata.getEpisode("user-1", "ep-jb99-resume");
+  assert(epAfterTick1);
+  assertEquals(epAfterTick1.status, "pending", "status returned to pending for next tick");
+  assertEquals(epAfterTick1.phase, "synthesized_1_of_3");
+  assertEquals(epAfterTick1.attempts, 0, "attempts reset to 0 after progress");
+
+  let blobGetCalls = 0;
+  const origBlobGet = stores.blobs.get.bind(stores.blobs);
+  stores.blobs.get = (key, opts) => {
+    blobGetCalls++;
+    return origBlobGet(key, opts);
+  };
+
+  // --- TICK 2: low remaining budget (20s) < required paid turn budget (25s + 5s = 30s) ---
+  // Turn 1 must be restored from cache without being blocked by the 30s preflight check.
+  // Turn 2 is uncached and must yield before paid spend.
+  const batch2 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-jb99-tick2",
+    maxClaims: 3,
+    maxInvocationDurationMs: 20_000,
+    estimatedTurnDurationMs: 10_000,
+    flushMarginMs: 5_000,
+  });
+
+  assertEquals(batch2.ready.length, 0, "tick 2 should not complete episode");
+  assertEquals(batch2.yielded.length, 1, "tick 2 should yield before turn 2");
+  assertEquals(batch2.yielded[0]?.completedTurns, 1, "turn 1 was restored from cache!");
+  assertEquals(
+    dialogueCalls,
+    1,
+    "0 paid calls in tick 2 (turn 1 was cached, turn 2 yielded before spend)",
+  );
+  assertEquals(
+    blobGetCalls >= 1,
+    true,
+    "cached segment blob MUST be fetched during tick 2 restore",
+  );
+
+  const epAfterTick2 = await stores.metadata.getEpisode("user-1", "ep-jb99-resume");
+  assert(epAfterTick2);
+  assertEquals(epAfterTick2.status, "pending");
+  assertEquals(epAfterTick2.phase, "synthesized_1_of_3");
+
+  // --- TICK 3: sufficient budget to finish remaining turns ---
+  const batch3 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-jb99-tick3",
+    maxClaims: 3,
+    maxInvocationDurationMs: 180_000,
+    estimatedTurnDurationMs: 45_000,
+    flushMarginMs: 5_000,
+  });
+
+  assertEquals(batch3.ready.length, 1, "tick 3 should finish episode");
+  assertEquals(
+    dialogueCalls,
+    3,
+    "all 3 turns synthesized once across ticks (turn 1 never re-synthesized)",
+  );
+
+  const epFinal = await stores.metadata.getEpisode("user-1", "ep-jb99-resume");
+  assert(epFinal);
+  assertEquals(epFinal.status, "ready");
+});
+
+Deno.test("audio-feed-jb99: (2) genuinely-not-resumable mode yields before turn 1 starts when budget is insufficient", async () => {
+  const { ctx, stores } = await setupEnv();
+  let paidCalls = 0;
+  const mockClient = new GeminiTtsClient({ apiKey: "dummy-key" });
+  mockClient.sendRequest = () => {
+    paidCalls++;
+    return Promise.resolve(fakeAudio());
+  };
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client: mockClient,
+    scriptGenerator: null,
+  });
+
+  let yieldErr: unknown = null;
+  try {
+    await synth({
+      article: (await stores.metadata.getArticle("user-1", "article-1"))!,
+      source: (await stores.metadata.getSource("user-1", "inbox"))!,
+      episode: makeEpisode({
+        id: "ep-not-resumable",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        mode: "deepdive",
+        status: "synthesizing",
+        scriptTurns: [
+          { speaker: "Alex", text: "Turn 1" },
+          { speaker: "Sam", text: "Turn 2" },
+        ],
+      }),
+      mode: "deepdive",
+      // resume is undefined -> genuinely not resumable mode
+      invocationBudget: {
+        maxDurationMs: 20_000,
+        startTimeMonotonicMs: performance.now(),
+        estimatedTurnDurationMs: 45_000,
+        flushMarginMs: 5_000,
+      },
+    });
+  } catch (err) {
+    yieldErr = err;
+  }
+
+  assert(yieldErr instanceof SynthesisYieldError, "must yield with SynthesisYieldError");
+  assertEquals((yieldErr as SynthesisYieldError).completedTurns, 0, "completed turns must be 0");
+  assertEquals(paidCalls, 0, "0 paid calls made");
+});
