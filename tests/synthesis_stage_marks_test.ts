@@ -102,16 +102,38 @@ Deno.test("audio-feed-huh4: a throwing stage is still marked, and the mark attac
 });
 
 Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rather than silently dropped", async () => {
-  // One more episode than the cap can cover at three stages each, so the cap is reached by the
-  // SUCCESS path (tts, upload, yield) rather than by looping a failure.
-  const ids = Array.from({ length: 6 }, (_, i) => `ep-huh4-cap-${i}`);
+  // NINE EPISODES, AND THE NUMBER IS THE POINT (audio-feed-9pvk): a SUCCESSFUL episode emits TWO
+  // stage marks - tts and upload - because the yield mark is only reached when the invocation budget
+  // aborts. The old seed of six assumed three stages each, which would have been eighteen; what it
+  // actually produced was TWELVE, under the fifteen cap, so the cap assertions were never reached and
+  // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the cap
+  // by three.
+  //
+  // THE PER-EPISODE MARK COUNT COMES FROM A TEST-OWNED LIST OF STAGE NAMES, and both halves of that are
+  // deliberate.
+  //
+  // WHY A LIST RATHER THAN A BARE INTEGER: an integer cannot distinguish "the code changed" from "the
+  // assumption is wrong". audio-feed-avgc added the `verify` mark, and a bare count of 2 failed LOUDLY ON
+  // THE MAIN THIS BRANCH WAS GOING TO LAND ON, which is the expensive version of correct. A list forces a
+  // VISIBLE TEST EDIT when the stage set moves, and that edit is what a reviewer sees in the diff.
+  //
+  // WHY NOT DERIVED FROM src/worker/synthesis.ts: deriving it from the code under test would make this row
+  // unable to detect a MISSING mark, which is the defect it exists to catch. The literal IS the control.
+  //
+  // THE THREE ARE THE MARKS ON A SUCCESSFUL PATH. `yield` is EXCLUDED because it is the CONDITIONAL
+  // budget-yield path, which is exactly why this count was two before avgc and three after it.
+  // Sites: markStage("tts", ...), markStage("verify", ...), markStage("upload", ...) in
+  // src/worker/synthesis.ts.
+  const successfulPathStages = ["tts", "verify", "upload"] as const;
+  const marksPerSuccessfulEpisode = successfulPathStages.length;
+  const ids = Array.from({ length: 9 }, (_, i) => `ep-huh4-cap-${i}`);
   const { ctx, stores } = await seedEpisodes(ids);
   const audio = fakeAudio();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
-    batchSize: 6,
+    batchSize: 9,
     owner: "huh4-cap",
   });
-  assertEquals(run.ready.length, 6, "every seeded episode must reach ready");
+  assertEquals(run.ready.length, 9, "every seeded episode must reach ready");
 
   const logs = await stores.metadata.listLogs();
   const invocation = logs.filter((log) => log.type === "synthesis.invocation");
@@ -129,11 +151,46 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
     assertEquals(mark.correlationId, invocation[0]?.correlationId);
     assert((mark.durationMs ?? -1) >= 0);
   }
-  // Suppression is reported exactly once, and only when it actually happened.
-  if (marked.length === STAGE_MARK_CAP) {
-    assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
-    assert(Number(capped[0]?.context?.suppressed ?? 0) > 0, "the capped event must name how many");
-  } else {
-    assertEquals(capped.length, 0, "an invocation under the cap must not claim suppression");
-  }
+  /**
+   * THE CAP MUST BE SHOWN TO BITE (audio-feed-9pvk). The old form of this row BRANCHED on whether the
+   * cap had been reached, asserting "no suppression" in the else arm - so at six episodes it took the
+   * else arm, asserted something true and vacuous, and proved nothing about the cap at all. A floor
+   * that is only observed is not a floor. These assertions cannot pass unless the run genuinely
+   * executed more stages than the cap allows.
+   */
+  assertEquals(marked.length, STAGE_MARK_CAP, "a batch that exceeds the cap must fill it exactly");
+  assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
+  const suppressed = Number(capped[0]?.context?.suppressed ?? 0);
+  // THE EXACT COUNT, DERIVED rather than hardcoded: the suppression that must be named is every stage
+  // execution beyond the cap, and that depends on how many marks a successful episode emits. Asserting
+  // the derived value is what makes this a control - it cannot pass at 0 (no cap: 0 !== 3) and it cannot
+  // pass at a miscounted 1 (1 !== 3) - while the derivation from ONE named assumption means a change to
+  // the stage set produces a failure that names the line to update instead of a stale constant.
+  const expectedSuppressed = 9 * marksPerSuccessfulEpisode - STAGE_MARK_CAP;
+  assertEquals(
+    suppressed,
+    expectedSuppressed,
+    `with ${marksPerSuccessfulEpisode} marks per successful episode (${
+      successfulPathStages.join(", ")
+    }), nine episodes exceed the cap by ${expectedSuppressed}: if a stage was added or removed, update successfulPathStages (audio-feed-9pvk)`,
+  );
+  /**
+   * THE CONTROL, CORRECTED AFTER REVIEW (audio-feed-9pvk). The first version asserted
+   * marked.length + suppressed > STAGE_MARK_CAP and called itself a negative control. IT WAS A
+   * TAUTOLOGY: once marked.length === STAGE_MARK_CAP is asserted above, that expression reduces to
+   * suppressed > 0, which the line above already asserts, so it added no verification at all - and it
+   * still PASSED with the cap removed from src/worker/synthesis.ts, because a run with no cap emits no
+   * capped event and therefore has suppressed = 0, giving 18 + 0 > 15. A control that cannot detect the
+   * absence of the thing it controls for is not a control.
+   *
+   * The EXACT accounting is what bites: the suppressed count must equal every execution beyond the cap,
+   * which is nine episodes x marksPerSuccessfulEpisode minus the cap. Remove the cap and suppressed is 0,
+   * which fails; mis-count the suppressions and the equality fails; reach the cap only by accident and
+   * the first line fails.
+   */
+  assertEquals(
+    marked.length + suppressed,
+    9 * marksPerSuccessfulEpisode,
+    "kept + suppressed must account for every stage execution: episodes x marksPerSuccessfulEpisode",
+  );
 });
