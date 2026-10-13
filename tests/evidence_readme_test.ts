@@ -1,0 +1,139 @@
+/**
+ * Unit tests for the marker-delimited generated region (audio-feed-pluv).
+ *
+ * These are the gate-runnable half of the fix: the r97 generator is a browser proof and cannot run in
+ * the fast gate, so the properties that make a two-writer README safe have to be pinned here, on a
+ * fixture, rather than by hoping a browser run agrees with a committed file.
+ *
+ *   deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv \
+ *     tests/evidence_readme_test.ts
+ */
+
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  GENERATED_BEGIN,
+  GENERATED_END,
+  isRegenerationStable,
+  mergeGeneratedRegion,
+  splitGeneratedRegion,
+  wrapGeneratedRegion,
+} from "../scripts/evidence-readme.ts";
+
+const GENERATED_BODY = "PASS  a generated row\nPASS  another generated row";
+
+/** The shape the real evidence READMEs have: curated prose a generator knows nothing about, plus a log. */
+const CURATED = `# Browser Proof: request access (fixture)
+
+- Script: scripts/some-proof.ts
+
+## Why this exists
+
+A human wrote this paragraph and it must survive every regeneration - this is the class of content the
+r97 run destroyed (measured: 36 committed lines reduced to 4).
+
+${GENERATED_BEGIN}
+${GENERATED_BODY}
+${GENERATED_END}
+
+## Criteria
+
+1. A human-curated criterion that no generator knows about.
+`;
+
+Deno.test("audio-feed-pluv: merging the SAME generated body twice is a no-op (idempotent)", () => {
+  const once = mergeGeneratedRegion(CURATED, GENERATED_BODY);
+  const twice = mergeGeneratedRegion(once, GENERATED_BODY);
+  assertEquals(twice, once, "a second run must not change the file");
+  assertEquals(isRegenerationStable(once, GENERATED_BODY), true);
+});
+
+Deno.test("audio-feed-pluv: content OUTSIDE the region survives regeneration byte-for-byte", () => {
+  const merged = mergeGeneratedRegion(CURATED, "PASS  a fresh row");
+  assertStringIncludes(
+    merged,
+    "A human wrote this paragraph and it must survive every regeneration",
+  );
+  assertStringIncludes(merged, "1. A human-curated criterion that no generator knows about.");
+  assertStringIncludes(merged, "- Script: scripts/some-proof.ts");
+  assert(!merged.includes("another generated row"), "the superseded generated body must be gone");
+  assertStringIncludes(merged, "PASS  a fresh row");
+});
+
+Deno.test("audio-feed-pluv: the byte-identity pin can FAIL, or it pins nothing", () => {
+  assertEquals(isRegenerationStable(CURATED, GENERATED_BODY), true);
+  assertEquals(
+    isRegenerationStable(CURATED, "PASS  a DIFFERENT row"),
+    false,
+    "a README that disagrees with the generator must be reported unstable",
+  );
+  assertEquals(
+    isRegenerationStable(mergeGeneratedRegion(CURATED, "x"), GENERATED_BODY),
+    false,
+    "an edited region must be reported unstable",
+  );
+});
+
+Deno.test("audio-feed-pluv: a marker MENTIONED inline is not a marker (whole-line matching)", () => {
+  const doc = `# t
+
+A README may talk about \`${GENERATED_BEGIN}\` in the middle of a sentence.
+
+${GENERATED_BEGIN}
+body
+${GENERATED_END}
+`;
+  const split = splitGeneratedRegion(doc);
+  assertEquals(split.generated, "body");
+  assertStringIncludes(split.before, "in the middle of a sentence");
+  assertEquals(
+    mergeGeneratedRegion(doc, "body"),
+    doc,
+    "the inline mention is human text and must round-trip untouched",
+  );
+});
+
+Deno.test("audio-feed-pluv: KNOWN LIMIT, pinned on purpose - a marker alone on a line inside a fence IS a marker", () => {
+  // Text alone cannot say whether a standalone marker line is a fence's contents or the real marker,
+  // and this module deliberately does not parse markdown. The contract is therefore "never paste the
+  // marker alone on a line", and this row exists so the limit is a decision rather than a surprise:
+  // if someone later teaches the splitter to skip fenced regions, this test failing is the intended
+  // signal that the contract changed.
+  const doc = `# t
+
+\`\`\`
+${GENERATED_END}
+\`\`\`
+
+${GENERATED_BEGIN}
+body
+${GENERATED_END}
+`;
+  assertThrows(
+    () => splitGeneratedRegion(doc),
+    Error,
+    "appears 2 times",
+    "the fenced copy is counted as a second marker, which is why the contract says not to paste one",
+  );
+});
+
+Deno.test("audio-feed-pluv: malformed marker sets are LOUD, never guessed", () => {
+  assertThrows(
+    () => splitGeneratedRegion("# no markers at all\n"),
+    Error,
+    "is missing",
+  );
+  assertThrows(
+    () => splitGeneratedRegion(`${GENERATED_BEGIN}\nx\n${GENERATED_END}\n${GENERATED_END}\n`),
+    Error,
+    "appears 2 times",
+  );
+  assertThrows(
+    () => splitGeneratedRegion(`${GENERATED_END}\nx\n${GENERATED_BEGIN}\n`),
+    Error,
+    "precedes the begin",
+  );
+});
+
+Deno.test("audio-feed-pluv: the wrapper emits the markers as their own lines", () => {
+  assertEquals(wrapGeneratedRegion("body\n"), `${GENERATED_BEGIN}\nbody\n${GENERATED_END}`);
+});
