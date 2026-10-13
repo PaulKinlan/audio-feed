@@ -1,6 +1,7 @@
 # Request Access Front Door Verification Report: audio-feed-r97
 
 - Debt: admitted (audio-feed-tgnu)
+- The confirmation line below was refreshed from the v78p browser run; other log lines remain the original r97 capture.
 
 ## Verified Criteria
 1. **Public Front Door Onboarding**: Prospective subscribers can submit email + optional display name via `#request-access-form` on `/`.
@@ -15,7 +16,7 @@
 ```
 PASS  front door has request access section  header: 'Request access'
 PASS  subscribing copy links down to request access form  anchor present
-PASS  response acknowledges submission honestly  msg: 'Access request received. An administrator will review your request before audio generation is enabled.Nothing generates until an administrator approves your account.'
+PASS  response acknowledges submission honestly  msg: 'If this address is eligible, your access request will be reviewed by an administrator.Nothing generates until an administrator approves your account.'
 PASS  response does NOT leak capability URL to unapproved applicant  no token or URL exposed
 PASS  user lands in metadata store as pending  status: 'pending'
 PASS  pending user cannot ingest (403 forbidden)  status: 403
