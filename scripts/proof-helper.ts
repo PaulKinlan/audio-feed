@@ -892,6 +892,7 @@ export async function writeEvidenceReadme(
     for (const section of options.sections) {
       lines.push("");
       lines.push(`## ${section.heading.trim()}`);
+      lines.push("");
       lines.push(section.body.trim());
     }
   }
