@@ -681,6 +681,7 @@ export function createGeminiSynthesizer(
       }
     };
 
+    let getTotalTurns = () => MAX_TTS_SEGMENTS;
     let initiatedTurnsCount = 0;
     let committedTurnsCount = 0;
     const wrappedResume = resume
@@ -688,6 +689,39 @@ export function createGeminiSynthesizer(
         prepare: async (segmentText: string, voice: string) => {
           const res = await resume.prepare(segmentText, voice);
           if (res === "synthesize") {
+            // audio-feed-jb99: Preflight check before paid turn.
+            // Bounded by maxSegments if configured.
+            if (
+              invocationBudget?.maxSegments &&
+              initiatedTurnsCount >= invocationBudget.maxSegments
+            ) {
+              throw new SynthesisYieldError(
+                committedTurnsCount,
+                getTotalTurns(),
+                `Synthesis reached segment limit (${invocationBudget.maxSegments})`,
+              );
+            }
+            // Preflight check: does remaining budget fit next turn + flush margin? (audio-feed-9wqt, audio-feed-jb99)
+            // Evaluated specifically before paid synthesis so cached turns can be restored in milliseconds
+            // without being blocked by the 50s turn estimate.
+            if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+              const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+              const remaining = invocationBudget.maxDurationMs - elapsed;
+              const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
+                deps.estimatedTurnDurationMs ??
+                ESTIMATED_TTS_TURN_DURATION_MS;
+              if (remaining < turnEstimate + flushMargin) {
+                throw new SynthesisYieldError(
+                  committedTurnsCount,
+                  getTotalTurns(),
+                  `Synthesis yielded before paid turn ${
+                    initiatedTurnsCount + 1
+                  }: remaining budget ${Math.round(remaining)}ms < required ${
+                    turnEstimate + flushMargin
+                  }ms`,
+                );
+              }
+            }
             initiatedTurnsCount++;
           }
           return res;
@@ -696,8 +730,9 @@ export function createGeminiSynthesizer(
           segmentText: string,
           decoded: DecodedAudioResult,
           voice: string,
+          signal?: AbortSignal,
         ) => {
-          await resume.commit(segmentText, decoded, voice);
+          await resume.commit(segmentText, decoded, voice, signal);
           committedTurnsCount++;
         },
       }
@@ -714,8 +749,16 @@ export function createGeminiSynthesizer(
       ) {
         return true;
       }
-      // Preflight check before each turn: does remaining budget fit next turn + flush margin? (audio-feed-9wqt)
-      if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
+      // audio-feed-jb99: When resume is NOT configured, every turn is un-cached paid work, so enforce the turn
+      // estimate preflight indiscriminately before every turn (audio-feed-9wqt).
+      // When resume IS configured, the preflight check is evaluated inside wrappedResume.prepare
+      // specifically when a turn requires paid synthesis (res === "synthesize"), allowing cached
+      // segments to be restored in milliseconds without tripping the budget gate.
+      if (
+        !wrappedResume &&
+        invocationBudget?.maxDurationMs &&
+        invocationBudget?.startTimeMonotonicMs
+      ) {
         const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
         const remaining = invocationBudget.maxDurationMs - elapsed;
         const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
@@ -752,6 +795,9 @@ export function createGeminiSynthesizer(
       // Research and write the script first (audio-feed-yaz5).
       // Check if script turns were already saved in a previous attempt (audio-feed-siv1)
       let turns = episode.scriptTurns;
+      if (turns && turns.length > 0) {
+        getTotalTurns = () => turns!.length;
+      }
       if (!turns || turns.length === 0) {
         if (claimedBy) {
           await checkpointEpisodeClaim(
@@ -787,6 +833,7 @@ export function createGeminiSynthesizer(
         );
         turns = script?.turns;
         if (turns && turns.length > 0) {
+          getTotalTurns = () => turns!.length;
           if (claimedBy) {
             await checkpointEpisodeClaim(
               ctx.stores.metadata,
@@ -828,13 +875,17 @@ export function createGeminiSynthesizer(
       ) {
         throw new GeminiTtsError("synthesis stopped before claim lease expired", 400);
       }
+      const turnEstimate = invocationBudget?.estimatedTurnDurationMs ??
+        deps.estimatedTurnDurationMs ??
+        ESTIMATED_TTS_TURN_DURATION_MS;
+      const stageEntryEstimateMs = wrappedResume
+        ? Math.min(turnEstimate, Math.max(1, flushMargin))
+        : turnEstimate;
       const dialogueOutcome = await withInvocationBudget({
         name: "dialogue_tts",
         budget: invocationBudget,
         flushMarginMs: flushMargin,
-        worstCaseEstimateMs: invocationBudget?.estimatedTurnDurationMs ??
-          deps.estimatedTurnDurationMs ??
-          ESTIMATED_TTS_TURN_DURATION_MS,
+        worstCaseEstimateMs: stageEntryEstimateMs,
         completedTurns: committedTurnsCount,
         totalTurns: turns?.length ?? MAX_TTS_SEGMENTS,
         fn: (signal) => {
@@ -900,13 +951,17 @@ export function createGeminiSynthesizer(
     ) {
       throw new GeminiTtsError("synthesis stopped before claim lease expired", 400);
     }
+    const turnEstimate = invocationBudget?.estimatedTurnDurationMs ??
+      deps.estimatedTurnDurationMs ??
+      ESTIMATED_TTS_TURN_DURATION_MS;
+    const stageEntryEstimateMs = wrappedResume
+      ? Math.min(turnEstimate, Math.max(1, flushMargin))
+      : turnEstimate;
     const narrationOutcome = await withInvocationBudget({
       name: "narration_tts",
       budget: invocationBudget,
       flushMarginMs: flushMargin,
-      worstCaseEstimateMs: invocationBudget?.estimatedTurnDurationMs ??
-        deps.estimatedTurnDurationMs ??
-        ESTIMATED_TTS_TURN_DURATION_MS,
+      worstCaseEstimateMs: stageEntryEstimateMs,
       completedTurns: committedTurnsCount,
       totalTurns: MAX_TTS_SEGMENTS,
       fn: (signal) => {
