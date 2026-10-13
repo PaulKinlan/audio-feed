@@ -47,8 +47,9 @@ scan (binding scopes, per-module constant visibility, execute relations).
 ## Decision
 
 The scanner is a **single-pass character-level scan** that maintains lexical state, because lexical
-state is the only thing that answers these questions correctly, and it is cheap enough to run on
-every gate.
+state is the only thing that answers these questions correctly. Whether it is ALSO cheap enough to
+run on every gate is a question with a measured answer, in "What it costs" below — not an assumption
+of this decision.
 
 `stripComments` (`scripts/test-selection.ts:343`, **271 lines**) returns `{ stripped, spans }`:
 `stripped` is the source with comments removed, and `spans` records the byte ranges that are string
@@ -91,6 +92,51 @@ the real path is spanned either way. Keeping them in the table with a reason, ra
 them, is the right shape: an ignored case with a reason is a known gap, an absent case is a
 surprise.
 
+**What it costs, measured (audio-feed-csbr).** The cost of the scan is not an impression. Over **335
+files and 5,148,143 bytes** — every `.ts` under `tests/`, `scripts/` and `src/`, walked recursively
+— a full pass of `stripComments` takes **224.83 ms**, which is **671.1 µs per file**. Against the 14
+s to 40 s a fast gate actually takes, the entire universe costs **0.56% to 1.61%** of the run, and a
+typical invocation is far smaller than the universe: the selector scans the changed suite and the
+modules it imports to a closure depth of 2, so **ten files is about 6.7 ms**. Method: three warm-up
+passes then twenty timed, reading the same file contents for every scanner compared, on this VM. The
+corpus is walked recursively and deliberately overstates a single invocation, which is the safe
+direction for a budget.
+
+The pre-lexer revision has no comparable function to time — `97d5552^` has no `stripComments` at
+all, and is 1813 lines against today's 2026 — so the comparison this record can honestly make is the
+scan against the gate's total, plus the correctness record above, where eight fixes are the price
+the earlier approach paid instead. The parser alternative stays real, and the numbers above say how
+much room it has before it is worth taking.
+
+**Budget and trigger.** The scan is expected to stay under **400 ms per full pass** and **1 ms per
+file** — about a further 78% of headroom on today's numbers, and still under 3% of a 14 s gate. If a
+change doubles the measured 224.83 ms, or the open-case rate keeps climbing, the parser trade
+becomes the cheaper option and should be measured rather than assumed.
+
+**Malformed and uncertain input, and why the failure direction is the safe one (audio-feed-pgpp).**
+The scanner has no error channel: it reports spans of text that are NOT code, and a malformed input
+produces no spans rather than a complaint. That is the behaviour to state, because "no spans" means
+NOTHING is excluded from code, so every read site survives and the selection can only WIDEN — the
+selector's safe direction, since a wider selection costs gate time and can never lose a suite. It is
+a property of the shape rather than of one case: only marking text as non-code can hide a reference,
+and malformed input marks none.
+
+Measured on five inputs, each producing `spans === []` with `stripped` byte-identical to the source
+and no read lost: a string left unterminated at EOF by a trailing escape; an unterminated string
+with a read BEFORE it and again with a read AFTER it (the order that could plausibly swallow a real
+site); and a stray close quote forming a phantom string. Boundary rows for the malformed cases are
+in `tests/source_scanner_test.ts` (M1–M3), so the next change to the scanner has to keep this
+direction deliberate rather than accidental. The two known-ambiguous lexical cases above are the
+same story with the harm named, and they stay pinned with `ignore: true` and their reasons rather
+than deleted.
+
+**The alternative considered and not taken:** treat an uncertain scan as "unresolved", or fall back
+to the full suite. Both are safe, and both were declined for the same reason: there is no error
+channel to detect the uncertainty with, so they add a second mechanism whose only effect is MORE
+selection on inputs that already widen — and the coarser version selects the whole universe for a
+stray backslash instead of the handful of files that mention a symbol. If a future change gives the
+scanner an error channel, this section is the thing to revisit.
+
 **What it forecloses, and the trigger to revisit.** Nothing permanently. The escalation path is a
 real TypeScript parser, and the trigger should be stated rather than felt: **two of sixteen cases
 are already open, each needing "more than one clause" to close** — if scanner fixes keep arriving at
@@ -106,10 +152,13 @@ one.
    correct-by-construction answer and it is what most tools would do. It was not chosen because this
    file runs on **every** gate invocation, on every lane, for every change: a WebAssembly parser
    adds a dependency and a startup cost to the hottest path in the toolchain, to answer questions
-   that need lexical state and not a syntax tree. Stated as reasoning, not measurement — the startup
-   cost was not measured for this record, and anyone choosing between the two should measure it.
-   This is also why the escalation trigger above matters: the alternative stays real and gets better
-   as the lexer grows.
+   that need lexical state and not a syntax tree. The startup cost remains unmeasured for this
+   record — measuring it means adding the dependency and its lockfile change, which is a decision in
+   its own right rather than a probe — so what this record fixes instead is the budget that decides
+   the question: if the lexer's own per-pass cost doubles past the 224.83 ms measured above, the
+   parser's startup stops being a hypothetical and becomes the next thing to measure. This is also
+   why the escalation trigger above matters: the alternative stays real and gets better as the lexer
+   grows.
 3. **Track only strings and comments, and ignore regex literals.** This is what the earlier attempts
    effectively did, and `audio-feed-aiiy` is the record of why it does not work: a regex literal
    containing a quote or a brace makes the string tracker lose its place, and everything after it is

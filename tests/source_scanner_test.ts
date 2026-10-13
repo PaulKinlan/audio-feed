@@ -226,6 +226,42 @@ const cases: Case[] = [
       }`,
     }),
   },
+  {
+    // audio-feed-pgpp: MALFORMED INPUT, AND THE DIRECTION IT FAILS IN. A string left unterminated at EOF
+    // by a trailing escape produces NO spans, which means nothing is excluded from code, so every read
+    // site survives and the selection can only WIDEN. That is the selector's safe direction - a wider
+    // selection costs gate time and can never lose a suite - and this row exists so a future change to
+    // the scanner has to keep it deliberate. The read is asserted PRESENT, not blanked.
+    name: "M1 malformed: unterminated string at EOF (trailing escape) marks nothing non-code",
+    src: `const s = "Deno.readTextFile(\n`,
+    expect: "FAIL-CLOSED: no span is marked non-code, so the text stays code and the read survives",
+    check: (r) => ({
+      pass: r.spans.length === 0 && r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
+  {
+    // The order that could plausibly HIDE a real read rather than widen: the real site comes AFTER the
+    // unterminated string, so a phantom string swallowing the rest of the file would lose it. Measured
+    // not to happen; the row pins that.
+    name: "M2 malformed: real read AFTER an unterminated string still survives",
+    src: `const s = "unterminated\nawait Deno.readTextFile(p);\n`,
+    expect: "FAIL-CLOSED: the read after the malformed string is still code, so it is not lost",
+    check: (r) => ({
+      pass: r.spans.length === 0 && r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
+  {
+    // A stray close quote forms a phantom string. Same assertion: the read outside it is never eaten.
+    name: "M3 malformed: stray close quote does not swallow a real read",
+    src: `const s = "abc\";\nawait Deno.readTextFile(p);\n`,
+    expect: "FAIL-CLOSED: a phantom string does not remove the read that follows it",
+    check: (r) => ({
+      pass: r.stripped.includes("Deno.readTextFile("),
+      obs: `readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
 ];
 for (const c of cases) {
   Deno.test({
