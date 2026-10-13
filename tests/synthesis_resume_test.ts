@@ -23,11 +23,13 @@ import {
   decodedFromWav,
   GeminiTtsError,
   MAX_TTS_INPUT_BYTES,
-  MAX_TTS_SEGMENTS,
   parseWavHeader,
   pcmToWav,
 } from "../src/tts/gemini.ts";
-import { ESTIMATED_TTS_TURN_DURATION_MS } from "../src/synthesis/limits.ts";
+import {
+  ESTIMATED_TTS_TURN_DURATION_MS,
+  INVOCATION_FLUSH_MARGIN_MS,
+} from "../src/synthesis/limits.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { segmentBlobKey, segmentTextHash } from "../src/types.ts";
@@ -624,17 +626,42 @@ Deno.test("decodedFromWav round-trips pcmToWav without losing the audio", () => 
   assertStringIncludes(decoded.mimeType, "wav");
 });
 
-Deno.test("audio-feed-9lrl: invocation budget constants accommodate 45-55s turns and 3k byte segments", () => {
-  assertEquals(DEFAULT_MAX_INVOCATION_DURATION_MS, 180_000);
-  assertEquals(ESTIMATED_TTS_TURN_DURATION_MS, 45_000);
-  assertEquals(MAX_TTS_INPUT_BYTES, 3_000);
-  assertEquals(MAX_TTS_SEGMENTS, 24);
-  assertEquals(MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS, 72_000);
+Deno.test("audio-feed-chx6: a cap-sized TTS turn fits its estimate and the invocation window", () => {
+  // The old 9lrl test compared constants to refreshed literals, then checked that three
+  // estimates fit the window. It did not check whether ONE cap-sized paid call fits the
+  // estimate used by preflight, so an unsafe byte cap could still pass that test.
+  // Fleet-proxy ASCII ladder (kvb6/240d9a6): 1k chars ~18.7s, 3k ~26.6s, 6k ~55.1s.
+  // The marginal 3k->6k rate is ~9.5ms/ASCII byte. A 15s floor PLUS that rate is a
+  // conservative planning envelope, not a measured intercept or a production SLA;
+  // non-ASCII provider latency needs its own measurements.
+  const fixedOverheadMs = 15_000;
+  const measuredMsPerAsciiByte = 9.5;
+  const defaults = {
+    inputCapBytes: MAX_TTS_INPUT_BYTES,
+    estimateMs: ESTIMATED_TTS_TURN_DURATION_MS,
+    invocationMs: DEFAULT_MAX_INVOCATION_DURATION_MS,
+    flushMs: INVOCATION_FLUSH_MARGIN_MS,
+    rateMsPerByte: measuredMsPerAsciiByte,
+  };
+  const fits = (values: typeof defaults) =>
+    fixedOverheadMs + Math.ceil(values.inputCapBytes * values.rateMsPerByte) <=
+      values.estimateMs &&
+    values.estimateMs + values.flushMs <= values.invocationMs;
 
-  // Verify that an invocation budget preflight gives enough headroom for realistic turns
-  const netBudget = DEFAULT_MAX_INVOCATION_DURATION_MS - 5_000; // minus INVOCATION_FLUSH_MARGIN_MS
   assert(
-    netBudget >= ESTIMATED_TTS_TURN_DURATION_MS * 3,
-    "default budget fits at least 3 worst-case TTS turns",
+    fits(defaults),
+    "a cap-sized paid TTS turn must fit its preflight estimate, and that estimate plus flush must fit the invocation window",
+  );
+  assert(
+    !fits({ ...defaults, inputCapBytes: 6_000 }),
+    "the guard must reject the former unsafe 6k byte cap even if the invocation window stays generous",
+  );
+  assert(
+    !fits({ ...defaults, invocationMs: 45_000 }),
+    "the guard must reject the former 45s window even when the byte cap stays small",
+  );
+  assert(
+    !fits({ ...defaults, rateMsPerByte: 10.5 }),
+    "a slower measured provider must invalidate an estimate that no longer covers one cap-sized call",
   );
 });
