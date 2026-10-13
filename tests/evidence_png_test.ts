@@ -1,14 +1,15 @@
 /**
- * Unit tests for evidence PNG palette quantisation helper (audio-feed-az9j).
+ * Unit tests for evidence PNG palette quantisation helper (audio-feed-az9j, audio-feed-xgjc).
  *
  * Verifies:
  * 1. Stub `convert` on PATH exiting 7 throws naming the file and exit code, leaving no .tmp file.
  * 2. Missing `convert` (absent from PATH) throws naming the file and code ENOENT, leaving no .tmp file.
  * 3. Positive control: successful convert produces byte-identical output to direct ImageMagick invocation.
  * 4. Injectable runner support for seam testing without process execution.
+ * 5. Artefact chunk assertion: helper output carries no tIME chunk, with positive and negative controls.
  */
 
-import { assertEquals, assertMatch, assertRejects } from "@std/assert";
+import { assertEquals, assertMatch, assertRejects, assertThrows } from "@std/assert";
 import { quantiseEvidencePng } from "../scripts/evidence-png.ts";
 
 Deno.test({
@@ -221,6 +222,216 @@ Deno.test({
       });
       assertEquals(res, filePath);
       assertEquals(await Deno.readTextFile(filePath), "converted-bytes");
+
+      // D. Verify runner always receives unconditional -strip flag
+      let capturedArgs: string[] = [];
+      await Deno.writeTextFile(tmpPath, "runner-bytes");
+      await quantiseEvidencePng(filePath, {
+        colors: 128,
+        formatPrefix: "PNG8",
+        runner: (_cmd, args) => {
+          capturedArgs = args;
+          return Promise.resolve({ success: true, code: 0 });
+        },
+      });
+      assertEquals(
+        capturedArgs.includes("-strip"),
+        true,
+        "-strip must always be passed to convert",
+      );
+      assertEquals(capturedArgs[1], "-strip", "-strip must precede options");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+/**
+ * PNG chunk metadata parsed by walking the binary stream according to the PNG spec.
+ */
+interface PngChunk {
+  type: string;
+  length: number;
+  offset: number;
+}
+
+/**
+ * Parses the chunk sequence of a PNG file by walking the 8-byte signature,
+ * followed by each chunk's 4-byte length, 4-byte type, data bytes, and 4-byte CRC.
+ *
+ * Fails closed on invalid signature, truncated chunk header, or unconsumed trailing bytes.
+ */
+function parsePngChunks(bytes: Uint8Array): PngChunk[] {
+  const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < 8) {
+    throw new Error(`Invalid PNG: file too short (${bytes.length} bytes)`);
+  }
+  for (let i = 0; i < 8; i++) {
+    if (bytes[i] !== PNG_SIGNATURE[i]) {
+      throw new Error(
+        `Invalid PNG signature at byte ${i}: got ${bytes[i]}, expected ${PNG_SIGNATURE[i]}`,
+      );
+    }
+  }
+
+  const chunks: PngChunk[] = [];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 8;
+
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset, false);
+    const typeBytes = bytes.subarray(offset + 4, offset + 8);
+    const type = new TextDecoder("ascii").decode(typeBytes);
+    chunks.push({ type, length, offset });
+
+    offset += 8 + length + 4;
+  }
+
+  if (offset !== bytes.length) {
+    throw new Error(
+      `Invalid PNG: offset (${offset}) did not match byte length (${bytes.length})`,
+    );
+  }
+
+  return chunks;
+}
+
+/**
+ * Asserts that a PNG file's chunk sequence contains no chunk of the specified type.
+ * Throws an Error with full chunk sequence details if found.
+ */
+function assertNoPngChunk(bytes: Uint8Array, forbiddenChunkType: string): void {
+  const chunks = parsePngChunks(bytes);
+  const found = chunks.filter((c) => c.type === forbiddenChunkType);
+  if (found.length > 0) {
+    throw new Error(
+      `PNG artefact contains forbidden chunk type "${forbiddenChunkType}" (${found.length} occurrence(s)). ` +
+        `Chunk sequence: ${chunks.map((c) => c.type).join(" -> ")}`,
+    );
+  }
+}
+
+/**
+ * Synthetically constructs a PNG with a tIME chunk inserted before IEND
+ * to prove negative control rejection independently of any external tool.
+ */
+function injectSyntheticTimeChunk(pngBytes: Uint8Array): Uint8Array {
+  const chunks = parsePngChunks(pngBytes);
+  const iend = chunks.find((c) => c.type === "IEND");
+  if (!iend) throw new Error("IEND chunk not found in PNG");
+
+  // PNG tIME chunk: length = 7 bytes
+  // Year: 2 bytes (2026 = 0x07ea), Month: 10, Day: 13, Hour: 12, Min: 0, Sec: 0
+  const timeData = new Uint8Array([0x07, 0xea, 10, 13, 12, 0, 0]);
+  const typeAndData = new Uint8Array(4 + timeData.length);
+  typeAndData.set(new TextEncoder().encode("tIME"), 0);
+  typeAndData.set(timeData, 4);
+
+  // CRC32 calculation over type and data
+  let c = 0xffffffff;
+  for (let i = 0; i < typeAndData.length; i++) {
+    c ^= typeAndData[i]!;
+    for (let k = 0; k < 8; k++) {
+      c = (c >>> 1) ^ (c & 1 ? 0xedb88320 : 0);
+    }
+  }
+  const crc = (c ^ 0xffffffff) >>> 0;
+
+  const chunkBuf = new Uint8Array(4 + 4 + 7 + 4);
+  const view = new DataView(chunkBuf.buffer);
+  view.setUint32(0, 7, false); // Length
+  chunkBuf.set(typeAndData, 4);
+  view.setUint32(15, crc, false); // CRC
+
+  // Splice before IEND
+  const result = new Uint8Array(pngBytes.length + chunkBuf.length);
+  result.set(pngBytes.subarray(0, iend.offset), 0);
+  result.set(chunkBuf, iend.offset);
+  result.set(pngBytes.subarray(iend.offset), iend.offset + chunkBuf.length);
+  return result;
+}
+
+Deno.test({
+  name:
+    "quantiseEvidencePng: artefact carries no tIME chunk (negative controls prove assertion rejects tIME)",
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-png-time-" });
+    const rawPath = `${dir}/raw_with_time.png`;
+
+    try {
+      // 1. Generate an initial image with ImageMagick without -strip.
+      // Default ImageMagick write stamps an encode-instant tIME chunk.
+      const makeOut = await new Deno.Command("/usr/bin/convert", {
+        args: ["-size", "8x8", "xc:red", rawPath],
+      }).output();
+      assertEquals(makeOut.success, true, "Failed to generate initial unstripped PNG");
+
+      const rawBytes = await Deno.readFile(rawPath);
+      const rawChunks = parsePngChunks(rawBytes);
+
+      // Verify baseline: unstripped image MUST have tIME chunk
+      const hasInitialTime = rawChunks.some((c) => c.type === "tIME");
+      assertEquals(
+        hasInitialTime,
+        true,
+        "Baseline ImageMagick PNG must carry tIME chunk to validate negative control",
+      );
+
+      // 2. NEGATIVE CONTROL 1: assertNoPngChunk MUST throw when given the unstripped file
+      assertThrows(
+        () => assertNoPngChunk(rawBytes, "tIME"),
+        Error,
+        'PNG artefact contains forbidden chunk type "tIME"',
+      );
+
+      // 3. POSITIVE ASSERTION (default options: 256 colors, png8:)
+      const defaultPath = `${dir}/stripped_default.png`;
+      await Deno.copyFile(rawPath, defaultPath);
+      await quantiseEvidencePng(defaultPath);
+
+      const defaultBytes = await Deno.readFile(defaultPath);
+      const defaultChunks = parsePngChunks(defaultBytes);
+
+      // Must NOT carry tIME chunk
+      assertNoPngChunk(defaultBytes, "tIME");
+
+      // Verify essential chunks are intact and metadata chunks are stripped
+      assertEquals(defaultChunks.some((c) => c.type === "IHDR"), true, "Must have IHDR");
+      assertEquals(defaultChunks.some((c) => c.type === "IDAT"), true, "Must have IDAT");
+      assertEquals(defaultChunks.some((c) => c.type === "IEND"), true, "Must have IEND");
+      assertEquals(
+        defaultChunks.some((c) => c.type === "tIME" || c.type === "cHRM"),
+        false,
+        "Metadata chunks (tIME, cHRM) must be stripped",
+      );
+
+      // 4. POSITIVE ASSERTION (site 8 custom options: 128 colors, compressionLevel 9, formatPrefix PNG8)
+      const site8Path = `${dir}/stripped_site8.png`;
+      await Deno.copyFile(rawPath, site8Path);
+      await quantiseEvidencePng(site8Path, {
+        colors: 128,
+        compressionLevel: 9,
+        formatPrefix: "PNG8",
+      });
+
+      const site8Bytes = await Deno.readFile(site8Path);
+      assertNoPngChunk(site8Bytes, "tIME");
+
+      // 5. NEGATIVE CONTROL 2: Synthetic tIME chunk injection on the stripped artefact.
+      // Proves that even on a valid quantised output, adding a tIME chunk is immediately rejected.
+      const syntheticWithTime = injectSyntheticTimeChunk(defaultBytes);
+      const syntheticChunks = parsePngChunks(syntheticWithTime);
+      assertEquals(
+        syntheticChunks.some((c) => c.type === "tIME"),
+        true,
+        "Synthetic PNG must contain tIME chunk",
+      );
+
+      assertThrows(
+        () => assertNoPngChunk(syntheticWithTime, "tIME"),
+        Error,
+        'PNG artefact contains forbidden chunk type "tIME"',
+      );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

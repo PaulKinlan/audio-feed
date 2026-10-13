@@ -33,6 +33,7 @@ import { runSynthesisBatch, type Synthesizer } from "../src/worker/synthesis.ts"
 import { GeminiTtsClient } from "../src/tts/gemini.ts";
 import { recordRun } from "../src/stats.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { EVIDENCE_PNG_BUDGET_BYTES } from "./evidence-compress.ts";
 import {
@@ -96,8 +97,8 @@ function inImagePixels(
 const MIN_CLAIM_INK_LEGIBILITY = 0.5;
 
 /**
- * Compress a written capture in place, with the repository's own recipe (scripts/evidence-compress.ts:
- * `convert -strip -colors 256 PNG8:`).
+ * Compress a written capture in place using the shared evidence-png quantisation helper
+ * (audio-feed-xgjc).
  *
  * WHY THE PROOF COMPRESSES RATHER THAN LEAVING IT TO A DOCUMENTED STEP (audio-feed-vvo7): the
  * committed PNGs were compressed but a REPLAY of the documented command was not, so anyone who ran
@@ -106,20 +107,7 @@ const MIN_CLAIM_INK_LEGIBILITY = 0.5;
  * budget assertion below fails the run if it cannot.
  */
 async function compressInPlace(path: string): Promise<number> {
-  const tmp = `${path}.png8.tmp`;
-  const out = await new Deno.Command("convert", {
-    args: [path, "-strip", "-colors", "256", `PNG8:${tmp}`],
-    stdout: "null",
-    stderr: "piped",
-  }).output();
-  if (!out.success) {
-    await Deno.remove(tmp).catch(() => {});
-    throw new Error(`convert failed for ${path}: ${new TextDecoder().decode(out.stderr)}`);
-  }
-  const before = (await Deno.stat(path)).size;
-  const after = (await Deno.stat(tmp)).size;
-  if (after < before) await Deno.rename(tmp, path);
-  else await Deno.remove(tmp);
+  await quantiseEvidencePng(path, { formatPrefix: "PNG8" });
   return (await Deno.stat(path)).size;
 }
 

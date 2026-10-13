@@ -16,6 +16,7 @@
  */
 
 import { HARNESS_PORT_DEFAULT } from "./harness-port.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8fc/", import.meta.url).pathname;
@@ -122,25 +123,7 @@ await runProof("account-browser-proof", async (checker) => {
               filePath,
               Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
             );
-            let out: Deno.CommandOutput;
-            try {
-              const cmd = new Deno.Command("convert", {
-                args: [filePath, "-strip", "-colors", "256", `png8:${filePath}.tmp`],
-              });
-              out = await cmd.output();
-            } catch (err) {
-              await Deno.remove(`${filePath}.tmp`).catch(() => {});
-              const detail = err instanceof Error ? err.message : String(err);
-              const code = (err && typeof err === "object" && "code" in err)
-                ? ` (code ${(err as { code: unknown }).code})`
-                : "";
-              throw new Error(`convert failed for ${filePath}${code}: ${detail}`);
-            }
-            if (!out.success) {
-              await Deno.remove(`${filePath}.tmp`).catch(() => {});
-              throw new Error(`convert failed for ${filePath} with exit code ${out.code}`);
-            }
-            await Deno.rename(`${filePath}.tmp`, filePath);
+            await quantiseEvidencePng(filePath);
             shots.push(file);
           }
         }
