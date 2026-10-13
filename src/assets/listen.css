@@ -1143,9 +1143,7 @@ dialog.confirm-dialog .confirm-actions {
    color take no text focus and do not zoom. The home page and the kit pages have the same rule in the
    shell's base stylesheet (shell.ts, SHELL_CSS); there is no single stylesheet all three share.
    Modern Web Guidance, forms 5: "DO set font-size to at least 1rem (16px) to prevent iOS zoom." */
-body input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]):not(
-    [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]
-  ),
+body input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]):not([type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]),
 body select,
 body textarea {
   font-size: max(1rem, 1em); /* >=16px, and still follows the user's own font scaling. */

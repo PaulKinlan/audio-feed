@@ -174,7 +174,6 @@ input[type="password"] {
   border-radius: var(--radius);
 }
 
-
 fieldset {
   border: 1px solid var(--border);
   border-radius: var(--radius);
