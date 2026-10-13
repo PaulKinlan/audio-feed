@@ -117,7 +117,7 @@ Deno.test("c0gj divergence - fixc0gj v1 (9f18cc1) diverges on solitary 6-backtic
   );
 });
 
-Deno.test("c0gj divergence - fixc0gj v2 (3d32fc4) resolves 6-backtick runs but diverges on <pre><code no-gt here</pre>", () => {
+Deno.test("c0gj divergence - fixc0gj Candidate B (6c884f9) resolves 6-backtick runs but diverges on <pre><code no-gt here</pre>", () => {
   // Resolved 6-backtick runs
   assertEquals(formatCodeForTts_fixc0gj_3d32fc4("``````", "skip"), "");
   assertEquals(formatCodeForTts_fixc0gj_3d32fc4("``````abc", "skip"), "abc");

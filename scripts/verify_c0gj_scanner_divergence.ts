@@ -960,8 +960,8 @@ export const PINNED_REVISIONS = {
     expectedLength: 2984,
   },
   fixc0gj_v2: {
-    commit: "3d32fc44f750ae343cae3da56566d8c57637b908",
-    name: "fleet/fixc0gj v2 (tip 3d32fc4)",
+    commit: "6c884f95b2174de841a97c4bf3cfb79e7668b548",
+    name: "fleet/fixc0gj Candidate B (tip 6c884f9, tree 085a7b7)",
     expectedSha256: "44c8b67189a07ce30ffd9bba1a1d3e3ecfc63197dfd786f9444b4bae7d01ed44",
     expectedLength: 3447,
   },
@@ -1300,10 +1300,10 @@ export async function runVerification(fuzzCount = 10000) {
   );
   printCandidateReport(fixc0gjV1Result);
 
-  // Evaluate fixc0gj v2 (tip 3d32fc4)
+  // Evaluate fixc0gj Candidate B (tip 6c884f9, tree 085a7b7)
   const fixc0gjV2Result = evaluateCandidate(
-    "fixc0gj v2",
-    "fleet/fixc0gj @ 3d32fc4",
+    "fixc0gj Candidate B",
+    "fleet/fixc0gj @ 6c884f9",
     fullCorpus,
     formatCodeForTts_fixc0gj_3d32fc4,
     extractCodeBlocks_fixc0gj_3d32fc4,
