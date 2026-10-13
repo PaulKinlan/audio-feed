@@ -1551,11 +1551,11 @@ export async function deriveReadRelationReport(
     // be excluded here (audio-feed-es8y's scope note) on the argument that they keep the conservative
     // full-suite fallback - which was true, and cost every one of them the whole gate: a one-line change to
     // src/assets/home.css could not select the suite that reads it. Measured before this change (at commit
-    // bc4b0d9 on 2026-10-11, when the full suite was 108 suites; 142 suites today), that file and four
-    // others like it were UNCLASSIFIED and ran all 108 suites (the full fallback tier then; all 142 today).
-    // The fallback is still what protects them when the relation names no reader (classifyNonTsChanges pushes
-    // them to `unclassified`, never to `inert` - only markdown is inert), so extending the relation cannot
-    // make such a change silent: it can only turn "everything" into "the suites that read it".
+    // bc4b0d9 on 2026-10-11, where git ls-tree found 107 *_test.ts suites), that file and four others
+    // like it were UNCLASSIFIED and fell back to executing every discovered test suite. The fallback is
+    // still what protects them when the relation names no reader (classifyNonTsChanges pushes them to
+    // `unclassified`, never to `inert` - only markdown is inert), so extending the relation cannot make
+    // such a change silent: it can only turn "the full suite" into "the suites that read it".
     const list = relations.get(path) ?? [];
     if (!list.includes(suite)) list.push(suite);
     relations.set(path, list);
