@@ -22,6 +22,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { bytes, makeArticle, makeEpisode, makeSource, makeUser } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-syhu/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -275,23 +276,7 @@ await runProof("audio-feed-syhu", async (checker) => {
           const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
           const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
           await Deno.writeFile(`${OUT}${name}-1280x900.png`, raw);
-          try {
-            const cmd = new Deno.Command("convert", {
-              args: [
-                `${OUT}${name}-1280x900.png`,
-                "-strip",
-                "-colors",
-                "256",
-                `png8:${OUT}${name}-1280x900.png.tmp`,
-              ],
-            });
-            const out = await cmd.output();
-            if (out.success) {
-              await Deno.rename(`${OUT}${name}-1280x900.png.tmp`, `${OUT}${name}-1280x900.png`);
-            }
-          } catch {
-            await Deno.remove(`${OUT}${name}-1280x900.png.tmp`).catch(() => {});
-          }
+          await quantiseEvidencePng(`${OUT}${name}-1280x900.png`);
         }
 
         await writeEvidenceReadme({

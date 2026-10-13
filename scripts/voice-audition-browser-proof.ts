@@ -22,6 +22,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { pcmToWav } from "../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-msw/", import.meta.url).pathname;
 const VOICES = ["Aoede", "Charon", "Fenrir", "Kore", "Puck"];
@@ -149,17 +150,7 @@ try {
       const image = await cdp("Page.captureScreenshot", { format: "png" });
       const raw = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
       await Deno.writeFile(`${OUT}${name}`, raw);
-      try {
-        const cmd = new Deno.Command("convert", {
-          args: [`${OUT}${name}`, "-strip", "-colors", "256", `png8:${OUT}${name}.tmp`],
-        });
-        const out = await cmd.output();
-        if (out.success) {
-          await Deno.rename(`${OUT}${name}.tmp`, `${OUT}${name}`);
-        }
-      } catch {
-        await Deno.remove(`${OUT}${name}.tmp`).catch(() => {});
-      }
+      await quantiseEvidencePng(`${OUT}${name}`);
       console.log(`Saved screenshot to ${OUT}${name}`);
     };
 

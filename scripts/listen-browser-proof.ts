@@ -14,6 +14,7 @@
 
 import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { connectCdp } from "./proof-cdp.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-py5/", import.meta.url).pathname;
 
@@ -101,26 +102,7 @@ await runProof("audio-feed-py5", async (checker) => {
         const shot = await cdp("Page.captureScreenshot", { format: "png" });
         const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
         await Deno.writeFile(`${OUT}01-listen-harness-5-episodes.png`, raw);
-        try {
-          const cmd = new Deno.Command("convert", {
-            args: [
-              `${OUT}01-listen-harness-5-episodes.png`,
-              "-strip",
-              "-colors",
-              "256",
-              `png8:${OUT}01-listen-harness-5-episodes.png.tmp`,
-            ],
-          });
-          const out = await cmd.output();
-          if (out.success) {
-            await Deno.rename(
-              `${OUT}01-listen-harness-5-episodes.png.tmp`,
-              `${OUT}01-listen-harness-5-episodes.png`,
-            );
-          }
-        } catch {
-          await Deno.remove(`${OUT}01-listen-harness-5-episodes.png.tmp`).catch(() => {});
-        }
+        await quantiseEvidencePng(`${OUT}01-listen-harness-5-episodes.png`);
         console.log(`Saved screenshot to ${OUT}01-listen-harness-5-episodes.png`);
 
         await writeEvidenceReadme({
