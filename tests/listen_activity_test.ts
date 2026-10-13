@@ -441,6 +441,23 @@ Deno.test({
     const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
     await Deno.writeTextFile(tempHtmlFile, html);
 
+    // audio-feed-w5f1: keep this row off the machine's shared /tmp. createTempChromeProfile sweeps
+    // `TMPDIR ?? /tmp` BEFORE it allocates, so with the sweep age-and-signature based instead of
+    // prefix-scoped (audio-feed-h62q) a real TMPDIR means reclaiming EVERY abandoned profile on the VM.
+    // The redirect must span the profile's WHOLE LIFE - restoring it early deletes the profile out from
+    // under the browser - so it is restored in the finally below, and asserted where it is set.
+    const originalTmp = Deno.env.get("TMPDIR");
+    const scratchTmp = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
+    Deno.env.set("TMPDIR", scratchTmp);
+    if (Deno.env.get("TMPDIR") !== scratchTmp) {
+      throw new Error(`TMPDIR redirect did not take: ${Deno.env.get("TMPDIR")}`);
+    }
+    const restoreTmp = async () => {
+      if (originalTmp === undefined) Deno.env.delete("TMPDIR");
+      else Deno.env.set("TMPDIR", originalTmp);
+      await Deno.remove(scratchTmp, { recursive: true }).catch(() => {});
+    };
+
     const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-player-fix-proof-");
     const chrome = new Deno.Command(newestChrome(), {
       args: [
@@ -531,6 +548,7 @@ Deno.test({
         chrome.kill();
       } catch { /* ignore */ }
       await cleanup();
+      await restoreTmp();
       await Deno.remove(tempHtmlFile).catch(() => {});
     }
   },

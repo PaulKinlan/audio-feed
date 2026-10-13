@@ -88,12 +88,46 @@ Deno.test("txcz: the no-support path keeps the sticky geometry, and the stuck ru
   }
 });
 
+/**
+ * audio-feed-w5f1: point TMPDIR at a scratch directory and hand back the restore.
+ *
+ * WHY THIS SUITE NEEDS IT: createTempChromeProfile() reclaims abandoned profiles under
+ * `TMPDIR ?? /tmp` BEFORE it allocates, so running this proof against the machine's real TMPDIR makes a
+ * test mutate shared state. That was always true of this suite's own prefix; with the sweep now
+ * age-and-signature based instead of prefix-scoped (audio-feed-h62q) it is true of EVERY abandoned
+ * profile on the VM.
+ *
+ * THE REDIRECT MUST SPAN THE PROFILE'S WHOLE LIFE, NOT JUST THE ALLOCATION: TMPDIR is both the sweep's
+ * root and the profile's root, so restoring it - and deleting the scratch tree - while the browser is
+ * still running would delete the profile out from under it. Measured on this repo's sibling suite,
+ * which failed with ENOENT writing into a profile that had just been swept away; so `restore` is called
+ * in the same `finally` that kills Chrome.
+ *
+ * The redirect is ASSERTED where it is set: a helper that silently failed to take would leave the suite
+ * exactly as it was while reading as fixed.
+ */
+async function redirectTmpToScratch(): Promise<() => Promise<void>> {
+  const original = Deno.env.get("TMPDIR");
+  const scratch = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
+  Deno.env.set("TMPDIR", scratch);
+  if (Deno.env.get("TMPDIR") !== scratch) {
+    throw new Error(`TMPDIR redirect did not take: ${Deno.env.get("TMPDIR")}`);
+  }
+  return async () => {
+    if (original === undefined) Deno.env.delete("TMPDIR");
+    else Deno.env.set("TMPDIR", original);
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  };
+}
+
 /** Launch headless Chrome, connect over CDP, hand the caller an evaluate(). */
 async function withChrome<T>(
   // deno-lint-ignore no-explicit-any
   fn: (evaluate: (expr: string) => Promise<any>) => Promise<T>,
 ): Promise<T> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // audio-feed-w5f1: BEFORE the allocation, and restored in the finally below - see the helper above.
+  const restoreTmp = await redirectTmpToScratch();
   const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-txcz-");
   const chrome = new Deno.Command(newestChrome(), {
     args: [
@@ -151,6 +185,7 @@ async function withChrome<T>(
       // already gone
     }
     cleanup();
+    await restoreTmp();
   }
 }
 
