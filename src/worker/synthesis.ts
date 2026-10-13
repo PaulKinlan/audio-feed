@@ -1313,9 +1313,15 @@ async function settleTerminalPersistence(
  * is not in this union cannot be emitted by accident.
  *
  * Four members, because four are wrapped: `verify` records the terminal HEAD plus byte comparison,
- * even when no PUT follows. `read` and `script` are the next two the bead names (the article fetch
- * and runScriptStage, the LLM call) and they are NOT declared here until their wraps exist - a
- * union member with no emitter is a claim the code does not make.
+ * even when no PUT follows. `read` and `script` are the next two `audio-feed-pw86` names (the
+ * article fetch and runScriptStage, the LLM call) and they are NOT declared here until their wraps
+ * exist - a union member with no emitter is a claim the code does not make.
+ *
+ * THIS UNION'S SIZE IS ALSO WRITTEN AS A LITERAL, here and in this type's own test: the `* 4`
+ * in `defaultStageMarkCap`'s multiplier, the "four stages" comments beside it and at the batch
+ * helper, and the same phrase in `tests/synthesis_stage_marks_test.ts`. Adding a member means
+ * changing all of them together, and a test that pins the cap's OUTPUTS will NOT catch a missed
+ * one - it would suppress stage marks rather than lose them (audio-feed-pw86).
  */
 export type SynthesisStage = "tts" | "verify" | "upload" | "yield";
 /** Wrap a stage so its duration is recorded on the way out, including when it throws. */
@@ -1328,7 +1334,9 @@ export type StageMarker = <T>(
 /**
  * Default ceiling for stage marks per synthesis invocation (audio-feed-938b).
  * Sized to cover batchSize episodes across all four stages (tts, verify, upload, yield)
- * with a production minimum floor of 25.
+ * with a production minimum floor of 25. The multiplier below IS the stage count, not an
+ * independent constant - see the coupling note on `SynthesisStage` for the sites that must
+ * move with it and why the output-pinning tests do not catch a miss (audio-feed-pw86).
  */
 export function defaultStageMarkCap(batchSize: number = DEFAULTS.batchSize): number {
   return Math.max(25, batchSize * 4);
