@@ -801,6 +801,17 @@ export function planTests(
 }
 
 if (import.meta.main) {
+  // audio-feed-p2la: ensure repo git pre-push hook is installed and chained into git hooks
+  try {
+    const installScript = `${ROOT}/scripts/hooks/install-hooks.sh`;
+    const stat = await Deno.stat(installScript).catch(() => null);
+    if (stat) {
+      await new Deno.Command(installScript, { cwd: ROOT }).output();
+    }
+  } catch {
+    // non-fatal if outside git repo
+  }
+
   const forceAll = Deno.args.includes("--all");
   const started = performance.now();
 
