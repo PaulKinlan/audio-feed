@@ -508,24 +508,58 @@ export async function runFeedPollBatch(
 
   const users = await ctx.stores.metadata.listUsers();
   const due: Source[] = [];
-  for (let i = 0; i < users.length; i += userConcurrency) {
-    const chunk = users.slice(i, i + userConcurrency);
-    const chunkSources = await mapWithConcurrency(
-      chunk,
-      userConcurrency,
-      (user) => ctx.stores.metadata.listSources(user.id),
-    );
-    for (const sources of chunkSources) {
+  const results: Source[][] = new Array(users.length);
+  let next = 0;
+  let processed = 0;
+  let inFlight = 0;
+  let stop = false;
+
+  const drain = () => {
+    while (processed < users.length && results[processed] !== undefined) {
+      if (stop) return;
+      const sources = results[processed]!;
       for (const source of sources) {
         if (!source.feedUrl) continue;
         const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
         if (!Number.isFinite(last) || last <= cutoff) due.push(source);
-        if (due.length >= batchSize) break;
+        if (due.length >= batchSize) {
+          stop = true;
+          return;
+        }
       }
-      if (due.length >= batchSize) break;
+      processed++;
     }
-    if (due.length >= batchSize) break;
+  };
+
+  const startWorker = async () => {
+    while (true) {
+      if (stop || due.length >= batchSize || next >= users.length) return;
+      if (inFlight + due.length >= batchSize) return;
+      const idx = next++;
+      inFlight++;
+      try {
+        const sources = await ctx.stores.metadata.listSources(users[idx]!.id);
+        results[idx] = sources;
+        drain();
+      } catch (err) {
+        stop = true;
+        throw err;
+      } finally {
+        inFlight--;
+      }
+    }
+  };
+
+  const poolLimit = Math.min(userConcurrency, Math.max(1, batchSize - due.length));
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < poolLimit; w++) {
+    if (w > 0) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (stop || due.length >= batchSize) break;
+    workers.push(startWorker());
   }
+  await Promise.all(workers);
 
   let queued = 0;
   let failed = 0;
