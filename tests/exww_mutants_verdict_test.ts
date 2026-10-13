@@ -19,22 +19,30 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  CAPTURE_04,
   exitCodeFor,
   interpretRun,
   isUnknownExit,
+  MUTANTS,
   runProofIn,
   summarise,
   UNKNOWN_EXIT_CODES,
+  WRONG_SCALE,
+  wrongScaleRedDetail,
 } from "../scripts/exww-mutants.ts";
 
-const NEEDLE = "image is 640x473 for a clip of 1280x946";
+// A FIXTURE LINE, and it is the stub's own manufacture rather than a claim about the page - which is why its
+// numbers may be any self-consistent pair. audio-feed-yylk: the wrong-scale ROW no longer pins dimensions at all
+// (they belong to the section's live rendered box, and a 43px link moved them), so this line is here only to be
+// a plausible red while the verdict rules are tested. Its scale is WRONG_SCALE and its arithmetic holds.
+const NEEDLE = `image is 640x495 for a clip of 1280x989 at scale ${WRONG_SCALE}`;
 const SCRATCH_PREFIX = "l6b6-verdict-";
 
 /** A tree whose "proof" is a stub that prints the expected FAIL line and then exits with `code`. */
 async function withStubProof(
   code: number,
   body: (outcome: Awaited<ReturnType<typeof runProofIn>>) => Promise<void> | void,
-  { emitFail = true }: { emitFail?: boolean } = {},
+  { emitFail = true, failLine = NEEDLE }: { emitFail?: boolean; failLine?: string } = {},
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: SCRATCH_PREFIX });
   try {
@@ -45,9 +53,7 @@ async function withStubProof(
       `console.log("PASS something trivial");\n` +
         // A clean run prints no FAIL line at all - `green` requires BOTH exit 0 and no failures, and a fixture
         // that always printed one would have tested the wrong thing while looking like it tested this.
-        (emitFail
-          ? `console.log("FAIL ${NEEDLE} at scale 0.5, so it should be 1280x946");\n`
-          : "") +
+        (emitFail ? `console.log("FAIL ${failLine}");\n` : "") +
         `Deno.exit(${code});\n`,
     );
     await body(await runProofIn(dir, 60_000));
@@ -228,5 +234,96 @@ Deno.test("audio-feed-2qcp: a CLI run with UNKNOWN rows exits NON-ZERO, and the 
     out,
     "UNKNOWN rows: a bound killed the run, so the row proved nothing",
     "the UNKNOWN rows must be reported as their own outcome, not folded into unexpected",
+  );
+});
+
+Deno.test("audio-feed-yylk: the wrong-scale red is asserted as a RELATIONSHIP, so a resized section cannot read as a mutant that did not react", () => {
+  // The row used to pin `image is 640x473 for a clip of 1280x946`. Clip dimensions are the LIVE layout - the
+  // proof computes them from the section's own rendered box - so a 43px admin link moved the clip to 1280x989
+  // and the harness reported a working predicate as a mutant that did not react. Both eras of the SAME
+  // relationship are accepted here; what is refused is a red that is not that relationship.
+  // THE REAL BYTES, copied from a browser run rather than paraphrased - including the LEADING SPACE and the
+  // double space before "image is", because a matcher that only worked on a tidied version of this line would
+  // pass here and fail on the run it exists for (which is what happened once already on this bead).
+  const red = (imageW: number, imageH: number, clipW: number, clipH: number, scale: number) =>
+    ` ${CAPTURE_04} covers the Recent failures section carrying the provider error  image is ${imageW}x${imageH} ` +
+    `for a clip of ${clipW}x${clipH} at scale ${scale}, so it should be ${clipW}x${clipH}`;
+
+  assertEquals(
+    wrongScaleRedDetail([red(640, 495, 1280, 989, WRONG_SCALE)]),
+    null,
+    "the post-resize red",
+  );
+  assertEquals(
+    wrongScaleRedDetail([red(640, 473, 1280, 946, WRONG_SCALE)]),
+    null,
+    "the pre-resize red",
+  );
+
+  assertStringIncludes(
+    wrongScaleRedDetail([red(1280, 989, 1280, 989, 1)])!,
+    `not the ${WRONG_SCALE} this mutant substitutes`,
+    "a red at the proof's own scale means the substitution did not reach the capture",
+  );
+  assertStringIncludes(
+    wrongScaleRedDetail([red(640, 473, 1280, 989, WRONG_SCALE)])!,
+    "but its own clip",
+    "a red whose image is not its own clip at the mutated scale must not satisfy the row",
+  );
+  assertStringIncludes(
+    wrongScaleRedDetail(["anchor appears 2 time(s), expected exactly 1"])!,
+    "no failure names the 04 capture",
+    "a red from a different check must never satisfy this row",
+  );
+});
+
+Deno.test("audio-feed-yylk: NEGATIVE CONTROL - a mutant that does not react and one that does not apply are BOTH refused, and the real red is accepted", async () => {
+  const row = MUTANTS.find((m) => m.name === "wrong-scale")!;
+  const expectation = {
+    kind: "detector",
+    expect: row.expect,
+    expectRelationship: row.expectRelationship,
+    soleRed: row.soleRed,
+  } as const;
+
+  // (i) THE CHECK DID NOT REACT: exit 0. This is the shape coord called out - an expectation that cannot fail
+  // here would be worse than the literal it replaced, so a derived row must stay refused.
+  await withStubProof(0, (outcome) => {
+    const judged = interpretRun(outcome, expectation);
+    assertEquals(judged.verdict, "unexpected");
+    assertStringIncludes(judged.detail, "did not redden the proof");
+  }, { emitFail: false });
+
+  // (ii) THE SUBSTITUTION DID NOT REACH THE CAPTURE: the red is at the proof's own scale. The literal could not
+  // see this distinction; the relationship names the part that differs.
+  await withStubProof(1, (outcome) => {
+    const judged = interpretRun(outcome, expectation);
+    assertEquals(judged.verdict, "unexpected");
+    assertStringIncludes(judged.detail, "this is the part that differs");
+    assertStringIncludes(judged.detail, `not the ${WRONG_SCALE} this mutant substitutes`);
+  }, { failLine: `${CAPTURE_04} image is 1280x989 for a clip of 1280x989 at scale 1` });
+
+  // (iii) THE POSITIVE, through the same path: the red the proof actually emits is accepted.
+  await withStubProof(1, (outcome) => {
+    assertEquals(interpretRun(outcome, expectation).verdict, "red on the named check");
+  }, { failLine: `${CAPTURE_04} image is 640x495 for a clip of 1280x989 at scale ${WRONG_SCALE}` });
+});
+
+Deno.test("audio-feed-yylk: the wrong-scale mutant is not VACUOUS - its scale must differ from the proof's own", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../scripts/exww-live-claims-browser-proof.ts", import.meta.url),
+  );
+  const match = source.match(/const EVIDENCE_SCALE = ([\d.]+);/);
+  assert(
+    match,
+    "EVIDENCE_SCALE must stay a literal this guard can read; if it moved, update the guard",
+  );
+  assert(
+    Number(match![1]) !== WRONG_SCALE,
+    `this row substitutes ${WRONG_SCALE} for the 04 capture, but the proof already captures at ` +
+      `${
+        match![1]
+      } - the substitution would change nothing and the row would pass while proving nothing, ` +
+      `which is worse than the literal it replaced`,
   );
 });
