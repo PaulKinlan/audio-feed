@@ -28,6 +28,7 @@ import type { AppConfig, Stores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { evidencePngDigestLine } from "./evidence-png-digest.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
 
 const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
@@ -359,6 +360,10 @@ await runProof("audio-feed-kvnw", async (checker) => {
             : "the front-door snippet element was not found",
         );
 
+        const digestLine = await evidencePngDigestLine(
+          `${OUT}01-account-bookmarklet-disclosure-open.png`,
+          "01-account-bookmarklet-disclosure-open.png",
+        );
         await writeEvidenceReadme({
           dir: OUT,
           title: "Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)",
@@ -391,7 +396,7 @@ await runProof("audio-feed-kvnw", async (checker) => {
             {
               heading: "Screenshot",
               body:
-                `- \`01-account-bookmarklet-disclosure-open.png\`: the bookmarklet box with the disclosure expanded, clipped to the box so the evidence is legible and the PNG stays inside the evidence size budget.`,
+                `- \`01-account-bookmarklet-disclosure-open.png\`: the bookmarklet box with the disclosure expanded, clipped to the box so the evidence is legible and the PNG stays inside the evidence size budget.\n${digestLine}`,
             },
           ],
         });
