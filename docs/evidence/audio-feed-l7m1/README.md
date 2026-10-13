@@ -50,7 +50,7 @@ PASS  admin observability page loads with h1 header
 PASS  unhandled error renders screened message  contains SUPPRESSED_MESSAGE
 PASS  client canary string is NOT leaked into the document  checked absence of 'canary-client-token-998877'
 PASS  unhandled error log was produced with screened message  screened message: 'message suppressed (not authored by this codebase)'
-PASS  client canary is completely absent from all durable logs  canary absent from logs by construction
+PASS  client canary is completely absent from all durable logs  canary absent from every durable log, asserted by scanning them (not structural)
 PASS  limits section explains screened error messages  
 PASS  limits section explains distinct uploadRetry counter bounded by maxUploadRetries  
 PASS  retrying table renders durable uploadRetry counter  uploadRetry cell: '2'

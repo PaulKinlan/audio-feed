@@ -23,7 +23,7 @@ import process from "node:process";
 export const EXPECTED_01_PNG_BLOB = "835349478343356b90b84dc6070b77e0f76328ed";
 export const EXPECTED_02_PNG_BLOB = "de50533128d33b9b160a600d14a3de7477dc99e6";
 export const EXPECTED_03_PNG_BLOB = "01d787704e3320f92c9a77e853a61704310817d9";
-export const EXPECTED_README_BLOB = "446947a9577bb13d6fc6a6e1959e335daa26cb79";
+export const EXPECTED_README_BLOB = "a0028c7e5e61a69cbdf258b5a09a2e9dccaafd07";
 
 export interface EvidenceArtefacts {
   png01: { bytes: Uint8Array; blobHash: string };
