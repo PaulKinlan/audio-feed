@@ -7,6 +7,69 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@^1.0.0";
 import { extractCodeBlocks, formatCodeForTts } from "../src/tts/gemini.ts";
+import {
+  buildFuzzCorpus,
+  buildHandcraftedCorpus,
+  extractCodeBlocks_main,
+  formatCodeForTts_main,
+} from "../scripts/verify_c0gj_scanner_divergence.ts";
+
+Deno.test("c0gj - branch extractCodeBlocks and formatCodeForTts achieve 0 mismatches across full 10,089-input corpus", async () => {
+  const handcrafted = buildHandcraftedCorpus();
+  const fuzz1 = buildFuzzCorpus(3333, 101);
+  const fuzz2 = buildFuzzCorpus(3333, 202);
+  const fuzz3 = buildFuzzCorpus(3334, 303);
+  const fullCorpus = [...handcrafted, ...fuzz1, ...fuzz2, ...fuzz3];
+
+  let skipMismatches = 0;
+  let explainMismatches = 0;
+  let blockMismatches = 0;
+
+  for (const item of fullCorpus) {
+    const text = item.text;
+    const expectedSkip = formatCodeForTts_main(text, "skip");
+    const expectedExplain = formatCodeForTts_main(text, "explain");
+    const expectedBlocks = extractCodeBlocks_main(text);
+
+    const actualSkip = await formatCodeForTts(text, "skip");
+    const actualExplain = await formatCodeForTts(
+      text,
+      "explain",
+      (c) => `summary(${c})`,
+    );
+    const actualBlocks = extractCodeBlocks(text);
+
+    if (actualSkip !== expectedSkip) skipMismatches++;
+    if (actualExplain !== expectedExplain) explainMismatches++;
+    const blocksMatch = actualBlocks.length === expectedBlocks.length &&
+      actualBlocks.every((b, i) => {
+        const exp = expectedBlocks[i];
+        return (
+          exp !== undefined &&
+          b.index === exp.index &&
+          b.full === exp.full &&
+          b.code === exp.code
+        );
+      });
+    if (!blocksMatch) blockMismatches++;
+  }
+
+  assertEquals(
+    skipMismatches,
+    0,
+    "skip mode must have 0 mismatches across 10,089 corpus cases",
+  );
+  assertEquals(
+    explainMismatches,
+    0,
+    "explain mode must have 0 mismatches across 10,089 corpus cases",
+  );
+  assertEquals(
+    blockMismatches,
+    0,
+    "block AST must have 0 mismatches across 10,089 corpus cases",
+  );
+});
 
 Deno.test("c0gj - divergent input <pre><code no-gt here</pre> strips to empty string and extracts code", async () => {
   const input = "<pre><code no-gt here</pre>";
