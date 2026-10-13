@@ -20,7 +20,8 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { runProof, withChrome } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -197,10 +198,12 @@ await runProof("audio-feed-3xq", async (checker) => {
             "clean",
         );
         const shot1 = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
+        const shot1Path = `${OUT}part4b-home-1280x900.png`;
         await Deno.writeFile(
-          `${OUT}part4b-home-1280x900.png`,
+          shot1Path,
           Uint8Array.from(atob(shot1.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(shot1Path);
 
         events.length = 0;
         await cdp("Emulation.setDeviceMetricsOverride", {
@@ -222,36 +225,13 @@ await runProof("audio-feed-3xq", async (checker) => {
             "clean",
         );
         const shot2 = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
+        const shot2Path = `${OUT}part4b-home-390x844.png`;
         await Deno.writeFile(
-          `${OUT}part4b-home-390x844.png`,
+          shot2Path,
           Uint8Array.from(atob(shot2.data), (c) => c.charCodeAt(0)),
         );
-
-        await writeEvidenceReadme({
-          dir: OUT,
-          title: "Browser Proof: Home Module Architecture (audio-feed-3xq part 4b)",
-          script: "scripts/home-module-browser-proof.ts",
-          asserts: checks.map((c) => c.name),
-          sections: [
-            {
-              heading: "Verified Features",
-              body:
-                `1. Homepage CSS and client JS are fetched as immutable content-addressed assets.\n2. #home-data island delivers server origin to the client.\n3. Client-side form validation styling activates on interaction only (blur on invalid URL -> aria-invalid="true"; typing valid URL -> removed).\n4. Zero console errors/warnings/exceptions at desktop (1280x900) and mobile (390x844).`,
-            },
-            {
-              heading: "Execution Log",
-              body: `\`\`\`\n${
-                checks.map((c) => `${c.pass ? "PASS" : "FAIL"}  ${c.name}  ${c.detail}`).join("\n")
-              }\n\`\`\``,
-            },
-            {
-              heading: "Screenshots",
-              body:
-                `- part4b-home-1280x900.png: Desktop homepage\n- part4b-home-390x844.png: Mobile homepage`,
-            },
-          ],
-        });
-        console.log(`Screenshots and report in ${OUT}`);
+        await quantiseEvidencePng(shot2Path);
+        console.log(`Screenshots quantised and saved in ${OUT}`);
       } finally {
         try {
           ws.close();
