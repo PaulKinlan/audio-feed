@@ -689,7 +689,10 @@ Deno.test("proof-helper: writeEvidenceReadme generates valid README passing evid
       content,
       "- Asserts: audio route serves audio/wav; web player renders playback bar",
     );
-    assertStringIncludes(content, "## Verified Features");
+    assertStringIncludes(
+      content,
+      "## Verified Features\n\nVerified that playback bar renders and direct audio responds with 200 OK.",
+    );
 
     // Matches regexes enforced by tests/evidence_size_test.ts
     const assertsMatch = content.match(/^- Asserts:\s*(.+)$/m);
