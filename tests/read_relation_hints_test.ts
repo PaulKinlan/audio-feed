@@ -195,12 +195,11 @@ Deno.test("audio-feed-7l9m: a markdown FRAGMENT blocks only when the change coul
 
 Deno.test("audio-feed-lm4d: on the REAL tree an inert change is inert, and a real change still selects its readers", async () => {
   const report = await deriveReadRelationReport(ROOT);
-  // audio-feed-hclj: scripts/verify_live_e2e_tts.ts contains an authored read of var/segments/.
-  // Because test-selection has no declaration mechanism for in-repo scratch paths (tool gap bead filed),
-  // var/segments/ is honestly reported as an unresolved read hint rather than suppressed.
+  // The invariant this bead restores: on an unchanged tree the relation is COMPLETE, so the inert class is
+  // reachable. A red here means a hint is inaccurate again - fix the hint, do not widen the change.
   assertEquals(
     report.unresolved,
-    ["var/segments/"],
+    [],
     "an unresolved hint disables the inert class for EVERY change; see the report's other buckets",
   );
 
@@ -213,8 +212,8 @@ Deno.test("audio-feed-lm4d: on the REAL tree an inert change is inert, and a rea
     ),
   ];
 
-  // With var/segments/ unresolved, audio-feed-q0ky's rule widens docs-only changes to the full suite
-  // until the tool gap is resolved with an explicit declaration mechanism.
+  // An inert change selects NOTHING, and says so (audio-feed-es8y condition 2: an empty selection must never
+  // read like a pass - the reason has to carry the fact).
   const inert = planTests(
     ["docs/ingest.md"],
     NO_MAP,
@@ -223,13 +222,9 @@ Deno.test("audio-feed-lm4d: on the REAL tree an inert change is inert, and a rea
     [],
     blockFor(["docs/ingest.md"]),
   );
-  assertEquals(
-    inert.testFiles,
-    null,
-    `a docs-only change widens while relation has unresolved reads: ${inert.reason}`,
-  );
-  assertStringIncludes(inert.reason, "INCOMPLETE");
-  assertStringIncludes(inert.reason, "var/segments/");
+  assertEquals(inert.testFiles, [], `a docs-only change must be inert now: ${inert.reason}`);
+  assertStringIncludes(inert.reason, "inert");
+  assertStringIncludes(inert.reason, "docs/ingest.md");
 
   // The mirror error, asserted so the fix cannot be "widen nothing": a file a suite is DERIVED to read still
   // selects exactly those suites.
@@ -497,11 +492,7 @@ Deno.test("audio-feed-i9ao: the eleven mis-parses stay corrected, so no known hi
       })
     }`,
   );
-  assertEquals(
-    report.unresolved,
-    ["var/segments/"],
-    "and nothing other than var/segments/ may be an unresolved PATH hint",
-  );
+  assertEquals(report.unresolved, [], "and nothing may be an unresolved PATH hint");
 });
 
 Deno.test("audio-feed-snww: a runtime-assembled name is REPORTED, and still cannot block", async (t) => {
