@@ -542,7 +542,7 @@ li.episode[data-current="true"] .ep-play {
 .filter-field input[type="search"],
 .filter-field select {
   font: inherit;
-  font-size: 0.9rem;
+  font-size: max(1rem, 1em); /* >=16px: smaller text makes iOS zoom on focus. */
   inline-size: 100%;
   padding: 0.5rem 0.75rem;
   background: var(--surface-sunken);
@@ -964,7 +964,9 @@ input[type="range"][disabled] {
   border: 1px solid var(--border-2);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 0.8rem;
+  /* audio-feed-f12o: was 0.8rem (12.8px), which focuses with the iOS viewport zoom the 16px form-control
+     floor exists to prevent. min-inline-size below is a floor, so the pill widens to fit 16px text. */
+  font-size: max(1rem, 1em); /* >=16px: smaller text makes iOS zoom on focus. */
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -1042,7 +1044,7 @@ dialog.confirm-dialog .share-copy-row {
 dialog.confirm-dialog .share-copy-row input {
   flex: 1 1 auto;
   font: inherit;
-  font-size: 0.85rem;
+  font-size: max(1rem, 1em); /* >=16px: smaller text makes iOS zoom on focus. */
   padding: 0.5rem 0.6rem;
   background: var(--surface-sunken);
   color: var(--text);
