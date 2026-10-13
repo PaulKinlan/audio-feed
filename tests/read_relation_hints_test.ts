@@ -705,8 +705,8 @@ Deno.test("audio-feed-axlt: unsupported destructured and namespace imports repor
     "tests/destructured_test.ts": [
       'import * as x from "../src/dep.ts";',
       'const FILE = "docs/present.md";',
-      "function read() { const { FILE } = x; return Deno.readTextFile(FILE); }",
-      "read();",
+      "function read(x: { FILE: string }) { const { FILE } = x; return Deno.readTextFile(FILE); }",
+      'read({ FILE: "docs/other.md" });',
     ].join("\n"),
     "tests/namespace_test.ts": [
       'import * as x from "../src/dep.ts";',
@@ -1344,3 +1344,75 @@ Deno.test("audio-feed-hfz5: space-containing read paths produce hints or resolve
     },
   );
 });
+
+Deno.test(
+  "audio-feed-wasy: namespace and destructured imports resolve positively and detect wrong scope across modules",
+  async () => {
+    await withTempTree({
+      "docs/a.md": "a\n",
+      "docs/b.md": "b\n",
+      "src/modA.ts": 'export const FILE = "docs/a.md";\n',
+      "src/modB.ts": 'export const FILE = "docs/b.md";\n',
+      "tests/positive_test.ts": [
+        'import * as a from "../src/modA.ts";',
+        'import * as b from "../src/modB.ts";',
+        "export function readA() { return Deno.readTextFile(a.FILE); }",
+        "export function readB() { const { FILE } = b; return Deno.readTextFile(FILE); }",
+        "export function readShadow(a: { FILE: string }) { return Deno.readTextFile(a.FILE); }",
+      ].join("\n"),
+    }, async (root) => {
+      const report = await deriveReadRelationReport(root, ["tests/positive_test.ts"]);
+      assertEquals(
+        report.relations.get("docs/a.md"),
+        ["tests/positive_test.ts"],
+        "namespace access a.FILE resolves to modA",
+      );
+      assertEquals(
+        report.relations.get("docs/b.md"),
+        ["tests/positive_test.ts"],
+        "destructured access { FILE } = b resolves to modB",
+      );
+      assertEquals(
+        report.unresolved,
+        ["FILE"],
+        "shadowed parameter a.FILE does not resolve to modA and reports unresolved",
+      );
+    });
+  },
+);
+
+Deno.test(
+  "audio-feed-isbz: multiple destructured namespace bindings in separate scopes attribute both readers",
+  async () => {
+    await withTempTree({
+      "docs/a.md": "a\n",
+      "docs/b.md": "b\n",
+      "src/modA.ts": 'export const FILE = "docs/a.md";\n',
+      "src/modB.ts": 'export const FILE = "docs/b.md";\n',
+      "tests/positive_test.ts": [
+        'import * as a from "../src/modA.ts";',
+        'import * as b from "../src/modB.ts";',
+        "export function readA() { const { FILE } = a; return Deno.readTextFile(FILE); }",
+        "export function readB() { const { FILE } = b; return Deno.readTextFile(FILE); }",
+        "export function readShadow(a: { FILE: string }) { const { FILE } = a; return Deno.readTextFile(FILE); }",
+      ].join("\n"),
+    }, async (root) => {
+      const report = await deriveReadRelationReport(root, ["tests/positive_test.ts"]);
+      assertEquals(
+        report.relations.get("docs/a.md"),
+        ["tests/positive_test.ts"],
+        "first destructured binding { FILE } = a attributes docs/a.md",
+      );
+      assertEquals(
+        report.relations.get("docs/b.md"),
+        ["tests/positive_test.ts"],
+        "second destructured binding { FILE } = b attributes docs/b.md without clobbering the first",
+      );
+      assertEquals(
+        [...report.unclassified],
+        ["FILE"],
+        "shadowed parameter in readShadow does not leak modA and reports unclassified",
+      );
+    });
+  },
+);

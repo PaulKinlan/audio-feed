@@ -663,6 +663,23 @@ function isOutOfRepoBinding(
   return false;
 }
 
+/** Whether an identifier is shadowed by an inner parameter, block, or unparsed signature at offset. */
+function isIdentifierShadowed(
+  scopes: ReadonlyArray<BindingScope>,
+  name: string,
+  offset: number,
+): boolean {
+  const containing = scopes.filter((scope) =>
+    scope.start > 0 && offset > scope.start && offset < scope.end
+  )
+    .sort((a, b) => (a.end - a.start) - (b.end - b.start));
+  for (const scope of containing) {
+    if (scope.unparsedSignature) return true;
+    if (scope.bindings.has(name)) return true;
+  }
+  return false;
+}
+
 type BindingKind = "out-of-repo" | "other";
 
 /** One lexical scope and the bindings made DIRECTLY in it. */
@@ -1493,6 +1510,7 @@ export async function deriveReadRelationReport(
   const fileSpans = new Map<string, Array<[number, number]>>();
   const fileImports = new Map<string, string[]>();
   const fileImportedSymbols = new Map<string, Map<string, Map<string, string>>>();
+  const fileNamespaceImports = new Map<string, Map<string, string>>();
   const fileConstants = new Map<
     string,
     {
@@ -1547,6 +1565,18 @@ export async function deriveReadRelationReport(
       importedSymbols.set(imported, symbols);
     }
     fileImportedSymbols.set(relPath, importedSymbols);
+
+    const namespaceImports = new Map<string, string>();
+    for (
+      const match of source.matchAll(
+        /import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["'](\.[^"']+)["']/g,
+      )
+    ) {
+      if (!match[1] || !match[2]) continue;
+      const imported = normalisePath(`${dir}/${match[2]}`);
+      if (imported) namespaceImports.set(match[1], imported);
+    }
+    fileNamespaceImports.set(relPath, namespaceImports);
 
     const scopes = bindingScopes(source, spans);
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
@@ -1617,6 +1647,10 @@ export async function deriveReadRelationReport(
     at: number,
     own: ReturnType<typeof pathConstants> | undefined,
     visible: ReadonlyMap<string, string>,
+    destructured?: ReadonlyMap<
+      string,
+      ReadonlyArray<{ offset: number; scope: BindingScope; path: string }>
+    >,
   ): string => {
     const containing = scopes.filter((scope) => at > scope.start && at < scope.end)
       .sort((a, b) => (a.end - a.start) - (b.end - b.start));
@@ -1627,8 +1661,23 @@ export async function deriveReadRelationReport(
         const matching = (own?.declarations.get(name) ?? []).filter((declaration) =>
           innermostScope(scopes, declaration.offset) === scope
         );
-        return kind !== "ambiguous" && matching.length === 1 ? matching[0]!.path : name;
+        if (kind !== "ambiguous" && matching.length === 1) {
+          return matching[0]!.path;
+        }
+        const matchingDest = (destructured?.get(name) ?? []).filter((dest) =>
+          dest.scope === scope && at > dest.offset
+        );
+        if (matchingDest.length === 1) {
+          return matchingDest[0]!.path;
+        }
+        return name;
       }
+    }
+    const matchingDest = (destructured?.get(name) ?? []).filter((dest) =>
+      dest.scope === scopes[0] && at > dest.offset
+    );
+    if (matchingDest.length === 1) {
+      return matchingDest[0]!.path;
     }
     return visible.get(name) ?? name;
   };
@@ -1650,18 +1699,41 @@ export async function deriveReadRelationReport(
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
     const visible = visibleConstantsFor(relPath);
     const own = fileConstants.get(relPath);
-    // Namespace and destructured imports are not statically resolved by the direct named-import map. A use
-    // in a read must still be reported, not silently treated as if no read had been attempted.
-    const namespaceNames = new Set(
-      [...source.matchAll(/import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["'][^"']+["']/g)]
-        .map((match) => match[1]!),
-    );
+    const namespaceImports = fileNamespaceImports.get(relPath) ?? new Map<string, string>();
     const destructuredNames = new Set<string>();
-    for (const match of source.matchAll(/(?:const|let)\s*\{([^}]+)\}\s*=\s*([A-Za-z_$][\w$]*)/g)) {
-      if (!namespaceNames.has(match[2]!)) continue;
+    const destructuredDeclarations = new Map<
+      string,
+      Array<{ offset: number; scope: BindingScope; path: string }>
+    >();
+
+    for (
+      const match of source.matchAll(/(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([A-Za-z_$][\w$]*)/g)
+    ) {
+      const at = match.index ?? 0;
+      if (insideSpans(spans, at)) continue;
+      const ns = match[2]!;
+      const isNs = namespaceImports.has(ns);
+      if (!isNs) continue;
+      const targetMod = namespaceImports.get(ns)!;
+      const isShadowed = isIdentifierShadowed(scopes, ns, at);
+      const declScope = innermostScope(scopes, at);
       for (const part of match[1]!.split(",")) {
-        const name = part.trim().split(/\s*:\s*/).pop();
-        if (name && /^[A-Za-z_$][\w$]*$/.test(name)) destructuredNames.add(name);
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const tokens = trimmed.split(/\s*:\s*/);
+        const orig = tokens[0]?.trim();
+        const alias = tokens[1]?.trim() ?? orig;
+        if (alias && /^[A-Za-z_$][\w$]*$/.test(alias)) {
+          destructuredNames.add(alias);
+          if (!isShadowed && orig) {
+            const path = fileConstants.get(targetMod)?.exported.get(orig);
+            if (path) {
+              const list = destructuredDeclarations.get(alias) ?? [];
+              list.push({ offset: at, scope: declScope, path });
+              destructuredDeclarations.set(alias, list);
+            }
+          }
+        }
       }
     }
 
@@ -1728,12 +1800,20 @@ export async function deriveReadRelationReport(
             unclassified.add(hint);
           }
         }
-        // Name candidates include known constants and namespace-derived destructured names.
-        // Namespace accesses are not named imports; their member remains unresolved until that syntax is
-        // supported, rather than attributing a value from another scope.
+        // Name candidates include known constants, namespace member accesses, and destructured names.
         for (const member of scanText.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) {
-          if (namespaceNames.has(member[1]!)) {
-            (isExecuteCall ? executed : resolved).push(member[2]!);
+          const ns = member[1]!;
+          const prop = member[2]!;
+          if (namespaceImports.has(ns)) {
+            if (!isIdentifierShadowed(scopes, ns, at)) {
+              const targetMod = namespaceImports.get(ns)!;
+              const path = fileConstants.get(targetMod)?.exported.get(prop);
+              if (path) {
+                (isExecuteCall ? executed : resolved).push(path);
+                continue;
+              }
+            }
+            (isExecuteCall ? executed : resolved).push(prop);
           }
         }
         for (const identifier of scanText.matchAll(/(?<![\w.$])([A-Za-z_$][\w$]*)/g)) {
@@ -1742,7 +1822,14 @@ export async function deriveReadRelationReport(
             // A NAME resolved inside an execute call is the spawn's argument, so it takes the same route as a
             // literal one - this is the branch probe B takes (a `.ts` path held in a module-local constant and
             // interpolated into a `Deno.Command` args array).
-            const resolvedValue = resolveReadName(scopes, name, at, own, visible);
+            const resolvedValue = resolveReadName(
+              scopes,
+              name,
+              at,
+              own,
+              visible,
+              destructuredDeclarations,
+            );
             if (resolvedValue === name) {
               const path = toRepoPath(name, dir, root);
               if (path) {
