@@ -35,18 +35,42 @@ import {
   usableSynthesis,
 } from "./synthesis_observation.ts";
 
+function isCommittedPath(path: string): boolean {
+  const parts: string[] = [];
+  for (const seg of path.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      parts.pop();
+    } else {
+      parts.push(seg);
+    }
+  }
+  const clean = parts.join("/");
+  return clean === "docs/evidence/audio-feed-9vns" ||
+    clean.endsWith("/docs/evidence/audio-feed-9vns");
+}
+
 export function resolveEvidenceOutputDir(args: string[] = []): {
   dir: string;
   isCommitted: boolean;
 } {
-  const outDirArg = args.find((a) => a.startsWith("--out-dir="))?.split("=")[1];
-  if (outDirArg) {
-    return { dir: outDirArg, isCommitted: false };
-  }
+  const COMMITTED_DIR = "docs/evidence/audio-feed-9vns";
   const writeCommitted = args.includes("--write-committed-evidence") ||
     args.includes("--update-evidence");
+  const outDirArg = args.find((a) => a.startsWith("--out-dir="))?.split("=")[1];
+
+  if (outDirArg) {
+    const isTargetingCommitted = isCommittedPath(outDirArg);
+    if (isTargetingCommitted && !writeCommitted) {
+      throw new Error(
+        `Refusing to overwrite committed evidence at '${outDirArg}' without explicit --write-committed-evidence flag.`,
+      );
+    }
+    return { dir: outDirArg, isCommitted: isTargetingCommitted && writeCommitted };
+  }
+
   return {
-    dir: writeCommitted ? "docs/evidence/audio-feed-9vns" : "var/evidence/audio-feed-9vns",
+    dir: writeCommitted ? COMMITTED_DIR : "var/evidence/audio-feed-9vns",
     isCommitted: writeCommitted,
   };
 }
