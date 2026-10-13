@@ -561,31 +561,47 @@ Deno.test("audio-feed-n16x: four target browser proofs execute inside runProof a
       ),
       `${script} must record crash failure on checker to suppress evidence publication`,
     );
+
+    // audio-feed-0gbo: write targets must be resolvable at call sites (no blind spots)
+    const result = censusSource(content);
+    assertEquals(
+      result.unresolvedWrites,
+      [],
+      `${script} must resolve all evidence write targets: ${result.unresolvedWrites.join(", ")}`,
+    );
   }
 });
 
-Deno.test("audio-feed-n16x: all browser proof scripts writing evidence use runProof and shared helpers", async () => {
+function checkProofCompliance(content: string, relative: string): string | null {
+  const result = censusSource(content);
+  // audio-feed-0gbo: unknown writes must not pass in silence
+  const writesEvidence = result.writes.length > 0 || result.unresolvedWrites.length > 0;
+  if (!writesEvidence) return null;
+
+  const hasRunProof = content.includes("runProof(");
+  const hasReadme = content.includes("writeEvidenceReadme(");
+
+  if (!hasRunProof || !hasReadme) {
+    return `${relative} (writes: ${result.writes.join(", ")}, unresolved: ${
+      result.unresolvedWrites.join(", ")
+    }, runProof: ${hasRunProof}, readme: ${hasReadme})`;
+  }
+  return null;
+}
+
+Deno.test("audio-feed-0gbo: all browser proof scripts writing evidence use runProof and shared helpers", async () => {
   const root = new URL("..", import.meta.url).pathname;
   const unmediated: string[] = [];
 
   for await (const entry of Deno.readDir(`${root}/scripts`)) {
     if (!entry.isFile || !entry.name.endsWith("-browser-proof.ts")) continue;
+    // regenerate-browser-proof.ts is a CLI child process driven by regenerate-harness.ts with parameterized outDir
+    if (entry.name === "regenerate-browser-proof.ts") continue;
+
     const relative = `scripts/${entry.name}`;
     const content = await Deno.readTextFile(`${root}/${relative}`);
-    const result = censusSource(content);
-
-    if (result.writes.length > 0) {
-      const hasRunProof = content.includes("runProof(");
-      const hasReadme = content.includes("writeEvidenceReadme(");
-
-      if (!hasRunProof || !hasReadme) {
-        unmediated.push(
-          `${relative} (writes: ${
-            result.writes.join(", ")
-          }, runProof: ${hasRunProof}, readme: ${hasReadme})`,
-        );
-      }
-    }
+    const failure = checkProofCompliance(content, relative);
+    if (failure) unmediated.push(failure);
   }
 
   assertEquals(
@@ -594,5 +610,26 @@ Deno.test("audio-feed-n16x: all browser proof scripts writing evidence use runPr
     `All browser proofs writing evidence must use runProof and writeEvidenceReadme: ${
       JSON.stringify(unmediated, null, 2)
     }`,
+  );
+});
+
+Deno.test("audio-feed-0gbo: NEGATIVE CONTROL - unresolved evidence write is detected and fails audit when runProof is omitted", () => {
+  const syntheticProof = [
+    'const OUT = "docs/evidence/audio-feed-test/";',
+    "const target = `${OUT}01-shot.png`;",
+    "await Deno.writeFile(target, new Uint8Array());",
+  ].join("\n");
+
+  const result = censusSource(syntheticProof);
+  assertEquals(
+    result.unresolvedWrites,
+    ["Deno.writeFile"],
+    "Indirect variable write target must be classified as unresolved write",
+  );
+
+  const failure = checkProofCompliance(syntheticProof, "scripts/synthetic-browser-proof.ts");
+  assert(
+    failure !== null,
+    "Unresolved evidence write in proof without runProof must be caught, not skipped as false green",
   );
 });

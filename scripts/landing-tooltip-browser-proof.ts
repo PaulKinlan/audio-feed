@@ -153,12 +153,11 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
 
   async function screenshot(name: string) {
     const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
-    const shotPath = `${OUT}${name}.png`;
     await Deno.writeFile(
-      shotPath,
+      `${OUT}${name}.png`,
       Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
     );
-    await quantiseEvidencePng(shotPath);
+    await quantiseEvidencePng(`${OUT}${name}.png`);
   }
 
   let crashError: unknown = null;

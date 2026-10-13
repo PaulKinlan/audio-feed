@@ -174,13 +174,12 @@ await runProof("playback-position-browser-proof", async (checker) => {
 
     // 4. Capture screenshot showing resume badge and play-from-start button
     const shot = await cdp("Page.captureScreenshot", { format: "png" });
-    const shotPath = `${OUT}01-resume-playback-position.png`;
     await Deno.writeFile(
-      shotPath,
+      `${OUT}01-resume-playback-position.png`,
       Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
     );
-    await quantiseEvidencePng(shotPath);
-    console.log(`Saved screenshot to ${shotPath}`);
+    await quantiseEvidencePng(`${OUT}01-resume-playback-position.png`);
+    console.log(`Saved screenshot to ${OUT}01-resume-playback-position.png`);
 
     // 5. Click resume -> verify audio seeks to 45s
     await js(`${row1}?.querySelector("button.ep-play")?.click()`);
