@@ -527,3 +527,72 @@ Deno.test("audio-feed-t9w1: mixed input splits exactly once, with no id in both 
   assertEquals(Object.keys(credited), [backed]);
   assertEquals(Object.keys(writesWithoutDirectory), [unbacked]);
 });
+
+Deno.test("audio-feed-n16x: four target browser proofs execute inside runProof and invoke evidence helpers", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const specimens = [
+    "scripts/playback-position-browser-proof.ts",
+    "scripts/spend-visibility-browser-proof.ts",
+    "scripts/landing-tooltip-browser-proof.ts",
+    "scripts/request-access-browser-proof.ts",
+  ];
+  for (const script of specimens) {
+    const content = await Deno.readTextFile(`${root}/${script}`);
+    assert(content.includes("runProof("), `${script} must execute inside runProof`);
+    assert(
+      content.includes("quantiseEvidencePng("),
+      `${script} must process screenshots with quantiseEvidencePng`,
+    );
+    assert(
+      content.includes("writeEvidenceReadme("),
+      `${script} must write evidence README with writeEvidenceReadme`,
+    );
+    assert(
+      !content.includes("Deno.writeTextFile(`${OUT}README.md`"),
+      `${script} must not write raw README.md directly`,
+    );
+    assert(
+      content.includes("crashError"),
+      `${script} must track unhandled exceptions to prevent misleading README generation`,
+    );
+    assert(
+      content.includes(
+        'checker.check("proof execution completed without unhandled exception", false,',
+      ),
+      `${script} must record crash failure on checker to suppress evidence publication`,
+    );
+  }
+});
+
+Deno.test("audio-feed-n16x: all browser proof scripts writing evidence use runProof and shared helpers", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const unmediated: string[] = [];
+
+  for await (const entry of Deno.readDir(`${root}/scripts`)) {
+    if (!entry.isFile || !entry.name.endsWith("-browser-proof.ts")) continue;
+    const relative = `scripts/${entry.name}`;
+    const content = await Deno.readTextFile(`${root}/${relative}`);
+    const result = censusSource(content);
+
+    if (result.writes.length > 0) {
+      const hasRunProof = content.includes("runProof(");
+      const hasReadme = content.includes("writeEvidenceReadme(");
+
+      if (!hasRunProof || !hasReadme) {
+        unmediated.push(
+          `${relative} (writes: ${
+            result.writes.join(", ")
+          }, runProof: ${hasRunProof}, readme: ${hasReadme})`,
+        );
+      }
+    }
+  }
+
+  assertEquals(
+    unmediated,
+    [],
+    `All browser proofs writing evidence must use runProof and writeEvidenceReadme: ${
+      JSON.stringify(unmediated, null, 2)
+    }`,
+  );
+});

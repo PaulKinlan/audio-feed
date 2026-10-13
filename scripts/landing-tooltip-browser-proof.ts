@@ -21,236 +21,248 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { makeUser } from "../tests/fixtures.ts";
-import { createTempChromeProfile, newestChrome } from "./proof-helper.ts";
+import {
+  createTempChromeProfile,
+  newestChrome,
+  runProof,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
-const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
-const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-proof-3xq-4c-");
-const TOKEN = "tok-landing";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-await Deno.mkdir(OUT, { recursive: true });
+await runProof("landing-tooltip-browser-proof", async (checker) => {
+  const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
+  const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-proof-3xq-4c-");
+  const TOKEN = "tok-landing";
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  await Deno.mkdir(OUT, { recursive: true });
 
-const stores: Stores = memoryStores();
-const config: AppConfig = { port: 0 };
-const ctx = { config, stores };
-await stores.metadata.putUser(
-  makeUser({ id: "user-1", displayName: "Paul", status: "approved", feedToken: TOKEN }),
-);
-const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
-const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
-const PORT = (server.addr as Deno.NetAddr).port;
-const BASE = `http://localhost:${PORT}`;
-config.port = PORT;
-config.publicBaseUrl = BASE;
+  const stores: Stores = memoryStores();
+  const config: AppConfig = { port: 0 };
+  const ctx = { config, stores };
+  await stores.metadata.putUser(
+    makeUser({ id: "user-1", displayName: "Paul", status: "approved", feedToken: TOKEN }),
+  );
+  const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
+  const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+  const PORT = (server.addr as Deno.NetAddr).port;
+  const BASE = `http://localhost:${PORT}`;
+  config.port = PORT;
+  config.publicBaseUrl = BASE;
 
-const chrome = new Deno.Command(newestChrome(), {
-  args: [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${PROFILE}`,
-    "about:blank",
-  ],
-  stdout: "null",
-  stderr: "null",
-}).spawn();
+  const chrome = new Deno.Command(newestChrome(), {
+    args: [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${PROFILE}`,
+      "about:blank",
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
 
-let debugPort = "";
-for (let i = 0; i < 100 && !debugPort; i++) {
-  await sleep(100);
-  debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
-    "\n",
-  )[0]!;
-}
-if (!debugPort) throw new Error("Chrome did not open a debug port");
-
-const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
-const page = targets.find((t: { type: string }) => t.type === "page");
-const ws = new WebSocket(page.webSocketDebuggerUrl);
-await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-let nextId = 0;
-const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-interface CdpEvent {
-  method: string;
-  params: {
-    response?: { url?: string; status?: number; headers?: Record<string, string> };
-    type?: string;
-    entry?: { level?: string };
-  };
-}
-const events: CdpEvent[] = [];
-ws.addEventListener("message", (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.id && pending.has(msg.id)) {
-    pending.get(msg.id)!(msg);
-    pending.delete(msg.id);
-  } else if (msg.method) {
-    events.push({ method: msg.method, params: msg.params });
+  let debugPort = "";
+  for (let i = 0; i < 100 && !debugPort; i++) {
+    await sleep(100);
+    debugPort = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+      "\n",
+    )[0]!;
   }
-});
+  if (!debugPort) throw new Error("Chrome did not open a debug port");
 
-function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  const id = ++nextId;
-  return new Promise((resolve, reject) => {
-    pending.set(id, (res) => {
-      if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
-      else resolve(res.result);
+  const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
+  const page = targets.find((t: { type: string }) => t.type === "page");
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+  let nextId = 0;
+  const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
+  interface CdpEvent {
+    method: string;
+    params: {
+      response?: { url?: string; status?: number; headers?: Record<string, string> };
+      type?: string;
+      entry?: { level?: string };
+    };
+  }
+  const events: CdpEvent[] = [];
+  ws.addEventListener("message", (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)!(msg);
+      pending.delete(msg.id);
+    } else if (msg.method) {
+      events.push({ method: msg.method, params: msg.params });
+    }
+  });
+
+  function cdp(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    const id = ++nextId;
+    return new Promise((resolve, reject) => {
+      pending.set(id, (res) => {
+        if (res.error) reject(new Error(`${method}: ${JSON.stringify(res.error)}`));
+        else resolve(res.result);
+      });
+      ws.send(JSON.stringify({ id, method, params }));
     });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
-
-async function js(expr: string): Promise<unknown> {
-  const res = await cdp("Runtime.evaluate", {
-    expression: expr,
-    returnByValue: true,
-    awaitPromise: true,
-  }) as { result?: { value?: unknown } };
-  return res.result?.value;
-}
-
-async function until(expr: string, desc = expr, timeout = 15_000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    // During a navigation the execution context is destroyed mid-poll; that is progress, not
-    // failure — swallow and keep asking.
-    try {
-      if (await js(`Boolean(${expr})`)) return;
-    } catch { /* context destroyed mid-navigation */ }
-    await sleep(50);
   }
-  throw new Error(`Timeout waiting for: ${desc}`);
-}
 
-async function navigate(url: string) {
-  events.length = 0;
-  await cdp("Page.navigate", { url });
-  await until(`document.readyState === "complete"`, `loaded ${url}`);
-}
+  async function js(expr: string): Promise<unknown> {
+    const res = await cdp("Runtime.evaluate", {
+      expression: expr,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as { result?: { value?: unknown } };
+    return res.result?.value;
+  }
 
-const checks: { name: string; pass: boolean; detail: string }[] = [];
-function check(name: string, pass: boolean, detail: string) {
-  checks.push({ name, pass, detail });
-  console.log(`${pass ? "PASS" : "FAIL"}  ${name}  ${detail}`);
-}
+  async function until(expr: string, desc = expr, timeout = 15_000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      // During a navigation the execution context is destroyed mid-poll; that is progress, not
+      // failure — swallow and keep asking.
+      try {
+        if (await js(`Boolean(${expr})`)) return;
+      } catch { /* context destroyed mid-navigation */ }
+      await sleep(50);
+    }
+    throw new Error(`Timeout waiting for: ${desc}`);
+  }
 
-const consoleBad = () =>
-  events.filter((e) =>
-    (e.method === "Runtime.consoleAPICalled" &&
-      ["error", "warning"].includes(e.params.type ?? "")) ||
-    e.method === "Runtime.exceptionThrown" ||
-    (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
-  );
+  async function navigate(url: string) {
+    events.length = 0;
+    await cdp("Page.navigate", { url });
+    await until(`document.readyState === "complete"`, `loaded ${url}`);
+  }
 
-async function screenshot(name: string) {
-  const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
-  await Deno.writeFile(
-    `${OUT}${name}.png`,
-    Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-  );
-}
+  const checks: { name: string; pass: boolean; detail: string }[] = [];
+  function check(name: string, pass: boolean, detail: string) {
+    checks.push({ name, pass, detail });
+    checker.check(name, pass, detail);
+  }
 
-let exitCode = 0;
-try {
-  await cdp("Page.enable");
-  await cdp("Network.enable");
-  await cdp("Log.enable");
-  await cdp("Runtime.enable");
-  await cdp("Emulation.setDeviceMetricsOverride", {
-    width: 1280,
-    height: 900,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
+  const consoleBad = () =>
+    events.filter((e) =>
+      (e.method === "Runtime.consoleAPICalled" &&
+        ["error", "warning"].includes(e.params.type ?? "")) ||
+      e.method === "Runtime.exceptionThrown" ||
+      (e.method === "Log.entryAdded" && e.params.entry?.level === "error")
+    );
 
-  // --- landing, fresh (no stored token): assets + form flow -----------------
-  await navigate(`${BASE}/listen`);
-  // audio-feed-dc2y: compiled once per distinct suffix instead of once per captured CDP event
-  // (perf-review INFO). The pattern is static for a given suffix, so recompiling it inside the
-  // predicate was pure overhead on every event in the log.
-  const assetPatterns = new Map<string, RegExp>();
-  const assetResponse = (suffix: string) => {
-    const pattern = assetPatterns.get(suffix) ??
-      assetPatterns.set(suffix, new RegExp(`/assets/[0-9a-f]+\\.${suffix}$`)).get(suffix)!;
-    return events.find(
-      (e) =>
-        e.method === "Network.responseReceived" &&
-        pattern.test(e.params.response?.url ?? ""),
-    )?.params.response;
-  };
-  const cssRes = assetResponse("listen-landing\\.css");
-  check(
-    "listen-landing.css fetched content-addressed, immutable, text/css",
-    cssRes?.status === 200 &&
-      cssRes.headers?.["content-type"]?.startsWith("text/css") === true &&
-      cssRes.headers?.["cache-control"] === "public, max-age=31536000, immutable",
-    cssRes ? `${cssRes.url} ${cssRes.status}` : "no response seen",
-  );
-  const jsRes = assetResponse("listen-landing\\.js");
-  check(
-    "listen-landing.js fetched content-addressed, immutable, text/javascript",
-    jsRes?.status === 200 &&
-      jsRes.headers?.["content-type"]?.startsWith("text/javascript") === true &&
-      jsRes.headers?.["cache-control"] === "public, max-age=31536000, immutable",
-    jsRes ? `${jsRes.url} ${jsRes.status}` : "no response seen",
-  );
-  check(
-    "no console errors on the fresh landing",
-    consoleBad().length === 0,
-    consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
-      "clean",
-  );
-  await screenshot("part4c-listen-landing-1280x900");
+  async function screenshot(name: string) {
+    const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
+    const shotPath = `${OUT}${name}.png`;
+    await Deno.writeFile(
+      shotPath,
+      Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
+    );
+    await quantiseEvidencePng(shotPath);
+  }
 
-  // form path: paste a full feed URL, submit -> tokenFrom() extracts -> /listen/<token>
-  await js(`
+  let crashError: unknown = null;
+  try {
+    await cdp("Page.enable");
+    await cdp("Network.enable");
+    await cdp("Log.enable");
+    await cdp("Runtime.enable");
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
+    // --- landing, fresh (no stored token): assets + form flow -----------------
+    await navigate(`${BASE}/listen`);
+    // audio-feed-dc2y: compiled once per distinct suffix instead of once per captured CDP event
+    // (perf-review INFO). The pattern is static for a given suffix, so recompiling it inside the
+    // predicate was pure overhead on every event in the log.
+    const assetPatterns = new Map<string, RegExp>();
+    const assetResponse = (suffix: string) => {
+      const pattern = assetPatterns.get(suffix) ??
+        assetPatterns.set(suffix, new RegExp(`/assets/[0-9a-f]+\\.${suffix}$`)).get(suffix)!;
+      return events.find(
+        (e) =>
+          e.method === "Network.responseReceived" &&
+          pattern.test(e.params.response?.url ?? ""),
+      )?.params.response;
+    };
+    const cssRes = assetResponse("listen-landing\\.css");
+    check(
+      "listen-landing.css fetched content-addressed, immutable, text/css",
+      cssRes?.status === 200 &&
+        cssRes.headers?.["content-type"]?.startsWith("text/css") === true &&
+        cssRes.headers?.["cache-control"] === "public, max-age=31536000, immutable",
+      cssRes ? `${cssRes.url} ${cssRes.status}` : "no response seen",
+    );
+    const jsRes = assetResponse("listen-landing\\.js");
+    check(
+      "listen-landing.js fetched content-addressed, immutable, text/javascript",
+      jsRes?.status === 200 &&
+        jsRes.headers?.["content-type"]?.startsWith("text/javascript") === true &&
+        jsRes.headers?.["cache-control"] === "public, max-age=31536000, immutable",
+      jsRes ? `${jsRes.url} ${jsRes.status}` : "no response seen",
+    );
+    check(
+      "no console errors on the fresh landing",
+      consoleBad().length === 0,
+      consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
+        "clean",
+    );
+    await screenshot("part4c-listen-landing-1280x900");
+
+    // form path: paste a full feed URL, submit -> tokenFrom() extracts -> /listen/<token>
+    await js(`
     (() => {
       const u = document.getElementById("feedUrl");
       u.value = ${JSON.stringify(`${BASE}/feed/${TOKEN}/master.xml`)};
       document.getElementById("restore").requestSubmit();
     })()
   `);
-  await until(`location.pathname === "/listen/${TOKEN}"`, "form submit navigated to the player");
-  await until(`document.getElementById("episodeCount") !== null`, "player rendered");
-  check(
-    "form submit turns a pasted feed URL into the player for that token",
-    await js(`location.pathname`) === `/listen/${TOKEN}`,
-    `pathname=${await js(`location.pathname`)}`,
-  );
+    await until(`location.pathname === "/listen/${TOKEN}"`, "form submit navigated to the player");
+    await until(`document.getElementById("episodeCount") !== null`, "player rendered");
+    check(
+      "form submit turns a pasted feed URL into the player for that token",
+      await js(`location.pathname`) === `/listen/${TOKEN}`,
+      `pathname=${await js(`location.pathname`)}`,
+    );
 
-  // restore path: an active session redirects without any interaction (audio-feed-ufg9)
-  const { createSession } = await import("../src/auth/sessions.ts");
-  const sessionSecret = await createSession(stores.metadata, "user-1");
-  await cdp("Network.setCookie", {
-    url: BASE,
-    name: "__Host-af_session",
-    value: sessionSecret,
-    secure: true,
-    path: "/",
-    httpOnly: true,
-    sameSite: "Lax",
-  });
-  await navigate(`${BASE}/listen`);
-  await until(`location.pathname === "/listen/${TOKEN}"`, "stored token redirected to the player");
-  check(
-    "a stored token redirects straight to the player",
-    await js(`location.pathname`) === `/listen/${TOKEN}`,
-    `pathname=${await js(`location.pathname`)}`,
-  );
-  check(
-    "no console errors on the restore run",
-    consoleBad().length === 0,
-    consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
-      "clean",
-  );
+    // restore path: an active session redirects without any interaction (audio-feed-ufg9)
+    const { createSession } = await import("../src/auth/sessions.ts");
+    const sessionSecret = await createSession(stores.metadata, "user-1");
+    await cdp("Network.setCookie", {
+      url: BASE,
+      name: "__Host-af_session",
+      value: sessionSecret,
+      secure: true,
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+    });
+    await navigate(`${BASE}/listen`);
+    await until(
+      `location.pathname === "/listen/${TOKEN}"`,
+      "stored token redirected to the player",
+    );
+    check(
+      "a stored token redirects straight to the player",
+      await js(`location.pathname`) === `/listen/${TOKEN}`,
+      `pathname=${await js(`location.pathname`)}`,
+    );
+    check(
+      "no console errors on the restore run",
+      consoleBad().length === 0,
+      consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
+        "clean",
+    );
 
-  // --- shell tooltip client on the homepage ----------------------------------
-  await js(`localStorage.removeItem("audio-feed-token")`);
-  await navigate(BASE);
-  await until(`document.querySelector("[data-tooltip]") !== null`, "tooltip target present");
-  const shown = await js(`
+    // --- shell tooltip client on the homepage ----------------------------------
+    await js(`localStorage.removeItem("audio-feed-token")`);
+    await navigate(BASE);
+    await until(`document.querySelector("[data-tooltip]") !== null`, "tooltip target present");
+    const shown = await js(`
     (() => {
       const t = document.querySelector("[data-tooltip]");
       // Bring the target (and the tooltip that anchors to it) into the viewport so the
@@ -266,14 +278,15 @@ try {
       };
     })()
   `) as { visible: boolean; text: string; expected: string; describedby: string | null };
-  await sleep(150);
-  check(
-    "pointerover shows #appTooltip with the target's text and aria-describedby",
-    shown?.visible === true && shown.text === shown.expected && shown.describedby === "appTooltip",
-    JSON.stringify(shown),
-  );
-  await screenshot("part4c-home-tooltip-visible-1280x900");
-  const hidden = await js(`
+    await sleep(150);
+    check(
+      "pointerover shows #appTooltip with the target's text and aria-describedby",
+      shown?.visible === true && shown.text === shown.expected &&
+        shown.describedby === "appTooltip",
+      JSON.stringify(shown),
+    );
+    await screenshot("part4c-home-tooltip-visible-1280x900");
+    const hidden = await js(`
     (() => {
       const t = document.querySelector("[data-tooltip]");
       t.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
@@ -282,48 +295,52 @@ try {
       );
     })()
   `);
-  check("pointerout hides the tooltip again", hidden === true, `hidden=${hidden}`);
-  check(
-    "no console errors on the homepage with the extracted tooltip client",
-    consoleBad().length === 0,
-    consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
-      "clean",
-  );
+    check("pointerout hides the tooltip again", hidden === true, `hidden=${hidden}`);
+    check(
+      "no console errors on the homepage with the extracted tooltip client",
+      consoleBad().length === 0,
+      consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
+        "clean",
+    );
 
-  // --- 390x844 ----------------------------------------------------------------
-  await cdp("Network.clearBrowserCookies");
-  await cdp("Emulation.setDeviceMetricsOverride", {
-    width: 390,
-    height: 844,
-    deviceScaleFactor: 1,
-    mobile: true,
-  });
-  await navigate(`${BASE}/listen`);
-  await until(`document.getElementById("feedUrl") !== null`, "landing form at 390x844");
-  check(
-    "no console errors at 390x844",
-    consoleBad().length === 0,
-    consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
-      "clean",
-  );
-  await screenshot("part4c-listen-landing-390x844");
+    // --- 390x844 ----------------------------------------------------------------
+    await cdp("Network.clearBrowserCookies");
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await navigate(`${BASE}/listen`);
+    await until(`document.getElementById("feedUrl") !== null`, "landing form at 390x844");
+    check(
+      "no console errors at 390x844",
+      consoleBad().length === 0,
+      consoleBad().slice(0, 2).map((e) => JSON.stringify(e.params).slice(0, 160)).join(" | ") ||
+        "clean",
+    );
+    await screenshot("part4c-listen-landing-390x844");
 
-  console.log(`Screenshots in ${OUT}`);
-} catch (err) {
-  exitCode = 1;
-  console.error("PROOF CRASHED:", err);
-} finally {
-  try {
-    ws.close();
-  } catch { /* already closed */ }
-  try {
-    chrome.kill("SIGKILL");
-  } catch { /* already dead */ }
-  await server.shutdown();
-  await cleanup();
-}
-
-const failed = checks.filter((c) => !c.pass);
-console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
-if (failed.length > 0) exitCode = 1;
-Deno.exit(exitCode);
+    console.log(`Screenshots in ${OUT}`);
+  } catch (err) {
+    crashError = err;
+    checker.check("proof execution completed without unhandled exception", false, String(err));
+  } finally {
+    try {
+      ws.close();
+    } catch { /* already closed */ }
+    try {
+      chrome.kill("SIGKILL");
+    } catch { /* already dead */ }
+    await server.shutdown();
+    await cleanup();
+    await writeEvidenceReadme({
+      dir: OUT,
+      title: "Browser Proof: Landing & Shell Tooltip Client (audio-feed-3xq)",
+      script: "scripts/landing-tooltip-browser-proof.ts",
+      asserts: checks.map((c) => c.name),
+      checker,
+    });
+  }
+  if (crashError) throw crashError;
+});

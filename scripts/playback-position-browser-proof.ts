@@ -17,272 +17,301 @@
  *   deno run --allow-all --unstable-kv scripts/playback-position-browser-proof.ts
  */
 
-import { createTempChromeProfile, newestChrome, spawnHarness } from "./proof-helper.ts";
+import {
+  createTempChromeProfile,
+  newestChrome,
+  runProof,
+  spawnHarness,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
-const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
-const harness = await spawnHarness("scripts/listen-harness.ts");
-const BASE = harness.base;
-const TOKEN = "harness-token";
-const OUT = new URL("../docs/evidence/audio-feed-kzi/", import.meta.url).pathname;
+const ASSERTS = [
+  "playback position 45s saved to localStorage",
+  "row displays 'Resume from 0:45' badge",
+  "play button action is 'resume'",
+  "distinct 'Play from start' button is present",
+  "clicking resume seeks audio to 45s",
+  "clicking 'Play from start' clears stored position",
+  "re-saved position 50s",
+  "other user cannot resume user-1's playback position (per-user isolation)",
+  "ended event clears stored position",
+];
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+await runProof("playback-position-browser-proof", async (checker) => {
+  const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
+  const harness = await spawnHarness("scripts/listen-harness.ts");
+  const BASE = harness.base;
+  const TOKEN = "harness-token";
+  const OUT = new URL("../docs/evidence/audio-feed-kzi/", import.meta.url).pathname;
 
-// -- launch chrome ------------------------------------------------------------
-await Deno.mkdir(OUT, { recursive: true });
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const chrome = new Deno.Command(newestChrome(), {
-  args: [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${PROFILE}`,
-    "about:blank",
-  ],
-  stdout: "null",
-  stderr: "null",
-}).spawn();
+  // -- launch chrome ------------------------------------------------------------
+  await Deno.mkdir(OUT, { recursive: true });
 
-let port = "";
-for (let i = 0; i < 100 && !port; i++) {
-  await sleep(100);
-  port = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split("\n")[0]!;
-}
+  const chrome = new Deno.Command(newestChrome(), {
+    args: [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${PROFILE}`,
+      "about:blank",
+    ],
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
 
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-const page = targets.find((t: { type: string }) => t.type === "page");
-const ws = new WebSocket(page.webSocketDebuggerUrl);
-await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-
-let nextId = 0;
-const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
-ws.addEventListener("message", (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.id && pending.has(msg.id)) {
-    pending.get(msg.id)!(msg);
-    pending.delete(msg.id);
+  let port = "";
+  for (let i = 0; i < 100 && !port; i++) {
+    await sleep(100);
+    port = (await Deno.readTextFile(`${PROFILE}/DevToolsActivePort`).catch(() => "")).split(
+      "\n",
+    )[0]!;
   }
-});
 
-// deno-lint-ignore no-explicit-any
-async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-  const id = ++nextId;
-  ws.send(JSON.stringify({ id, method, params }));
-  const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
-  if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-  return msg.result;
-}
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+  const page = targets.find((t: { type: string }) => t.type === "page");
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 
-// deno-lint-ignore no-explicit-any
-async function js(expression: string): Promise<any> {
-  const r = await cdp("Runtime.evaluate", {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-    userGesture: true,
-  });
-  if (r.exceptionDetails) throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
-  return r.result?.value;
-}
-
-function check(name: string, pass: boolean, detail = "") {
-  const tag = pass ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
-  console.log(`${tag}  ${name}  ${detail}`);
-  if (!pass) throw new Error(`step failed: ${name}`);
-}
-
-async function until(expr: string, desc: string, timeoutMs = 8000) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if (await js(expr)) return;
-    await sleep(50);
-  }
-  throw new Error(`timed out waiting for: ${desc}`);
-}
-
-let exitCode = 0;
-try {
-  await cdp("Page.enable");
-  await cdp("Runtime.enable");
-  await cdp("Emulation.setDeviceMetricsOverride", {
-    width: 1280,
-    height: 900,
-    deviceScaleFactor: 1,
-    mobile: false,
+  let nextId = 0;
+  const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
+  ws.addEventListener("message", (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)!(msg);
+      pending.delete(msg.id);
+    }
   });
 
-  // 1. Navigate to player
-  await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-  await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page load 5 rows");
+  // deno-lint-ignore no-explicit-any
+  async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+    const id = ++nextId;
+    ws.send(JSON.stringify({ id, method, params }));
+    const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+    if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
+    return msg.result;
+  }
 
-  // 2. Play episode 1 and set position to 45s, save to localStorage
-  await js(`
+  // deno-lint-ignore no-explicit-any
+  async function js(expression: string): Promise<any> {
+    const r = await cdp("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true,
+    });
+    if (r.exceptionDetails) throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+    return r.result?.value;
+  }
+
+  function check(name: string, pass: boolean, detail = "") {
+    checker.check(name, pass, detail);
+  }
+
+  async function until(expr: string, desc: string, timeoutMs = 8000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (await js(expr)) return;
+      await sleep(50);
+    }
+    throw new Error(`timed out waiting for: ${desc}`);
+  }
+
+  let crashError: unknown = null;
+  try {
+    await cdp("Page.enable");
+    await cdp("Runtime.enable");
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
+    // 1. Navigate to player
+    await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+    await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page load 5 rows");
+
+    // 2. Play episode 1 and set position to 45s, save to localStorage
+    await js(`
     document.querySelector('li.episode[data-episode-id="ep-1"] button.ep-play')?.click();
     const audio = document.getElementById("audio");
     audio.currentTime = 45;
     audio.dispatchEvent(new Event("pause"));
   `);
-  await sleep(100);
+    await sleep(100);
 
-  const storedPos = await js(`
+    const storedPos = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `);
-  check("playback position 45s saved to localStorage", storedPos === 45, `stored ${storedPos}s`);
+    check("playback position 45s saved to localStorage", storedPos === 45, `stored ${storedPos}s`);
 
-  // 3. Reload page and check UI affordance
-  await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-  await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page reloaded");
+    // 3. Reload page and check UI affordance
+    await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+    await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page reloaded");
 
-  const row1 = `document.querySelector('li.episode[data-episode-id="ep-1"]')`;
-  const badgeText = await js(`${row1}?.querySelector(".ep-resume-badge")?.textContent`);
-  check(
-    "row displays 'Resume from 0:45' badge",
-    typeof badgeText === "string" && badgeText.includes("0:45"),
-    `badge text: '${badgeText}'`,
-  );
+    const row1 = `document.querySelector('li.episode[data-episode-id="ep-1"]')`;
+    const badgeText = await js(`${row1}?.querySelector(".ep-resume-badge")?.textContent`);
+    check(
+      "row displays 'Resume from 0:45' badge",
+      typeof badgeText === "string" && badgeText.includes("0:45"),
+      `badge text: '${badgeText}'`,
+    );
 
-  const playAction = await js(`${row1}?.querySelector("button.ep-play")?.dataset.action`);
-  check("play button action is 'resume'", playAction === "resume", `action: '${playAction}'`);
+    const playAction = await js(`${row1}?.querySelector("button.ep-play")?.dataset.action`);
+    check("play button action is 'resume'", playAction === "resume", `action: '${playAction}'`);
 
-  const restartBtn = await js(`!!${row1}?.querySelector("button.ep-restart")`);
-  check(
-    "distinct 'Play from start' button is present",
-    restartBtn === true,
-    "restart button exists",
-  );
+    const restartBtn = await js(`!!${row1}?.querySelector("button.ep-restart")`);
+    check(
+      "distinct 'Play from start' button is present",
+      restartBtn === true,
+      "restart button exists",
+    );
 
-  // 4. Capture screenshot showing resume badge and play-from-start button
-  const shot = await cdp("Page.captureScreenshot", { format: "png" });
-  await Deno.writeFile(
-    `${OUT}01-resume-playback-position.png`,
-    Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-  );
-  console.log(`Saved screenshot to ${OUT}01-resume-playback-position.png`);
+    // 4. Capture screenshot showing resume badge and play-from-start button
+    const shot = await cdp("Page.captureScreenshot", { format: "png" });
+    const shotPath = `${OUT}01-resume-playback-position.png`;
+    await Deno.writeFile(
+      shotPath,
+      Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
+    );
+    await quantiseEvidencePng(shotPath);
+    console.log(`Saved screenshot to ${shotPath}`);
 
-  // 5. Click resume -> verify audio seeks to 45s
-  await js(`${row1}?.querySelector("button.ep-play")?.click()`);
-  await until(
-    `Math.round(document.getElementById("audio")?.currentTime || 0) === 45`,
-    "audio seeked to 45s",
-  );
-  const currentPos = await js(`Math.round(document.getElementById("audio")?.currentTime || 0)`);
-  check("clicking resume seeks audio to 45s", currentPos === 45, `currentTime is ${currentPos}`);
+    // 5. Click resume -> verify audio seeks to 45s
+    await js(`${row1}?.querySelector("button.ep-play")?.click()`);
+    await until(
+      `Math.round(document.getElementById("audio")?.currentTime || 0) === 45`,
+      "audio seeked to 45s",
+    );
+    const currentPos = await js(`Math.round(document.getElementById("audio")?.currentTime || 0)`);
+    check("clicking resume seeks audio to 45s", currentPos === 45, `currentTime is ${currentPos}`);
 
-  // 6. Click 'Play from start' -> verify audio seeks to 0 and position cleared
-  await js(`${row1}?.querySelector("button.ep-restart")?.click()`);
-  await until(
-    `Math.round(document.getElementById("audio")?.currentTime || 0) === 0`,
-    "audio restarted to 0s",
-  );
-  const clearedStored = await js(`
+    // 6. Click 'Play from start' -> verify audio seeks to 0 and position cleared
+    await js(`${row1}?.querySelector("button.ep-restart")?.click()`);
+    await until(
+      `Math.round(document.getElementById("audio")?.currentTime || 0) === 0`,
+      "audio restarted to 0s",
+    );
+    const clearedStored = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
-  check(
-    "clicking 'Play from start' clears stored position",
-    clearedStored === undefined,
-    "cleared from storage",
-  );
+    check(
+      "clicking 'Play from start' clears stored position",
+      clearedStored === undefined,
+      "cleared from storage",
+    );
 
-  // 7. Finish episode (ended event) -> position cleared
-  await js(`(() => {
+    // 7. Finish episode (ended event) -> position cleared
+    await js(`(() => {
     const audio = document.getElementById("audio");
     audio.currentTime = 50;
     audio.dispatchEvent(new Event("pause"));
   })()`);
-  await sleep(100);
-  check(
-    "re-saved position 50s",
-    (await js(`
+    await sleep(100);
+    check(
+      "re-saved position 50s",
+      (await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]?.position
   `)) === 50,
-    "re-saved at 50s",
-  );
+      "re-saved at 50s",
+    );
 
-  // 8. Per-user isolation: a different user does not see these positions
-  // Open the second user's page while user-1 still has a saved position
-  const tab2 = await cdp("Target.createTarget", { url: `${BASE}/listen/other-token` });
-  const ws2 = new WebSocket(
+    // 8. Per-user isolation: a different user does not see these positions
+    // Open the second user's page while user-1 still has a saved position
+    const tab2 = await cdp("Target.createTarget", { url: `${BASE}/listen/other-token` });
+    const ws2 = new WebSocket(
+      // deno-lint-ignore no-explicit-any
+      targets.find((t: any) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
+        (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(
+          // deno-lint-ignore no-explicit-any
+          (t: any) => t.id === tab2.targetId,
+        ).webSocketDebuggerUrl,
+    );
+    await new Promise((r) => ws2.addEventListener("open", r, { once: true }));
+    let nextId2 = 0;
     // deno-lint-ignore no-explicit-any
-    targets.find((t: any) => t.id === tab2.targetId)?.webSocketDebuggerUrl ||
-      (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(
-        // deno-lint-ignore no-explicit-any
-        (t: any) => t.id === tab2.targetId,
-      ).webSocketDebuggerUrl,
-  );
-  await new Promise((r) => ws2.addEventListener("open", r, { once: true }));
-  let nextId2 = 0;
-  // deno-lint-ignore no-explicit-any
-  const pending2 = new Map<number, (v: any) => void>();
-  ws2.addEventListener("message", (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.id && pending2.has(msg.id)) {
-      pending2.get(msg.id)!(msg);
-      pending2.delete(msg.id);
-    }
-  });
-  // deno-lint-ignore no-explicit-any
-  const cdp2 = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
-    const id = ++nextId2;
-    return new Promise((resolve, reject) => {
-      pending2.set(
-        id,
-        // deno-lint-ignore no-explicit-any
-        (msg: any) => msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result),
-      );
-      ws2.send(JSON.stringify({ id, method, params }));
+    const pending2 = new Map<number, (v: any) => void>();
+    ws2.addEventListener("message", (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.id && pending2.has(msg.id)) {
+        pending2.get(msg.id)!(msg);
+        pending2.delete(msg.id);
+      }
     });
-  };
-  // deno-lint-ignore no-explicit-any
-  const js2 = async (expression: string): Promise<any> => {
-    const res = await cdp2("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (res.exceptionDetails) {
-      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
-    }
-    return res.result.value;
-  };
-  await js2(
-    `(() => { return new Promise((resolve, reject) => { const start = Date.now(); const i = setInterval(() => { if (document.querySelector("li.episode[data-episode-id='ep-1']")) { clearInterval(i); resolve(); } else if (Date.now() - start > 10000) { clearInterval(i); reject(new Error("timed out waiting for ep-1 row")); } }, 50); }); })()`,
-  );
+    // deno-lint-ignore no-explicit-any
+    const cdp2 = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+      const id = ++nextId2;
+      return new Promise((resolve, reject) => {
+        pending2.set(
+          id,
+          // deno-lint-ignore no-explicit-any
+          (msg: any) => msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result),
+        );
+        ws2.send(JSON.stringify({ id, method, params }));
+      });
+    };
+    // deno-lint-ignore no-explicit-any
+    const js2 = async (expression: string): Promise<any> => {
+      const res = await cdp2("Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (res.exceptionDetails) {
+        throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
+      }
+      return res.result.value;
+    };
+    await js2(
+      `(() => { return new Promise((resolve, reject) => { const start = Date.now(); const i = setInterval(() => { if (document.querySelector("li.episode[data-episode-id='ep-1']")) { clearInterval(i); resolve(); } else if (Date.now() - start > 10000) { clearInterval(i); reject(new Error("timed out waiting for ep-1 row")); } }, 50); }); })()`,
+    );
 
-  const otherUserBadge = await js2(`
+    const otherUserBadge = await js2(`
     document.querySelector('li.episode[data-episode-id="ep-1"] .ep-resume-badge')?.textContent || "none"
   `);
-  check(
-    "other user cannot resume user-1's playback position (per-user isolation)",
-    otherUserBadge === "none",
-    `second user badge: ${otherUserBadge}`,
-  );
-  try {
-    ws2.close();
-  } catch { /* ignore */ }
+    check(
+      "other user cannot resume user-1's playback position (per-user isolation)",
+      otherUserBadge === "none",
+      `second user badge: ${otherUserBadge}`,
+    );
+    try {
+      ws2.close();
+    } catch { /* ignore */ }
 
-  await js(`(() => {
+    await js(`(() => {
     const audio = document.getElementById("audio");
     audio.dispatchEvent(new Event("ended"));
   })()`);
-  await sleep(100);
-  const endedStored = await js(`
+    await sleep(100);
+    const endedStored = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
   `);
-  check(
-    "ended event clears stored position",
-    endedStored === undefined,
-    "position removed after ended",
-  );
-} catch (error) {
-  console.error(error);
-  exitCode = 1;
-} finally {
-  try {
-    chrome.kill();
-  } catch { /* ignore */ }
-  harness.kill();
-  await cleanup();
-}
-
-Deno.exit(exitCode);
+    check(
+      "ended event clears stored position",
+      endedStored === undefined,
+      "position removed after ended",
+    );
+  } catch (err) {
+    crashError = err;
+    checker.check("proof execution completed without unhandled exception", false, String(err));
+  } finally {
+    try {
+      chrome.kill();
+    } catch { /* ignore */ }
+    harness.kill();
+    await cleanup();
+    await writeEvidenceReadme({
+      dir: OUT,
+      title: "Browser Acceptance Proof: audio-feed-kzi",
+      script: "scripts/playback-position-browser-proof.ts",
+      asserts: ASSERTS,
+      checker,
+    });
+  }
+  if (crashError) throw crashError;
+});
