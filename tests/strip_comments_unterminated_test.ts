@@ -155,3 +155,57 @@ Deno.test("audio-feed-ywjz: the prefix before an unterminated comment is emitted
     "and the unparseable tail is still included as code",
   );
 });
+
+/**
+ * audio-feed-dmrw: THE INVARIANT, ASSERTED AS AN EQUALITY ON A FIXTURE SMALL ENOUGH TO READ IT AGAINST.
+ * Stated at the width of the evidence rather than at the width of the sentiment, which is the correction the
+ * review of audio-feed-ywjz made:
+ *
+ *   EVERY BYTE THE STRIPPER INTENDS TO KEEP APPEARS EXACTLY ONCE, IN THE ORDER IT APPEARED, WITH NO KEPT
+ *   REGION DROPPED, DUPLICATED, OR EXCLUDED BY A LATER MALFORMED REGION.
+ *
+ * COMMENT BYTES ARE OMITTED BY DESIGN and the unterminated block-comment opener becomes a single space, so
+ * "the stripped result equals the input" is NOT the invariant - a row asserting that would FAIL AGAINST
+ * CORRECT CODE. Three repairs to stripComments each closed one direction and opened another: BLANKING (the
+ * rest of the file lost to EOF), SHADOWING (a commented-out import made visible, so it could shadow the real
+ * one), and DUPLICATION (the prefix emitted twice). Each was an error in ONE of the words above.
+ *
+ * WHY AN EQUALITY AND NOT MORE membership or counting assertions: this row asserts the WHOLE STRING, because
+ * membership and counting can each pass while the answer is wrong in a direction nobody has named yet. The
+ * counting rows stay ALONGSIDE this one, and they fail differently: counting names WHICH direction broke,
+ * equality catches drops, wrong exclusions, and whatever has no name yet.
+ *
+ * THE EXPECTED STRING BELOW WAS REASONED FROM THE CODE BEFORE IT WAS RUN, not pasted from what the function
+ * returned - an expectation copied from behaviour proves only that the behaviour has not changed, which is
+ * not what this row is for.
+ */
+Deno.test("audio-feed-dmrw: the stripped result EQUALS an explicit expected string, byte for byte", () => {
+  const source = [
+    `import { real } from "./real.ts";`,
+    `// import { decoy } from "./decoy.ts";`,
+    `const value = "docs/real.md";`,
+    `Deno.readTextFile(value);`,
+    `/* never closed`,
+    `more code after the unterminated opener`,
+  ].join("\n");
+
+  const expected = [
+    `import { real } from "./real.ts";`,
+    ``,
+    `const value = "docs/real.md";`,
+    `Deno.readTextFile(value);`,
+    // TWO SPACES, and the reason is worth keeping because it is the first thing this row caught: the
+    // unterminated opener is replaced by ONE space, and the fixture's own `/* never closed` supplies a
+    // second one after the delimiter. My reasoned expectation said one, the assertion said two, and that
+    // is a discrepancy no membership or counting assertion in this file can see.
+    `  never closed`,
+    `more code after the unterminated opener`,
+  ].join("\n");
+
+  assertEquals(
+    stripComments(source).stripped,
+    expected,
+    "every kept byte exactly once and in order: the line comment gone, the unterminated opener as ONE space, " +
+      "the tail kept as code, and no line duplicated",
+  );
+});
