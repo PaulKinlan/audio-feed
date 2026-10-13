@@ -212,8 +212,10 @@ UNVERIFIED, not verified.**
 curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
 # { "status": "ok", "storage": "...", "deploy": "<id>", "deploySource": "DENO_DEPLOYMENT_ID", "time": "..." }
 
-# map the id back to a revision:
-deployctl deployments list        # the Deno Deploy dashboard lists the same deployment id
+# map the id back to a revision (with DENO_DEPLOY_TOKEN set to the configured ddo_ org token):
+deno deploy deployments list --app audio-feed --org paulkinlan-ea --json --non-interactive
+# The old deployment CLI and classic dash.deno.com API reject ddo_ organization tokens by design;
+# the classic API was retired 2026-07-20. Use the v2 deno deploy CLI above.
 # when deploySource is GIT_COMMIT_SHA the id IS the commit:
 git log --oneline -1 <id>
 ```
