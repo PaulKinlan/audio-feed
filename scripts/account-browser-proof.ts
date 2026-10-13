@@ -111,10 +111,22 @@ await runProof("account-browser-proof", async (checker) => {
             await sleep(80);
             const { data } = await cdp("Page.captureScreenshot", { format: "png" });
             const file = `${name}-${width}-${scheme}.png`;
+            const filePath = `${OUT}${file}`;
             await Deno.writeFile(
-              `${OUT}${file}`,
+              filePath,
               Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
             );
+            try {
+              const cmd = new Deno.Command("convert", {
+                args: [filePath, "-strip", "-colors", "256", `png8:${filePath}.tmp`],
+              });
+              const out = await cmd.output();
+              if (out.success) {
+                await Deno.rename(`${filePath}.tmp`, filePath);
+              }
+            } catch {
+              await Deno.remove(`${filePath}.tmp`).catch(() => {});
+            }
             shots.push(file);
           }
         }
