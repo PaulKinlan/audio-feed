@@ -483,6 +483,19 @@ try {
         // Scroll the bookmarklet box and opened disclosure into view
         await js(`document.querySelector(".bookmarklet-box")?.scrollIntoView({ block: "center" })`);
         await sleep(150);
+        // Align the scrolled, sticky home header to a whole pixel and let two paints settle.
+        // Without this, the header shadow varies across raw captures even when its content does not.
+        await js(`window.scrollTo(0, Math.round(window.scrollY))`);
+        await js(
+          `new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+        );
+        const bookmarkletInFrame = await js(`(() => {
+          const box = document.querySelector(".bookmarklet-box")?.getBoundingClientRect();
+          const code = document.querySelector("details.bookmarklet-code")?.getBoundingClientRect();
+          return !!box && !!code && box.top >= 0 && box.bottom <= innerHeight &&
+            code.top >= 0 && code.bottom <= innerHeight;
+        })()`);
+        if (!bookmarkletInFrame) throw new Error("bookmarklet evidence left the captured viewport");
 
         const shotHome = (await cdp("Page.captureScreenshot", { format: "png" })) as {
           data: string;
