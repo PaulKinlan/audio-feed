@@ -269,9 +269,11 @@ Deno.test("code blocks are stripped before the byte budget is measured (audio-fe
   // while the narration input is a few bytes — counting raw bytes failed such articles permanently,
   // which the first byte-based fix made 3x stricter for non-Latin listings.
   const budget = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS;
+  const cjkBytes = new TextEncoder().encode("あ").length;
+  const oversizedListing = "あ".repeat(Math.floor(budget / cjkBytes) + 1);
   const listings = [
-    `Start.\n\n\`\`\`\n${"あ".repeat(25_000)}\n\`\`\`\n\nEnd.`,
-    `Start.\n\n<pre>${"あ".repeat(25_000)}</pre>\n\nEnd.`,
+    `Start.\n\n\`\`\`\n${oversizedListing}\n\`\`\`\n\nEnd.`,
+    `Start.\n\n<pre>${oversizedListing}</pre>\n\nEnd.`,
   ];
   for (const content of listings) {
     const { ctx, stores } = await queued();
@@ -1169,12 +1171,18 @@ Deno.test("emoji are measured in bytes, not UTF-16 units (audio-feed-y98q)", asy
 });
 
 Deno.test("the default byte budget refuses the reviewer's CJK repro before any spend (audio-feed-y98q)", async () => {
-  // The bead's own repro string, against the real defaults: 30,000 CJK characters is 90,000 bytes
-  // and 15 segments — over the 72,000-byte / 12-segment budget, but under it in code units, which
-  // is how it used to reach the client and fail there.
+  // Keep the reviewer's 30,000-character repro (90,000 UTF-8 bytes) while it exceeds
+  // the current default byte budget. If that budget grows beyond the repro, scale the CJK
+  // text just past it: this test pins the pre-spend byte guard, not today's cap product.
+  const budget = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS;
+  const character = "あ";
+  const bytesPerCharacter = new TextEncoder().encode(character).length;
+  const content = character.repeat(Math.max(30_000, Math.floor(budget / bytesPerCharacter) + 1));
+  const contentBytes = new TextEncoder().encode(content).length;
+  assert(contentBytes > budget, "CJK fixture must exceed the default byte budget");
   const { ctx, stores } = await queued();
   await stores.metadata.putArticle(
-    makeArticle({ id: "article-1", userId: "user-1", content: "あ".repeat(30_000) }),
+    makeArticle({ id: "article-1", userId: "user-1", content }),
   );
 
   let synthesized = false;
@@ -1186,7 +1194,7 @@ Deno.test("the default byte budget refuses the reviewer's CJK repro before any s
   const result = await runSynthesisBatch(ctx, synth);
   assertEquals(synthesized, false, "the guard must fire before the client is reached");
   assertEquals(result.failed.length, 1);
-  assertStringIncludes(result.failed[0]!.error, "90000 > 72000 bytes");
+  assertStringIncludes(result.failed[0]!.error, `${contentBytes} > ${budget} bytes`);
 });
 
 Deno.test("synthesised audio blob key is canonically scoped with a content revision (audio-feed-avgc)", async () => {

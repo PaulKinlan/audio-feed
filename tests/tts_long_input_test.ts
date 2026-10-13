@@ -274,8 +274,10 @@ Deno.test("allowTruncated is explicit and remains visible for segmented audio", 
       );
     }) as typeof fetch,
   });
+  const plannedCalls = splitTtsText(formatNarrationPrompt(input)).length;
+  assert(plannedCalls > 1, "this fixture must exercise segmented audio");
   const output = await client.synthesizeNarration(input, { allowTruncated: true });
-  assertEquals(calls, 17);
+  assertEquals(calls, plannedCalls, "allowTruncated must make one paid call per planned segment");
   assert(output.truncated);
   assertEquals(output.finishReason, "MAX_TOKENS");
 });
