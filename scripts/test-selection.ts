@@ -604,12 +604,16 @@ export function stripComments(
 
   if (context === "BLOCK_COMMENT") {
     // An unterminated block comment means the file is ill-formed: the scan ran off the end still in
-    // comment state. The safe direction is to exclude NOTHING - hand the source back unchanged, with no
-    // spans. The old behaviour dropped everything from the `/*` onward while KEEPING the string spans
-    // found before it, so anything named after the unterminated comment - an import, a module path, a
-    // referrer - was invisible to the selector, and a hidden module NARROWS the selection and can lose
-    // a suite that should have been selected. Over-selection only costs gate time. audio-feed-ywjz.
-    return { stripped: source, spans: [] };
+    // comment state. THE REPAIR IS ASYMMETRIC, and the first version of this fix got it wrong
+    // (audio-feed-ywjz, review finding P1 against 2e10b31): returning the WHOLE raw source also
+    // un-strips every WELL-FORMED comment before it, and because visibleConstantsFor() keeps the FIRST
+    // binding for a local name, a commented-out import earlier in the file then becomes visible, shadows
+    // the real one, and the read is attributed to the decoy - a NEW narrowing traded for the old one.
+    // So: keep the prefix exactly as it was stripped, include the tail as code, and keep the span list,
+    // which is already aligned with `result` rather than with `source`. Widening applies to the part
+    // that could not be parsed; the part that parsed stays parsed.
+    result += source.slice(offset, i);
+    return { stripped: result, spans };
   }
 
   if (context !== "LINE_COMMENT") {

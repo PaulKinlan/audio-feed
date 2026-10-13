@@ -13,10 +13,16 @@ import { stripComments } from "../scripts/test-selection.ts";
  * is why the ill-formed case has to be handled in the widening direction, and the measured instance
  * was a 54-character source collapsing to 1.
  *
- * These rows are written so that they FAIL against the blanking behaviour rather than passing beside
- * it. The last two are the controls: an unterminated LINE comment is still dropped (it loses nothing,
- * because the dropped text is a comment rather than code), and a well-formed file still has its string
- * spans, so the fix has not simply disabled the scanner.
+ * THE REPAIR IS ASYMMETRIC, and that asymmetry is the whole finding: the exclusions made BEFORE the
+ * unterminated comment STAND, and only the unparseable tail is included as code. Returning the whole raw
+ * source instead - the first attempt at this fix - also un-strips well-formed prefix comments, and
+ * because the derivation keeps the FIRST binding for a local name, a commented-out import can then
+ * shadow the real one and the read is attributed to the decoy: a new narrowing traded for the old one.
+ *
+ * These rows are written so that they FAIL against the behaviour they replace rather than passing beside
+ * it. The controls are on the other direction - an unterminated LINE comment is still dropped (it loses
+ * nothing, because the dropped text is a comment rather than code), a well-formed file still records its
+ * string spans, and a well-formed comment before the unterminated one stays stripped.
  */
 
 const UNTERMINATED = `const before = "a string";
@@ -38,17 +44,27 @@ Deno.test("audio-feed-ywjz: the tail after an unterminated block comment is not 
   );
 });
 
-Deno.test("audio-feed-ywjz: an ill-formed input excludes nothing at all", () => {
+Deno.test("audio-feed-ywjz: an ill-formed file keeps the exclusions it made BEFORE the comment", () => {
+  // THE FIRST VERSION OF THIS ROW WAS WRONG (review finding P1 against 2e10b31). It asserted
+  // spans.length === 0 and stripped === source - "an ill-formed file excludes NOTHING" - and that
+  // reading is unsafe: un-stripping a well-formed prefix comment can make a commented-out import
+  // visible, and visibleConstantsFor() keeps the FIRST binding for a name, so the decoy shadows the real
+  // one. The contract is asymmetric instead: exclusions made before the unterminated comment STAND, and
+  // only the unparseable tail is included as code.
   const { stripped, spans } = stripComments(UNTERMINATED);
   assertEquals(
     spans.length,
-    0,
-    "an ill-formed file must not exclude spans: excluding nothing is the safe direction",
+    1,
+    "the string literal before the unterminated comment stays excluded",
   );
-  assertEquals(
-    stripped,
-    UNTERMINATED,
-    "the ill-formed case must hand back the source unchanged rather than a partially blanked copy",
+  const [start, end] = spans[0]!;
+  assert(
+    UNTERMINATED.slice(start, end).includes("a string"),
+    "that span must cover the string content it was recorded for",
+  );
+  assert(
+    stripped.includes("export const tail"),
+    "and the unparseable tail is still included rather than blanked",
   );
 });
 
@@ -76,4 +92,36 @@ Deno.test("audio-feed-ywjz: control - a well-formed file still records its strin
     "the recorded span must cover the string content",
   );
   assert(stripped.includes("const b = 2"), "code between and after strings must be preserved");
+});
+
+/**
+ * THE P1 THE FIRST FIX MISSED (review finding on 2e10b31). Returning the WHOLE raw source for an
+ * ill-formed file also un-strips every WELL-FORMED comment that preceded it. That matters because
+ * visibleConstantsFor() keeps the FIRST binding for a local name - `!visible.has(localName)` in
+ * scripts/test-selection.ts - so a commented-out import earlier in the file becomes visible, shadows
+ * the real one, and the read is attributed to the decoy: a real relation LOST. Widening must apply
+ * only to the part that could not be parsed; the parsed prefix stays parsed.
+ *
+ * This row fails against 2e10b31, which is exactly why it exists.
+ */
+Deno.test("audio-feed-ywjz: the prefix stays stripped, so a commented-out import cannot shadow a real one", () => {
+  const source = `/* import { P } from "./decoy.ts"; */
+import { P } from "./real.ts";
+Deno.readTextFile(P);
+/* this block comment is never closed
+`;
+  const { stripped } = stripComments(source);
+  assert(
+    !stripped.includes("decoy.ts"),
+    "a WELL-FORMED comment before the unterminated one must stay stripped, or its import shadows the real one",
+  );
+  assert(stripped.includes('"./real.ts"'), "the real import must remain visible");
+  assert(
+    stripped.includes("Deno.readTextFile(P)"),
+    "the tail after the unterminated comment must still be included",
+  );
+  assert(
+    stripped.includes("never closed"),
+    "the unparseable tail is code as far as the selector knows, so it is included rather than blanked",
+  );
 });
