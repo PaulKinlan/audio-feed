@@ -145,10 +145,28 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
   const suppressed = Number(capped[0]?.context?.suppressed ?? 0);
   assert(suppressed > 0, "the capped event must name how many were suppressed");
-  // THE NEGATIVE CONTROL: kept + suppressed is every stage execution this run performed, so if that
-  // total does not exceed the cap the run never reached it and this row is vacuous by construction.
-  assert(
-    marked.length + suppressed > STAGE_MARK_CAP,
-    `the run must execute more stages than the cap allows, else this row proves nothing: kept ${marked.length}, suppressed ${suppressed}, cap ${STAGE_MARK_CAP}`,
+  /**
+   * THE CONTROL, CORRECTED AFTER REVIEW (audio-feed-9pvk). The first version asserted
+   * marked.length + suppressed > STAGE_MARK_CAP and called itself a negative control. IT WAS A
+   * TAUTOLOGY: once marked.length === STAGE_MARK_CAP is asserted above, that expression reduces to
+   * suppressed > 0, which the line above already asserts, so it added no verification at all - and it
+   * still PASSED with the cap removed from src/worker/synthesis.ts, because a run with no cap emits no
+   * capped event and therefore has suppressed = 0, giving 18 + 0 > 15. A control that cannot detect the
+   * absence of the thing it controls for is not a control.
+   *
+   * The EXACT accounting is what bites: nine episodes x two stages is eighteen executions, the cap keeps
+   * fifteen, so exactly three must be named as suppressed. Remove the cap and suppressed is 0, which
+   * fails; mis-count the suppressions and the equality fails; reach the cap only by accident and the
+   * first line fails.
+   */
+  assertEquals(
+    suppressed,
+    3,
+    "nine episodes x two stages minus a cap of 15 leaves exactly 3 suppressed",
+  );
+  assertEquals(
+    marked.length + suppressed,
+    18,
+    "kept + suppressed must account for every stage execution: 9 episodes x 2 stages",
   );
 });
