@@ -227,6 +227,17 @@ Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves p
   assertStringIncludes(CONFIRM_DIALOG_CLIENT, "confirmDialog.showModal()");
   assertStringIncludes(CONFIRM_DIALOG_CLIENT, 'confirmDialog.returnValue === "confirm"');
   assertStringIncludes(CONFIRM_DIALOG_CLIENT, "closedBy");
+  // audio-feed-qz3x (-zpud): the reset that keeps Escape honest must be in the EMITTED client and must
+  // run BEFORE showModal(). showModal() does not clear returnValue and an Escape close carries no
+  // result, so without this the next dialog inherits the previous "confirm" and a dismissed action is
+  // read as approval. Asserted as an ORDER rather than a bare substring: a reset placed after
+  // showModal() would leave the browser's stale value in place and satisfy a substring check.
+  assertStringIncludes(CONFIRM_DIALOG_CLIENT, 'confirmDialog.returnValue = ""');
+  assert(
+    CONFIRM_DIALOG_CLIENT.indexOf('confirmDialog.returnValue = ""') <
+      CONFIRM_DIALOG_CLIENT.indexOf("confirmDialog.showModal()"),
+    "the returnValue reset must be emitted BEFORE confirmDialog.showModal()",
+  );
 
   // Functional simulation of askConfirm logic
   type Listener = (e: { target?: unknown }) => void;
@@ -235,6 +246,10 @@ Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves p
     returnValue: "",
     open: false,
     showModal() {
+      // audio-feed-qz3x (-zpud): mirror src/assets/confirm-shared.js, which clears returnValue
+      // immediately before showModal(). Without this line the shim models the BUG: an Escape close
+      // carries no result, so the previous "confirm" survives and the next dialog resolves true.
+      dialog.returnValue = "";
       dialog.open = true;
     },
     close(val?: string) {
@@ -309,6 +324,30 @@ Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves p
   const cancelled = await cancelPromise;
   assertEquals(cancelled, false);
   assertEquals(dialog.open, false);
+
+  // Test 3 (audio-feed-qz3x, audio-feed-zpud): an APPROVED dialog must not arm the NEXT one. Escape and
+  // light-dismiss close with NO result, so without the reset showModal() leaves the previous "confirm"
+  // in place and this row resolves TRUE - the destructive action the user just cancelled. This is the
+  // gate-runnable twin of the browser proof's hazard row (scripts/verify_qz3x_confirm_dismiss_browser.ts),
+  // which cannot run here because it launches Chrome; the ORDER assertion above is what guards the real
+  // emitted client, and this row is what makes the shim behave like it.
+  const approved = testAskConfirm("First: the user approves this one");
+  dialog.close("confirm");
+  assertEquals(await approved, true);
+  assertEquals(
+    dialog.returnValue,
+    "confirm",
+    "the approved dialog leaves the value the next dialog would inherit",
+  );
+
+  const second = testAskConfirm("Second: the user presses Escape on THIS one");
+  assertEquals(dialog.returnValue, "", "the reset must clear the stale value before showModal()");
+  dialog.close();
+  assertEquals(
+    await second,
+    false,
+    "a dialog dismissed after an APPROVED one must resolve false, not inherit its approval",
+  );
 });
 
 Deno.test("confirmClientFromSource rejects malformed sources loudly (audio-feed-0r0s review nit)", () => {
