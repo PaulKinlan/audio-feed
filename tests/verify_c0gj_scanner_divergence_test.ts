@@ -15,7 +15,13 @@ import {
   formatCodeForTts_fixc0gj_3d32fc4,
   formatCodeForTts_fixc0gj_9f18cc1,
   formatCodeForTts_main,
+  verifyAgainstGitRefs,
 } from "../scripts/verify_c0gj_scanner_divergence.ts";
+
+Deno.test("c0gj divergence - verifyAgainstGitRefs validates implementations against git revisions", async () => {
+  const verified = await verifyAgainstGitRefs();
+  assertEquals(verified, true);
+});
 
 Deno.test("c0gj divergence - handcrafted corpus covers all 12 required categories", () => {
   const corpus = buildHandcraftedCorpus();

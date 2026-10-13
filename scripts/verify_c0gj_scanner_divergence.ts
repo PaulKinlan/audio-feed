@@ -701,10 +701,11 @@ export function buildHandcraftedCorpus(): CorpusItem[] {
   add("exact-delimiter-length", "triple-newlines-only", "```\n\n```");
 
   // 9. Thousands of tiny blocks vs one huge block
-  const tinyBlocks = Array.from({ length: 100 }, (_, i) => `p${i}\n\`\`\`\nx${i}\n\`\`\``).join(
-    "\n\n",
-  );
-  add("scale-shapes", "hundred-tiny-blocks", tinyBlocks);
+  const tinyBlocks = Array.from(
+    { length: 1000 },
+    (_, i) => `p${i}\n\`\`\`\nx${i}\n\`\`\``,
+  ).join("\n\n");
+  add("scale-shapes", "thousand-tiny-blocks", tinyBlocks);
   const hugeBlock = "Intro\n```js\n" + "const x = 1;\n".repeat(2000) + "```\nOutro";
   add("scale-shapes", "huge-28kb-block", hugeBlock);
 
@@ -940,31 +941,87 @@ export function evaluateCandidate(
 // ============================================================================
 
 export async function verifyAgainstGitRefs(): Promise<boolean> {
-  console.log("Checking inlined implementations against git revisions...");
+  console.log("Verifying inlined implementations against target git revisions...");
   const refs = [
-    { name: "origin/main", ref: "origin/main:src/tts/gemini.ts" },
-    { name: "fleet/audit1 (tip f70e3fa)", ref: "origin/fleet/audit1:src/tts/gemini.ts" },
-    { name: "fleet/fixc0gj v1 (9f18cc1)", ref: "9f18cc1:src/tts/gemini.ts" },
-    { name: "fleet/fixc0gj v2 (tip 3d32fc4)", ref: "origin/fleet/fixc0gj:src/tts/gemini.ts" },
+    {
+      name: "origin/main",
+      ref: "origin/main:src/tts/gemini.ts",
+      verify: (src: string) => {
+        const needle =
+          "/(?:```+|~~~+)(?:[^\\n\\r]*\\r?\\n)?([\\s\\S]*?)(?:```+|~~~+)|<pre\\b[^>]*>(?:<code\\b[^>]*>)?([\\s\\S]*?)(?:<\\/code>)?<\\/pre>/gi";
+        if (!src.includes(needle)) {
+          throw new Error(
+            "origin/main:src/tts/gemini.ts does not contain reference codeBlockRegex",
+          );
+        }
+      },
+    },
+    {
+      name: "fleet/audit1 (tip f70e3fa)",
+      ref: "origin/fleet/audit1:src/tts/gemini.ts",
+      verify: (src: string) => {
+        if (!src.includes("function findCodeBlocks(text: string): CodeBlock[]")) {
+          throw new Error("origin/fleet/audit1:src/tts/gemini.ts missing findCodeBlocks");
+        }
+        if (
+          !src.includes("function matchFence(text: string, run: { index: number; end: number })")
+        ) {
+          throw new Error("origin/fleet/audit1:src/tts/gemini.ts missing matchFence");
+        }
+        if (!src.includes("const shortest = Math.max(3, length - 3);")) {
+          throw new Error(
+            "origin/fleet/audit1:src/tts/gemini.ts missing 3-char opener shrink bound",
+          );
+        }
+      },
+    },
+    {
+      name: "fleet/fixc0gj v1 (9f18cc1)",
+      ref: "9f18cc1:src/tts/gemini.ts",
+      verify: (src: string) => {
+        if (!src.includes("function extractCodeBlocks(text: string): CodeBlockMatch[]")) {
+          throw new Error("9f18cc1:src/tts/gemini.ts missing extractCodeBlocks");
+        }
+        if (!src.includes("const closeBackticksRegex = /`{3,}/g;")) {
+          throw new Error("9f18cc1:src/tts/gemini.ts missing separate closeBackticksRegex");
+        }
+        if (!src.includes("hasMoreBackticks = false;")) {
+          throw new Error("9f18cc1:src/tts/gemini.ts missing hasMoreBackticks flag reset");
+        }
+      },
+    },
+    {
+      name: "fleet/fixc0gj v2 (tip 3d32fc4)",
+      ref: "origin/fleet/fixc0gj:src/tts/gemini.ts",
+      verify: (src: string) => {
+        if (!src.includes("function extractCodeBlocks(text: string): CodeBlockMatch[]")) {
+          throw new Error("origin/fleet/fixc0gj:src/tts/gemini.ts missing extractCodeBlocks");
+        }
+        if (!src.includes("const closeFenceRegex = /(?:`{3,}|~{3,})/g;")) {
+          throw new Error("origin/fleet/fixc0gj:src/tts/gemini.ts missing closeFenceRegex");
+        }
+        if (!src.includes("if (opener.length >= 6)")) {
+          throw new Error(
+            "origin/fleet/fixc0gj:src/tts/gemini.ts missing self-closing >= 6 fence check",
+          );
+        }
+      },
+    },
   ];
 
-  let ok = true;
   for (const r of refs) {
-    try {
-      const proc = new Deno.Command("git", { args: ["show", r.ref] });
-      const res = await proc.output();
-      if (!res.success) {
-        console.warn(`  [WARN] Could not read ${r.ref} from git: exit ${res.code}`);
-        ok = false;
-      } else {
-        console.log(`  [OK] Successfully loaded ${r.ref} (${res.stdout.length} bytes)`);
-      }
-    } catch (e) {
-      console.warn(`  [WARN] git command failed for ${r.ref}:`, e);
-      ok = false;
+    const proc = new Deno.Command("git", { args: ["show", r.ref] });
+    const res = await proc.output();
+    if (!res.success) {
+      throw new Error(`Could not read ${r.ref} from git: command failed with exit ${res.code}`);
     }
+    const content = new TextDecoder().decode(res.stdout);
+    r.verify(content);
+    console.log(
+      `  [OK] Verified ${r.name} (${r.ref}, ${res.stdout.length} bytes) matches implementation.`,
+    );
   }
-  return ok;
+  return true;
 }
 
 export function printCandidateReport(res: CandidateResult) {
@@ -985,6 +1042,14 @@ export function printCandidateReport(res: CandidateResult) {
       console.log(`INPUT:\n${JSON.stringify(d.input)}`);
       console.log(`EXPECTED (origin/main regex):\n${JSON.stringify(d.expected)}`);
       console.log(`ACTUAL (${res.name}):\n${JSON.stringify(d.actual)}`);
+      if (d.explanationExpected !== d.explanationActual) {
+        console.log(
+          `EXPECTED EXPLAIN:\n${JSON.stringify(d.explanationExpected)}`,
+        );
+        console.log(
+          `ACTUAL EXPLAIN:\n${JSON.stringify(d.explanationActual)}`,
+        );
+      }
       console.log(`EXPECTED BLOCKS:`, JSON.stringify(d.blocksExpected));
       console.log(`ACTUAL BLOCKS:  `, JSON.stringify(d.blocksActual));
     });
