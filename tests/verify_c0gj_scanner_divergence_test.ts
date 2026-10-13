@@ -6,6 +6,7 @@
  */
 
 import { assert, assertEquals } from "jsr:@std/assert@^1.0.0";
+import { PINNED_REVISIONS } from "../scripts/verify_c0gj_scanner_divergence.ts";
 import {
   buildFuzzCorpus,
   buildHandcraftedCorpus,
@@ -20,6 +21,40 @@ import {
 Deno.test("c0gj divergence - verifyAgainstGitRefs validates implementations against git revisions", async () => {
   const verified = await verifyAgainstGitRefs();
   assertEquals(verified, true);
+});
+
+function refsContainingCommit(commit: string): string[] {
+  const { success, stdout } = new Deno.Command("git", {
+    args: ["for-each-ref", "--contains", commit, "--format=%(refname)"],
+    stdout: "piped",
+    stderr: "null",
+  }).outputSync();
+  if (!success) return [];
+  return new TextDecoder()
+    .decode(stdout)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+Deno.test("c0gj divergence - every pinned revision is contained in at least one ref (pin durability)", () => {
+  const uncontained: string[] = [];
+  for (const [key, pin] of Object.entries(PINNED_REVISIONS)) {
+    if (refsContainingCommit(pin.commit).length === 0) {
+      uncontained.push(
+        `${key} -> ${pin.commit} (${pin.name}) is contained in NO ref`,
+      );
+    }
+  }
+  assertEquals(
+    uncontained,
+    [],
+    "A pinned revision that no ref contains is a pin-by-object defect: it " +
+      "resolves only while the object survives in a local store, so the harness " +
+      "reads different bytes (or fails) in a fresh clone. Fix by pushing the " +
+      "branch that holds the commit, or by repointing the pin at a contained " +
+      "tip - not by relaxing this assertion.",
+  );
 });
 
 Deno.test("c0gj divergence - handcrafted corpus covers all 12 required categories", () => {
