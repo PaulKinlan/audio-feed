@@ -37,6 +37,8 @@ import { quantiseEvidencePng } from "./evidence-png.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { EVIDENCE_PNG_BUDGET_BYTES } from "./evidence-compress.ts";
 import {
+  inImagePixels,
+  MIN_CLAIM_INK_LEGIBILITY,
   MIN_SECTION_BAND_DISTRIBUTION,
   MIN_SECTION_CONTENT_RETENTION,
   MIN_SECTION_FADE_LEGIBILITY,
@@ -70,31 +72,6 @@ const VIEWPORT_WIDTH = 1280;
  * and every pixel-space crop is derived from the clip's scale rather than assuming 1 (audio-feed-9zgi).
  */
 const EVIDENCE_SCALE = 1;
-
-/**
- * A document-space rectangle expressed in the image's own pixels.
- */
-function inImagePixels(
-  rect: { x: number; y: number; width: number; height: number },
-  scale: number,
-): { x: number; y: number; width: number; height: number } {
-  return {
-    x: rect.x * scale,
-    y: rect.y * scale,
-    width: rect.width * scale,
-    height: rect.height * scale,
-  };
-}
-
-/**
- * The minimum contrast the claim text's OWN box shows (audio-feed-9zgi, audio-feed-l11d).
- *
- * MEASURED, not chosen to make a failure stop: the four committed clean captures' claim boxes
- * all measure 0.880 contrast range, while a faded claim text at opacity 0.35 measures 0.312,
- * and a background-coloured claim (text styled with background color) measures 0.00000000.
- * A floor of 0.5 ensures the claim text itself is legibly rendered with ink, not washed out.
- */
-const MIN_CLAIM_INK_LEGIBILITY = 0.5;
 
 /**
  * Compress a written capture in place using the shared evidence-png quantisation helper

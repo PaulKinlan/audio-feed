@@ -6,6 +6,26 @@
  * doc comments below, so the next reader can re-derive them from the repository.
  */
 
+/** Convert a document-space rectangle relative to a clip to the captured PNG's pixel scale. */
+export function inImagePixels(
+  rect: { x: number; y: number; width: number; height: number },
+  scale: number,
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: rect.x * scale,
+    y: rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale,
+  };
+}
+
+/**
+ * The minimum contrast the claim text's OWN box shows (audio-feed-9zgi, audio-feed-l11d).
+ * Four clean captures measured 0.880, faded text at opacity 0.35 measured 0.312,
+ * and background-coloured text measured 0. The floor predates the request-access proof.
+ */
+export const MIN_CLAIM_INK_LEGIBILITY = 0.5;
+
 /**
  * Contrast range (maxima minus minima in greyscale) of a captured crop, read out of the PNG
  * itself (audio-feed-7yom, audio-feed-l11d).
