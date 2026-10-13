@@ -32,6 +32,7 @@ import {
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { inImagePixels, MIN_CLAIM_INK_LEGIBILITY, pixelContrast } from "./exww-section-measures.ts";
 
 await runProof("request-access-browser-proof", async (checker) => {
   const { profileDir: PROFILE, cleanup } = await createTempChromeProfile(
@@ -136,6 +137,88 @@ await runProof("request-access-browser-proof", async (checker) => {
     checker.check(name, pass, detail);
   }
 
+  // The visibility check above reads computed style, so a claim painted in the background's own
+  // colour - or under an opaque overlay - is "visible" to it and blank in the image.
+  // This floor is load-bearing: a future dsf change that thins the text needs a bounded capture
+  // INCLUDING this region, not a lower floor. This is the project's third scale-sensitive capture.
+  async function checkConfirmationPixels(path: string, name: string, negativeControl = false) {
+    const image = await Deno.readFile(path);
+    const size = {
+      width: new DataView(image.buffer, image.byteOffset).getUint32(16),
+      height: new DataView(image.buffer, image.byteOffset).getUint32(20),
+    };
+    // The full-height capture starts at viewport origin. Read the TEXT range rather than the
+    // surrounding result block, whose padding/background could masquerade as legible ink.
+    const bounds = await js(`(() => {
+      const result = document.getElementById("request-result");
+      const range = document.createRange();
+      range.selectNodeContents(result);
+      const r = range.getBoundingClientRect();
+      return {left:r.left, top:r.top, right:r.right, bottom:r.bottom};
+    })()`);
+    const clip = { x: 0, y: 0, scale: 1, width: size.width, height: size.height };
+    const rect = {
+      x: bounds.left - clip.x,
+      y: bounds.top - clip.y,
+      width: bounds.right - bounds.left,
+      height: bounds.bottom - bounds.top,
+    };
+    const inClip = rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0 &&
+      rect.x + rect.width <= clip.width && rect.y + rect.height <= clip.height;
+    check(
+      `${name} includes the confirmation text's height band in the PNG`,
+      inClip,
+      `text y=${rect.y.toFixed(1)}..${(rect.y + rect.height).toFixed(1)}, ` +
+        `x=${rect.x.toFixed(1)}..${(rect.x + rect.width).toFixed(1)}; ` +
+        `captured PNG ${size.width}x${size.height} at scale ${clip.scale}`,
+    );
+    const contrast = inClip
+      ? await pixelContrast(path, inImagePixels(rect, clip.scale))
+      : Number.NaN;
+    check(
+      `${name} shows legible ink in the confirmation's own text box`,
+      Number.isFinite(contrast) && contrast >= MIN_CLAIM_INK_LEGIBILITY,
+      `measured contrast ${contrast.toFixed(8)} against floor ${MIN_CLAIM_INK_LEGIBILITY}`,
+    );
+    if (negativeControl && inClip) {
+      const mutant = await Deno.makeTempFile({ suffix: ".png" });
+      try {
+        const crop = inImagePixels(rect, clip.scale);
+        const output = await new Deno.Command("convert", {
+          args: [
+            path,
+            "-crop",
+            `${Math.round(crop.width)}x${Math.round(crop.height)}+${Math.round(crop.x)}+${
+              Math.round(crop.y)
+            }`,
+            "+repage",
+            "-fill",
+            "#f7f7f7",
+            "-colorize",
+            "100",
+            mutant,
+          ],
+          stdout: "null",
+          stderr: "piped",
+        }).output();
+        if (!output.success) throw new Error(new TextDecoder().decode(output.stderr));
+        const erased = await pixelContrast(mutant, {
+          x: 0,
+          y: 0,
+          width: crop.width,
+          height: crop.height,
+        });
+        check(
+          `${name} rejects a background-coloured confirmation box (negative control)`,
+          erased < MIN_CLAIM_INK_LEGIBILITY,
+          `mutant contrast ${erased.toFixed(8)} FAILS floor ${MIN_CLAIM_INK_LEGIBILITY}`,
+        );
+      } finally {
+        await Deno.remove(mutant).catch(() => {});
+      }
+    }
+  }
+
   async function until(expr: string, desc: string, timeoutMs = 8000) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -213,6 +296,19 @@ await runProof("request-access-browser-proof", async (checker) => {
     );
 
     // Capture desktop submitted screenshot
+    // uiye: re-size to the document's FULL height before the submitted
+    // capture. The metrics above were set once for the pre-submit page, so a plain
+    // viewport grab crops the confirmation that submission appends below the fold -
+    // which is why 03 and 04 came out byte-identical.
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: Math.ceil(
+        await js("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"),
+      ),
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
     const shotDesktop2 = await cdp("Page.captureScreenshot", { format: "png" });
     const shotDesktop2Path = `${OUT}02-request-access-submitted-desktop.png`;
     await Deno.writeFile(
@@ -221,6 +317,7 @@ await runProof("request-access-browser-proof", async (checker) => {
     );
     await quantiseEvidencePng(shotDesktop2Path);
     console.log(`Saved screenshot to ${shotDesktop2Path}`);
+    await checkConfirmationPixels(shotDesktop2Path, "desktop submitted capture");
 
     // Verify user in store
     const pendingUser = await stores.metadata.getUserByEmail("visitor@example.com");
@@ -261,7 +358,7 @@ await runProof("request-access-browser-proof", async (checker) => {
     await cdp("Emulation.setDeviceMetricsOverride", {
       width: 390,
       height: 844,
-      deviceScaleFactor: 3,
+      deviceScaleFactor: 1,
       mobile: true,
     });
 
@@ -297,6 +394,17 @@ await runProof("request-access-browser-proof", async (checker) => {
       "mobile request submitted",
     );
 
+    // uiye: same re-size for the mobile pair (dsf 3), so the submitted
+    // confirmation is inside the frame rather than below it.
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: Math.ceil(
+        await js("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"),
+      ),
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+
     const shotMobile2 = await cdp("Page.captureScreenshot", { format: "png" });
     const shotMobile2Path = `${OUT}04-request-access-submitted-mobile.png`;
     await Deno.writeFile(
@@ -305,6 +413,7 @@ await runProof("request-access-browser-proof", async (checker) => {
     );
     await quantiseEvidencePng(shotMobile2Path);
     console.log(`Saved screenshot to ${shotMobile2Path}`);
+    await checkConfirmationPixels(shotMobile2Path, "mobile submitted capture", true);
 
     // 3. Admin approval unlocks capabilities
     await approveUser(stores.metadata, pendingUser!.id, "admin");
