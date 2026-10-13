@@ -1136,3 +1136,128 @@ Deno.test("transitive out-of-repo: nested temp-dir bindings suppress unresolved,
     );
   });
 });
+
+Deno.test("audio-feed-hfz5: space-containing read paths produce hints or resolve, and never drop silently", async (t) => {
+  await t.step(
+    "template constant resolves to file when template provides enough info",
+    async () => {
+      await withTempTree({
+        "docs/notes final/readme.md": "# Notes Final\n",
+        "tests/s_test.ts": [
+          "const dir = `${import.meta.dirname}/../docs`;",
+          "const page = `${dir}/notes final/readme.md`;",
+          "export async function r() {",
+          "  return await Deno.readTextFile(page);",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const rp = await deriveReadRelationReport(root, ["tests/s_test.ts"]);
+        assertEquals(
+          rp.unresolved,
+          [],
+          "resolved constant to existing file leaves unresolved hints empty",
+        );
+        assert(
+          rp.relations.get("docs/notes final/readme.md")?.includes("tests/s_test.ts"),
+          `relation must include space-containing target: ${
+            JSON.stringify([...rp.relations.entries()])
+          }`,
+        );
+
+        // Property 2: An inert change still selects no suites
+        const inert = planTests(
+          ["docs/other.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(
+          inert.testFiles,
+          [],
+          `inert markdown change selects 0 suites when relation is complete: ${inert.reason}`,
+        );
+
+        // Changed observed file selects the reading suite
+        const active = planTests(
+          ["docs/notes final/readme.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(
+          active.testFiles,
+          ["tests/s_test.ts"],
+          "changing the space-containing file selects the reading suite",
+        );
+      });
+    },
+  );
+
+  await t.step(
+    "template constant without enough info or missing file produces unresolved hint (mutation control)",
+    async () => {
+      await withTempTree({
+        "tests/s_test.ts": [
+          "const dir = `${import.meta.dirname}/../docs`;",
+          "const page = `${dir}/notes final/missing.md`;",
+          "export async function r() {",
+          "  return await Deno.readTextFile(page);",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const rp = await deriveReadRelationReport(root, ["tests/s_test.ts"]);
+        // Mutation control: reverting the cutTail guard at line 1135 drops the cut token
+        // and leaves unresolved empty, making this assertion fail (redden).
+        assertEquals(
+          rp.unresolved,
+          ["final/missing.md"],
+          "a read path with space that cannot resolve to an existing file must be UNRESOLVED, never silent",
+        );
+
+        // Property 1 & incomplete relation: inert class is disabled
+        const plan = planTests(
+          ["docs/notes final/missing.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(
+          plan.testFiles,
+          null,
+          "an unresolved hint keeps the inert class unreachable and widens to full suite",
+        );
+        assertStringIncludes(plan.reason, "INCOMPLETE");
+        assertStringIncludes(plan.reason, "final/missing.md");
+      });
+    },
+  );
+
+  await t.step(
+    "direct unresolvable template with space produces unresolved hint, not silence",
+    async () => {
+      await withTempTree({
+        "tests/s_test.ts": [
+          "export async function r(dir: string) {",
+          "  return await Deno.readTextFile(`${dir}/notes final/readme.md`);",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const rp = await deriveReadRelationReport(root, ["tests/s_test.ts"]);
+        assertEquals(
+          rp.unresolved,
+          ["final/readme.md"],
+          "unresolvable base template produces unresolved hint, not silence",
+        );
+      });
+    },
+  );
+});
