@@ -463,6 +463,32 @@ export function formatFailureOutput(stdout: string, stderr: string): string {
   return parts.join("\n");
 }
 
+/**
+ * The summary line(s) Deno prints when it SKIPS tests rather than running them:
+ *
+ *     ok | 0 passed | 0 failed | 2 ignored (6ms)
+ *
+ * (audio-feed-48b7). On a successful run the fast gate prints only its own
+ * markers, so this line - the only evidence that a suite ran NOTHING - was
+ * invisible in the gate log. That is how the fast gate's own recursion-guard
+ * suite came to report "ok" while executing zero assertions.
+ *
+ * DELIBERATELY BOUNDED to the summary line(s) that carry the ignored count, never
+ * the whole stdout. The first version of this passthrough printed `stdout.trim()`
+ * WHOLE, which dumps every per-test line for a large successful suite that
+ * happens to contain one ignored test (audio-feed-48b7 review: "preserve bounded
+ * output where possible"). `[1-9]` and not `\d`: a run with zero ignored tests is
+ * an ordinary quiet pass and must stay quiet.
+ */
+export function ignoredSummary(stdout: string): string {
+  const ignored = /\|\s*[1-9]\d*\s+ignored\b/;
+  return stdout
+    .split("\n")
+    .filter((line) => ignored.test(line))
+    .join("\n")
+    .trim();
+}
+
 export interface RunResult {
   code: number;
   stdout: string;
@@ -490,6 +516,18 @@ export async function run(
         options.onOutput(formatted);
       } else {
         console.error(formatted);
+      }
+    }
+  } else {
+    // audio-feed-48b7: on success the gate stays quiet, so a suite whose tests
+    // were IGNORED was indistinguishable from one that ran and passed. Surface
+    // the ignored-count summary line - and only that line.
+    const ignored = ignoredSummary(stdout);
+    if (ignored.length > 0) {
+      if (options.onOutput) {
+        options.onOutput(ignored);
+      } else {
+        console.log(ignored);
       }
     }
   }
