@@ -76,14 +76,49 @@ ws.onmessage = (event) => {
     void send("Page.handleJavaScriptDialog", { accept: true }, msg.sessionId);
   }
 };
+ws.onclose = () => {
+  for (const [_id, cb] of pending.entries()) {
+    cb({ error: { message: "WebSocket connection closed" } });
+  }
+  pending.clear();
+};
+ws.onerror = (e) => {
+  for (const [_id, cb] of pending.entries()) {
+    cb({ error: { message: `WebSocket error: ${e}` } });
+  }
+  pending.clear();
+};
+
 // deno-lint-ignore no-explicit-any
-async function send(method: string, params: unknown = {}, sessionId?: string): Promise<any> {
+async function send<T = any>(
+  method: string,
+  params: unknown = {},
+  sessionId?: string,
+  timeoutMs = 15_000,
+): Promise<T> {
   const id = nextId++;
-  const reply = new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const reply = new Promise<{ result?: unknown; error?: unknown }>(
+    (resolve) => {
+      timer = setTimeout(() => {
+        pending.delete(id);
+        resolve({
+          error: {
+            message: `CDP command ${method} timed out after ${timeoutMs}ms`,
+          },
+        });
+      }, timeoutMs);
+      pending.set(id, (msg) => {
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(msg);
+      });
+    },
+  );
   ws.send(JSON.stringify({ id, method, params, sessionId }));
   const msg = await reply;
   if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-  return msg.result;
+  // deno-lint-ignore no-explicit-any
+  return msg.result as any;
 }
 
 async function openTab(url: string): Promise<string> {
@@ -330,12 +365,25 @@ try {
       "\n",
   );
 } finally {
-  ws.close();
+  try {
+    await send("Browser.close", {}, undefined, 2000).catch(() => {});
+  } catch { /* already closing */ }
+  try {
+    ws.close();
+  } catch { /* already closed */ }
   try {
     chrome.kill("SIGKILL");
   } catch { /* already gone */ }
-  await chrome.status;
-  await h.shutdown();
+  await Promise.race([
+    chrome.status.catch(() => {}),
+    new Promise((r) => setTimeout(r, 2000)),
+  ]);
+  try {
+    await Promise.race([
+      h.shutdown().catch(() => {}),
+      new Promise((r) => setTimeout(r, 2000)),
+    ]);
+  } catch { /* already down */ }
 }
 
 const failed = checks.filter((c) => !c.ok);
