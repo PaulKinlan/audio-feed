@@ -22,6 +22,7 @@ import type { AppConfig, Stores } from "../src/config.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { defaultStageMarkCap, runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { SynthesisYieldError } from "../src/synthesis/limits.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 
 const config: AppConfig = {
@@ -283,49 +284,120 @@ Deno.test("audio-feed-938b: default production cap accommodates standard 6-episo
   );
 });
 
-Deno.test("audio-feed-a73i: each stage wrap threads currentEpisode.id so a suppressed terminal stage names its episode", async () => {
-  // audio-feed-a73i (P3 review finding from rev-44):
+Deno.test("audio-feed-a73i/audio-feed-4att: each markStage call site (tts, verify, upload, yield) threads currentEpisode.id so every suppressed stage attributes its episode", async () => {
+  // audio-feed-a73i (P3 review finding from rev-44, expanded by audio-feed-4att from rev-52):
   // The suppressedEpisodes guarantee rests on EVERY markStage call site threading currentEpisode.id.
-  // If an episode's ONLY executed stage after cap exhaustion is suppressed (e.g. tts throws on its first attempt,
-  // before verify or upload can run), that episode MUST still appear in suppressedEpisodes.
-  // A mutant that drops currentEpisode.id from markStage("tts", ...) leaves suppressedEpisodes empty for this episode.
-  const ids = Array.from({ length: 6 }, (_, i) => `ep-a73i-isolated-${i}`);
-  const { ctx, stores } = await seedEpisodes(ids);
-  const audio = fakeAudio();
-  const run = await runSynthesisBatch(
-    ctx,
-    (params) => {
-      // Episodes 0..4 succeed across all 3 stages (5 x 3 = 15 marks emitted).
-      // Episode 5's TTS immediately throws, so tts is its ONLY executed stage.
-      if (params.episode.id === "ep-a73i-isolated-5") {
-        throw new Error("isolated tts failure on suppressed episode");
+  // There are four call sites in src/worker/synthesis.ts:
+  //   1. tts: line 1781 (markStage("tts", ..., currentEpisode.id))
+  //   2. verify: line 2082 (markStage("verify", ..., currentEpisode.id))
+  //   3. upload: line 2106 (markStage("upload", ..., currentEpisode.id))
+  //   4. yield: line 1830 (markStage("yield", ..., currentEpisode.id))
+  // For each site, we assert an isolated scenario where that stage is the SOLE suppressed stage for its episode.
+  // A mutation dropping currentEpisode.id from ANY of the four sites fails the corresponding sub-assertion.
+
+  // --- 1. TTS site pin ---
+  {
+    const ids = Array.from({ length: 6 }, (_, i) => `ep-tts-${i}`);
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+    await runSynthesisBatch(
+      ctx,
+      (params) => {
+        if (params.episode.id === "ep-tts-5") {
+          throw new Error("isolated tts failure on suppressed episode");
+        }
+        return Promise.resolve(audio);
+      },
+      { batchSize: 6, maxAttempts: 1, owner: "a73i-tts", stageMarkCap: 15 },
+    );
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressedStages, { tts: 1 });
+    assertEquals(
+      capped[0]?.context?.suppressedEpisodes,
+      ["ep-tts-5"],
+      "tts site must thread currentEpisode.id",
+    );
+  }
+
+  // --- 2. Verify site pin ---
+  {
+    const ids = Array.from({ length: 6 }, (_, i) => `ep-ver-${i}`);
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+    const origHead = stores.blobs.head.bind(stores.blobs);
+    stores.blobs.head = (key) => {
+      if (key.includes("ep-ver-5")) {
+        throw new Error("isolated verify failure on suppressed episode");
       }
-      return Promise.resolve(audio);
-    },
-    { batchSize: 6, maxAttempts: 1, owner: "a73i-isolated", stageMarkCap: 15 },
-  );
+      return origHead(key);
+    };
+    await runSynthesisBatch(
+      ctx,
+      () => Promise.resolve(audio),
+      // 5 episodes x 3 = 15 marks. 6th episode's TTS is mark 16 (emitted). Verify is mark 17 (suppressed).
+      { batchSize: 6, maxAttempts: 1, owner: "a73i-ver", stageMarkCap: 16 },
+    );
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressedStages, { verify: 1 });
+    assertEquals(
+      capped[0]?.context?.suppressedEpisodes,
+      ["ep-ver-5"],
+      "verify site must thread currentEpisode.id",
+    );
+  }
 
-  assertEquals(run.ready.length, 5, "5 episodes succeed before cap exhaustion");
-  assertEquals(run.failed.length, 1, "6th episode fails terminally on TTS");
+  // --- 3. Upload site pin ---
+  {
+    const ids = Array.from({ length: 6 }, (_, i) => `ep-up-${i}`);
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+    const origPut = stores.blobs.put.bind(stores.blobs);
+    stores.blobs.put = (key, data, opts) => {
+      if (key.includes("ep-up-5")) {
+        return Promise.reject(new Error("isolated upload failure on suppressed episode"));
+      }
+      return origPut(key, data, opts);
+    };
+    await runSynthesisBatch(
+      ctx,
+      () => Promise.resolve(audio),
+      // 5 episodes x 3 = 15 marks. 6th episode's TTS (16) and Verify (17) are emitted. Upload is mark 18 (suppressed).
+      { batchSize: 6, maxAttempts: 1, owner: "a73i-up", stageMarkCap: 17 },
+    );
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressedStages, { upload: 1 });
+    assertEquals(
+      capped[0]?.context?.suppressedEpisodes,
+      ["ep-up-5"],
+      "upload site must thread currentEpisode.id",
+    );
+  }
 
-  const logs = await stores.metadata.listLogs();
-  const all = stageMarks(logs);
-  const capped = all.filter((log) => log.phase === "capped");
-  assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
-
-  const context = capped[0]?.context;
-  const suppressedEpisodes = context?.suppressedEpisodes as string[] | undefined;
-  assertEquals(context?.suppressed, 1, "exactly 1 mark suppressed");
-  assertEquals(context?.suppressedStages, { tts: 1 }, "only tts was suppressed for 6th episode");
-  assertEquals(
-    suppressedEpisodes,
-    ["ep-a73i-isolated-5"],
-    "suppressedEpisodes must name the episode whose only executed stage (tts) was suppressed",
-  );
-  for (let i = 0; i < 5; i++) {
-    assert(
-      !suppressedEpisodes?.includes(`ep-a73i-isolated-${i}`),
-      `unsuppressed episode ep-a73i-isolated-${i} must not appear in suppressedEpisodes`,
+  // --- 4. Yield site pin ---
+  {
+    const { ctx, stores } = await seedEpisodes(["ep-yield-0"]);
+    await runSynthesisBatch(
+      ctx,
+      () => {
+        throw new SynthesisYieldError(0, 1, "budget yield");
+      },
+      // TTS is mark 1 (emitted). Yield is mark 2 (suppressed).
+      { batchSize: 1, maxAttempts: 2, owner: "a73i-yield", stageMarkCap: 1 },
+    );
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressedStages, { yield: 1 });
+    assertEquals(
+      capped[0]?.context?.suppressedEpisodes,
+      ["ep-yield-0"],
+      "yield site must thread currentEpisode.id",
     );
   }
 });
