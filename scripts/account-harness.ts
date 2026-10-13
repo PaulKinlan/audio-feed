@@ -37,7 +37,23 @@ const paul = await person("paul@example.com", "Paul Kinlan", true, true);
 const rita = await person("rita@example.com", "Rita Reader", false, true);
 await person("sam@example.com", "Sam Newcomer", false, false);
 
-const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+/**
+ * Pinned base instant for reproducible evidence screenshots (audio-feed-vc4u).
+ * The default is a fixed instant so tests, harnesses and proofs render the
+ * exact same timestamps forever. For manual/interactive exploration, pass
+ * ACCOUNT_HARNESS_NOW=live or a specific ISO timestamp.
+ */
+const HARNESS_BASE_INSTANT_DEFAULT = "2026-10-12T03:30:00.000Z";
+const baseInstantMs = (() => {
+  const env = Deno.env.get("ACCOUNT_HARNESS_NOW");
+  if (env === "live" || env === "now") return Date.now();
+  if (env) {
+    const parsed = Date.parse(env);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Date.parse(HARNESS_BASE_INSTANT_DEFAULT);
+})();
+const hoursAgo = (h: number) => new Date(baseInstantMs - h * 3_600_000).toISOString();
 for (
   const [id, title, feedUrl, modes] of [
     ["stratechery", "Stratechery", "https://stratechery.com/feed/", ["direct"]],
