@@ -18,8 +18,6 @@ export interface QuantiseEvidencePngOptions {
   compressionLevel?: number;
   /** Format prefix (default: "png8"). Site 8 uses "PNG8". */
   formatPrefix?: string;
-  /** Explicit argument list override if caller needs exact custom args. */
-  args?: string[];
   /** Optional injectable runner for unit testing without spawning real binaries. */
   runner?: (
     cmd: string,
@@ -32,9 +30,11 @@ export interface QuantiseEvidencePngOptions {
  *
  * Guarantees:
  * 1. Byte-for-byte argument compatibility with existing inline calls.
- * 2. On spawn failure (e.g. ENOENT): removes the `.tmp` file and throws an Error naming the file and error code.
- * 3. On nonzero exit: removes the `.tmp` file and throws an Error naming the file and exit code.
- * 4. On success: atomically renames `.tmp` over `filePath` and returns `filePath`.
+ * 2. Unconditional metadata strip: "-strip" is prepended unconditionally in the helper
+ *    so callers cannot drop or omit it, ensuring evidence PNGs carry no encode-time tIME chunks.
+ * 3. On spawn failure (e.g. ENOENT): removes the `.tmp` file and throws an Error naming the file and error code.
+ * 4. On nonzero exit: removes the `.tmp` file and throws an Error naming the file and exit code.
+ * 5. On success: atomically renames `.tmp` over `filePath` and returns `filePath`.
  *
  * @param filePath Absolute or relative path to the PNG image on disk.
  * @param opts Configuration options for colors, compression, format prefix, or runner injection.
@@ -47,19 +47,16 @@ export async function quantiseEvidencePng(
   const tmpPath = `${filePath}.tmp`;
   const formatPrefix = opts?.formatPrefix ?? "png8";
   const colors = opts?.colors !== undefined ? String(opts.colors) : "256";
-  const args = opts?.args ?? (
-    opts?.compressionLevel !== undefined
-      ? [
-        filePath,
-        "-strip",
-        "-colors",
-        colors,
-        "-define",
-        `png:compression-level=${opts.compressionLevel}`,
-        `${formatPrefix}:${tmpPath}`,
-      ]
-      : [filePath, "-strip", "-colors", colors, `${formatPrefix}:${tmpPath}`]
-  );
+  const args = [
+    filePath,
+    "-strip",
+    "-colors",
+    colors,
+    ...(opts?.compressionLevel !== undefined
+      ? ["-define", `png:compression-level=${opts.compressionLevel}`]
+      : []),
+    `${formatPrefix}:${tmpPath}`,
+  ];
 
   let out: { success: boolean; code: number };
   try {
