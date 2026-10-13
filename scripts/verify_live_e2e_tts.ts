@@ -35,19 +35,35 @@ import {
   usableSynthesis,
 } from "./synthesis_observation.ts";
 
-function isCommittedPath(path: string): boolean {
-  const parts: string[] = [];
-  for (const seg of path.split("/")) {
-    if (seg === "" || seg === ".") continue;
-    if (seg === "..") {
-      parts.pop();
-    } else {
-      parts.push(seg);
+export function isCommittedTarget(targetPath: string): boolean {
+  const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+  const committedReal = (() => {
+    try {
+      return Deno.realPathSync(`${repoRoot}/docs/evidence/audio-feed-9vns`);
+    } catch {
+      return `${repoRoot}/docs/evidence/audio-feed-9vns`;
     }
-  }
-  const clean = parts.join("/");
-  return clean === "docs/evidence/audio-feed-9vns" ||
-    clean.endsWith("/docs/evidence/audio-feed-9vns");
+  })();
+
+  const targetReal = (() => {
+    try {
+      return Deno.realPathSync(targetPath);
+    } catch {
+      const abs = targetPath.startsWith("/") ? targetPath : `${Deno.cwd()}/${targetPath}`;
+      const parts: string[] = [];
+      for (const seg of abs.split("/")) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") {
+          parts.pop();
+        } else {
+          parts.push(seg);
+        }
+      }
+      return "/" + parts.join("/");
+    }
+  })();
+
+  return targetReal === committedReal;
 }
 
 export function resolveEvidenceOutputDir(args: string[] = []): {
@@ -60,7 +76,7 @@ export function resolveEvidenceOutputDir(args: string[] = []): {
   const outDirArg = args.find((a) => a.startsWith("--out-dir="))?.split("=")[1];
 
   if (outDirArg) {
-    const isTargetingCommitted = isCommittedPath(outDirArg);
+    const isTargetingCommitted = isCommittedTarget(outDirArg);
     if (isTargetingCommitted && !writeCommitted) {
       throw new Error(
         `Refusing to overwrite committed evidence at '${outDirArg}' without explicit --write-committed-evidence flag.`,
@@ -634,12 +650,15 @@ timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write sc
       ],
     });
     console.log(`Saved report to ${output.dir}/README.md`);
-    if (!output.isCommitted) {
+    const wroteCommitted = isCommittedTarget(output.dir);
+    if (!wroteCommitted) {
       console.log(
         "[audio-feed-v20a] Committed evidence in docs/evidence/audio-feed-9vns/ preserved untouched. " +
           `Run evidence written to uncommitted ${output.dir}/. ` +
           "Pass --write-committed-evidence to deliberately regenerate committed documentation.",
       );
+    } else {
+      console.log(`[audio-feed-v20a] Updated committed evidence in ${output.dir}/.`);
     }
     console.log("\nALL VERIFICATIONS PASSED SUCCESSFULLY!");
   });

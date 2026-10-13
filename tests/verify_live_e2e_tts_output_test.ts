@@ -4,7 +4,7 @@
  * to docs/evidence/audio-feed-9vns/ when explicitly requested via --write-committed-evidence.
  */
 import { assertEquals, assertThrows } from "@std/assert";
-import { resolveEvidenceOutputDir } from "../scripts/verify_live_e2e_tts.ts";
+import { isCommittedTarget, resolveEvidenceOutputDir } from "../scripts/verify_live_e2e_tts.ts";
 
 Deno.test("audio-feed-v20a: default run routes evidence to uncommitted var/ to protect committed docs", () => {
   const result = resolveEvidenceOutputDir([]);
@@ -50,4 +50,14 @@ Deno.test("audio-feed-ulab: --out-dir targeting committed directory WITH --write
   ]);
   assertEquals(result.dir, "docs/evidence/audio-feed-9vns");
   assertEquals(result.isCommitted, true);
+});
+
+Deno.test("audio-feed-ulab: isCommittedTarget canonicalises relative, .., and absolute aliases", () => {
+  assertEquals(isCommittedTarget("docs/evidence/audio-feed-9vns"), true);
+  assertEquals(isCommittedTarget("docs/evidence/audio-feed-9vns/../audio-feed-9vns"), true);
+  assertEquals(isCommittedTarget("./docs/evidence/audio-feed-9vns"), true);
+  assertEquals(isCommittedTarget(`${Deno.cwd()}/docs/evidence/audio-feed-9vns`), true);
+  assertEquals(isCommittedTarget("docs/evidence/audio-feed-3xq"), false);
+  assertEquals(isCommittedTarget("var/evidence/audio-feed-9vns"), false);
+  assertEquals(isCommittedTarget("/tmp/custom-run"), false);
 });
