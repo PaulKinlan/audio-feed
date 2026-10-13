@@ -196,7 +196,9 @@ await runProof("request-access-browser-proof", async (checker) => {
     const resultText = await js(`document.getElementById("request-result")?.textContent`);
     check(
       "response acknowledges submission honestly",
-      resultText?.includes("Access request received") === true,
+      resultText?.includes(
+        "If this address is eligible, your access request will be reviewed by an administrator.",
+      ) === true,
       `msg: '${resultText}'`,
     );
 
