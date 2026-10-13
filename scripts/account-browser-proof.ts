@@ -116,17 +116,23 @@ await runProof("account-browser-proof", async (checker) => {
               filePath,
               Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
             );
+            let out: Deno.CommandOutput;
             try {
               const cmd = new Deno.Command("convert", {
                 args: [filePath, "-strip", "-colors", "256", `png8:${filePath}.tmp`],
               });
-              const out = await cmd.output();
-              if (out.success) {
-                await Deno.rename(`${filePath}.tmp`, filePath);
-              }
-            } catch {
+              out = await cmd.output();
+            } catch (err) {
               await Deno.remove(`${filePath}.tmp`).catch(() => {});
+              const detail = err instanceof Error ? err.message : String(err);
+              const code = (err && typeof err === "object" && "code" in err) ? ` (code ${(err as { code: unknown }).code})` : "";
+              throw new Error(`convert failed for ${filePath}${code}: ${detail}`);
             }
+            if (!out.success) {
+              await Deno.remove(`${filePath}.tmp`).catch(() => {});
+              throw new Error(`convert failed for ${filePath} with exit code ${out.code}`);
+            }
+            await Deno.rename(`${filePath}.tmp`, filePath);
             shots.push(file);
           }
         }
