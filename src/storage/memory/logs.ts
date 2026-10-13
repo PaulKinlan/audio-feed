@@ -34,6 +34,21 @@ export function createLogsRepository(
       return Promise.resolve(record);
     },
 
+    appendLogOnce(input, key, expectedNewestSeq) {
+      if (!/^[\w:.-]{1,220}$/.test(key)) return Promise.resolve("unavailable" as const);
+      if (state.logOnce.has(key)) return Promise.resolve("duplicate" as const);
+      if (state.logSeq !== expectedNewestSeq) return Promise.resolve("changed" as const);
+      const safe = sanitizeLogRecord({
+        ...input,
+        context: { ...input.context, detectorKey: key },
+      });
+      if (!logRecordFits(safe)) return Promise.resolve("unavailable" as const);
+      // Single-threaded: the sequence, warning, and guard move without an await.
+      state.logs.push({ ...safe, seq: ++state.logSeq });
+      state.logOnce.add(key);
+      return Promise.resolve("written" as const);
+    },
+
     listLogs(query: LogQuery = {}): Promise<LogRecord[]> {
       const since = query.sinceSeq ?? 0;
       const until = query.untilSeq ?? Number.MAX_SAFE_INTEGER;
@@ -80,6 +95,13 @@ export function createLogsRepository(
       }
       if (doomed.length === 0) return Promise.resolve(0);
       const dropped = new Set(doomed);
+      for (const record of state.logs) {
+        if (!dropped.has(record.seq)) continue;
+        const key = record.context?.detectorKey;
+        if (typeof key === "string" && record.type === "synthesis.invocation.overdue") {
+          state.logOnce.delete(key);
+        }
+      }
       state.logs = state.logs.filter((record) => !dropped.has(record.seq));
       state.logWatermark = doomed[doomed.length - 1]!;
       return Promise.resolve(doomed.length);

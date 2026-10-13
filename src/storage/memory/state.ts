@@ -53,6 +53,8 @@ export interface MemoryState {
    */
   logs: LogRecord[];
   logSeq: number;
+  /** Keys committed with a detector warning; pruned with that warning's log record. */
+  logOnce: Set<string>;
   /** The newest seq pruned, contiguously from the start. What `bounds()` reports from. */
   logWatermark: number;
   // Accounts (audio-feed-8fc).
@@ -86,6 +88,7 @@ export function createMemoryState(): MemoryState {
     runs: [],
     logs: [],
     logSeq: 0,
+    logOnce: new Set(),
     logWatermark: 0,
     sessions: new Map<string, Session>(),
     credentials: new Map<string, PasskeyCredential>(),

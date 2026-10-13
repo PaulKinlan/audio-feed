@@ -51,6 +51,7 @@ import type { LogBounds, LogRecord, LogSeverity } from "../storage/mod.ts";
 import { LOG_READ_LIMIT, summarizeRecords } from "../storage/log_shape.ts";
 import { json, problem } from "../http.ts";
 import { timingSafeEqual } from "../ids.ts";
+import { detectOverdueInvocations } from "../observability/invocation_overdue.ts";
 
 /** Events returned when the caller does not say. Deliberately the store's own read bound. */
 export const DEFAULT_LIMIT = 200;
@@ -250,6 +251,21 @@ function window(bounds: LogBounds) {
   return { oldestRetained: bounds.oldestSeq, newest: bounds.newestSeq };
 }
 
+/** Refuse a quiet answer when the invocation detector could not read or append its evidence. */
+async function invocationScan(ctx: AppContext) {
+  try {
+    return await detectOverdueInvocations(ctx.stores.metadata);
+  } catch (error) {
+    console.error("[audio-feed] invocation detection unavailable:", error);
+    return problem({
+      status: 503,
+      title: "invocation_detection_unavailable",
+      detail:
+        "Invocation records could not be checked. No clean coverage claim or cursor is returned; retry later.",
+    });
+  }
+}
+
 export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppContext> {
   return async ({ req }) => {
     const refused = authorise(ctx, req);
@@ -257,6 +273,8 @@ export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppCo
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;
 
+    const detection = await invocationScan(ctx);
+    if (detection instanceof Response) return detection;
     const bounds = await ctx.stores.metadata.logBounds();
     if (cursorExpired(parsed.since, bounds)) return tooOld(parsed.since, bounds);
 
@@ -284,6 +302,7 @@ export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppCo
       hasMore,
       scanned: scanned.length,
       returned: events.length,
+      invocationDetection: detection,
       window: window(bounds),
     });
   };
@@ -296,6 +315,8 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;
 
+    const detection = await invocationScan(ctx);
+    if (detection instanceof Response) return detection;
     const bounds = await ctx.stores.metadata.logBounds();
     if (cursorExpired(parsed.since, bounds)) return tooOld(parsed.since, bounds);
 
@@ -346,6 +367,7 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       // How many records the scan examined, regardless of the filter. Reported because it is what
       // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
       scanned: scanned.length,
+      invocationDetection: detection,
       window: window(bounds),
     });
   };

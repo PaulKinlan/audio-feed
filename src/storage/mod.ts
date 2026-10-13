@@ -810,6 +810,8 @@ export interface LogSummary {
   truncated: boolean;
 }
 
+export type LogAppendOnceResult = "written" | "duplicate" | "changed" | "unavailable";
+
 export interface LogRepository {
   /**
    * Append one record, numbering it. Bounded and redacted on the way in.
@@ -819,6 +821,17 @@ export interface LogRepository {
    * stored.
    */
   appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null>;
+  /**
+   * Conditionally append an alert against the exact log snapshot the detector read.
+   * The sequence check races safely with terminal writes; the durable key prevents two
+   * concurrent scans from reporting the same invocation twice. A changed snapshot
+   * must be rescanned, never reported as a clean bill of health.
+   */
+  appendLogOnce(
+    record: Omit<LogRecord, "seq">,
+    key: string,
+    expectedNewestSeq: number,
+  ): Promise<LogAppendOnceResult>;
   listLogs(query?: LogQuery): Promise<LogRecord[]>;
   logBounds(): Promise<LogBounds>;
   summarizeLogs(query?: LogQuery): Promise<LogSummary>;

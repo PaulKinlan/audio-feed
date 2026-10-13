@@ -50,11 +50,13 @@ Why this is not a hole, in the terms of the gate's own threat model:
   path without the key is `401`; with no key configured it is `503 observability_not_configured`,
   which names the variable to set — including on a refused host, so the operator is never left
   reading a generic failure.
-- **It derives and emits nothing from the request.** The host gate exists so an attacker-chosen
-  `Host` never becomes the advertised origin, feed `selfUrl`/enclosure URLs, a redirect or the
-  WebAuthn RP ID (`audio-feed-fp4r`/`7lsy`/`4x4t`). These routes answer JSON built from the log
-  store: no redirect, no URL, no `Access-Control-Allow-Origin`. The one place a request host reaches
-  a response header is the CSP `report-uri`, and that branch is HTML-only. A test asserts the
+- **It derives no origin or log content from the request host.** The host gate exists so an
+  attacker-chosen `Host` never becomes the advertised origin, feed `selfUrl`/enclosure URLs, a
+  redirect or the WebAuthn RP ID (`audio-feed-fp4r`/`7lsy`/`4x4t`). After authentication, a read
+  can append a bounded overdue-invocation warning derived only from stored marks and the clock;
+  it does not persist the request host. These routes answer JSON built from the log store: no
+  redirect, no URL, no `Access-Control-Allow-Origin`. The one place a request host reaches a
+  response header is the CSP `report-uri`, and that branch is HTML-only. A test asserts the
   attacker's host appears in neither the body nor any response header.
 - **It cannot be widened by accident.** Matching is exact against the same normalised pathname the
   router dispatches on, so `/api/observability/errors/extra`, a percent-encoded lookalike or a
@@ -114,6 +116,12 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
   "hasMore": false,
   "scanned": 1,
   "returned": 1,
+  "invocationDetection": {
+    "scannedFromSeq": 1, "scannedThroughSeq": 42, "oldestRetainedSeq": 1,
+    "olderStartsUnknown": false, "retentionGap": false,
+    "incompleteMarkers": 0, "warningsWritten": 0,
+    "inspectedAttempts": 0, "moreDue": false
+  },
   "window": { "oldestRetained": 1, "newest": 42 }
 }
 ```
@@ -121,10 +129,32 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
 a separate id would be a second identity that could disagree with the cursor.
 
-`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, scanned, window }`.
+`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, scanned, invocationDetection, window }`.
 `total: 0` is the cheap answer to "has anything happened since my cursor" — one bounded scan instead
 of a page of events. It applies the same cursor rules, including the `410` when retention has moved
 past the cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
+
+## Overdue synthesis invocations (audio-feed-a7i0)
+
+An authenticated `/summary` or `/errors` read first checks the **newest 500 retained log records**
+for `synthesis.invocation` start/terminal pairs. Strictly more than twice the budget recorded on a
+start (`context.budgetMs`; 180 seconds by default) with no observed terminal in that snapshot
+produces one durable `warn` event, `synthesis.invocation.overdue`. The log's sequence check forces a
+rescan if any writer, including a late terminal, commits before the warning; a per-invocation guard
+prevents concurrent readers from appending two warnings. It reports **only** that no terminal mark
+was observed as of the scan. It cannot establish that an isolate died, whether work is still
+running, or whether a terminal write failed. The normal warn/error filter returns the event, and
+summary sees it before deciding a poll is idle.
+
+This is deliberately not an all-history detector. `invocationDetection.scannedFromSeq` and
+`scannedThroughSeq` say which window was actually checked; `olderStartsUnknown` is true when the
+window truncated older retained records, retention pruned earlier records, or a start mark lacked
+a usable recorded budget. `retentionGap` says earlier records were pruned. `moreDue` means the
+per-request attempt/warning cap stopped with visible due work still pending: poll again, never
+read it as "zero overdue". A store read, partial sequence window, or warning-write failure
+returns `503 invocation_detection_unavailable` without a feed cursor or a quiet `total: 0`. A
+reader can therefore distinguish no overdue start **in the observed window** from an inability to
+see earlier starts. Older starts outside that window are not enumerated by this detector.
 
 The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A scan is
 bounded, so a window larger than the bound is examined in part: `truncated: true` says so, `cursor`
@@ -144,7 +174,8 @@ durable = "0"
 loop:
   s = GET /api/observability/summary?since=<durable>    # PROBE: is there anything?
   if s.total == 0 and not s.truncated:
-      continue                                          # genuinely nothing new
+      # No new matching EVENTS; inspect s.invocationDetection before claiming history is clear.
+      continue                                          # no newly emitted warning in this page
   # DRAIN FIRST, from the cursor you last consumed, and only then move it. A probe may look past
   # records its filter excluded; the durable cursor may not (audio-feed-2af8).
   cursor = durable

@@ -24,6 +24,7 @@ import type {
   ListPendingResult,
   ListSynthesizingOptions,
   ListSynthesizingResult,
+  LogAppendOnceResult,
   LogBounds,
   LogQuery,
   LogRecord,
@@ -411,6 +412,13 @@ export class KvMetadataStore implements MetadataStore {
   // -- logs (audio-feed-wzv9) --
   appendLog(record: Omit<LogRecord, "seq">): Promise<LogRecord | null> {
     return this.repositories.logs.appendLog(record);
+  }
+  appendLogOnce(
+    record: Omit<LogRecord, "seq">,
+    key: string,
+    expectedNewestSeq: number,
+  ): Promise<LogAppendOnceResult> {
+    return this.repositories.logs.appendLogOnce(record, key, expectedNewestSeq);
   }
   listLogs(query?: LogQuery): Promise<LogRecord[]> {
     return this.repositories.logs.listLogs(query);
