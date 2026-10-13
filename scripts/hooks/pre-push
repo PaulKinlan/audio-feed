@@ -10,31 +10,42 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
   [ -z "$local_sha" ] && continue
 
-  # Guard 1: Prevent accidentally pushing origin/main onto a fleet/* feature branch (audio-feed-ng60)
+  # Guard 1: Prevent accidentally pushing origin/main (or origin/main's tree) onto a fleet/* feature branch (audio-feed-ng60, audio-feed-fgay)
   if [[ "$remote_ref" =~ ^refs/heads/fleet/ ]]; then
     main_sha=$(git rev-parse origin/main 2>/dev/null || echo "")
+    main_tree=$(git rev-parse origin/main^{tree} 2>/dev/null || echo "")
+    local_tree=$(git rev-parse "${local_sha}^{tree}" 2>/dev/null || echo "")
     if [ -n "$main_sha" ] && [ "$local_sha" = "$main_sha" ]; then
       echo "pre-push: REFUSING to push $remote_ref - local commit $local_sha equals origin/main." >&2
       echo "Publishing a copy of main onto a feature branch is forbidden (audio-feed-ng60)." >&2
       exit 1
     fi
+    if [ -n "$main_tree" ] && [ "$local_tree" = "$main_tree" ]; then
+      echo "pre-push: REFUSING to push $remote_ref - local tree $local_tree matches origin/main^{tree}." >&2
+      echo "Publishing a copy of main's tree onto a feature branch is forbidden (audio-feed-ng60, audio-feed-fgay)." >&2
+      exit 1
+    fi
   fi
 
-  # Guard 2: Prevent pushing a non-gated tree when FLEET_REQUIRE_GATED_PUSH=1
-  # (or when running under fleet lane environment)
-  if [ "${FLEET_REQUIRE_GATED_PUSH:-0}" = "1" ]; then
+  # Guard 2: Prevent pushing a non-gated tree (armed when FLEET_REQUIRE_GATED_PUSH=1, or in fleet lanes)
+  # (audio-feed-4iae, audio-feed-p2la)
+  if [ "${FLEET_REQUIRE_GATED_PUSH:-0}" = "1" ] || [ -n "${FLEET_LANE:-}" ]; then
     tree=$(git rev-parse "${local_sha}^{tree}" 2>/dev/null || echo "")
     if [ -n "$tree" ]; then
       has_pass=0
       for rec in "$HOME/.fleet/checks/$tree.fast.json" "$HOME/.fleet/checks/$tree.json"; do
         if [ -f "$rec" ] && [ "$(jq -r .state "$rec" 2>/dev/null)" = "PASS" ]; then
-          has_pass=1
-          break
+          rec_sha=$(jq -r .sha "$rec" 2>/dev/null || echo "")
+          # audio-feed-4iae: require record sha prefix to match pushed sha
+          if [ -n "$rec_sha" ] && [[ "$local_sha" == "$rec_sha"* ]]; then
+            has_pass=1
+            break
+          fi
         fi
       done
       if [ "$has_pass" -eq 0 ]; then
-        echo "pre-push: REFUSING push of $remote_ref ($local_sha) - tree $tree has no passing fleet-check record." >&2
-        echo "Run fleet-check --fast before pushing (audio-feed-ng60)." >&2
+        echo "pre-push: REFUSING push of $remote_ref ($local_sha) - tree $tree has no passing fleet-check record for this commit." >&2
+        echo "Run fleet-check --fast before pushing (audio-feed-ng60, audio-feed-4iae)." >&2
         exit 1
       fi
     fi
