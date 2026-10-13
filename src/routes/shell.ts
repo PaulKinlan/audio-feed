@@ -265,6 +265,28 @@ export const SHELL_CSS = `
       position-try-fallbacks: flip-block;
     }
   }
+  /* audio-feed-rxa2: the iOS focus floor, by TYPE rather than by enumeration.
+     iOS Safari zooms the viewport when a focused form control computes below 16px, and this app is
+     installed as a standalone PWA (viewport-fit=cover) with no browser chrome to pinch back out of.
+     This lives in SHELL_CSS rather than in the kit, because it is a platform floor for every form
+     control a shell page ships rather than part of the kit's control styling: the kit is only emitted
+     for pages that ask for it (kit: true), while home.css owns the home page's controls and ships no
+     kit. The control styling in the kit supplies the same value only indirectly, through 'font: inherit'
+     on the four input types and 'select' it enumerates, so every control type added later falls
+     through it - and a page stylesheet that sets a smaller font-size on one wins outright, which is how
+     listen.css shipped a search box at 0.9rem, a speed control at 0.8rem and a share field at 0.85rem.
+     The exclusions are by platform mechanism - checkbox, radio, range, file and color take no text
+     focus and do not zoom - and they are two :not() groups rather than one list so that the floor also
+     outweighs page-level selectors such as '.filter-field input[type="search"]' that used to win the
+     tie. Pages should not set control font sizes; this is the floor.
+     Modern Web Guidance, forms §5: "DO set 'font-size' to at least '1rem' (16px) to prevent iOS zoom." */
+  .shell input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]):not(
+      [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]
+    ),
+  .shell select,
+  .shell textarea {
+    font-size: max(1rem, 1em); /* >=16px, and still follows the user's own font scaling. */
+  }
 `;
 
 /**
@@ -302,6 +324,7 @@ export const SHELL_KIT_CSS = `
     border: 1px solid var(--border-2); border-radius: var(--radius-sm);
     padding: 0.6rem 0.75rem; inline-size: 100%; min-inline-size: 0;
   }
+
   .shell input:user-invalid { border-color: var(--danger); }
 
   /* audio-feed-d6l: adopt customizable select using appearance: base-select and ::picker(select).

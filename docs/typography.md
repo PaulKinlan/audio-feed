@@ -33,15 +33,47 @@ described exactly — including its blind spots — in §2.
   here** — no iOS device was available to this work. The warrant sentence is about `input`. The
   text-entry controls in the table below are the cases the repository measured; the two selects are
   the cases it inferred, and a reader should treat them as likely rather than as demonstrated.
-- **What the code does today: four declarations, seven controls.** audio-feed-f12o raised these from
-  a measured value below the floor to `max(1rem, 1em)`:
+- **What the code does today: one rule per document root, written by control TYPE.** There is no
+  stylesheet all three surfaces share — the player is a standalone document with its own CSS asset,
+  and the shell's kit CSS is emitted only for pages that ask for it (`kit: true`: account, admin,
+  login), which the home page does not — so the same rule appears in the two document roots that
+  need it, and nowhere else:
 
-  | declaration                                 | controls it covers                                                     | measured before → after            |
-  | ------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------- |
-  | `src/assets/home.css:183` (new family rule) | `#request-email` (email), `#request-name` (text), `#feed-title` (text) | `13.33px` (UA default) → `16.14px` |
-  | `src/assets/listen.css:545`                 | `.filter-field input[type="search"]`, `.filter-field select`           | `0.9rem` = 14.4px → `16px`         |
-  | `src/assets/listen.css:969` (`.rate`)       | `<select id="rate">`, the playback-speed control                       | `0.8rem` = 12.8px → `16px`         |
-  | `src/assets/listen.css:1047`                | `dialog.confirm-dialog .share-copy-row input`                          | `0.85rem` = 13.6px → `16px`        |
+  | rule                                          | documents it covers                                                 |
+  | --------------------------------------------- | ------------------------------------------------------------------- |
+  | `SHELL_CSS` in `src/routes/shell.ts`          | every page rendered through the shell (home, admin, account, login) |
+  | `src/assets/listen.css` (last rule, file end) | the standalone player document                                      |
+
+  Both declare only `font-size: max(1rem, 1em)`, on the same selector with `body` in place of
+  `.shell`:
+
+  ```css
+  .shell input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]):not([type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]),
+  .shell select,
+  .shell textarea {
+    font-size: max(1rem, 1em);
+  }
+  ```
+
+  The exclusions are the controls the platform does not zoom. They are two `:not()` groups rather
+  than one list for a reason worth keeping: it puts the floor above page-level selectors such as
+  `.filter-field input[type="search"]`, and a page rule that sets a smaller control font is exactly
+  what produced the four defects this section records.
+
+  **What that replaced, and why it matters here:** four per-site declarations — a list of eight
+  input types in `home.css`, and `0.9rem`/`0.8rem`/`0.85rem` on the player — which is the
+  enumeration shape that produced the defects. On the player the controls were small _on top of_
+  `font: inherit` from a 1rem base (`src/assets/listen.css:66` gives `button, select`
+  `font: inherit`), so removing the small sizes was half the fix; the home page's three inputs had
+  no rule at all and took the UA default. Measured per control, at the merge-base and at the tip:
+
+  | control                                                 | before                 | after                                    |
+  | ------------------------------------------------------- | ---------------------- | ---------------------------------------- |
+  | `#request-email`, `#request-name`, `#feed-title` (home) | `13.33px` (UA default) | `16.14px` at 390×844, `17px` at 1280×900 |
+  | `#filterText` (`.filter-field input[type="search"]`)    | `0.9rem` = 14.4px      | `16px`                                   |
+  | `#filterSource` (`.filter-field select`)                | `0.9rem` = 14.4px      | `16px`                                   |
+  | `#rate` (playback speed)                                | `0.8rem` = 12.8px      | `16px`                                   |
+  | `#shareUrlInput` (share dialog)                         | `0.85rem` = 13.6px     | `16px`                                   |
 
   `src/assets/home.css:169` (`input[type="url"], input[type="password"]`) is the repository's
   EARLIEST instance of the expression, and its own comment names the mechanism:
@@ -54,35 +86,53 @@ described exactly — including its blind spots — in §2.
   repo-wide 16px form-control floor; this document does not adopt one on its behalf, and a reader
   should not go looking for a decision that does not exist. What follows is a list of what the code
   does.
-- **The control type the shell kit does not list is covered elsewhere, and that was measured rather
-  than assumed.** `src/routes/shell.ts:299` lists only `text`, `url`, `email`, `password` and
-  `select`, so a text-entry control outside that list would fall to the UA default of `13.33px`. The
-  only such control in the app today is `src/routes/admin.ts:251`'s
-  `<input id="newDailyBudget" type="number">`, and the admin page's own stylesheet gives every
-  `input` and `select` `font: inherit`, which lands it on the shell body's
-  `clamp(1rem, 0.96rem + 0.2vw, 1.0625rem)`: **measured 16.14px at 390×844 and 17px at 1280×900**,
-  so no known text-entry control is below the floor. (An earlier revision of this document claimed
-  `13.33px` here, and filed **audio-feed-oh1r**, on the strength of an absent `font-size`
-  declaration. Absence of a declaration is not the UA default: `font: inherit` plus an inherited
-  body size is what decides, and the measurement above closed that bead as refuted.)
+- **The control the kit's own enumeration does not list is covered by the family rule, and that was
+  measured rather than assumed.** `SHELL_KIT_CSS` — emitted only for `kit: true` pages — enumerates
+  `text`, `url`, `email`, `password` and `select` for its control _styling_, so a control outside
+  that list gets no kit styling; the floor above does not depend on that list, which is the point of
+  writing it by type. The only text-entry control the kit does not enumerate in the app today is
+  `src/routes/admin.ts:251`'s `<input id="newDailyBudget" type="number">`, **measured at 16.14px at
+  390×844 and 17px at 1280×900** — before this change through the admin page's own
+  `input, select { font: inherit }` landing on the shell body's
+  `clamp(1rem, 0.96rem + 0.2vw, 1.0625rem)`, and after it through the family rule as well. No known
+  text-entry control is below the floor. (An earlier revision of this document claimed `13.33px`
+  here and filed **audio-feed-oh1r** on the strength of an absent `font-size` declaration. Absence
+  of a declaration is not the UA default: `font: inherit` plus an inherited body size is what
+  decides, and the measurement closed that bead as refuted.)
 - **Out of scope by the platform mechanism.** `input[type="radio"]`, `input[type="checkbox"]` and
   `input[type="range"]` keep the UA default (13.33px, measured): they take no text focus and raise
-  no keyboard, so they do not trigger the zoom.
+  no keyboard, so they do not trigger the zoom. They are excluded by the rules above, not forgotten
+  by them.
+- **How the coverage was checked, including the part of it that could have been wrong.** A browser
+  instrument walks the page's own stylesheets, tests every rule's selector against each control with
+  `Element.matches()`, and reports the computed size plus which rules declare it and how:
+  - the five controls in the table report `font-size: max(1rem, 1em)` at both viewports;
+  - control TYPES the app does not ship yet — an injected `input[type="tel"]`, `input[type="date"]`
+    and `<textarea>` — report it too. That is what "by type" means, and a list of present controls
+    could not have shown it;
+  - its NEGATIVE CONTROL: the deliberately excluded controls (`range`, `color`, `checkbox`) report
+    `ABSENT (no rule declares a size)` and compute to the UA default 13.33px, an answer the
+    instrument must still be able to give; and run against the pre-change tree it reports `ABSENT`
+    for the home page's three inputs, so it finds the real defect as well as the fix.
 - **What enforces it: nothing.** No test, no CSS lint and no station rule asserts this floor. The
   station's rules are colour-token drift, missing `:focus-visible`, dark-mode adaptation, **integer
   px below 12px**, fetch-without-loading-state and the responsive viewport meta, and **none of them
-  reads a form control's font size**. The declarations above are held by review: a new or changed
+  reads a form control's font size**. The two rules above are held by review: a new or changed
   control is checked by hand, by reading `getComputedStyle(el).fontSize` in a browser at a mobile
-  width.
+  width. The duplication between the two document roots is real and deliberate — a shared stylesheet
+  neither surface links would be wrong — and if the floor ever needs one source, the change is a
+  shared asset linked from both, not a third copy.
 - **How the numbers above were measured.** Over CDP in headless Chrome at a 390×844 /
-  deviceScaleFactor 2 viewport, on `/` and `/listen/:token`, reading
+  deviceScaleFactor 2 viewport and again at 1280×900, on `/` and `/listen/:token`, reading
   `[...document.querySelectorAll("input,select,textarea")].map((el) => [el.id || el.className, getComputedStyle(el).fontSize])`
   **at the merge-base of this change (`8f09bbc`, i.e. before it) and again at its tip (after it)**.
   Both columns of the table above are measured values from those two runs, not declarations
-  converted. Measured before, for the record: `.filter-field` search and select 14.4px,
-  `#shareUrlInput` 13.6px, `#rate` 12.8px, `#request-email`/`#request-name`/`#feed-title` 13.33px.
-  The admin control above is measured the same way without a session: `/admin` needs one this work
-  did not have, so the rendered page's shipped CSS is inlined into the returned HTML and loaded from
+  converted. The same instrument reports the geometry, which is how the second half of that claim is
+  checked: the only box changes are size-derived (the player's filter controls 39.6px → 42px tall,
+  its share field 192px → 221px wide, the speed pill 57.6px → 61.1px wide, the home inputs 21px →
+  25px tall), with padding and border unchanged everywhere and the excluded controls untouched. The
+  admin control above is measured the same way without a session: `/admin` needs one this work did
+  not have, so the rendered page's shipped CSS is inlined into the returned HTML and loaded from
   `file://` in headless Chrome, at 390×844 and 1280×900.
 
 ## 2. UI/label readability floor: ≥ 0.75rem / 12px (project heuristic)
@@ -144,7 +194,8 @@ described exactly — including its blind spots — in §2.
 
 Written for audio-feed-rxa2 (the station enforced a 12px floor that no document in this repository
 stated). Corrected for the review findings audio-feed-uw1m, audio-feed-w1lt, audio-feed-mj2u and
-audio-feed-f12o: the stale Lighthouse warrant, the location that named no sizes, the enforcement
+audio-feed-f12o (the scope of §1, the shape of the fix), the stale Lighthouse warrant, the location
+that named no sizes, the enforcement gap, the measurement that refuted an earlier claim, and the
 blind spot, the unlanded cross-repo edit, and the §1 violations. §1's scope was settled by coord's
 ruling on 2026-10-13: the sites this change styles are raised and named here, and the one text-entry
 control the shell kit does not list is shown by measurement to be covered anyway (audio-feed-oh1r,

@@ -174,22 +174,6 @@ input[type="password"] {
   border-radius: var(--radius);
 }
 
-/* audio-feed-f12o: the rule above styles only url/password, so every other text-entry control kept the
-   UA default of 13.33px and focused with the same iOS zoom the rule exists to prevent (measured on
-   #request-email, #request-name and #feed-title at a 390px viewport). Font sizes the whole family here
-   instead of adding each new input to a list. Radio/checkbox/range are deliberately absent: they take
-   no text focus and do not zoom. Modern Web Guidance, forms §5: "DO set `font-size` to at least `1rem`
-   (16px) to prevent iOS zoom." */
-input[type="text"],
-input[type="email"],
-input[type="search"],
-input[type="tel"],
-input[type="url"],
-input[type="password"],
-input[type="number"],
-textarea {
-  font-size: max(1rem, 1em); /* >=16px: smaller text makes iOS zoom on focus. */
-}
 
 fieldset {
   border: 1px solid var(--border);
