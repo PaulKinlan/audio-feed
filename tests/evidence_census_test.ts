@@ -14,7 +14,8 @@
  * negative control available: the four scripts named on the bead must come out
  * with a mention and no write.
  */
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { maskNonCode } from "../scripts/source-mask.ts";
 import {
   census,
   censusSource,
@@ -572,14 +573,22 @@ Deno.test("audio-feed-n16x: four target browser proofs execute inside runProof a
   }
 });
 
+// audio-feed-9yaq: explicitly pinned exemption set for browser proofs with unmediated evidence writes
+// scripts/regenerate-browser-proof.ts is blocked by audio-feed-ebyy (P2 IN_REVIEW, passkey rotation auth migration)
+const EXEMPT_UNMEDIATED_PROOFS = new Set([
+  "scripts/regenerate-browser-proof.ts", // audio-feed-ebyy / fleet/ufg9
+]);
+
 function checkProofCompliance(content: string, relative: string): string | null {
   const result = censusSource(content);
   // audio-feed-0gbo: unknown writes must not pass in silence
   const writesEvidence = result.writes.length > 0 || result.unresolvedWrites.length > 0;
   if (!writesEvidence) return null;
 
-  const hasRunProof = content.includes("runProof(");
-  const hasReadme = content.includes("writeEvidenceReadme(");
+  // audio-feed-2hgp: mask comments and strings so mentions do not pass as helper calls
+  const masked = maskNonCode(content);
+  const hasRunProof = masked.includes("runProof(");
+  const hasReadme = masked.includes("writeEvidenceReadme(");
 
   if (!hasRunProof || !hasReadme) {
     return `${relative} (writes: ${result.writes.join(", ")}, unresolved: ${
@@ -589,16 +598,16 @@ function checkProofCompliance(content: string, relative: string): string | null 
   return null;
 }
 
-Deno.test("audio-feed-0gbo: all browser proof scripts writing evidence use runProof and shared helpers", async () => {
+Deno.test("audio-feed-0gbo / audio-feed-9yaq: browser proof scripts writing evidence use runProof and shared helpers (except pinned exemptions)", async () => {
+  assertEquals(EXEMPT_UNMEDIATED_PROOFS.size, 1, "Exemption list is strictly pinned");
   const root = new URL("..", import.meta.url).pathname;
   const unmediated: string[] = [];
 
   for await (const entry of Deno.readDir(`${root}/scripts`)) {
     if (!entry.isFile || !entry.name.endsWith("-browser-proof.ts")) continue;
-    // regenerate-browser-proof.ts is a CLI child process driven by regenerate-harness.ts with parameterized outDir
-    if (entry.name === "regenerate-browser-proof.ts") continue;
-
     const relative = `scripts/${entry.name}`;
+    if (EXEMPT_UNMEDIATED_PROOFS.has(relative)) continue;
+
     const content = await Deno.readTextFile(`${root}/${relative}`);
     const failure = checkProofCompliance(content, relative);
     if (failure) unmediated.push(failure);
@@ -607,13 +616,13 @@ Deno.test("audio-feed-0gbo: all browser proof scripts writing evidence use runPr
   assertEquals(
     unmediated,
     [],
-    `All browser proofs writing evidence must use runProof and writeEvidenceReadme: ${
+    `All non-exempt browser proofs writing evidence must use runProof and writeEvidenceReadme: ${
       JSON.stringify(unmediated, null, 2)
     }`,
   );
 });
 
-Deno.test("audio-feed-0gbo: NEGATIVE CONTROL - unresolved evidence write is detected and fails audit when runProof is omitted", () => {
+Deno.test("audio-feed-0gbo / audio-feed-2hgp: NEGATIVE CONTROL - unresolved evidence write is detected and failure text names call", () => {
   const syntheticProof = [
     'const OUT = "docs/evidence/audio-feed-test/";',
     "const target = `${OUT}01-shot.png`;",
@@ -632,4 +641,38 @@ Deno.test("audio-feed-0gbo: NEGATIVE CONTROL - unresolved evidence write is dete
     failure !== null,
     "Unresolved evidence write in proof without runProof must be caught, not skipped as false green",
   );
+  assertStringIncludes(
+    failure,
+    "Deno.writeFile",
+    "Failure message must specifically name the unresolved write call",
+  );
+});
+
+Deno.test("audio-feed-2hgp: NEGATIVE CONTROL - mentioning helpers in a comment only fails audit", () => {
+  const commentOnlyProof = [
+    'const OUT = new URL("../docs/evidence/audio-feed-zzzz/", import.meta.url).pathname;',
+    "// should use runProof( and writeEvidenceReadme( - see proof-helper.ts",
+    "await Deno.writeFile(`${OUT}01-x.png`, new Uint8Array());",
+  ].join("\n");
+
+  const failure = checkProofCompliance(commentOnlyProof, "scripts/comment-only-browser-proof.ts");
+  assert(
+    failure !== null,
+    "Proof only mentioning helpers in a comment must be flagged, not granted false green",
+  );
+  assertStringIncludes(failure, "runProof: false");
+  assertStringIncludes(failure, "readme: false");
+});
+
+Deno.test("audio-feed-9yaq: NEGATIVE CONTROL - regenerate-browser-proof.ts fails compliance audit when evaluated without exemption", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const content = await Deno.readTextFile(`${root}/scripts/regenerate-browser-proof.ts`);
+  const failure = checkProofCompliance(content, "scripts/regenerate-browser-proof.ts");
+  assert(
+    failure !== null,
+    "regenerate-browser-proof.ts must fail compliance audit when evaluated without exemption",
+  );
+  assertStringIncludes(failure, "scripts/regenerate-browser-proof.ts");
+  assertStringIncludes(failure, "runProof: false");
+  assertStringIncludes(failure, "readme: false");
 });
