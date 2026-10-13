@@ -641,6 +641,28 @@ function isOutOfRepoRhs(rhs: string): boolean {
   );
 }
 
+/**
+ * Whether a binding's right-hand side is derived from a path outside the repository.
+ * Either directly constructed via makeTemp* / HOME / tmpdir, or transitively derived
+ * from an in-scope out-of-repo base via template interpolation (`${base}/...`),
+ * path join/resolve (`join(base, ...)`), string concatenation (`base + "/..."`), or direct alias.
+ */
+function isOutOfRepoBinding(
+  rhs: string,
+  scopes: ReadonlyArray<BindingScope>,
+  offset: number,
+): boolean {
+  if (isOutOfRepoRhs(rhs)) return true;
+  const leadingBase = /^\s*`\s*\$\{([A-Za-z_$][\w$]*)\}/.exec(rhs)?.[1] ??
+    /^\s*(?:path\.)?(?:join|resolve)\s*\(\s*([A-Za-z_$][\w$]*)/.exec(rhs)?.[1] ??
+    /^\s*([A-Za-z_$][\w$]*)\s*\+\s*["'`]/.exec(rhs)?.[1] ??
+    /^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?(?:\s*\.\s*[A-Za-z_$][\w$]*\s*\(.*\))*\s*$/.exec(rhs)?.[1];
+  if (leadingBase && baseIsOutOfRepo(scopes, leadingBase, offset)) {
+    return true;
+  }
+  return false;
+}
+
 type BindingKind = "out-of-repo" | "other";
 
 /** One lexical scope and the bindings made DIRECTLY in it. */
@@ -784,7 +806,7 @@ function bindingScopes(source: string, spans: ReadonlyArray<[number, number]>): 
     record(
       innermostScope(scopes, at),
       match[1]!,
-      isOutOfRepoRhs(match[2] ?? "") ? "out-of-repo" : "other",
+      isOutOfRepoBinding(match[2] ?? "", scopes, at) ? "out-of-repo" : "other",
     );
   }
   // Destructured locals are bindings too. A named outer constant cannot win merely because its inner
@@ -1110,6 +1132,7 @@ function staticPathHints(
       for (const token of text.split(/[\s"']+/).filter(Boolean)) {
         const wildcard = token.search(/\$\{/);
         if (wildcard < 0) {
+          if (cutTail && wholeTail.includes(token)) continue;
           hints.push(token);
           continue;
         }

@@ -1094,3 +1094,45 @@ Deno.test("audio-feed-uiyv: / regex literal vs division disambiguation correctly
     }
   });
 });
+
+Deno.test("transitive out-of-repo: nested temp-dir bindings suppress unresolved, authored paths still fail", async () => {
+  await withTempTree({
+    // Nested tempdir derivation: root -> subDir -> file, including spaces in segments
+    "tests/nested_tempdir_test.ts": [
+      "const root = await Deno.makeTempDir();",
+      "const subDir = `${root}/parent with spaces`;",
+      "const file = `${subDir}/actor file.png`;",
+      "export async function readIt() {",
+      "  return await Deno.readTextFile(file);",
+      "}",
+      "",
+    ].join("\n"),
+    // Authored repo path that is missing: must still be caught as unresolved
+    "tests/authored_missing_test.ts": [
+      'const repoBase = "tests/fixtures";',
+      "const file = `${repoBase}/genuine_missing_file.json`;",
+      "export async function readIt() {",
+      "  return await Deno.readTextFile(file);",
+      "}",
+      "",
+    ].join("\n"),
+  }, async (root) => {
+    const temp = await deriveReadRelationReport(root, ["tests/nested_tempdir_test.ts"]);
+    assertEquals(
+      temp.unresolved,
+      [],
+      "nested tempdir read must not be reported as unresolved repo path",
+    );
+    assert(
+      temp.outOfRepo.includes("actor file.png"),
+      `the nested temp-dir hint is REPORTED as out-of-repo: ${JSON.stringify(temp.outOfRepo)}`,
+    );
+
+    const authored = await deriveReadRelationReport(root, ["tests/authored_missing_test.ts"]);
+    assertEquals(
+      authored.unresolved,
+      ["genuine_missing_file.json"],
+      "an authored path that names nothing is STILL unresolved (the guard is untouched)",
+    );
+  });
+});
