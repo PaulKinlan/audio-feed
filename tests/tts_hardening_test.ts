@@ -524,7 +524,6 @@ console.log("script attempt finished");
   const job = new Deno.Command(Deno.execPath(), {
     args: [
       "eval",
-      "-A",
       "--config",
       new URL("../deno.json", import.meta.url).pathname,
       child,

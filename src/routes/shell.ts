@@ -469,7 +469,8 @@ export const SHELL_KIT_CSS = `
     .rows > li > .meta,
     .rows > li > .feed-paths,
     .rows > li > .actions,
-    .rows > li > .error-detail {
+    .rows > li > .error-detail,
+    .rows > li > .ep-audio {
       grid-column: 1 / -1;
     }
 
@@ -595,9 +596,8 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
   const link = (href: string, label: string, section: ShellSection) =>
     `<a href="${href}"${current === section ? ` aria-current="page"` : ""}>${label}</a>`;
   const nav = [
-    link("/", "Home", "home"),
+    viewer ? link("/account", "Account", "account") : link("/", "Home", "home"),
     link("/listen", "Web Player", "player"),
-    viewer ? link("/account", "Account", "account") : "",
     viewer?.isAdmin ? link("/admin", "Admin", "admin") : "",
   ].join("");
   const who = viewer
@@ -609,7 +609,7 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
       current === "login" ? "" : `<a class="sign-in" href="/login">Sign in</a>`
     }</div>`;
   return `<div class="site-header-sticky"><header class="site-header"><div class="bar">
-    <a class="brand" href="/">${MARK}<span>Audio Feed</span></a>
+    <a class="brand" href="${viewer ? "/account" : "/"}">${MARK}<span>Audio Feed</span></a>
     <nav class="site-nav" aria-label="Main">${nav}</nav>
     ${who}
   </div></header></div>`;

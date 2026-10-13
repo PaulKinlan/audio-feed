@@ -11,6 +11,39 @@
   margin-inline: auto;
   padding: var(--space-8) var(--space-4) var(--space-12);
 }
+.admin-subnav {
+  margin-block: var(--space-4) var(--space-6);
+  border-block-end: 1px solid var(--border);
+  padding-block-end: var(--space-3);
+}
+.admin-subnav-list {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.admin-subnav-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius-sm, 6px);
+  text-decoration: none;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.95rem;
+  transition: background 0.15s, color 0.15s;
+}
+.admin-subnav-link:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.admin-subnav-link.is-active {
+  background: var(--accent);
+  color: var(--accent-ink, #000);
+  font-weight: 600;
+}
 .signin-card .row {
   margin-block-start: var(--space-3);
 }

@@ -700,7 +700,7 @@ Deno.test("audio-feed-vqu4: long synthesis completes across multiple bounded tic
   await stores.metadata.deleteEpisode("user-1", "episode-1");
 
   let scriptCalls = 0;
-  const textChunk = (id: number) => `Segment ${id} `.repeat(500);
+  const textChunk = (id: number) => `Segment ${id} `.repeat(250);
   const mockScriptGenerator = () => {
     scriptCalls++;
     return Promise.resolve({
@@ -973,7 +973,7 @@ Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptT
     const synth = createGeminiSynthesizer(ctx, {
       scriptGenerator: () => {
         scriptCalls++;
-        simulatedMs += 40_000;
+        simulatedMs += 150_000;
         return Promise.resolve({
           turns: [
             { speaker: "Alex" as const, text: "Turn 1" },
@@ -999,7 +999,7 @@ Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptT
 
     const result1 = await runSynthesisBatch(ctx, synth, {
       owner: "worker-tick-1",
-      maxInvocationDurationMs: 45_000,
+      maxInvocationDurationMs: 180_000,
     });
 
     assertEquals(result1.yielded.length, 1, "must yield cleanly");
@@ -1013,7 +1013,7 @@ Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptT
     simulatedMs = 1;
     await runSynthesisBatch(ctx, synth, {
       owner: "worker-tick-2",
-      maxInvocationDurationMs: 45_000,
+      maxInvocationDurationMs: 180_000,
       maxSegmentsPerInvocation: 2,
     });
 
@@ -1205,7 +1205,7 @@ Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecyc
   const result = await runSynthesisBatch(ctx, providerAbortSynth, {
     owner: "worker-provider-abort",
     maxAttempts: 1,
-    maxInvocationDurationMs: 45_000,
+    maxInvocationDurationMs: 180_000,
   });
 
   assertEquals(calls, 1, "synthesizer was called");
@@ -1221,7 +1221,7 @@ Deno.test("audio-feed-zni7: (b) provider AbortError enters retry/failure lifecyc
   const result2 = await runSynthesisBatch(ctx, providerAbortSynth, {
     owner: "worker-provider-abort-tick2",
     maxAttempts: 1,
-    maxInvocationDurationMs: 45_000,
+    maxInvocationDurationMs: 180_000,
   });
   assertEquals(result2.failed.length, 0);
   assertEquals(result2.yielded.length, 0);

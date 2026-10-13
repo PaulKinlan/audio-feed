@@ -24,7 +24,7 @@ import { bookmarkletHref } from "./bookmarklet.ts";
 import type { RouteContext } from "../router.ts";
 import { originCacheControl, resolveOrigin } from "../origin.ts";
 import { DEFAULT_NARRATION_VOICE } from "../tts/gemini.ts";
-import { renderShell, type Viewer, viewerOf } from "./shell.ts";
+import { renderShell, type Viewer } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { assetUrl } from "./assets.ts";
 import { jsonForScript } from "./html.ts";
@@ -142,19 +142,11 @@ export function renderHomePage({
     accepts an RSS URL. Episodes appear once synthesis finishes.
   </p>
 
-  <!-- audio-feed-b6nr: this box used to be revealed by a script reading a remembered capability out
-       of localStorage. It is rendered from the session instead, so nothing has to be stored and the
-       link needs no token in it: the bare /listen path resolves the subscriber server-side. -->
-  <div id="returningSubscriber" class="note u-my-4"${viewer ? "" : " hidden"}>
-    <p><strong>Welcome back!</strong>
-    <a href="/listen" id="openPlayerLink" class="u-strong-link">Open your Web Player &rarr;</a></p>
-  </div>
-
   <h2 id="request-access">Request access</h2>
   <p>
     Audio Feed is currently in private preview. Every account requires administrator approval
     before audio is synthesised, keeping resource spend within budget. Request access below
-    and an administrator will review your account.
+    and an administrator will review your account. Already have an account? <a href="/login">Sign in</a>.
   </p>
   <!-- audio-feed-dc2y: WebMCP annotations. Additive and ignored by browsers without support. -->
   <form id="request-access-form" action="/api/request-access" method="post"
@@ -197,89 +189,12 @@ export function renderHomePage({
 
   <div id="request-result" role="status" aria-live="polite"></div>
 
-  <h2 id="send">Send an article to audio</h2>
-  ${
-    viewer
-      ? `<p class="note" role="status">You're signed in: <a href="/account">send from your
-    account</a> without pasting a token. The form below still works with one.</p>`
-      : ""
-  }
-  <p>
-    Give it a link and it will be queued, synthesised, and added to your feed.
-    Accounts need admin approval before anything is generated, because synthesis
-    is the part that costs money.
-  </p>
-
   ${
     synthesisConfigured ? "" : `<p class="note" role="status">
     <strong>Note:</strong> this deployment has no Gemini API key configured, so
     articles can be queued but will not be synthesised until one is set.
   </p>`
   }
-
-  <!--
-    method="post" is a safety property, not a formality: if scripting fails, the
-    browser's native submit posts the token in the request body and gets a 415,
-    instead of a GET that would write the token into the URL bar and history.
-  -->
-  <form id="ingest" action="/api/ingest" method="post">
-    <div class="field">
-      <label for="url">Article URL</label>
-      <span class="hint" id="url-hint">A public link to the article you want read.</span>
-      <input
-        type="url"
-        id="url"
-        name="url"
-        required
-        placeholder="https://example.com/an-article"
-        aria-describedby="url-hint"
-        aria-errormessage="url-error"
-        autocomplete="url"
-        spellcheck="false"
-      >
-      <span class="error" id="url-error"><span aria-hidden="true">⚠</span> Enter a full URL, including https://</span>
-    </div>
-
-    <div class="field">
-      <label for="token">Your feed token</label>
-      <span class="hint" id="token-hint">
-        The token from your feed URL. Sent as a request header, never in the address bar.
-      </span>
-      <input
-        type="password"
-        id="token"
-        name="token"
-        required
-        aria-describedby="token-hint"
-        aria-errormessage="token-error"
-        autocomplete="off"
-        spellcheck="false"
-      >
-      <span class="error" id="token-error"><span aria-hidden="true">⚠</span> A feed token is required.</span>
-    </div>
-
-    <fieldset>
-      <legend>How should it sound?</legend>
-      <div class="choice">
-        <input type="radio" id="mode-direct" name="mode" value="direct" checked>
-        <label for="mode-direct">
-          Direct read
-          <span class="what">One voice, reading the article.</span>
-        </label>
-      </div>
-      <div class="choice">
-        <input type="radio" id="mode-deepdive" name="mode" value="deepdive">
-        <label for="mode-deepdive">
-          Deep dive
-          <span class="what">Two voices, discussing it.</span>
-        </label>
-      </div>
-    </fieldset>
-
-    <button type="submit" id="submit">Send to Audio</button>
-  </form>
-
-  <div id="result" role="status" aria-live="polite"></div>
 
   <div class="note bookmarklet-box u-mt-4">
     <p><strong>Browser Bookmarklet:</strong> Drag <a class="bookmarklet-link u-strong-link" href="${
@@ -294,84 +209,14 @@ export function renderHomePage({
     </details>
   </div>
 
-  <h2 id="subscribe-feed">Subscribe to an RSS feed</h2>
-  <p>
-    Follow an entire publication. Recent posts will be queued and converted to audio as they are published.
-  </p>
-
-  <!--
-    method="post" ensures a no-JS native submit never puts the token in the URL.
-    Uses the same feed token field entered above.
-  -->
-  <form id="subscribe-source" action="/api/sources" method="post">
-    <div class="field">
-      <label for="feed-url">RSS or Atom feed URL</label>
-      <span class="hint" id="feed-url-hint">The XML feed address of the blog or newsletter.</span>
-      <input
-        type="url"
-        id="feed-url"
-        name="feedUrl"
-        required
-        placeholder="https://example.com/feed.xml"
-        aria-describedby="feed-url-hint"
-        aria-errormessage="feed-url-error"
-        autocomplete="url"
-        spellcheck="false"
-      >
-      <span class="error" id="feed-url-error"><span aria-hidden="true">⚠</span> Enter a full feed URL, including https://</span>
-    </div>
-
-    <div class="field">
-      <label for="feed-title">Feed title (optional)</label>
-      <span class="hint" id="feed-title-hint">Defaults to the title in the feed.</span>
-      <input
-        type="text"
-        id="feed-title"
-        name="title"
-        placeholder="e.g. Stratechery"
-        aria-describedby="feed-title-hint"
-        autocomplete="off"
-        spellcheck="false"
-      >
-    </div>
-
-    <fieldset>
-      <legend>Audio presentation mode</legend>
-      <div class="choice">
-        <input type="radio" id="feed-mode-direct" name="feedMode" value="direct" checked>
-        <label for="feed-mode-direct">
-          Direct read
-          <span class="what">One narrator reading each post.</span>
-        </label>
-      </div>
-      <div class="choice">
-        <input type="radio" id="feed-mode-deepdive" name="feedMode" value="deepdive">
-        <label for="feed-mode-deepdive">
-          Deep dive
-          <span class="what">Two-voice discussion of each post.</span>
-        </label>
-      </div>
-    </fieldset>
-
-    <button type="submit" id="submit-feed">Subscribe to Feed</button>
-  </form>
-
-  <div id="feed-result" role="status" aria-live="polite"></div>
-
   <noscript>
     <p class="note">
-      These forms need JavaScript, because the feed token travels in a request
-      header rather than the URL. Without it, use curl:
+      JavaScript is optional. With a private feed token, you can also send articles via curl:
     </p>
     <pre><code>curl -X POST ${base}/api/ingest \\
   -H 'content-type: application/json' \\
   -H 'x-feed-token: YOUR_TOKEN' \\
-  -d '{"url":"https://example.com/an-article","mode":"direct"}'
-
-curl -X POST ${base}/api/sources \\
-  -H 'content-type: application/json' \\
-  -H 'x-feed-token: YOUR_TOKEN' \\
-  -d '{"feedUrl":"https://example.com/feed.xml","modes":["direct"]}'</code></pre>
+  -d '{"url":"https://example.com/an-article","mode":"direct"}'</code></pre>
   </noscript>
 
   <h2>Prefer the command line?</h2>
@@ -416,7 +261,19 @@ export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promis
   // print `http://localhost:8000/feed/...` as the URL to subscribe to.
   const origin = resolveOrigin(ctx.config, req);
 
-  const viewer = viewerOf(await sessionUser(ctx.stores.metadata, req));
+  // Signed-in users are redirected to their account page (audio-feed-irgu).
+  const user = await sessionUser(ctx.stores.metadata, req);
+  if (user) {
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: "/account",
+        "cache-control": "private, no-store",
+        vary: origin.explicit ? "Cookie" : "Host, Cookie",
+      },
+    });
+  }
+
   const nonce = newCspNonce();
   const html = renderHomePage({
     publicBaseUrl: origin.baseUrl,
@@ -424,7 +281,7 @@ export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promis
     // Resolved, not hard-coded: an operator who sets DEFAULT_VOICE must not be
     // shown a page that still claims the default is Charon (audio-feed-4xt).
     defaultVoice: ctx.config.defaultVoice ?? DEFAULT_NARRATION_VOICE,
-    viewer,
+    viewer: null,
     nonce,
   });
 
@@ -441,11 +298,7 @@ export async function handleHome({ ctx, req }: RouteContext<AppContext>): Promis
       // The max-age is short regardless: the page reports whether synthesis is
       // configured, so a stale copy could claim the service is unavailable
       // after it has been fixed.
-      //
-      // audio-feed-8fc: the header names whoever is signed in, so a signed-in
-      // response is never stored, and every response varies on Cookie so a
-      // cached signed-out copy is not replayed to someone who just signed in.
-      "cache-control": viewer ? "private, no-store" : originCacheControl(origin, 300),
+      "cache-control": originCacheControl(origin, 300),
       // The response body varies with the host that routed the request, so say
       // so: a cache keyed only on path would otherwise be free to mix them.
       vary: origin.explicit ? "Cookie" : "Host, Cookie",

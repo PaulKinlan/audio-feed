@@ -59,9 +59,9 @@ function stubClient(calls: string[]) {
   });
 }
 
-/** Two paragraphs, each over the 6,000-byte segment budget: exactly two segments. */
+/** Two paragraphs, each within the 3,000-byte segment budget: exactly two segments. */
 const TWO_SEGMENT_BODY = [0, 1].map((n) =>
-  `Movement ${n}: ` + "the quarterly numbers arrived exactly as nobody expected. ".repeat(90)
+  `Movement ${n}: ` + "the quarterly numbers arrived exactly as nobody expected. ".repeat(40)
 ).join("\n\n");
 
 Deno.test("the real narration client resumes stored segments and skips their paid calls", async () => {
@@ -112,7 +112,7 @@ Deno.test("the real narration client resumes stored segments and skips their pai
 
 Deno.test("the real dialogue client keys segments by attributed turn text and joined voices", async () => {
   const turnText = (n: number) =>
-    `Turn ${n} says: ` + "and then the discussion went exactly where the data led it. ".repeat(80);
+    `Turn ${n} says: ` + "and then the discussion went exactly where the data led it. ".repeat(40);
   const turns = [
     { speaker: "Alex", text: turnText(0) },
     { speaker: "Sam", text: turnText(1) },

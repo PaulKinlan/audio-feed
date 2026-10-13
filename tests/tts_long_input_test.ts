@@ -275,7 +275,7 @@ Deno.test("allowTruncated is explicit and remains visible for segmented audio", 
     }) as typeof fetch,
   });
   const output = await client.synthesizeNarration(input, { allowTruncated: true });
-  assertEquals(calls, 8);
+  assertEquals(calls, 17);
   assert(output.truncated);
   assertEquals(output.finishReason, "MAX_TOKENS");
 });
@@ -306,7 +306,7 @@ Deno.test("MAX_TOKENS audio causes local adaptive split, not silent publication 
     }) as typeof fetch,
   });
   const output = await client.synthesizeNarration(input);
-  assert(calls >= 10 && calls <= MAX_TTS_SEGMENTS); // refused segment replaced by smaller chunks
+  assert(calls >= 18 && calls <= MAX_TTS_SEGMENTS); // refused segment replaced by smaller chunks
   assertEquals(output.rawBytes.length, (calls - 1) * pcm.length);
   assertEquals(
     transcripts.filter((_text, index) => index !== 2).join(" ").split(/\s+/u),

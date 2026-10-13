@@ -10,7 +10,13 @@ import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/as
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
-import { createSession, hashSecret, SESSION_COOKIE } from "../src/auth/sessions.ts";
+import {
+  createSession,
+  endSession,
+  hashSecret,
+  SESSION_COOKIE,
+  sessionUser,
+} from "../src/auth/sessions.ts";
 import { makeSource, makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
 
@@ -747,4 +753,42 @@ Deno.test("sign out from a no-referrer page: Origin null counts only when the br
   const ok = await logout("same-origin");
   assertEquals(ok.status, 303);
   assertEquals(ok.headers.get("location"), "/");
+});
+
+Deno.test("sessionUser memoizes promise per Request and deduplicates store lookups (audio-feed-akwg)", async () => {
+  const stores = memoryStores();
+  const user = await seed(stores);
+  const cookie = await cookieFor(stores, user.id);
+  const req = call("/account", { cookie });
+
+  let sessionLookups = 0;
+  const originalGetSession = stores.metadata.getSession.bind(stores.metadata);
+  stores.metadata.getSession = async (idHash: string) => {
+    sessionLookups++;
+    return await originalGetSession(idHash);
+  };
+
+  const u1 = await sessionUser(stores.metadata, req);
+  const u2 = await sessionUser(stores.metadata, req);
+  const u3 = await sessionUser(stores.metadata, req);
+
+  assertEquals(u1?.id, user.id);
+  assertEquals(u2?.id, user.id);
+  assertEquals(u3?.id, user.id);
+  assertEquals(
+    sessionLookups,
+    1,
+    "store.getSession was called exactly once across 3 sessionUser calls for same Request",
+  );
+
+  // A different request performs its own lookup
+  const req2 = call("/account", { cookie });
+  const u4 = await sessionUser(stores.metadata, req2);
+  assertEquals(u4?.id, user.id);
+  assertEquals(sessionLookups, 2, "new Request triggers its own store lookup");
+
+  // Calling endSession clears the cache
+  await endSession(stores.metadata, req);
+  const u5 = await sessionUser(stores.metadata, req);
+  assertEquals(u5, null, "session is ended and no longer resolves");
 });

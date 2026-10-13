@@ -211,6 +211,21 @@ export async function pollFeedSource(
       }" (${source.feedUrl}): ${errorMsg}`,
     );
     result.errors.push(errorMsg);
+    // audio-feed-r7sb: surface pre-episode feed poll failure in structured logs
+    await ctx.stores.metadata.appendLog({
+      time: new Date().toISOString(),
+      severity: "warn",
+      type: "ingest.failed",
+      message: "Feed poll failed before episode creation",
+      process: "cron",
+      job: "feed-poll",
+      userId: source.userId,
+      correlationId: crypto.randomUUID(),
+      reason: "feed_poll_failed",
+      context: {
+        sourceId: source.id,
+      },
+    });
     // lastPolledAt still moves: a permanently broken feed must not be retried on
     // every tick forever.
     await ctx.stores.metadata.putSource({
@@ -334,6 +349,21 @@ async function queueItems(
         if (result.errors.length < 5) {
           result.errors.push(`${item.link}: ${errMsg}`);
         }
+        // audio-feed-r7sb: surface pre-episode extraction failure in structured logs
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: "warn",
+          type: "ingest.failed",
+          message: "Feed article extraction failed before episode creation",
+          process: "cron",
+          job: "feed-poll",
+          userId: source.userId,
+          correlationId: crypto.randomUUID(),
+          reason: "extraction_failed",
+          context: {
+            sourceId: source.id,
+          },
+        });
         return;
       }
     }

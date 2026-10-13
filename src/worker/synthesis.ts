@@ -200,7 +200,7 @@ export interface SynthesisWorkerOptions {
   /**
    * Maximum duration in ms a single invocation may spend synthesizing before
    * checkpointing and yielding back to the queue (audio-feed-vqu4).
-   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (45_000ms), safely inside Deno Deploy's cron isolate lifetime.
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (180_000ms), safely inside Deno Deploy's cron isolate lifetime.
    */
   maxInvocationDurationMs?: number;
   /** Margin reserved for flushing checkpoints and yields in ms (audio-feed-9wqt, audio-feed-vvwb). */

@@ -993,6 +993,20 @@ export function audioPayload(article: ExtractedArticle, mode: AudioMode): Ingest
   return { mode, article, narration: [...intro.filter(Boolean), article.body].join("\n\n") };
 }
 
+export interface IngestFailureInfo {
+  user?: User;
+  reason:
+    | "url_rejected"
+    | "fetch_failed"
+    | "extraction_failed"
+    | "payload_too_large"
+    | "unsupported_media"
+    | "invalid_input"
+    | "internal_error";
+  status: number;
+  mode?: AudioMode;
+}
+
 export interface IngestDependencies {
   /** Resolve verified identity; the handler independently enforces admin approval. */
   authorize: (request: Request) => Promise<User | Response>;
@@ -1001,6 +1015,7 @@ export interface IngestDependencies {
     input: { article: ExtractedArticle; mode: AudioMode; user: User },
   ) => Promise<{ articleId: string; episodeId: string }>;
   fetchArticle?: (url: string, signal: AbortSignal) => Promise<ExtractedArticle>;
+  onFailure?: (info: IngestFailureInfo) => Promise<void> | void;
 }
 
 /** Mount at POST /api/ingest. Caller supplies approved-user authorization and durable queue. */
@@ -1013,13 +1028,16 @@ export function createUrlIngestHandler(
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
     }
+    let user: User | Response | undefined;
+    let targetMode: AudioMode | undefined;
     try {
-      const user = await deps.authorize(request);
+      user = await deps.authorize(request);
       if (user instanceof Response) return user;
       if (!user?.id || !isSynthesisAuthorized(user)) {
         return json({ error: "An approved user is required." }, 403);
       }
       if (!/^application\/json(?:;|$)/i.test(request.headers.get("content-type") ?? "")) {
+        await deps.onFailure?.({ user, reason: "unsupported_media", status: 415 });
         return json({ error: "Send an application/json body." }, 415);
       }
       let input: unknown;
@@ -1029,21 +1047,45 @@ export function createUrlIngestHandler(
           new TextDecoder().decode(await readBounded(request.body, 8 * 1024, 413, bodySignal)),
         );
       } catch (error) {
-        if (error instanceof IngestError) throw error;
+        if (error instanceof IngestError) {
+          const reason = error.status === 413 ? "payload_too_large" : "internal_error";
+          await deps.onFailure?.({ user, reason, status: error.status });
+          throw error;
+        }
+        await deps.onFailure?.({ user, reason: "invalid_input", status: 400 });
         return json({ error: "Invalid JSON body." }, 400);
       }
       if (!input || typeof input !== "object" || Array.isArray(input)) {
+        await deps.onFailure?.({ user, reason: "invalid_input", status: 400 });
         return json({ error: "Expected { url, mode }." }, 400);
       }
       const { url, mode = "direct" } = input as Record<string, unknown>;
       if (typeof url !== "string" || !isAudioMode(mode)) {
+        await deps.onFailure?.({ user, reason: "invalid_input", status: 400 });
         return json({ error: "Expected a URL and mode direct or deepdive." }, 400);
       }
-      const target = articleUrl(url).href;
-      const article = await (deps.fetchArticle ?? ((url, signal) => fetchArticle(url, { signal })))(
-        target,
-        request.signal,
-      );
+      targetMode = mode;
+      let target: string;
+      try {
+        target = articleUrl(url).href;
+      } catch (error) {
+        await deps.onFailure?.({ user, reason: "url_rejected", status: 400, mode: targetMode });
+        throw error;
+      }
+      let article: ExtractedArticle;
+      try {
+        article = await (deps.fetchArticle ?? ((url, signal) => fetchArticle(url, { signal })))(
+          target,
+          request.signal,
+        );
+      } catch (error) {
+        const reason = (error instanceof IngestError && error.message.includes("Readability"))
+          ? "extraction_failed"
+          : "fetch_failed";
+        const status = error instanceof IngestError ? error.status : 503;
+        await deps.onFailure?.({ user, reason, status, mode: targetMode });
+        throw error;
+      }
       request.signal.throwIfAborted();
       const job = await deps.enqueue({ article, mode, user });
       return json({ ...job, status: "queued", mode, article }, 202);

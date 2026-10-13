@@ -15,6 +15,8 @@ import { memoryStores } from "../src/config.ts";
 import { renderHomePage } from "../src/routes/home.ts";
 import { assetBody } from "../src/routes/assets.ts";
 import { shippedCss } from "./admin_css.ts";
+import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
+import { makeUser } from "./fixtures.ts";
 import type { AppConfig } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -24,6 +26,12 @@ function app(overrides: Partial<AppConfig> = {}) {
   const stores = memoryStores();
   const { fetch } = createApp({ config: { ...config, ...overrides }, stores });
   return fetch;
+}
+
+function appWithStores(overrides: Partial<AppConfig> = {}) {
+  const stores = memoryStores();
+  const { fetch } = createApp({ config: { ...config, ...overrides }, stores });
+  return { fetch, stores };
 }
 
 const get = (path: string, init?: RequestInit) => new Request(`${BASE}${path}`, init);
@@ -97,11 +105,11 @@ Deno.test("the form posts, so a token can never land in the URL bar", async () =
   );
 });
 
-Deno.test("the token field is masked and excluded from autofill", async () => {
+Deno.test("the logged-out homepage does not render token password inputs (audio-feed-irgu)", async () => {
   const html = await (await app()(get("/"))).text();
 
-  assertStringIncludes(html, 'type="password"');
-  assertStringIncludes(html, 'autocomplete="off"');
+  assert(!html.includes('id="token"'), "homepage does not render token input");
+  assert(!html.includes('type="password"'), "homepage has no password inputs");
 });
 
 Deno.test("the token travels as a header, never as a query parameter", async () => {
@@ -146,17 +154,11 @@ Deno.test("the document declares a language and scales on mobile", async () => {
 Deno.test("every input has a label and an error message it points at", async () => {
   const html = await (await app()(get("/"))).text();
 
-  for (const id of ["url", "token"]) {
-    assertStringIncludes(html, `<label for="${id}">`);
-    assertStringIncludes(html, `aria-errormessage="${id}-error"`);
-    // The referenced element must exist, or the ARIA reference is a dead link.
-    assertStringIncludes(html, `id="${id}-error"`);
-  }
-
-  // Radios are labelled too, and grouped by a legend rather than a bare div.
-  assertStringIncludes(html, '<label for="mode-direct">');
-  assertStringIncludes(html, '<label for="mode-deepdive">');
-  assertStringIncludes(html, "<legend>");
+  assertStringIncludes(html, '<label for="request-email">');
+  assertStringIncludes(html, 'aria-errormessage="request-email-error"');
+  // The referenced element must exist, or the ARIA reference is a dead link.
+  assertStringIncludes(html, 'id="request-email-error"');
+  assertStringIncludes(html, '<label for="request-name">');
 });
 
 Deno.test("the result region announces itself to assistive technology", async () => {
@@ -171,7 +173,7 @@ Deno.test("errors are not signalled by colour alone", async () => {
 
   // Each error carries a glyph and text, not just a red border.
   assertStringIncludes(html, 'aria-hidden="true">⚠');
-  assertStringIncludes(html, "Enter a full URL");
+  assertStringIncludes(html, "Enter a valid email address.");
 });
 
 Deno.test("validation styling waits for interaction rather than firing on load", async () => {
@@ -275,7 +277,7 @@ Deno.test("POST / is 405, not 404", async () => {
   assertStringIncludes((await res.json()).detail, "GET");
 });
 
-Deno.test("the homepage renders the RSS subscribe form with secure method and token handling", () => {
+Deno.test("the homepage does not render redundant token-based forms (audio-feed-irgu)", () => {
   const html = renderHomePage({
     nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
@@ -283,21 +285,14 @@ Deno.test("the homepage renders the RSS subscribe form with secure method and to
     defaultVoice: "Charon",
   });
 
-  assertStringIncludes(html, '<form id="subscribe-source" action="/api/sources" method="post">');
-  assertStringIncludes(html, 'id="feed-url"');
-  assertStringIncludes(html, 'name="feedUrl"');
-  assertStringIncludes(html, 'id="feed-title"');
-  assertStringIncludes(html, 'id="submit-feed"');
-  assertStringIncludes(html, 'id="feed-result"');
-
-  // Must reuse the token header and never expose it in a query string.
-  // audio-feed-3xq part 4b: the header wiring is client code now.
-  assertStringIncludes(assetBody("home.js") ?? "", '"x-feed-token": token.value.trim()');
+  // Redundant token forms belong on /account, not the explainer landing page.
+  assert(!html.includes('id="subscribe-source"'), "no subscribe-source form on /");
+  assert(!html.includes('id="ingest"'), "no ingest form on /");
   assert(!html.includes("?token="));
   assert(!html.includes("?feedToken="));
 });
 
-Deno.test("the front door links to the web player in header and body without leaking capabilities (audio-feed-ytg)", () => {
+Deno.test("the front door links to the web player and login without leaking capabilities (audio-feed-ytg, audio-feed-irgu)", () => {
   const html = renderHomePage({
     nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
@@ -307,13 +302,30 @@ Deno.test("the front door links to the web player in header and body without lea
 
   // Link in header nav and body
   assertStringIncludes(html, '<a href="/listen">Web Player</a>');
-  // Returning subscriber banner
-  assertStringIncludes(html, 'id="returningSubscriber"');
-  assertStringIncludes(html, 'href="/listen"');
+  assertStringIncludes(html, '<a href="/login">Sign in</a>');
+  // Redundant returning subscriber banner removed from public explainer
+  assert(!html.includes('id="returningSubscriber"'), "no returningSubscriber banner on /");
 
   // No capability leaks: no token is baked into the rendered HTML
   assertEquals(html.includes("/listen/token-"), false, "never bake tokens into public links");
   assertEquals(html.includes("feedToken"), false, "never bake feedToken in public homepage");
+});
+
+Deno.test("GET / redirects signed-in users to /account with 303 (audio-feed-irgu)", async () => {
+  const { fetch, stores } = appWithStores();
+  const user = makeUser({ id: "user-test", email: "user@example.com" });
+  await stores.metadata.putUser(user);
+  const token = await createSession(stores.metadata, user.id);
+
+  const res = await fetch(
+    new Request(`${BASE}/`, {
+      headers: { cookie: `${SESSION_COOKIE}=${token}` },
+    }),
+  );
+  assertEquals(res.status, 303);
+  assertEquals(res.headers.get("location"), "/account");
+  assertEquals(res.headers.get("cache-control"), "private, no-store");
+  assertStringIncludes(res.headers.get("vary") ?? "", "Cookie");
 });
 
 Deno.test("homepage script includes open in web player action on submission success (audio-feed-ytg)", () => {

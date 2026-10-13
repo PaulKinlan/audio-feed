@@ -38,6 +38,12 @@ export interface AccountPageData {
   sources: Source[];
   credentials: PasskeyCredential[];
   episodes: Episode[];
+  /** Whether there are more episodes beyond the currently displayed limit (audio-feed-w2zc). */
+  hasMoreEpisodes?: boolean;
+  /** Next page limit for 'Show more episodes' (audio-feed-w2zc). */
+  nextEpisodesLimit?: number;
+  /** Current page limit (audio-feed-w2zc). */
+  currentLimit?: number;
   /** Published episodes made by other prompts, across the whole feed (audio-feed-ktn). */
   outdatedCount: number;
   /** Failed episodes across the user's feed that can be retried (audio-feed-6y9). */
@@ -57,6 +63,8 @@ const CSS = `
   .ep-status { font-size: 0.78rem; font-weight: 600; color: var(--muted); }
   .ep-status[data-status="ready"] { color: var(--ok); }
   .ep-status[data-status="failed"] { color: var(--danger); }
+  .ep-audio { width: 100%; height: 2.25rem; margin-block: 0.35rem 0.15rem; }
+  .episodes-pagination { display: flex; gap: 0.5rem; margin-block-start: 1rem; align-items: center; }
   .send-row { display: grid; gap: 0.75rem; }
   @media (min-width: 40rem) { .send-row { grid-template-columns: 1fr auto; align-items: end; } }
   .send .choices { margin-block-start: 0.75rem; }
@@ -133,12 +141,16 @@ export function renderAccountPage(d: AccountPageData): string {
       <div class="feed-paths">${paths}</div></li>`;
   }).join("");
 
-  const episodeItems = d.episodes.map((e) =>
-    `<li><div class="row-head"><span class="row-title">${esc(e.title)}</span>
+  const episodeItems = d.episodes.map((e) => {
+    const audioUrl = e.status === "ready" && e.audioKey
+      ? `/audio/${e.audioKey.replace(/^\/+/, "")}`
+      : null;
+    return `<li><div class="row-head"><span class="row-title">${esc(e.title)}</span>
       <span class="ep-status" data-status="${esc(e.status)}">${esc(e.status)}</span></div>
       <div class="meta">${e.mode === "direct" ? "Read aloud" : "Deep dive"} · ${
       esc(e.sourceTitle ?? e.sourceId)
     } · ${when(e.createdAt)}</div>
+${audioUrl ? `<audio controls preload="none" class="ep-audio" src="${esc(audioUrl)}"></audio>` : ""}
 ${e.status === "failed" && e.error ? `<div class="error-detail">${esc(e.error)}</div>` : ""}
 ${
       approved && e.status === "ready" && !e.regenerating
@@ -155,8 +167,8 @@ ${
         }" data-title="${esc(e.title)}" data-tooltip="Retry ${esc(e.title)}">Retry</button></div>`
         : ""
     }
-    </li>`
-  ).join("");
+    </li>`;
+  }).join("");
 
   const passkeyItems = d.credentials.map((c) => {
     const provider = resolvePasskeyProvider(c.aaguid);
@@ -394,6 +406,22 @@ ${sendSection}
     episodeItems
       ? `<ul class="rows">${episodeItems}</ul>`
       : `<p class="empty">Nothing yet. Send an article above and it appears here.</p>`
+  }
+    ${
+    d.hasMoreEpisodes || (d.currentLimit && d.currentLimit > 10)
+      ? `<div class="episodes-pagination">
+          ${
+        d.hasMoreEpisodes
+          ? `<a class="btn quiet small" id="loadMoreEpisodes" href="/account?limit=${d.nextEpisodesLimit}#episodes-h">Show more episodes</a>`
+          : ""
+      }
+          ${
+        d.currentLimit && d.currentLimit > 10
+          ? `<a class="btn quiet small" id="showFewerEpisodes" href="/account#episodes-h">Show fewer</a>`
+          : ""
+      }
+        </div>`
+      : ""
   }
     <p class="feedback" id="regenFeedback" role="status" aria-live="polite"></p>
   </section>
@@ -798,15 +826,25 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
   }
   const baseUrl = resolveOrigin(ctx.config, req).baseUrl;
   const nonce = newCspNonce();
-  const [sources, credentials, episodes, outdatedCount, failedEpisodes] = await Promise.all([
+  const rawLimit = reqUrl.searchParams.get("limit");
+  const parsedLimit = rawLimit ? parseInt(rawLimit, 10) : 10;
+  const currentLimit = Number.isFinite(parsedLimit) && parsedLimit > 0
+    ? Math.min(Math.max(parsedLimit, 10), 100)
+    : 10;
+
+  const [sources, credentials, rawEpisodes, outdatedCount, failedEpisodes] = await Promise.all([
     store.listSources(user.id),
     store.listCredentials(user.id),
-    store.listEpisodes({ userId: user.id, limit: 10 }),
+    store.listEpisodes({ userId: user.id, limit: currentLimit + 1 }),
     user.status === "approved" ? countOutdatedEpisodes(store, user.id) : 0,
     user.status === "approved"
       ? store.listEpisodes({ userId: user.id, status: "failed", limit: 50 })
       : [],
   ]);
+
+  const hasMoreEpisodes = rawEpisodes.length > currentLimit;
+  const episodes = hasMoreEpisodes ? rawEpisodes.slice(0, currentLimit) : rawEpisodes;
+  const nextEpisodesLimit = Math.min(currentLimit + 15, 100);
 
   const rawAdd = reqUrl.searchParams.get("add") || reqUrl.searchParams.get("url");
   const rawTitle = reqUrl.searchParams.get("title");
@@ -827,6 +865,9 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     sources,
     credentials,
     episodes,
+    hasMoreEpisodes,
+    nextEpisodesLimit,
+    currentLimit,
     outdatedCount,
     failedCount: failedEpisodes.length,
     prefill,

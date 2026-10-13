@@ -41,6 +41,7 @@ import { renderShell, type Viewer, viewerOf } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { RUN_HISTORY_LIMIT } from "../storage/mod.ts";
+import { renderAdminNav } from "./admin_nav.ts";
 
 export interface AdminPageOptions {
   /** Absolute origin, so the shown feed URL is the one that actually works. */
@@ -99,9 +100,7 @@ export function renderAdminPage(
     produce audio until they are approved — that gate is what keeps synthesis
     spend to people you have accepted.
   </p>
-  <!-- audio-feed-n6uu: the failures and job state Paul asked to see without copying
-       anything out of the UI. Read-only, behind the same admin gate. -->
-  <p><a href="/admin/observability">Observability — recent failures and queue state</a></p>
+  ${renderAdminNav("operations")}
 
   ${
     adminConfigured || signedIn ? "" : `<div class="card" role="alert">

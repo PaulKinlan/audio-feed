@@ -34,7 +34,10 @@ import { handleAudio, notImplemented } from "./routes/audio.ts";
 import { sessionUser } from "./auth/sessions.ts";
 import { handleHome } from "./routes/home.ts";
 import { handleAdmin } from "./routes/admin.ts";
+import { handleAdminSubscriberDetail, handleAdminSubscribers } from "./routes/admin_subscribers.ts";
 import { handleAdminObservability } from "./routes/admin_observability.ts";
+import { handleAdminIssues } from "./routes/admin_issues.ts";
+import { handleAdminTelemetry } from "./routes/admin_telemetry.ts";
 import { handleLogin } from "./routes/login.ts";
 import { handleAccount } from "./routes/account.ts";
 import {
@@ -128,9 +131,13 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // every byte of that data comes from the token-gated /api/admin/users routes
   // (audio-feed-z2s).
   router.get("/admin", handleAdmin);
+  router.get("/admin/subscribers", handleAdminSubscribers);
+  router.get("/admin/subscribers/:id", handleAdminSubscriberDetail);
   // audio-feed-n6uu: the observability page. Same session + isActiveAdmin gate as /admin (the
   // handler applies it); registered as its own route so the console shell stays data-free.
   router.get("/admin/observability", handleAdminObservability);
+  router.get("/admin/observability/issues", handleAdminIssues);
+  router.get("/admin/observability/telemetry", handleAdminTelemetry);
   // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.
   // audio-feed-sw1r: a DEV/TEST-ONLY surface that THROWS, so the canary invariant test has a request path
   // that reaches the server's unhandled-error record. The screen it exercises is the point; the route exists

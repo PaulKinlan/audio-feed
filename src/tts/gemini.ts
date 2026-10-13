@@ -80,17 +80,17 @@ export const DEFAULT_FOIL_VOICE: GeminiTtsVoice = "Puck";
 export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 /** 3.8 Flash TTS accepts at most 8192 input tokens; UTF-8 bytes are a conservative
  * upper bound for transcript tokens: each text token consumes at least one input byte, even
- * in CJK/multibyte text. 6000 leaves >2000 tokens for metadata/overhead vs the 8192 cap.
+ * in CJK/multibyte text. 3000 bytes keeps single-turn TTS latency ~20-25s and within invocation budgets (audio-feed-9lrl).
  * Exact counts still require the provider countTokens endpoint. */
-export const MAX_TTS_INPUT_BYTES = 6_000;
+export const MAX_TTS_INPUT_BYTES = 3_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
-/** Bound paid calls per episode (audio-feed-9yu8). Further adaptive splits count too; long
+/** Bound paid calls per episode (audio-feed-9yu8, audio-feed-9lrl). Further adaptive splits count too; long
  * articles fail before sending any requests. The claim lease — not this cap — is the wall-clock
  * outer bound: the worker stops paid work 60s before expiry and passes a lease AbortSignal, and
  * resumable segments (audio-feed-wr1u) mean a claim that expires mid-episode re-pays only the
  * segment that was in flight. */
-export const MAX_TTS_SEGMENTS = 12;
+export const MAX_TTS_SEGMENTS = 24;
 /**
  * Per-attempt deadline: a hung request must not hold a synthesis worker forever. 120s answers the
  * 2026-10-09 incident (audio-feed-bp6r): 9vns measured segments at 45-55s wall-clock, and the

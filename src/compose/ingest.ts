@@ -139,6 +139,24 @@ export function createIngestHandler(
       }
       return { articleId, episodeId };
     },
+    onFailure: async ({ user, reason, status, mode }) => {
+      // audio-feed-r7sb: surface pre-episode ingest failures in structured logs for dead-letter visibility
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: "warn",
+        type: "ingest.failed",
+        message: "Article ingest failed before episode creation",
+        process: "app",
+        route: "/api/ingest",
+        userId: user?.id,
+        correlationId: crypto.randomUUID(),
+        reason,
+        context: {
+          status,
+          ...(mode ? { mode } : {}),
+        },
+      });
+    },
   });
   // The ingest seam is a Router handler; the lane factory is a Request handler.
   return ({ req }) => handler(req);

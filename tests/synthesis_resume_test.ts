@@ -15,11 +15,19 @@
  * 3. A voice change does not reuse another voice's audio.
  */
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
-import { memoryStores } from "../src/config.ts";
+import { DEFAULT_MAX_INVOCATION_DURATION_MS, memoryStores } from "../src/config.ts";
 import { runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { deleteUserSource } from "../src/compose/account.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
-import { decodedFromWav, GeminiTtsError, parseWavHeader, pcmToWav } from "../src/tts/gemini.ts";
+import {
+  decodedFromWav,
+  GeminiTtsError,
+  MAX_TTS_INPUT_BYTES,
+  MAX_TTS_SEGMENTS,
+  parseWavHeader,
+  pcmToWav,
+} from "../src/tts/gemini.ts";
+import { ESTIMATED_TTS_TURN_DURATION_MS } from "../src/synthesis/limits.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { segmentBlobKey, segmentTextHash } from "../src/types.ts";
@@ -614,4 +622,19 @@ Deno.test("decodedFromWav round-trips pcmToWav without losing the audio", () => 
   assertEquals(decoded.toWav(), wav);
   assertMatch(String(decoded.durationSeconds), /^\d+(\.\d+)?$/);
   assertStringIncludes(decoded.mimeType, "wav");
+});
+
+Deno.test("audio-feed-9lrl: invocation budget constants accommodate 45-55s turns and 3k byte segments", () => {
+  assertEquals(DEFAULT_MAX_INVOCATION_DURATION_MS, 180_000);
+  assertEquals(ESTIMATED_TTS_TURN_DURATION_MS, 45_000);
+  assertEquals(MAX_TTS_INPUT_BYTES, 3_000);
+  assertEquals(MAX_TTS_SEGMENTS, 24);
+  assertEquals(MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS, 72_000);
+
+  // Verify that an invocation budget preflight gives enough headroom for realistic turns
+  const netBudget = DEFAULT_MAX_INVOCATION_DURATION_MS - 5_000; // minus INVOCATION_FLUSH_MARGIN_MS
+  assert(
+    netBudget >= ESTIMATED_TTS_TURN_DURATION_MS * 3,
+    "default budget fits at least 3 worst-case TTS turns",
+  );
 });

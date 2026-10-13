@@ -28,6 +28,7 @@ import { esc } from "./html.ts";
 import { renderShell, viewerOf } from "./shell.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { resolveOrigin } from "../origin.ts";
+import { ADMIN_NAV_CSS, renderAdminNav } from "./admin_nav.ts";
 import {
   buildObservabilityReport,
   type ClaimAttempt,
@@ -57,6 +58,7 @@ function page(
     title: "Observability — Audio Feed",
     viewer,
     current: "admin",
+    css: ADMIN_NAV_CSS,
     head: `<meta name="robots" content="noindex, nofollow">`,
     main,
     nonce,
@@ -386,6 +388,8 @@ export async function handleAdminObservability(
   controls on this page on purpose — the page that reports an incident must not be able to cause
   one. <a href="/admin">Back to the console</a>.</p>
 
+  ${renderAdminNav("observability")}
+
   ${readFailureNotice}
 
   ${liveClaimsSection}
@@ -462,6 +466,9 @@ export async function handleAdminObservability(
       ? `<p>No warn/error records in the retained window.</p>`
       : report.failures.map((failure) => failureRowHtml(failure, report)).join("")
   }
+    <p class="u-mt-4">
+      <a href="/admin/observability/issues" class="btn secondary">Browse all issues, filter by route / correlation ID, and dead letters &rarr;</a>
+    </p>
   </section>
 
   <section class="card" aria-labelledby="limits-h">

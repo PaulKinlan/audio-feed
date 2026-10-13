@@ -24,26 +24,15 @@ const homeDataElement = document.getElementById("home-data");
 const HOME_DATA = homeDataElement ? JSON.parse(homeDataElement.textContent || "{}") : { base: "" };
 const BASE = HOME_DATA.base;
 
-/**
- * The ids the homepage always renders. Missing one is a deploy bug, not a state to recover
- * from, so it is checked once here rather than optional-chained at every use (same guard, same
- * reasoning, as admin.js and listen.js). Elements the code already guards with `if (el)` keep
- * their plain `document.getElementById` + null type.
- * @param {string} id
- */
-const $ = (id) => {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`homepage is missing #${id}`);
-  return el;
-};
-
-const form = /** @type {HTMLFormElement} */ ($("ingest"));
-const button = /** @type {HTMLButtonElement} */ ($("submit"));
-const result = $("result");
-const url = /** @type {HTMLInputElement} */ ($("url"));
-const token = /** @type {HTMLInputElement} */ ($("token"));
+const form = /** @type {HTMLFormElement | null} */ (document.getElementById("ingest"));
+const button = /** @type {HTMLButtonElement | null} */ (document.getElementById("submit"));
+const result = document.getElementById("result");
+const url = /** @type {HTMLInputElement | null} */ (document.getElementById("url"));
+const token = /** @type {HTMLInputElement | null} */ (document.getElementById("token"));
 /** @type {HTMLInputElement[]} */
-const required = [url, token];
+const required = [url, token].filter(
+  /** @type {(el: HTMLInputElement | null) => el is HTMLInputElement} */ ((el) => el !== null),
+);
 
 // :user-invalid is a visual state only. Assistive technology needs
 // aria-invalid, and it has to appear on the same schedule as the styling —
@@ -64,276 +53,283 @@ const sync = (input) => {
   if (!supportsUserInvalid) input.classList.toggle("is-invalid", !valid);
 };
 
-form.addEventListener("blur", (e) => {
-  const target = /** @type {HTMLInputElement | null} */ (e.target);
-  if (target && required.includes(target)) sync(target);
-}, true);
+if (form && button && result && url && token) {
+  form.addEventListener("blur", (e) => {
+    const target = /** @type {HTMLInputElement | null} */ (e.target);
+    if (target && required.includes(target)) sync(target);
+  }, true);
 
-form.addEventListener("input", (e) => {
-  const target = /** @type {HTMLInputElement | null} */ (e.target);
-  if (target && required.includes(target) && target.checkValidity()) {
-    target.removeAttribute("aria-invalid");
-    target.classList.remove("is-invalid");
-  }
-});
-
-/**
- * @param {string} kind
- * @param {string} message
- * @param {string} [detail]
- * @param {string} [playerUrl]
- */
-const say = (kind, message, detail, playerUrl) => {
-  result.className = kind;
-  result.innerHTML = "";
-  const p = document.createElement("p");
-  p.textContent = message;
-  result.append(p);
-  if (detail) {
-    const d = document.createElement("p");
-    d.className = "detail";
-    d.textContent = detail;
-    result.append(d);
-  }
-  if (playerUrl) {
-    const linkWrap = document.createElement("p");
-    linkWrap.className = "player-action";
-    linkWrap.style.marginBlockStart = "var(--space-2)";
-    const a = document.createElement("a");
-    a.href = playerUrl;
-    a.className = "player-link";
-    a.style.fontWeight = "600";
-    a.textContent = "Open in Web Player →";
-    linkWrap.appendChild(a);
-    result.append(linkWrap);
-  }
-};
-
-// audio-feed-b6nr: the returning-subscriber box is rendered visible by the server when the request
-// carries a session, so this client neither reads nor prefills from localStorage. Nothing in this
-// file has to know the capability.
-
-const queryParams = new URLSearchParams(location.search);
-const addQuery = queryParams.get("add") || queryParams.get("url");
-const feedQuery = queryParams.get("feed");
-const titleQuery = queryParams.get("title");
-
-if (addQuery) {
-  try {
-    const parsed = new URL(addQuery);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      url.value = addQuery;
+  form.addEventListener("input", (e) => {
+    const target = /** @type {HTMLInputElement | null} */ (e.target);
+    if (target && required.includes(target) && target.checkValidity()) {
+      target.removeAttribute("aria-invalid");
+      target.classList.remove("is-invalid");
     }
-  } catch { /* ignore */ }
-}
-if (feedQuery) {
-  try {
-    const parsedFeed = new URL(feedQuery);
-    if (parsedFeed.protocol === "http:" || parsedFeed.protocol === "https:") {
-      const feedInput = /** @type {HTMLInputElement | null} */ (
-        document.getElementById("feed-url")
-      );
-      if (feedInput) feedInput.value = feedQuery;
+  });
+
+  /**
+   * @param {string} kind
+   * @param {string} message
+   * @param {string} [detail]
+   * @param {string} [playerUrl]
+   */
+  const say = (kind, message, detail, playerUrl) => {
+    result.className = kind;
+    result.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = message;
+    result.append(p);
+    if (detail) {
+      const d = document.createElement("p");
+      d.className = "detail";
+      d.textContent = detail;
+      result.append(d);
     }
-  } catch { /* ignore */ }
-}
-if (titleQuery) {
-  const feedTitleInput = /** @type {HTMLInputElement | null} */ (
-    document.getElementById("feed-title")
-  );
-  if (feedTitleInput) feedTitleInput.value = titleQuery.slice(0, 100);
-}
+    if (playerUrl) {
+      const linkWrap = document.createElement("p");
+      linkWrap.className = "player-action";
+      linkWrap.style.marginBlockStart = "var(--space-2)";
+      const a = document.createElement("a");
+      a.href = playerUrl;
+      a.className = "player-link";
+      a.style.fontWeight = "600";
+      a.textContent = "Open in Web Player →";
+      linkWrap.appendChild(a);
+      result.append(linkWrap);
+    }
+  };
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  required.forEach(sync);
-  if (!form.checkValidity()) {
-    form.reportValidity();
-    return;
-  }
+  // audio-feed-b6nr: the returning-subscriber box is rendered visible by the server when the request
+  // carries a session, so this client neither reads nor prefills from localStorage. Nothing in this
+  // file has to know the capability.
 
-  button.setAttribute("aria-disabled", "true");
-  button.textContent = "Sending…";
-  say("", "Queueing the article…");
+  const queryParams = new URLSearchParams(location.search);
+  const addQuery = queryParams.get("add") || queryParams.get("url");
+  const feedQuery = queryParams.get("feed");
+  const titleQuery = queryParams.get("title");
 
-  try {
-    const response = await fetch("/api/ingest", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        // A header, never a query parameter: a token in a URL ends up in
-        // history, referrers and server logs.
-        "x-feed-token": token.value.trim(),
-      },
-      body: JSON.stringify({
-        url: url.value.trim(),
-        mode: /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value,
-      }),
-    });
-
-    const body = await response.json().catch(() => ({}));
-
-    if (response.status === 202) {
-      say(
-        "ok",
-        "Queued. It will appear in your feed once synthesis finishes.",
-        body.article && body.article.title ? "Article: " + body.article.title : undefined,
-        token.value.trim() ? "/listen/" + encodeURIComponent(token.value.trim()) : undefined,
-      );
-
-      // Clearing url.value alone is not enough, and the difference is
-      // visible: an emptied required field the user has already interacted
-      // with matches :user-invalid, so a red "Enter a full URL" error appeared
-      // directly beneath the green success message. form.reset() is what
-      // clears the browser's interaction state; the token and mode are then
-      // restored because someone sending a second article wants to keep them.
-      const keptToken = token.value;
-      const keptMode = /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value;
-      form.reset();
-      token.value = keptToken;
-      /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value = keptMode;
-      for (const field of required) {
-        field.removeAttribute("aria-invalid");
-        field.classList.remove("is-invalid");
+  if (addQuery) {
+    try {
+      const parsed = new URL(addQuery);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        url.value = addQuery;
       }
-      url.focus();
-    } else if (response.status === 403) {
-      say(
-        "bad",
-        "That token was not accepted, or the account is not approved yet.",
-        "New accounts need admin approval before audio can be generated.",
-      );
-    } else {
-      say("bad", body.error || "The article could not be queued.", "Status " + response.status);
+    } catch { /* ignore */ }
+  }
+  if (feedQuery) {
+    try {
+      const parsedFeed = new URL(feedQuery);
+      if (parsedFeed.protocol === "http:" || parsedFeed.protocol === "https:") {
+        const feedInput = /** @type {HTMLInputElement | null} */ (
+          document.getElementById("feed-url")
+        );
+        if (feedInput) feedInput.value = feedQuery;
+      }
+    } catch { /* ignore */ }
+  }
+  if (titleQuery) {
+    const feedTitleInput = /** @type {HTMLInputElement | null} */ (
+      document.getElementById("feed-title")
+    );
+    if (feedTitleInput) feedTitleInput.value = titleQuery.slice(0, 100);
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    required.forEach(sync);
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      return;
     }
-  } catch (error) {
-    say("bad", "Could not reach the server.", String(error));
-  } finally {
-    button.removeAttribute("aria-disabled");
-    button.textContent = "Send to Audio";
-  }
-});
 
-const feedForm = /** @type {HTMLFormElement} */ ($("subscribe-source"));
-const feedButton = /** @type {HTMLButtonElement} */ ($("submit-feed"));
-const feedResult = $("feed-result");
-const feedUrl = /** @type {HTMLInputElement} */ ($("feed-url"));
-const feedTitle = /** @type {HTMLInputElement} */ ($("feed-title"));
+    button.setAttribute("aria-disabled", "true");
+    button.textContent = "Sending…";
+    say("", "Queueing the article…");
 
-/**
- * @param {string} kind
- * @param {string} message
- * @param {string} [detail]
- * @param {string} [playerUrl]
- */
-const sayFeed = (kind, message, detail, playerUrl) => {
-  feedResult.className = kind;
-  feedResult.innerHTML = "";
-  const p = document.createElement("p");
-  p.textContent = message;
-  feedResult.append(p);
-  if (detail) {
-    const d = document.createElement("p");
-    d.className = "detail";
-    d.textContent = detail;
-    feedResult.append(d);
-  }
-  if (playerUrl) {
-    const linkWrap = document.createElement("p");
-    linkWrap.className = "player-action";
-    linkWrap.style.marginBlockStart = "var(--space-2)";
-    const a = document.createElement("a");
-    a.href = playerUrl;
-    a.className = "player-link";
-    a.style.fontWeight = "600";
-    a.textContent = "Open in Web Player →";
-    linkWrap.appendChild(a);
-    feedResult.append(linkWrap);
-  }
-};
+    try {
+      const response = await fetch("/api/ingest", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          // A header, never a query parameter: a token in a URL ends up in
+          // history, referrers and server logs.
+          "x-feed-token": token.value.trim(),
+        },
+        body: JSON.stringify({
+          url: url.value.trim(),
+          mode: /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value,
+        }),
+      });
 
-feedUrl.addEventListener("blur", () => sync(feedUrl));
-feedUrl.addEventListener("input", () => {
-  if (feedUrl.checkValidity()) {
-    feedUrl.removeAttribute("aria-invalid");
-    feedUrl.classList.remove("is-invalid");
-  }
-});
+      const body = await response.json().catch(() => ({}));
 
-feedForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  sync(feedUrl);
-  sync(token);
-  if (!token.value.trim()) {
-    sayFeed("bad", "A feed token is required.", "Enter your feed token in the field above.");
-    token.focus();
-    return;
-  }
-  if (!feedUrl.checkValidity()) {
-    feedUrl.reportValidity();
-    return;
-  }
+      if (response.status === 202) {
+        say(
+          "ok",
+          "Queued. It will appear in your feed once synthesis finishes.",
+          body.article && body.article.title ? "Article: " + body.article.title : undefined,
+          token.value.trim() ? "/listen/" + encodeURIComponent(token.value.trim()) : undefined,
+        );
 
-  feedButton.setAttribute("aria-disabled", "true");
-  feedButton.textContent = "Subscribing…";
-  sayFeed("", "Checking feed and queueing posts…");
+        // Clearing url.value alone is not enough, and the difference is
+        // visible: an emptied required field the user has already interacted
+        // with matches :user-invalid, so a red "Enter a full URL" error appeared
+        // directly beneath the green success message. form.reset() is what
+        // clears the browser's interaction state; the token and mode are then
+        // restored because someone sending a second article wants to keep them.
+        const keptToken = token.value;
+        const keptMode = /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value;
+        form.reset();
+        token.value = keptToken;
+        /** @type {HTMLSelectElement} */ (form.elements.namedItem("mode")).value = keptMode;
+        for (const field of required) {
+          field.removeAttribute("aria-invalid");
+          field.classList.remove("is-invalid");
+        }
+        url.focus();
+      } else if (response.status === 403) {
+        say(
+          "bad",
+          "That token was not accepted, or the account is not approved yet.",
+          "New accounts need admin approval before audio can be generated.",
+        );
+      } else {
+        say("bad", body.error || "The article could not be queued.", "Status " + response.status);
+      }
+    } catch (error) {
+      say("bad", "Could not reach the server.", String(error));
+    } finally {
+      button.removeAttribute("aria-disabled");
+      button.textContent = "Send to Audio";
+    }
+  });
+}
 
-  try {
-    const response = await fetch("/api/sources", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-feed-token": token.value.trim(),
-      },
-      body: JSON.stringify({
-        feedUrl: feedUrl.value.trim(),
-        title: feedTitle.value.trim() || undefined,
-        modes: [/** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode")).value],
-      }),
-    });
+const feedForm =
+  /** @type {HTMLFormElement | null} */ (document.getElementById("subscribe-source"));
+const feedButton = /** @type {HTMLButtonElement | null} */ (document.getElementById("submit-feed"));
+const feedResult = document.getElementById("feed-result");
+const feedUrl = /** @type {HTMLInputElement | null} */ (document.getElementById("feed-url"));
+const feedTitle = /** @type {HTMLInputElement | null} */ (document.getElementById("feed-title"));
 
-    const body = await response.json().catch(() => ({}));
+if (feedForm && feedButton && feedResult && feedUrl) {
+  /**
+   * @param {string} kind
+   * @param {string} message
+   * @param {string} [detail]
+   * @param {string} [playerUrl]
+   */
+  const sayFeed = (kind, message, detail, playerUrl) => {
+    feedResult.className = kind;
+    feedResult.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = message;
+    feedResult.append(p);
+    if (detail) {
+      const d = document.createElement("p");
+      d.className = "detail";
+      d.textContent = detail;
+      feedResult.append(d);
+    }
+    if (playerUrl) {
+      const linkWrap = document.createElement("p");
+      linkWrap.className = "player-action";
+      linkWrap.style.marginBlockStart = "var(--space-2)";
+      const a = document.createElement("a");
+      a.href = playerUrl;
+      a.className = "player-link";
+      a.style.fontWeight = "600";
+      a.textContent = "Open in Web Player →";
+      linkWrap.appendChild(a);
+      feedResult.append(linkWrap);
+    }
+  };
 
-    if (response.status === 201) {
-      const count = body.poll && typeof body.poll.queued === "number" ? body.poll.queued : 0;
-      const sourceTitle = body.source && body.source.title ? body.source.title : "the feed";
-      const feedPath = body.feedPaths && body.feedPaths[0] ? body.feedPaths[0] : null;
-      const detail = feedPath ? "Per-source feed URL: " + BASE + feedPath : undefined;
-      const userToken = token.value.trim();
-
-      sayFeed(
-        "ok",
-        "Subscribed to " + sourceTitle + ". " + count + " post(s) queued for synthesis.",
-        detail,
-        userToken ? "/listen/" + encodeURIComponent(userToken) : undefined,
-      );
-
-      const keptMode = /** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode"))
-        .value;
-      feedForm.reset();
-      /** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode")).value = keptMode;
+  feedUrl.addEventListener("blur", () => sync(feedUrl));
+  feedUrl.addEventListener("input", () => {
+    if (feedUrl.checkValidity()) {
       feedUrl.removeAttribute("aria-invalid");
       feedUrl.classList.remove("is-invalid");
-    } else if (response.status === 403) {
-      sayFeed(
-        "bad",
-        "That token was not accepted, or the account is not approved yet.",
-        "New accounts need admin approval before audio can be generated.",
-      );
-    } else {
-      sayFeed(
-        "bad",
-        body.error || "The feed could not be subscribed.",
-        "Status " + response.status,
-      );
     }
-  } catch (error) {
-    sayFeed("bad", "Could not reach the server.", String(error));
-  } finally {
-    feedButton.removeAttribute("aria-disabled");
-    feedButton.textContent = "Subscribe to Feed";
-  }
-});
+  });
+
+  feedForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    sync(feedUrl);
+    if (token) {
+      sync(token);
+      if (!token.value.trim()) {
+        sayFeed("bad", "A feed token is required.", "Enter your feed token in the field above.");
+        token.focus();
+        return;
+      }
+    }
+    if (!feedUrl.checkValidity()) {
+      feedUrl.reportValidity();
+      return;
+    }
+
+    feedButton.setAttribute("aria-disabled", "true");
+    feedButton.textContent = "Subscribing…";
+    sayFeed("", "Checking feed and queueing posts…");
+
+    try {
+      const response = await fetch("/api/sources", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-feed-token": token ? token.value.trim() : "",
+        },
+        body: JSON.stringify({
+          feedUrl: feedUrl.value.trim(),
+          title: feedTitle ? feedTitle.value.trim() || undefined : undefined,
+          modes: [/** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode")).value],
+        }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+
+      if (response.status === 201) {
+        const count = body.poll && typeof body.poll.queued === "number" ? body.poll.queued : 0;
+        const sourceTitle = body.source && body.source.title ? body.source.title : "the feed";
+        const feedPath = body.feedPaths && body.feedPaths[0] ? body.feedPaths[0] : null;
+        const detail = feedPath ? "Per-source feed URL: " + BASE + feedPath : undefined;
+        const userToken = token ? token.value.trim() : "";
+
+        sayFeed(
+          "ok",
+          "Subscribed to " + sourceTitle + ". " + count + " post(s) queued for synthesis.",
+          detail,
+          userToken ? "/listen/" + encodeURIComponent(userToken) : undefined,
+        );
+
+        const keptMode = /** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode"))
+          .value;
+        feedForm.reset();
+        /** @type {HTMLSelectElement} */ (feedForm.elements.namedItem("feedMode")).value = keptMode;
+        feedUrl.removeAttribute("aria-invalid");
+        feedUrl.classList.remove("is-invalid");
+      } else if (response.status === 403) {
+        sayFeed(
+          "bad",
+          "That token was not accepted, or the account is not approved yet.",
+          "New accounts need admin approval before audio can be generated.",
+        );
+      } else {
+        sayFeed(
+          "bad",
+          body.error || "The feed could not be subscribed.",
+          "Status " + response.status,
+        );
+      }
+    } catch (error) {
+      sayFeed("bad", "Could not reach the server.", String(error));
+    } finally {
+      feedButton.removeAttribute("aria-disabled");
+      feedButton.textContent = "Subscribe to Feed";
+    }
+  });
+}
 
 const requestForm = /** @type {HTMLFormElement | null} */ (
   document.getElementById("request-access-form")
@@ -341,12 +337,14 @@ const requestForm = /** @type {HTMLFormElement | null} */ (
 const requestSubmit = /** @type {HTMLButtonElement | null} */ (
   document.getElementById("request-submit")
 );
-const requestResult = $("request-result");
+const requestResult = document.getElementById("request-result");
 const requestEmail = /** @type {HTMLInputElement | null} */ (
   document.getElementById("request-email")
 );
-// Always rendered with the request form; used unguarded inside the submit handler.
-const requestName = /** @type {HTMLInputElement} */ ($("request-name"));
+// Rendered with the request form
+const requestName = /** @type {HTMLInputElement | null} */ (
+  document.getElementById("request-name")
+);
 
 /**
  * @param {string} kind
@@ -354,6 +352,7 @@ const requestName = /** @type {HTMLInputElement} */ ($("request-name"));
  * @param {string} [detail]
  */
 const sayRequest = (kind, message, detail) => {
+  if (!requestResult) return;
   requestResult.className = kind;
   requestResult.innerHTML = "";
   const p = document.createElement("p");
@@ -367,7 +366,7 @@ const sayRequest = (kind, message, detail) => {
   }
 };
 
-if (requestForm && requestEmail && requestSubmit) {
+if (requestForm && requestEmail && requestSubmit && requestResult && requestName) {
   requestEmail.addEventListener("blur", () => sync(requestEmail));
   requestEmail.addEventListener("input", () => {
     if (requestEmail.checkValidity()) {

@@ -64,11 +64,24 @@ export function readCookie(req: Request, name: string): string | null {
   return null;
 }
 
+const requestUserCache = new WeakMap<Request, Promise<User | null>>();
+
 /**
  * The signed-in user, or `null`. Unknown, expired, and orphaned sessions all
  * resolve `null`; the caller never learns which.
+ *
+ * Memoized per Request via WeakMap so multiple middleware/route calls within
+ * the same request do not repeat cookie parsing, crypto hashing, and store lookups (audio-feed-akwg).
  */
-export async function sessionUser(store: MetadataStore, req: Request): Promise<User | null> {
+export function sessionUser(store: MetadataStore, req: Request): Promise<User | null> {
+  const cached = requestUserCache.get(req);
+  if (cached !== undefined) return cached;
+  const promise = resolveSessionUser(store, req);
+  requestUserCache.set(req, promise);
+  return promise;
+}
+
+async function resolveSessionUser(store: MetadataStore, req: Request): Promise<User | null> {
   const secret = readCookie(req, SESSION_COOKIE);
   if (!secret) return null;
   const idHash = await hashSecret(secret);
@@ -83,6 +96,7 @@ export async function sessionUser(store: MetadataStore, req: Request): Promise<U
 
 /** Delete the session this request carries, if any. */
 export async function endSession(store: MetadataStore, req: Request): Promise<void> {
+  requestUserCache.delete(req);
   const secret = readCookie(req, SESSION_COOKIE);
   if (secret) await store.deleteSession(await hashSecret(secret));
 }

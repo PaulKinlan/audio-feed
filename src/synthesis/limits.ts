@@ -105,8 +105,8 @@ export function isInvocationBudgetAbort(error: unknown): boolean {
   return false;
 }
 
-/** Worst-case estimated duration for a single TTS turn in ms (audio-feed-9wqt). */
-export const ESTIMATED_TTS_TURN_DURATION_MS = 15_000;
+/** Worst-case estimated duration for a single TTS turn in ms (audio-feed-9wqt, audio-feed-9lrl). */
+export const ESTIMATED_TTS_TURN_DURATION_MS = 45_000;
 /** Worst-case estimated duration for grounded script generation stage in ms (audio-feed-9wqt). */
 export const ESTIMATED_SCRIPT_STAGE_DURATION_MS = 20_000;
 /** Worst-case estimated duration for terminal audio blob upload in ms (audio-feed-dv4p). */
@@ -116,7 +116,7 @@ export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
  *
  * THE ARITHMETIC THIS CONSTANT HAS TO SURVIVE (measured from the repo, 2026-10-13):
  * Gemini TTS emits 24 kHz 16-bit mono PCM = 48_000 B/s of audio. Input is capped
- * at MAX_TTS_INPUT_BYTES (6 KB) x MAX_TTS_SEGMENTS (12) = 72 KB of text ~= 80
+ * at MAX_TTS_INPUT_BYTES (3 KB) x MAX_TTS_SEGMENTS (24) = 72 KB of text ~= 80
  * minutes of narration at typical speaking rates, so the WAV ceiling is
  * 80 min x 48 KB/s ~= 230 MB; a typical 2_000-4_000 word article narrates to
  * 13-27 min = 37-77 MB. To fit the default upload window (45 s budget - 5 s

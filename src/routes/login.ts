@@ -18,7 +18,9 @@ import { htmlResponse, newCspNonce } from "./csp.ts";
 
 /** Only a same-site path: `/x`, never `//host` or `/\host`. */
 export function safeNext(raw: string | null, fallback = "/account"): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
+  if (
+    !raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\") || raw === "/"
+  ) {
     return fallback;
   }
   return raw;

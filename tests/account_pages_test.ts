@@ -219,7 +219,13 @@ Deno.test("GET /admin: an admin session gets the console, signed in (audio-feed-
 Deno.test("every page shares one shell and the player's palette (audio-feed-8fc)", async () => {
   const { fetch, stores } = app();
   const me = await seed(stores, { isAdmin: true });
-  for (const path of ["/", "/login", "/account", "/admin"]) {
+  const anon = await (await get(fetch, "/")).text();
+  assertStringIncludes(anon, 'class="site-header"', "/");
+  assertStringIncludes(anon, 'class="site-footer"', "/");
+  assertStringIncludes(anon, "--bg: #0a0a0c", "/");
+  assertStringIncludes(anon, "--accent: #a78bfa", "/");
+
+  for (const path of ["/login", "/account", "/admin"]) {
     const html = await (await get(fetch, path, stores, me.id)).text();
     assertStringIncludes(html, 'class="site-header"', path);
     assertStringIncludes(html, 'class="site-footer"', path);
@@ -229,7 +235,7 @@ Deno.test("every page shares one shell and the player's palette (audio-feed-8fc)
   }
 });
 
-Deno.test("the homepage header knows who is signed in, and is then private (audio-feed-8fc)", async () => {
+Deno.test("the homepage redirects signed-in users to /account, and logged-out is private (audio-feed-8fc, audio-feed-irgu)", async () => {
   const { fetch, stores } = app();
   const me = await seed(stores, { displayName: "Reader One" });
   const anon = await get(fetch, "/");
@@ -237,9 +243,80 @@ Deno.test("the homepage header knows who is signed in, and is then private (audi
   assertStringIncludes(anon.headers.get("vary") ?? "", "Cookie");
 
   const signed = await get(fetch, "/", stores, me.id);
+  assertEquals(signed.status, 303);
+  assertEquals(signed.headers.get("location"), "/account");
   assertEquals(signed.headers.get("cache-control"), "private, no-store");
-  const html = await signed.text();
-  assertStringIncludes(html, "Reader One");
-  assertStringIncludes(html, 'href="/account"');
-  assertStringIncludes(html, 'action="/api/auth/logout"');
+  assertStringIncludes(signed.headers.get("vary") ?? "", "Cookie");
+});
+
+Deno.test("GET /account renders inline audio player for ready episodes (audio-feed-w2zc)", async () => {
+  const { fetch, stores } = app();
+  const me = await seed(stores, { id: "user-audio-test", displayName: "Listener" });
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-ready-1",
+      userId: me.id,
+      title: "Playable Episode One",
+      status: "ready",
+      audioKey: "user-audio-test/direct/ep-ready-1.mp3",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-pending-1",
+      userId: me.id,
+      title: "Pending Episode",
+      status: "pending",
+    }),
+  );
+
+  const res = await get(fetch, "/account", stores, me.id);
+  assertEquals(res.status, 200);
+  const html = await res.text();
+  assertStringIncludes(
+    html,
+    '<audio controls preload="none" class="ep-audio" src="/audio/user-audio-test/direct/ep-ready-1.mp3"></audio>',
+  );
+  assertStringIncludes(html, "Playable Episode One");
+  assertStringIncludes(html, "Pending Episode");
+});
+
+Deno.test("GET /account supports episode pagination via limit query parameter (audio-feed-w2zc)", async () => {
+  const { fetch, stores } = app();
+  const me = await seed(stores, { id: "user-paginated", displayName: "Power Listener" });
+
+  // Seed 15 episodes
+  for (let i = 1; i <= 15; i++) {
+    const num = String(i).padStart(2, "0");
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-${num}`,
+        userId: me.id,
+        title: `Episode Number ${num}`,
+        status: "ready",
+        createdAt: new Date(Date.now() - (15 - i) * 60_000).toISOString(),
+      }),
+    );
+  }
+
+  // Default GET /account fetches 10 episodes and offers "Show more episodes"
+  const resDefault = await get(fetch, "/account", stores, me.id);
+  assertEquals(resDefault.status, 200);
+  const htmlDefault = await resDefault.text();
+  assertStringIncludes(htmlDefault, 'id="loadMoreEpisodes"');
+  assertStringIncludes(htmlDefault, 'href="/account?limit=25#episodes-h"');
+  assertStringIncludes(htmlDefault, "Show more episodes");
+
+  // GET /account?limit=25 fetches all 15 episodes and shows "Show fewer"
+  const resMore = await get(fetch, "/account?limit=25", stores, me.id);
+  assertEquals(resMore.status, 200);
+  const htmlMore = await resMore.text();
+  assertStringIncludes(htmlMore, "Episode Number 01");
+  assertStringIncludes(htmlMore, "Episode Number 15");
+  assertStringIncludes(htmlMore, 'id="showFewerEpisodes"');
+  assertStringIncludes(htmlMore, 'href="/account#episodes-h"');
+  assert(
+    !htmlMore.includes('id="loadMoreEpisodes"'),
+    "no loadMoreEpisodes when all episodes fit in limit",
+  );
 });
