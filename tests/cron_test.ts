@@ -382,6 +382,107 @@ Deno.test("POST /api/admin/poll-now requires admin token and runs batch feed pol
   assertEquals(episodes[0]!.status, "pending");
 });
 
+Deno.test("audio-feed-dvlk: cron feed poll emits feed.poll event readable via observability API with polled/queued/failed counts", async () => {
+  const obsKey = "obs-key-dvlk";
+  const stores: Stores = memoryStores();
+  const ctx: AppContext = {
+    config: { ...config, observabilityKey: obsKey },
+    stores,
+  };
+  await stores.metadata.putUser(makeUser({ id: "u1", status: "approved" }));
+  const source = makeSource({ id: "s1", userId: "u1", feedUrl: "https://example.com/feed.xml" });
+  await stores.metadata.putSource(source);
+
+  const sampleRss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Feed 1</title>
+  <item>
+    <title>Post 1</title>
+    <link>https://example.com/post-1</link>
+    <pubDate>Mon, 01 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+  <item>
+    <title>Post 2</title>
+    <link>https://example.com/post-2</link>
+    <pubDate>Tue, 02 Sep 2026 06:00:00 +0000</pubDate>
+  </item>
+</channel></rss>`;
+
+  const registered: CronRegistration[] = [];
+  const mockCron = (name: string, schedule: string, handler: () => Promise<void>) => {
+    registered.push({ name, schedule, handler });
+  };
+
+  const handlers = createHandlers(ctx, {
+    feedTransport: () =>
+      Promise.resolve(
+        new Response(sampleRss, { headers: { "content-type": "application/rss+xml" } }),
+      ),
+    fetchArticle: (url: string) =>
+      Promise.resolve({
+        url,
+        title: url.endsWith("post-1") ? "Post 1" : "Post 2",
+        author: "Author",
+        publishedAt: null,
+        lead: "",
+        body: "Article text.",
+      }),
+  });
+
+  registerCronJobs(ctx, {
+    cron: mockCron,
+    feedPollDeps: {
+      transport: () =>
+        Promise.resolve(
+          new Response(sampleRss, { headers: { "content-type": "application/rss+xml" } }),
+        ),
+      fetchArticle: (url: string) =>
+        Promise.resolve({
+          url,
+          title: url.endsWith("post-1") ? "Post 1" : "Post 2",
+          author: "Author",
+          publishedAt: null,
+          lead: "",
+          body: "Article text.",
+        }),
+    },
+  });
+
+  const pollJob = registered.find((j) => j.name === "audio-feed-poll-feeds");
+  assert(pollJob);
+
+  // Execute cron poll handler
+  await pollJob.handler();
+
+  // 1. Storage verification: feed.poll log record exists
+  const logs = await stores.metadata.listLogs();
+  const pollRecord = logs.find((l) => l.type === "feed.poll");
+  assert(pollRecord, "feed.poll record must be emitted into log store");
+  assertEquals(pollRecord.process, "cron");
+  assertEquals(pollRecord.job, "audio-feed-poll-feeds");
+  assertEquals(pollRecord.message, "cron feeds: polled 1, queued 2, failed 0");
+  assertEquals(pollRecord.context?.polled, 1);
+  assertEquals(pollRecord.context?.queued, 2);
+  assertEquals(pollRecord.context?.failed, 0);
+
+  // 2. Observability API verification: GET /api/observability/errors?since=0&severity=all
+  const { fetch } = createApp(ctx, handlers);
+  const res = await fetch(
+    new Request(`${BASE}/api/observability/errors?since=0&severity=all`, {
+      headers: { authorization: `Bearer ${obsKey}` },
+    }),
+  );
+  assertEquals(res.status, 200);
+  const data = await res.json();
+  const pollEvent = data.events.find((e: { type: string }) => e.type === "feed.poll");
+  assert(pollEvent, "feed.poll event must be returned by observability API");
+  assertEquals(pollEvent.job, "audio-feed-poll-feeds");
+  assertEquals(pollEvent.message, "cron feeds: polled 1, queued 2, failed 0");
+  assertEquals(pollEvent.context?.polled, 1);
+  assertEquals(pollEvent.context?.queued, 2);
+  assertEquals(pollEvent.context?.failed, 0);
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/admin/synthesize-now
 // ---------------------------------------------------------------------------
