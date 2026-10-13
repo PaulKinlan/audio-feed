@@ -983,7 +983,7 @@ interface GitLoadedModule {
     mode: "skip" | "explain",
     summarizer?: (code: string) => string | Promise<string>,
   ) => Promise<string>;
-  extract?: (text: string) => CodeBlockMatch[];
+  extract: (text: string) => CodeBlockMatch[];
 }
 
 async function loadGitModule(commit: string): Promise<GitLoadedModule> {
@@ -1006,6 +1006,19 @@ const CODE_EXPLANATION_CONCURRENCY = 4;
       extra = "export { findCodeBlocks as extractBlocks };\n";
     } else if (text.includes("function extractCodeBlocks(")) {
       extra = "export { extractCodeBlocks as extractBlocks };\n";
+    } else {
+      // For origin/main: derive extractor directly using the module's codeBlockRegex
+      extra =
+        "export function extractBlocks(text: string): { full: string; code: string; index: number }[] {\n" +
+        "  const matches: { full: string; code: string; index: number }[] = [];\n" +
+        "  const re = /(?:`{3,}|~{3,})(?:[^\\n\\r]*\\r?\\n)?([\\s\\S]*?)(?:`{3,}|~{3,})|<pre\\b[^>]*>(?:<code\\b[^>]*>)?([\\s\\S]*?)(?:<\\/code>)?<\\/pre>/gi;\n" +
+        "  let match: RegExpExecArray | null;\n" +
+        "  while ((match = re.exec(text)) !== null) {\n" +
+        '    const rawCode = match[1] ?? (match[2] ? decodeHtmlEntities(match[2]) : "");\n' +
+        "    matches.push({ full: match[0], code: rawCode.trim(), index: match.index });\n" +
+        "  }\n" +
+        "  return matches;\n" +
+        "}\n";
     }
     const entities = text.slice(
       text.indexOf("function decodeHtmlEntities"),
@@ -1017,6 +1030,11 @@ const CODE_EXPLANATION_CONCURRENCY = 4;
     );
     await Deno.writeTextFile(tempFile, stubs + "\n" + entities + "\n" + formatTts + "\n" + extra);
     const mod = await import("file://" + tempFile);
+    if (!mod.formatCodeForTts || !mod.extractBlocks) {
+      throw new Error(
+        `Git module for commit ${commit} failed to export required formatCodeForTts or extractBlocks`,
+      );
+    }
     return {
       format: mod.formatCodeForTts,
       extract: mod.extractBlocks,
@@ -1128,6 +1146,13 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
         `Inlined main diverged in explain mode from git at commit ${PINNED_REVISIONS.main.commit} on ${item.id}`,
       );
     }
+    const mBlocksGit = mainGit.extract(item.text);
+    const mBlocksInline = extractCodeBlocks_main(item.text);
+    if (JSON.stringify(mBlocksGit) !== JSON.stringify(mBlocksInline)) {
+      throw new Error(
+        `Inlined main diverged in block extraction AST from git on ${item.id}`,
+      );
+    }
 
     // 2. audit1
     const aSkipGit = await audit1Git.format(item.text, "skip");
@@ -1144,14 +1169,12 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
         `Inlined audit1 diverged in explain mode from git at commit ${PINNED_REVISIONS.audit1.commit} on ${item.id}`,
       );
     }
-    if (audit1Git.extract) {
-      const aBlocksGit = audit1Git.extract(item.text);
-      const aBlocksInline = extractCodeBlocks_audit1(item.text);
-      if (JSON.stringify(aBlocksGit) !== JSON.stringify(aBlocksInline)) {
-        throw new Error(
-          `Inlined audit1 diverged in block extraction AST from git on ${item.id}`,
-        );
-      }
+    const aBlocksGit = audit1Git.extract(item.text);
+    const aBlocksInline = extractCodeBlocks_audit1(item.text);
+    if (JSON.stringify(aBlocksGit) !== JSON.stringify(aBlocksInline)) {
+      throw new Error(
+        `Inlined audit1 diverged in block extraction AST from git on ${item.id}`,
+      );
     }
 
     // 3. fixc0gj v1
@@ -1169,14 +1192,12 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
         `Inlined fixc0gj v1 diverged in explain mode from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
       );
     }
-    if (fixV1Git.extract) {
-      const f1BlocksGit = fixV1Git.extract(item.text);
-      const f1BlocksInline = extractCodeBlocks_fixc0gj_9f18cc1(item.text);
-      if (JSON.stringify(f1BlocksGit) !== JSON.stringify(f1BlocksInline)) {
-        throw new Error(
-          `Inlined fixc0gj v1 diverged in block extraction AST from git on ${item.id}`,
-        );
-      }
+    const f1BlocksGit = fixV1Git.extract(item.text);
+    const f1BlocksInline = extractCodeBlocks_fixc0gj_9f18cc1(item.text);
+    if (JSON.stringify(f1BlocksGit) !== JSON.stringify(f1BlocksInline)) {
+      throw new Error(
+        `Inlined fixc0gj v1 diverged in block extraction AST from git on ${item.id}`,
+      );
     }
 
     // 4. fixc0gj v2
@@ -1194,14 +1215,12 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
         `Inlined fixc0gj v2 diverged in explain mode from git at commit ${PINNED_REVISIONS.fixc0gj_v2.commit} on ${item.id}`,
       );
     }
-    if (fixV2Git.extract) {
-      const f2BlocksGit = fixV2Git.extract(item.text);
-      const f2BlocksInline = extractCodeBlocks_fixc0gj_3d32fc4(item.text);
-      if (JSON.stringify(f2BlocksGit) !== JSON.stringify(f2BlocksInline)) {
-        throw new Error(
-          `Inlined fixc0gj v2 diverged in block extraction AST from git on ${item.id}`,
-        );
-      }
+    const f2BlocksGit = fixV2Git.extract(item.text);
+    const f2BlocksInline = extractCodeBlocks_fixc0gj_3d32fc4(item.text);
+    if (JSON.stringify(f2BlocksGit) !== JSON.stringify(f2BlocksInline)) {
+      throw new Error(
+        `Inlined fixc0gj v2 diverged in block extraction AST from git on ${item.id}`,
+      );
     }
   }
   console.log(
