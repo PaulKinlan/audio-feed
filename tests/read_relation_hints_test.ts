@@ -1260,4 +1260,87 @@ Deno.test("audio-feed-hfz5: space-containing read paths produce hints or resolve
       });
     },
   );
+
+  await t.step(
+    "literal space-containing read of missing file produces unresolved hint (audio-feed-14yj)",
+    async () => {
+      await withTempTree({
+        "tests/s_test.ts": [
+          "export async function r() {",
+          '  return await Deno.readTextFile("docs/notes final/missing.md");',
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const rp = await deriveReadRelationReport(root, ["tests/s_test.ts"]);
+        assertEquals(
+          rp.unresolved,
+          ["docs/notes final/missing.md"],
+          "direct literal read of missing space-containing path must be UNRESOLVED, never silent",
+        );
+
+        const plan = planTests(
+          ["docs/other.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(
+          plan.testFiles,
+          null,
+          "unresolved literal space read disables inert class and widens to full suite",
+        );
+        assertStringIncludes(plan.reason, "INCOMPLETE");
+        assertStringIncludes(plan.reason, "docs/notes final/missing.md");
+      });
+    },
+  );
+
+  await t.step(
+    "literal space-containing read of existing file populates relations and preserves inert docs",
+    async () => {
+      await withTempTree({
+        "docs/notes final/doc.md": "# Existing\n",
+        "tests/s_test.ts": [
+          "export async function r() {",
+          '  return await Deno.readTextFile("docs/notes final/doc.md");',
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const rp = await deriveReadRelationReport(root, ["tests/s_test.ts"]);
+        assertEquals(rp.unresolved, [], "existing literal space read leaves unresolved empty");
+        assert(
+          rp.relations.get("docs/notes final/doc.md")?.includes("tests/s_test.ts"),
+          "relation includes existing literal space-containing target",
+        );
+
+        const inert = planTests(
+          ["docs/other.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(inert.testFiles, [], "inert docs select 0 suites when relation is complete");
+
+        const active = planTests(
+          ["docs/notes final/doc.md"],
+          NO_MAP,
+          NO_MAP,
+          rp.relations,
+          [],
+          rp.unresolved,
+        );
+        assertEquals(
+          active.testFiles,
+          ["tests/s_test.ts"],
+          "modifying target selects reading suite",
+        );
+      });
+    },
+  );
 });

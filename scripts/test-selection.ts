@@ -1335,29 +1335,7 @@ function toRepoPath(hint: string, moduleDir: string, root: string): string | nul
   // Only path-shaped hints count. A `Deno.Command` call is full of literals that are not files: CLI flags
   // (`--allow-all`, `-c`), numbers, and punctuation from an args array. Keeping them out is what makes the
   // relation readable and keeps a change from matching junk.
-  if (!/^[\w@./-]+$/.test(path)) {
-    // A path containing spaces or other characters is only a repo path if it actually exists on disk.
-    // Anything else is rejected so command arguments and arbitrary strings are never mistaken for repo paths.
-    const norm = normalisePath(
-      path.startsWith(root)
-        ? path.slice(root.length)
-        : (path.startsWith("./") || path.startsWith("../")
-          ? `${moduleDir ? `${moduleDir}/` : ""}${path}`
-          : path),
-    );
-    if (!norm) return null;
-    try {
-      if (
-        Deno.statSync(`${root}${norm}`).isFile ||
-        Deno.statSync(`${root}${norm}`).isDirectory
-      ) {
-        return norm;
-      }
-    } catch {
-      // does not exist on disk
-    }
-    return null;
-  }
+  if (!/^[\w@./ -]+$/.test(path)) return null;
   if (path.startsWith("-")) return null;
   if (!path.includes("/") && !/\.[A-Za-z0-9]{1,5}$/.test(path)) return null;
   if (/^[a-z]+:/i.test(path) && !/^file:/i.test(path)) return null; // http(s):, jsr:, node:, data:
