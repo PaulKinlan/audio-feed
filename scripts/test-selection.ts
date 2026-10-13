@@ -602,7 +602,17 @@ export function stripComments(
     i++;
   }
 
-  if (context !== "LINE_COMMENT" && context !== "BLOCK_COMMENT") {
+  if (context === "BLOCK_COMMENT") {
+    // An unterminated block comment means the file is ill-formed: the scan ran off the end still in
+    // comment state. The safe direction is to exclude NOTHING - hand the source back unchanged, with no
+    // spans. The old behaviour dropped everything from the `/*` onward while KEEPING the string spans
+    // found before it, so anything named after the unterminated comment - an import, a module path, a
+    // referrer - was invisible to the selector, and a hidden module NARROWS the selection and can lose
+    // a suite that should have been selected. Over-selection only costs gate time. audio-feed-ywjz.
+    return { stripped: source, spans: [] };
+  }
+
+  if (context !== "LINE_COMMENT") {
     result += source.slice(offset, i);
   }
 
