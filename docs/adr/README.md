@@ -8,6 +8,7 @@ Format: **Context** (what forced a choice) → **Decision** (what we chose, in t
 (including "do nothing" and why not). Keep the measured numbers in the file — a decision record
 whose evidence is a claim nobody can re-run is not a record.
 
-| ADR | Decision | Status |
-| --- | --- | --- |
-| [0001](0001-domain-repositories.md) | Split `MetadataStore` into domain repositories | Accepted — Phase 1 landed (audio-feed-d9sl) |
+| ADR                                                                | Decision                                                          | Status                                                                                    |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [0001](0001-domain-repositories.md)                                | Split `MetadataStore` into domain repositories                    | Accepted — Phase 1 landed (audio-feed-d9sl)                                               |
+| [0002](0002-character-level-source-scanning-for-test-selection.md) | Scan test-selection's source at character level, not with regexes | Accepted — implemented by audio-feed-70u4, refined by audio-feed-aiiy and audio-feed-ghym |
