@@ -14,7 +14,7 @@
  * negative control available: the four scripts named on the bead must come out
  * with a mention and no write.
  */
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { maskNonCode } from "../scripts/source-mask.ts";
 import {
   census,
@@ -610,14 +610,26 @@ function checkProofCompliance(content: string, relative: string): string | null 
   return null;
 }
 
-Deno.test("audio-feed-0gbo / audio-feed-9yaq / audio-feed-blm4: browser proof scripts writing evidence use runProof and shared helpers (except pinned exemptions)", async () => {
-  assertEquals(EXEMPT_UNMEDIATED_PROOFS.size, 1, "Exemption list is strictly pinned");
-  const root = new URL("..", import.meta.url).pathname;
+export interface ProofScanEntry {
+  name: string;
+  isFile: boolean;
+}
+
+export interface ProofAuditReport {
+  scanned: string[];
+  unmediated: string[];
+  exemptionsMatched: Set<string>;
+}
+
+export async function auditBrowserProofs(
+  entries: AsyncIterable<ProofScanEntry> | Iterable<ProofScanEntry>,
+  readFile: (relPath: string) => Promise<string>,
+): Promise<ProofAuditReport> {
   const unmediated: string[] = [];
   const scanned: string[] = [];
   const exemptionsMatched = new Set<string>();
 
-  for await (const entry of Deno.readDir(`${root}/scripts`)) {
+  for await (const entry of entries) {
     if (!entry.isFile || !entry.name.endsWith("-browser-proof.ts")) continue;
     const relative = `scripts/${entry.name}`;
     if (EXEMPT_UNMEDIATED_PROOFS.has(relative)) {
@@ -626,7 +638,7 @@ Deno.test("audio-feed-0gbo / audio-feed-9yaq / audio-feed-blm4: browser proof sc
     }
 
     scanned.push(relative);
-    const content = await Deno.readTextFile(`${root}/${relative}`);
+    const content = await readFile(relative);
     const failure = checkProofCompliance(content, relative);
     if (failure) unmediated.push(failure);
   }
@@ -642,6 +654,18 @@ Deno.test("audio-feed-0gbo / audio-feed-9yaq / audio-feed-blm4: browser proof sc
     `Sweep must examine all active non-exempt browser proofs (scanned ${scanned.length}, expected >= 20)`,
   );
 
+  return { scanned, unmediated, exemptionsMatched };
+}
+
+Deno.test("audio-feed-0gbo / audio-feed-9yaq / audio-feed-blm4: browser proof scripts writing evidence use runProof and shared helpers (except pinned exemptions)", async () => {
+  assertEquals(EXEMPT_UNMEDIATED_PROOFS.size, 1, "Exemption list is strictly pinned");
+  const root = new URL("..", import.meta.url).pathname;
+
+  const { unmediated } = await auditBrowserProofs(
+    Deno.readDir(`${root}/scripts`),
+    (rel) => Deno.readTextFile(`${root}/${rel}`),
+  );
+
   assertEquals(
     unmediated,
     [],
@@ -651,17 +675,21 @@ Deno.test("audio-feed-0gbo / audio-feed-9yaq / audio-feed-blm4: browser proof sc
   );
 });
 
-Deno.test("audio-feed-blm4: NEGATIVE CONTROL - empty sweep scan fails audit instead of passing vacuously", () => {
-  const scanned: string[] = [];
-  const unmediated: string[] = [];
-  const runSweepAssertion = () => {
-    assert(scanned.length > 0, "Sweep must examine at least one browser proof");
-    assertEquals(unmediated, []);
-  };
-  assertThrows(
-    runSweepAssertion,
+Deno.test("audio-feed-8yki: NEGATIVE CONTROL - insufficient sweep scan fails audit via real auditBrowserProofs", async () => {
+  // Feed synthetic entries with the pinned exemption satisfied but insufficient (< 20) scanned proofs:
+  const syntheticEntries = [
+    { name: "regenerate-browser-proof.ts", isFile: true },
+    { name: "dummy-browser-proof.ts", isFile: true },
+  ];
+  await assertRejects(
+    async () => {
+      await auditBrowserProofs(
+        syntheticEntries,
+        () => Promise.resolve(""),
+      );
+    },
     Error,
-    "Sweep must examine at least one browser proof",
+    "Sweep must examine all active non-exempt browser proofs (scanned 1, expected >= 20)",
   );
 });
 
