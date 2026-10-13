@@ -21,6 +21,7 @@ import {
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
 } from "../src/tts/gemini.ts";
+import { MAX_ARTICLE_CONTENT_CHARS } from "../src/ingest/url.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
@@ -1040,6 +1041,36 @@ Deno.test("article content exceeding maxInputBytes fails closed without spending
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "failed");
   assertStringIncludes(episode?.error ?? "", "1000 > 500 bytes");
+});
+
+Deno.test("article content exceeding MAX_ARTICLE_CONTENT_CHARS fails closed before synthesis (audio-feed-cg8s)", async () => {
+  const { ctx, stores } = await queued();
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-1",
+      userId: "user-1",
+      content: "A".repeat(MAX_ARTICLE_CONTENT_CHARS + 1),
+    }),
+  );
+
+  let synthesized = false;
+  const synth: Synthesizer = () => {
+    synthesized = true;
+    return Promise.resolve(fakeAudio());
+  };
+
+  const result = await runSynthesisBatch(ctx, synth);
+  assertEquals(synthesized, false, "must fail closed before calling synthesis");
+  assertEquals(result.failed.length, 1);
+  assertStringIncludes(result.failed[0]!.error, "article content exceeds character limit");
+  assertEquals(result.ready.length, 0);
+
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "failed");
+  assertStringIncludes(
+    episode?.error ?? "",
+    `${MAX_ARTICLE_CONTENT_CHARS + 1} > ${MAX_ARTICLE_CONTENT_CHARS} chars`,
+  );
 });
 
 Deno.test("the input pre-check counts UTF-8 bytes, so a multibyte article is refused up-front (audio-feed-y98q)", async () => {

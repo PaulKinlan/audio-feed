@@ -19,6 +19,7 @@ import {
   detectAudioFormat,
   DialogueSpeaker,
   DialogueTurn,
+  extractCodeBlocks,
   formatCodeForTts,
   formatDialoguePrompt,
   formatNarrationIntro,
@@ -1053,6 +1054,163 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
     return `[explained: ${code}]`;
   });
   assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
+});
+
+Deno.test("formatCodeForTts - scales linearly without quadratic blowup on unclosed pre tags, fences, and no-gt openers (audio-feed-c0gj, audio-feed-cg8s)", async () => {
+  // 32,000 unclosed <pre> tags previously took >6 seconds due to quadratic regex backtracking
+  const unclosedPre = "<pre><code>".repeat(32_000);
+  const t0 = performance.now();
+  const processedPre = await formatCodeForTts(unclosedPre, "skip");
+  const elapsedPre = performance.now() - t0;
+  assert(
+    elapsedPre < 500,
+    `unclosed <pre> scan must be linear and fast: took ${elapsedPre.toFixed(1)}ms`,
+  );
+  assertEquals(processedPre, unclosedPre);
+
+  // 16,000 unclosed backtick fences
+  const unclosedFences = "```\n".repeat(16_000);
+  const t1 = performance.now();
+  const processedFences = await formatCodeForTts(unclosedFences, "skip");
+  const elapsedFences = performance.now() - t1;
+  assert(
+    elapsedFences < 500,
+    `unclosed fences scan must be linear and fast: took ${elapsedFences.toFixed(1)}ms`,
+  );
+  assert(typeof processedFences === "string");
+
+  // 100,000 unclosed <pre without > (audio-feed-t06l regression avoidance)
+  const unclosedNoGt = "<pre ".repeat(100_000);
+  const t2 = performance.now();
+  const processedNoGt = await formatCodeForTts(unclosedNoGt, "skip");
+  const elapsedNoGt = performance.now() - t2;
+  assert(
+    elapsedNoGt < 500,
+    `unclosed <pre without > scan must be linear and fast: took ${elapsedNoGt.toFixed(1)}ms`,
+  );
+  assertEquals(processedNoGt, unclosedNoGt);
+});
+
+Deno.test("formatCodeForTts - differential equivalence with reference regex grammar across edge shapes (audio-feed-c0gj, audio-feed-cg8s)", async () => {
+  const referenceRegex =
+    /(?:```+|~~~+)(?:[^\n\r]*\r?\n)?([\s\S]*?)(?:```+|~~~+)|<pre\b[^>]*>(?:<code\b[^>]*>)?([\s\S]*?)(?:<\/code>)?<\/pre>/gi;
+
+  function referenceFormatCode(text: string): string {
+    if (!referenceRegex.test(text)) {
+      return text;
+    }
+    referenceRegex.lastIndex = 0;
+    return text
+      .replace(referenceRegex, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  const shapes = [
+    "",
+    "Plain text without any code fences or pre tags.",
+    "`inline` code and ``double inline`` code should not be stripped.",
+    "```code```",
+    "```js\r\nconst x = 1;\r\n```",
+    "~~~py\r\ndef f():\r\n  return 1\r\n~~~",
+    "Prefix\r\n```\r\ncode\r\n```\r\nSuffix",
+    "```foo.bar-baz_123:test\nspecial\n```",
+    "```c++\nint x = 1;\n```",
+    "```c#\nint x = 1;\n```",
+    '<pre class="hljs" id="test"><code class="language-ts">const a = 1;</code></pre>',
+    '<pre style="color: red;" onclick="alert(1)">raw code</pre>',
+    "<PRE><CODE>UPPERCASE</CODE></PRE>",
+    "<Pre><Code>MixedCase</Code></Pre>",
+    "<pre><code>&lt;div&gt;&amp;quot;test&amp;quot;&lt;/div&gt;</code></pre>",
+    "~~~~~~~<code>const x = 1;c++",
+    "~~~~<PRE></PRE>python</CODE>```Paragraph\n\n",
+    "````</PRE>def foo(): pass```Paragraph in between.\n\n~~~~```",
+    "```js\n// fence\n```\n```ts\ninner\n```",
+    "Text before\n```js\ncode\n```\nText between\n<pre><code>html code</code></pre>\nText after",
+    "````\n```\n````",
+    "```\n~~~~\n```",
+    "~~~~\n````\n~~~~",
+    "Intro\n```\nconst x = 1;",
+    "Intro\n~~~python\ndef f():",
+    "```\n",
+    "~~~",
+    "```",
+    "````",
+    "Prefix\n```\nSuffix",
+    "```\n```",
+    "```\r\n```",
+    "<pre></pre>",
+    "<pre><code></code></pre>",
+    "<pre>code</pre>",
+    "<pre><code no-gt here</pre>",
+  ];
+
+  for (const shape of shapes) {
+    const expected = referenceFormatCode(shape);
+    const actual = await formatCodeForTts(shape, "skip");
+    assertEquals(
+      actual,
+      expected,
+      `mismatch on shape: ${JSON.stringify(shape)}`,
+    );
+  }
+});
+
+Deno.test("formatCodeForTts - fast-path returns text untouched when no code blocks exist (audio-feed-c0gj, audio-feed-cg8s)", async () => {
+  // 13 distinct plain-text shapes measured in fixc0gj
+  const plainInputs = [
+    "",
+    "Simple plain text paragraph.",
+    "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
+    "Inline `single` backtick code.",
+    "Double ``inline`` backticks.",
+    "HTML tags like <p>paragraph</p> and <br> and <b>bold</b>.",
+    "Fake pre tags like <previous> or <prelude> or <presentation>.",
+    "Mathematical comparisons: a < b and c > d.",
+    "Mathematical expressions: 3 < 5 > 2.",
+    "Japanese CJK text: こんにちは、これはテストです。",
+    "Emoji text: 🎙️ 🎧 🔊",
+    "Accented characters: naïve café résumé façade.",
+    "   Whitespace and newlines only:   \n\n   \t  \n  ",
+  ];
+
+  for (const input of plainInputs) {
+    const hasPotentialCode = input.includes("```") || input.includes("~~~") ||
+      /<pre\b/i.test(input);
+    assertEquals(hasPotentialCode, false, `fixture must not have potential code: ${input}`);
+    const output = await formatCodeForTts(input, "skip");
+    assertEquals(output, input, "no-code text must be returned untouched");
+  }
+});
+
+Deno.test("formatCodeForTts - codeOpenRegex must not cross a </pre> regression test (audio-feed-cg8s)", async () => {
+  // Divergent input: "<pre><code no-gt here</pre>"
+  // Measured defect in fixc0gj v2: codeOpenRegex greedily consumed through the closing '>' of </pre>,
+  // causing the </pre> closer match to fail, hasMorePre to go false, and markup left in text.
+  // The baseline regex backtracks and strips.
+  const divergentInput = "<pre><code no-gt here</pre>";
+
+  // 1. Skip mode: must strip markup completely
+  const skipped = await formatCodeForTts(divergentInput, "skip");
+  assertEquals(skipped, "", "divergent input must be stripped cleanly");
+
+  // 2. Explain mode: must extract '<code no-gt here' and invoke summarizer
+  let summarizedCode = "";
+  const explained = await formatCodeForTts(divergentInput, "explain", (code) => {
+    summarizedCode = code;
+    return `summary(${code})`;
+  });
+  assertEquals(summarizedCode, "<code no-gt here");
+  assertStringIncludes(explained, "summary(<code no-gt here)");
+
+  // 3. Block AST: extractCodeBlocks extracts the block with correct boundaries
+  const blocks = extractCodeBlocks(divergentInput);
+  assertEquals(blocks.length, 1);
+  assertEquals(blocks[0]!.full, "<pre><code no-gt here</pre>");
+  assertEquals(blocks[0]!.code, "<code no-gt here");
+  assertEquals(blocks[0]!.index, 0);
 });
 
 Deno.test("GeminiTtsClient - synthesizeDialogue guarantees 100% of parts specify speech_metadata.speaker with zero bare parts (audio-feed-9pc)", async () => {

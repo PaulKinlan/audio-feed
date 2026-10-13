@@ -909,27 +909,158 @@ function decodeHtmlEntities(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
+export interface CodeBlockMatch {
+  index: number;
+  full: string;
+  code: string;
+}
+
+/**
+ * Linear forward scanner for fenced code blocks and HTML <pre> blocks.
+ * Replaces quadratic regex backtracking over unclosed tags (audio-feed-c0gj, audio-feed-cg8s).
+ */
+export function extractCodeBlocks(text: string): CodeBlockMatch[] {
+  if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
+    return [];
+  }
+
+  const matches: CodeBlockMatch[] = [];
+  const openerRegex = /(?:`{3,}|~{3,})|<pre\b/gi;
+  const codeOpenRegex = /<code\b[^>]*>/iy;
+  const infoRegex = /[^\n\r]*\r?\n/y;
+  const closePreRegex = /<\/pre>/gi;
+  const closeFenceRegex = /(?:`{3,}|~{3,})/g;
+
+  let hasMorePre = true;
+  let hasMoreFences = true;
+
+  while (true) {
+    if (!hasMorePre && !hasMoreFences) {
+      break;
+    }
+
+    const match = openerRegex.exec(text);
+    if (!match) break;
+
+    const opener = match[0];
+    const startIndex = match.index;
+
+    if (opener.startsWith("<")) {
+      if (!hasMorePre) {
+        continue;
+      }
+      const gtIndex = text.indexOf(">", startIndex + 4);
+      if (gtIndex === -1) {
+        hasMorePre = false;
+        continue;
+      }
+      const afterPre = gtIndex + 1;
+      let contentStart = afterPre;
+      codeOpenRegex.lastIndex = afterPre;
+      const codeMatch = codeOpenRegex.exec(text);
+      let usedCodeMatch = false;
+
+      // audio-feed-cg8s: codeOpenRegex must not cross a </pre>.
+      // If a malformed <code tag lacks a closing '>' before </pre>, codeOpenRegex will
+      // greedily consume through </pre>'s closing '>'. Discard codeMatch if it contains </pre.
+      if (codeMatch && !/<\/pre/i.test(codeMatch[0])) {
+        contentStart = afterPre + codeMatch[0].length;
+        usedCodeMatch = true;
+      }
+
+      closePreRegex.lastIndex = contentStart;
+      let closeMatch = closePreRegex.exec(text);
+
+      // If matching the optional <code ...> tag prevented finding </pre>, backtrack and retry
+      // without the <code ...> tag, matching the reference regex's backtracking order.
+      if (!closeMatch && usedCodeMatch) {
+        contentStart = afterPre;
+        closePreRegex.lastIndex = contentStart;
+        closeMatch = closePreRegex.exec(text);
+      }
+
+      if (!closeMatch) {
+        hasMorePre = false;
+        continue;
+      }
+
+      const closeIndex = closeMatch.index;
+      let contentEnd = closeIndex;
+      if (
+        closeIndex >= contentStart + 7 &&
+        text.slice(closeIndex - 7, closeIndex).toLowerCase() === "</code>"
+      ) {
+        contentEnd = closeIndex - 7;
+      }
+
+      const rawCode = text.slice(contentStart, contentEnd);
+      const code = decodeHtmlEntities(rawCode).trim();
+      const full = text.slice(startIndex, closeMatch.index + 6);
+
+      matches.push({ full, code, index: startIndex });
+      openerRegex.lastIndex = closeMatch.index + 6;
+      continue;
+    }
+
+    if (!hasMoreFences) {
+      continue;
+    }
+
+    const afterOpener = startIndex + opener.length;
+    let contentStart = afterOpener;
+
+    infoRegex.lastIndex = afterOpener;
+    const infoMatch = infoRegex.exec(text);
+    if (infoMatch) {
+      contentStart = afterOpener + infoMatch[0].length;
+    }
+
+    closeFenceRegex.lastIndex = contentStart;
+    let closeMatch = closeFenceRegex.exec(text);
+
+    if (!closeMatch && infoMatch) {
+      contentStart = afterOpener;
+      closeFenceRegex.lastIndex = contentStart;
+      closeMatch = closeFenceRegex.exec(text);
+    }
+
+    if (!closeMatch) {
+      if (opener.length >= 6) {
+        matches.push({
+          full: opener,
+          code: "",
+          index: startIndex,
+        });
+        openerRegex.lastIndex = startIndex + opener.length;
+        continue;
+      }
+      hasMoreFences = false;
+      continue;
+    }
+
+    const closeIndex = closeMatch.index;
+    const rawCode = text.slice(contentStart, closeIndex);
+    const code = rawCode.trim();
+    const full = text.slice(startIndex, closeMatch.index + closeMatch[0].length);
+
+    matches.push({ full, code, index: startIndex });
+    openerRegex.lastIndex = closeMatch.index + closeMatch[0].length;
+  }
+
+  return matches;
+}
+
 export async function formatCodeForTts(
   text: string,
   codeHandling: CodeHandling = "skip",
   summarizer?: (code: string) => string | Promise<string>,
 ): Promise<string> {
-  const codeBlockRegex =
-    /(?:```+|~~~+)(?:[^\n\r]*\r?\n)?([\s\S]*?)(?:```+|~~~+)|<pre\b[^>]*>(?:<code\b[^>]*>)?([\s\S]*?)(?:<\/code>)?<\/pre>/gi;
-  if (!codeBlockRegex.test(text)) {
+  const matches = extractCodeBlocks(text);
+  if (matches.length === 0) {
     return text;
   }
-  codeBlockRegex.lastIndex = 0;
 
   if (codeHandling === "explain" && summarizer) {
-    const matches: Array<{ full: string; code: string; index: number }> = [];
-    let match: RegExpExecArray | null;
-    while ((match = codeBlockRegex.exec(text)) !== null) {
-      const rawCode = match[1] ?? (match[2] ? decodeHtmlEntities(match[2]) : "");
-      const code = rawCode.trim();
-      matches.push({ full: match[0], code, index: match.index });
-    }
-
     // audio-feed-8acp: resolve every explanation concurrently. Awaiting the summarizer
     // inside the assembly loop made N code blocks cost N sequential model round-trips.
     // The pool is bounded because each call is a model request: a long article with a
@@ -965,12 +1096,14 @@ export async function formatCodeForTts(
   }
 
   // Fallback or "skip" mode: strip code blocks completely so raw code is never read aloud.
-  return text
-    .replace(codeBlockRegex, "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .join("\n\n");
+  let result = "";
+  let lastIndex = 0;
+  for (const m of matches) {
+    result += text.slice(lastIndex, m.index);
+    lastIndex = m.index + m.full.length;
+  }
+  result += text.slice(lastIndex);
+  return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
 }
 
 /**
