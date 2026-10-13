@@ -532,6 +532,14 @@ export interface ErrorsPage {
 }
 
 export interface SummaryBody {
+  /** Absence on older deployments means detection coverage is UNKNOWN, not clear. */
+  invocationDetection?: {
+    olderStartsUnknown: boolean;
+    retentionGap: boolean;
+    scannedFromSeq: number;
+    scannedThroughSeq: number;
+    moreDue: boolean;
+  };
   cursor: string;
   since: string;
   total: number;
@@ -1081,9 +1089,18 @@ export async function runOnce(
   // the tests missed it because their stubs were built from the same wrong type.
   if (summary.ok && summary.body.total === 0 && !summary.body.truncated) {
     artifact.reason = "idle";
+    const detection = summary.body.invocationDetection;
     artifact.note =
       `Nothing new since cursor ${state.cursor}: 0 matching record(s) and nothing unscanned ` +
-      `in the window (scanned ${summary.body.scanned}). This run made no model call.`;
+      `in the event window (scanned ${summary.body.scanned}). This run made no model call. ` +
+      (detection && !detection.olderStartsUnknown && !detection.moreDue
+        ? `Invocation marks checked through seq ${detection.scannedThroughSeq}; no overdue start was observed in the scanned window.`
+        : `Invocation detection coverage UNKNOWN beyond the bounded/retained scan` +
+          `${
+            detection
+              ? ` (from seq ${detection.scannedFromSeq} through ${detection.scannedThroughSeq})`
+              : " (endpoint did not report it)"
+          }; older starts cannot be ruled out.`);
     return { artifact: await finish("idle"), state };
   }
 

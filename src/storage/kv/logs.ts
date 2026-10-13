@@ -113,6 +113,37 @@ export function createLogsRepository(core: KvCore, _host: () => MetadataStore): 
     },
 
     /**
+     * Both checks matter: the sequence must still describe the snapshot that showed no
+     * terminal, and the key must still be absent. Terminal and warning writers share
+     * SEQ_KEY, so a late completion before this commit forces a fresh scan.
+     */
+    async appendLogOnce(input, key, expectedNewestSeq) {
+      if (!/^[\w:.-]{1,220}$/.test(key)) return "unavailable";
+      const safe = sanitizeLogRecord({
+        ...input,
+        context: { ...input.context, detectorKey: key },
+      });
+      if (!logRecordFits(safe)) return "unavailable";
+      const markerKey: Deno.KvKey = ["log_once", key];
+      const [sequence, marker] = await Promise.all([
+        core.kv.get<number>(SEQ_KEY),
+        core.kv.get<number>(markerKey),
+      ]);
+      if (marker.value !== null) return "duplicate";
+      const newest = typeof sequence.value === "number" ? sequence.value : 0;
+      if (newest !== expectedNewestSeq) return "changed";
+      const seq = newest + 1;
+      const record: LogRecord = { ...safe, seq };
+      const committed = await core.kv.atomic()
+        .check(sequence).check(marker)
+        .set(SEQ_KEY, seq).set(["log", seq], record).set(markerKey, seq)
+        .commit();
+      if (committed.ok) return "written";
+      const after = await core.kv.get<number>(markerKey);
+      return after.value !== null ? "duplicate" : "changed";
+    },
+
+    /**
      * Records in sequence order, oldest first.
      *
      * `sinceSeq` is EXCLUSIVE — the caller passes the last seq it has already seen, which is
@@ -186,7 +217,7 @@ export function createLogsRepository(core: KvCore, _host: () => MetadataStore): 
       const cutoff = before.getTime();
       const bounds = await this.logBounds();
       let watermark = bounds.oldestSeq - 1;
-      const doomed: { key: Deno.KvKey; seq: number }[] = [];
+      const doomed: { key: Deno.KvKey; seq: number; detectorKey?: string }[] = [];
       const from: Deno.KvKey = ["log", watermark + 1];
       const to: Deno.KvKey = ["log", Number.MAX_SAFE_INTEGER];
       for await (const entry of core.kv.list<LogRecord>({ start: from, end: to })) {
@@ -194,7 +225,14 @@ export function createLogsRepository(core: KvCore, _host: () => MetadataStore): 
         // but not exclusively so, so only a CONTIGUOUS leading run may be dropped: that is what
         // lets `bounds()` advance honestly and keeps "oldestSeq" a value a cursor can trust.
         if (Date.parse(entry.value.time) >= cutoff) break;
-        doomed.push({ key: entry.key, seq: entry.value.seq });
+        const detectorKey = entry.value.type === "synthesis.invocation.overdue"
+          ? entry.value.context?.detectorKey
+          : undefined;
+        doomed.push({
+          key: entry.key,
+          seq: entry.value.seq,
+          ...(typeof detectorKey === "string" ? { detectorKey } : {}),
+        });
       }
       if (doomed.length === 0) return 0;
 
@@ -203,18 +241,29 @@ export function createLogsRepository(core: KvCore, _host: () => MetadataStore): 
       // committed, and every record below it really is gone. Doing it the other way round —
       // advancing first, deleting after — would let `bounds()` report "cursor too old" for
       // records a caller could still have read, which is the one direction that loses data.
-      const BATCH = 8; // Deno KV bounds an atomic operation to 10 mutations; leave room for the set.
       let deleted = 0;
-      for (let i = 0; i < doomed.length; i += BATCH) {
-        const batch = doomed.slice(i, i + BATCH);
+      for (let i = 0; i < doomed.length;) {
+        // Retain the old batch size when there are no alert markers. Each marker costs
+        // one extra delete; leave a mutation for the watermark (KV permits at most 10).
+        let end = i;
+        let mutations = 1;
+        while (end < doomed.length && mutations + 1 + (doomed[end]!.detectorKey ? 1 : 0) <= 9) {
+          mutations += 1 + (doomed[end]!.detectorKey ? 1 : 0);
+          end++;
+        }
+        const batch = doomed.slice(i, end);
         const last = batch[batch.length - 1]!;
         const tx = core.kv.atomic();
-        for (const item of batch) tx.delete(item.key);
+        for (const item of batch) {
+          tx.delete(item.key);
+          if (item.detectorKey) tx.delete(["log_once", item.detectorKey]);
+        }
         tx.set(WATERMARK_KEY, last.seq);
         const res = await tx.commit();
         if (!res.ok) break; // Keep the watermark where it is; the caller can prune again.
         watermark = last.seq;
         deleted += batch.length;
+        i = end;
       }
       return deleted;
     },
