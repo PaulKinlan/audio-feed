@@ -2,7 +2,7 @@
  * Browser verification proof for bookmarklet CSP click fallback and duplicate class fix (audio-feed-3asd).
  *
  * Drives real headless Chrome over CDP:
- *   1. Starts app server on an ephemeral port with real CSP headers.
+ *   1. Starts app server on fixed port 8133 with real CSP headers.
  *   2. Desktop (1280x900):
  *      - Loads homepage (/).
  *      - Verifies bookmarklet link is present, has merged class="bookmarklet-link u-strong-link",
@@ -14,6 +14,8 @@
  *      - Asserts zero unhandled page crashes, and captures screenshot evidence.
  *
  *   deno run --allow-all --unstable-kv scripts/verify_3asd_bookmarklet_browser.ts
+ *   If 8133 is busy, retry when free for commit-worthy captures. For local-only
+ *   verification, BOOKMARKLET_PROOF_PORT=8134 writes evidence to OS temp instead.
  */
 
 import { createApp } from "../src/app.ts";
@@ -22,17 +24,37 @@ import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
 
-const OUT = new URL("../docs/evidence/audio-feed-3asd/", import.meta.url).pathname;
+const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
+if (PROOF_PORT === 0) throw new Error("Bookmarklet evidence requires a fixed port, not 0");
+const OUT = PROOF_PORT === HARNESS_PORT_DEFAULT
+  ? new URL("../docs/evidence/audio-feed-3asd/", import.meta.url).pathname
+  : `${await Deno.makeTempDir({ prefix: "audio-feed-3asd-local-" })}/`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
 
 await runProof("audio-feed-3asd", async (checker) => {
   const stores: Stores = memoryStores();
-  const config: AppConfig = { port: 0 };
+  const config: AppConfig = { port: PROOF_PORT };
   const ctx = { config, stores };
   const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
-  const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+  let server: Deno.HttpServer<Deno.NetAddr>;
+  try {
+    server = Deno.serve(
+      { port: PROOF_PORT, onListen: () => {} },
+      (req, info) => appFetch(req, info),
+    );
+  } catch (error) {
+    await stores.metadata.close();
+    if (error instanceof Deno.errors.AddrInUse) {
+      throw new Error(
+        `Bookmarklet proof port ${PROOF_PORT} is busy; retry when free, or use BOOKMARKLET_PROOF_PORT=8134 for local-only OS-temp evidence`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   const PORT = (server.addr as Deno.NetAddr).port;
   const BASE = `http://localhost:${PORT}`;
   config.port = PORT;
@@ -189,6 +211,14 @@ await runProof("audio-feed-3asd", async (checker) => {
           codeSnippet === anchorHref
             ? `snippet matches href (${codeSnippet?.length} chars)`
             : `snippet mismatch: snippet len ${codeSnippet?.length}, href len ${anchorHref?.length}`,
+        );
+        check(
+          "rendered bookmarklet uses the selected proof port",
+          Boolean(codeSnippet?.includes(`localhost:${PROOF_PORT}`)) &&
+            Boolean(anchorHref?.includes(`localhost:${PROOF_PORT}`)),
+          `selected port ${PROOF_PORT}; rendered port ${
+            codeSnippet?.match(/localhost:(\d+)/)?.[1] ?? "none"
+          }`,
         );
 
         const preBox = (await js(`(() => {
