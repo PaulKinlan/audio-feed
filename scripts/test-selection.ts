@@ -329,12 +329,20 @@ const READ_CALLS = [
 ];
 
 /**
- * Strip comments before scanning: the detector reads raw text, and this file's own documentation contains
+ * Strip comments and track string boundaries in a single character-level scan.
+ *
+ * COMMENTS: The detector reads raw text, and this file's own documentation contains
  * example lines like `const EVIDENCE_DIR = ...docs/evidence` which would otherwise be read as a real path
- * constant (found by exactly that false positive on the first run). The line-comment rule leaves `https://`
- * alone because a colon or quote precedes the slashes there.
+ * constant. Comments are stripped to prevent this.
+ *
+ * STRINGS: We track spans of `stripped` that are STRING CONTENT rather than code (audio-feed-lm4d).
+ * A read call inside a string literal is data, not a read site. Counting it put synthetic fixtures
+ * into the unresolved list, keeping the inert class unreachable (audio-feed-q0ky).
+ * A template INTERPOLATION is code, not string content, so a read inside `${...}` is still a read.
  */
-function stripComments(source: string): string {
+export function stripComments(
+  source: string,
+): { stripped: string; spans: Array<[number, number]> } {
   let result = "";
   let i = 0;
   let offset = 0;
@@ -383,6 +391,9 @@ function stripComments(source: string): string {
   let lastNonWsChar = "";
   let lastWordClass: "EXPRESSION" | "STATEMENT" | "CONTROL_HEAD" | "OTHER" = "OTHER";
 
+  const spans: Array<[number, number]> = [];
+  let stringSpanStart = -1;
+
   while (i < source.length) {
     const ch = source[i]!;
 
@@ -401,10 +412,12 @@ function stripComments(source: string): string {
           stringQuote = ch;
           expectOperand = false;
           lastNonWsChar = ch;
+          stringSpanStart = result.length + (i + 1 - offset);
         } else if (ch === "`") {
           context = "TEMPLATE";
           expectOperand = false;
           lastNonWsChar = ch;
+          stringSpanStart = result.length + (i + 1 - offset);
         } else if (ch === "/") {
           if (expectOperand) {
             context = "REGEX";
@@ -442,6 +455,9 @@ function stripComments(source: string): string {
             context = popped.context;
             braceDepth = popped.braceDepth;
             expectOperand = true;
+            if (context === "TEMPLATE") {
+              stringSpanStart = result.length + (i + 1 - offset);
+            }
           } else {
             expectOperand = true;
           }
@@ -520,6 +536,7 @@ function stripComments(source: string): string {
           i++;
         } else if (ch === stringQuote) {
           context = "CODE";
+          spans.push([stringSpanStart, result.length + (i - offset)]);
         }
         break;
 
@@ -530,11 +547,13 @@ function stripComments(source: string): string {
           stack.push({ context: "TEMPLATE", braceDepth });
           context = "CODE";
           braceDepth = 0;
+          spans.push([stringSpanStart, result.length + (i - offset)]);
           i++;
           expectOperand = true;
           lastNonWsChar = "{";
         } else if (ch === "`") {
           context = "CODE";
+          spans.push([stringSpanStart, result.length + (i - offset)]);
         }
         break;
 
@@ -577,97 +596,7 @@ function stripComments(source: string): string {
     result += source.slice(offset, i);
   }
 
-  return result;
-}
-
-/**
- * Spans of `source` that are STRING CONTENT rather than code (audio-feed-lm4d).
- *
- * The scan is textual, so a read call that exists only inside a string literal looks exactly like a read
- * site. It cannot be one - string content is data - and counting it as one put five paths into the
- * unresolved list that no suite can ever read, because `tests/fast_gate_subset_test.ts` carries synthetic
- * module sources as fixtures and those fixtures read things (`data/table.csv`, `fixtures.html`,
- * `docs/absent.html`, `docs/present.md`). Under audio-feed-q0ky's rule those five are enough on their own to
- * keep the inert class disabled for EVERY change, so a documentation-only edit paid the full suite.
- *
- * A template INTERPOLATION is code, not string content, so a read inside `${...}` is still a read: that is
- * the boundary, and it is asserted in tests/read_relation_hints_test.ts.
- */
-function stringContentSpans(source: string): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
-  const scan = (from: number, to: number): void => {
-    let i = from;
-    while (i < to) {
-      const ch = source[i]!;
-      if (ch === "/" && source[i + 1] === "/") {
-        while (i < to && source[i] !== "\n") i++;
-        continue;
-      }
-      if (ch === "/" && source[i + 1] === "*") {
-        i += 2;
-        while (i < to && !(source[i] === "*" && source[i + 1] === "/")) i++;
-        i += 2;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        const start = i++;
-        while (i < to && source[i] !== ch) {
-          if (source[i] === "\\") i++;
-          i++;
-        }
-        i++;
-        spans.push([start, Math.min(i, to)]);
-        continue;
-      }
-      if (ch === "`") {
-        i++;
-        let chunk = i;
-        while (i < to) {
-          const c = source[i]!;
-          if (c === "\\") {
-            i += 2;
-            continue;
-          }
-          if (c === "`") {
-            i++;
-            break;
-          }
-          if (c === "$" && source[i + 1] === "{") {
-            spans.push([chunk, i]);
-            i += 2;
-            const codeStart = i;
-            let depth = 1;
-            while (i < to && depth > 0) {
-              const d = source[i]!;
-              if (d === "{") {
-                depth++;
-              } else if (d === "}") {
-                depth--;
-                if (depth === 0) break;
-              } else if (d === '"' || d === "'" || d === "`") {
-                i++;
-                while (i < to && source[i] !== d) {
-                  if (source[i] === "\\") i++;
-                  i++;
-                }
-              }
-              i++;
-            }
-            scan(codeStart, i);
-            i++;
-            chunk = i;
-            continue;
-          }
-          i++;
-        }
-        spans.push([chunk, i]);
-        continue;
-      }
-      i++;
-    }
-  };
-  scan(0, source.length);
-  return spans;
+  return { stripped: result, spans };
 }
 
 /** Whether an index falls inside string content rather than code. */
@@ -1501,6 +1430,7 @@ export async function deriveReadRelationReport(
   // independence, we build per-file constant maps and each file's direct imports for the whole closure FIRST,
   // then derive the relation using those maps.
   const fileSources = new Map<string, string>();
+  const fileSpans = new Map<string, Array<[number, number]>>();
   const fileImports = new Map<string, string[]>();
   const fileImportedSymbols = new Map<string, Map<string, Map<string, string>>>();
   const fileConstants = new Map<
@@ -1518,8 +1448,9 @@ export async function deriveReadRelationReport(
     if (existing !== undefined) return existing;
     const raw = await read(relPath);
     if (raw === null) return null;
-    const source = stripComments(raw);
+    const { stripped: source, spans } = stripComments(raw);
     fileSources.set(relPath, source);
+    fileSpans.set(relPath, spans);
 
     const dir = relPath.split("/").slice(0, -1).join("/");
     const imports: string[] = [];
@@ -1557,7 +1488,6 @@ export async function deriveReadRelationReport(
     }
     fileImportedSymbols.set(relPath, importedSymbols);
 
-    const spans = stringContentSpans(source);
     const scopes = bindingScopes(source, spans);
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
 
@@ -1655,7 +1585,7 @@ export async function deriveReadRelationReport(
 
   for (const [relPath, source] of fileSources) {
     const dir = relPath.split("/").slice(0, -1).join("/");
-    const spans = stringContentSpans(source);
+    const spans = fileSpans.get(relPath)!;
     const scopes = bindingScopes(source, spans);
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
     const visible = visibleConstantsFor(relPath);
