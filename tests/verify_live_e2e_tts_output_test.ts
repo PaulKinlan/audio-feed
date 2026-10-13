@@ -3,8 +3,14 @@
  * routing runtime verification evidence to uncommitted var/ by default and only writing
  * to docs/evidence/audio-feed-9vns/ when explicitly requested via --write-committed-evidence.
  */
-import { assertEquals, assertThrows } from "@std/assert";
-import { isCommittedTarget, resolveEvidenceOutputDir } from "../scripts/verify_live_e2e_tts.ts";
+import { assertEquals, assertNotEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { formatEvidenceReadme } from "../scripts/proof-helper.ts";
+import { buildU60aReadmeOptions } from "../scripts/verify_live_tts.ts";
+import {
+  build9vnsReadmeOptions,
+  isCommittedTarget,
+  resolveEvidenceOutputDir,
+} from "../scripts/verify_live_e2e_tts.ts";
 
 Deno.test("audio-feed-v20a: default run routes evidence to uncommitted var/ to protect committed docs", () => {
   const result = resolveEvidenceOutputDir([]);
@@ -123,4 +129,48 @@ Deno.test("audio-feed-ulab (shape 2): symlinked default directory pointing to co
     Deno.chdir(origCwd);
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("audio-feed-1t8t / audio-feed-guep: u60a committed README matches generator formatEvidenceReadme byte-for-byte", async () => {
+  const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+  const committed = await Deno.readTextFile(`${repoRoot}/docs/evidence/audio-feed-u60a/README.md`);
+  const expected = formatEvidenceReadme(buildU60aReadmeOptions());
+  assertEquals(committed, expected, "u60a committed README must be byte-identical to generator");
+
+  // Negative control: a modified body or extra character fails equality
+  const modified = expected + "\n";
+  assertNotEquals(committed, modified, "extra newline must fail equality");
+  const mutatedOptions = buildU60aReadmeOptions();
+  mutatedOptions.sections![0]!.body += " mutant";
+  assertNotEquals(
+    committed,
+    formatEvidenceReadme(mutatedOptions),
+    "mutated section body must fail equality",
+  );
+});
+
+Deno.test("audio-feed-1t8t / audio-feed-guep / audio-feed-6y1n: 9vns committed README matches generator formatEvidenceReadme byte-for-byte and retains 2026-10-08 table", async () => {
+  const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+  const committed = await Deno.readTextFile(`${repoRoot}/docs/evidence/audio-feed-9vns/README.md`);
+  const expected = formatEvidenceReadme(build9vnsReadmeOptions("docs/evidence/audio-feed-9vns"));
+  assertEquals(committed, expected, "9vns committed README must be byte-identical to generator");
+
+  // audio-feed-6y1n: verify dated table is preserved and labeled as 2026-10-08 snapshot
+  assertStringIncludes(
+    committed,
+    "The counts and per-segment table below describe the original 2026-10-08 verification run",
+  );
+  assertStringIncludes(
+    committed,
+    "| **Total** | **44,645** | **44,703** | **2,689.20** | **129,130,512** | **129,081,600** | — | — |",
+  );
+
+  // Negative control: a modified body or extra character fails equality
+  const mutatedOptions = build9vnsReadmeOptions("docs/evidence/audio-feed-9vns");
+  mutatedOptions.sections![0]!.body += " mutant";
+  assertNotEquals(
+    committed,
+    formatEvidenceReadme(mutatedOptions),
+    "mutated section body must fail equality",
+  );
 });

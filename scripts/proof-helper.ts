@@ -3618,36 +3618,7 @@ export interface EvidenceReadmeOptions {
   allowOutsideProof?: boolean;
 }
 
-export async function writeEvidenceReadme(
-  options: EvidenceReadmeOptions,
-): Promise<string> {
-  const activeProof = activeProofStorage.getStore();
-  if (!activeProof && !options.allowOutsideProof) {
-    throw new Error(
-      `writeEvidenceReadme() called outside of runProof() context for '${
-        options.script ?? options.dir
-      }'. Evidence must be written inside await runProof(name, async (checker) => { ... }) to ensure atomic rollback and transactional integrity. (Pass allowOutsideProof: true only for non-proof maintenance tools).`,
-    );
-  }
-  const checkers: Checker[] = [];
-  if (activeProof?.checker) {
-    checkers.push(activeProof.checker);
-  }
-  if (options.checker && options.checker !== activeProof?.checker) {
-    checkers.push(options.checker);
-  }
-  for (const checker of checkers) {
-    if (checker.failures.length > 0) {
-      const summary = checker.failures
-        .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
-        .join("; ");
-      const proofLabel = activeProof?.name ? ` for proof '${activeProof.name}'` : "";
-      throw new Error(
-        `Refusing to write evidence README${proofLabel}: proof has ${checker.failures.length} recorded failure(s): ${summary}`,
-      );
-    }
-  }
-
+export function formatEvidenceReadme(options: EvidenceReadmeOptions): string {
   const isCapture = Boolean(options.capture);
   let captureReason = "";
   if (isCapture) {
@@ -3741,6 +3712,40 @@ export async function writeEvidenceReadme(
     );
   }
 
+  return content;
+}
+
+export async function writeEvidenceReadme(
+  options: EvidenceReadmeOptions,
+): Promise<string> {
+  const activeProof = activeProofStorage.getStore();
+  if (!activeProof && !options.allowOutsideProof) {
+    throw new Error(
+      `writeEvidenceReadme() called outside of runProof() context for '${
+        options.script ?? options.dir
+      }'. Evidence must be written inside await runProof(name, async (checker) => { ... }) to ensure atomic rollback and transactional integrity. (Pass allowOutsideProof: true only for non-proof maintenance tools).`,
+    );
+  }
+  const checkers: Checker[] = [];
+  if (activeProof?.checker) {
+    checkers.push(activeProof.checker);
+  }
+  if (options.checker && options.checker !== activeProof?.checker) {
+    checkers.push(options.checker);
+  }
+  for (const checker of checkers) {
+    if (checker.failures.length > 0) {
+      const summary = checker.failures
+        .map((f) => f.detail ? `${f.name} (${f.detail})` : f.name)
+        .join("; ");
+      const proofLabel = activeProof?.name ? ` for proof '${activeProof.name}'` : "";
+      throw new Error(
+        `Refusing to write evidence README${proofLabel}: proof has ${checker.failures.length} recorded failure(s): ${summary}`,
+      );
+    }
+  }
+
+  const content = formatEvidenceReadme(options);
   await Deno.mkdir(options.dir, { recursive: true });
   const cleanDir = options.dir.replace(/\/+$/, "");
   const readmePath = `${cleanDir}/README.md`;
