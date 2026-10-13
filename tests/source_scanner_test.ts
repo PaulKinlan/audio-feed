@@ -226,6 +226,63 @@ const cases: Case[] = [
       }`,
     }),
   },
+  {
+    // audio-feed-pgpp: MALFORMED INPUT, AND THE DIRECTION IT FAILS IN. A string left unterminated at EOF
+    // by a trailing escape produces NO spans, which means nothing is excluded from code, so every read
+    // site survives and the selection can only WIDEN. That is the selector's safe direction - a wider
+    // selection costs gate time and can never lose a suite - and this row exists so a future change to
+    // the scanner has to keep it deliberate. The read is asserted PRESENT, not blanked.
+    name: "M1 malformed: unterminated string at EOF (trailing escape) marks nothing non-code",
+    src: `const s = "Deno.readTextFile(\n`,
+    expect: "FAIL-CLOSED: no span is marked non-code, so the text stays code and the read survives",
+    check: (r) => ({
+      pass: r.spans.length === 0 && r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
+  {
+    // The order that could plausibly HIDE a real read rather than widen: the real site comes AFTER the
+    // unterminated string, so a phantom string swallowing the rest of the file would lose it. Measured
+    // not to happen; the row pins that.
+    name: "M2 malformed: real read AFTER an unterminated string still survives",
+    src: `const s = "unterminated\nawait Deno.readTextFile(p);\n`,
+    expect: "FAIL-CLOSED: the read after the malformed string is still code, so it is not lost",
+    check: (r) => ({
+      pass: r.spans.length === 0 && r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
+  {
+    // A stray close quote forms a phantom string. Same assertion: the read outside it is never eaten.
+    name: "M3 malformed: stray close quote does not swallow a real read",
+    src: `const s = "abc\";\nawait Deno.readTextFile(p);\n`,
+    expect: "FAIL-CLOSED: a phantom string does not remove the read that follows it",
+    check: (r) => ({
+      pass: r.stripped.includes("Deno.readTextFile("),
+      obs: `readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
+  {
+    // The named counterexample to "malformed input widens" (audio-feed-ywjz): an unterminated block
+    // comment is a NARROWING malformed input - the spans are empty AND everything to EOF is blanked,
+    // so a read after it is LOST and the selection can lose a suite rather than gain one.
+    //
+    // IGNORED ON PURPOSE, and that reason is the point of the row: a LIVE assertion here would have to
+    // assert the current behaviour - that the scan blanks to EOF - which is a pin that passes WITH the
+    // defect present, worse than no pin at all (audio-feed-zpud). It stays visible with its bead id
+    // until the safe fix lands: on reaching EOF still inside a lexical state, exclude nothing rather
+    // than blanking, because widening costs gate time and narrowing loses a suite.
+    name:
+      "M4 malformed: UNTERMINATED BLOCK COMMENT blanks to EOF and NARROWS (known gap, audio-feed-ywjz)",
+    src: `/* unterminated\nconst a = await Deno.readTextFile(p);\n`,
+    expect: "KNOWN GAP (audio-feed-ywjz): the read after an unterminated /* is currently LOST",
+    ignore: true,
+    check: (r) => ({
+      // Deliberately asserts the SAFE direction, so the fix is a one-word change: flip `ignore`.
+      pass: r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
 ];
 for (const c of cases) {
   Deno.test({
