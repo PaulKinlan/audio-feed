@@ -17,7 +17,26 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 
-const port = Number(Deno.args.find((a) => /^\d+$/.test(a)) ?? 8133);
+/**
+ * Fixed port for reproducible evidence screenshots (audio-feed-vc4u).
+ * An ephemeral port (port 0) leaks random OS-assigned port digits into
+ * screenshots (bookmarklet snippet, curl examples, and feed URLs) which breaks
+ * byte reproducibility and causes varying PNG compression sizes.
+ *
+ * The default is a fixed, documented port (8133) so tests, proofs, and harnesses
+ * always render the exact same port digits.
+ * For an ephemeral or custom port, pass ACCOUNT_HARNESS_PORT=0 (or 'ephemeral'/'live')
+ * or set a specific port number via env or command-line argument.
+ */
+const HARNESS_PORT_DEFAULT = 8133;
+const port = (() => {
+  const env = Deno.env.get("ACCOUNT_HARNESS_PORT");
+  if (env === "ephemeral" || env === "0") return 0;
+  if (env && /^\d+$/.test(env)) return Number(env);
+  const cliPort = Deno.args.find((a) => /^[1-9]\d*$/.test(a));
+  if (cliPort) return Number(cliPort);
+  return HARNESS_PORT_DEFAULT;
+})();
 const stores = memoryStores();
 const config = { port, adminToken: "harness-admin" };
 const ctx = { config, stores };
@@ -40,8 +59,11 @@ await person("sam@example.com", "Sam Newcomer", false, false);
 /**
  * Pinned base instant for reproducible evidence screenshots (audio-feed-vc4u).
  * The default is a fixed instant so tests, harnesses and proofs render the
- * exact same timestamps forever. For manual/interactive exploration, pass
- * ACCOUNT_HARNESS_NOW=live or a specific ISO timestamp.
+ * exact same timestamps forever. This default instant was chosen to keep
+ * the regulated artefact set inside the evidence size budget (150KB per file)
+ * without wall-clock drift. Do not round or alter this instant without re-verifying
+ * evidence size budgets and screenshot reproducibility.
+ * For manual/interactive exploration, pass ACCOUNT_HARNESS_NOW=live or a specific ISO timestamp.
  */
 const HARNESS_BASE_INSTANT_DEFAULT = "2026-10-12T03:30:00.000Z";
 const baseInstantMs = (() => {
