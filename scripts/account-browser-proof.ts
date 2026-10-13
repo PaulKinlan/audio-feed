@@ -168,10 +168,32 @@ await runProof("account-browser-proof", async (checker) => {
       try {
         await cdp("Page.enable");
         await cdp("Runtime.enable");
-        // audio-feed-5sei: freeze toLocaleTimeString on new documents so the admin
-        // dashboard's "Updated <time>." status renders deterministically in evidence screenshots.
+        // audio-feed-5sei (audio-feed-ugez): freeze client Date and Temporal to the harness's
+        // base instant (2026-10-12T03:30:00.000Z = 1791775800000) so that relative ages calculated
+        // by ago() in admin.js (e.g. "24h ago") and the "Updated <time>." status render 100%
+        // deterministically across runs separated by arbitrary hours or days.
         await cdp("Page.addScriptToEvaluateOnNewDocument", {
-          source: `Date.prototype.toLocaleTimeString = function() { return "12:00:00 PM"; };`,
+          source: `(() => {
+            const PINNED_MS = 1791775800000;
+            const OrigDate = Date;
+            const PinnedDate = function(...args) {
+              if (new.target) {
+                if (args.length === 0) return new OrigDate(PINNED_MS);
+                return new OrigDate(...args);
+              }
+              return new OrigDate(PINNED_MS).toString();
+            };
+            PinnedDate.now = function() { return PINNED_MS; };
+            PinnedDate.parse = OrigDate.parse;
+            PinnedDate.UTC = OrigDate.UTC;
+            PinnedDate.prototype = OrigDate.prototype;
+            globalThis.Date = PinnedDate;
+            if (typeof Temporal !== "undefined" && Temporal.Now) {
+              Temporal.Now.instant = function() {
+                return Temporal.Instant.fromEpochMilliseconds(PINNED_MS);
+              };
+            }
+          })()`,
         });
         await cdp("WebAuthn.enable");
         const { authenticatorId } = await cdp("WebAuthn.addVirtualAuthenticator", {
