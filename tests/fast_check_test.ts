@@ -15,6 +15,7 @@ import {
   extractFailingTests,
   failureMarkers,
   formatFailureOutput,
+  ignoredSummary,
   nameMatchedTests,
   planTests,
   reachableTests,
@@ -579,4 +580,71 @@ Deno.test("psjb: the uniform marker is emitted on EVERY path, not only the passi
   // The consumed contract stays intact: passed:/ran: are still emitted where they always were.
   assertEquals((source.match(/console\.log\(\s*suiteMarker\("passed"/g) ?? []).length, 2);
   assertEquals((source.match(/console\.log\(\s*suiteMarker\("ran"/g) ?? []).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-48b7: a suite that ran NOTHING must not be reportable as a pass.
+// Deno counts IGNORED tests separately from passed ones, and the gate is silent
+// on success - so the ignored count was unobservable in the gate log, which is
+// how the fast gate's own recursion-guard suite reported "ok" while executing
+// zero assertions. Note this is a NARROW EXCEPTION to the pinned contract above
+// ("run remains completely quiet on success", pkv1): quiet UNLESS Deno says
+// something was skipped, and then only the line that says so.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-48b7: the ignored summary is BOUNDED to the line carrying it", () => {
+  // A large successful suite with ONE ignored test must not dump every per-test
+  // line into the gate log - the row rev-56 asked for ("preserve bounded output
+  // where possible"), which the first version of this passthrough failed by
+  // printing stdout.trim() whole.
+  const stdout = [
+    "running 3 tests from ./tests/example_test.ts",
+    "a real test that ran ... ok (12ms)",
+    "another real test ... ok (7ms)",
+    "a test that was skipped ... ignored (0ms)",
+    "",
+    "ok | 2 passed | 0 failed | 1 ignored (19ms)",
+    "",
+  ].join("\n");
+  assertEquals(ignoredSummary(stdout), "ok | 2 passed | 0 failed | 1 ignored (19ms)");
+  // Controls: an ordinary quiet pass STAYS quiet, because the guard is [1-9], not \d.
+  assertEquals(ignoredSummary("ok | 3 passed | 0 failed (19ms)"), "");
+  assertEquals(ignoredSummary("ok | 3 passed | 0 failed | 0 ignored (19ms)"), "");
+  assertEquals(ignoredSummary(""), "");
+});
+
+Deno.test("audio-feed-48b7: run surfaces the ignored count but NOT the rest of stdout", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    [
+      "deno",
+      "eval",
+      "console.log('UNRELATED_PASSING_TEST_DETAILS'); console.log('ok | 0 passed | 0 failed | 2 ignored (6ms)');",
+    ],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+  assertEquals(res.code, 0);
+  const combined = logged.join("\n");
+  assert(
+    combined.includes("2 ignored"),
+    `the ignored count must be surfaced on a successful run; got: ${JSON.stringify(combined)}`,
+  );
+  assert(
+    !combined.includes("UNRELATED_PASSING_TEST_DETAILS"),
+    `the passthrough must stay BOUNDED to the summary line; got: ${JSON.stringify(combined)}`,
+  );
+});
+
+Deno.test("audio-feed-48b7: nothing ignored means the success path stays silent", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    [
+      "deno",
+      "eval",
+      "console.log('QUIET_PASS_DETAIL'); console.log('ok | 2 passed | 0 failed (9ms)');",
+    ],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+  assertEquals(res.code, 0);
+  assertEquals(logged, [], "no ignored tests means the pkv1 quiet contract is intact");
 });
