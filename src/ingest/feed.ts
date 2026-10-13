@@ -467,10 +467,20 @@ export interface FeedPollOptions {
   minIntervalMs?: number;
   batchSize?: number;
   maxItemsPerSource?: number;
+  userScanConcurrency?: number;
   signal?: AbortSignal;
 }
 
 const DEFAULT_MIN_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * User source scans in flight at once (audio-feed-f3aa).
+ *
+ * Bounded concurrency, matching ARTICLE_FETCH_CONCURRENCY: on an idle tick
+ * or during user traversal, user source lists are queried in bounded batches
+ * instead of a serial round-trip per user.
+ */
+export const USER_SCAN_CONCURRENCY = 4;
 
 /**
  * Poll every source that is due, across all users.
@@ -493,15 +503,25 @@ export async function runFeedPollBatch(
 ): Promise<FeedPollBatchResult> {
   const minInterval = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const batchSize = deps.batchSize ?? 5;
+  const userConcurrency = Math.max(1, deps.userScanConcurrency ?? USER_SCAN_CONCURRENCY);
   const cutoff = Date.now() - minInterval;
 
   const users = await ctx.stores.metadata.listUsers();
   const due: Source[] = [];
-  for (const user of users) {
-    for (const source of await ctx.stores.metadata.listSources(user.id)) {
-      if (!source.feedUrl) continue;
-      const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
-      if (!Number.isFinite(last) || last <= cutoff) due.push(source);
+  for (let i = 0; i < users.length; i += userConcurrency) {
+    const chunk = users.slice(i, i + userConcurrency);
+    const chunkSources = await mapWithConcurrency(
+      chunk,
+      userConcurrency,
+      (user) => ctx.stores.metadata.listSources(user.id),
+    );
+    for (const sources of chunkSources) {
+      for (const source of sources) {
+        if (!source.feedUrl) continue;
+        const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
+        if (!Number.isFinite(last) || last <= cutoff) due.push(source);
+        if (due.length >= batchSize) break;
+      }
       if (due.length >= batchSize) break;
     }
     if (due.length >= batchSize) break;
