@@ -109,11 +109,11 @@ Deno.test("a queued episode is synthesised, stored and marked ready", async () =
 
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "ready");
-  // Every synthesis writes its own revision under the canonical scoping
-  // (audio-feed-xsu): the episode's key is never the bare canonical path.
+  // Every episode keeps canonical scoping while a content-derived revision
+  // prevents the bare immutable URL from ever being overwritten.
   assertMatch(
     episode?.audioKey ?? "",
-    /^audio\/user-1\/direct\/episode-1-[0-9a-f-]+\.wav$/,
+    /^audio\/user-1\/direct\/episode-1-sha256-[0-9a-f]{64}\.wav$/,
   );
   assertEquals(episode?.contentType, "audio/wav");
   assertEquals(episode?.byteLength, 524);
@@ -1163,19 +1163,16 @@ Deno.test("the default byte budget refuses the reviewer's CJK repro before any s
   assertStringIncludes(result.failed[0]!.error, "90000 > 72000 bytes");
 });
 
-Deno.test("synthesised audio blob key is the canonical scoping plus a per-attempt revision (audio-feed-3hb, -xsu)", async () => {
+Deno.test("synthesised audio blob key is canonically scoped with a content revision (audio-feed-avgc)", async () => {
   const { ctx, stores } = await queued();
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()));
   assertEquals(result.ready.length, 1);
   const canonical = audioBlobKey({ userId: "user-1", id: "episode-1", mode: "direct" }, "wav");
   assertEquals(canonical, "audio/user-1/direct/episode-1.wav");
   const audioKey = result.ready[0]!.audioKey!;
-  // Same user/mode/name directory scoping, with the attempt's revision attached:
-  // the bare canonical path is never written by a synthesis (audio-feed-xsu).
-  assertEquals(
-    audioKey.replace(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.wav$/, ".wav"),
-    canonical,
-  );
+  // Same user/mode/name directory scoping, with a stable content-derived
+  // revision; the bare canonical path is never written by synthesis.
+  assertEquals(audioKey.replace(/-sha256-[0-9a-f]{64}\.wav$/, ".wav"), canonical);
   assert(audioKey !== canonical);
   assert(await stores.blobs.get(audioKey));
   assert(await stores.blobs.get(canonical) === null, "the bare canonical key stays unwritten");
@@ -1226,6 +1223,48 @@ Deno.test("a superseded FIRST synthesis deletes only its own blob — the winner
   assertEquals(episodeAfter?.audioKey, canonical, "the feed still points at the winner's audio");
 });
 
+Deno.test("audio-feed-avgc: superseded upload leaves a shared content key for its new claim to commit", async () => {
+  const { ctx, stores } = await queuedMany(1);
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let sharedKey = "";
+  stores.blobs.put = async (key, body, opts) => {
+    const stored = await oldPut(key, body, opts);
+    sharedKey = key;
+    // Lease takeover after the whole object exists but before the old owner
+    // writes ready. The new owner has not yet committed that SAME content key.
+    const episode = await stores.metadata.getEpisode("user-1", "ep-0");
+    await stores.metadata.putEpisode({
+      ...episode!,
+      status: "synthesizing",
+      claimedBy: "successor",
+      claimedAt: new Date().toISOString(),
+    });
+    return stored;
+  };
+
+  const old = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    owner: "superseded",
+  });
+  assertEquals(old.superseded.length, 1);
+  const waiting = await stores.metadata.getEpisode("user-1", "ep-0");
+  assertEquals(waiting?.claimedBy, "successor");
+  const blob = await stores.blobs.head(sharedKey);
+  assert(blob, "the old owner cannot delete a shared key while successor still holds the claim");
+  const committed = await stores.metadata.completeEpisode(
+    {
+      ...waiting!,
+      status: "ready",
+      audioKey: sharedKey,
+      byteLength: blob.size,
+      contentType: "audio/wav",
+    },
+    "successor",
+    { byteLength: blob.size },
+  );
+  assertEquals(committed, true);
+  assert(await stores.blobs.head(sharedKey), "the winner's ready audio still fetches");
+});
+
 Deno.test("a superseded worker whose cleanup delete fails records the orphan (audio-feed-owq)", async () => {
   const { ctx, stores } = await queuedMany(1);
   const episode = await stores.metadata.getEpisode("user-1", "ep-0");
@@ -1245,6 +1284,24 @@ Deno.test("a superseded worker whose cleanup delete fails records the orphan (au
       claimedBy: "someone-else",
       claimedAt: new Date().toISOString(),
     });
+    // Once the successor has committed a DIFFERENT key, cleanup of the old
+    // unreferenced key is safe to attempt (and must record a failed delete).
+    await origPut(canonical, new Uint8Array([7]), { contentType: "audio/wav" });
+    const successor = (await stores.metadata.getEpisode("user-1", "ep-0"))!;
+    assertEquals(
+      await stores.metadata.completeEpisode(
+        {
+          ...successor,
+          status: "ready",
+          audioKey: canonical,
+          byteLength: 1,
+          contentType: "audio/wav",
+        },
+        "someone-else",
+        { byteLength: 1 },
+      ),
+      true,
+    );
     return res;
   };
 

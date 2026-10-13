@@ -60,6 +60,166 @@ async function setupEnv(episodeId: string) {
   return { ctx, stores };
 }
 
+Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry commits that same blob without another PUT", async () => {
+  const episodeId = "ep-avgc-late-put";
+  const { ctx, stores } = await setupEnv(episodeId);
+  const audio = fakeAudio(1_024);
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  const keys: string[] = [];
+  let settled: Promise<unknown> = Promise.resolve();
+  stores.blobs.put = (key, body, opts) => {
+    keys.push(key);
+    // Model an atomic server-side PUT that finishes after the client aborts:
+    // the local connection closed, but the complete object exists in storage.
+    settled = new Promise((resolve, reject) => {
+      setTimeout(
+        () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
+        250,
+      );
+    });
+    return settled as ReturnType<typeof oldPut>;
+  };
+
+  const first = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-upload-1",
+    maxInvocationDurationMs: 150,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(first.yielded.length, 1, "the budget must yield before the delayed PUT settles");
+  assertEquals(keys.length, 1, "the first tick started exactly one PUT");
+  await settled;
+  const existing = await stores.blobs.head(keys[0]!);
+  assertEquals(existing?.size, audio.rawBytes.length, "completed upload must survive the yield");
+  assertEquals((await stores.metadata.getEpisode("user-1", episodeId))?.phase, "upload_retry");
+
+  const second = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-upload-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(second.ready.length, 1, "the next fresh tick commits the retained blob");
+  assertEquals(keys.length, 1, "retry must not PUT again, even under a new key");
+  assertEquals(second.ready[0]?.audioKey, keys[0], "ready audio reuses the first attempt's key");
+  assert(await stores.blobs.head(keys[0]!), "the published object is still present");
+
+  // The observability contract must distinguish a real upload from verified
+  // reuse and from never reaching the terminal stage. Bind each mark to its
+  // invocation rather than assuming an ordering of returned log records.
+  const logs = await stores.metadata.listLogs({ limit: 100 });
+  const invocations = logs.filter((log) =>
+    log.type === "synthesis.invocation" && log.phase === "started"
+  );
+  const stages = logs.filter((log) => log.type === "synthesis.stage");
+  assertEquals(invocations.length, 2, "both attempts must have observable invocation starts");
+  const uploaded = stages.find((log) => log.phase === "upload");
+  assert(uploaded?.correlationId, "the first invocation must mark its actual PUT");
+  const reused = invocations.find((log) => log.correlationId !== uploaded.correlationId);
+  assert(reused?.correlationId, "the second invocation must have a distinct correlation ID");
+  assert(
+    stages.some((log) => log.phase === "verify" && log.correlationId === uploaded.correlationId),
+    "first invocation verifies absence before uploading",
+  );
+  assert(
+    stages.some((log) => log.phase === "verify" && log.correlationId === reused.correlationId),
+    "retry verifies the stored bytes before reusing",
+  );
+  assertEquals(
+    stages.some((log) => log.phase === "upload" && log.correlationId === reused.correlationId),
+    false,
+    "verified reuse must never be misreported as another upload",
+  );
+});
+
+Deno.test("audio-feed-avgc: absent object after an aborted PUT retries under the same key", async () => {
+  const episodeId = "ep-avgc-aborted-put";
+  const { ctx, stores } = await setupEnv(episodeId);
+  const audio = fakeAudio(1_024);
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  const keys: string[] = [];
+  stores.blobs.put = (key, body, opts) => {
+    keys.push(key);
+    if (keys.length > 1) return oldPut(key, body, opts);
+    return new Promise((_resolve, reject) => {
+      opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+    });
+  };
+  const first = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-absent-1",
+    maxInvocationDurationMs: 150,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(first.yielded.length, 1);
+  assertEquals(keys.length, 1);
+  assertEquals(await stores.blobs.head(keys[0]!), null, "aborted whole PUT left no object");
+  const second = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-absent-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(second.ready.length, 1);
+  assertEquals(
+    keys,
+    [keys[0], keys[0]],
+    "retry reuses the stable key even when a new PUT is needed",
+  );
+});
+
+Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reused or overwritten", async () => {
+  const episodeId = "ep-avgc-mismatched-put";
+  const { ctx, stores } = await setupEnv(episodeId);
+  const audio = fakeAudio(1_024);
+  const oldPut = stores.blobs.put.bind(stores.blobs);
+  let stagingKey = "";
+  let puts = 0;
+  let settled: Promise<unknown> = Promise.resolve();
+  stores.blobs.put = (key, body, opts) => {
+    stagingKey = key;
+    puts++;
+    settled = new Promise((resolve, reject) => {
+      setTimeout(
+        () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
+        250,
+      );
+    });
+    return settled as ReturnType<typeof oldPut>;
+  };
+  const first = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-mismatch-1",
+    maxInvocationDurationMs: 150,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(first.yielded.length, 1);
+  await settled;
+  const wrong = new Uint8Array(audio.rawBytes);
+  wrong[wrong.length - 1] = wrong[wrong.length - 1]! ^ 1; // HEAD alone would falsely accept it
+  await oldPut(stagingKey, wrong, { contentType: "audio/wav" });
+  const second = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "avgc-mismatch-2",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 1,
+    flushMarginMs: 5,
+  });
+  assertEquals(second.ready.length, 0, "mismatched bytes must never become published audio");
+  assertEquals(
+    second.failed.length,
+    1,
+    "corrupt staged key fails visibly instead of retrying forever",
+  );
+  assertEquals(puts, 1, "a mismatched existing key must not be overwritten");
+  assertEquals((await stores.blobs.head(stagingKey))?.size, wrong.length);
+});
+
 Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next tick with fresh budget completes", async () => {
   const episodeId = "ep-aqms-resume";
   const { ctx, stores } = await setupEnv(episodeId);
