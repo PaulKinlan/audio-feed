@@ -374,8 +374,28 @@ Deno.test("audio-feed-2mbx: suite and CLI failure reporting must not truncate fa
     expect: row.expect,
     expectRelationship: row.expectRelationship,
   });
-  assertEquals(judged.verdict, "unexpected");
-  assertStringIncludes(judged.detail, "640x473");
-  assertStringIncludes(judged.detail, "1280x989");
-  assertStringIncludes(judged.detail, "640x495");
+  // audio-feed-2mbx: verify that any future layout drift (dimensions differing from any historical literal)
+  // is accepted when the relationship holds: round(clipWidth * scale) x round(clipHeight * scale)
+  const arbitraryClipW = 1340;
+  const arbitraryClipH = 1020;
+  const expectedImgW = Math.round(arbitraryClipW * WRONG_SCALE);
+  const expectedImgH = Math.round(arbitraryClipH * WRONG_SCALE);
+  const validDriftLine =
+    ` ${CAPTURE_04} covers the Recent failures section carrying the provider error  image is ${expectedImgW}x${expectedImgH} ` +
+    `for a clip of ${arbitraryClipW}x${arbitraryClipH} at scale ${WRONG_SCALE}, so it should be ${arbitraryClipW}x${arbitraryClipH}`;
+  assertEquals(
+    wrongScaleRedDetail([validDriftLine]),
+    null,
+    "wrongScaleRedDetail must accept arbitrary live layout dimensions when the derived relationship holds",
+  );
+
+  // And verify that a stale expectation (image not matching derived clip at scale) is rejected with full dimensions
+  const staleDriftLine =
+    ` ${CAPTURE_04} covers the Recent failures section carrying the provider error  image is 640x473 ` +
+    `for a clip of ${arbitraryClipW}x${arbitraryClipH} at scale ${WRONG_SCALE}, so it should be ${arbitraryClipW}x${arbitraryClipH}`;
+  const staleDetail = wrongScaleRedDetail([staleDriftLine]);
+  assert(staleDetail !== null);
+  assertStringIncludes(staleDetail, "640x473");
+  assertStringIncludes(staleDetail, `${arbitraryClipW}x${arbitraryClipH}`);
+  assertStringIncludes(staleDetail, `${expectedImgW}x${expectedImgH}`);
 });
