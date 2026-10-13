@@ -116,6 +116,11 @@ Deno.test("audio-feed-huh4: a throwing stage is still marked, and the mark attac
     (marks[0]?.message ?? "").includes("FAILED"),
     "the message must say the stage failed rather than only how long it took",
   );
+  assertEquals(
+    marks[0]?.episodeId,
+    "ep-huh4-throw",
+    "the episode must be on the ROOT field, where spans and claim.lifecycle already put it",
+  );
   assertEquals(run.considered, 1, "the seeded episode must actually have been considered");
 });
 
@@ -151,6 +156,7 @@ Deno.test("audio-feed-k3x6: a stage that SUCCEEDS is not recorded as a failure (
       undefined,
       `stage ${mark.phase} succeeded, so it must carry no failure reason`,
     );
+    assertEquals(mark.episodeId, "ep-k3x6-ok", "a mark must name its episode on the root field");
   }
   assertEquals(run.ready.length, 1, "the seeded episode must actually have been synthesized");
 });

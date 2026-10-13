@@ -1425,6 +1425,10 @@ export async function runSynthesisBatch(
         // The reason at the ROOT, where spans and claim.lifecycle already put it, so a reader that
         // groups failures does not have to reach into context for it.
         ...(failureReason ? { reason: failureReason } : {}),
+        // The episode at the ROOT as well as in context: spans and claim.lifecycle populate the root
+        // field, so a reader joining on it silently missed stage marks while the key sat one level
+        // down. Same value, promoted, not a second identity.
+        ...(episodeId ? { episodeId } : {}),
         context: {
           invocationId,
           stage: "synthesis",
