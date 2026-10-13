@@ -125,3 +125,33 @@ Deno.readTextFile(P);
     "the unparseable tail is code as far as the selector knows, so it is included rather than blanked",
   );
 });
+
+/**
+ * THE SECOND P1 (review finding against 0b80453), and it is a DUPLICATION. At the unterminated block
+ * comment the prefix is appended WITH a space (scripts/test-selection.ts, the CODE case) and `offset` was
+ * not advanced there, so the EOF branch appended `source.slice(offset, i)` a second time - the whole
+ * prefix, twice. The consequence is not cosmetic: resolveReadName() rejects multiple matching declarations,
+ * so a duplicated `const P = ...` makes the real read relation unresolvable and it is LOST, and the second
+ * copy of a string literal lies outside its recorded span, so it reads as code.
+ *
+ * INCLUDES ASSERTIONS CANNOT SEE THIS - a duplicated prefix still includes everything once - which is why
+ * this row COUNTS occurrences. It fails against 0b80453 and passes after the offset fix.
+ */
+Deno.test("audio-feed-ywjz: the prefix before an unterminated comment is emitted exactly once", () => {
+  const source = `const P = "docs/real.md";\nDeno.readTextFile(P);\n/* unfinished\n`;
+  const { stripped } = stripComments(source);
+  assertEquals(
+    stripped.split("const P =").length - 1,
+    1,
+    "the declaration before the unterminated comment must appear EXACTLY once, or the relation is lost",
+  );
+  assertEquals(
+    stripped.split("Deno.readTextFile(P)").length - 1,
+    1,
+    "a read before the unterminated comment must not be duplicated either",
+  );
+  assert(
+    stripped.includes("unfinished"),
+    "and the unparseable tail is still included as code",
+  );
+});
