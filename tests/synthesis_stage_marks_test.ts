@@ -102,16 +102,21 @@ Deno.test("audio-feed-huh4: a throwing stage is still marked, and the mark attac
 });
 
 Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rather than silently dropped", async () => {
-  // One more episode than the cap can cover at three stages each, so the cap is reached by the
-  // SUCCESS path (tts, upload, yield) rather than by looping a failure.
-  const ids = Array.from({ length: 6 }, (_, i) => `ep-huh4-cap-${i}`);
+  // NINE EPISODES, AND THE NUMBER IS THE POINT (audio-feed-9pvk): a SUCCESSFUL episode emits TWO
+  // stage marks - tts and upload - because the yield mark is only reached when the invocation budget
+  // aborts. The old seed of six assumed three stages each, which would have been eighteen; what it
+  // actually produced was TWELVE, under the fifteen cap, so the cap assertions were never reached and
+  // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the
+  // cap by three. The assertions below are deliberately written so that a future change to the number
+  // of stages per episode makes this row FAIL LOUDLY rather than go vacuous again.
+  const ids = Array.from({ length: 9 }, (_, i) => `ep-huh4-cap-${i}`);
   const { ctx, stores } = await seedEpisodes(ids);
   const audio = fakeAudio();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
-    batchSize: 6,
+    batchSize: 9,
     owner: "huh4-cap",
   });
-  assertEquals(run.ready.length, 6, "every seeded episode must reach ready");
+  assertEquals(run.ready.length, 9, "every seeded episode must reach ready");
 
   const logs = await stores.metadata.listLogs();
   const invocation = logs.filter((log) => log.type === "synthesis.invocation");
@@ -129,11 +134,21 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
     assertEquals(mark.correlationId, invocation[0]?.correlationId);
     assert((mark.durationMs ?? -1) >= 0);
   }
-  // Suppression is reported exactly once, and only when it actually happened.
-  if (marked.length === STAGE_MARK_CAP) {
-    assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
-    assert(Number(capped[0]?.context?.suppressed ?? 0) > 0, "the capped event must name how many");
-  } else {
-    assertEquals(capped.length, 0, "an invocation under the cap must not claim suppression");
-  }
+  /**
+   * THE CAP MUST BE SHOWN TO BITE (audio-feed-9pvk). The old form of this row BRANCHED on whether the
+   * cap had been reached, asserting "no suppression" in the else arm - so at six episodes it took the
+   * else arm, asserted something true and vacuous, and proved nothing about the cap at all. A floor
+   * that is only observed is not a floor. These assertions cannot pass unless the run genuinely
+   * executed more stages than the cap allows.
+   */
+  assertEquals(marked.length, STAGE_MARK_CAP, "a batch that exceeds the cap must fill it exactly");
+  assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
+  const suppressed = Number(capped[0]?.context?.suppressed ?? 0);
+  assert(suppressed > 0, "the capped event must name how many were suppressed");
+  // THE NEGATIVE CONTROL: kept + suppressed is every stage execution this run performed, so if that
+  // total does not exceed the cap the run never reached it and this row is vacuous by construction.
+  assert(
+    marked.length + suppressed > STAGE_MARK_CAP,
+    `the run must execute more stages than the cap allows, else this row proves nothing: kept ${marked.length}, suppressed ${suppressed}, cap ${STAGE_MARK_CAP}`,
+  );
 });
