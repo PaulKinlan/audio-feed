@@ -303,7 +303,7 @@ try {
         check(
           "client canary is completely absent from all durable logs",
           !JSON.stringify(logs).includes(CLIENT_CANARY),
-          "canary absent from logs by construction",
+          "canary absent from every durable log, asserted by scanning them (not structural)",
         );
 
         // Verify limits section
