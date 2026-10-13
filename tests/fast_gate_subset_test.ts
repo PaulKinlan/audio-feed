@@ -1055,19 +1055,17 @@ function assertSelected(
     "tests/evidence_census_test.ts",
     "tests/evidence_run_test.ts",
     "tests/evidence_selection_test.ts",
-    // audio-feed-qmcf: a suite that IMPORTS a pure utility from a module which also walks directories
-    // inherits that module's DIRECTORY relations, because the closure follows imports (depth 2) and a
-    // relation is recorded per suite. chrome_profile_sweep_sites_test.ts imports maskNonCode() and
-    // firstArgument() from scripts/evidence-census.ts - a string function with no filesystem behaviour of
-    // its own - so it is derived as an observer of docs/evidence/ and of scripts/ exactly as
-    // evidence_census_test.ts is (verified by deriving the relation for each suite alone: the two suites
-    // produce the SAME two keys, and the class controls below produce only their own concrete path).
-    // The consequence is over-selection in the SAFE direction - a docs/evidence or scripts/ change also
-    // runs one 40ms suite - which is the class this list exists to tolerate BY NAME, not a reason to
-    // loosen the assertion. Deliberately NOT fixed by editing the census module or by re-implementing the
-    // masker in the test: reuse is the point of the change, and moving the utility into its own module is
-    // a layering change that belongs in its own bead rather than in this re-cut.
-    "tests/chrome_profile_sweep_sites_test.ts",
+    // audio-feed-amho REMOVED A DECLARATION FROM THIS LIST, and the reason it is recorded here rather
+    // than silently dropped is that its absence from the diff is otherwise indistinguishable from an
+    // oversight. tests/chrome_profile_sweep_sites_test.ts used to be tolerated as an over-selector
+    // because it imported maskNonCode()/firstArgument() from scripts/evidence-census.ts - a pure string
+    // utility living in a module that WALKS DIRECTORIES, so the relation closure (depth 2, recorded per
+    // suite) lent the suite docs/evidence/ and scripts/ relations it never observes. Those helpers now
+    // live in scripts/source-mask.ts, which reads nothing: the suite derives NO relation, and it is
+    // therefore selected only for what it really reads. The declaration is gone because the CAUSE is
+    // gone, not because the assertion was loosened - `required` is unchanged and `unexpected` still
+    // fails - so if this suite ever needs a declaration here again, that means a module it imports has
+    // started lending it directory relations and the reason should be re-derived rather than assumed.
   ],
 ): void {
   assert(
