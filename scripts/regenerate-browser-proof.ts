@@ -274,11 +274,17 @@ try {
   `,
   );
 
-  await waitFor(admin, `!document.getElementById("confirmDialog")?.open`, 2000);
+  // The 2s timeout is an UNPROVEN guard, not a measured flake budget (audio-feed-vwi4).
+  // Calibrating it requires repeated COMPLETE baseline runs on a loaded Chrome host,
+  // with the observed closure latencies and the stuck-dialog mutant both recorded.
+  // A partial run reaching this check cannot establish that end-to-end bound.
+  const closeWaitStartedMs = performance.now();
+  await waitFor(admin, `!document.getElementById("confirmDialog")?.open`, 2_000);
+  const closeWaitMs = performance.now() - closeWaitStartedMs;
   check(
     "confirm dialog is properly closed",
     !(await evaluate(admin, `document.getElementById("confirmDialog")?.open`)),
-    "dialog no longer open",
+    `dialog no longer open; observed wait ${closeWaitMs.toFixed(1)}ms (2s unproven guard)`,
   );
 
   await waitFor(admin, `${episodeRow(OLD_TITLE)}?.cells[2].textContent === 'regenerating'`);
