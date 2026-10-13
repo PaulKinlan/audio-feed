@@ -162,7 +162,52 @@ async function waitFor(session: string, expression: string, timeoutMs = 10_000) 
 }
 
 async function screenshot(session: string, name: string) {
-  const { data } = await send("Page.captureScreenshot", { format: "png" }, session);
+  // A second tab leaves the admin renderer backgrounded. Capturing that hidden tab
+  // intermittently stalls in Chrome; bring the target to the foreground first.
+  await send("Page.bringToFront", {}, session);
+  const visibility = await send(
+    "Runtime.evaluate",
+    {
+      expression: "document.hidden",
+      returnByValue: true,
+    },
+    session,
+    1_500,
+  );
+  if (visibility.result?.value !== false) {
+    throw new Error(
+      `screenshot ${name} refused: document.hidden=${visibility.result?.value} after Page.bringToFront; target tab is not paintable`,
+    );
+  }
+  let data: string;
+  try {
+    ({ data } = await send("Page.captureScreenshot", { format: "png" }, session));
+  } catch (error) {
+    // Name the failure mode, rather than blaming the product for a bare CDP timeout.
+    let renderer = "unreachable";
+    let browser = "unreachable";
+    try {
+      const probe = await send(
+        "Runtime.evaluate",
+        {
+          expression:
+            '({ readyState: document.readyState, hidden: document.hidden, dialogOpen: document.getElementById("confirmDialog")?.open })',
+          returnByValue: true,
+        },
+        session,
+        1_000,
+      );
+      renderer = JSON.stringify(probe.result?.value);
+    } catch { /* the page may genuinely be unresponsive */ }
+    try {
+      await send("Browser.getVersion", {}, undefined, 1_000);
+      browser = "responsive";
+    } catch { /* the CDP control connection may have stopped */ }
+    throw new Error(
+      `screenshot ${name} failed: renderer=${renderer}, browser=${browser}, pending=${pending.size}`,
+      { cause: error },
+    );
+  }
   await Deno.writeFile(
     `${outDir}/${name}.png`,
     Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
