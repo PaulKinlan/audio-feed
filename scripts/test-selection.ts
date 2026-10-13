@@ -1132,7 +1132,9 @@ function staticPathHints(
       for (const token of text.split(/[\s"']+/).filter(Boolean)) {
         const wildcard = token.search(/\$\{/);
         if (wildcard < 0) {
-          if (cutTail && wholeTail.includes(token)) continue;
+          const cutBase = cutTail ? interpolationBaseName(cutTail) : "";
+          const cutIsOutOfRepo = cutBase ? isOutOfRepoBase(cutBase) : false;
+          if (cutTail && cutIsOutOfRepo && wholeTail.includes(token)) continue;
           hints.push(token);
           continue;
         }
@@ -1207,6 +1209,31 @@ function pathConstants(
     if (isExported) exported.set(name, value);
   };
   const resolve = (expr: string, offset: number): string | null => {
+    // If the expression is a template referencing known constants, expand them and check for an existing file
+    const expanded = expr.replace(
+      /\$\{([A-Za-z_$][\w$]*)\}/g,
+      (_, name) => constants.get(name) ?? _,
+    );
+    const tmplMatch = /^[`"'\s]*(.+?)[`"'\s;]*$/.exec(expanded);
+    if (tmplMatch?.[1] && !tmplMatch[1].includes("${")) {
+      const candidate = normalisePath(
+        tmplMatch[1].startsWith("/") && tmplMatch[1].startsWith(root)
+          ? tmplMatch[1].slice(root.length)
+          : tmplMatch[1],
+      );
+      if (candidate) {
+        try {
+          if (
+            Deno.statSync(`${root}${candidate}`).isFile ||
+            Deno.statSync(`${root}${candidate}`).isDirectory
+          ) {
+            return candidate;
+          }
+        } catch {
+          // not found on disk
+        }
+      }
+    }
     const { paths, tailCandidates } = staticPathHints(
       expr,
       moduleDir,
@@ -1308,7 +1335,7 @@ function toRepoPath(hint: string, moduleDir: string, root: string): string | nul
   // Only path-shaped hints count. A `Deno.Command` call is full of literals that are not files: CLI flags
   // (`--allow-all`, `-c`), numbers, and punctuation from an args array. Keeping them out is what makes the
   // relation readable and keeps a change from matching junk.
-  if (!/^[\w@./-]+$/.test(path)) return null;
+  if (!/^[\w@./ -]+$/.test(path)) return null;
   if (path.startsWith("-")) return null;
   if (!path.includes("/") && !/\.[A-Za-z0-9]{1,5}$/.test(path)) return null;
   if (/^[a-z]+:/i.test(path) && !/^file:/i.test(path)) return null; // http(s):, jsr:, node:, data:
