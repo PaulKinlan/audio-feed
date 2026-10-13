@@ -24,6 +24,7 @@ import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
+import { evidencePngDigestLine } from "./evidence-png-digest.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
 
 const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
@@ -303,6 +304,10 @@ await runProof("audio-feed-3asd", async (checker) => {
         const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
         await Deno.writeFile(`${OUT}01-bookmarklet-disclosure-open.png`, raw);
         await quantiseEvidencePng(`${OUT}01-bookmarklet-disclosure-open.png`);
+        const digestLine = await evidencePngDigestLine(
+          `${OUT}01-bookmarklet-disclosure-open.png`,
+          "01-bookmarklet-disclosure-open.png",
+        );
 
         await writeEvidenceReadme({
           dir: OUT,
@@ -330,7 +335,7 @@ await runProof("audio-feed-3asd", async (checker) => {
             {
               heading: "Screenshots",
               body:
-                `- \`01-bookmarklet-disclosure-open.png\`: Homepage with bookmarklet box and expanded fallback disclosure showing snippet code.`,
+                `- \`01-bookmarklet-disclosure-open.png\`: Homepage with bookmarklet box and expanded fallback disclosure showing snippet code.\n${digestLine}`,
             },
           ],
         });
