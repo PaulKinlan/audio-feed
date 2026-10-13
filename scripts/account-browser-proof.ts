@@ -168,6 +168,11 @@ await runProof("account-browser-proof", async (checker) => {
       try {
         await cdp("Page.enable");
         await cdp("Runtime.enable");
+        // audio-feed-5sei: freeze toLocaleTimeString on new documents so the admin
+        // dashboard's "Updated <time>." status renders deterministically in evidence screenshots.
+        await cdp("Page.addScriptToEvaluateOnNewDocument", {
+          source: `Date.prototype.toLocaleTimeString = function() { return "12:00:00 PM"; };`,
+        });
         await cdp("WebAuthn.enable");
         const { authenticatorId } = await cdp("WebAuthn.addVirtualAuthenticator", {
           options: {
