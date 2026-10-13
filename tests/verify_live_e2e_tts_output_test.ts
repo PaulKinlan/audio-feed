@@ -62,6 +62,16 @@ Deno.test("audio-feed-ulab: isCommittedTarget canonicalises relative, .., and ab
   assertEquals(isCommittedTarget("/tmp/custom-run"), false);
 });
 
+Deno.test("audio-feed-ulab: target canonicalisation checks containment for subdirectories", () => {
+  assertEquals(isCommittedTarget("docs/evidence/audio-feed-9vns/nested"), true);
+  assertEquals(isCommittedTarget("docs/evidence/audio-feed-9vns/nested/deep"), true);
+  assertThrows(
+    () => resolveEvidenceOutputDir(["--out-dir=docs/evidence/audio-feed-9vns/nested"]),
+    Error,
+    "Refusing to overwrite committed evidence",
+  );
+});
+
 Deno.test("audio-feed-ulab (shape 1): out-dir containing file symlink to committed evidence throws without write flag", async () => {
   const tmpDir = await Deno.makeTempDir({ prefix: "ulab-file-symlink-" });
   try {
