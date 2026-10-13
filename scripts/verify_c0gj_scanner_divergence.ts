@@ -1135,12 +1135,15 @@ export async function runVerification(fuzzCount = 10000) {
   const handcrafted = buildHandcraftedCorpus();
   console.log(`\nBuilt handcrafted corpus: ${handcrafted.length} cases.`);
 
-  // Build fuzz corpus across 3 deterministic seeds
-  const fuzz1 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 101);
-  const fuzz2 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 202);
-  const fuzz3 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 303);
+  // Build fuzz corpus across 3 deterministic seeds (total exactly fuzzCount)
+  const part = Math.floor(fuzzCount / 3);
+  const fuzz1 = buildFuzzCorpus(part, 101);
+  const fuzz2 = buildFuzzCorpus(part, 202);
+  const fuzz3 = buildFuzzCorpus(fuzzCount - part * 2, 303);
   const fullCorpus = [...handcrafted, ...fuzz1, ...fuzz2, ...fuzz3];
-  console.log(`Total corpus size (handcrafted + 3-seed fuzz): ${fullCorpus.length} cases.`);
+  console.log(
+    `Total corpus size (handcrafted + 3-seed fuzz): ${fullCorpus.length} cases.`,
+  );
 
   // Evaluate current branch (src/tts/gemini.ts)
   const branchResult = evaluateCandidate(
@@ -1189,14 +1192,18 @@ export async function runVerification(fuzzCount = 10000) {
   console.log(
     `--------------------------------+------------------+------------------+--------------------`,
   );
+  const branchPct = (
+    (branchResult.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(1);
+  const audit1Pct = (
+    (audit1Result.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(1);
+  const fixc0gjPct = (
+    (fixc0gjV2Result.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(2);
+
   console.log(
-    `Differing Inputs (Distinct)     | ${branchResult.totalDistinctDifferingInputs} / ${fullCorpus.length} (0.0%) | ${audit1Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
-      (audit1Result.totalDistinctDifferingInputs / fullCorpus.length * 100)
-        .toFixed(1)
-    }%) | ${fixc0gjV2Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
-      (fixc0gjV2Result.totalDistinctDifferingInputs / fullCorpus.length * 100)
-        .toFixed(2)
-    }%)`,
+    `Differing Inputs (Distinct)     | ${branchResult.totalDistinctDifferingInputs} / ${fullCorpus.length} (${branchPct}%) | ${audit1Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${audit1Pct}%) | ${fixc0gjV2Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${fixc0gjPct}%)`,
   );
   console.log(
     `Skip Mode Output Mismatches     | ${branchResult.skipDivergences}                | ${audit1Result.skipDivergences}                | ${fixc0gjV2Result.skipDivergences}`,

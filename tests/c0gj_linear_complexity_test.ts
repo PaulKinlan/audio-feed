@@ -14,7 +14,7 @@ import {
   formatCodeForTts_main,
 } from "../scripts/verify_c0gj_scanner_divergence.ts";
 
-Deno.test("c0gj - branch extractCodeBlocks and formatCodeForTts achieve 0 mismatches across full 10,089-input corpus", async () => {
+Deno.test("c0gj - branch extractCodeBlocks and formatCodeForTts achieve 0 mismatches across full 10,090-input corpus", async () => {
   const handcrafted = buildHandcraftedCorpus();
   const fuzz1 = buildFuzzCorpus(3333, 101);
   const fuzz2 = buildFuzzCorpus(3333, 202);
@@ -57,17 +57,17 @@ Deno.test("c0gj - branch extractCodeBlocks and formatCodeForTts achieve 0 mismat
   assertEquals(
     skipMismatches,
     0,
-    "skip mode must have 0 mismatches across 10,089 corpus cases",
+    "skip mode must have 0 mismatches across 10,090 corpus cases",
   );
   assertEquals(
     explainMismatches,
     0,
-    "explain mode must have 0 mismatches across 10,089 corpus cases",
+    "explain mode must have 0 mismatches across 10,090 corpus cases",
   );
   assertEquals(
     blockMismatches,
     0,
-    "block AST must have 0 mismatches across 10,089 corpus cases",
+    "block AST must have 0 mismatches across 10,090 corpus cases",
   );
 });
 
