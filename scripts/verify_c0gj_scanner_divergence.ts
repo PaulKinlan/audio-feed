@@ -977,6 +977,37 @@ export async function computeSha256(text: string): Promise<string> {
     .join("");
 }
 
+async function loadGitFormat(
+  commit: string,
+): Promise<(text: string, mode: "skip" | "explain") => Promise<string>> {
+  const p = new Deno.Command("git", { args: ["show", `${commit}:src/tts/gemini.ts`] });
+  const out = await p.output();
+  if (!out.success) {
+    throw new Error(`Failed to read commit ${commit} from git: exit ${out.code}`);
+  }
+  const text = new TextDecoder().decode(out.stdout);
+  const tempFile = await Deno.makeTempFile({ prefix: "git-scanner-", suffix: ".ts" });
+  try {
+    const entities = text.slice(
+      text.indexOf("function decodeHtmlEntities"),
+      text.indexOf("export async function formatCodeForTts"),
+    );
+    const formatTts = text.slice(
+      text.indexOf("export async function formatCodeForTts"),
+      text.indexOf("export function formatDialoguePrompt"),
+    );
+    await Deno.writeTextFile(tempFile, entities + "\n" + formatTts);
+    const mod = await import("file://" + tempFile);
+    return mod.formatCodeForTts;
+  } finally {
+    try {
+      await Deno.remove(tempFile);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export async function verifyAgainstGitRefs(): Promise<boolean> {
   console.log("Verifying inlined implementations against pinned git revisions...");
   const specs = [
@@ -1045,6 +1076,51 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
       }, ${slice.length}B, SHA: ${actualSha.slice(0, 16)}...)`,
     );
   }
+
+  // Cross-validate behavioral parity: run git-extracted modules against inlined functions
+  console.log("Cross-validating inlined functions against git-extracted modules across corpus...");
+  const mainGit = await loadGitFormat(PINNED_REVISIONS.main.commit);
+  const audit1Git = await loadGitFormat(PINNED_REVISIONS.audit1.commit);
+  const fixV1Git = await loadGitFormat(PINNED_REVISIONS.fixc0gj_v1.commit);
+  const fixV2Git = await loadGitFormat(PINNED_REVISIONS.fixc0gj_v2.commit);
+
+  const corpus = buildHandcraftedCorpus();
+  for (const item of corpus) {
+    const mGit = await mainGit(item.text, "skip");
+    const mInline = formatCodeForTts_main(item.text, "skip");
+    if (mGit !== mInline) {
+      throw new Error(
+        `Inlined main diverged from git at commit ${PINNED_REVISIONS.main.commit} on ${item.id}`,
+      );
+    }
+
+    const aGit = await audit1Git(item.text, "skip");
+    const aInline = formatCodeForTts_audit1(item.text, "skip");
+    if (aGit !== aInline) {
+      throw new Error(
+        `Inlined audit1 diverged from git at commit ${PINNED_REVISIONS.audit1.commit} on ${item.id}`,
+      );
+    }
+
+    const f1Git = await fixV1Git(item.text, "skip");
+    const f1Inline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "skip");
+    if (f1Git !== f1Inline) {
+      throw new Error(
+        `Inlined fixc0gj v1 diverged from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
+      );
+    }
+
+    const f2Git = await fixV2Git(item.text, "skip");
+    const f2Inline = formatCodeForTts_fixc0gj_3d32fc4(item.text, "skip");
+    if (f2Git !== f2Inline) {
+      throw new Error(
+        `Inlined fixc0gj v2 diverged from git at commit ${PINNED_REVISIONS.fixc0gj_v2.commit} on ${item.id}`,
+      );
+    }
+  }
+  console.log(
+    "  [OK] 100% behavioral parity confirmed between inlined functions and git revisions.",
+  );
   return true;
 }
 
