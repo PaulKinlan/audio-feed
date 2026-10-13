@@ -139,12 +139,47 @@ function deps(
   return Object.assign(base, wrapped, { calls, beadArgs });
 }
 
+/**
+ * audio-feed-w5f1: point TMPDIR at a scratch directory and hand back the restore.
+ *
+ * WHY THIS SUITE NEEDS IT: createTempChromeProfile() reclaims abandoned profiles under
+ * `TMPDIR ?? /tmp` BEFORE it allocates, so running this proof against the machine's real TMPDIR makes a
+ * test mutate shared state. That was always true of this suite's own prefix; with the sweep now
+ * age-and-signature based instead of prefix-scoped (audio-feed-h62q) it is true of EVERY abandoned
+ * profile on the VM.
+ *
+ * THE REDIRECT MUST SPAN THE PROFILE'S WHOLE LIFE, NOT JUST THE ALLOCATION: TMPDIR is both the sweep's
+ * root and the profile's root, so restoring it - and deleting the scratch tree - while the caller is
+ * still using the profile would delete it out from under them. Measured on this repo's sibling suite,
+ * which failed with ENOENT writing into a profile that had just been swept away; so `restore` runs in
+ * the same `finally` that cleans the profile up.
+ *
+ * The redirect is ASSERTED where it is set: a helper that silently failed to take would leave the suite
+ * exactly as it was while reading as fixed.
+ */
+async function redirectTmpToScratch(): Promise<() => Promise<void>> {
+  const original = Deno.env.get("TMPDIR");
+  const scratch = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
+  Deno.env.set("TMPDIR", scratch);
+  if (Deno.env.get("TMPDIR") !== scratch) {
+    throw new Error(`TMPDIR redirect did not take: ${Deno.env.get("TMPDIR")}`);
+  }
+  return async () => {
+    if (original === undefined) Deno.env.delete("TMPDIR");
+    else Deno.env.set("TMPDIR", original);
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  };
+}
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  // audio-feed-w5f1: the redirect covers the whole call INCLUDING the caller's use of the profile.
+  const restoreTmp = await redirectTmpToScratch();
   const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-");
   try {
     return await fn(profileDir);
   } finally {
     await cleanup();
+    await restoreTmp();
   }
 }
 
