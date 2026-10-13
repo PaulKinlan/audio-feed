@@ -212,11 +212,33 @@ export function callArguments(source: string, open: number): string | null {
 export function evidenceBindings(source: string): Map<string, string> {
   const bindings = new Map<string, string>();
   const re = /^[ \t]*(?:export[ \t]+)?const[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[ \t]*([^\n;]+)/gm;
-  for (const match of source.matchAll(re)) {
-    const name = match[1]!;
-    const value = match[2]!;
-    if (!value.includes(EVIDENCE_PREFIX)) continue;
-    bindings.set(name, value);
+  const declared: Array<[string, string]> = [];
+  for (const match of source.matchAll(re)) declared.push([match[1]!, match[2]!]);
+  for (const [name, value] of declared) {
+    if (value.includes(EVIDENCE_PREFIX)) bindings.set(name, value);
+  }
+  // FOLLOW THE CHAIN (audio-feed-21od). A const whose value NAMES another evidence binding is itself
+  // an evidence binding, and the write naming THAT const is resolvable one hop further:
+  // `const OUT = new URL("../docs/evidence/audio-feed-x/", ...)` then
+  // `const shotPath = `${OUT}01-x.png`` then `Deno.writeFile(shotPath, bytes)`. Before this pass the
+  // third line looked UNATTRIBUTABLE to the census even though the second line names the slice, which
+  // is not a depth the predicate lacked - it is a hop it did not follow. Bounded by `declared.length`
+  // passes and a set that only grows, so a cyclic reference terminates instead of looping.
+  const wordIn = (text: string, name: string) =>
+    new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\b`).test(text);
+  for (let pass = 0; pass < declared.length; pass++) {
+    let grew = false;
+    for (const [name, value] of declared) {
+      if (bindings.has(name)) continue;
+      for (const [key, resolved] of bindings) {
+        if (wordIn(value, key)) {
+          bindings.set(name, `${value} ${resolved}`);
+          grew = true;
+          break;
+        }
+      }
+    }
+    if (!grew) break;
   }
   return bindings;
 }

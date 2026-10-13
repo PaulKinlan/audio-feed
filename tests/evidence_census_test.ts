@@ -715,9 +715,15 @@ Deno.test("audio-feed-8yki: NEGATIVE CONTROL - insufficient sweep scan fails aud
 });
 
 Deno.test("audio-feed-0gbo / audio-feed-2hgp: NEGATIVE CONTROL - unresolved evidence write is detected and failure text names call", () => {
+  // audio-feed-21od: THE FIXTURE HAD TO CHANGE, THE ASSERTION DID NOT. This row used a target derived
+  // from an evidence binding (`const target = `${OUT}01-shot.png``), which the census CAN resolve - it
+  // already substitutes a binding named in a write target, and it resolved exactly that shape for three
+  // real scripts once the binding-to-binding hop was added. So the old fixture was passing by testing an
+  // unattributability that was a gap rather than a fact, and the control now uses a target that is
+  // genuinely assembled at runtime: nothing in the source names a slice, so nothing can attribute it.
   const syntheticProof = [
     'const OUT = "docs/evidence/audio-feed-test/";',
-    "const target = `${OUT}01-shot.png`;",
+    "const target = Deno.args[0];",
     "await Deno.writeFile(target, new Uint8Array());",
   ].join("\n");
 
@@ -725,8 +731,9 @@ Deno.test("audio-feed-0gbo / audio-feed-2hgp: NEGATIVE CONTROL - unresolved evid
   assertEquals(
     result.unresolvedWrites,
     ["Deno.writeFile"],
-    "Indirect variable write target must be classified as unresolved write",
+    "A runtime-assembled write target must be classified as an unresolved write",
   );
+  assertEquals(result.writes, [], "nothing about this source is attributable as evidence");
 
   const failure = checkProofCompliance(syntheticProof, "scripts/synthetic-browser-proof.ts");
   assert(
@@ -737,6 +744,49 @@ Deno.test("audio-feed-0gbo / audio-feed-2hgp: NEGATIVE CONTROL - unresolved evid
     failure,
     "Deno.writeFile",
     "Failure message must specifically name the unresolved write call",
+  );
+});
+
+Deno.test("audio-feed-21od: a bead-id comment cannot change what a script's writes resolve to", () => {
+  // THE REGRESSION ROW FOR THIS BEAD, and it is the six-line case rather than a paraphrase of it. The
+  // real proof declared its screenshot paths as consts derived from an evidence binding, wrote through
+  // those consts, and gained a comment naming `audio-feed-<id>` - and the comment ALONE flipped the file
+  // from "no unresolved writes" to five, because the mention opened the reporting gate in front of a
+  // bucket the resolver had failed to fill. Both halves are pinned here: the write RESOLVES, and a
+  // mention-bearing comment cannot change that. The mention itself is still expected to be reported,
+  // because that is the bucket it belongs in.
+  const base = [
+    'const OUT = new URL("../docs/evidence/audio-feed-21od/", import.meta.url).pathname;',
+    "await Deno.mkdir(OUT, { recursive: true });",
+    "const shotPath = `${OUT}01-shot.png`;",
+    "await Deno.writeFile(shotPath, new Uint8Array());",
+  ].join("\n");
+  const withComment = base.replace(
+    "const shotPath",
+    "// audio-feed-uiye: a comment that merely NAMES a bead, above the write it is near\nconst shotPath",
+  );
+
+  const before = censusSource(base);
+  const after = censusSource(withComment);
+  assertEquals(
+    before.unresolvedWrites,
+    [],
+    "a const derived from an evidence binding is resolvable",
+  );
+  assertEquals(
+    before.writes,
+    ["audio-feed-21od"],
+    "the derived target attributes the write to the slice",
+  );
+  assertEquals(
+    after.unresolvedWrites,
+    before.unresolvedWrites,
+    "a comment carrying a bead id must not change write resolution",
+  );
+  assertEquals(after.writes, before.writes, "and must not change the credited writes either");
+  assert(
+    after.mentions.includes("audio-feed-uiye"),
+    "the comment's token is still reported as a MENTION, which is where it belongs",
   );
 });
 
