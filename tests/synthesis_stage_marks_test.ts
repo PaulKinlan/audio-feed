@@ -102,12 +102,19 @@ Deno.test("audio-feed-huh4: a throwing stage is still marked, and the mark attac
 });
 
 Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rather than silently dropped", async () => {
-  // NINE EPISODES, AND THE NUMBER IS THE POINT (audio-feed-9pvk): a SUCCESSFUL episode emits TWO
-  // stage marks - tts and upload - because the yield mark is only reached when the invocation budget
-  // aborts. The old seed of six assumed three stages each, which would have been eighteen; what it
-  // actually produced was TWELVE, under the fifteen cap, so the cap assertions were never reached and
-  // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the cap
-  // by three.
+  // NINE EPISODES, AND THE NUMBER IS THE POINT (audio-feed-9pvk): a SUCCESSFUL episode emits THREE
+  // stage marks - tts, verify and upload - because the yield mark is only reached when the invocation
+  // budget aborts. Nine episodes x three stages = twenty-seven, which exceeds the fifteen cap by twelve.
+  //
+  // THIS HEADER WAS TWO-STAGE ONCE AND THE HISTORY IS KEPT ON PURPOSE (audio-feed-gyzx). It was written
+  // when the successful path was TWO marks - tts and upload - and said "nine x two = eighteen, which
+  // exceeds the cap by three". audio-feed-avgc then added the `verify` mark, so the PROSE went stale
+  // while the CONTROL below stayed correct, because the control derives from successfulPathStages rather
+  // than from a number written here. The assertion could not go stale; the comment could, and did.
+  //
+  // THE SIX-EPISODE SEED IS HISTORICAL TOO: it assumed three stages each and would have been eighteen,
+  // but on the two-stage path it produced TWELVE - under the fifteen cap - so the cap assertions were
+  // never reached and this row proved nothing about the cap at all.
   //
   // THE PER-EPISODE MARK COUNT COMES FROM A TEST-OWNED LIST OF STAGE NAMES, and both halves of that are
   // deliberate.
@@ -164,9 +171,11 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   const suppressed = Number(capped[0]?.context?.suppressed ?? 0);
   // THE EXACT COUNT, DERIVED rather than hardcoded: the suppression that must be named is every stage
   // execution beyond the cap, and that depends on how many marks a successful episode emits. Asserting
-  // the derived value is what makes this a control - it cannot pass at 0 (no cap: 0 !== 3) and it cannot
-  // pass at a miscounted 1 (1 !== 3) - while the derivation from ONE named assumption means a change to
-  // the stage set produces a failure that names the line to update instead of a stale constant.
+  // the derived value is what makes this a control - it cannot pass at 0 (with no cap nothing is
+  // suppressed, so 0 is never the expected count) and it cannot pass at a miscounted 1 (the expectation
+  // is 9 * marksPerSuccessfulEpisode - STAGE_MARK_CAP, which is not 1) - while the derivation from ONE
+  // named assumption means a change to the stage set produces a failure that names the line to update
+  // instead of a stale constant.
   const expectedSuppressed = 9 * marksPerSuccessfulEpisode - STAGE_MARK_CAP;
   assertEquals(
     suppressed,
@@ -181,8 +190,8 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
    * TAUTOLOGY: once marked.length === STAGE_MARK_CAP is asserted above, that expression reduces to
    * suppressed > 0, which the line above already asserts, so it added no verification at all - and it
    * still PASSED with the cap removed from src/worker/synthesis.ts, because a run with no cap emits no
-   * capped event and therefore has suppressed = 0, giving 18 + 0 > 15. A control that cannot detect the
-   * absence of the thing it controls for is not a control.
+   * capped event and therefore has suppressed = 0, which satisfies marked.length + 0 > STAGE_MARK_CAP
+   * on its own. A control that cannot detect the absence of the thing it controls for is not a control.
    *
    * The EXACT accounting is what bites: the suppressed count must equal every execution beyond the cap,
    * which is nine episodes x marksPerSuccessfulEpisode minus the cap. Remove the cap and suppressed is 0,
