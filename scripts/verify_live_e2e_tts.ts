@@ -35,35 +35,75 @@ import {
   usableSynthesis,
 } from "./synthesis_observation.ts";
 
+function getCommittedRootReal(): string {
+  const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+  try {
+    return Deno.realPathSync(`${repoRoot}/docs/evidence/audio-feed-9vns`);
+  } catch {
+    return `${repoRoot}/docs/evidence/audio-feed-9vns`;
+  }
+}
+
+function resolveRealPathOrAncestor(path: string, baseDir: string = Deno.cwd()): string {
+  const abs = path.startsWith("/") ? path : `${baseDir}/${path}`;
+  try {
+    return Deno.realPathSync(abs);
+  } catch {
+    const segments = abs.split("/").filter((s) => s && s !== ".");
+    let existingPath = "";
+    let i = segments.length;
+    for (; i > 0; i--) {
+      const candidate = "/" + segments.slice(0, i).join("/");
+      try {
+        existingPath = Deno.realPathSync(candidate);
+        break;
+      } catch {
+        // continue walking up
+      }
+    }
+    const remainder = segments.slice(i);
+    const resolvedParts = existingPath ? existingPath.split("/").filter(Boolean) : [];
+    for (const seg of remainder) {
+      if (seg === "..") resolvedParts.pop();
+      else if (seg !== ".") resolvedParts.push(seg);
+    }
+    return "/" + resolvedParts.join("/");
+  }
+}
+
 export function isCommittedTarget(targetPath: string): boolean {
   const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
-  const committedReal = (() => {
-    try {
-      return Deno.realPathSync(`${repoRoot}/docs/evidence/audio-feed-9vns`);
-    } catch {
-      return `${repoRoot}/docs/evidence/audio-feed-9vns`;
-    }
-  })();
+  const committedReal = getCommittedRootReal();
 
-  const targetReal = (() => {
-    try {
-      return Deno.realPathSync(targetPath);
-    } catch {
-      const abs = targetPath.startsWith("/") ? targetPath : `${Deno.cwd()}/${targetPath}`;
-      const parts: string[] = [];
-      for (const seg of abs.split("/")) {
-        if (seg === "" || seg === ".") continue;
-        if (seg === "..") {
-          parts.pop();
-        } else {
-          parts.push(seg);
+  // Check resolved against Deno.cwd() AND against repoRoot
+  const targetCwdReal = resolveRealPathOrAncestor(targetPath, Deno.cwd());
+  const targetRepoReal = resolveRealPathOrAncestor(targetPath, repoRoot);
+
+  if (
+    targetCwdReal === committedReal || targetCwdReal.startsWith(committedReal + "/") ||
+    targetRepoReal === committedReal || targetRepoReal.startsWith(committedReal + "/")
+  ) {
+    return true;
+  }
+
+  // Check output candidate files within target directory for file symlinks pointing to committed files
+  for (const file of ["README.md", "live-e2e-validation.json"]) {
+    for (const base of [Deno.cwd(), repoRoot]) {
+      const filePath = targetPath.startsWith("/")
+        ? `${targetPath}/${file}`
+        : `${base}/${targetPath}/${file}`;
+      try {
+        const fileReal = Deno.realPathSync(filePath);
+        if (fileReal === committedReal || fileReal.startsWith(committedReal + "/")) {
+          return true;
         }
+      } catch {
+        // file doesn't exist
       }
-      return "/" + parts.join("/");
     }
-  })();
+  }
 
-  return targetReal === committedReal;
+  return false;
 }
 
 export function resolveEvidenceOutputDir(args: string[] = []): {
@@ -75,19 +115,19 @@ export function resolveEvidenceOutputDir(args: string[] = []): {
     args.includes("--update-evidence");
   const outDirArg = args.find((a) => a.startsWith("--out-dir="))?.split("=")[1];
 
-  if (outDirArg) {
-    const isTargetingCommitted = isCommittedTarget(outDirArg);
-    if (isTargetingCommitted && !writeCommitted) {
-      throw new Error(
-        `Refusing to overwrite committed evidence at '${outDirArg}' without explicit --write-committed-evidence flag.`,
-      );
-    }
-    return { dir: outDirArg, isCommitted: isTargetingCommitted && writeCommitted };
+  const candidateDir = outDirArg ??
+    (writeCommitted ? COMMITTED_DIR : "var/evidence/audio-feed-9vns");
+  const isTargetingCommitted = isCommittedTarget(candidateDir);
+
+  if (isTargetingCommitted && !writeCommitted) {
+    throw new Error(
+      `Refusing to overwrite committed evidence at '${candidateDir}' without explicit --write-committed-evidence flag.`,
+    );
   }
 
   return {
-    dir: writeCommitted ? COMMITTED_DIR : "var/evidence/audio-feed-9vns",
-    isCommitted: writeCommitted,
+    dir: candidateDir,
+    isCommitted: isTargetingCommitted && writeCommitted,
   };
 }
 
@@ -228,8 +268,7 @@ if (import.meta.main) {
       truncated?: boolean;
     }
 
-    const cacheDir = `${Deno.env.get("TMPDIR") || "/tmp"}/audio-feed-segments`;
-    await Deno.mkdir(cacheDir, { recursive: true });
+    await Deno.mkdir("var/segments", { recursive: true });
 
     const capturedSegments: SegmentRecord[] = [];
     let prepareIndex = 1;
@@ -293,7 +332,7 @@ if (import.meta.main) {
                 `Unexpected segment text at index ${index}; cannot attribute evidence or cache safely`,
               );
             }
-            const cacheFile = `${cacheDir}/segment-${index}.wav`;
+            const cacheFile = `var/segments/segment-${index}.wav`;
             try {
               const wav = await Deno.readFile(cacheFile);
               if (wav.length > 44) {
@@ -318,7 +357,7 @@ if (import.meta.main) {
             pendingIndex = undefined;
             // Cache segment WAV to disk
             try {
-              await Deno.writeFile(`${cacheDir}/segment-${index}.wav`, decoded.toWav());
+              await Deno.writeFile(`var/segments/segment-${index}.wav`, decoded.toWav());
             } catch {
               // ignore cache write failures
             }
@@ -636,7 +675,7 @@ timeout -k 30 60 deno test --allow-env tests/gemini_base_url_test.ts
 timeout -k 30 30 deno test --allow-env --allow-read tests/tts_test.ts
 
 # 3. Force a fresh run (otherwise the harness reports cache/mixed provenance)
-rm -rf "\${TMPDIR:-/tmp}/audio-feed-segments"
+rm -rf var/segments
 timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
 \`\`\``,
         },

@@ -61,3 +61,56 @@ Deno.test("audio-feed-ulab: isCommittedTarget canonicalises relative, .., and ab
   assertEquals(isCommittedTarget("var/evidence/audio-feed-9vns"), false);
   assertEquals(isCommittedTarget("/tmp/custom-run"), false);
 });
+
+Deno.test("audio-feed-ulab (shape 1): out-dir containing file symlink to committed evidence throws without write flag", async () => {
+  const tmpDir = await Deno.makeTempDir({ prefix: "ulab-file-symlink-" });
+  try {
+    const outDir = `${tmpDir}/output`;
+    await Deno.mkdir(outDir, { recursive: true });
+    const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+    const realReadme = `${repoRoot}/docs/evidence/audio-feed-9vns/README.md`;
+    await Deno.symlink(realReadme, `${outDir}/README.md`);
+
+    // Refuses without write flag
+    assertThrows(
+      () => resolveEvidenceOutputDir([`--out-dir=${outDir}`]),
+      Error,
+      "Refusing to overwrite committed evidence",
+    );
+
+    // Succeeds and is marked committed WITH write flag
+    const res = resolveEvidenceOutputDir([`--out-dir=${outDir}`, "--write-committed-evidence"]);
+    assertEquals(res.dir, outDir);
+    assertEquals(res.isCommitted, true);
+  } finally {
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-ulab (shape 2): symlinked default directory pointing to committed evidence throws without write flag", async () => {
+  const tmpDir = await Deno.makeTempDir({ prefix: "ulab-dir-symlink-" });
+  const origCwd = Deno.cwd();
+  try {
+    await Deno.mkdir(`${tmpDir}/var/evidence`, { recursive: true });
+    const repoRoot = new URL("../", import.meta.url).pathname.replace(/\/+$/, "");
+    const committedTarget = `${repoRoot}/docs/evidence/audio-feed-9vns`;
+    await Deno.symlink(committedTarget, `${tmpDir}/var/evidence/audio-feed-9vns`);
+
+    Deno.chdir(tmpDir);
+
+    // Default args [] targets var/evidence/audio-feed-9vns.
+    // Because that symlinks to docs/evidence/audio-feed-9vns, it must refuse without write flag:
+    assertThrows(
+      () => resolveEvidenceOutputDir([]),
+      Error,
+      "Refusing to overwrite committed evidence",
+    );
+
+    // With explicit write flag, it succeeds and is marked committed
+    const res = resolveEvidenceOutputDir(["--write-committed-evidence"]);
+    assertEquals(res.isCommitted, true);
+  } finally {
+    Deno.chdir(origCwd);
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+  }
+});
