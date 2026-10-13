@@ -394,3 +394,45 @@ Deno.test("audio-feed-9rer: the false relation is gone AND the plan stays FAIL-C
     );
   });
 });
+
+/**
+ * audio-feed-tziw: THE READ THAT IS ADMITTED, AND IT IS THE NARROWER CASE ON PURPOSE.
+ *
+ * "Proven read" in this change means THE RESOLVER RESOLVED THE PATH - not "the suite reads it". The two
+ * fixtures below differ in exactly one way: whether the resolver can follow the path from the read call.
+ * The literal one passes the path as a string and lands in authoredPaths; the named one passes a module
+ * local constant and lands in resolvedPaths. Only the second earns a .ts relation, and the row asserting
+ * that a LITERAL read is excluded (audio-feed-4kl3's read row, above) is deliberately left untouched.
+ *
+ * WHY BOTH DIRECTIONS ARE HERE RATHER THAN ONLY THE POSITIVE: a row that admits a read but cannot fail is
+ * coverage theatre. This row goes green when the resolved read is admitted AND red if that admission is
+ * removed - which is demonstrated by mutating the resolvedPaths call site back to a plain add(), a one-word
+ * change whose substitution count is reported when the demonstration is run.
+ */
+const TREE_TZIW: Record<string, string> = {
+  "scripts/tool.ts": "export const t = 1;\n",
+  "tests/read_name_test.ts":
+    'const TOOL = "scripts/tool.ts";\nexport async function r() { return await Deno.readTextFile(TOOL); }\nDeno.test("r", () => {});\n',
+  "tests/read_literal_test.ts":
+    'export async function r() { return await Deno.readTextFile("../scripts/tool.ts"); }\nDeno.test("r", () => {});\n',
+};
+
+Deno.test("audio-feed-tziw: a read the RESOLVER can follow earns the .ts relation, and a literal one still does not", async () => {
+  await withTempTree(TREE_TZIW, async (root) => {
+    const byName = await deriveReadRelationReport(root, ["tests/read_name_test.ts"]);
+    assertEquals(
+      byName.relations.get("scripts/tool.ts"),
+      ["tests/read_name_test.ts"],
+      "a read whose path the RESOLVER resolved must earn a relation for the reading suite (audio-feed-tziw)",
+    );
+
+    // The contrast, in the same row, so the distinction is visible in one place: same script, same read
+    // call, and the only difference is whether the resolver could follow the path.
+    const byLiteral = await deriveReadRelationReport(root, ["tests/read_literal_test.ts"]);
+    assertEquals(
+      byLiteral.relations.get("scripts/tool.ts"),
+      undefined,
+      "and a LITERAL read stays out: it lands in authoredPaths, which this change deliberately does not admit",
+    );
+  });
+});

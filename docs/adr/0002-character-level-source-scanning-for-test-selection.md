@@ -187,3 +187,145 @@ one.
    effectively did, and `audio-feed-aiiy` is the record of why it does not work: a regex literal
    containing a quote or a brace makes the string tracker lose its place, and everything after it is
    read as the wrong kind of text.
+
+## Amendment — 2026-10-13: the read question this record left open (`audio-feed-tziw`)
+
+The Context above asks whether a read is a relation when `Deno.readTextFile` names a path that lands
+in the repository, and records that the honest answer depends on whether such a path is a
+**comment** or **data**, because a read inside a string is data (`audio-feed-lm4d`). This is that
+answer, with its measurements, and with both dead ends kept so the next person does not repeat them.
+
+### The decision
+
+A read is admitted as a relation for a `.ts` path **only when the resolver resolved the path**. In
+`scripts/test-selection.ts` that is exactly `resolvedPaths`, and the admission is the one-word
+call-site change from `add(path, suite)` to `add(path, suite, true)` — the same proven flag
+`executedPaths` already passes. Nothing else changes. The guard is no longer `!isExecute` but
+`!isProvenRead`, because two different reads now reach it and only one is admitted.
+
+### What "proven" means here, and what it deliberately does not
+
+**`proven read` means THE RESOLVER RESOLVED THE PATH. It does not mean "the suite reads it".** A
+read is NOT admitted when its path arrives through `authoredPaths`, which includes a **parameterised
+or dynamic read** where the argument is assembled at run time. The worked example is the fixture
+tree in `tests/spawn_relation_test.ts`: a suite reading `"../scripts/tool.ts"` by literal lands in
+`authoredPaths` and earns **no** relation, and the row asserting that (`audio-feed-4kl3`'s read row)
+is left exactly as it was. The distinction this draws is **read-visible-to-the-resolver versus
+read-not-visible**, _not_ read versus mention; the broader mention-versus-read distinction is the
+next section.
+
+### The gap that remains, and the escape hatch that is NOT BUILT
+
+A suite whose read is dynamic cannot earn the relation this way, and an unresolvable read still
+falls to the same FAIL-CLOSED path rather than being silently dropped, because a dynamic read is
+exactly where being loud beats being quiet. Such a suite should declare the dependency explicitly.
+**NO SUCH DECLARATION MECHANISM IS BUILT — it does not exist yet.** Until it does, a suite with a
+dynamic read is uncovered and the full-tier fallback is what protects it.
+
+### The two rejected forms, measured rather than remembered
+
+All three shapes were built and run against the same tree. The numbers are data paths from
+`--list-relations` and rows from `tests/spawn_relation_test.ts`:
+
+| shape                                                         | data paths | `.ts` keys | the four pinned rows             |
+| ------------------------------------------------------------- | ---------- | ---------- | -------------------------------- |
+| `main` before this change                                     | 34         | 11         | pass                             |
+| admit every `.ts` path a suite **mentions** (the A2 widening) | 47         | —          | **FOUR FAIL**                    |
+| admit `authoredPaths` **and** `resolvedPaths`                 | 45         | 22         | **FOUR FAIL**, plus the read row |
+| **admit `resolvedPaths` only (accepted)**                     | **40**     | **17**     | **pass**                         |
+
+The four rows are not incidental: they are the acceptance test of this change, and they are the
+reason the narrow form was chosen. In their own words they assert that a change to a spawned script
+selects the suite that executes it **and only that suite**; that a path passed in `env`/`cwd` earns
+**no** execute relation; that with only `env`/`cwd` mentions the selection is the **FAIL-CLOSED
+TIER**; and that _"echo prints the path as data; a relation here is the false positive this bead is
+about"_.
+
+Reading the failure messages rather than only the count showed why every broader design fails the
+same four: with admission widened, those rows report a relation for `tests/consumer_test.ts` where
+they expect none — a suite in a **read** position. So the four encode a policy that a reading suite
+gets no relation, and this change **keeps** that policy for every read the resolver cannot see,
+rather than reversing it.
+
+### Why not the broader read-class form
+
+A third build admitted literal read-call arguments by classifying the **call** (`readTextFile` and
+its equivalents) rather than the bucket. It is a defensible design and it does admit the five
+`src/*.ts` keys that suites read as data, but it turns the same four rows red, because those rows
+protect the _position_ rather than the _call_. Kept here as a named option: if a future author needs
+coverage for reads the resolver cannot follow, that shape is the starting point, and the four rows
+are the price to be argued for explicitly — not a cost to be slipped in.
+
+### Consequence
+
+A change to a `.ts` file that a suite reads **as data** now selects that suite when the resolver can
+see the path (6 additional keys, none removed), and continues not to when it cannot. The fast gate
+gains those suites' runtime, which is the intended trade: the alternative was a read that selected
+nobody.
+
+### THIS AMENDMENT IS A PARTIAL, AND IT MUST NOT BE READ AS COMPLETE
+
+Stated plainly, because a partial described as complete is the same class of error as a documented
+mechanism that is not built:
+
+1. **It does NOT cover `Deno.readTextFile` with a LITERAL path.** That is the common form, and it is
+   the form `audio-feed-tziw` was filed about. A suite reading
+   `Deno.readTextFile("../scripts/tool.ts")` still earns **no** relation and a change to that file
+   still selects none of its readers. What this amendment covers is the residue: reads whose path
+   the **resolver** can follow.
+2. **The declaration escape hatch does NOT exist.** A suite with a dynamic read has no way to
+   declare the dependency, and that mechanism is **not built**. Until it is, the full-tier fallback
+   is what protects those suites, and the FAIL-CLOSED path is deliberate rather than incidental.
+3. **The contract question is open, and it is tracked rather than settled.** The four pinned rows go
+   red as soon as a `.ts` path is derived for a **reading** suite at all - not because `env`/`cwd`
+   is misread as a read, which was the initial hypothesis - and this amendment is green only because
+   it admits nothing those four fixtures touch. Whether those rows should still say what they say,
+   now that a read is a relation in some cases, is a decision about the SELECTOR's contract rather
+   than a detail of this change. It has been split out to its own bead carrying the three builds'
+   measurements and the four rows' exact assertions and fixtures, so it is argued on its evidence
+   rather than re-litigated here.
+
+**Read this amendment for:** reads the resolver can see now select their readers, and three broader
+designs were measured and rejected with their numbers. **Do not read it as:** reads-as-data are
+covered.
+
+### THE RULING ON THE CONFLICT, AND WHY IT IS THIS WAY (`audio-feed-rwx5`)
+
+**`audio-feed-9rer` WINS, and the reasoning belongs here rather than only the outcome.** Three
+designs were built and measured and every one that admits a literal `.ts` read turns the same four
+assertions red. That is not a run of bad designs: it is proof that **no predicate satisfies both
+policies**, because `audio-feed-tziw` and `audio-feed-9rer` encode **opposite** ones. `tziw` says a
+suite that reads a `.ts` file as data _should_ get the relation; `9rer` says a suite in that
+position _must not_, in its own words _"echo prints the path as data; a relation here is the false
+positive this bead is about."_ Chasing a fourth shape would have been trying to satisfy a
+contradiction, which is why the attempt stopped rather than continued.
+
+`9rer` wins on **specificity**: it is about a specific _position_ — a path that is printed, or
+passed via `env`/`cwd`, is not a dependency — whereas `tziw` is about a category. It was also
+written **deliberately**, after a false positive was observed. Reversing it therefore needs a
+**cost/benefit** argument with the false-positive volume measured, not a design argument, and no
+such argument has been made.
+
+**The gap is DOCUMENTED rather than closed, and this record is the documentation.** The conflict now
+has its own bead rather than living only in an ADR, so it is findable by the next person who asks
+why a read does not select its reader.
+
+### The loss is real, and this is how big it is
+
+The narrower reading of "proven" is not a non-event dressed up as one. Of the keys this change adds,
+the five that arrive **only** from literal read-class arguments are
+`scripts/passkey-provider-browser-proof.ts`, `src/feed/rss.ts`, `src/ingest/url.ts`,
+`src/routes/account.ts` and `src/routes/shell.ts` — and those are **exactly the class
+`audio-feed-tziw` exists for**: `src/*.ts` files that suites read as data. They are the reason this
+outcome is a **measured** loss rather than a convenient one, and they are the starting point for
+anyone who later makes the cost/benefit argument `9rer` is entitled to.
+
+### The dead end worth keeping most
+
+The most useful paragraph in this amendment is the **mechanism** behind `v1`'s failure: the bucket
+carrying a read's own argument — `authoredPaths` — **also carries every other non-execute call's
+argument.** So "a path the resolver resolved" and "a path the suite merely mentions" are **not
+separated by the code as it stands**, and no amount of condition-twisting on that bucket can
+separate them. A future attempt at the wider coverage has to introduce a genuinely different signal
+— classifying the **call** rather than the bucket — and must then argue the four rows on their
+merits. That is the one thing this record most wants to save the next person.
