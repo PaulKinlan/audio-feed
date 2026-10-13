@@ -14,8 +14,8 @@
  * as well as raw extracted block matches [{ full, code, index }].
  *
  * Usage:
- *   deno run --allow-run=git scripts/verify_c0gj_scanner_divergence.ts
- *   deno run scripts/verify_c0gj_scanner_divergence.ts --fuzz-count 10000
+ *   deno run --allow-run=git --allow-read --allow-write scripts/verify_c0gj_scanner_divergence.ts
+ *   deno run --allow-run=git --allow-read --allow-write scripts/verify_c0gj_scanner_divergence.ts --fuzz-count 10000
  */
 
 export interface CodeBlockMatch {
@@ -977,9 +977,16 @@ export async function computeSha256(text: string): Promise<string> {
     .join("");
 }
 
-async function loadGitFormat(
-  commit: string,
-): Promise<(text: string, mode: "skip" | "explain") => Promise<string>> {
+interface GitLoadedModule {
+  format: (
+    text: string,
+    mode: "skip" | "explain",
+    summarizer?: (code: string) => string | Promise<string>,
+  ) => Promise<string>;
+  extract?: (text: string) => CodeBlockMatch[];
+}
+
+async function loadGitModule(commit: string): Promise<GitLoadedModule> {
   const p = new Deno.Command("git", { args: ["show", `${commit}:src/tts/gemini.ts`] });
   const out = await p.output();
   if (!out.success) {
@@ -988,6 +995,18 @@ async function loadGitFormat(
   const text = new TextDecoder().decode(out.stdout);
   const tempFile = await Deno.makeTempFile({ prefix: "git-scanner-", suffix: ".ts" });
   try {
+    const stubs = `
+const mapWithConcurrency = async <T, R>(items: T[], _limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
+  return Promise.all(items.map(fn));
+};
+const CODE_EXPLANATION_CONCURRENCY = 4;
+`;
+    let extra = "";
+    if (text.includes("function findCodeBlocks(")) {
+      extra = "export { findCodeBlocks as extractBlocks };\n";
+    } else if (text.includes("function extractCodeBlocks(")) {
+      extra = "export { extractCodeBlocks as extractBlocks };\n";
+    }
     const entities = text.slice(
       text.indexOf("function decodeHtmlEntities"),
       text.indexOf("export async function formatCodeForTts"),
@@ -996,9 +1015,12 @@ async function loadGitFormat(
       text.indexOf("export async function formatCodeForTts"),
       text.indexOf("export function formatDialoguePrompt"),
     );
-    await Deno.writeTextFile(tempFile, entities + "\n" + formatTts);
+    await Deno.writeTextFile(tempFile, stubs + "\n" + entities + "\n" + formatTts + "\n" + extra);
     const mod = await import("file://" + tempFile);
-    return mod.formatCodeForTts;
+    return {
+      format: mod.formatCodeForTts,
+      extract: mod.extractBlocks,
+    };
   } finally {
     try {
       await Deno.remove(tempFile);
@@ -1078,48 +1100,112 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
   }
 
   // Cross-validate behavioral parity: run git-extracted modules against inlined functions
-  console.log("Cross-validating inlined functions against git-extracted modules across corpus...");
-  const mainGit = await loadGitFormat(PINNED_REVISIONS.main.commit);
-  const audit1Git = await loadGitFormat(PINNED_REVISIONS.audit1.commit);
-  const fixV1Git = await loadGitFormat(PINNED_REVISIONS.fixc0gj_v1.commit);
-  const fixV2Git = await loadGitFormat(PINNED_REVISIONS.fixc0gj_v2.commit);
+  // across skip mode, explain mode, and block extraction AST.
+  console.log(
+    "Cross-validating inlined functions against git-extracted modules (skip, explain, AST) across corpus...",
+  );
+  const mainGit = await loadGitModule(PINNED_REVISIONS.main.commit);
+  const audit1Git = await loadGitModule(PINNED_REVISIONS.audit1.commit);
+  const fixV1Git = await loadGitModule(PINNED_REVISIONS.fixc0gj_v1.commit);
+  const fixV2Git = await loadGitModule(PINNED_REVISIONS.fixc0gj_v2.commit);
 
+  const testSummarizer = (c: string) => `test-summary(${c})`;
   const corpus = buildHandcraftedCorpus();
+
   for (const item of corpus) {
-    const mGit = await mainGit(item.text, "skip");
-    const mInline = formatCodeForTts_main(item.text, "skip");
-    if (mGit !== mInline) {
+    // 1. main
+    const mSkipGit = await mainGit.format(item.text, "skip");
+    const mSkipInline = formatCodeForTts_main(item.text, "skip");
+    if (mSkipGit !== mSkipInline) {
       throw new Error(
-        `Inlined main diverged from git at commit ${PINNED_REVISIONS.main.commit} on ${item.id}`,
+        `Inlined main diverged in skip mode from git at commit ${PINNED_REVISIONS.main.commit} on ${item.id}`,
+      );
+    }
+    const mExpGit = await mainGit.format(item.text, "explain", testSummarizer);
+    const mExpInline = formatCodeForTts_main(item.text, "explain", testSummarizer);
+    if (mExpGit !== mExpInline) {
+      throw new Error(
+        `Inlined main diverged in explain mode from git at commit ${PINNED_REVISIONS.main.commit} on ${item.id}`,
       );
     }
 
-    const aGit = await audit1Git(item.text, "skip");
-    const aInline = formatCodeForTts_audit1(item.text, "skip");
-    if (aGit !== aInline) {
+    // 2. audit1
+    const aSkipGit = await audit1Git.format(item.text, "skip");
+    const aSkipInline = formatCodeForTts_audit1(item.text, "skip");
+    if (aSkipGit !== aSkipInline) {
       throw new Error(
-        `Inlined audit1 diverged from git at commit ${PINNED_REVISIONS.audit1.commit} on ${item.id}`,
+        `Inlined audit1 diverged in skip mode from git at commit ${PINNED_REVISIONS.audit1.commit} on ${item.id}`,
       );
     }
-
-    const f1Git = await fixV1Git(item.text, "skip");
-    const f1Inline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "skip");
-    if (f1Git !== f1Inline) {
+    const aExpGit = await audit1Git.format(item.text, "explain", testSummarizer);
+    const aExpInline = formatCodeForTts_audit1(item.text, "explain", testSummarizer);
+    if (aExpGit !== aExpInline) {
       throw new Error(
-        `Inlined fixc0gj v1 diverged from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
+        `Inlined audit1 diverged in explain mode from git at commit ${PINNED_REVISIONS.audit1.commit} on ${item.id}`,
       );
     }
+    if (audit1Git.extract) {
+      const aBlocksGit = audit1Git.extract(item.text);
+      const aBlocksInline = extractCodeBlocks_audit1(item.text);
+      if (JSON.stringify(aBlocksGit) !== JSON.stringify(aBlocksInline)) {
+        throw new Error(
+          `Inlined audit1 diverged in block extraction AST from git on ${item.id}`,
+        );
+      }
+    }
 
-    const f2Git = await fixV2Git(item.text, "skip");
-    const f2Inline = formatCodeForTts_fixc0gj_3d32fc4(item.text, "skip");
-    if (f2Git !== f2Inline) {
+    // 3. fixc0gj v1
+    const f1SkipGit = await fixV1Git.format(item.text, "skip");
+    const f1SkipInline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "skip");
+    if (f1SkipGit !== f1SkipInline) {
       throw new Error(
-        `Inlined fixc0gj v2 diverged from git at commit ${PINNED_REVISIONS.fixc0gj_v2.commit} on ${item.id}`,
+        `Inlined fixc0gj v1 diverged in skip mode from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
       );
+    }
+    const f1ExpGit = await fixV1Git.format(item.text, "explain", testSummarizer);
+    const f1ExpInline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "explain", testSummarizer);
+    if (f1ExpGit !== f1ExpInline) {
+      throw new Error(
+        `Inlined fixc0gj v1 diverged in explain mode from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
+      );
+    }
+    if (fixV1Git.extract) {
+      const f1BlocksGit = fixV1Git.extract(item.text);
+      const f1BlocksInline = extractCodeBlocks_fixc0gj_9f18cc1(item.text);
+      if (JSON.stringify(f1BlocksGit) !== JSON.stringify(f1BlocksInline)) {
+        throw new Error(
+          `Inlined fixc0gj v1 diverged in block extraction AST from git on ${item.id}`,
+        );
+      }
+    }
+
+    // 4. fixc0gj v2
+    const f2SkipGit = await fixV2Git.format(item.text, "skip");
+    const f2SkipInline = formatCodeForTts_fixc0gj_3d32fc4(item.text, "skip");
+    if (f2SkipGit !== f2SkipInline) {
+      throw new Error(
+        `Inlined fixc0gj v2 diverged in skip mode from git at commit ${PINNED_REVISIONS.fixc0gj_v2.commit} on ${item.id}`,
+      );
+    }
+    const f2ExpGit = await fixV2Git.format(item.text, "explain", testSummarizer);
+    const f2ExpInline = formatCodeForTts_fixc0gj_3d32fc4(item.text, "explain", testSummarizer);
+    if (f2ExpGit !== f2ExpInline) {
+      throw new Error(
+        `Inlined fixc0gj v2 diverged in explain mode from git at commit ${PINNED_REVISIONS.fixc0gj_v2.commit} on ${item.id}`,
+      );
+    }
+    if (fixV2Git.extract) {
+      const f2BlocksGit = fixV2Git.extract(item.text);
+      const f2BlocksInline = extractCodeBlocks_fixc0gj_3d32fc4(item.text);
+      if (JSON.stringify(f2BlocksGit) !== JSON.stringify(f2BlocksInline)) {
+        throw new Error(
+          `Inlined fixc0gj v2 diverged in block extraction AST from git on ${item.id}`,
+        );
+      }
     }
   }
   console.log(
-    "  [OK] 100% behavioral parity confirmed between inlined functions and git revisions.",
+    "  [OK] 100% behavioral parity confirmed across skip mode, explain mode, and block AST between inlined functions and git revisions.",
   );
   return true;
 }
