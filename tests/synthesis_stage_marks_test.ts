@@ -21,7 +21,7 @@ import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
-import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { defaultStageMarkCap, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 
 const config: AppConfig = {
@@ -132,6 +132,7 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
     batchSize: 9,
     owner: "huh4-cap",
+    stageMarkCap: STAGE_MARK_CAP,
   });
   assertEquals(run.ready.length, 9, "every seeded episode must reach ready");
 
@@ -192,5 +193,83 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
     marked.length + suppressed,
     9 * marksPerSuccessfulEpisode,
     "kept + suppressed must account for every stage execution: episodes x marksPerSuccessfulEpisode",
+  );
+
+  // audio-feed-938b: reaching the cap must name WHICH episodes and stages were suppressed
+  const suppressedStages = capped[0]?.context?.suppressedStages as
+    | Record<string, number>
+    | undefined;
+  const suppressedEpisodes = capped[0]?.context?.suppressedEpisodes as
+    | string[]
+    | undefined;
+  assert(suppressedStages, "capped event must carry suppressedStages breakdown");
+  assert(suppressedEpisodes, "capped event must carry suppressedEpisodes list");
+
+  const unsuppressedIds = ids.slice(0, 5);
+  const expectedSuppressedIds = ids.slice(5);
+  assertEquals(
+    suppressedEpisodes,
+    expectedSuppressedIds,
+    "suppressedEpisodes must exactly match the episodes that ran after cap was exhausted",
+  );
+  for (const id of unsuppressedIds) {
+    assert(
+      !suppressedEpisodes.includes(id),
+      `unsuppressed episode ${id} must not appear in suppressedEpisodes`,
+    );
+  }
+  assertEquals(
+    suppressedStages,
+    { tts: 4, verify: 4, upload: 4 },
+    "suppressedStages must record exact count per suppressed stage",
+  );
+  assertEquals(
+    Object.values(suppressedStages).reduce((a, b) => a + b, 0),
+    expectedSuppressed,
+    "sum of suppressedStages must equal total suppressed",
+  );
+});
+
+Deno.test("audio-feed-938b: production default stage mark cap formula and cron invocation override invariant", async () => {
+  // Tier 1 (Production Default Invariant):
+  // Sized to cover batchSize episodes across all four stages (tts, verify, upload, yield)
+  // with a production minimum floor of 25.
+  assertEquals(defaultStageMarkCap(1), 25);
+  assertEquals(defaultStageMarkCap(5), 25);
+  assertEquals(defaultStageMarkCap(6), 25);
+  assertEquals(defaultStageMarkCap(7), 28);
+  assertEquals(defaultStageMarkCap(8), 32);
+  assertEquals(defaultStageMarkCap(10), 40);
+
+  // Assert cron invocation passes no stageMarkCap override:
+  const cronSource = await Deno.readTextFile(new URL("../src/cron.ts", import.meta.url));
+  assert(
+    cronSource.includes("runSynthesisBatch(ctx, synthesizer)"),
+    "cron synthesis run must pass no stageMarkCap override",
+  );
+});
+
+Deno.test("audio-feed-938b: default production cap accommodates standard 6-episode batch without premature suppression", async () => {
+  const ids = Array.from({ length: 6 }, (_, i) => `ep-938b-default-${i}`);
+  const { ctx } = await seedEpisodes(ids);
+  const audio = fakeAudio();
+  // Standard 6-episode batch using the default cap formula (Math.max(25, 6 * 4) = 25):
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    batchSize: 6,
+    owner: "938b-default",
+  });
+  assertEquals(run.ready.length, 6, "all 6 episodes must reach ready");
+
+  const logs = await ctx.stores.metadata.listLogs();
+  const all = stageMarks(logs);
+  const capped = all.filter((log) => log.phase === "capped");
+  const marked = all.filter((log) => log.phase !== "capped");
+
+  // 6 episodes x 3 stages (tts, verify, upload) = 18 marks <= 25 default cap:
+  assertEquals(marked.length, 18, "all 18 stage marks must be emitted under the default cap");
+  assertEquals(
+    capped.length,
+    0,
+    "default cap must not prematurely suppress a standard 6-episode batch",
   );
 });
