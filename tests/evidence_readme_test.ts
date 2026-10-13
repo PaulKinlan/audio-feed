@@ -137,3 +137,25 @@ Deno.test("audio-feed-pluv: malformed marker sets are LOUD, never guessed", () =
 Deno.test("audio-feed-pluv: the wrapper emits the markers as their own lines", () => {
   assertEquals(wrapGeneratedRegion("body\n"), `${GENERATED_BEGIN}\nbody\n${GENERATED_END}`);
 });
+
+Deno.test("audio-feed-fied: a marker-delimited README with NO final newline round-trips byte-for-byte", () => {
+  // rev-19's finding, pinned in both directions: the merge used to append a newline to any file whose
+  // end marker was its last line, so `isRegenerationStable` reported an unstable file that was already
+  // correct - and the first regeneration would have dirtied it. A README's final-newline convention is
+  // its own; this module must preserve whichever one the committed file has.
+  const noFinalNewline = `${GENERATED_BEGIN}\nbody\n${GENERATED_END}`;
+  assertEquals(mergeGeneratedRegion(noFinalNewline, "body"), noFinalNewline);
+  assertEquals(isRegenerationStable(noFinalNewline, "body"), true);
+
+  const withFinalNewline = `${noFinalNewline}\n`;
+  assertEquals(mergeGeneratedRegion(withFinalNewline, "body"), withFinalNewline);
+  assertEquals(isRegenerationStable(withFinalNewline, "body"), true);
+
+  // and a human tail is preserved with or without a final newline
+  const tailNoNewline = `${GENERATED_BEGIN}\nbody\n${GENERATED_END}\n\n## Criteria\n1. x`;
+  assertEquals(mergeGeneratedRegion(tailNoNewline, "body"), tailNoNewline);
+  assertEquals(isRegenerationStable(tailNoNewline, "body"), true);
+  const tailWithNewline = `${tailNoNewline}\n`;
+  assertEquals(mergeGeneratedRegion(tailWithNewline, "body"), tailWithNewline);
+  assertEquals(isRegenerationStable(tailWithNewline, "body"), true);
+});

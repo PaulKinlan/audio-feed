@@ -88,7 +88,11 @@ export function splitGeneratedRegion(text: string): GeneratedRegionSplit {
     // emits those, so including them here would double them on every merge.
     before: begin === 0 ? "" : lines.slice(0, begin).join("\n") + "\n",
     generated: lines.slice(begin + 1, end).join("\n"),
-    after: "\n" + lines.slice(end + 1).join("\n"),
+    // The newline after the end marker is emitted ONLY when the committed file actually had one.
+    // A README whose end marker is its last line and which has no final newline must round-trip with
+    // NO final newline, or the first regeneration dirties a file it did not change - the byte-identity
+    // pin would report an unstable file that is in fact identical (audio-feed-fied).
+    after: lines.length > end + 1 ? "\n" + lines.slice(end + 1).join("\n") : "",
   };
 }
 
