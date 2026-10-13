@@ -11,6 +11,8 @@
  * - Intent: explicit, descriptive, and matches the moral contract approved by coord.
  */
 
+import { getActiveProof } from "./proof-helper.ts";
+
 export interface QuantiseEvidencePngOptions {
   /** Target colour count (default: 256). */
   colors?: number;
@@ -18,6 +20,8 @@ export interface QuantiseEvidencePngOptions {
   compressionLevel?: number;
   /** Format prefix (default: "png8"). Site 8 uses "PNG8". */
   formatPrefix?: string;
+  /** Explicit opt-out for maintenance tools (e.g. evidence-compress.ts) running outside a proof transaction. */
+  allowOutsideProof?: boolean;
   /** Optional injectable runner for unit testing without spawning real binaries. */
   runner?: (
     cmd: string,
@@ -44,6 +48,12 @@ export async function quantiseEvidencePng(
   filePath: string,
   opts?: QuantiseEvidencePngOptions,
 ): Promise<string> {
+  if (!getActiveProof() && !opts?.allowOutsideProof) {
+    throw new Error(
+      `quantiseEvidencePng() called outside of runProof() context for '${filePath}'. Evidence must be written inside await runProof(name, async (checker) => { ... }) to ensure atomic rollback and transactional integrity. (Pass allowOutsideProof: true only for non-proof maintenance tools).`,
+    );
+  }
+
   const tmpPath = `${filePath}.tmp`;
   const formatPrefix = opts?.formatPrefix ?? "png8";
   const colors = opts?.colors !== undefined ? String(opts.colors) : "256";
@@ -82,4 +92,15 @@ export async function quantiseEvidencePng(
 
   await Deno.rename(tmpPath, filePath);
   return filePath;
+}
+
+/**
+ * Maintenance entrypoint for post-hoc CLI tools (e.g. evidence-compress.ts)
+ * that re-encode committed evidence outside of a proof transaction.
+ */
+export async function quantiseMaintenancePng(
+  filePath: string,
+  opts?: Omit<QuantiseEvidencePngOptions, "allowOutsideProof">,
+): Promise<string> {
+  return await quantiseEvidencePng(filePath, { ...opts, allowOutsideProof: true });
 }

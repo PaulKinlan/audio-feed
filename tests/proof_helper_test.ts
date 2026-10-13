@@ -635,6 +635,26 @@ Deno.test("proof-helper: passkey provider browser proof desktop claim uses isFul
   );
 });
 
+Deno.test("proof-helper: writeEvidenceReadme throws when called outside runProof without allowOutsideProof", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "evidence-readme-unbound-" });
+  try {
+    const err = await assertRejects(
+      () =>
+        writeEvidenceReadme({
+          dir,
+          title: "Browser Proof: Untransactioned Readme",
+          script: "scripts/unbound-proof.ts",
+          asserts: ["some assertion"],
+        }),
+      Error,
+      "writeEvidenceReadme() called outside of runProof() context",
+    );
+    assertStringIncludes(err.message, "Evidence must be written inside await runProof");
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test("proof-helper: writeEvidenceReadme generates valid README passing evidence declaration regexes", async () => {
   const dir = await Deno.makeTempDir({ prefix: "evidence-readme-test-" });
   try {
@@ -643,6 +663,7 @@ Deno.test("proof-helper: writeEvidenceReadme generates valid README passing evid
       title: "Browser Proof: Audio Feed Verification (audio-feed-test)",
       script: "scripts/test-browser-proof.ts",
       asserts: ["audio route serves audio/wav", "web player renders playback bar"],
+      allowOutsideProof: true,
       sections: [
         {
           heading: "Verified Features",
@@ -683,6 +704,7 @@ Deno.test("proof-helper: writeEvidenceReadme renders Executed by field when prov
       script: "scripts/test-browser-proof.ts",
       executedBy: "tests/my_suite_test.ts",
       asserts: ["audio route serves audio/wav"],
+      allowOutsideProof: true,
     });
     const content = await Deno.readTextFile(readmePath);
     assertStringIncludes(content, "- Script: scripts/test-browser-proof.ts");
@@ -698,6 +720,7 @@ Deno.test("proof-helper: writeEvidenceReadme renders Executed by field when prov
           executedBy: "tests/my_suite_test.ts",
           capture: true,
           captureReason: "no assertions",
+          allowOutsideProof: true,
         }),
       Error,
       "writeEvidenceReadme with executedBy requires a script",
@@ -716,6 +739,7 @@ Deno.test("proof-helper: writeEvidenceReadme handles capture declarations and en
       script: "scripts/capture-storage.ts",
       capture: true,
       captureReason: "no assertions; state observation only",
+      allowOutsideProof: true,
     });
     const content = await Deno.readTextFile(readmePath);
     assertStringIncludes(content, "- Script: scripts/capture-storage.ts");
@@ -731,6 +755,7 @@ Deno.test("proof-helper: writeEvidenceReadme handles capture declarations and en
           title: "Capture Without Reason",
           script: "scripts/capture-storage.ts",
           capture: true,
+          allowOutsideProof: true,
         });
       },
       Error,
@@ -745,6 +770,7 @@ Deno.test("proof-helper: writeEvidenceReadme handles capture declarations and en
           title: "Empty Asserts",
           script: "scripts/proof.ts",
           asserts: [],
+          allowOutsideProof: true,
         });
       },
       Error,
@@ -768,6 +794,7 @@ Deno.test("proof-helper: writeEvidenceReadme refuses ephemeral localhost URLs un
           sections: [
             { heading: "Target", body: "Tested against http://localhost:5173/overview" },
           ],
+          allowOutsideProof: true,
         });
       },
       Error,
@@ -784,6 +811,7 @@ Deno.test("proof-helper: writeEvidenceReadme refuses ephemeral localhost URLs un
         { heading: "Target", body: "Tested against http://localhost:5173/overview" },
       ],
       allowLocalhost: true,
+      allowOutsideProof: true,
     });
     const content = await Deno.readTextFile(path);
     assertStringIncludes(content, "http://localhost:5173/overview");
@@ -805,6 +833,7 @@ Deno.test("proof-helper: writeEvidenceReadme refuses bare commit SHA tokens", as
           sections: [
             { heading: "Environment", body: "Verified against commit a1b2c3d4e5f6 on origin/main" },
           ],
+          allowOutsideProof: true,
         });
       },
       Error,
@@ -1193,6 +1222,7 @@ Deno.test("proof-helper: writeEvidenceReadme refuses to write when options.check
           script: "scripts/test-proof.ts",
           asserts: ["explicit failure"],
           checker,
+          allowOutsideProof: true,
         });
       },
       Error,

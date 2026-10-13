@@ -23,7 +23,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { canonicalAudioKey, enclosureUrl, toFeedEpisode } from "../src/feed/adapter.ts";
 import { audioBlobKey } from "../src/types.ts";
-import { withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 export const COMMITTED_SHA = "3fd98e28e034cf3bc60b90ef345681d0deb78d38";
 export const COMMITTED_TREE = "fa4371042eb50e3b9e20447b66184de1c584d531";
@@ -756,72 +756,74 @@ export async function runVerification(): Promise<VerificationResult> {
 
 if (import.meta.main) {
   try {
-    const res = await runVerification();
-    const OUT_DIR = "docs/evidence/audio-feed-ieek/";
-    await Deno.mkdir(OUT_DIR, { recursive: true });
+    await runProof("audio-feed-ieek", async () => {
+      const res = await runVerification();
+      const OUT_DIR = "docs/evidence/audio-feed-ieek/";
+      await Deno.mkdir(OUT_DIR, { recursive: true });
 
-    // Save structured verification JSON with all ephemeral run details
-    const jsonPath = `${OUT_DIR}verification.json`;
-    await Deno.writeTextFile(jsonPath, JSON.stringify(res, null, 2));
-    console.log(`[ieek] Written structured evidence to ${jsonPath}`);
+      // Save structured verification JSON with all ephemeral run details
+      const jsonPath = `${OUT_DIR}verification.json`;
+      await Deno.writeTextFile(jsonPath, JSON.stringify(res, null, 2));
+      console.log(`[ieek] Written structured evidence to ${jsonPath}`);
 
-    // Compress screenshots in docs/evidence/audio-feed-ieek
-    console.log(`[ieek] Compressing evidence screenshot...`);
-    const compressCmd = new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-read",
-        "--allow-write",
-        "--allow-run=convert,git",
-        "scripts/evidence-compress.ts",
-        OUT_DIR,
-      ],
-      stdout: "piped",
-      stderr: "piped",
+      // Compress screenshots in docs/evidence/audio-feed-ieek
+      console.log(`[ieek] Compressing evidence screenshot...`);
+      const compressCmd = new Deno.Command("deno", {
+        args: [
+          "run",
+          "--allow-read",
+          "--allow-write",
+          "--allow-run=convert,git",
+          "scripts/evidence-compress.ts",
+          OUT_DIR,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const compressOutput = await compressCmd.output();
+      console.log(new TextDecoder().decode(compressOutput.stdout).trim());
+
+      // Generate compliant README.md
+      await writeEvidenceReadme({
+        dir: OUT_DIR,
+        title: "Post-landing live verification of canonical RSS & listen URLs (audio-feed-ieek)",
+        script: "scripts/verify_ieek_canonical_urls.ts",
+        asserts: [
+          "RSS feed emits canonical enclosure URL and resolves byte-for-byte matching stored audio payload",
+          "already-canonical episode is unaffected by landing emitting unmodified canonical route",
+          "RSS feed and listen web player agree character-for-character on canonical URL shape",
+          "headless Chrome loads listen page and mounts canonical URL in audio element",
+          "listen.js adopts legacy scoped keys to subscriber id scope and removes capability token",
+          "historical flat-only episode fails closed with 404 at canonical URL without serving wrong bytes",
+          "historical flat-only episode fails closed with 404 at direct flat URL closing capability bypass",
+        ],
+        sections: [
+          {
+            heading: "Canonical URL Contract",
+            body: `Canonical URL shape: \`/audio/<userId>/<mode>/<filename>.<ext>\`\n` +
+              `Governed by: \`src/feed/adapter.ts\` (\`canonicalAudioKey\`, \`enclosureUrl\`), ` +
+              `\`src/types.ts\` (\`audioBlobKey\`), and \`src/routes/listen.ts\`.\n\n` +
+              `Read in this run: see \`docs/evidence/audio-feed-ieek/verification.json\` for exact ephemeral values ` +
+              `(commit SHA, tree SHA, ephemeral server port, payload hashes, and timing).`,
+          },
+          {
+            heading: "Verification Summary",
+            body:
+              `- Row 1 (RSS & payload bytes): PASS. Enclosure URL resolves 200 with byte-for-byte equality to stored audio.\n` +
+              `- Row 2 (Already-canonical episode): PASS. Stored canonical key emits without modification; HEAD and Range 206 resolve.\n` +
+              `- Row 3 (RSS and Listen agreement): PASS. Both RSS and /listen surfaces emit the identical canonical route.\n` +
+              `- Row 4 (Headless Chrome execution): PASS. Player mounts canonical audio source, verifies \`adoptScopedKey\`, captures screenshot.\n` +
+              `- Historical flat-only episode: PASS. Direction A (canonical URL) and Direction B (direct flat key) both fail closed with 404.`,
+          },
+          {
+            heading: "Screenshots",
+            body:
+              `- \`01-listen-canonical-playback.png\`: Web player rendering canonical episode with loaded audio element.`,
+          },
+        ],
+      });
+      console.log(`[ieek] Successfully generated docs/evidence/audio-feed-ieek/README.md`);
     });
-    const compressOutput = await compressCmd.output();
-    console.log(new TextDecoder().decode(compressOutput.stdout).trim());
-
-    // Generate compliant README.md
-    await writeEvidenceReadme({
-      dir: OUT_DIR,
-      title: "Post-landing live verification of canonical RSS & listen URLs (audio-feed-ieek)",
-      script: "scripts/verify_ieek_canonical_urls.ts",
-      asserts: [
-        "RSS feed emits canonical enclosure URL and resolves byte-for-byte matching stored audio payload",
-        "already-canonical episode is unaffected by landing emitting unmodified canonical route",
-        "RSS feed and listen web player agree character-for-character on canonical URL shape",
-        "headless Chrome loads listen page and mounts canonical URL in audio element",
-        "listen.js adopts legacy scoped keys to subscriber id scope and removes capability token",
-        "historical flat-only episode fails closed with 404 at canonical URL without serving wrong bytes",
-        "historical flat-only episode fails closed with 404 at direct flat URL closing capability bypass",
-      ],
-      sections: [
-        {
-          heading: "Canonical URL Contract",
-          body: `Canonical URL shape: \`/audio/<userId>/<mode>/<filename>.<ext>\`\n` +
-            `Governed by: \`src/feed/adapter.ts\` (\`canonicalAudioKey\`, \`enclosureUrl\`), ` +
-            `\`src/types.ts\` (\`audioBlobKey\`), and \`src/routes/listen.ts\`.\n\n` +
-            `Read in this run: see \`docs/evidence/audio-feed-ieek/verification.json\` for exact ephemeral values ` +
-            `(commit SHA, tree SHA, ephemeral server port, payload hashes, and timing).`,
-        },
-        {
-          heading: "Verification Summary",
-          body:
-            `- Row 1 (RSS & payload bytes): PASS. Enclosure URL resolves 200 with byte-for-byte equality to stored audio.\n` +
-            `- Row 2 (Already-canonical episode): PASS. Stored canonical key emits without modification; HEAD and Range 206 resolve.\n` +
-            `- Row 3 (RSS and Listen agreement): PASS. Both RSS and /listen surfaces emit the identical canonical route.\n` +
-            `- Row 4 (Headless Chrome execution): PASS. Player mounts canonical audio source, verifies \`adoptScopedKey\`, captures screenshot.\n` +
-            `- Historical flat-only episode: PASS. Direction A (canonical URL) and Direction B (direct flat key) both fail closed with 404.`,
-        },
-        {
-          heading: "Screenshots",
-          body:
-            `- \`01-listen-canonical-playback.png\`: Web player rendering canonical episode with loaded audio element.`,
-        },
-      ],
-    });
-    console.log(`[ieek] Successfully generated docs/evidence/audio-feed-ieek/README.md`);
 
     console.log("\n========================================================");
     console.log("VERIFICATION COMPLETED SUCCESSFULLY WITH ZERO REGRESSIONS");

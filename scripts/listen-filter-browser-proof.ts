@@ -47,271 +47,276 @@ await Deno.mkdir(OUT, { recursive: true });
 let exitCode = 0;
 try {
   await runProof("listen-filter-browser-proof", async (checker) => {
-    await withChrome(async (chrome) => {
-      let nextId = 0;
-      const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
+    try {
+      await withChrome(async (chrome) => {
+        let nextId = 0;
+        const pending = new Map<number, (v: { result?: unknown; error?: unknown }) => void>();
 
-      const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
-      const page = targets.find((t: { type: string }) => t.type === "page");
-      const ws = new WebSocket(page.webSocketDebuggerUrl);
-      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+        const targets = await (await fetch(`http://127.0.0.1:${chrome.port}/json/list`)).json();
+        const page = targets.find((t: { type: string }) => t.type === "page");
+        const ws = new WebSocket(page.webSocketDebuggerUrl);
+        await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 
-      ws.addEventListener("message", (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.id && pending.has(msg.id)) {
-          pending.get(msg.id)!(msg);
-          pending.delete(msg.id);
-        }
-      });
-
-      // deno-lint-ignore no-explicit-any
-      async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
-        const id = ++nextId;
-        ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
-        );
-        if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
-        return msg.result;
-      }
-
-      // deno-lint-ignore no-explicit-any
-      async function js(expression: string): Promise<any> {
-        const r = await cdp("Runtime.evaluate", {
-          expression,
-          awaitPromise: true,
-          returnByValue: true,
-          userGesture: true,
+        ws.addEventListener("message", (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.id && pending.has(msg.id)) {
+            pending.get(msg.id)!(msg);
+            pending.delete(msg.id);
+          }
         });
-        if (r.exceptionDetails) {
-          throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+
+        // deno-lint-ignore no-explicit-any
+        async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
+          const id = ++nextId;
+          ws.send(JSON.stringify({ id, method, params }));
+          const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
+            pending.set(id, r)
+          );
+          if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
+          return msg.result;
         }
-        return r.result?.value;
-      }
 
-      async function until(expr: string, desc: string, timeoutMs = 8000) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < timeoutMs) {
-          if (await js(expr)) return;
-          await sleep(50);
+        // deno-lint-ignore no-explicit-any
+        async function js(expression: string): Promise<any> {
+          const r = await cdp("Runtime.evaluate", {
+            expression,
+            awaitPromise: true,
+            returnByValue: true,
+            userGesture: true,
+          });
+          if (r.exceptionDetails) {
+            throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
+          }
+          return r.result?.value;
         }
-        throw new Error(`timed out waiting for: ${desc}`);
-      }
-      await cdp("Page.enable");
-      await cdp("Runtime.enable");
-      await cdp("Accessibility.enable");
 
-      // 1. Desktop test
-      await cdp("Emulation.setDeviceMetricsOverride", {
-        width: 1280,
-        height: 900,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
+        async function until(expr: string, desc: string, timeoutMs = 8000) {
+          const t0 = Date.now();
+          while (Date.now() - t0 < timeoutMs) {
+            if (await js(expr)) return;
+            await sleep(50);
+          }
+          throw new Error(`timed out waiting for: ${desc}`);
+        }
+        await cdp("Page.enable");
+        await cdp("Runtime.enable");
+        await cdp("Accessibility.enable");
 
-      const sessionSecret = harness.getLogs().stdout.match(/sessionSecret=([^ \n]+)/)?.[1] || "";
-      await cdp("Network.setCookie", {
-        url: BASE,
-        name: "__Host-af_session",
-        value: sessionSecret,
-        secure: true,
-        path: "/",
-        httpOnly: true,
-        sameSite: "Lax",
-      });
+        // 1. Desktop test
+        await cdp("Emulation.setDeviceMetricsOverride", {
+          width: 1280,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
 
-      await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 5`,
-        "page load 5 rows",
-      );
+        const sessionSecret = harness.getLogs().stdout.match(/sessionSecret=([^ \n]+)/)?.[1] || "";
+        await cdp("Network.setCookie", {
+          url: BASE,
+          name: "__Host-af_session",
+          value: sessionSecret,
+          secure: true,
+          path: "/",
+          httpOnly: true,
+          sameSite: "Lax",
+        });
 
-      checker.check(
-        "initial load shows 5 rows and '5 episodes'",
-        (await js(`document.getElementById("episodeCount")?.textContent`)) === "5 episodes",
-        "5 episodes uninhibited",
-      );
+        await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 5`,
+          "page load 5 rows",
+        );
 
-      // 2. Filter by source: The Verge
-      await js(`(() => {
+        checker.check(
+          "initial load shows 5 rows and '5 episodes'",
+          (await js(`document.getElementById("episodeCount")?.textContent`)) === "5 episodes",
+          "5 episodes uninhibited",
+        );
+
+        // 2. Filter by source: The Verge
+        await js(`(() => {
     const sel = document.getElementById("filterSource");
     sel.value = "The Verge";
     sel.dispatchEvent(new Event("change"));
   })()`);
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 2`,
-        "filtered to 2 Verge rows",
-      );
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 2`,
+          "filtered to 2 Verge rows",
+        );
 
-      const vergeCount = await js(`document.getElementById("episodeCount")?.textContent`);
-      checker.check(
-        "source filter updates count to '2 of 5 episodes'",
-        vergeCount === "2 of 5 episodes",
-        `count text: '${vergeCount}'`,
-      );
+        const vergeCount = await js(`document.getElementById("episodeCount")?.textContent`);
+        checker.check(
+          "source filter updates count to '2 of 5 episodes'",
+          vergeCount === "2 of 5 episodes",
+          `count text: '${vergeCount}'`,
+        );
 
-      const sources = await js(`
+        const sources = await js(`
     [...document.querySelectorAll("#episodes .episode .ep-source")].map(el => el.textContent)
   `);
-      checker.check(
-        "visible rows belong exclusively to 'The Verge'",
-        sources.every((s: string) => s === "The Verge") && sources.length === 2,
-        JSON.stringify(sources),
-      );
+        checker.check(
+          "visible rows belong exclusively to 'The Verge'",
+          sources.every((s: string) => s === "The Verge") && sources.length === 2,
+          JSON.stringify(sources),
+        );
 
-      // 3. Text filter: "Marco"
-      await js(`(() => {
+        // 3. Text filter: "Marco"
+        await js(`(() => {
     const inp = document.getElementById("filterText");
     inp.value = "Marco";
     inp.dispatchEvent(new Event("input"));
   })()`);
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 1`,
-        "filtered to 1 Marco row",
-      );
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 1`,
+          "filtered to 1 Marco row",
+        );
 
-      const marcoCount = await js(`document.getElementById("episodeCount")?.textContent`);
-      checker.check(
-        "text filter updates count to '1 of 5 episodes'",
-        marcoCount === "1 of 5 episodes",
-        `count text: '${marcoCount}'`,
-      );
+        const marcoCount = await js(`document.getElementById("episodeCount")?.textContent`);
+        checker.check(
+          "text filter updates count to '1 of 5 episodes'",
+          marcoCount === "1 of 5 episodes",
+          `count text: '${marcoCount}'`,
+        );
 
-      // 4. Non-matching query: honest empty state
-      await js(`(() => {
+        // 4. Non-matching query: honest empty state
+        await js(`(() => {
     const inp = document.getElementById("filterText");
     inp.value = "NonExistentTerm";
     inp.dispatchEvent(new Event("input"));
   })()`);
-      await until(
-        `!document.getElementById("filterEmpty")?.classList.contains("hidden")`,
-        "filterEmpty shown",
-      );
+        await until(
+          `!document.getElementById("filterEmpty")?.classList.contains("hidden")`,
+          "filterEmpty shown",
+        );
 
-      const filterEmptyMsg = await js(`document.getElementById("filterEmptyMessage")?.textContent`);
-      checker.check(
-        "empty state names the active filters honestly",
-        typeof filterEmptyMsg === "string" && filterEmptyMsg.includes("NonExistentTerm") &&
-          filterEmptyMsg.includes("The Verge"),
-        `message: '${filterEmptyMsg}'`,
-      );
+        const filterEmptyMsg = await js(
+          `document.getElementById("filterEmptyMessage")?.textContent`,
+        );
+        checker.check(
+          "empty state names the active filters honestly",
+          typeof filterEmptyMsg === "string" && filterEmptyMsg.includes("NonExistentTerm") &&
+            filterEmptyMsg.includes("The Verge"),
+          `message: '${filterEmptyMsg}'`,
+        );
 
-      const genericEmptyHidden = await js(
-        `document.getElementById("empty")?.classList.contains("hidden")`,
-      );
-      checker.check(
-        "generic 'No episodes yet' empty state is hidden while filter is active",
-        genericEmptyHidden === true,
-        "generic empty remains hidden",
-      );
+        const genericEmptyHidden = await js(
+          `document.getElementById("empty")?.classList.contains("hidden")`,
+        );
+        checker.check(
+          "generic 'No episodes yet' empty state is hidden while filter is active",
+          genericEmptyHidden === true,
+          "generic empty remains hidden",
+        );
 
-      // 5. Clear filter button resets view
-      await js(`document.getElementById("clearFilterBtn")?.click()`);
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 5`,
-        "reset to 5 rows",
-      );
+        // 5. Clear filter button resets view
+        await js(`document.getElementById("clearFilterBtn")?.click()`);
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 5`,
+          "reset to 5 rows",
+        );
 
-      const resetCount = await js(`document.getElementById("episodeCount")?.textContent`);
-      checker.check(
-        "clearing filters restores '5 episodes'",
-        resetCount === "5 episodes",
-        `count text: '${resetCount}'`,
-      );
+        const resetCount = await js(`document.getElementById("episodeCount")?.textContent`);
+        checker.check(
+          "clearing filters restores '5 episodes'",
+          resetCount === "5 episodes",
+          `count text: '${resetCount}'`,
+        );
 
-      // 6. Persistence across reload
-      await js(`(() => {
+        // 6. Persistence across reload
+        await js(`(() => {
     const sel = document.getElementById("filterSource");
     sel.value = "Stratechery";
     sel.dispatchEvent(new Event("change"));
   })()`);
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 3`,
-        "filtered to 3 Stratechery rows",
-      );
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 3`,
+          "filtered to 3 Stratechery rows",
+        );
 
-      // Reload page
-      await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-      await until(
-        `document.querySelectorAll("#episodes .episode").length === 3`,
-        "reload restores 3 rows",
-      );
+        // Reload page
+        await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 3`,
+          "reload restores 3 rows",
+        );
 
-      const reloadedSource = await js(`document.getElementById("filterSource")?.value`);
-      const reloadedCount = await js(`document.getElementById("episodeCount")?.textContent`);
-      checker.check(
-        "filters survive reload on the same token",
-        reloadedSource === "Stratechery" && reloadedCount === "3 of 5 episodes",
-        `source: '${reloadedSource}', count: '${reloadedCount}'`,
-      );
+        const reloadedSource = await js(`document.getElementById("filterSource")?.value`);
+        const reloadedCount = await js(`document.getElementById("episodeCount")?.textContent`);
+        checker.check(
+          "filters survive reload on the same token",
+          reloadedSource === "Stratechery" && reloadedCount === "3 of 5 episodes",
+          `source: '${reloadedSource}', count: '${reloadedCount}'`,
+        );
 
-      // 7. Per-token isolation
-      const savedFilter = await js(`localStorage.getItem("audio-feed-filter:user-1")`);
-      const otherTokenFilter = await js(`localStorage.getItem("audio-feed-filter:other-user")`);
-      checker.check(
-        "filter state is scoped per-user",
-        savedFilter !== null && otherTokenFilter === null,
-        `saved: ${savedFilter}, other: ${otherTokenFilter}`,
-      );
+        // 7. Per-token isolation
+        const savedFilter = await js(`localStorage.getItem("audio-feed-filter:user-1")`);
+        const otherTokenFilter = await js(`localStorage.getItem("audio-feed-filter:other-user")`);
+        checker.check(
+          "filter state is scoped per-user",
+          savedFilter !== null && otherTokenFilter === null,
+          `saved: ${savedFilter}, other: ${otherTokenFilter}`,
+        );
 
-      // 8. Capture desktop screenshot & dump a11y tree
-      const shotDesktop = await cdp("Page.captureScreenshot", { format: "png" });
-      await Deno.writeFile(
-        `${OUT}01-listen-filter-desktop.png`,
-        Uint8Array.from(atob(shotDesktop.data), (c) => c.charCodeAt(0)),
-      );
-      console.log(`Saved screenshot to ${OUT}01-listen-filter-desktop.png`);
+        // 8. Capture desktop screenshot & dump a11y tree
+        const shotDesktop = await cdp("Page.captureScreenshot", { format: "png" });
+        await Deno.writeFile(
+          `${OUT}01-listen-filter-desktop.png`,
+          Uint8Array.from(atob(shotDesktop.data), (c) => c.charCodeAt(0)),
+        );
+        console.log(`Saved screenshot to ${OUT}01-listen-filter-desktop.png`);
 
-      const axNodes = await cdp("Accessibility.getFullAXTree");
-      const searchSection = axNodes.nodes?.find((n: { role?: { value: string } }) =>
-        n.role?.value === "search"
-      );
-      checker.check(
-        "a11y tree includes search role landmark",
-        Boolean(searchSection),
-        `found search landmark in AX tree: id=${searchSection?.nodeId}`,
-      );
+        const axNodes = await cdp("Accessibility.getFullAXTree");
+        const searchSection = axNodes.nodes?.find((n: { role?: { value: string } }) =>
+          n.role?.value === "search"
+        );
+        checker.check(
+          "a11y tree includes search role landmark",
+          Boolean(searchSection),
+          `found search landmark in AX tree: id=${searchSection?.nodeId}`,
+        );
 
-      // 9. Mobile test (390x844)
-      await cdp("Emulation.setDeviceMetricsOverride", {
-        width: 390,
-        height: 844,
-        deviceScaleFactor: 3,
-        mobile: true,
+        // 9. Mobile test (390x844)
+        await cdp("Emulation.setDeviceMetricsOverride", {
+          width: 390,
+          height: 844,
+          deviceScaleFactor: 3,
+          mobile: true,
+        });
+
+        await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+        await until(`document.querySelectorAll("#episodes .episode").length === 3`, "mobile load");
+
+        const overflow = await js(
+          `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
+        );
+        checker.check(
+          "mobile layout has zero horizontal overflow at 390px",
+          overflow === false,
+          "no horizontal scroll",
+        );
+
+        const shotMobile = await cdp("Page.captureScreenshot", { format: "png" });
+        await Deno.writeFile(
+          `${OUT}02-listen-filter-mobile-390.png`,
+          Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
+        );
+        console.log(`Saved screenshot to ${OUT}02-listen-filter-mobile-390.png`);
+      }, { prefix: "audiofeed-listen-filter-" });
+    } finally {
+      await writeEvidenceReadme({
+        dir: OUT,
+        title: "Player source and text filtering",
+        script: "scripts/listen-filter-browser-proof.ts",
+        asserts: ASSERTS,
+        checker,
       });
-
-      await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-      await until(`document.querySelectorAll("#episodes .episode").length === 3`, "mobile load");
-
-      const overflow = await js(
-        `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
-      );
-      checker.check(
-        "mobile layout has zero horizontal overflow at 390px",
-        overflow === false,
-        "no horizontal scroll",
-      );
-
-      const shotMobile = await cdp("Page.captureScreenshot", { format: "png" });
-      await Deno.writeFile(
-        `${OUT}02-listen-filter-mobile-390.png`,
-        Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
-      );
-      console.log(`Saved screenshot to ${OUT}02-listen-filter-mobile-390.png`);
-    }, { prefix: "audiofeed-listen-filter-" });
+    }
   });
 } catch (error) {
   console.error(error);
   exitCode = 1;
 } finally {
   harness.kill();
-
-  await writeEvidenceReadme({
-    dir: OUT,
-    title: "Player source and text filtering",
-    script: "scripts/listen-filter-browser-proof.ts",
-    asserts: ASSERTS,
-  });
 }
 
 Deno.exit(exitCode);
