@@ -1497,7 +1497,9 @@ export async function deriveReadRelationReport(
   const unclassified = new Set<string>();
   const authoredPaths = new Set<string>();
   const tailPaths = new Set<string>();
-  const add = (path: string, suite: string, isExecute = false) => {
+  // isProvenRead (audio-feed-tziw, A3): true only for a path the RESOLVER RESOLVED, or one the suite
+  // EXECUTES. See the guard below for what that does and does not cover.
+  const add = (path: string, suite: string, isProvenRead = false) => {
     // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
     // never be consulted, and it would bury the non-TS paths that matter.
     //
@@ -1510,7 +1512,41 @@ export async function deriveReadRelationReport(
     // The drop stays for READS: the import graph covers those, and admitting them here would bury the non-TS
     // paths that matter. Note the drop is SILENT by design (resolved, then discarded, with no hint) - unlike
     // an unresolvable namespace import, which raises one - so nothing should be expected to warn about it.
-    if (path.endsWith(".ts") && !isExecute) return;
+    //
+    // THAT REASON IS KEPT ABOVE BECAUSE IT WAS RIGHT FOR THE CASE IT DESCRIBED, and a decision that was
+    // correct when it was made is evidence rather than an error to tidy away. It holds for an IMPORTED read,
+    // which the import graph does follow. It has no edge at all for a read the graph cannot see: a suite that
+    // reads a .ts file AS DATA (Deno.readTextFile on a repo script, or a source scanner inspecting .ts as
+    // text), where NOTHING covered the read and a change to that file selected none of its readers - the
+    // same class of defect as the spawn case above and as audio-feed-ywjz, a read that is LOST or NARROWED.
+    //
+    // SO A PROVEN READ IS ADMITTED NOW (audio-feed-tziw, accepted 2026-10-13), AND "PROVEN" IS NARROWER
+    // THAN IT SOUNDS: IT MEANS THE RESOLVER RESOLVED THE PATH, NOT THAT THE SUITE READS IT. Only a path in
+    // resolvedPaths earns a .ts relation. A read whose path arrives through authoredPaths - including a
+    // PARAMETERISED or DYNAMIC read, where the argument is assembled at runtime - is STILL NOT ADMITTED, and
+    // the worked example is the fixture in tests/spawn_relation_test.ts whose read is a literal: it lands in
+    // authoredPaths, so its row still passes asserting that a read of a .ts path is NOT a relation
+    // (audio-feed-4kl3's read row, left exactly as it was). Read-visible-to-the-resolver and
+    // read-not-visible, NOT read and mention.
+    //
+    // THE GAP THAT REMAINS, AND THE ESCAPE HATCH THAT DOES NOT EXIST: a suite whose read is dynamic cannot
+    // earn the relation this way, and an unresolvable read still falls to the same FAIL-CLOSED path as
+    // before rather than being silently dropped, because a dynamic read is exactly where being loud beats
+    // being quiet. Such a suite should DECLARE the dependency explicitly, and NO SUCH DECLARATION MECHANISM
+    // IS BUILT - it does not exist yet. Until it does, a suite with a dynamic read is uncovered and the
+    // full-tier fallback is what protects it.
+    //
+    // WHY NOT BROADER, WITH ALL THREE ATTEMPTS MEASURED RATHER THAN REMEMBERED (so the next person does not
+    // repeat the first two):
+    //   * the mention form, admitting every .ts path a suite names: 34 -> 47 data paths, and it turns FOUR
+    //     existing assertions red - audio-feed-4kl3's "selects the suite that executes it AND ONLY THAT
+    //     SUITE", audio-feed-20c7's two env/cwd rows, and audio-feed-9rer's "echo prints the path as data; a
+    //     relation here is the false positive THIS BEAD IS ABOUT". Re-admitting those is a CORRECTNESS
+    //     regression traded for a gate saving.
+    //   * admitting authoredPaths as well as resolvedPaths: the same four failures, plus the read row.
+    //   * this form: 34 -> 40 data paths (+6, none removed), and ALL FOUR rows stay green, at the cost of
+    //     covering only reads the resolver can see. That is the accepted trade.
+    if (path.endsWith(".ts") && !isProvenRead) return;
     // audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are now in the relation too. They used to
     // be excluded here (audio-feed-es8y's scope note) on the argument that they keep the conservative
     // full-suite fallback - which was true, and cost every one of them the whole gate: a one-line change to
@@ -1893,7 +1929,9 @@ export async function deriveReadRelationReport(
         add(path, suite);
       }
       for (const path of reads.resolvedPaths) {
-        add(path, suite);
+        // PROVEN in the A3 sense: the RESOLVER resolved this path (audio-feed-tziw). This is the only read
+        // form admitted for .ts; authoredPaths stays excluded, which is what keeps the four rows green.
+        add(path, suite, true);
       }
       for (const path of reads.executedPaths) {
         add(path, suite, true);
