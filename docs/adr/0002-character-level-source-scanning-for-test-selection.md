@@ -6,7 +6,13 @@
 - **Decision bead:** `audio-feed-2ggf` (this record). This is a **record of a decision already
   taken**: the bead that asked for it described the tokenizer as a proposal, and by the time it was
   picked up the scanner was one. What was missing was the written decision, not the code.
-- **Evidence pinned at:** `0bf07a7`. Every line number below is as of that revision.
+- **Evidence pinned at:** `0bf07a7`. Every line number **and every count** below is as of that
+  revision, which is the whole point of pinning it: a reader comparing a figure here against a
+  later tree is comparing it against the wrong thing, and will read a correct historical
+  measurement as a stale number (`audio-feed-n5e9`). Re-derive rather than trust them — the
+  `stripComments` span is its `export function` line to its closing brace, the file sizes are
+  `wc -l`, and the test figures are the row count of the case table and the rows that set
+  `ignore: true` in it.
 
 ## Context
 
@@ -51,7 +57,8 @@ state is the only thing that answers these questions correctly. Whether it is AL
 run on every gate is a question with a measured answer, in "What it costs" below — not an assumption
 of this decision.
 
-`stripComments` (`scripts/test-selection.ts:343`, **271 lines**) returns `{ stripped, spans }`:
+`stripComments` (`scripts/test-selection.ts:343`, **268 lines** at the pinned revision) returns
+`{ stripped, spans }`:
 `stripped` is the source with comments removed, and `spans` records the UTF-16 code-unit ranges that
 are string **content** — so a read call inside a string is data, while a read inside a template's
 `${…}` is still a read, because an interpolation is code.
@@ -80,7 +87,7 @@ patched one at a time, and lexical state lives in exactly one place that can be 
 on the scan — 93 rows in total, and they are the real safety net, because a scanner that reads
 correctly but classifies wrongly still loses a relation.
 
-**What it costs — and this is the part to keep in view.** 271 lines of hand-written lexer is itself
+**What it costs — and this is the part to keep in view.** 268 lines of hand-written lexer is itself
 a correctness surface, and the eight fixes above are the price already paid for it. It is not a
 parser and does not pretend to be: it tracks only the state this file's questions need. The residual
 risk is visible and measured rather than imagined: **2 of the 16 cases are known-open and marked
