@@ -3598,6 +3598,40 @@ export function isFullyVisible(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Generated regions for evidence READMEs (audio-feed-pluv)
+// ---------------------------------------------------------------------------------------------
+//
+// A proof that writes an evidence README is one of TWO writers: a human curates the same file -
+// correcting copied values, adding criteria, recording why something was re-run - so a generator that
+// rewrites the whole file silently reverts landed human work. Measured on
+// docs/evidence/audio-feed-r97/README.md: one run took a 36-line curated document to 4 lines
+// (numstat 2 insertions / 34 deletions), destroying the Debt note, the "Verified Criteria" section and
+// the recorded execution log, including a landed correction.
+//
+// The fix is the idiom this repository already uses to share one client between surfaces - shell.ts
+// slices confirm-shared.js between "// #confirm-shared-begin" and "// #confirm-shared-end" - applied to
+// READMEs: the generator writes ONLY between its markers, and everything outside them survives.
+//
+// Re-exported HERE, beside the other evidence-README helpers, on purpose: a module of its own would be
+// invisible to the next proof author, and this is where they look. The behaviour is defined and tested
+// in scripts/evidence-readme.ts and tests/evidence_readme_test.ts, which pin the four properties that
+// matter - merging is IDEMPOTENT, so a re-run cannot dirty a tracked file; content OUTSIDE the region
+// survives byte-for-byte; malformed marker sets REFUSE loudly rather than being guessed; and the
+// byte-identity pin CAN FAIL, so a README that disagrees with its generator is reported instead of
+// passing quietly.
+//
+// No proof is wired to this yet: migrating a README to the marker-delimited shape is a deliberate
+// per-file change, and the module refuses a README with no markers rather than injecting them into one.
+export {
+  GENERATED_BEGIN,
+  GENERATED_END,
+  isRegenerationStable,
+  mergeGeneratedRegion,
+  splitGeneratedRegion,
+  wrapGeneratedRegion,
+} from "./evidence-readme.ts";
+
 export interface EvidenceSection {
   heading: string;
   body: string;
