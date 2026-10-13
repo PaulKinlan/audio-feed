@@ -15,8 +15,8 @@
  *      silently working - or silently doing nothing at all). audio-feed-1d0n is the reason this is an
  *      assertion rather than a collected-and-dropped array: a check that cannot fail is a false green.
  *
- * The report deliberately does NOT write the ephemeral port into the committed README (audio-feed-1d0n):
- * a fixed port that the script cannot reproduce makes the artifact wrong from the next run onwards.
+ * The committed capture uses fixed port 8133 so the visible bookmarklet origin is stable.
+ * If it is busy, retry when free. BOOKMARKLET_PROOF_PORT=8134 is local-only OS-temp evidence.
  *
  *   deno run --allow-all --unstable-kv scripts/verify_kvnw_account_bookmarklet_browser.ts
  */
@@ -28,13 +28,18 @@ import type { AppConfig, Stores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "./harness-port.ts";
 
-const OUT = new URL("../docs/evidence/audio-feed-kvnw/", import.meta.url).pathname;
+const PROOF_PORT = resolveHarnessPort([], Deno.env.get("BOOKMARKLET_PROOF_PORT"));
+if (PROOF_PORT === 0) throw new Error("Bookmarklet evidence requires a fixed port, not 0");
+const OUT = PROOF_PORT === HARNESS_PORT_DEFAULT
+  ? new URL("../docs/evidence/audio-feed-kvnw/", import.meta.url).pathname
+  : `${await Deno.makeTempDir({ prefix: "audio-feed-kvnw-local-" })}/`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
 
 await runProof("audio-feed-kvnw", async (checker) => {
-  const config: AppConfig = { port: 0 };
+  const config: AppConfig = { port: PROOF_PORT };
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
 
@@ -46,7 +51,22 @@ await runProof("audio-feed-kvnw", async (checker) => {
   const sessionSecret = await createSession(stores.metadata, user.id);
 
   const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
-  const server = Deno.serve({ port: 0, onListen: () => {} }, (req, info) => appFetch(req, info));
+  let server: Deno.HttpServer<Deno.NetAddr>;
+  try {
+    server = Deno.serve(
+      { port: PROOF_PORT, onListen: () => {} },
+      (req, info) => appFetch(req, info),
+    );
+  } catch (error) {
+    await stores.metadata.close();
+    if (error instanceof Deno.errors.AddrInUse) {
+      throw new Error(
+        `Bookmarklet proof port ${PROOF_PORT} is busy; retry when free, or use BOOKMARKLET_PROOF_PORT=8134 for local-only OS-temp evidence`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   const PORT = (server.addr as Deno.NetAddr).port;
   const BASE = `http://localhost:${PORT}`;
   config.port = PORT;
@@ -340,7 +360,7 @@ await runProof("audio-feed-kvnw", async (checker) => {
             {
               heading: "Test Environment",
               body:
-                `- **Browser:** Headless Chrome (CDP), 1280x900\n- **Page:** \`GET /account\` on an in-process server with an ephemeral port\n- **Session:** a real seeded session cookie (\`__Host-af_session\`), the same way the unit tests sign in`,
+                `- **Browser:** Headless Chrome (CDP), 1280x900\n- **Page:** \`GET /account\` on canonical proof port 8133 (alternate ports are local-only)\n- **Session:** a real seeded session cookie (\`__Host-af_session\`), the same way the unit tests sign in`,
             },
             {
               heading: "Key Verifications",
