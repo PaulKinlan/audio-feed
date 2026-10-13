@@ -412,6 +412,20 @@ await runProof("account-browser-proof", async (checker) => {
         );
         await sweep("08-admin-403");
 
+        // audio-feed-jgt3: Pin 'at' timestamp in evidence.json to the harness base instant
+        // ("2026-10-12T03:30:00.000Z") when not running with ACCOUNT_HARNESS_NOW=live.
+        // LIMIT STATEMENT: Clock, port, token, and the run timestamp are ALL PINNED, so the
+        // bundle is 100% byte-reproducible AND NO LONGER CARRIES ITS OWN PROVENANCE.
+        const evidenceAt = (() => {
+          const env = Deno.env.get("ACCOUNT_HARNESS_NOW");
+          if (env === "live" || env === "now") return new Date().toISOString();
+          if (env) {
+            const parsed = Date.parse(env);
+            if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+          }
+          return "2026-10-12T03:30:00.000Z";
+        })();
+
         // Write evidence.json
         await Deno.writeTextFile(
           `${OUT}evidence.json`,
@@ -419,7 +433,7 @@ await runProof("account-browser-proof", async (checker) => {
             {
               bead: "audio-feed-8fc",
               also: "audio-feed-ktn",
-              at: new Date().toISOString(),
+              at: evidenceAt,
               steps,
               shots,
             },
