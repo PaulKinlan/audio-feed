@@ -588,6 +588,15 @@ const EXEMPT_UNMEDIATED_PROOFS = new Set([
   "scripts/regenerate-browser-proof.ts", // audio-feed-ebyy / fleet/ufg9
 ]);
 
+// audio-feed-cp9j / audio-feed-7ulw: strictly pinned set of multi-tenant evidence contributors.
+// These proofs contribute screenshots into a shared evidence directory (audio-feed-3xq) owned
+// and declared by admin-module-browser-proof.ts. They must execute in runProof and process
+// screenshots with quantiseEvidencePng, but must NOT call writeEvidenceReadme to avoid clobbering.
+const MULTI_TENANT_CONTRIBUTOR_PROOFS = new Set([
+  "scripts/landing-tooltip-browser-proof.ts", // audio-feed-3xq part 4c (audio-feed-s9z5)
+  "scripts/home-module-browser-proof.ts", // audio-feed-3xq part 4b (audio-feed-7ulw)
+]);
+
 function checkProofCompliance(content: string, relative: string): string | null {
   const result = censusSource(content);
   // audio-feed-0gbo: unknown writes must not pass in silence
@@ -600,12 +609,24 @@ function checkProofCompliance(content: string, relative: string): string | null 
   const hasQuantise = masked.includes("quantiseEvidencePng(");
   const hasReadme = masked.includes("writeEvidenceReadme(");
 
-  // audio-feed-s9z5: proofs writing evidence must execute in runProof and use shared helpers
-  // (sole tenants write README; multi-tenant contributors use quantiseEvidencePng without clobbering README)
-  if (!hasRunProof || (!hasQuantise && !hasReadme)) {
-    return `${relative} (writes: ${result.writes.join(", ")}, unresolved: ${
-      result.unresolvedWrites.join(", ")
-    }, runProof: ${hasRunProof}, quantise: ${hasQuantise}, readme: ${hasReadme})`;
+  const isMultiTenant = MULTI_TENANT_CONTRIBUTOR_PROOFS.has(relative);
+  if (isMultiTenant) {
+    if (!hasRunProof || !hasQuantise) {
+      return `${relative} (multi-tenant contributor must use runProof and quantiseEvidencePng: runProof=${hasRunProof}, quantise=${hasQuantise})`;
+    }
+    if (hasReadme) {
+      return `${relative} (multi-tenant contributor must NOT call writeEvidenceReadme to protect shared README)`;
+    }
+  } else {
+    // audio-feed-cp9j: sole-tenant proofs writing evidence MUST use runProof and writeEvidenceReadme;
+    // quantiseEvidencePng alone without writeEvidenceReadme is not permitted for sole tenants.
+    if (!hasRunProof || !hasReadme) {
+      return `${relative} (sole tenant writing evidence must use runProof and writeEvidenceReadme: writes: ${
+        result.writes.join(", ")
+      }, unresolved: ${
+        result.unresolvedWrites.join(", ")
+      }, runProof: ${hasRunProof}, readme: ${hasReadme})`;
+    }
   }
   return null;
 }
@@ -687,4 +708,53 @@ Deno.test("audio-feed-9yaq: NEGATIVE CONTROL - regenerate-browser-proof.ts fails
   assertStringIncludes(failure, "scripts/regenerate-browser-proof.ts");
   assertStringIncludes(failure, "runProof: false");
   assertStringIncludes(failure, "readme: false");
+});
+
+Deno.test("audio-feed-cp9j: multi-tenant contributor set is strictly pinned", () => {
+  assertEquals(
+    MULTI_TENANT_CONTRIBUTOR_PROOFS.size,
+    2,
+    "Multi-tenant contributor set is strictly pinned",
+  );
+});
+
+Deno.test("audio-feed-cp9j: NEGATIVE CONTROL - sole tenant proof with quantiseEvidencePng but no README fails audit", () => {
+  const syntheticProof = [
+    'const OUT = "docs/evidence/audio-feed-sole/";',
+    'await runProof("sole-browser-proof", async () => {',
+    "  await Deno.writeFile(`${OUT}01-shot.png`, new Uint8Array());",
+    "  await quantiseEvidencePng(`${OUT}01-shot.png`);",
+    "});",
+  ].join("\n");
+
+  const failure = checkProofCompliance(syntheticProof, "scripts/synthetic-sole-browser-proof.ts");
+  assert(
+    failure !== null,
+    "Sole tenant proof with quantiseEvidencePng but no writeEvidenceReadme must be rejected",
+  );
+  assertStringIncludes(
+    failure,
+    "sole tenant writing evidence must use runProof and writeEvidenceReadme",
+  );
+});
+
+Deno.test("audio-feed-7ulw: NEGATIVE CONTROL - multi-tenant proof calling writeEvidenceReadme fails audit", () => {
+  const syntheticProof = [
+    'const OUT = "docs/evidence/audio-feed-3xq/";',
+    'await runProof("home-browser-proof", async () => {',
+    "  await Deno.writeFile(`${OUT}part4b-home-1280x900.png`, new Uint8Array());",
+    "  await quantiseEvidencePng(`${OUT}part4b-home-1280x900.png`);",
+    "  await writeEvidenceReadme({ dir: OUT });",
+    "});",
+  ].join("\n");
+
+  const failure = checkProofCompliance(syntheticProof, "scripts/home-module-browser-proof.ts");
+  assert(
+    failure !== null,
+    "Multi-tenant contributor calling writeEvidenceReadme must be rejected to protect shared README",
+  );
+  assertStringIncludes(
+    failure,
+    "multi-tenant contributor must NOT call writeEvidenceReadme",
+  );
 });
