@@ -21,12 +21,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { makeUser } from "../tests/fixtures.ts";
-import {
-  createTempChromeProfile,
-  newestChrome,
-  runProof,
-  writeEvidenceReadme,
-} from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome, runProof } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 
 await runProof("landing-tooltip-browser-proof", async (checker) => {
@@ -333,13 +328,6 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     } catch { /* already dead */ }
     await server.shutdown();
     await cleanup();
-    await writeEvidenceReadme({
-      dir: OUT,
-      title: "Browser Proof: Landing & Shell Tooltip Client (audio-feed-3xq)",
-      script: "scripts/landing-tooltip-browser-proof.ts",
-      asserts: checks.map((c) => c.name),
-      checker,
-    });
   }
   if (crashError) throw crashError;
 });
