@@ -216,8 +216,8 @@ await runProof("audio-feed-3asd", async (checker) => {
           "rendered bookmarklet uses the selected proof port",
           Boolean(codeSnippet?.includes(`localhost:${PROOF_PORT}`)) &&
             Boolean(anchorHref?.includes(`localhost:${PROOF_PORT}`)),
-          `expected localhost:${PROOF_PORT}; rendered ${
-            codeSnippet?.match(/localhost:\d+/)?.[0] ?? "none"
+          `selected port ${PROOF_PORT}; rendered port ${
+            codeSnippet?.match(/localhost:(\d+)/)?.[1] ?? "none"
           }`,
         );
 

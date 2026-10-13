@@ -256,8 +256,8 @@ await runProof("audio-feed-kvnw", async (checker) => {
           "rendered account bookmarklet uses the selected proof port",
           snippetText.includes(`localhost:${PROOF_PORT}`) &&
             anchorHref.includes(`localhost:${PROOF_PORT}`),
-          `expected localhost:${PROOF_PORT}; rendered ${
-            snippetText.match(/localhost:\d+/)?.[0] ?? "none"
+          `selected port ${PROOF_PORT}; rendered port ${
+            snippetText.match(/localhost:(\d+)/)?.[1] ?? "none"
           }`,
         );
 
