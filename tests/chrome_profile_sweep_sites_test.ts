@@ -22,7 +22,7 @@
  */
 import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import { createTempChromeProfile } from "../scripts/proof-helper.ts";
-import { firstArgument, maskNonCode } from "../scripts/evidence-census.ts";
+import { firstArgument, maskNonCode } from "../scripts/source-mask.ts";
 
 export interface SiteAudit {
   file: string;
