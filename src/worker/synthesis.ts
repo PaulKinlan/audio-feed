@@ -1402,18 +1402,29 @@ export async function runSynthesisBatch(
     stage: SynthesisStage,
     durationMs: number,
     episodeId?: string,
+    failureReason?: string,
   ) => {
     try {
       const stored = await ctx.stores.metadata.appendLog({
         time: new Date().toISOString(),
-        severity: "info",
+        // A stage that DIED is a finding and a stage that finished is not, and the ONLY place that
+        // knows the difference is the caller's catch (audio-feed-k3x6). Both paths used to write
+        // "info", so this store could say a stage RAN and how long it took but never that it FAILED —
+        // which is why a per-stage distribution of lost voice input was unanswerable from a warn+error
+        // read, and why a fast failure was indistinguishable from a fast success.
+        severity: failureReason ? "warn" : "info",
         type: "synthesis.stage",
         process: "worker",
         job: "synthesis",
         correlationId: invocationId,
         phase: stage,
-        message: `synthesis stage ${stage} took ${Math.round(durationMs)}ms`,
+        message: failureReason
+          ? `synthesis stage ${stage} FAILED after ${Math.round(durationMs)}ms: ${failureReason}`
+          : `synthesis stage ${stage} took ${Math.round(durationMs)}ms`,
         durationMs: Math.max(0, Math.round(durationMs)),
+        // The reason at the ROOT, where spans and claim.lifecycle already put it, so a reader that
+        // groups failures does not have to reach into context for it.
+        ...(failureReason ? { reason: failureReason } : {}),
         context: {
           invocationId,
           stage: "synthesis",
@@ -1437,12 +1448,19 @@ export async function runSynthesisBatch(
     }
     stageMarksEmitted++;
     const startedMarkAt = performance.now();
+    let failureReason: string | undefined;
     try {
       return await fn();
+    } catch (err) {
+      // Captured BEFORE the finally so the mark can say the stage DIED rather than only that it
+      // ended (audio-feed-k3x6). The error is rethrown UNCHANGED: observability must not alter
+      // synthesis behaviour, the same contract the store write itself keeps below.
+      failureReason = err instanceof Error ? err.message : String(err);
+      throw err;
     } finally {
       // finally, not after: a stage that THREW is the one whose duration is most worth having, and a
       // stalled-then-aborted TTS call is exactly the shape this instrumentation exists to expose.
-      await appendStage(stage, performance.now() - startedMarkAt, episodeId);
+      await appendStage(stage, performance.now() - startedMarkAt, episodeId, failureReason);
     }
   };
   let outcome: "returned" | "threw" = "threw";

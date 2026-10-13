@@ -99,7 +99,60 @@ Deno.test("audio-feed-huh4: a throwing stage is still marked, and the mark attac
     invocation[0]?.correlationId,
     "a stage mark must attach to the invocation it happened in",
   );
+  // audio-feed-k3x6: THE MARK MUST ALSO SAY THE STAGE FAILED. Until this, a stage that threw and a
+  // stage that finished wrote the SAME "info" record, so no warn+error read of this store could
+  // produce a per-stage distribution of lost input, and a fast failure read as a fast success.
+  assertEquals(
+    marks[0]?.severity,
+    "warn",
+    "a stage that threw must be recorded as a FAILURE, not as an ordinary stage timing",
+  );
+  assertEquals(
+    marks[0]?.reason,
+    "provider stalled inside the TTS stage",
+    "the reason must be on the mark, so a reader does not have to infer why the stage died",
+  );
+  assert(
+    (marks[0]?.message ?? "").includes("FAILED"),
+    "the message must say the stage failed rather than only how long it took",
+  );
   assertEquals(run.considered, 1, "the seeded episode must actually have been considered");
+});
+
+Deno.test("audio-feed-k3x6: a stage that SUCCEEDS is not recorded as a failure (control)", async () => {
+  // THE CONTROL FOR THE ROW ABOVE, and it is the half that makes that row mean anything: if the
+  // failure severity were written UNCONDITIONALLY, the throwing row would still pass while every
+  // healthy stage became a warning - and a distribution built on this store would count success as
+  // loss. So this asserts the other direction on the same records.
+  const successfulPathStages = ["tts", "verify", "upload"] as const;
+  const { ctx, stores } = await seedEpisodes(["ep-k3x6-ok"]);
+  const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+    batchSize: 1,
+    owner: "k3x6-ok",
+    maxAttempts: 1,
+  });
+
+  const marks = stageMarks(await stores.metadata.listLogs()).filter((log) =>
+    log.phase !== "capped"
+  );
+  assertEquals(
+    marks.map((mark) => mark.phase).sort(),
+    [...successfulPathStages].sort(),
+    "the successful path must still mark the stages it ran",
+  );
+  for (const mark of marks) {
+    assertEquals(
+      mark.severity,
+      "info",
+      `stage ${mark.phase} succeeded, so its mark must not be a failure`,
+    );
+    assertEquals(
+      mark.reason,
+      undefined,
+      `stage ${mark.phase} succeeded, so it must carry no failure reason`,
+    );
+  }
+  assertEquals(run.ready.length, 1, "the seeded episode must actually have been synthesized");
 });
 
 Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rather than silently dropped", async () => {
