@@ -353,9 +353,7 @@ await runProof("verify_live_tts", async (checker) => {
       {
         heading: "Artifact Provenance",
         body:
-          `Run on 2026-10-08 UTC: \`timeout -k 30 300 deno run -A scripts/verify_live_tts.ts\`. The **complete actual script output** is [\`live-validation.json\`](live-validation.json). Each provider fetch has an AbortSignal timeout (20 seconds for metadata/counts, 120 seconds for synthesis controls). The fleet proxy at \`https://gemini.int.exe.xyz/v1beta\` appends the API path and injects the key server-side; no credential is stored or transmitted by this script.
-
-The \`live-validation.json\` artifact in this directory was captured by hand from script stdout during the original verification pass, while the claims declared above are programmatically verified by \`scripts/verify_live_tts.ts\`.`,
+          `The original run was on 2026-10-08 UTC: \`timeout -k 30 300 deno run -A scripts/verify_live_tts.ts\`. [\`live-validation.json\`](live-validation.json) is a **hand-captured snapshot of that original run**, not an output this script updates. Each new run prints its own measured JSON to stdout; save it separately to compare run-specific quantities. Each provider fetch has an AbortSignal timeout (20 seconds for metadata/counts, 120 seconds for synthesis controls). The fleet proxy at \`https://gemini.int.exe.xyz/v1beta\` appends the API path and injects the key server-side; no credential is stored or transmitted by this script.`,
       },
       {
         heading: "Live Verification Status & Provider Behavior (audio-feed-zrx9)",
@@ -389,7 +387,7 @@ The previous ad-hoc expanded-preamble result was **11,207** tokens; the committe
       {
         heading: "Article segmentation and positive audio",
         body:
-          `The source \`docs/evidence/audio-feed-gueb/article.txt\` has **47,000 characters / 47,018 UTF-8 bytes**. \`formatNarrationPrompt({ title: "History of the Internet", body: article })\` yields 47,044 bytes and 10,512 provider-counted tokens. Production segmentation yields eight chunks under the 6,000-byte budget:
+          `The counts and segment table below describe the original 2026-10-08 snapshot, not automatically updated measurements; compare a later run against its own printed JSON. The source \`docs/evidence/audio-feed-gueb/article.txt\` has **47,000 characters / 47,018 UTF-8 bytes**. \`formatNarrationPrompt({ title: "History of the Internet", body: article })\` yields 47,044 bytes and 10,512 provider-counted tokens. Production segmentation yields eight chunks under the 6,000-byte budget:
 
 | Segment | Bytes | Provider tokens |
 |---:|---:|---:|
@@ -402,7 +400,7 @@ The previous ad-hoc expanded-preamble result was **11,207** tokens; the committe
 | 7 | 5,858 | 1,372 |
 | 8 | 5,706 | 1,218 |
 
-The largest segment is 1,372 tokens (16.75% of the published input cap), matching the earlier mock-exact 8-chunk prediction. The positive request uses \`buildSingleVoiceRequest\` with Charon, temperature 0.7 and \`maxOutputTokens: 16384\` over the **first two paragraphs of article.txt** (1,097 characters / bytes), not the former 78-character smoke text. Observed HTTP 200, \`STOP\`, model version \`gemini-3.8-flash-tts\`, usage **215 text prompt tokens + 1,568 audio candidate tokens = 1,783 total**. The returned \`audio/wav\` base64 is 4,022,232 characters; decoded WAV is 3,016,674 bytes with first 16 header bytes \`52 49 46 46 da 07 2e 00 57 41 56 45 66 6d 74 20\`. Both RIFF and WAVE bytes are checked; PCM WAV header parsing confirmed **24,000 Hz, mono, 16-bit, 3,010,560 data bytes**, yielding **62.72 seconds** from the declared PCM rate. The production decoder also accepted it as non-truncated WAV. Generated audio token count/byte length can vary on a future rerun; these are observations from the committed output, not deterministic assertions.`,
+The largest segment is 1,372 tokens (16.75% of the published input cap), matching the earlier mock-exact 8-chunk prediction. The positive request uses \`buildSingleVoiceRequest\` with Charon, temperature 0.7 and \`maxOutputTokens: 16384\` over the **first two paragraphs of article.txt** (1,097 characters / bytes), not the former 78-character smoke text. The proof checks HTTP 200, \`STOP\`, \`audio/wav\` inline data, RIFF/WAVE magic, 24,000 Hz mono 16-bit PCM, duration calculated from PCM bytes, and production decoder acceptance. **Audio usage tokens, base64 length, PCM byte length, WAV header bytes and duration vary between runs**: consult this run's printed JSON for those values; the linked \`live-validation.json\` is the separate original 2026-10-08 snapshot, not this run's result.`,
       },
       {
         heading: "Verdict",

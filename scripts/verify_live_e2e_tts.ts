@@ -581,8 +581,7 @@ if (import.meta.main) {
         {
           heading: "Run Provenance",
           body:
-            `Run on 2026-10-08 UTC against the live fleet proxy at \`https://gemini.int.exe.xyz\`.
-Complete machine-readable results are recorded in [\`live-e2e-validation.json\`](live-e2e-validation.json).`,
+            `Run against the live fleet proxy at \`https://gemini.int.exe.xyz\`. The timestamp, whether each segment was fresh or cached, and all per-run quantities are recorded in the same-run [\`live-e2e-validation.json\`](live-e2e-validation.json). The original verification was on 2026-10-08; regenerated results must be read from their own JSON, not inferred from that date.`,
         },
         {
           heading: "Background & Scope",
@@ -631,40 +630,14 @@ Exercising \`client.sendRequest\` on raw segment 1 **as it behaved on the 2026-1
         {
           heading: "3. Production Narration Script & 8-Segment Synthesis",
           body:
-            `The production input path - a generated narration script - was tested using \`docs/evidence/audio-feed-9vns/narration-script.txt\` (44,626 characters / 44,710 prompt bytes).
-
-Production segmentation under \`MAX_TTS_INPUT_BYTES = 6000\` yielded EXACTLY 8 segments:
-- \`assertTextSeams(prompt, segments)\` passed with zero dropped or duplicate characters.
-
-| Segment | Characters | Text bytes | Duration (s) | Raw WAV bytes | PCM Data bytes | Source | Finish Reason |
-|---:|---:|---:|---:|---:|---:|:---:|:---:|
-| 1 | 5,890 | 5,900 | 348.72 | 16,744,674 | 16,738,560 | \`fresh\` | \`STOP\` |
-| 2 | 5,950 | 5,962 | 360.20 | 17,295,714 | 17,289,600 | \`fresh\` | \`STOP\` |
-| 3 | 5,885 | 5,891 | 346.60 | 16,642,914 | 16,636,800 | \`fresh\` | \`STOP\` |
-| 4 | 5,941 | 5,955 | 364.72 | 17,512,674 | 17,506,560 | \`fresh\` | \`STOP\` |
-| 5 | 5,876 | 5,880 | 351.28 | 16,867,554 | 16,861,440 | \`fresh\` | \`STOP\` |
-| 6 | 5,964 | 5,968 | 348.40 | 16,729,314 | 16,723,200 | \`fresh\` | \`STOP\` |
-| 7 | 5,879 | 5,885 | 368.56 | 17,696,994 | 17,690,880 | \`fresh\` | \`STOP\` |
-| 8 | 3,260 | 3,262 | 200.72 | 9,640,674 | 9,634,560 | \`fresh\` | \`STOP\` |
-| **Total** | **44,645** | **44,703** | **2,689.20** | **129,130,512** | **129,081,600** | — | — |
-
-Fresh-run elapsed time across all 8 serial provider synthesis calls: **342,315 ms** (342.315 seconds). The cache was cleared before this run; \`dataSource: fresh\`, \`freshRun: true\`, and each segment's \`source: fresh\` in the JSON distinguish this measurement from a replay. On cache replay the harness omits unobserved finish reasons and truncation flags.`,
+            `Production segmentation under \`MAX_TTS_INPUT_BYTES = 6000\` yields eight segments, and \`assertTextSeams(prompt, segments)\` checks for dropped or duplicate characters. Per-segment characters, bytes, durations, PCM sizes, source and observed finish reasons are in the same-run \`live-e2e-validation.json\`; generated audio sizes and durations are not fixed expectations. A fresh run records \`dataSource: fresh\` and \`freshRun: true\` with \`source: fresh\` for each segment. On cache replay the harness omits unobserved finish reasons and truncation flags; do not describe cached bytes as newly synthesized audio.`,
         },
         {
           heading: "4. Stitched Output Audio Verification",
-          body: `\`client.synthesizeNarration\` stitched all 8 segments via \`joinTtsAudio\`:
+          body:
+            `\`client.synthesizeNarration\` stitches eight segments via \`joinTtsAudio\`. The same-run \`live-e2e-validation.json\` records PCM/WAV byte lengths, duration, summed segment duration, delta and first 16 WAV header bytes. The proof checks that the stitched PCM byte length equals the sum of segment PCM bytes and that its duration is within 50ms of the sum of segment durations, rather than expecting the 2026-10-08 run's exact audio length.
 
-- **PCM data bytes**: \`129,081,600\` (exactly equal to sum of segment PCM data bytes).
-- **Total WAV bytes**: \`129,081,644\` (44-byte RIFF/WAVE header + 129,081,600 PCM bytes).
-- **Stitched duration**: \`2,689.20\` seconds (44 minutes, 49.20 seconds), matching \`sum(segmentDurations) = 2,689.20s\` with **0.000s delta**.
-- **WAV Header Magic**: First 16 bytes: \`52 49 46 46 24 a1 b1 07 57 41 56 45 66 6d 74 20\` (\`RIFF....WAVEfmt \`).
-- **PCM Format Details**:
-  - \`audioFormat\`: \`1\` (uncompressed PCM)
-  - \`sampleRate\`: \`24,000 Hz\`
-  - \`channels\`: \`1\` (mono)
-  - \`bitsPerSample\`: \`16\`
-  - \`duration = dataLength / (sampleRate * channels * (bitsPerSample / 8))\` = \`129,081,600 / 48,000 = 2,689.20s\`.
-- Decodable by the production \`decodeAudioResponse\` on the stitched WAV bytes (\`format: "wav"\`, \`truncated: false\`), non-empty, and valid.`,
+It also checks RIFF/WAVE magic, uncompressed PCM format 1, 24,000 Hz mono 16-bit output, non-empty data and acceptance by production \`decodeAudioResponse\` as non-truncated WAV.`,
         },
         {
           heading: "Exact Commands",
@@ -683,7 +656,7 @@ timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write sc
         {
           heading: "Verdict",
           body:
-            `**VERIFIED as of the 2026-10-08 run; NARROWED AND CORRECTED TWICE 2026-10-12 (audio-feed-zrx9, then audio-feed-fipl, then audio-feed-kx2m): the raw-article refusal claims no longer describe the provider, so they now assert that usable speech was returned - 200, a candidate that completed, and the application's own decoder accepting the observed response - before concluding that no refusal was seen; every shape the two earlier attempts got wrong is pinned as an offline mutant in tests/synthesis_observation_test.ts - see the live verification status section above.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, successfully synthesizes all 8 segments of the production narration script, and stitches them into a bit-exact, valid, decodable RIFF/WAVE audio file of 2,689.20 seconds duration.`,
+            `**VERIFIED as of the 2026-10-08 run; NARROWED AND CORRECTED TWICE 2026-10-12 (audio-feed-zrx9, then audio-feed-fipl, then audio-feed-kx2m): the raw-article refusal claims no longer describe the provider, so they now assert that usable speech was returned - 200, a candidate that completed, and the application's own decoder accepting the observed response - before concluding that no refusal was seen; every shape the two earlier attempts got wrong is pinned as an offline mutant in tests/synthesis_observation_test.ts - see the live verification status section above.** The production \`GeminiTtsClient\` resolves the proxy base URL via \`GEMINI_API_BASE_URL\`, checks synthesis of all eight narration segments and their stitching into a valid, decodable RIFF/WAVE file without assuming an exact generated duration; the measured duration is in the same-run JSON, and pass/fail status is in the proof assertions.`,
         },
       ],
     });
