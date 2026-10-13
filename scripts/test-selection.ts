@@ -404,7 +404,15 @@ export function stripComments(
           context = "LINE_COMMENT";
           i++;
         } else if (ch === "/" && source[i + 1] === "*") {
+          // audio-feed-ywjz: ADVANCE offset past the `/*` as the comment OPENS. Without this the opening
+          // left `offset` where it was, so the EOF branch for an UNTERMINATED comment - which appends
+          // source.slice(offset, i) to include the unparseable tail - appended the whole PREFIX a second
+          // time. That is not cosmetic: a duplicated declaration makes resolveReadName() reject the
+          // multiple matching declarations and the read relation is LOST, and the duplicate copy of a
+          // string literal lies outside its recorded span so it reads as code. The " " is KEPT, because
+          // for a TERMINATED comment it is the only thing separating the tokens on either side.
           result += source.slice(offset, i) + " ";
+          offset = i + 2;
           context = "BLOCK_COMMENT";
           i++;
         } else if (ch === '"' || ch === "'") {
@@ -602,7 +610,21 @@ export function stripComments(
     i++;
   }
 
-  if (context !== "LINE_COMMENT" && context !== "BLOCK_COMMENT") {
+  if (context === "BLOCK_COMMENT") {
+    // An unterminated block comment means the file is ill-formed: the scan ran off the end still in
+    // comment state. THE REPAIR IS ASYMMETRIC, and the first version of this fix got it wrong
+    // (audio-feed-ywjz, review finding P1 against 2e10b31): returning the WHOLE raw source also
+    // un-strips every WELL-FORMED comment before it, and because visibleConstantsFor() keeps the FIRST
+    // binding for a local name, a commented-out import earlier in the file then becomes visible, shadows
+    // the real one, and the read is attributed to the decoy - a NEW narrowing traded for the old one.
+    // So: keep the prefix exactly as it was stripped, include the tail as code, and keep the span list,
+    // which is already aligned with `result` rather than with `source`. Widening applies to the part
+    // that could not be parsed; the part that parsed stays parsed.
+    result += source.slice(offset, i);
+    return { stripped: result, spans };
+  }
+
+  if (context !== "LINE_COMMENT") {
     result += source.slice(offset, i);
   }
 
