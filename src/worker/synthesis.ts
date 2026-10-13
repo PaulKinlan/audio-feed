@@ -274,6 +274,35 @@ const DEFAULTS: Required<
  * A `deploymentDefault` that is not a finite number >= 0 also falls back to the constant, so no
  * caller, test double or future refactor can hand this function a value that means "no ceiling".
  */
+/**
+ * audio-feed-8905: the REAL narration plan size, as observed by the client's own
+ * progress callback, carried on the error that crosses out of the synthesis function.
+ *
+ * Read ONCE here rather than as scattered casts at each call site: the property is
+ * attached dynamically by the thrower, so a future refactor that renames or drops it
+ * degrades to the caller's fallback rather than failing silently - hence the shape check
+ * inside, instead of a bare assertion at every reader.
+ *
+ * Returns undefined before any progress event has fired, which is exactly when the
+ * caller must fall back to the constant ceiling.
+ */
+/**
+ * Exported so the fallback contract can be pinned directly by a unit test
+ * (audio-feed-8905): the property is attached dynamically by the thrower, so the
+ * behaviour that matters most is what happens when it is absent or not a number.
+ */
+export function observedPlanSize(err: unknown): number | undefined {
+  // A cast is a COMPILE-TIME promise, not a runtime guard: reading a property off null or
+  // undefined throws. The yield handler can be handed any thrown value, so the reader must
+  // survive one that is not an object before it can fall back.
+  if (typeof err !== "object" || err === null) return undefined;
+  const value = (err as { observedTotalTurns?: number }).observedTotalTurns;
+  // Number.isFinite, not typeof: typeof NaN === "number", so a NaN reaching this reader
+  // would be printed as a plan size in the operator-facing label. A count must be a
+  // finite number or the caller falls back.
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export function dailyEpisodeBudgetFor(
   user: { dailyEpisodeBudget?: number } | null | undefined,
   deploymentDefault?: number,
@@ -673,7 +702,16 @@ export function createGeminiSynthesizer(
     }
     const leaseSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);
     const claimedBy = episode.claimedBy ?? "";
+    // audio-feed-8905: `total` is the REAL plan size, published by the client from its
+    // own split (gemini.ts onProgress(turn, total)). Captured so the yield label and the
+    // abort message report the plan rather than MAX_TTS_SEGMENTS.
+    // FALLBACK: unchanged when no progress event ever arrives (an error before the first
+    // segment begins), so the ceiling remains the answer in exactly that one case. The
+    // two must stay distinguishable - a fallback silently equal to a real count is the
+    // defect being fixed here.
+    let observedTotalTurns: number | null = null;
     const onProgress = async (turn: number, total: number) => {
+      observedTotalTurns = total;
       if (claimedBy) {
         await checkpointEpisodeClaim(ctx.stores.metadata, episode.userId, episode.id, claimedBy, {
           phase: `synthesizing_segment_${turn}_of_${total}`,
@@ -742,6 +780,10 @@ export function createGeminiSynthesizer(
       deps.flushMarginMs ??
       (invocationBudget?.maxDurationMs ? INVOCATION_FLUSH_MARGIN_MS : 0);
 
+    // audio-feed-8905: both arguments are deliberately unused - time-based yielding is
+    // decided by withInvocationBudget, not here. Underscored so it reads as intent rather
+    // than oversight. NOTE: _total is the SAME real plan size that onProgress captures
+    // above and that the yield label needs.
     const shouldYield = (_completed: number, _total: number) => {
       if (
         invocationBudget?.maxSegments &&
@@ -963,6 +1005,10 @@ export function createGeminiSynthesizer(
       flushMarginMs: flushMargin,
       worstCaseEstimateMs: stageEntryEstimateMs,
       completedTurns: committedTurnsCount,
+      // audio-feed-8905: THE EARLY-ERROR FALLBACK - a CEILING, not the plan.
+      // Consumers see this only when the failure precedes the first progress event,
+      // i.e. before any plan size has been observed. Once the client reports a real
+      // total, the yield handler prefers that (see the observedTotalTurns note below).
       totalTurns: MAX_TTS_SEGMENTS,
       fn: (signal) => {
         const combinedSignal = signal && leaseSignal
@@ -984,6 +1030,14 @@ export function createGeminiSynthesizer(
       },
     });
     if (narrationOutcome.kind === "budget-yield") {
+      // The yield label and the abort message are built by the caller from this error's
+      // totalTurns, whose value (and message) were fixed at construction - before the
+      // client had split anything. The observed count is therefore carried alongside it
+      // and preferred by the reader; the constant stands only if no event arrived.
+      if (observedTotalTurns !== null) {
+        (narrationOutcome.error as { observedTotalTurns?: number }).observedTotalTurns =
+          observedTotalTurns;
+      }
       throw narrationOutcome.error;
     }
     if (narrationOutcome.kind === "error") {
@@ -1898,7 +1952,9 @@ async function runSynthesisBatchCore(
           }
 
           // Clean yield to respect invocation budget: resets attempts to 0 on progress, or advances attempts on zero progress.
-          const yieldPhase = `synthesized_${finalSegments}_of_${yieldErr.totalTurns}`;
+          const yieldPhase = `synthesized_${finalSegments}_of_${
+            observedPlanSize(yieldErr) ?? yieldErr.totalTurns
+          }`;
           const yielded = await markStage("yield", () =>
             metadata.yieldEpisodeClaim(
               currentEpisode.userId,
@@ -1919,8 +1975,10 @@ async function runSynthesisBatchCore(
                   phase: yieldPhase,
                   attempt: currentEpisode.attempts ?? 1,
                   claimOutcome: "yielded",
-                  reason:
-                    `invocation budget reached with ${finalSegments} of ${yieldErr.totalTurns} segments committed; resuming on a later tick`,
+                  reason: `invocation budget reached with ${finalSegments} of ${
+                    observedPlanSize(yieldErr) ??
+                      yieldErr.totalTurns
+                  } segments committed; resuming on a later tick`,
                 }),
               );
             } catch {
@@ -1929,7 +1987,8 @@ async function runSynthesisBatchCore(
             result.yielded.push({
               episodeId: currentEpisode.id,
               completedTurns: finalSegments,
-              totalTurns: yieldErr.totalTurns,
+              totalTurns: observedPlanSize(yieldErr) ??
+                yieldErr.totalTurns,
             });
           } else {
             result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
