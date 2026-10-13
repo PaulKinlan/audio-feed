@@ -1,6 +1,7 @@
 # audio-feed-9vns: Live End-to-End GeminiTtsClient Verification & 8-Segment Stitched Playback
 
 - Script: scripts/verify_live_e2e_tts.ts
+- Timeout: 600
 - Asserts: GeminiTtsClient resolves baseUrl with /v1beta suffix; raw article prompt splits into 8 segments under byte budget; raw article segment returns usable speech from the real client: decoded audio with finishReason STOP (audio-feed-zrx9, audio-feed-fipl, audio-feed-kx2m); provider returns usable speech for the raw article: status 200, candidate present, finishReason STOP, production decoder accepted it (audio-feed-zrx9, audio-feed-fipl, audio-feed-kx2m); narration prompt splits into 8 segments under byte budget; narration segments have seamless text boundaries; all 8 narration segments synthesized; captured segments are in narration order; stitched audio format is PCM; stitched audio is not marked as truncated; stitched WAV has valid length; stitched WAV has valid RIFF header; stitched WAV has valid WAVE format; production audio decoder accepts stitched WAV; WAV header specifies PCM audio format 1; WAV header specifies 24000 Hz sample rate; WAV header specifies 1 mono channel; WAV header specifies 16 bits per sample; WAV header has non-zero PCM data length; stitched duration matches sum of segment durations within 50ms; stitched PCM byte length matches sum of segment PCM bytes
 
 ## Run Provenance
