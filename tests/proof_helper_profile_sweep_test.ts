@@ -1,23 +1,36 @@
 /**
- * audio-feed-u8nv: an abandoned Chrome profile directory is reclaimed by the next run of the SAME
- * prefix - and NOTHING ELSE is.
+ * audio-feed-u8nv, widened by audio-feed-h62q: an abandoned Chrome profile is reclaimed by AGE and
+ * PROFILE SIGNATURE - and NOTHING ELSE is, whatever it is called.
  *
- * WHY THIS TEST EXISTS IN THIS SHAPE. The leak does not come from a missing `finally`: measured on
- * this VM, a browser test on its SUCCESS path left zero new directories, both `finally` blocks guard
- * `chrome.kill()` and then run `await cleanup()`, and there were zero orphaned Chrome processes. The
- * leak is that a KILLED run executes no `finally` at all, and 1926 directories totalling 1.5 GB had
- * accumulated in /tmp as a result. So the repair is a reclaim, and the reclaim's whole risk is that
- * it removes a directory that is IN USE. That is what the three assertions below are for, one per
- * way of being wrong:
+ * WHY THE RULE IS A SIGNATURE AND NOT A NAME. The original reclaim matched the caller's prefix, which
+ * is safe but unreachable: a directory created by a path that does not go through
+ * `createTempChromeProfile` can never be named by a later sweep, so it sits there forever. MEASURED on
+ * this VM before this change: of 9408 directories under /tmp that are >=45 minutes stale, 82 carry the
+ * signature (`Default/` present, `.git` absent) - 66 reachable by some caller's prefix and 16 NOT,
+ * among them six `i9hq-*-prof` at ~1027 minutes, `regen-prof`, `l6tl-mutant-prof` and five
+ * `audiofeed-txcz-*`. The 16 are the defect this file now fences.
  *
- *   1. a STALE directory of this prefix is gone               (the reclaim is load-bearing)
- *   2. a YOUNG directory of this prefix is KEPT               (a live run is not destroyed)
- *   3. a STALE directory of ANOTHER prefix is KEPT            (another proof or lane is not destroyed)
- *   4. a stale FILE sharing the name shape is KEPT            (only makeTempDir() dirs are ours)
+ * WHY THE SIGNATURE IS THE SAFER HALF, ALSO MEASURED: `Default/` was present in 20 of 20 profiles and
+ * 0 of 22 non-profiles when u8nv first tried this shape, and 9326 of those 9408 stale directories do
+ * NOT carry it. Age alone is not enough - a by-age sweep deleted other lanes' git worktrees under /tmp
+ * earlier that night - so the checkout exclusion is asserted here as a WALL, not as a comment.
+ *
+ * THE WAYS TO BE WRONG, one assertion each, and the negative rows are the load-bearing ones:
+ *   1. a STALE PROFILE                -> reclaimed   (the reclaim is load-bearing)
+ *   2. a YOUNG PROFILE                -> kept        (a live run is not destroyed)
+ *   3. a STALE PLAIN DIRECTORY        -> kept        (the signature is the rule, never the age)
+ *   4. a STALE CHECKOUT               -> kept        (a worktree is not a profile, marker or not)
+ *   5. a STALE FILE                   -> kept        (only directories are candidates)
+ *   6. another prefix's stale profile -> reclaimed   (THE WIDENING: no name decides any more)
  *
  * EVERY DIRECTORY HERE IS CREATED UNDER A TMPDIR POINTING AT A SCRATCH DIRECTORY, so the test cannot
  * observe, depend on, or disturb the real /tmp pile or another lane's profile - which is also why it
  * needs no browser: the sweep is the behaviour under test, not Chrome.
+ *
+ * THE FIXTURES CARRY `Default/` BECAUSE THE RULE READS IT, AND THEY ARE AGED AFTER IT IS CREATED:
+ * `mkdir` bumps the parent's mtime, so aging first leaves the fixture YOUNG and a row can pass on the
+ * age guard while claiming to test the signature. u8nv hit exactly that in its checkout row, which is
+ * why `profileDir` below owns the ordering instead of leaving it to each row.
  */
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -49,22 +62,44 @@ async function age(path: string, ageMs: number): Promise<void> {
   await Deno.utime(path, when, when);
 }
 
-/** A directory of `prefix` under `scratch`, aged by `ageMs` so the bound can be exercised. */
-async function agedDir(scratch: string, prefix: string, ageMs: number): Promise<string> {
-  const dir = (await Deno.makeTempDir({ dir: scratch, prefix })).replace(/\/$/, "");
-  const when = new Date(Date.now() - ageMs);
-  await Deno.utime(dir, when, when);
+/**
+ * A profile-shaped directory with an EXPLICIT name, aged by `ageMs`.
+ *
+ * The name is explicit rather than `makeTempDir({prefix})` because the rule under test does not read
+ * names at all, and the names used below are the names of real orphans measured in the pile. `Default/`
+ * is created FIRST and the fixture is aged LAST, for the mtime reason in the file header.
+ */
+async function profileDir(scratch: string, name: string, ageMs: number): Promise<string> {
+  const dir = `${scratch}/${name}`;
+  await Deno.mkdir(`${dir}/Default`, { recursive: true });
+  await age(dir, ageMs);
   return dir;
 }
 
-Deno.test("audio-feed-u8nv: the reclaim takes THIS prefix's stale profile and reports it", async () => {
+/** A stale directory that is NOT a profile: same age, no marker inside. */
+async function plainDir(scratch: string, name: string, ageMs: number): Promise<string> {
+  const dir = `${scratch}/${name}`;
+  await Deno.mkdir(dir, { recursive: true });
+  await age(dir, ageMs);
+  return dir;
+}
+
+/** Assert a path is still on disk, without throwing out of the row. */
+async function assertSurvives(path: string, why: string): Promise<void> {
+  const info = await Deno.stat(path);
+  assert(info.isDirectory, `${why} (${path})`);
+}
+
+Deno.test("audio-feed-h62q: a STALE PROFILE is reclaimed WHATEVER IT IS CALLED", async () => {
   await withScratchTmp(async (scratch) => {
-    const stale = await agedDir(scratch, "u8nv-sweep-", STALE_PROFILE_AGE_MS + HOUR);
-    const swept = await sweepStaleProfiles("u8nv-sweep-");
-    assertEquals(swept, [stale], "the stale directory of this prefix is what the reclaim removed");
+    // The name is a real orphan's: created by something that never went through the helper, so no
+    // prefix sweep will ever ask for it. This is the row the old name rule fails.
+    const orphan = await profileDir(scratch, "i9hq-parent-prof", STALE);
+    const swept = await sweepStaleProfiles();
+    assertEquals(swept, [orphan], "the stale profile is what the reclaim removed");
     let gone = false;
     try {
-      await Deno.stat(stale);
+      await Deno.stat(orphan);
     } catch {
       gone = true;
     }
@@ -72,149 +107,136 @@ Deno.test("audio-feed-u8nv: the reclaim takes THIS prefix's stale profile and re
   });
 });
 
-Deno.test("audio-feed-u8nv: a YOUNG profile of this prefix survives - a live run is not destroyed", async () => {
+Deno.test("audio-feed-h62q: a YOUNG profile survives, whatever its name is", async () => {
   await withScratchTmp(async (scratch) => {
-    // Younger than the bound by a wide margin: this is what an in-flight run looks like.
-    // TWO SIDES OF THE BOUND: the first version aged its "young" profile by an hour, which was
-    // young under the retired 2-hour bound and OLD under the 45-minute one.
-    // THE SWEPT PREFIX MUST MATCH THE PLANTED ONE or this row CANNOT FIRE: it planted `u8nv-fresh-`
-    // and `u8nv-inside-` while the sweep asked for `u8nv-live-`, so it passed with the age guard
-    // removed. A check that cannot fire is worse than one that cannot fail.
-    const fresh = await agedDir(scratch, "u8nv-live-", 0);
-    const justInside = await agedDir(scratch, "u8nv-live-", Math.floor(STALE_PROFILE_AGE_MS / 2));
-    const swept = await sweepStaleProfiles("u8nv-live-");
+    // TWO SIDES OF THE BOUND, and the margin is wide on purpose: u8nv's first version aged its "young"
+    // profile by an hour, which was young under the retired 2-hour bound and OLD under this one.
+    const fresh = await profileDir(scratch, "i9hq-live-fresh", 0);
+    const justInside = await profileDir(
+      scratch,
+      "i9hq-live-inside",
+      Math.floor(STALE_PROFILE_AGE_MS / 2),
+    );
+    const swept = await sweepStaleProfiles();
     assertEquals(swept, [], "nothing younger than the bound is reclaimed");
-    for (const dir of [fresh, justInside]) {
-      const info = await Deno.stat(dir);
-      assert(info.isDirectory, `${dir} is still there`);
-    }
-  });
-});
-
-Deno.test("audio-feed-u8nv: a STALE profile of ANOTHER prefix survives - scoping is load-bearing", async () => {
-  await withScratchTmp(async (scratch) => {
-    const other = await agedDir(scratch, "u8nv-other-", STALE_PROFILE_AGE_MS + HOUR);
-    const mine = await agedDir(scratch, "u8nv-mine-", STALE_PROFILE_AGE_MS + HOUR);
-    const swept = await sweepStaleProfiles("u8nv-mine-");
-    assertEquals(swept, [mine], "only this prefix is in scope");
-    await Deno.stat(other); // throws if the scoping leaked
+    await assertSurvives(fresh, "a freshly created profile belongs to a run that is starting");
+    await assertSurvives(
+      justInside,
+      "and one inside the bound may belong to a run that is running",
+    );
   });
 });
 
 /**
- * The FILE case, asserted because the reclaim decides on `entry.isDirectory` and that decision is
- * one line away from deleting something that is not a profile at all.
+ * THE ROW A PURE-AGE RULE FAILS, and the reason the signature is the rule rather than a nicety: aged,
+ * a directory, and it would be swept by age alone. 9326 of the 9408 stale directories on this VM look
+ * like this one, and among them are other lanes' git worktrees - one of which a by-age sweep actually
+ * deleted. Nothing here is profile-shaped, so nothing here is ours to remove.
  */
-Deno.test("audio-feed-u8nv: a stale FILE that shares the prefix is left alone", async () => {
+Deno.test("audio-feed-h62q: a STALE PLAIN DIRECTORY is kept - the signature is the rule, not the age", async () => {
   await withScratchTmp(async (scratch) => {
-    const file = `${scratch}/u8nv-file-not-a-profile`;
+    const plain = await plainDir(scratch, "rxa2-scratch-notes", STALE);
+    const swept = await sweepStaleProfiles();
+    assertEquals(swept, [], "age alone is not ownership");
+    await assertSurvives(plain, "a stale directory that holds no profile is not reclaimed");
+  });
+});
+
+/**
+ * THE WALL, ASSERTED SEPARATELY FROM THE PLAIN-DIRECTORY ROW because it is a different mistake in a
+ * different direction: this directory DOES hold a profile marker, so the signature alone would reclaim
+ * it - only the checkout exclusion saves it. `.git` is written as a FILE, because that is what it is
+ * inside a LINKED WORKTREE, and the exclusion tests existence rather than `isDirectory` for exactly
+ * that reason. An exclusion no test exercises is a claim, not a guard.
+ */
+Deno.test("audio-feed-h62q: a stale CHECKOUT survives even when it contains a profile marker", async () => {
+  await withScratchTmp(async (scratch) => {
+    const checkout = `${scratch}/audiofeed-mytask`;
+    await Deno.mkdir(`${checkout}/Default`, { recursive: true });
+    await Deno.writeTextFile(
+      `${checkout}/.git`,
+      "gitdir: /home/exedev/audio-feed/.git/worktrees/x\n",
+    );
+    await age(checkout, STALE);
+    const swept = await sweepStaleProfiles();
+    assertEquals(swept, [], "a checkout is never reclaimed, whatever it holds");
+    await assertSurvives(checkout, "another lane's worktree is still there");
+  });
+});
+
+/**
+ * The FILE case, asserted because the reclaim decides on `entry.isDirectory` and that decision is one
+ * line away from deleting something that is not a profile at all.
+ */
+Deno.test("audio-feed-u8nv: a stale FILE that looks like a profile is left alone", async () => {
+  await withScratchTmp(async (scratch) => {
+    const file = `${scratch}/i9hq-file-not-a-profile`;
     await Deno.writeTextFile(file, "not a chrome profile\n");
-    const when = new Date(Date.now() - (STALE_PROFILE_AGE_MS + HOUR));
+    const when = new Date(Date.now() - STALE);
     await Deno.utime(file, when, when);
-    const swept = await sweepStaleProfiles("u8nv-file-");
+    const swept = await sweepStaleProfiles();
     assertEquals(swept, [], "a file is not a profile directory");
     await Deno.stat(file);
   });
 });
 
 /**
- * AND THE INTEGRATION, because the guard above is about the sweep in isolation: the thing callers
+ * THE WIDENING, STATED AS A ROW RATHER THAN LEFT TO INFERENCE: this is the deliberate change of
+ * behaviour, and it is the one that retires audio-feed-3nit's guard. Under the name rule a sweep for
+ * `audiofeed-chrome-` had to leave `audiofeed-chrome-test-` alone - a shorter prefix could not tell a
+ * sibling from its own - and two tests existed to hold that. Nothing compares names now, so both are
+ * reclaimed, and the invariant that replaces it is the one asserted above: never a non-profile, never a
+ * checkout, whatever the name. If this row ever looks wrong, the fix is to argue the widening, not to
+ * reinstate a name comparison as the ownership rule.
+ */
+Deno.test("audio-feed-h62q: another prefix's stale profile IS reclaimed - 3nit's guard retired with the name rule", async () => {
+  await withScratchTmp(async (scratch) => {
+    const shorter = await profileDir(scratch, "audiofeed-chrome-a1b2c3", STALE);
+    const overlapping = await profileDir(scratch, "audiofeed-chrome-test-d4e5f6", STALE);
+    const swept = await sweepStaleProfiles();
+    assertEquals(
+      swept.sort(),
+      [shorter, overlapping].sort(),
+      "both are abandoned profiles, so both are reclaimed",
+    );
+  });
+});
+
+/**
+ * The other half of the retired boundary, kept because the fact behind it is still true: `makeTempDir`
+ * always appends a tail, so a directory named EXACTLY the prefix was made by something else. It is kept
+ * here for a different reason than before - it holds no profile marker - and the name it carries is now
+ * irrelevant, which is the point.
+ */
+Deno.test("audio-feed-h62q: a directory named EXACTLY like an old prefix is kept when it holds no profile", async () => {
+  await withScratchTmp(async (scratch) => {
+    const bare = await plainDir(scratch, "audiofeed-bare-", STALE);
+    const swept = await sweepStaleProfiles();
+    assertEquals(swept, [], "no marker, no reclaim - the name is not consulted");
+    await assertSurvives(bare, "and it is still there");
+  });
+});
+
+/**
+ * AND THE INTEGRATION, because every guard above is about the sweep in isolation: the thing callers
  * actually get must (a) hand back a FRESH directory of its own prefix and (b) have reclaimed the
- * stale one on the way in, reporting how many it took.
+ * abandoned profile on the way in, reporting how many it took. The planted orphan is deliberately
+ * NOT of the caller's prefix: that is the widening, seen from the only call site that matters.
  */
 Deno.test("audio-feed-u8nv: createTempChromeProfile reclaims before it allocates, and says how many", async () => {
   await withScratchTmp(async (scratch) => {
-    const stale = await agedDir(
-      scratch,
-      "audiofeed-u8nv-integration-",
-      STALE_PROFILE_AGE_MS + HOUR,
-    );
-    const { profileDir, cleanup, sweptStale } = await createTempChromeProfile(
+    const stale = await profileDir(scratch, "l6tl-mutant-prof", STALE);
+    const { profileDir: allocated, cleanup, sweptStale } = await createTempChromeProfile(
       "audiofeed-u8nv-integration-",
     );
     assertEquals(sweptStale, 1, "the call reports the one directory it reclaimed");
     assert(
-      profileDir !== stale,
+      allocated !== stale,
       "and the directory it returns is a NEW one, not the reclaimed path",
     );
-    const info = await Deno.stat(profileDir);
+    const info = await Deno.stat(allocated);
     assert(info.isDirectory, "the returned profile exists");
     await cleanup();
-    await Deno.remove(profileDir, { recursive: true }).catch(() => {});
-  });
-});
-
-/**
- * audio-feed-3nit: THE OWN-PREFIX GUARD AGAINST A COUNTEREXAMPLE, WHICH IS THE CASE THE SUITE ABOVE
- * COULD NOT SEE. Every prefix in the earlier tests is disjoint from every other, so `startsWith(prefix)`
- * passed all of them - a predicate validated only on positive examples. The reviewer supplied the
- * counterexample instead: `audiofeed-chrome-test-` STARTS WITH `audiofeed-chrome-`, so a sweep for the
- * shorter prefix reclaimed a longer prefix's directories. One overlapping pair exists in this tree by
- * construction, because the helper's own suite creates `audiofeed-chrome-test-` profiles under the
- * helper's default `audiofeed-chrome-`.
- *
- * BOTH DIRECTIONS ARE ASSERTED, because they are different mistakes: the shorter prefix must not reach
- * the longer one, and the longer prefix must still reclaim its own.
- */
-Deno.test("audio-feed-3nit: a SIBLING prefix survives a sweep for the shorter prefix", async () => {
-  await withScratchTmp(async (scratch) => {
-    const own = await agedDir(scratch, "audiofeed-chrome-", STALE_PROFILE_AGE_MS + HOUR);
-    const sibling = await agedDir(scratch, "audiofeed-chrome-test-", STALE_PROFILE_AGE_MS + HOUR);
-    const swept = await sweepStaleProfiles("audiofeed-chrome-");
-    assertEquals(swept, [own], "only this prefix's OWN directory is in scope");
-    const info = await Deno.stat(sibling);
-    assert(info.isDirectory, "the overlapping sibling prefix is still there");
-  });
-});
-
-Deno.test("audio-feed-3nit: the LONGER prefix still reclaims its own, and not the shorter one's", async () => {
-  await withScratchTmp(async (scratch) => {
-    const shorter = await agedDir(scratch, "audiofeed-chrome-", STALE_PROFILE_AGE_MS + HOUR);
-    const longer = await agedDir(scratch, "audiofeed-chrome-test-", STALE_PROFILE_AGE_MS + HOUR);
-    const swept = await sweepStaleProfiles("audiofeed-chrome-test-");
-    assertEquals(swept, [longer], "the longer prefix reclaims its own");
-    const info = await Deno.stat(shorter);
-    assert(info.isDirectory, "and leaves the shorter prefix's directory alone");
-  });
-});
-
-/** The other half of the boundary: name === prefix is not an owned profile either. */
-Deno.test("audio-feed-3nit: a directory named EXACTLY the prefix was not made by makeTempDir", async () => {
-  await withScratchTmp(async (scratch) => {
-    const bare = `${scratch}/audiofeed-bare-`;
-    await Deno.mkdir(bare);
-    const when = new Date(Date.now() - (STALE_PROFILE_AGE_MS + HOUR));
-    await Deno.utime(bare, when, when);
-    const swept = await sweepStaleProfiles("audiofeed-bare-");
-    assertEquals(swept, [], "makeTempDir always appends a tail, so a bare prefix is not ours");
-    await Deno.stat(bare);
-  });
-});
-
-/**
- * THE INSURANCE'S OWN FENCE ROW. The prefix matcher alone WOULD reclaim this: it is aged, it is a
- * directory, and its name is the caller's prefix plus a separator-free tail. What saves it is that it
- * is a CHECKOUT - which coord discovered is what the other /tmp piles actually are (ten of the newest
- * 22 entries under `af-*`/`audio-feed-*` were git worktrees). Asserted separately because an exclusion
- * that no test exercises is a claim, not a guard.
- */
-Deno.test("audio-feed-u8nv: an aged CHECKOUT under our own prefix survives - a worktree is not a profile", async () => {
-  await withScratchTmp(async (scratch) => {
-    // SEPARATOR-FREE TAIL, so the prefix rule REACHES it and only the `.git` insurance can save it: a
-    // name like `audiofeed-checkout-<rand>` is rejected by the boundary rule first, which would make
-    // this row theatre. Real worktrees are named `audiofeed-<word>`.
-    // AND THE DIRECTORY IS AGED **AFTER** THE `.git` IS CREATED, which is not tidiness: `mkdir` bumps
-    // the parent's mtime, so aging first left the fixture YOUNG and the row passed on the AGE guard
-    // while claiming to test the insurance. It only read as green because the exclusion was inert.
-    const checkout = (await Deno.makeTempDir({ dir: scratch, prefix: "audiofeed-w" })).replace(
-      /\/$/,
-      "",
-    );
-    await Deno.mkdir(`${checkout}/.git`, { recursive: true });
-    await age(checkout, STALE);
-    const swept = await sweepStaleProfiles("audiofeed-");
-    assertEquals(swept, [], "a checkout is never reclaimed, whatever it is called");
-    const info = await Deno.stat(checkout);
-    assert(info.isDirectory, "the worktree is still there");
+    await Deno.remove(allocated, { recursive: true }).catch(() => {});
   });
 });
