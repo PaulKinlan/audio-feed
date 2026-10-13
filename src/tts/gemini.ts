@@ -915,139 +915,203 @@ export interface CodeBlockMatch {
   code: string;
 }
 
+const WORD_CHAR = /[A-Za-z0-9_]/;
+
 /**
- * Linear forward scanner for fenced code blocks and HTML <pre> blocks.
- * Replaces quadratic regex backtracking over unclosed tags (audio-feed-c0gj, audio-feed-cg8s).
+ * The next run of three or more backticks, or of three or more tildes, at or after `from`.
+ * `index` is the start of the run and `end` one past its last character: the regex this
+ * replaces matched the run greedily (`+`), so four backticks were one four-wide fence.
+ */
+function nextFenceRun(
+  text: string,
+  from: number,
+): { index: number; end: number } | null {
+  const ticks = text.indexOf("```", from);
+  const tildes = text.indexOf("~~~", from);
+  const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
+  if (index < 0) return null;
+  const char = text[index];
+  let end = index;
+  while (end < text.length && text[end] === char) end++;
+  return { index, end };
+}
+
+/**
+ * The next `<pre ...>` tag at or after `from`, or null. `<pre` must be followed by a
+ * non-word character (`<pre\b`, so `<prefix>` is not a tag) and then by a `>`; `[^>]*`
+ * cannot cross a `>`, so the first `>` after the name closes the tag.
+ *
+ * audio-feed-wqup (c0gj): If no `>` exists after `index + 4`, no subsequent `<pre`
+ * opener can have a closing `>` either; returning null immediately prevents quadratic
+ * re-scanning across unterminated `<pre` sequences.
+ */
+function nextPreTag(
+  text: string,
+  from: number,
+): { index: number; end: number } | null {
+  let index = nextCi(PRE_OPEN, text, from);
+  while (index >= 0) {
+    const after = text[index + 4];
+    if (after !== undefined && !WORD_CHAR.test(after)) {
+      const close = text.indexOf(">", index + 4);
+      if (close < 0) return null;
+      return { index, end: close + 1 };
+    }
+    index = nextCi(PRE_OPEN, text, index + 1);
+  }
+  return null;
+}
+
+/** Where the optional info string (`(?:[^\n\r]*\r?\n)?`) ends, or null when it cannot match. */
+function fenceInfoEnd(text: string, openerEnd: number): number | null {
+  let lineEnd = openerEnd;
+  while (
+    lineEnd < text.length && text[lineEnd] !== "\n" && text[lineEnd] !== "\r"
+  ) {
+    lineEnd++;
+  }
+  if (text[lineEnd] === "\n") return lineEnd + 1;
+  if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") return lineEnd + 2;
+  return null;
+}
+
+/** The next match of `re` at or after `from`, or null. Callers own `re.lastIndex`. */
+function nextCi(re: RegExp, text: string, from: number): number {
+  re.lastIndex = from;
+  const match = re.exec(text);
+  return match ? match.index : -1;
+}
+
+const PRE_OPEN = /<pre/gi;
+const CODE_OPEN = /<code/gi;
+const PRE_CLOSE = /<\/pre>/gi;
+const CODE_CLOSE = /<\/code>/gi;
+
+/**
+ * Match a fenced block whose opening run is `run`, or null when there is no fence to match.
+ *
+ * The old pattern was a fence open, an optional info line, a lazy content group, and a fence
+ * close; a regex gives characters back from the RIGHT, so the order this reproduces is: the lazy
+ * content expands first, then the optional info string is dropped (six backticks followed by
+ * `abc` and a newline match as an EMPTY block opened by three backticks, because the info line
+ * is given up rather than the opener), and only then does the greedy opener shrink. An opener
+ * can only shrink to a length that leaves a three-character tail behind it, because that tail
+ * is the closer - so at most four opener lengths are worth trying and this stays linear.
+ */
+function matchFence(
+  text: string,
+  run: { index: number; end: number },
+): CodeBlockMatch | null {
+  const length = run.end - run.index;
+  const shortest = Math.max(3, length - 3);
+  for (let openerLength = length; openerLength >= shortest; openerLength--) {
+    const openerEnd = run.index + openerLength;
+    const infoEnd = fenceInfoEnd(text, openerEnd);
+    // The info string is tried first, then dropped.
+    for (
+      const contentStart of infoEnd === null ? [openerEnd] : [infoEnd, openerEnd]
+    ) {
+      const close = nextFenceRun(text, contentStart);
+      if (close) {
+        return {
+          index: run.index,
+          full: text.slice(run.index, close.end),
+          code: text.slice(contentStart, close.index).trim(),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/** The end of an immediately-following `<code ...>` tag, or null when there is not one. */
+function codeTagEnd(text: string, from: number): number | null {
+  if (nextCi(CODE_OPEN, text, from) !== from) return null;
+  const after = text[from + 5];
+  if (after === undefined || WORD_CHAR.test(after)) return null;
+  const close = text.indexOf(">", from + 5);
+  return close < 0 ? null : close + 1;
+}
+
+/** Match a `<pre>` block whose tag is `tag`, with content starting at `contentStart`. */
+function matchPreAt(
+  text: string,
+  tag: { index: number; end: number },
+  contentStart: number,
+): CodeBlockMatch | null {
+  const pre = nextCi(PRE_CLOSE, text, contentStart);
+  if (pre < 0) return null;
+  let contentEnd = pre;
+  if (
+    pre - 7 >= contentStart &&
+    nextCi(CODE_CLOSE, text, pre - 7) === pre - 7
+  ) {
+    contentEnd = pre - 7;
+  }
+  return {
+    index: tag.index,
+    full: text.slice(tag.index, pre + 6),
+    code: decodeHtmlEntities(text.slice(contentStart, contentEnd)).trim(),
+  };
+}
+
+/**
+ * Match a `<pre>` block whose tag is `tag`, or null when no `</pre>` follows. The optional
+ * `<code ...>` is itself optional in the pattern, so a tag that swallows the only `</pre>`
+ * (malformed markup, as in `<pre><code no-gt here</pre>`) is retried without it - that backtrack
+ * is why Markdown-ish text starting with `<code` can still be a block at all.
+ */
+function matchPre(
+  text: string,
+  tag: { index: number; end: number },
+): CodeBlockMatch | null {
+  const codeEnd = codeTagEnd(text, tag.end);
+  if (codeEnd !== null) {
+    const withCode = matchPreAt(text, tag, codeEnd);
+    if (withCode) return withCode;
+  }
+  return matchPreAt(text, tag, tag.end);
+}
+
+/**
+ * Every code block in `text`, in order (audio-feed-c0gj, audio-feed-wqup, audio-feed-t06l).
+ *
+ * Linear O(N) single-pass extraction matching origin/main REGEX grammar without
+ * quadratic backtracking or repetitive scans.
  */
 export function extractCodeBlocks(text: string): CodeBlockMatch[] {
   if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
     return [];
   }
 
-  const matches: CodeBlockMatch[] = [];
-  const openerRegex = /(?:`{3,}|~{3,})|<pre\b/gi;
-  const codeOpenRegex = /<code\b[^>]*>/iy;
-  const infoRegex = /[^\n\r]*\r?\n/y;
-  const closePreRegex = /<\/pre>/gi;
-  const closeFenceRegex = /(?:`{3,}|~{3,})/g;
-
-  let hasMorePre = true;
-  let hasMoreFences = true;
-
-  while (true) {
-    if (!hasMorePre && !hasMoreFences) {
-      break;
+  const blocks: CodeBlockMatch[] = [];
+  let fencesExhausted = false;
+  let presExhausted = false;
+  let from = 0;
+  while (from < text.length) {
+    const fence = fencesExhausted ? null : nextFenceRun(text, from);
+    const pre = presExhausted ? null : nextPreTag(text, from);
+    if (!fence && !pre) break;
+    // The earlier start wins; the two alternatives can never begin at the same index.
+    if (fence && (!pre || fence.index < pre.index)) {
+      const block = matchFence(text, fence);
+      if (block) {
+        blocks.push(block);
+        from = block.index + block.full.length;
+      } else {
+        fencesExhausted = true;
+      }
+    } else {
+      const block = matchPre(text, pre!);
+      if (block) {
+        blocks.push(block);
+        from = block.index + block.full.length;
+      } else {
+        presExhausted = true;
+      }
     }
-
-    const match = openerRegex.exec(text);
-    if (!match) break;
-
-    const opener = match[0];
-    const startIndex = match.index;
-
-    if (opener.startsWith("<")) {
-      if (!hasMorePre) {
-        continue;
-      }
-      const gtIndex = text.indexOf(">", startIndex + 4);
-      if (gtIndex === -1) {
-        hasMorePre = false;
-        continue;
-      }
-      const afterPre = gtIndex + 1;
-      let contentStart = afterPre;
-      codeOpenRegex.lastIndex = afterPre;
-      const codeMatch = codeOpenRegex.exec(text);
-      let usedCodeMatch = false;
-
-      // audio-feed-cg8s: codeOpenRegex must not cross a </pre>.
-      // If a malformed <code tag lacks a closing '>' before </pre>, codeOpenRegex will
-      // greedily consume through </pre>'s closing '>'. Discard codeMatch if it contains </pre.
-      if (codeMatch && !/<\/pre/i.test(codeMatch[0])) {
-        contentStart = afterPre + codeMatch[0].length;
-        usedCodeMatch = true;
-      }
-
-      closePreRegex.lastIndex = contentStart;
-      let closeMatch = closePreRegex.exec(text);
-
-      // If matching the optional <code ...> tag prevented finding </pre>, backtrack and retry
-      // without the <code ...> tag, matching the reference regex's backtracking order.
-      if (!closeMatch && usedCodeMatch) {
-        contentStart = afterPre;
-        closePreRegex.lastIndex = contentStart;
-        closeMatch = closePreRegex.exec(text);
-      }
-
-      if (!closeMatch) {
-        hasMorePre = false;
-        continue;
-      }
-
-      const closeIndex = closeMatch.index;
-      let contentEnd = closeIndex;
-      if (
-        closeIndex >= contentStart + 7 &&
-        text.slice(closeIndex - 7, closeIndex).toLowerCase() === "</code>"
-      ) {
-        contentEnd = closeIndex - 7;
-      }
-
-      const rawCode = text.slice(contentStart, contentEnd);
-      const code = decodeHtmlEntities(rawCode).trim();
-      const full = text.slice(startIndex, closeMatch.index + 6);
-
-      matches.push({ full, code, index: startIndex });
-      openerRegex.lastIndex = closeMatch.index + 6;
-      continue;
-    }
-
-    if (!hasMoreFences) {
-      continue;
-    }
-
-    const afterOpener = startIndex + opener.length;
-    let contentStart = afterOpener;
-
-    infoRegex.lastIndex = afterOpener;
-    const infoMatch = infoRegex.exec(text);
-    if (infoMatch) {
-      contentStart = afterOpener + infoMatch[0].length;
-    }
-
-    closeFenceRegex.lastIndex = contentStart;
-    let closeMatch = closeFenceRegex.exec(text);
-
-    if (!closeMatch && infoMatch) {
-      contentStart = afterOpener;
-      closeFenceRegex.lastIndex = contentStart;
-      closeMatch = closeFenceRegex.exec(text);
-    }
-
-    if (!closeMatch) {
-      if (opener.length >= 6) {
-        matches.push({
-          full: opener,
-          code: "",
-          index: startIndex,
-        });
-        openerRegex.lastIndex = startIndex + opener.length;
-        continue;
-      }
-      hasMoreFences = false;
-      continue;
-    }
-
-    const closeIndex = closeMatch.index;
-    const rawCode = text.slice(contentStart, closeIndex);
-    const code = rawCode.trim();
-    const full = text.slice(startIndex, closeMatch.index + closeMatch[0].length);
-
-    matches.push({ full, code, index: startIndex });
-    openerRegex.lastIndex = closeMatch.index + closeMatch[0].length;
   }
-
-  return matches;
+  return blocks;
 }
 
 export async function formatCodeForTts(

@@ -20,6 +20,8 @@
  *   deno run --allow-run=git --allow-read --allow-write scripts/verify_c0gj_scanner_divergence.ts --fuzz-count 10000
  */
 
+import { extractCodeBlocks as extractCodeBlocks_branch } from "../src/tts/gemini.ts";
+
 export interface CodeBlockMatch {
   index: number;
   full: string;
@@ -413,6 +415,41 @@ export function formatCodeForTts_fixc0gj_3d32fc4(
       if (explanation) {
         result += `\nHere is what that code does: ${explanation}\n`;
       }
+      lastIndex = m.index + m.full.length;
+    }
+    result += text.slice(lastIndex);
+    return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
+  }
+
+  let result = "";
+  let lastIndex = 0;
+  for (const m of matches) {
+    result += text.slice(lastIndex, m.index);
+    lastIndex = m.index + m.full.length;
+  }
+  result += text.slice(lastIndex);
+  return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
+}
+
+// ============================================================================
+// 4. CURRENT BRANCH IMPLEMENTATION (src/tts/gemini.ts)
+// ============================================================================
+export function formatCodeForTts_branch(
+  text: string,
+  codeHandling: "skip" | "explain" = "skip",
+  summarizer: (code: string) => string = (c) => `summary(${c})`,
+): string {
+  const matches = extractCodeBlocks_branch(text);
+  if (matches.length === 0) {
+    return text;
+  }
+
+  if (codeHandling === "explain") {
+    let result = "";
+    let lastIndex = 0;
+    for (const m of matches) {
+      result += text.slice(lastIndex, m.index);
+      result += `\nHere is what that code does: ${summarizer(m.code)}\n`;
       lastIndex = m.index + m.full.length;
     }
     result += text.slice(lastIndex);
@@ -1098,12 +1135,25 @@ export async function runVerification(fuzzCount = 10000) {
   const handcrafted = buildHandcraftedCorpus();
   console.log(`\nBuilt handcrafted corpus: ${handcrafted.length} cases.`);
 
-  // Build fuzz corpus across 3 deterministic seeds
-  const fuzz1 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 101);
-  const fuzz2 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 202);
-  const fuzz3 = buildFuzzCorpus(Math.floor(fuzzCount / 3), 303);
+  // Build fuzz corpus across 3 deterministic seeds (total exactly fuzzCount)
+  const part = Math.floor(fuzzCount / 3);
+  const fuzz1 = buildFuzzCorpus(part, 101);
+  const fuzz2 = buildFuzzCorpus(part, 202);
+  const fuzz3 = buildFuzzCorpus(fuzzCount - part * 2, 303);
   const fullCorpus = [...handcrafted, ...fuzz1, ...fuzz2, ...fuzz3];
-  console.log(`Total corpus size (handcrafted + 3-seed fuzz): ${fullCorpus.length} cases.`);
+  console.log(
+    `Total corpus size (handcrafted + 3-seed fuzz): ${fullCorpus.length} cases.`,
+  );
+
+  // Evaluate current branch (src/tts/gemini.ts)
+  const branchResult = evaluateCandidate(
+    "current branch (src/tts/gemini.ts)",
+    "branch tip (audio-feed-wqup)",
+    fullCorpus,
+    formatCodeForTts_branch,
+    extractCodeBlocks_branch,
+  );
+  printCandidateReport(branchResult);
 
   // Evaluate audit1 (tip f70e3fa)
   const audit1Result = evaluateCandidate(
@@ -1125,35 +1175,48 @@ export async function runVerification(fuzzCount = 10000) {
   );
   printCandidateReport(fixc0gjV2Result);
 
-  // Print 2-column summary table
-  console.log(`\n====================================================================`);
-  console.log(`TWO-COLUMN RELATIVE DIVERGENCE SUMMARY (BASELINE: origin/main 4e402eb)`);
-  console.log(`====================================================================`);
+  // Print summary table
+  console.log(
+    `\n====================================================================`,
+  );
+  console.log(
+    `RELATIVE DIVERGENCE SUMMARY (BASELINE: origin/main 4e402eb)`,
+  );
+  console.log(
+    `====================================================================`,
+  );
   console.log(`Total corpus cases: ${fullCorpus.length}`);
   console.log(
-    `\nMetric                          | audit1 (f70e3fa) | fixc0gj Candidate B (3d32fc4)`,
+    `\nMetric                          | branch (wqup)    | audit1 (f70e3fa) | fixc0gj B (3d32fc4)`,
   );
   console.log(
-    `--------------------------------+------------------+------------------------------`,
+    `--------------------------------+------------------+------------------+--------------------`,
+  );
+  const branchPct = (
+    (branchResult.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(1);
+  const audit1Pct = (
+    (audit1Result.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(1);
+  const fixc0gjPct = (
+    (fixc0gjV2Result.totalDistinctDifferingInputs / fullCorpus.length) * 100
+  ).toFixed(2);
+
+  console.log(
+    `Differing Inputs (Distinct)     | ${branchResult.totalDistinctDifferingInputs} / ${fullCorpus.length} (${branchPct}%) | ${audit1Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${audit1Pct}%) | ${fixc0gjV2Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${fixc0gjPct}%)`,
   );
   console.log(
-    `Differing Inputs (Distinct)     | ${audit1Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
-      (audit1Result.totalDistinctDifferingInputs / fullCorpus.length * 100).toFixed(1)
-    }%) | ${fixc0gjV2Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
-      (fixc0gjV2Result.totalDistinctDifferingInputs / fullCorpus.length * 100).toFixed(2)
-    }%)`,
+    `Skip Mode Output Mismatches     | ${branchResult.skipDivergences}                | ${audit1Result.skipDivergences}                | ${fixc0gjV2Result.skipDivergences}`,
   );
   console.log(
-    `Skip Mode Output Mismatches     | ${audit1Result.skipDivergences}                | ${fixc0gjV2Result.skipDivergences}`,
+    `Explain Mode Output Mismatches  | ${branchResult.explainDivergences}                | ${audit1Result.explainDivergences}                | ${fixc0gjV2Result.explainDivergences}`,
   );
   console.log(
-    `Explain Mode Output Mismatches  | ${audit1Result.explainDivergences}                | ${fixc0gjV2Result.explainDivergences}`,
-  );
-  console.log(
-    `Block AST Match Mismatches      | ${audit1Result.blockDivergences}                | ${fixc0gjV2Result.blockDivergences}`,
+    `Block AST Match Mismatches      | ${branchResult.blockDivergences}                | ${audit1Result.blockDivergences}                | ${fixc0gjV2Result.blockDivergences}`,
   );
 
   return {
+    branchResult,
     audit1Result,
     fixc0gjV2Result,
   };
