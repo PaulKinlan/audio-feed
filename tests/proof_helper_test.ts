@@ -100,16 +100,48 @@ Deno.test({
   },
 });
 
-Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes temp dir", async () => {
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-profile-");
-  const stat = await Deno.stat(profileDir);
-  assertEquals(stat.isDirectory, true);
+/**
+ * audio-feed-9ot4: run `body` with TMPDIR redirected to a scratch directory, returning what it returns.
+ *
+ * WHY EVERY ROW THAT ALLOCATES A PROFILE USES THIS: `createTempChromeProfile` reclaims abandoned
+ * profiles under `TMPDIR ?? /tmp` BEFORE it allocates, so a row that calls it with the machine's real
+ * TMPDIR makes a unit test mutate shared machine state. That was always true of the row's own prefix;
+ * since the sweep became age-and-signature based rather than prefix-scoped (audio-feed-h62q) it is
+ * true of EVERY abandoned profile on the VM. MEASURED: a single run of the allocating rows reclaimed
+ * 82 directories from the real /tmp, none of which belonged to any test here.
+ *
+ * The redirect is asserted rather than assumed - a helper that silently failed to take would leave the
+ * rows exactly as they were while reading as fixed. Removal of the scratch tree is best-effort because
+ * the row that locks a subdirectory to exercise the failure path cannot always unlock it again; a
+ * leftover SCRATCH directory is ignored by the sweep (it holds no `Default/`), which is why redirecting
+ * is safe where the previous behaviour was not.
+ */
+async function withScratchTmp<T>(body: (scratch: string) => Promise<T>): Promise<T> {
+  const original = Deno.env.get("TMPDIR");
+  const scratch = await Deno.makeTempDir({ prefix: "9ot4-scratch-" });
+  Deno.env.set("TMPDIR", scratch);
+  assertEquals(Deno.env.get("TMPDIR"), scratch, "the redirect is the point: assert it took");
+  try {
+    return await body(scratch);
+  } finally {
+    if (original === undefined) Deno.env.delete("TMPDIR");
+    else Deno.env.set("TMPDIR", original);
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  }
+}
 
-  await cleanup();
-  await assertRejects(
-    async () => await Deno.stat(profileDir),
-    Deno.errors.NotFound,
-  );
+Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes temp dir", async () => {
+  await withScratchTmp(async () => {
+    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-profile-");
+    const stat = await Deno.stat(profileDir);
+    assertEquals(stat.isDirectory, true);
+
+    await cleanup();
+    await assertRejects(
+      async () => await Deno.stat(profileDir),
+      Deno.errors.NotFound,
+    );
+  });
 });
 
 Deno.test({
@@ -185,32 +217,36 @@ Deno.test({
 });
 
 Deno.test("proof-helper: createTempChromeProfile cleanup is idempotent and safe to call twice", async () => {
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-idempotent-");
-  await cleanup();
-  await cleanup(); // second call must not throw
-  await assertRejects(
-    async () => await Deno.stat(profileDir),
-    Deno.errors.NotFound,
-  );
+  await withScratchTmp(async () => {
+    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-idempotent-");
+    await cleanup();
+    await cleanup(); // second call must not throw
+    await assertRejects(
+      async () => await Deno.stat(profileDir),
+      Deno.errors.NotFound,
+    );
+  });
 });
 
 Deno.test("proof-helper: createTempChromeProfile throws descriptive error if profile directory cannot be removed", async () => {
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-fail-");
-  const sub = `${profileDir}/locked-sub`;
-  await Deno.mkdir(sub);
-  await Deno.writeTextFile(`${sub}/file.txt`, "lock");
-  await Deno.chmod(sub, 0o555);
+  await withScratchTmp(async () => {
+    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-fail-");
+    const sub = `${profileDir}/locked-sub`;
+    await Deno.mkdir(sub);
+    await Deno.writeTextFile(`${sub}/file.txt`, "lock");
+    await Deno.chmod(sub, 0o555);
 
-  try {
-    await assertRejects(
-      async () => await cleanup(),
-      Error,
-      `Failed to clean up temp Chrome profile '${profileDir}'`,
-    );
-  } finally {
-    await Deno.chmod(sub, 0o755);
-    await Deno.remove(profileDir, { recursive: true }).catch(() => {});
-  }
+    try {
+      await assertRejects(
+        async () => await cleanup(),
+        Error,
+        `Failed to clean up temp Chrome profile '${profileDir}'`,
+      );
+    } finally {
+      await Deno.chmod(sub, 0o755);
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+    }
+  });
 });
 
 Deno.test("proof-helper: createChecker passes when all checks pass and finish() does not throw", () => {
@@ -2522,33 +2558,40 @@ Deno.test("proof-helper: audio-feed-2bfv: cleaned Chrome profile remains absent 
   try {
     await assertRejects(
       async () => {
-        await runProof(
-          "test-2bfv-chrome-profile-cleanup",
-          async (checker) => {
-            const { profileDir, cleanup } = await createTempChromeProfile(
-              "audiofeed-chrome-test-fail-",
-            );
-            profileDirRef = profileDir;
+        // THE REDIRECT WRAPS THE WHOLE RUN, NOT JUST THE ALLOCATION (audio-feed-9ot4). TMPDIR is both
+        // the sweep's root and the profile's root, so restoring it - and deleting the scratch tree -
+        // the moment createTempChromeProfile returned would delete the profile out from under the
+        // callback below. Measured: that version of this fix failed the row with ENOENT writing
+        // `Preferences`, which is a real contract failing rather than a test artefact.
+        await withScratchTmp(() =>
+          runProof(
+            "test-2bfv-chrome-profile-cleanup",
+            async (checker) => {
+              const { profileDir, cleanup } = await createTempChromeProfile(
+                "audiofeed-chrome-test-fail-",
+              );
+              profileDirRef = profileDir;
 
-            // Simulate files created by browser inside profile
-            await Deno.writeTextFile(`${profileDir}/Preferences`, '{"test":true}');
+              // Simulate files created by browser inside profile
+              await Deno.writeTextFile(`${profileDir}/Preferences`, '{"test":true}');
 
-            // Browser teardown cleans up profile
-            await cleanup();
+              // Browser teardown cleans up profile
+              await cleanup();
 
-            // Verify profile is absent before failure
-            let existsBeforeFail = true;
-            try {
-              await Deno.stat(profileDir);
-            } catch {
-              existsBeforeFail = false;
-            }
-            assertEquals(existsBeforeFail, false);
+              // Verify profile is absent before failure
+              let existsBeforeFail = true;
+              try {
+                await Deno.stat(profileDir);
+              } catch {
+                existsBeforeFail = false;
+              }
+              assertEquals(existsBeforeFail, false);
 
-            // Proof fails
-            checker.check("failing check", false, "fail after chrome profile cleanup");
-          },
-          { logger: () => {} },
+              // Proof fails
+              checker.check("failing check", false, "fail after chrome profile cleanup");
+            },
+            { logger: () => {} },
+          )
         );
       },
       Error,
