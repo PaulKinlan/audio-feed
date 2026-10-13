@@ -940,85 +940,109 @@ export function evaluateCandidate(
 // CLI AND REPORTING
 // ============================================================================
 
+export const PINNED_REVISIONS = {
+  main: {
+    commit: "4e402eb796c28f74ece0dfb3d6b5c7157d727499",
+    name: "origin/main",
+    expectedSha256: "2edbef183cc591b39cb46dc668270653ef2d751274faea83d1b22591772690f9",
+    expectedLength: 119,
+  },
+  audit1: {
+    commit: "f70e3fac113a72f5af4e2729e056096ee018aaa9",
+    name: "fleet/audit1 (tip f70e3fa)",
+    expectedSha256: "b6a130e89ded3fa740b8a9767fe37618b88e64372f8e0fc117d222f882e11633",
+    expectedLength: 7023,
+  },
+  fixc0gj_v1: {
+    commit: "9f18cc1c36145d66fa47e63ab00078a8a286e67e",
+    name: "fleet/fixc0gj v1 (9f18cc1)",
+    expectedSha256: "0f22ed987060ce96d632ca9342553127933ed0a6f412f9aadde87d4ff4c8858a",
+    expectedLength: 2984,
+  },
+  fixc0gj_v2: {
+    commit: "3d32fc44f750ae343cae3da56566d8c57637b908",
+    name: "fleet/fixc0gj v2 (tip 3d32fc4)",
+    expectedSha256: "44c8b67189a07ce30ffd9bba1a1d3e3ecfc63197dfd786f9444b4bae7d01ed44",
+    expectedLength: 3447,
+  },
+};
+
+export async function computeSha256(text: string): Promise<string> {
+  const hashBuf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(hashBuf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export async function verifyAgainstGitRefs(): Promise<boolean> {
-  console.log("Verifying inlined implementations against target git revisions...");
-  const refs = [
+  console.log("Verifying inlined implementations against pinned git revisions...");
+  const specs = [
     {
-      name: "origin/main",
-      ref: "origin/main:src/tts/gemini.ts",
-      verify: (src: string) => {
-        const needle =
-          "/(?:```+|~~~+)(?:[^\\n\\r]*\\r?\\n)?([\\s\\S]*?)(?:```+|~~~+)|<pre\\b[^>]*>(?:<code\\b[^>]*>)?([\\s\\S]*?)(?:<\\/code>)?<\\/pre>/gi";
-        if (!src.includes(needle)) {
-          throw new Error(
-            "origin/main:src/tts/gemini.ts does not contain reference codeBlockRegex",
-          );
-        }
+      target: PINNED_REVISIONS.main,
+      sliceFn: (t: string) => {
+        const m = t.match(/const codeBlockRegex =\s*(\/(?:[^\n\r]*)\/[a-z]*);/);
+        return m ? m[1] ?? "" : "";
       },
     },
     {
-      name: "fleet/audit1 (tip f70e3fa)",
-      ref: "origin/fleet/audit1:src/tts/gemini.ts",
-      verify: (src: string) => {
-        if (!src.includes("function findCodeBlocks(text: string): CodeBlock[]")) {
-          throw new Error("origin/fleet/audit1:src/tts/gemini.ts missing findCodeBlocks");
-        }
-        if (
-          !src.includes("function matchFence(text: string, run: { index: number; end: number })")
-        ) {
-          throw new Error("origin/fleet/audit1:src/tts/gemini.ts missing matchFence");
-        }
-        if (!src.includes("const shortest = Math.max(3, length - 3);")) {
-          throw new Error(
-            "origin/fleet/audit1:src/tts/gemini.ts missing 3-char opener shrink bound",
-          );
-        }
+      target: PINNED_REVISIONS.audit1,
+      sliceFn: (t: string) => {
+        return t.slice(
+          t.indexOf("function nextFenceRun"),
+          t.indexOf("export async function formatCodeForTts"),
+        ).trim();
       },
     },
     {
-      name: "fleet/fixc0gj v1 (9f18cc1)",
-      ref: "9f18cc1:src/tts/gemini.ts",
-      verify: (src: string) => {
-        if (!src.includes("function extractCodeBlocks(text: string): CodeBlockMatch[]")) {
-          throw new Error("9f18cc1:src/tts/gemini.ts missing extractCodeBlocks");
-        }
-        if (!src.includes("const closeBackticksRegex = /`{3,}/g;")) {
-          throw new Error("9f18cc1:src/tts/gemini.ts missing separate closeBackticksRegex");
-        }
-        if (!src.includes("hasMoreBackticks = false;")) {
-          throw new Error("9f18cc1:src/tts/gemini.ts missing hasMoreBackticks flag reset");
-        }
+      target: PINNED_REVISIONS.fixc0gj_v1,
+      sliceFn: (t: string) => {
+        return t.slice(
+          t.indexOf("function extractCodeBlocks"),
+          t.indexOf("export async function formatCodeForTts"),
+        ).trim();
       },
     },
     {
-      name: "fleet/fixc0gj v2 (tip 3d32fc4)",
-      ref: "origin/fleet/fixc0gj:src/tts/gemini.ts",
-      verify: (src: string) => {
-        if (!src.includes("function extractCodeBlocks(text: string): CodeBlockMatch[]")) {
-          throw new Error("origin/fleet/fixc0gj:src/tts/gemini.ts missing extractCodeBlocks");
-        }
-        if (!src.includes("const closeFenceRegex = /(?:`{3,}|~{3,})/g;")) {
-          throw new Error("origin/fleet/fixc0gj:src/tts/gemini.ts missing closeFenceRegex");
-        }
-        if (!src.includes("if (opener.length >= 6)")) {
-          throw new Error(
-            "origin/fleet/fixc0gj:src/tts/gemini.ts missing self-closing >= 6 fence check",
-          );
-        }
+      target: PINNED_REVISIONS.fixc0gj_v2,
+      sliceFn: (t: string) => {
+        return t.slice(
+          t.indexOf("function extractCodeBlocks"),
+          t.indexOf("export async function formatCodeForTts"),
+        ).trim();
       },
     },
   ];
 
-  for (const r of refs) {
-    const proc = new Deno.Command("git", { args: ["show", r.ref] });
+  for (const s of specs) {
+    const gitRef = `${s.target.commit}:src/tts/gemini.ts`;
+    const proc = new Deno.Command("git", { args: ["show", gitRef] });
     const res = await proc.output();
     if (!res.success) {
-      throw new Error(`Could not read ${r.ref} from git: command failed with exit ${res.code}`);
+      throw new Error(
+        `FATAL: Could not read pinned commit ${s.target.name} (${gitRef}): exit code ${res.code}`,
+      );
     }
-    const content = new TextDecoder().decode(res.stdout);
-    r.verify(content);
+    const fullText = new TextDecoder().decode(res.stdout);
+    const slice = s.sliceFn(fullText);
+    const actualSha = await computeSha256(slice);
+
+    if (slice.length !== s.target.expectedLength) {
+      throw new Error(
+        `FATAL: Length mismatch for ${s.target.name}: expected ${s.target.expectedLength}, got ${slice.length}`,
+      );
+    }
+    if (actualSha !== s.target.expectedSha256) {
+      throw new Error(
+        `FATAL: SHA-256 hash mismatch for ${s.target.name}: expected ${s.target.expectedSha256}, got ${actualSha}`,
+      );
+    }
     console.log(
-      `  [OK] Verified ${r.name} (${r.ref}, ${res.stdout.length} bytes) matches implementation.`,
+      `  [OK] Cryptographically verified ${s.target.name} (commit ${
+        s.target.commit.slice(0, 7)
+      }, ${slice.length}B, SHA: ${actualSha.slice(0, 16)}...)`,
     );
   }
   return true;
