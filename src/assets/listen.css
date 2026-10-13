@@ -701,7 +701,7 @@ li.episode[data-current="true"] .ep-play {
   cursor: not-allowed;
 }
 .ep-download .pct {
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   font-family: var(--mono);
@@ -810,7 +810,7 @@ li.episode[data-current="true"] .ep-play {
   align-items: center;
   gap: 0.3rem;
   color: var(--ok);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 .now-badge .icon {
@@ -826,7 +826,7 @@ li.episode[data-current="true"] .ep-play {
 }
 .scrub .t {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   font-family: var(--mono);
   letter-spacing: -0.03em;
