@@ -52,9 +52,9 @@ run on every gate is a question with a measured answer, in "What it costs" below
 of this decision.
 
 `stripComments` (`scripts/test-selection.ts:343`, **271 lines**) returns `{ stripped, spans }`:
-`stripped` is the source with comments removed, and `spans` records the byte ranges that are string
-**content** — so a read call inside a string is data, while a read inside a template's `${…}` is
-still a read, because an interpolation is code.
+`stripped` is the source with comments removed, and `spans` records the UTF-16 code-unit ranges that
+are string **content** — so a read call inside a string is data, while a read inside a template's
+`${…}` is still a read, because an interpolation is code.
 
 1. **Six contexts** — `CODE`, `STRING`, `TEMPLATE`, `REGEX`, `LINE_COMMENT`, `BLOCK_COMMENT`.
 2. **A frame stack, not a single context**, where each frame carries its own `braceDepth`. A
@@ -93,14 +93,19 @@ them, is the right shape: an ignored case with a reason is a known gap, an absen
 surprise.
 
 **What it costs, measured (audio-feed-csbr).** The cost of the scan is not an impression. Over **335
-files and 5,148,143 bytes** — every `.ts` under `tests/`, `scripts/` and `src/`, walked recursively
-— a full pass of `stripComments` takes **224.83 ms**, which is **671.1 µs per file**. Against the 14
-s to 40 s a fast gate actually takes, the entire universe costs **0.56% to 1.61%** of the run, and a
-typical invocation is far smaller than the universe: the selector scans the changed suite and the
-modules it imports to a closure depth of 2, so **ten files is about 6.7 ms**. Method: three warm-up
-passes then twenty timed, reading the same file contents for every scanner compared, on this VM. The
-corpus is walked recursively and deliberately overstates a single invocation, which is the safe
-direction for a budget.
+files / 5,148,143 UTF-16 code units** (5,151,935 UTF-8 bytes; the unit is named because a
+`String.length` figure is code units, not bytes, and this is the one place in this record that
+should be exact) — every `.ts` under `tests/`, `scripts/` and `src/`, walked recursively — a full
+pass of `stripComments` takes **225–406 ms**, which is **671–1212 µs per file**. That is a RANGE
+because the spread is machine load, not the corpus: five runs over the same 335 files on this
+contended 2-vCPU VM gave 224.83, 248.85, 292.25, 266.96 and 405.86 ms — three of them consecutive at
+249/292/267 ms — with `steal` at 9.7M ticks. Quoting any single one as "the" cost would be the same
+defect as an unstated unit. Against the 14 s to 40 s a fast gate actually takes, the entire universe
+costs **0.6% to 2.1%** of the run, and a typical invocation is far smaller than the universe: the
+selector scans the changed suite and the modules it imports to a closure depth of 2, so **ten files
+is 7–12 ms**. Method: three warm-up passes then twenty timed, reading the same file contents for
+every scanner compared, on this VM. The corpus is walked recursively and deliberately overstates a
+single invocation, which is the safe direction for a budget.
 
 The pre-lexer revision has no comparable function to time — `97d5552^` has no `stripComments` at
 all, and is 1813 lines against today's 2026 — so the comparison this record can honestly make is the
@@ -108,9 +113,10 @@ scan against the gate's total, plus the correctness record above, where eight fi
 the earlier approach paid instead. The parser alternative stays real, and the numbers above say how
 much room it has before it is worth taking.
 
-**Budget and trigger.** The scan is expected to stay under **400 ms per full pass** and **1 ms per
-file** — about a further 78% of headroom on today's numbers, and still under 3% of a 14 s gate. If a
-change doubles the measured 224.83 ms, or the open-case rate keeps climbing, the parser trade
+**Budget and trigger.** The scan is expected to stay under **250 ms per full pass on an unloaded
+VM** and **450 ms under heavy-slot contention**, with **1.5 ms per file** covering both; even the
+contended figure is still under 3.3% of a 14 s gate. If a change doubles the measured range — past
+roughly 450 ms quiet or 800 ms contended — or the open-case rate keeps climbing, the parser trade
 becomes the cheaper option and should be measured rather than assumed.
 
 **Malformed and uncertain input, and why the failure direction is the safe one (audio-feed-pgpp).**
@@ -121,14 +127,13 @@ selector's safe direction, since a wider selection costs gate time and can never
 a property of the shape rather than of one case: only marking text as non-code can hide a reference,
 and malformed input marks none.
 
-Measured on five inputs, each producing `spans === []` with `stripped` byte-identical to the source
-and no read lost: a string left unterminated at EOF by a trailing escape; an unterminated string
-with a read BEFORE it and again with a read AFTER it (the order that could plausibly swallow a real
-site); and a stray close quote forming a phantom string. Boundary rows for the malformed cases are
-in `tests/source_scanner_test.ts` (M1–M3), so the next change to the scanner has to keep this
-direction deliberate rather than accidental. The two known-ambiguous lexical cases above are the
-same story with the harm named, and they stay pinned with `ignore: true` and their reasons rather
-than deleted.
+Measured on five inputs, each producing `spans === []` with `stripped` identical to the source and
+no read lost: a string left unterminated at EOF by a trailing escape; an unterminated string with a
+read BEFORE it and again with a read AFTER it (the order that could plausibly swallow a real site);
+and a stray close quote forming a phantom string. Boundary rows for the malformed cases are in
+`tests/source_scanner_test.ts` (M1–M3), so the next change to the scanner has to keep this direction
+deliberate rather than accidental. The two known-ambiguous lexical cases above are the same story
+with the harm named, and they stay pinned with `ignore: true` and their reasons rather than deleted.
 
 **The alternative considered and not taken:** treat an uncertain scan as "unresolved", or fall back
 to the full suite. Both are safe, and both were declined for the same reason: there is no error
@@ -155,7 +160,7 @@ one.
    that need lexical state and not a syntax tree. The startup cost remains unmeasured for this
    record — measuring it means adding the dependency and its lockfile change, which is a decision in
    its own right rather than a probe — so what this record fixes instead is the budget that decides
-   the question: if the lexer's own per-pass cost doubles past the 224.83 ms measured above, the
+   the question: if the lexer's own per-pass cost doubles past the 225–406 ms measured above, the
    parser's startup stops being a hypothetical and becomes the next thing to measure. This is also
    why the escalation trigger above matters: the alternative stays real and gets better as the lexer
    grows.
