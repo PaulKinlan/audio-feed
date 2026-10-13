@@ -800,6 +800,11 @@ export function planTests(
   };
 }
 
+/** The fixture is the only positional fmt path; production delegates scope to deno.json fmt.include. */
+export function formatCheckStep(fmtFixture?: string | null): string[] {
+  return ["deno", "fmt", "--check", ...(fmtFixture ? [fmtFixture] : [])];
+}
+
 if (import.meta.main) {
   // audio-feed-p2la: ensure repo git pre-push hook is installed and chained into git hooks
   try {
@@ -936,7 +941,7 @@ ${auditUniverseDrift}`);
   const fmtFixture = Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST")
     ? Deno.env.get("FAST_GATE_FMT_FIXTURE")
     : null;
-  const fmtStep = ["deno", "fmt", "--check", ...(fmtFixture ? [fmtFixture] : [])];
+  const fmtStep = formatCheckStep(fmtFixture);
   for (const step of [fmtStep, ["deno", "lint"], ["deno", "task", "check"]]) {
     const res = await run(step);
     if (res.code !== 0) {
