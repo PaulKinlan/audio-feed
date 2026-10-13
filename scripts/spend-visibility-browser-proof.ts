@@ -112,6 +112,7 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
     throw new Error(`timed out waiting for: ${desc}`);
   }
 
+  let crashError: unknown = null;
   try {
     await cdp("Page.enable");
     await cdp("Runtime.enable");
@@ -179,6 +180,9 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
     );
     await quantiseEvidencePng(shotPath);
     console.log(`Saved screenshot to ${shotPath}`);
+  } catch (err) {
+    crashError = err;
+    checker.check("proof execution completed without unhandled exception", false, String(err));
   } finally {
     try {
       chrome.kill();
@@ -193,4 +197,5 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
       checker,
     });
   }
+  if (crashError) throw crashError;
 });

@@ -121,6 +121,7 @@ await runProof("playback-position-browser-proof", async (checker) => {
     throw new Error(`timed out waiting for: ${desc}`);
   }
 
+  let crashError: unknown = null;
   try {
     await cdp("Page.enable");
     await cdp("Runtime.enable");
@@ -295,6 +296,9 @@ await runProof("playback-position-browser-proof", async (checker) => {
       endedStored === undefined,
       "position removed after ended",
     );
+  } catch (err) {
+    crashError = err;
+    checker.check("proof execution completed without unhandled exception", false, String(err));
   } finally {
     try {
       chrome.kill();
@@ -309,4 +313,5 @@ await runProof("playback-position-browser-proof", async (checker) => {
       checker,
     });
   }
+  if (crashError) throw crashError;
 });

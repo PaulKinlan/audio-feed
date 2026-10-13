@@ -161,6 +161,7 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     await quantiseEvidencePng(shotPath);
   }
 
+  let crashError: unknown = null;
   try {
     await cdp("Page.enable");
     await cdp("Network.enable");
@@ -321,6 +322,9 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     await screenshot("part4c-listen-landing-390x844");
 
     console.log(`Screenshots in ${OUT}`);
+  } catch (err) {
+    crashError = err;
+    checker.check("proof execution completed without unhandled exception", false, String(err));
   } finally {
     try {
       ws.close();
@@ -338,4 +342,5 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
       checker,
     });
   }
+  if (crashError) throw crashError;
 });

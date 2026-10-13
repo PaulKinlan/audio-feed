@@ -551,6 +551,16 @@ Deno.test("audio-feed-n16x: four target browser proofs execute inside runProof a
       !content.includes("Deno.writeTextFile(`${OUT}README.md`"),
       `${script} must not write raw README.md directly`,
     );
+    assert(
+      content.includes("crashError"),
+      `${script} must track unhandled exceptions to prevent misleading README generation`,
+    );
+    assert(
+      content.includes(
+        'checker.check("proof execution completed without unhandled exception", false,',
+      ),
+      `${script} must record crash failure on checker to suppress evidence publication`,
+    );
   }
 });
 
@@ -566,14 +576,13 @@ Deno.test("audio-feed-n16x: all browser proof scripts writing evidence use runPr
 
     if (result.writes.length > 0) {
       const hasRunProof = content.includes("runProof(");
-      const hasQuantise = content.includes("quantiseEvidencePng(");
       const hasReadme = content.includes("writeEvidenceReadme(");
 
-      if (!hasRunProof || (!hasQuantise && !hasReadme)) {
+      if (!hasRunProof || !hasReadme) {
         unmediated.push(
           `${relative} (writes: ${
             result.writes.join(", ")
-          }, runProof: ${hasRunProof}, quantise: ${hasQuantise}, readme: ${hasReadme})`,
+          }, runProof: ${hasRunProof}, readme: ${hasReadme})`,
         );
       }
     }
@@ -582,7 +591,7 @@ Deno.test("audio-feed-n16x: all browser proof scripts writing evidence use runPr
   assertEquals(
     unmediated,
     [],
-    `All browser proofs writing evidence must use runProof and shared helpers: ${
+    `All browser proofs writing evidence must use runProof and writeEvidenceReadme: ${
       JSON.stringify(unmediated, null, 2)
     }`,
   );
