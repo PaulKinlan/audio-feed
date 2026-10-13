@@ -15,12 +15,18 @@
  *   deno run --allow-all --unstable-kv scripts/account-browser-proof.ts
  */
 
+import { HARNESS_PORT_DEFAULT } from "./harness-port.ts";
 import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8fc/", import.meta.url).pathname;
 await Deno.mkdir(OUT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// audio-feed-943j: pin ACCOUNT_HARNESS_PORT to HARNESS_PORT_DEFAULT (8133) so that
+// spawnHarness runs the harness on the canonical port instead of an ephemeral port,
+// making long-page screenshots embedding ${base} 100% byte-reproducible across runs.
+Deno.env.set("ACCOUNT_HARNESS_PORT", String(HARNESS_PORT_DEFAULT));
 
 await runProof("account-browser-proof", async (checker) => {
   const harness = await spawnHarness("scripts/account-harness.ts");
