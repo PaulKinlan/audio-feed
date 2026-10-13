@@ -1,12 +1,12 @@
 # Browser Proof: /account bookmarklet CSP disclosure (audio-feed-kvnw)
 
 - Script: scripts/verify_kvnw_account_bookmarklet_browser.ts
-- Asserts: the browser is ON /account with the seeded session (not redirected to /login); bookmarklet anchor keeps its class and is still draggable; anchor still carries the javascript: bookmarklet payload; the disclosure exists on /account; the summary offers the code as the fallback; the open disclosure's snippet is the SAME payload as the anchor href (one builder); the wording names the Content Security Policy and tells the user to drag or paste; the disclosure's code is fully visible inside its box (no horizontal clipping); clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected; the refusal leaves the page and the open disclosure intact; the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)
+- Asserts: the browser is ON /account with the seeded session (not redirected to /login); bookmarklet anchor keeps its class and is still draggable; anchor still carries the javascript: bookmarklet payload; the disclosure exists on /account; the summary offers the code as the fallback; the open disclosure's snippet is the SAME payload as the anchor href (one builder); rendered account bookmarklet uses the selected proof port; the wording names the Content Security Policy and tells the user to drag or paste; the disclosure's code is fully visible inside its box (no horizontal clipping); clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected; the refusal leaves the page and the open disclosure intact; the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)
 
 ## Test Environment
 
 - **Browser:** Headless Chrome (CDP), 1280x900
-- **Page:** `GET /account` on an in-process server with an ephemeral port
+- **Page:** `GET /account` on canonical proof port 8133 (alternate ports are local-only)
 - **Session:** a real seeded session cookie (`__Host-af_session`), the same way the unit tests sign in
 
 ## Key Verifications
@@ -26,12 +26,13 @@ PASS  bookmarklet anchor keeps its class and is still draggable  class: 'btn qui
 PASS  anchor still carries the javascript: bookmarklet payload  href starts: 'javascript:(function(){var u=l...'
 PASS  the disclosure exists on /account  
 PASS  the summary offers the code as the fallback  summary: 'Can’t drag it? Get the bookmarklet code'
-PASS  the open disclosure's snippet is the SAME payload as the anchor href (one builder)  snippet matches href (617 chars)
+PASS  the open disclosure's snippet is the SAME payload as the anchor href (one builder)  snippet matches href (616 chars)
+PASS  rendered account bookmarklet uses the selected proof port  selected port 8133; rendered port 8133
 PASS  the wording names the Content Security Policy and tells the user to drag or paste  wording: 'Browsers refuse javascript: links when clicked directly on a...'
 PASS  the disclosure's code is fully visible inside its box (no horizontal clipping)  scrollWidth 1231 vs clientWidth 1231, white-space: pre-wrap, rendered height 82px
 PASS  clicking the anchor is REFUSED by the CSP, and the refusal is asserted rather than collected  console: '[error] Running the JavaScript URL violates the following Content Security Policy directive 'sc...'
 PASS  the refusal leaves the page and the open disclosure intact  pathname: /account, disclosure open: true
-PASS  the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)  scrollWidth 623 vs clientWidth 623, rendered height 190px
+PASS  the SAME shared rule also un-clips the front door's disclosure (audio-feed-3asd surface)  scrollWidth 1231 vs clientWidth 1231, rendered height 82px
 ```
 
 ## Screenshot
