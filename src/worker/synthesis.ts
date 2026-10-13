@@ -1155,6 +1155,49 @@ export async function runSynthesisBatch(
   synthesize: Synthesizer,
   options: SynthesisWorkerOptions = {},
 ): Promise<SynthesisBatchResult> {
+  // audio-feed-4nbt: this mark precedes even queue discovery. A killed isolate that never
+  // claims an episode otherwise leaves no claim.lifecycle event to investigate.
+  const invocationId = crypto.randomUUID();
+  const budgetMs = options.maxInvocationDurationMs ??
+    ctx.config.maxInvocationDurationMs ?? DEFAULT_MAX_INVOCATION_DURATION_MS;
+  const startedAt = performance.now();
+  const appendMark = async (phase: "started" | "terminal", outcome?: "returned" | "threw") => {
+    try {
+      const stored = await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: "info",
+        type: "synthesis.invocation",
+        process: "worker",
+        job: "synthesis",
+        correlationId: invocationId,
+        phase,
+        message: `synthesis invocation ${invocationId} ${phase}`,
+        ...(phase === "terminal" ? { durationMs: Math.max(0, performance.now() - startedAt) } : {}),
+        context: { invocationId, stage: "synthesis", budgetMs, ...(outcome ? { outcome } : {}) },
+      });
+      if (!stored) console.warn("[audio-feed] synthesis invocation mark was not stored");
+    } catch {
+      // The log store contract is best-effort: losing observability must not lose synthesis.
+      console.warn("[audio-feed] synthesis invocation mark write failed");
+    }
+  };
+  await appendMark("started");
+  let outcome: "returned" | "threw" = "threw";
+  try {
+    const result = await runSynthesisBatchCore(ctx, synthesize, options);
+    outcome = "returned";
+    return result;
+  } finally {
+    // A platform kill cannot enter finally; its durable start has no terminal partner.
+    await appendMark("terminal", outcome);
+  }
+}
+
+async function runSynthesisBatchCore(
+  ctx: AppContext,
+  synthesize: Synthesizer,
+  options: SynthesisWorkerOptions = {},
+): Promise<SynthesisBatchResult> {
   const opts = { ...DEFAULTS, ...options };
   /**
    * The deployment ceiling, resolved HERE from the context rather than threaded in by each caller
