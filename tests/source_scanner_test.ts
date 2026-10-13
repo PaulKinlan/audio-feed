@@ -267,16 +267,19 @@ const cases: Case[] = [
     // comment is a NARROWING malformed input - the spans are empty AND everything to EOF is blanked,
     // so a read after it is LOST and the selection can lose a suite rather than gain one.
     //
-    // IGNORED ON PURPOSE, and that reason is the point of the row: a LIVE assertion here would have to
-    // assert the current behaviour - that the scan blanks to EOF - which is a pin that passes WITH the
-    // defect present, worse than no pin at all (audio-feed-zpud). It stays visible with its bead id
-    // until the safe fix lands: on reaching EOF still inside a lexical state, exclude nothing rather
-    // than blanking, because widening costs gate time and narrowing loses a suite.
+    // THIS ROW IS LIVE NOW (the fix landed in audio-feed-ywjz). It used to carry `ignore: true` with the
+    // reason that a LIVE assertion would have had to assert the CURRENT behaviour - that the scan blanks to
+    // EOF - which is a pin that passes WITH the defect present, worse than no pin at all (audio-feed-zpud).
+    // That reasoning still stands and is why the row was ignored rather than made to pass; what changed is
+    // the behaviour, not the argument. The `check` below was written to assert the SAFE direction from the
+    // start, so the fix was a one-word change to `ignore` - which is exactly what happened.
     name:
-      "M4 malformed: UNTERMINATED BLOCK COMMENT blanks to EOF and NARROWS (known gap, audio-feed-ywjz)",
+      "M4 malformed: UNTERMINATED BLOCK COMMENT does NOT blank to EOF - the read after it SURVIVES (fixed by audio-feed-ywjz)",
     src: `/* unterminated\nconst a = await Deno.readTextFile(p);\n`,
-    expect: "KNOWN GAP (audio-feed-ywjz): the read after an unterminated /* is currently LOST",
-    ignore: true,
+    expect:
+      "the read after an unterminated /* must SURVIVE: audio-feed-ywjz made the scan exclude nothing rather " +
+      "than blanking to EOF",
+    ignore: false,
     check: (r) => ({
       // Deliberately asserts the SAFE direction, so the fix is a one-word change: flip `ignore`.
       pass: r.stripped.includes("Deno.readTextFile("),
