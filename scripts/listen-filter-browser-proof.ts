@@ -298,6 +298,13 @@ try {
         Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
       );
       console.log(`Saved screenshot to ${OUT}02-listen-filter-mobile-390.png`);
+
+      await writeEvidenceReadme({
+        dir: OUT,
+        title: "Player source and text filtering",
+        script: "scripts/listen-filter-browser-proof.ts",
+        asserts: ASSERTS,
+      });
     }, { prefix: "audiofeed-listen-filter-" });
   });
 } catch (error) {
@@ -305,13 +312,6 @@ try {
   exitCode = 1;
 } finally {
   harness.kill();
-
-  await writeEvidenceReadme({
-    dir: OUT,
-    title: "Player source and text filtering",
-    script: "scripts/listen-filter-browser-proof.ts",
-    asserts: ASSERTS,
-  });
 }
 
 Deno.exit(exitCode);

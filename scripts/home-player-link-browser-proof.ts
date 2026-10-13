@@ -253,6 +253,13 @@ try {
       );
       console.log(`Saved screenshot to ${OUT}02-home-player-link-mobile-390.png`);
 
+      await writeEvidenceReadme({
+        dir: OUT,
+        title: "Front door player links",
+        script: "scripts/home-player-link-browser-proof.ts",
+        asserts: ASSERTS,
+      });
+
       ws.close();
     }, { prefix: "audiofeed-home-player-" });
   });
@@ -261,13 +268,6 @@ try {
   exitCode = 1;
 } finally {
   harness.kill();
-
-  await writeEvidenceReadme({
-    dir: OUT,
-    title: "Front door player links",
-    script: "scripts/home-player-link-browser-proof.ts",
-    asserts: ASSERTS,
-  });
 }
 
 Deno.exit(exitCode);
