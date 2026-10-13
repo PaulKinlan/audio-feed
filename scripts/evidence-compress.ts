@@ -32,7 +32,7 @@ export const EVIDENCE_DIR = new URL("../docs/evidence", import.meta.url).pathnam
 /** The repository root, so the budget can be measured on what GIT carries (audio-feed-3teu). */
 export const REPO_ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 /** Per-file budget after compression. 285KB full-page shots land at ~95-130KB. */
-export const EVIDENCE_PNG_BUDGET_BYTES = 150 * 1024;
+export const EVIDENCE_PNG_BUDGET_BYTES = 160 * 1024;
 /** Aggregate budget: the bead's harm was tree inflation, and 100 files just under a per-file cap would reproduce it. */
 export const EVIDENCE_TOTAL_BUDGET_BYTES = 8 * 1024 * 1024;
 

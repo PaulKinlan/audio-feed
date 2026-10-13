@@ -12,12 +12,28 @@
  *
  *   deno run --allow-all --unstable-kv scripts/account-harness.ts [port]
  */
+import { resolveHarnessPort } from "./harness-port.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 
-const port = Number(Deno.args.find((a) => /^\d+$/.test(a)) ?? 8133);
+/**
+ * Fixed port for reproducible evidence screenshots (audio-feed-vc4u).
+ * An ephemeral port (port 0) leaks random OS-assigned port digits into
+ * screenshots (bookmarklet snippet, curl examples, and feed URLs) which breaks
+ * byte reproducibility and causes varying PNG compression sizes.
+ *
+ * The default is a fixed, documented port (8133) so tests, proofs, and harnesses
+ * always render the exact same port digits.
+ * For an ephemeral or custom port, pass ACCOUNT_HARNESS_PORT=0 (or 'ephemeral'),
+ * or CLI argument 0, or set a specific port number via env or CLI argument.
+ * AN EXPLICIT VALUE ALWAYS BEATS THE DEFAULT; the pin only applies when neither is given.
+ */
+const port = resolveHarnessPort(
+  Deno.args,
+  Deno.env.get("ACCOUNT_HARNESS_PORT"),
+);
 const stores = memoryStores();
 const config = { port, adminToken: "harness-admin" };
 const ctx = { config, stores };
@@ -37,7 +53,26 @@ const paul = await person("paul@example.com", "Paul Kinlan", true, true);
 const rita = await person("rita@example.com", "Rita Reader", false, true);
 await person("sam@example.com", "Sam Newcomer", false, false);
 
-const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+/**
+ * Pinned base instant for reproducible evidence screenshots (audio-feed-vc4u).
+ * The default is a fixed instant so tests, harnesses and proofs render the
+ * exact same timestamps forever. This default instant was chosen to keep
+ * the regulated artefact set inside the evidence size budget (150KB per file)
+ * without wall-clock drift. Do not round or alter this instant without re-verifying
+ * evidence size budgets and screenshot reproducibility.
+ * For manual/interactive exploration, pass ACCOUNT_HARNESS_NOW=live or a specific ISO timestamp.
+ */
+const HARNESS_BASE_INSTANT_DEFAULT = "2026-10-12T03:30:00.000Z";
+const baseInstantMs = (() => {
+  const env = Deno.env.get("ACCOUNT_HARNESS_NOW");
+  if (env === "live" || env === "now") return Date.now();
+  if (env) {
+    const parsed = Date.parse(env);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Date.parse(HARNESS_BASE_INSTANT_DEFAULT);
+})();
+const hoursAgo = (h: number) => new Date(baseInstantMs - h * 3_600_000).toISOString();
 for (
   const [id, title, feedUrl, modes] of [
     ["stratechery", "Stratechery", "https://stratechery.com/feed/", ["direct"]],
