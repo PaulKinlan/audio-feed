@@ -34,6 +34,7 @@ import {
   withChrome,
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
+import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "../scripts/harness-port.ts";
 
 Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
   try {
@@ -103,6 +104,37 @@ Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes tem
 });
 
 Deno.test({
+  name: "harness-port: an explicit value always beats the pinned default (audio-feed-mkn3)",
+  fn() {
+    // spawnHarness passes "0", so this is the contract that kept breaking.
+    assertEquals(resolveHarnessPort(["0"], undefined), 0, '"0" must bind an ephemeral port');
+    assertEquals(
+      resolveHarnessPort([], undefined),
+      HARNESS_PORT_DEFAULT,
+      "no input must use the pin, or evidence stops being reproducible",
+    );
+    assertEquals(
+      resolveHarnessPort(["1234"], undefined),
+      1234,
+      "an explicit port must be honoured",
+    );
+    assertEquals(resolveHarnessPort([], "ephemeral"), 0, "the env spelling must bind ephemeral");
+    assertEquals(resolveHarnessPort([], "0"), 0, "the env zero must bind ephemeral");
+    assertEquals(
+      resolveHarnessPort(["0"], "4321"),
+      4321,
+      "a numeric env must outrank the argument",
+    );
+    // The regression this bead was about: 0 must NOT fall through to the pin.
+    assertNotEquals(
+      resolveHarnessPort(["0"], undefined),
+      HARNESS_PORT_DEFAULT,
+      "an explicit 0 must never resolve to the pinned default",
+    );
+  },
+});
+
+Deno.test({
   name: "proof-helper: spawnHarness binds ephemeral port 0 and answers health check",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
@@ -114,8 +146,8 @@ Deno.test({
       assertEquals(harness.port > 0, true, `assigned port ${harness.port} must be > 0`);
       assertNotEquals(
         harness.port,
-        8133, // HARNESS_PORT_DEFAULT in scripts/account-harness.ts; NOT imported because that module starts a server on load
-        `spawnHarness passes "0", so the bind must be ephemeral, not the pinned default 8133`,
+        HARNESS_PORT_DEFAULT,
+        `spawnHarness passes "0", so the bind must be ephemeral, not the pinned default ${HARNESS_PORT_DEFAULT}`,
       );
       const health = await fetch(`${harness.base}/health`);
       assertEquals(health.ok, true);

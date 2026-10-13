@@ -12,6 +12,7 @@
  *
  *   deno run --allow-all --unstable-kv scripts/account-harness.ts [port]
  */
+import { resolveHarnessPort } from "./harness-port.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -29,19 +30,10 @@ import { approveUser, createUser } from "../src/auth/users.ts";
  * or CLI argument 0, or set a specific port number via env or CLI argument.
  * AN EXPLICIT VALUE ALWAYS BEATS THE DEFAULT; the pin only applies when neither is given.
  */
-const HARNESS_PORT_DEFAULT = 8133;
-const port = (() => {
-  const env = Deno.env.get("ACCOUNT_HARNESS_PORT");
-  if (env === "ephemeral" || env === "0") return 0;
-  if (env && /^\d+$/.test(env)) return Number(env);
-  // 0 IS A VALID EXPLICIT PORT (bind an ephemeral one). The previous filter
-  // /^[1-9]\d*$/ rejected it, so spawnHarness - which always passes "0" - silently
-  // got the pinned default instead, and every concurrent proof shared 8133.
-  // An EXPLICIT argument outranks a default (audio-feed-mkn3).
-  const cliPort = Deno.args.find((a) => /^(?:0|[1-9]\d*)$/.test(a));
-  if (cliPort) return Number(cliPort);
-  return HARNESS_PORT_DEFAULT;
-})();
+const port = resolveHarnessPort(
+  Deno.args,
+  Deno.env.get("ACCOUNT_HARNESS_PORT"),
+);
 const stores = memoryStores();
 const config = { port, adminToken: "harness-admin" };
 const ctx = { config, stores };
