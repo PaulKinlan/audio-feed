@@ -125,7 +125,9 @@ await runProof("account-browser-proof", async (checker) => {
             } catch (err) {
               await Deno.remove(`${filePath}.tmp`).catch(() => {});
               const detail = err instanceof Error ? err.message : String(err);
-              const code = (err && typeof err === "object" && "code" in err) ? ` (code ${(err as { code: unknown }).code})` : "";
+              const code = (err && typeof err === "object" && "code" in err)
+                ? ` (code ${(err as { code: unknown }).code})`
+                : "";
               throw new Error(`convert failed for ${filePath}${code}: ${detail}`);
             }
             if (!out.success) {
