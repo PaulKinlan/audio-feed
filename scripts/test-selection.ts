@@ -430,7 +430,17 @@ export function stripComments(
           lastNonWsChar = ch;
         } else if (ch === "{") {
           let kind: "OBJECT" | "BLOCK";
-          if (lastWordClass === "STATEMENT" || !expectOperand) {
+          // A `{` directly after a control head's `)` opens the BODY of that control statement, not an
+          // object literal (audio-feed-ghym). The `)` branch sets expectOperand = true ONLY when the group
+          // it closed was a CONTROL_HEAD - a call's `)` sets it false - so `lastNonWsChar === ")" &&
+          // expectOperand` can only mean a control head, and it is sound the other way too: any operator
+          // that could follow a `)` moves lastNonWsChar off ")" before this test runs. A body brace
+          // misread as OBJECT makes its closing `}` set expectOperand = false, which turns the NEXT
+          // statement's leading `/` into a division; the regex is then not masked, a quote inside it opens
+          // a string, and a real read in the following statement stops being spanned - the relation is
+          // silently lost, which is the under-read class this scanner exists to avoid.
+          const closesControlHead = lastNonWsChar === ")" && expectOperand;
+          if (lastWordClass === "STATEMENT" || !expectOperand || closesControlHead) {
             kind = "BLOCK";
           } else {
             kind = "OBJECT";
