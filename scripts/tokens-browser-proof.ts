@@ -20,6 +20,7 @@ import { approveUser, createUser } from "../src/auth/users.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const TOKEN = "subscriber-token-vpw";
 const OUT = new URL("../docs/evidence/audio-feed-vpw/", import.meta.url).pathname;
@@ -98,17 +99,7 @@ await runProof("audio-feed-vpw", async (checker) => {
     };
     const raw = Uint8Array.from(atob(shotData.data), (c) => c.charCodeAt(0));
     await Deno.writeFile(`${OUT}${name}`, raw);
-    try {
-      const cmd = new Deno.Command("convert", {
-        args: [`${OUT}${name}`, "-strip", "-colors", "256", `png8:${OUT}${name}.tmp`],
-      });
-      const out = await cmd.output();
-      if (out.success) {
-        await Deno.rename(`${OUT}${name}.tmp`, `${OUT}${name}`);
-      }
-    } catch {
-      await Deno.remove(`${OUT}${name}.tmp`).catch(() => {});
-    }
+    await quantiseEvidencePng(`${OUT}${name}`);
   };
 
   // deno-lint-ignore no-explicit-any

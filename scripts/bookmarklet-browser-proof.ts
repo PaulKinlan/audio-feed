@@ -32,6 +32,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { discoverFeeds as discoverFeedsOnPage } from "../src/ingest/url.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const TOKEN = "subscriber-token-ep1";
 const OUT = new URL("../docs/evidence/audio-feed-ep1/", import.meta.url).pathname;
@@ -168,17 +169,7 @@ await runProof("audio-feed-ep1", async (checker) => {
         };
         const raw = Uint8Array.from(atob(shotData.data), (c) => c.charCodeAt(0));
         await Deno.writeFile(path, raw);
-        try {
-          const cmd = new Deno.Command("convert", {
-            args: [path, "-strip", "-colors", "256", `png8:${path}.tmp`],
-          });
-          const out = await cmd.output();
-          if (out.success) {
-            await Deno.rename(`${path}.tmp`, path);
-          }
-        } catch {
-          await Deno.remove(`${path}.tmp`).catch(() => {});
-        }
+        await quantiseEvidencePng(path);
       };
       try {
         await cdp("Page.enable");

@@ -21,6 +21,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3asd/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -271,26 +272,7 @@ try {
       const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
       const raw = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
       await Deno.writeFile(`${OUT}01-bookmarklet-disclosure-open.png`, raw);
-      try {
-        const cmd = new Deno.Command("convert", {
-          args: [
-            `${OUT}01-bookmarklet-disclosure-open.png`,
-            "-strip",
-            "-colors",
-            "256",
-            `png8:${OUT}01-bookmarklet-disclosure-open.png.tmp`,
-          ],
-        });
-        const out = await cmd.output();
-        if (out.success) {
-          await Deno.rename(
-            `${OUT}01-bookmarklet-disclosure-open.png.tmp`,
-            `${OUT}01-bookmarklet-disclosure-open.png`,
-          );
-        }
-      } catch {
-        await Deno.remove(`${OUT}01-bookmarklet-disclosure-open.png.tmp`).catch(() => {});
-      }
+      await quantiseEvidencePng(`${OUT}01-bookmarklet-disclosure-open.png`);
 
       await writeEvidenceReadme({
         dir: OUT,

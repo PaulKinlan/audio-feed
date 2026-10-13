@@ -30,6 +30,7 @@ import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bootstrap } from "../src/server.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -385,36 +386,19 @@ try {
         `${OUT}01-admin-observability.png`,
         Uint8Array.from(atob(shotAdmin.data), (c) => c.charCodeAt(0)),
       );
-      try {
-        // This is a FULL-DOCUMENT capture (1280x~2900), the tallest screenshot in the
-        // tree. At the 256-colour palette `deno task evidence:compress` uses it lands at
-        // ~159KB, over the 150KB per-file budget in tests/evidence_size_test.ts, so it is
-        // quantised to 128 colours at max zlib compression instead (~144KB). The page is
-        // text on a flat background - measured RMSE against the 256-colour version is
-        // 0.17%, i.e. invisible at review scale, and the size class the 256-colour rule
-        // exists for (a dark gradient that bands) is not present here. The generator owns
-        // this so a regeneration cannot silently produce an over-budget file.
-        const cmd = new Deno.Command("convert", {
-          args: [
-            `${OUT}01-admin-observability.png`,
-            "-strip",
-            "-colors",
-            "128",
-            "-define",
-            "png:compression-level=9",
-            `PNG8:${OUT}01-admin-observability.png.tmp`,
-          ],
-        });
-        const out = await cmd.output();
-        if (out.success) {
-          await Deno.rename(
-            `${OUT}01-admin-observability.png.tmp`,
-            `${OUT}01-admin-observability.png`,
-          );
-        }
-      } catch {
-        await Deno.remove(`${OUT}01-admin-observability.png.tmp`).catch(() => {});
-      }
+      // This is a FULL-DOCUMENT capture (1280x~2900), the tallest screenshot in the
+      // tree. At the 256-colour palette `deno task evidence:compress` uses it lands at
+      // ~159KB, over the 150KB per-file budget in tests/evidence_size_test.ts, so it is
+      // quantised to 128 colours at max zlib compression instead (~144KB). The page is
+      // text on a flat background - measured RMSE against the 256-colour version is
+      // 0.17%, i.e. invisible at review scale, and the size class the 256-colour rule
+      // exists for (a dark gradient that bands) is not present here. The generator owns
+      // this so a regeneration cannot silently produce an over-budget file.
+      await quantiseEvidencePng(`${OUT}01-admin-observability.png`, {
+        colors: 128,
+        compressionLevel: 9,
+        formatPrefix: "PNG8",
+      });
 
       // Restore desktop viewport
       await cdp("Emulation.setDeviceMetricsOverride", {
@@ -488,26 +472,7 @@ try {
         `${OUT}02-homepage-bookmarklet-main.png`,
         Uint8Array.from(atob(shotHome.data), (c) => c.charCodeAt(0)),
       );
-      try {
-        const cmd = new Deno.Command("convert", {
-          args: [
-            `${OUT}02-homepage-bookmarklet-main.png`,
-            "-strip",
-            "-colors",
-            "256",
-            `png8:${OUT}02-homepage-bookmarklet-main.png.tmp`,
-          ],
-        });
-        const out = await cmd.output();
-        if (out.success) {
-          await Deno.rename(
-            `${OUT}02-homepage-bookmarklet-main.png.tmp`,
-            `${OUT}02-homepage-bookmarklet-main.png`,
-          );
-        }
-      } catch {
-        await Deno.remove(`${OUT}02-homepage-bookmarklet-main.png.tmp`).catch(() => {});
-      }
+      await quantiseEvidencePng(`${OUT}02-homepage-bookmarklet-main.png`);
       check(
         "homepage bookmarklet verified: 3asd fallback disclosure is LANDED on main",
         true,
