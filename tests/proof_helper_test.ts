@@ -11,6 +11,7 @@
 import {
   assertEquals,
   assertMatch,
+  assertNotEquals,
   assertRejects,
   assertStringIncludes,
   assertThrows,
@@ -107,7 +108,15 @@ Deno.test({
   async fn() {
     const harness = await spawnHarness("scripts/account-harness.ts");
     try {
+      // spawnHarness ALWAYS passes "0", so this must be an EPHEMERAL bind.
+      // `port > 0` alone was satisfied by the pinned default too, so a green row
+      // named a contract it did not check (audio-feed-bm58).
       assertEquals(harness.port > 0, true, `assigned port ${harness.port} must be > 0`);
+      assertNotEquals(
+        harness.port,
+        8133, // HARNESS_PORT_DEFAULT in scripts/account-harness.ts; NOT imported because that module starts a server on load
+        `spawnHarness passes "0", so the bind must be ephemeral, not the pinned default 8133`,
+      );
       const health = await fetch(`${harness.base}/health`);
       assertEquals(health.ok, true);
 

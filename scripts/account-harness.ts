@@ -25,15 +25,20 @@ import { approveUser, createUser } from "../src/auth/users.ts";
  *
  * The default is a fixed, documented port (8133) so tests, proofs, and harnesses
  * always render the exact same port digits.
- * For an ephemeral or custom port, pass ACCOUNT_HARNESS_PORT=0 (or 'ephemeral'/'live')
- * or set a specific port number via env or command-line argument.
+ * For an ephemeral or custom port, pass ACCOUNT_HARNESS_PORT=0 (or 'ephemeral'),
+ * or CLI argument 0, or set a specific port number via env or CLI argument.
+ * AN EXPLICIT VALUE ALWAYS BEATS THE DEFAULT; the pin only applies when neither is given.
  */
 const HARNESS_PORT_DEFAULT = 8133;
 const port = (() => {
   const env = Deno.env.get("ACCOUNT_HARNESS_PORT");
   if (env === "ephemeral" || env === "0") return 0;
   if (env && /^\d+$/.test(env)) return Number(env);
-  const cliPort = Deno.args.find((a) => /^[1-9]\d*$/.test(a));
+  // 0 IS A VALID EXPLICIT PORT (bind an ephemeral one). The previous filter
+  // /^[1-9]\d*$/ rejected it, so spawnHarness - which always passes "0" - silently
+  // got the pinned default instead, and every concurrent proof shared 8133.
+  // An EXPLICIT argument outranks a default (audio-feed-mkn3).
+  const cliPort = Deno.args.find((a) => /^(?:0|[1-9]\d*)$/.test(a));
   if (cliPort) return Number(cliPort);
   return HARNESS_PORT_DEFAULT;
 })();
