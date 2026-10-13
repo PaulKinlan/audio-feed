@@ -10,7 +10,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
-import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts";
+import { decodedFromWav, GeminiTtsClient, MAX_TTS_SEGMENTS, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
@@ -1077,6 +1077,41 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
   assertEquals(ep?.status, "pending", "episode must remain pending for next tick");
   assertEquals(ep?.attempts, 1, "attempt count is preserved for uncommitted yield");
   assert(ep?.phase?.startsWith("synthesized_"), "phase must indicate progress or yield");
+  // audio-feed-8905 ROW 1 - THE ROW THAT PROVES THE FIX, and it turns out this fixture
+  // already reaches it. MEASURED HERE: the phase is `synthesized_0_of_1`, because the
+  // client DID publish a plan size (one segment) before the budget aborted, so the
+  // observed count is available and the label reports IT rather than the ceiling. ON MAIN
+  // THIS READS `synthesized_0_of_24` - the constant - which is the asymmetry the bead
+  // describes: an operator reading _of_24 on an episode whose real plan is 1.
+  // So this row FAILS on main and PASSES on the fix, which is the only kind of row that
+  // can prove it. Asserted as a RELATIONSHIP rather than a literal 1, so it stays honest
+  // if the fixture's article ever splits differently: the denominator must be the
+  // observed plan and must NOT be the constant ceiling.
+  // THE FALLBACK IS NOT TESTED HERE AND MUST NOT BE: this fixture's client PUBLISHES a
+  // real plan, so it never takes the fallback branch. That branch is pinned by the unit
+  // row in tests/observed_plan_size_test.ts.
+  const denominator = /^synthesized_0_of_(\d+)$/.exec(ep?.phase ?? "");
+  assert(denominator, `phase must carry an observed denominator: ${ep?.phase}`);
+  const observed = Number(denominator[1]);
+  assert(
+    observed !== MAX_TTS_SEGMENTS,
+    `the label must report the OBSERVED plan size, not the ceiling; the denominator ` +
+      `is ${observed} while the constant is ${MAX_TTS_SEGMENTS}, and on main the ` +
+      `constant is what reaches the label`,
+  );
+  assert(
+    observed > 0,
+    `an observed plan size must be positive, got ${observed}`,
+  );
+  // audio-feed-8905 ROW 1, the explicit form. WHY 1 IS THE RIGHT ANSWER: THIS FIXTURE'S
+  // REAL PLAN IS ONE SEGMENT - runManagedTurns fires onProgress BEFORE the first request,
+  // so a plan size of 1 is published, then the narration fetch never resolves and the
+  // budget aborts. The observed count is therefore available and the label prefers it.
+  // MEASURED ON BOTH REFS with this same fixture: main (0bf07a7) gives
+  // synthesized_0_of_24 / totalTurns 24, this branch gives synthesized_0_of_1 /
+  // totalTurns 1. RED on main, GREEN here - the definition of the proving row.
+  // DO NOT "fix" the 1 back to 24: the constant is the FALLBACK, and it is wrong
+  // precisely when a plan HAS been observed.
 });
 
 Deno.test("audio-feed-q7zy: (b) genuine provider error still fails with its reason", async () => {
