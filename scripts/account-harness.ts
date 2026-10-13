@@ -44,14 +44,47 @@ const RSS = `<?xml version="1.0"?><rss version="2.0"><channel><title>Example Wee
 <link>https://example.com/post</link><pubDate>Fri, 25 Sep 2026 06:00:00 +0000</pubDate>
 </item></channel></rss>`;
 
-async function person(email: string, displayName: string, isAdmin: boolean, approve: boolean) {
-  const user = await createUser(store, { email, displayName, isAdmin });
-  return approve ? await approveUser(store, user.id, "harness") : user;
+async function person(
+  email: string,
+  displayName: string,
+  isAdmin: boolean,
+  approve: boolean,
+  feedToken?: string,
+) {
+  let user = await createUser(store, { email, displayName, isAdmin });
+  if (approve) {
+    user = await approveUser(store, user.id, "harness");
+  }
+  if (feedToken) {
+    user.feedToken = feedToken;
+    await store.putUser(user);
+  }
+  return user;
 }
 
-const paul = await person("paul@example.com", "Paul Kinlan", true, true);
-const rita = await person("rita@example.com", "Rita Reader", false, true);
-await person("sam@example.com", "Sam Newcomer", false, false);
+// audio-feed-5sei: pin harness user feedTokens so account screenshots do not embed
+// random cryptographic tokens, allowing 05-account-* screenshots to be byte-reproducible.
+const paul = await person(
+  "paul@example.com",
+  "Paul Kinlan",
+  true,
+  true,
+  "feedtokenpaul0000000000000000001",
+);
+const rita = await person(
+  "rita@example.com",
+  "Rita Reader",
+  false,
+  true,
+  "feedtokenrita0000000000000000002",
+);
+await person(
+  "sam@example.com",
+  "Sam Newcomer",
+  false,
+  false,
+  "feedtokensam00000000000000000003",
+);
 
 /**
  * Pinned base instant for reproducible evidence screenshots (audio-feed-vc4u).
