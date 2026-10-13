@@ -123,8 +123,8 @@ Deno.test({
         "red on the named check",
         `the ${ROW} mutant must redden its named check inside the bound, not time out and not redden ` +
           `something else: ${mutatedVerdict.detail}\n${
-            mutated.failures.slice(0, 4).map((f) => f.slice(0, 120)).join(" | ") ||
-            mutated.tail.slice(-300)
+            mutated.failures.slice(0, 4).join("\n") ||
+            mutated.tail.slice(-800)
           }`,
       );
     } finally {
