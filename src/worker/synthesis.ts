@@ -588,6 +588,28 @@ async function runScriptStage(
   return outcome.value;
 }
 
+/**
+ * Did a yielded invocation make durable progress? (audio-feed-uet6)
+ *
+ * BOTH disjuncts must compare entry to current. The script disjunct used to read
+ * `finalScriptTurns > 0 && initialScriptTurns === 0`, which is a ONE-SHOT LATCH: true only on the
+ * 0 -> N transition, so an invocation that began with script turns already present (i.e. any resume)
+ * could never register script progress however many turns it added, while its sibling disjunct
+ * measured growth. Zero progress advances the attempt count and, at `maxAttempts`, fails the episode,
+ * so a mis-stated progress test is how a recoverable yield becomes a terminal failure.
+ *
+ * Exported and pure so the distinction is tested directly: whether the resume case is REACHABLE in the
+ * worker today is a separate question, answered no by the script phase being skipped once
+ * `episode.scriptTurns` exists, and pinned by the audio-feed-vvwb row of
+ * tests/synthesis_claim_lifecycle_test.ts. See tests/synthesis_progress_predicate_test.ts.
+ */
+export function synthesisMadeProgress(
+  initial: { segments: number; scriptTurns: number },
+  final: { segments: number; scriptTurns: number },
+): boolean {
+  return final.segments > initial.segments || final.scriptTurns > initial.scriptTurns;
+}
+
 export function createGeminiSynthesizer(
   ctx: AppContext,
   /** Injectable so a test can drive the real request path with a capturing fetchFn
@@ -1648,8 +1670,10 @@ async function runSynthesisBatchCore(
             (await metadata.listSynthesisSegments(currentEpisode.userId, currentEpisode.id))
               .filter((s) => s.finalized).length;
 
-          const madeProgress = (finalSegments > initialSegments) ||
-            (finalScriptTurns > 0 && initialScriptTurns === 0);
+          const madeProgress = synthesisMadeProgress(
+            { segments: initialSegments, scriptTurns: initialScriptTurns },
+            { segments: finalSegments, scriptTurns: finalScriptTurns },
+          );
 
           if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
             // Refuse infinite livelock: zero progress across maxAttempts must fail the episode.
