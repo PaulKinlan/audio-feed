@@ -7,8 +7,10 @@
  * Evaluates:
  * 1. origin/main baseline regex (commit 4e402eb)
  * 2. fleet/audit1 implementation (tip f70e3fa, tree f330bb5)
- * 3. fleet/fixc0gj v1 initial implementation (tip 9f18cc1, tree c64c0b6)
- * 4. fleet/fixc0gj v2 repaired tip (tip 3d32fc4, tree 09976b8)
+ * 3. fleet/fixc0gj Candidate B (repointed to ref-contained tip 3d32fc4, tree 09976b8)
+ *
+ * Note: fixc0gj v1 (tip 9f18cc1) was dropped as it is contained in no git ref
+ * and cannot be resolved in fresh clones.
  *
  * Verifies equivalence on both "skip" mode (narration text) and "explain" mode,
  * as well as raw extracted block matches [{ full, code, index }].
@@ -273,148 +275,7 @@ export function formatCodeForTts_audit1(
 }
 
 // ============================================================================
-// 3. FIXC0GJ V1 INITIAL IMPLEMENTATION (fleet/fixc0gj: tip 9f18cc1)
-// ============================================================================
-export function extractCodeBlocks_fixc0gj_9f18cc1(text: string): CodeBlockMatch[] {
-  if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
-    return [];
-  }
-
-  const matches: CodeBlockMatch[] = [];
-  const openerRegex = /(?:`{3,}|~{3,})|<pre\b[^>]*>/gi;
-  const codeOpenRegex = /<code\b[^>]*>/iy;
-  const infoRegex = /[^\n\r]*\r?\n/y;
-  const closePreRegex = /<\/pre>/gi;
-  const closeBackticksRegex = /`{3,}/g;
-  const closeTildesRegex = /~{3,}/g;
-
-  let hasMorePre = true;
-  let hasMoreBackticks = true;
-  let hasMoreTildes = true;
-
-  while (true) {
-    if (!hasMorePre && !hasMoreBackticks && !hasMoreTildes) {
-      break;
-    }
-
-    const match = openerRegex.exec(text);
-    if (!match) break;
-
-    const opener = match[0];
-    const startIndex = match.index;
-
-    if (opener.startsWith("<")) {
-      if (!hasMorePre) {
-        continue;
-      }
-      const afterPre = startIndex + opener.length;
-      let contentStart = afterPre;
-      codeOpenRegex.lastIndex = afterPre;
-      const codeMatch = codeOpenRegex.exec(text);
-      if (codeMatch) {
-        contentStart = afterPre + codeMatch[0].length;
-      }
-
-      closePreRegex.lastIndex = contentStart;
-      const closeMatch = closePreRegex.exec(text);
-      if (!closeMatch) {
-        hasMorePre = false;
-        continue;
-      }
-
-      const closeIndex = closeMatch.index;
-      let contentEnd = closeIndex;
-      if (
-        closeIndex >= contentStart + 7 &&
-        text.slice(closeIndex - 7, closeIndex).toLowerCase() === "</code>"
-      ) {
-        contentEnd = closeIndex - 7;
-      }
-
-      const rawCode = decodeHtmlEntities(text.slice(contentStart, contentEnd));
-      matches.push({
-        full: text.slice(startIndex, closeIndex + closeMatch[0].length),
-        code: rawCode.trim(),
-        index: startIndex,
-      });
-      openerRegex.lastIndex = closeIndex + closeMatch[0].length;
-    } else {
-      const isBacktick = opener[0] === "`";
-      if (isBacktick ? !hasMoreBackticks : !hasMoreTildes) {
-        continue;
-      }
-
-      const afterOpener = startIndex + opener.length;
-      let contentStart = afterOpener;
-      infoRegex.lastIndex = afterOpener;
-      const infoMatch = infoRegex.exec(text);
-      if (infoMatch) {
-        contentStart = afterOpener + infoMatch[0].length;
-      }
-
-      const closerRegex = isBacktick ? closeBackticksRegex : closeTildesRegex;
-      closerRegex.lastIndex = contentStart;
-      const closeMatch = closerRegex.exec(text);
-      if (!closeMatch) {
-        if (isBacktick) {
-          hasMoreBackticks = false;
-        } else {
-          hasMoreTildes = false;
-        }
-        continue;
-      }
-
-      const closeIndex = closeMatch.index;
-      const rawCode = text.slice(contentStart, closeIndex);
-      matches.push({
-        full: text.slice(startIndex, closeIndex + closeMatch[0].length),
-        code: rawCode.trim(),
-        index: startIndex,
-      });
-      openerRegex.lastIndex = closeIndex + closeMatch[0].length;
-    }
-  }
-
-  return matches;
-}
-
-export function formatCodeForTts_fixc0gj_9f18cc1(
-  text: string,
-  codeHandling: "skip" | "explain" = "skip",
-  summarizer: (code: string) => string = (c) => `summary(${c})`,
-): string {
-  const matches = extractCodeBlocks_fixc0gj_9f18cc1(text);
-  if (matches.length === 0) {
-    return text;
-  }
-
-  if (codeHandling === "explain") {
-    let result = "";
-    let lastIndex = 0;
-    for (const m of matches) {
-      result += text.slice(lastIndex, m.index);
-      const explanation = summarizer(m.code);
-      if (explanation) {
-        result += `\nHere is what that code does: ${explanation}\n`;
-      }
-      lastIndex = m.index + m.full.length;
-    }
-    result += text.slice(lastIndex);
-    return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
-  }
-
-  let result = "";
-  let lastIndex = 0;
-  for (const m of matches) {
-    result += text.slice(lastIndex, m.index);
-    lastIndex = m.index + m.full.length;
-  }
-  result += text.slice(lastIndex);
-  return result.split("\n").map((l) => l.trim()).filter(Boolean).join("\n\n");
-}
-
-// ============================================================================
-// 4. FIXC0GJ V2 REPAIRED TIP IMPLEMENTATION (fleet/fixc0gj: tip 3d32fc4)
+// 3. FIXC0GJ V2 REPAIRED TIP IMPLEMENTATION (fleet/fixc0gj: tip 3d32fc4)
 // ============================================================================
 export function extractCodeBlocks_fixc0gj_3d32fc4(text: string): CodeBlockMatch[] {
   if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
@@ -940,6 +801,9 @@ export function evaluateCandidate(
 // CLI AND REPORTING
 // ============================================================================
 
+// Note: fixc0gj_v1 (commit 9f18cc1c36145d66fa47e63ab00078a8a286e67e) was removed
+// because it is contained in no git ref and cannot be fetched in a fresh clone,
+// and its module is not identical to the pushed tip (66427 bytes vs 66890 bytes).
 export const PINNED_REVISIONS = {
   main: {
     commit: "4e402eb796c28f74ece0dfb3d6b5c7157d727499",
@@ -953,15 +817,9 @@ export const PINNED_REVISIONS = {
     expectedSha256: "b6a130e89ded3fa740b8a9767fe37618b88e64372f8e0fc117d222f882e11633",
     expectedLength: 7023,
   },
-  fixc0gj_v1: {
-    commit: "9f18cc1c36145d66fa47e63ab00078a8a286e67e",
-    name: "fleet/fixc0gj v1 (9f18cc1)",
-    expectedSha256: "0f22ed987060ce96d632ca9342553127933ed0a6f412f9aadde87d4ff4c8858a",
-    expectedLength: 2984,
-  },
   fixc0gj_v2: {
-    commit: "6c884f95b2174de841a97c4bf3cfb79e7668b548",
-    name: "fleet/fixc0gj Candidate B (tip 6c884f9, tree 085a7b7)",
+    commit: "3d32fc44f750ae343cae3da56566d8c57637b908",
+    name: "fleet/fixc0gj Candidate B (tip 3d32fc4, tree 09976b8)",
     expectedSha256: "44c8b67189a07ce30ffd9bba1a1d3e3ecfc63197dfd786f9444b4bae7d01ed44",
     expectedLength: 3447,
   },
@@ -1068,15 +926,6 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
       },
     },
     {
-      target: PINNED_REVISIONS.fixc0gj_v1,
-      sliceFn: (t: string) => {
-        return t.slice(
-          t.indexOf("function extractCodeBlocks"),
-          t.indexOf("export async function formatCodeForTts"),
-        ).trim();
-      },
-    },
-    {
       target: PINNED_REVISIONS.fixc0gj_v2,
       sliceFn: (t: string) => {
         return t.slice(
@@ -1124,7 +973,6 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
   );
   const mainGit = await loadGitModule(PINNED_REVISIONS.main.commit);
   const audit1Git = await loadGitModule(PINNED_REVISIONS.audit1.commit);
-  const fixV1Git = await loadGitModule(PINNED_REVISIONS.fixc0gj_v1.commit);
   const fixV2Git = await loadGitModule(PINNED_REVISIONS.fixc0gj_v2.commit);
 
   const testSummarizer = (c: string) => `test-summary(${c})`;
@@ -1177,30 +1025,7 @@ export async function verifyAgainstGitRefs(): Promise<boolean> {
       );
     }
 
-    // 3. fixc0gj v1
-    const f1SkipGit = await fixV1Git.format(item.text, "skip");
-    const f1SkipInline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "skip");
-    if (f1SkipGit !== f1SkipInline) {
-      throw new Error(
-        `Inlined fixc0gj v1 diverged in skip mode from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
-      );
-    }
-    const f1ExpGit = await fixV1Git.format(item.text, "explain", testSummarizer);
-    const f1ExpInline = formatCodeForTts_fixc0gj_9f18cc1(item.text, "explain", testSummarizer);
-    if (f1ExpGit !== f1ExpInline) {
-      throw new Error(
-        `Inlined fixc0gj v1 diverged in explain mode from git at commit ${PINNED_REVISIONS.fixc0gj_v1.commit} on ${item.id}`,
-      );
-    }
-    const f1BlocksGit = fixV1Git.extract(item.text);
-    const f1BlocksInline = extractCodeBlocks_fixc0gj_9f18cc1(item.text);
-    if (JSON.stringify(f1BlocksGit) !== JSON.stringify(f1BlocksInline)) {
-      throw new Error(
-        `Inlined fixc0gj v1 diverged in block extraction AST from git on ${item.id}`,
-      );
-    }
-
-    // 4. fixc0gj v2
+    // 3. fixc0gj v2
     const f2SkipGit = await fixV2Git.format(item.text, "skip");
     const f2SkipInline = formatCodeForTts_fixc0gj_3d32fc4(item.text, "skip");
     if (f2SkipGit !== f2SkipInline) {
@@ -1290,62 +1115,47 @@ export async function runVerification(fuzzCount = 10000) {
   );
   printCandidateReport(audit1Result);
 
-  // Evaluate fixc0gj v1 (9f18cc1)
-  const fixc0gjV1Result = evaluateCandidate(
-    "fixc0gj v1",
-    "fleet/fixc0gj @ 9f18cc1",
-    fullCorpus,
-    formatCodeForTts_fixc0gj_9f18cc1,
-    extractCodeBlocks_fixc0gj_9f18cc1,
-  );
-  printCandidateReport(fixc0gjV1Result);
-
-  // Evaluate fixc0gj Candidate B (tip 6c884f9, tree 085a7b7)
+  // Evaluate fixc0gj Candidate B (tip 3d32fc4, tree 09976b8)
   const fixc0gjV2Result = evaluateCandidate(
     "fixc0gj Candidate B",
-    "fleet/fixc0gj @ 6c884f9",
+    "fleet/fixc0gj @ 3d32fc4 (tree 09976b8)",
     fullCorpus,
     formatCodeForTts_fixc0gj_3d32fc4,
     extractCodeBlocks_fixc0gj_3d32fc4,
   );
   printCandidateReport(fixc0gjV2Result);
 
-  // Audit1 reported reproducing 1927/6092 on fixc0gj v1:
-  // Let's test a specific 6,092 case corpus to check audit1's exact claim!
+  // Print 2-column summary table
   console.log(`\n====================================================================`);
-  console.log(`SPECIAL INVESTIGATION: REPRODUCING AUDIT1'S 1,927 / 6,092 CLAIM`);
+  console.log(`TWO-COLUMN RELATIVE DIVERGENCE SUMMARY (BASELINE: origin/main 4e402eb)`);
   console.log(`====================================================================`);
-  // Audit1 claimed: 46 shapes + 3,000 fuzz * 2 (skip + explain) = 6,092 comparisons.
-  const audit1CorpusFuzz = buildFuzzCorpus(3000, 42);
-  const audit1ReproduceCorpus = [...handcrafted.slice(0, 46), ...audit1CorpusFuzz];
-  const reproV1 = evaluateCandidate(
-    "fixc0gj v1 on 3046 inputs",
-    "9f18cc1",
-    audit1ReproduceCorpus,
-    formatCodeForTts_fixc0gj_9f18cc1,
-    extractCodeBlocks_fixc0gj_9f18cc1,
-  );
-  const totalComparisonsSkipAndExplain = reproV1.totalComparisons * 2;
-  const totalMismatchesSkipAndExplain = reproV1.skipDivergences + reproV1.explainDivergences;
+  console.log(`Total corpus cases: ${fullCorpus.length}`);
   console.log(
-    `Corpus size: ${reproV1.totalComparisons} inputs (x2 modes = ${totalComparisonsSkipAndExplain} comparisons)`,
+    `\nMetric                          | audit1 (f70e3fa) | fixc0gj Candidate B (3d32fc4)`,
   );
   console.log(
-    `fixc0gj v1 mismatches across skip + explain: ${totalMismatchesSkipAndExplain} / ${totalComparisonsSkipAndExplain} (${
-      (totalMismatchesSkipAndExplain / totalComparisonsSkipAndExplain * 100).toFixed(1)
+    `--------------------------------+------------------+------------------------------`,
+  );
+  console.log(
+    `Differing Inputs (Distinct)     | ${audit1Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
+      (audit1Result.totalDistinctDifferingInputs / fullCorpus.length * 100).toFixed(1)
+    }%) | ${fixc0gjV2Result.totalDistinctDifferingInputs} / ${fullCorpus.length} (${
+      (fixc0gjV2Result.totalDistinctDifferingInputs / fullCorpus.length * 100).toFixed(2)
     }%)`,
   );
   console.log(
-    `Distinct differing inputs: ${reproV1.totalDistinctDifferingInputs} / ${reproV1.totalComparisons} (${
-      (reproV1.totalDistinctDifferingInputs / reproV1.totalComparisons * 100).toFixed(1)
-    }%)`,
+    `Skip Mode Output Mismatches     | ${audit1Result.skipDivergences}                | ${fixc0gjV2Result.skipDivergences}`,
+  );
+  console.log(
+    `Explain Mode Output Mismatches  | ${audit1Result.explainDivergences}                | ${fixc0gjV2Result.explainDivergences}`,
+  );
+  console.log(
+    `Block AST Match Mismatches      | ${audit1Result.blockDivergences}                | ${fixc0gjV2Result.blockDivergences}`,
   );
 
   return {
     audit1Result,
-    fixc0gjV1Result,
     fixc0gjV2Result,
-    reproV1,
   };
 }
 

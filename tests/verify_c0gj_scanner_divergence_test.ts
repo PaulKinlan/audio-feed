@@ -13,7 +13,6 @@ import {
   extractCodeBlocks_audit1,
   formatCodeForTts_audit1,
   formatCodeForTts_fixc0gj_3d32fc4,
-  formatCodeForTts_fixc0gj_9f18cc1,
   formatCodeForTts_main,
   verifyAgainstGitRefs,
 } from "../scripts/verify_c0gj_scanner_divergence.ts";
@@ -88,36 +87,7 @@ Deno.test("c0gj divergence - audit1 (f70e3fa) achieves 0 mismatches across deter
   );
 });
 
-Deno.test("c0gj divergence - fixc0gj v1 (9f18cc1) diverges on solitary 6-backtick runs and leaves markup in text", () => {
-  // Solitary 6 backticks
-  const sixTicks = "``````";
-  const expectedSkip = formatCodeForTts_main(sixTicks, "skip");
-  const actualSkip = formatCodeForTts_fixc0gj_9f18cc1(sixTicks, "skip");
-  assertEquals(expectedSkip, "");
-  assertEquals(
-    actualSkip,
-    "``````",
-    "fixc0gj v1 leaves solitary 6 backticks unstripped",
-  );
-
-  // Six backticks with abc
-  const sixTicksAbc = "``````abc";
-  assertEquals(formatCodeForTts_main(sixTicksAbc, "skip"), "abc");
-  assertEquals(
-    formatCodeForTts_fixc0gj_9f18cc1(sixTicksAbc, "skip"),
-    "``````abc",
-  );
-
-  // Six backticks with \ntail
-  const sixTicksTail = "``````\ntail";
-  assertEquals(formatCodeForTts_main(sixTicksTail, "skip"), "tail");
-  assertEquals(
-    formatCodeForTts_fixc0gj_9f18cc1(sixTicksTail, "skip"),
-    "``````\ntail",
-  );
-});
-
-Deno.test("c0gj divergence - fixc0gj Candidate B (6c884f9) resolves 6-backtick runs but diverges on <pre><code no-gt here</pre>", () => {
+Deno.test("c0gj divergence - fixc0gj Candidate B (3d32fc4) resolves 6-backtick runs but diverges on <pre><code no-gt here</pre>", () => {
   // Resolved 6-backtick runs
   assertEquals(formatCodeForTts_fixc0gj_3d32fc4("``````", "skip"), "");
   assertEquals(formatCodeForTts_fixc0gj_3d32fc4("``````abc", "skip"), "abc");
