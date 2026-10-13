@@ -9,7 +9,7 @@
  * 3. End-to-end multi-segment synthesis of the 8-segment narration script via client.synthesizeNarration
  * 4. Stitched WAV output: valid RIFF/WAVE header, PCM parameters, decodability, duration ≈ sum of segments
  *
- * For fresh evidence, first rm -rf var/segments; then run with:
+ * For fresh evidence, first rm -rf "${TMPDIR:-/tmp}/audio-feed-segments"; then run with:
  *   timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
  *
  * To deliberately regenerate committed documentation (audio-feed-v20a):
@@ -228,9 +228,7 @@ if (import.meta.main) {
       truncated?: boolean;
     }
 
-    const cacheDir = Deno.env.get("TMPDIR")
-      ? `${Deno.env.get("TMPDIR")}/af-segments`
-      : "var/segments";
+    const cacheDir = `${Deno.env.get("TMPDIR") || "/tmp"}/audio-feed-segments`;
     await Deno.mkdir(cacheDir, { recursive: true });
 
     const capturedSegments: SegmentRecord[] = [];
@@ -638,7 +636,7 @@ timeout -k 30 60 deno test --allow-env tests/gemini_base_url_test.ts
 timeout -k 30 30 deno test --allow-env --allow-read tests/tts_test.ts
 
 # 3. Force a fresh run (otherwise the harness reports cache/mixed provenance)
-rm -rf var/segments
+rm -rf "\${TMPDIR:-/tmp}/audio-feed-segments"
 timeout -k 30 750 deno run --allow-net --allow-env --allow-read --allow-write scripts/verify_live_e2e_tts.ts
 \`\`\``,
         },
