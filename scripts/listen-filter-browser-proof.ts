@@ -10,7 +10,7 @@
  *      - Filters by non-matching query -> asserts honest #filterEmpty ("No episodes match..."), #empty hidden.
  *      - Clicks #clearFilterBtn -> asserts 5 rows and "5 episodes" restored.
  *      - Persists filter across reload -> asserts filter restored on reload.
- *      - Asserts per-token isolation (different token has no saved filter).
+ *      - Asserts per-user filter storage (another user ID has no saved filter).
  *      - Extracts a11y tree for filter controls.
  *   3. Mobile (390x844):
  *      - Verifies zero horizontal overflow (scrollWidth <= clientWidth).
@@ -29,7 +29,7 @@ const ASSERTS = [
   "empty state names the active filters honestly",
   "generic 'No episodes yet' empty state is hidden while filter is active",
   "clearing filters restores '5 episodes'",
-  "filters survive reload on the same token",
+  "filters survive reload for the same user",
   "filter state is scoped per-user",
   "a11y tree includes search role landmark",
   "mobile layout has zero horizontal overflow at 390px",
@@ -243,12 +243,12 @@ try {
         const reloadedSource = await js(`document.getElementById("filterSource")?.value`);
         const reloadedCount = await js(`document.getElementById("episodeCount")?.textContent`);
         checker.check(
-          "filters survive reload on the same token",
+          "filters survive reload for the same user",
           reloadedSource === "Stratechery" && reloadedCount === "3 of 5 episodes",
           `source: '${reloadedSource}', count: '${reloadedCount}'`,
         );
 
-        // 7. Per-token isolation
+        // 7. Per-user filter storage isolation
         const savedFilter = await js(`localStorage.getItem("audio-feed-filter:user-1")`);
         const otherTokenFilter = await js(`localStorage.getItem("audio-feed-filter:other-user")`);
         checker.check(
