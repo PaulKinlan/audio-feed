@@ -223,7 +223,7 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   );
   for (const id of unsuppressedIds) {
     assert(
-      !suppressedEpisodes.includes(id),
+      !suppressedEpisodes!.includes(id),
       `unsuppressed episode ${id} must not appear in suppressedEpisodes`,
     );
   }
@@ -233,7 +233,7 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
     "suppressedStages must record exact count per suppressed stage",
   );
   assertEquals(
-    Object.values(suppressedStages).reduce((a, b) => a + b, 0),
+    Object.values(suppressedStages!).reduce((a, b) => a + b, 0),
     expectedSuppressed,
     "sum of suppressedStages must equal total suppressed",
   );
@@ -281,4 +281,51 @@ Deno.test("audio-feed-938b: default production cap accommodates standard 6-episo
     0,
     "default cap must not prematurely suppress a standard 6-episode batch",
   );
+});
+
+Deno.test("audio-feed-a73i: each stage wrap threads currentEpisode.id so a suppressed terminal stage names its episode", async () => {
+  // audio-feed-a73i (P3 review finding from rev-44):
+  // The suppressedEpisodes guarantee rests on EVERY markStage call site threading currentEpisode.id.
+  // If an episode's ONLY executed stage after cap exhaustion is suppressed (e.g. tts throws on its first attempt,
+  // before verify or upload can run), that episode MUST still appear in suppressedEpisodes.
+  // A mutant that drops currentEpisode.id from markStage("tts", ...) leaves suppressedEpisodes empty for this episode.
+  const ids = Array.from({ length: 6 }, (_, i) => `ep-a73i-isolated-${i}`);
+  const { ctx, stores } = await seedEpisodes(ids);
+  const audio = fakeAudio();
+  const run = await runSynthesisBatch(
+    ctx,
+    (params) => {
+      // Episodes 0..4 succeed across all 3 stages (5 x 3 = 15 marks emitted).
+      // Episode 5's TTS immediately throws, so tts is its ONLY executed stage.
+      if (params.episode.id === "ep-a73i-isolated-5") {
+        throw new Error("isolated tts failure on suppressed episode");
+      }
+      return Promise.resolve(audio);
+    },
+    { batchSize: 6, maxAttempts: 1, owner: "a73i-isolated", stageMarkCap: 15 },
+  );
+
+  assertEquals(run.ready.length, 5, "5 episodes succeed before cap exhaustion");
+  assertEquals(run.failed.length, 1, "6th episode fails terminally on TTS");
+
+  const logs = await stores.metadata.listLogs();
+  const all = stageMarks(logs);
+  const capped = all.filter((log) => log.phase === "capped");
+  assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
+
+  const context = capped[0]?.context;
+  const suppressedEpisodes = context?.suppressedEpisodes as string[] | undefined;
+  assertEquals(context?.suppressed, 1, "exactly 1 mark suppressed");
+  assertEquals(context?.suppressedStages, { tts: 1 }, "only tts was suppressed for 6th episode");
+  assertEquals(
+    suppressedEpisodes,
+    ["ep-a73i-isolated-5"],
+    "suppressedEpisodes must name the episode whose only executed stage (tts) was suppressed",
+  );
+  for (let i = 0; i < 5; i++) {
+    assert(
+      !suppressedEpisodes?.includes(`ep-a73i-isolated-${i}`),
+      `unsuppressed episode ep-a73i-isolated-${i} must not appear in suppressedEpisodes`,
+    );
+  }
 });
