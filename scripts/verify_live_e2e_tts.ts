@@ -188,7 +188,10 @@ if (import.meta.main) {
       truncated?: boolean;
     }
 
-    await Deno.mkdir("var/segments", { recursive: true });
+    const cacheDir = Deno.env.get("TMPDIR")
+      ? `${Deno.env.get("TMPDIR")}/af-segments`
+      : "var/segments";
+    await Deno.mkdir(cacheDir, { recursive: true });
 
     const capturedSegments: SegmentRecord[] = [];
     let prepareIndex = 1;
@@ -252,7 +255,7 @@ if (import.meta.main) {
                 `Unexpected segment text at index ${index}; cannot attribute evidence or cache safely`,
               );
             }
-            const cacheFile = `var/segments/segment-${index}.wav`;
+            const cacheFile = `${cacheDir}/segment-${index}.wav`;
             try {
               const wav = await Deno.readFile(cacheFile);
               if (wav.length > 44) {
@@ -277,7 +280,7 @@ if (import.meta.main) {
             pendingIndex = undefined;
             // Cache segment WAV to disk
             try {
-              await Deno.writeFile(`var/segments/segment-${index}.wav`, decoded.toWav());
+              await Deno.writeFile(`${cacheDir}/segment-${index}.wav`, decoded.toWav());
             } catch {
               // ignore cache write failures
             }
