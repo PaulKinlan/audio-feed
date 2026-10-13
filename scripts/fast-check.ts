@@ -920,7 +920,13 @@ ${auditUniverseDrift}`);
   // an UNTOUCHED importer of a changed file is exactly what skipping them
   // would miss.
   let cheapStepsFailed = false;
-  for (const step of [["deno", "fmt", "--check"], ["deno", "lint"], ["deno", "task", "check"]]) {
+  // The integration test checks an OS-temp fixture explicitly, so SIGKILL cannot leave an
+  // untracked, unformatted test file behind to fail the next gate in this worktree.
+  const fmtFixture = Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST")
+    ? Deno.env.get("FAST_GATE_FMT_FIXTURE")
+    : null;
+  const fmtStep = ["deno", "fmt", "--check", ...(fmtFixture ? [fmtFixture] : [])];
+  for (const step of [fmtStep, ["deno", "lint"], ["deno", "task", "check"]]) {
     const res = await run(step);
     if (res.code !== 0) {
       console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);

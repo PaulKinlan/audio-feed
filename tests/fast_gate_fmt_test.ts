@@ -4,8 +4,9 @@ Deno.test({
   name: "audio-feed-8qnu: fmt failure does not stop the gate before coverage",
   ignore: !!Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST"),
   fn: async () => {
-    const file = "tests/temp_unformatted_test.ts";
-    // The missing spaces make it unformatted
+    // Keep the fixture outside the repo: SIGKILL bypasses finally, but cannot
+    // strand an untracked file that breaks the next gate's bare fmt step.
+    const file = await Deno.makeTempFile({ prefix: "audio-feed-unformatted-", suffix: ".ts" });
     await Deno.writeTextFile(file, "Deno.test('x', ()=>{})");
     try {
       const cmd = new Deno.Command("deno", {
@@ -16,7 +17,11 @@ Deno.test({
           "--allow-env",
           "scripts/fast-check.ts",
         ],
-        env: { ...Deno.env.toObject(), IN_FAST_GATE_INTEGRATION_TEST: "1" },
+        env: {
+          ...Deno.env.toObject(),
+          IN_FAST_GATE_INTEGRATION_TEST: "1",
+          FAST_GATE_FMT_FIXTURE: file,
+        },
         stdout: "piped",
         stderr: "piped",
       });
@@ -45,7 +50,7 @@ Deno.test({
   name: "audio-feed-8qnu control: formatted file passes gate without extra work",
   ignore: !!Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST"),
   fn: async () => {
-    const file = "tests/temp_formatted_test.ts";
+    const file = await Deno.makeTempFile({ prefix: "audio-feed-formatted-", suffix: ".ts" });
     await Deno.writeTextFile(file, 'Deno.test("x", () => {});\n');
     try {
       const cmd = new Deno.Command("deno", {
@@ -56,7 +61,11 @@ Deno.test({
           "--allow-env",
           "scripts/fast-check.ts",
         ],
-        env: { ...Deno.env.toObject(), IN_FAST_GATE_INTEGRATION_TEST: "1" },
+        env: {
+          ...Deno.env.toObject(),
+          IN_FAST_GATE_INTEGRATION_TEST: "1",
+          FAST_GATE_FMT_FIXTURE: file,
+        },
         stdout: "piped",
         stderr: "piped",
       });
