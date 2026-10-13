@@ -274,10 +274,12 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
           `document.getElementById("confirmDialog")?.open === true`,
           "second dialog open",
         );
-        // Evidence: the second dialog, open while returnValue still carries the stale "confirm".
-        // This is the state in which a user's Escape would be read as approval before the fix.
+        // Evidence: the second dialog open on the FIXED tree, i.e. after the reset has run, so
+        // returnValue is empty here. The image documents the surface this row drives; the STALE state
+        // is what the row asserts one check ABOVE, against the first (approved) dialog - not what the
+        // capture shows, because the reset has already cleared it by the time the dialog opens.
         const shot = (await cdp("Page.captureScreenshot", { format: "png" })) as { data: string };
-        const shotPath = `${OUT}01-second-dialog-stale-returnvalue.png`;
+        const shotPath = `${OUT}01-second-dialog-open.png`;
         await Deno.writeFile(shotPath, Uint8Array.fromBase64(shot.data));
         await quantiseEvidencePng(shotPath);
         await pressEscape();
