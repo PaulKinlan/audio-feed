@@ -106,9 +106,15 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   // stage marks - tts and upload - because the yield mark is only reached when the invocation budget
   // aborts. The old seed of six assumed three stages each, which would have been eighteen; what it
   // actually produced was TWELVE, under the fifteen cap, so the cap assertions were never reached and
-  // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the
-  // cap by three. The assertions below are deliberately written so that a future change to the number
-  // of stages per episode makes this row FAIL LOUDLY rather than go vacuous again.
+  // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the cap
+  // by three.
+  //
+  // THE EXACT SUPPRESSED COUNT IS COUPLED TO THE STAGE SET, so it is derived from ONE named assumption
+  // rather than written as a literal. IF A STAGE IS ADDED TO A SUCCESSFUL EPISODE - audio-feed-avgc
+  // adds a fourth and would make this 3, giving twelve suppressed - THE ROW WILL FAIL, and the failure
+  // message names this line. That is the intended trade: a loud, self-diagnosing failure on the day the
+  // stage set changes, rather than a hardcoded number that quietly stops meaning anything.
+  const marksPerSuccessfulEpisode = 2;
   const ids = Array.from({ length: 9 }, (_, i) => `ep-huh4-cap-${i}`);
   const { ctx, stores } = await seedEpisodes(ids);
   const audio = fakeAudio();
@@ -144,7 +150,17 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   assertEquals(marked.length, STAGE_MARK_CAP, "a batch that exceeds the cap must fill it exactly");
   assertEquals(capped.length, 1, "reaching the cap must emit exactly one capped event");
   const suppressed = Number(capped[0]?.context?.suppressed ?? 0);
-  assert(suppressed > 0, "the capped event must name how many were suppressed");
+  // THE EXACT COUNT, DERIVED rather than hardcoded: the suppression that must be named is every stage
+  // execution beyond the cap, and that depends on how many marks a successful episode emits. Asserting
+  // the derived value is what makes this a control - it cannot pass at 0 (no cap: 0 !== 3) and it cannot
+  // pass at a miscounted 1 (1 !== 3) - while the derivation from ONE named assumption means a change to
+  // the stage set produces a failure that names the line to update instead of a stale constant.
+  const expectedSuppressed = 9 * marksPerSuccessfulEpisode - STAGE_MARK_CAP;
+  assertEquals(
+    suppressed,
+    expectedSuppressed,
+    `with marksPerSuccessfulEpisode=${marksPerSuccessfulEpisode}, nine episodes exceed the cap by ${expectedSuppressed}: if a stage was added or removed, update marksPerSuccessfulEpisode (audio-feed-9pvk)`,
+  );
   /**
    * THE CONTROL, CORRECTED AFTER REVIEW (audio-feed-9pvk). The first version asserted
    * marked.length + suppressed > STAGE_MARK_CAP and called itself a negative control. IT WAS A
@@ -154,19 +170,14 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
    * capped event and therefore has suppressed = 0, giving 18 + 0 > 15. A control that cannot detect the
    * absence of the thing it controls for is not a control.
    *
-   * The EXACT accounting is what bites: nine episodes x two stages is eighteen executions, the cap keeps
-   * fifteen, so exactly three must be named as suppressed. Remove the cap and suppressed is 0, which
-   * fails; mis-count the suppressions and the equality fails; reach the cap only by accident and the
-   * first line fails.
+   * The EXACT accounting is what bites: the suppressed count must equal every execution beyond the cap,
+   * which is nine episodes x marksPerSuccessfulEpisode minus the cap. Remove the cap and suppressed is 0,
+   * which fails; mis-count the suppressions and the equality fails; reach the cap only by accident and
+   * the first line fails.
    */
   assertEquals(
-    suppressed,
-    3,
-    "nine episodes x two stages minus a cap of 15 leaves exactly 3 suppressed",
-  );
-  assertEquals(
     marked.length + suppressed,
-    18,
-    "kept + suppressed must account for every stage execution: 9 episodes x 2 stages",
+    9 * marksPerSuccessfulEpisode,
+    "kept + suppressed must account for every stage execution: episodes x marksPerSuccessfulEpisode",
   );
 });
