@@ -793,12 +793,21 @@ export interface EvidenceReadmeOptions {
   allowLocalhost?: boolean;
   executedBy?: string;
   checker?: Checker;
+  /** Explicit opt-out for maintenance tools or tests running outside a proof transaction. */
+  allowOutsideProof?: boolean;
 }
 
 export async function writeEvidenceReadme(
   options: EvidenceReadmeOptions,
 ): Promise<string> {
   const activeProof = activeProofStorage.getStore();
+  if (!activeProof && !options.allowOutsideProof) {
+    throw new Error(
+      `writeEvidenceReadme() called outside of runProof() context for '${
+        options.script ?? options.dir
+      }'. Evidence must be written inside await runProof(name, async (checker) => { ... }) to ensure atomic rollback and transactional integrity. (Pass allowOutsideProof: true only for non-proof maintenance tools).`,
+    );
+  }
   const checkers: Checker[] = [];
   if (activeProof?.checker) {
     checkers.push(activeProof.checker);

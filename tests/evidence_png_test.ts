@@ -10,7 +10,69 @@
  */
 
 import { assertEquals, assertMatch, assertRejects, assertThrows } from "@std/assert";
-import { quantiseEvidencePng } from "../scripts/evidence-png.ts";
+import { quantiseEvidencePng, quantiseMaintenancePng } from "../scripts/evidence-png.ts";
+import { runProof } from "../scripts/proof-helper.ts";
+
+Deno.test({
+  name: "quantiseEvidencePng: throws when called outside runProof without allowOutsideProof",
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-png-unbound-" });
+    const filePath = `${dir}/shot.png`;
+    await Deno.writeFile(filePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    try {
+      const err = await assertRejects(
+        () => quantiseEvidencePng(filePath),
+        Error,
+        "quantiseEvidencePng() called outside of runProof() context",
+      );
+      assertMatch(err.message, /Evidence must be written inside await runProof/);
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "quantiseMaintenancePng: succeeds outside runProof",
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-png-maintenance-" });
+    const filePath = `${dir}/shot.png`;
+    const tmpPath = `${filePath}.tmp`;
+    await Deno.writeFile(filePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    try {
+      await Deno.writeTextFile(tmpPath, "maintenance-bytes");
+      const res = await quantiseMaintenancePng(filePath, {
+        runner: () => Promise.resolve({ success: true, code: 0 }),
+      });
+      assertEquals(res, filePath);
+      assertEquals(await Deno.readTextFile(filePath), "maintenance-bytes");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "quantiseEvidencePng: succeeds inside runProof without explicit allowOutsideProof",
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-png-in-proof-" });
+    const filePath = `${dir}/shot.png`;
+    const tmpPath = `${filePath}.tmp`;
+    await Deno.writeFile(filePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    try {
+      await runProof("test-quantise-in-proof", async () => {
+        await Deno.writeTextFile(tmpPath, "in-proof-bytes");
+        const res = await quantiseEvidencePng(filePath, {
+          runner: () => Promise.resolve({ success: true, code: 0 }),
+        });
+        assertEquals(res, filePath);
+        assertEquals(await Deno.readTextFile(filePath), "in-proof-bytes");
+      });
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
 
 Deno.test({
   name:
@@ -47,7 +109,7 @@ exit 7
       Deno.env.set("PATH", `${binDir}:${origPath}`);
 
       const err = await assertRejects(
-        () => quantiseEvidencePng(filePath),
+        () => quantiseEvidencePng(filePath, { allowOutsideProof: true }),
         Error,
       );
 
@@ -88,7 +150,7 @@ Deno.test({
       Deno.env.set("PATH", emptyBinDir);
 
       const err = await assertRejects(
-        () => quantiseEvidencePng(filePath),
+        () => quantiseEvidencePng(filePath, { allowOutsideProof: true }),
         Error,
       );
 
@@ -134,7 +196,7 @@ Deno.test({
       await Deno.rename(`${oldPath}.tmp`, oldPath);
 
       // Run new helper
-      const returnedPath = await quantiseEvidencePng(newPath);
+      const returnedPath = await quantiseEvidencePng(newPath, { allowOutsideProof: true });
       assertEquals(returnedPath, newPath);
 
       // Byte-for-byte check
@@ -167,6 +229,7 @@ Deno.test({
         colors: 128,
         compressionLevel: 9,
         formatPrefix: "PNG8",
+        allowOutsideProof: true,
       });
 
       const oldBytes8 = await Deno.readFile(oldPath8);
@@ -192,6 +255,7 @@ Deno.test({
       const errExit = await assertRejects(
         () =>
           quantiseEvidencePng(filePath, {
+            allowOutsideProof: true,
             runner: () => Promise.resolve({ success: false, code: 42 }),
           }),
         Error,
@@ -204,6 +268,7 @@ Deno.test({
       const errSpawn = await assertRejects(
         () =>
           quantiseEvidencePng(filePath, {
+            allowOutsideProof: true,
             runner: () => {
               const e = new Error("Command failed to spawn");
               (e as unknown as { code: string }).code = "EACCES";
@@ -218,6 +283,7 @@ Deno.test({
       // C. Simulated success
       await Deno.writeTextFile(tmpPath, "converted-bytes");
       const res = await quantiseEvidencePng(filePath, {
+        allowOutsideProof: true,
         runner: () => Promise.resolve({ success: true, code: 0 }),
       });
       assertEquals(res, filePath);
@@ -229,6 +295,7 @@ Deno.test({
       await quantiseEvidencePng(filePath, {
         colors: 128,
         formatPrefix: "PNG8",
+        allowOutsideProof: true,
         runner: (_cmd, args) => {
           capturedArgs = args;
           return Promise.resolve({ success: true, code: 0 });
@@ -387,7 +454,7 @@ Deno.test({
       // 3. POSITIVE ASSERTION (default options: 256 colors, png8:)
       const defaultPath = `${dir}/stripped_default.png`;
       await Deno.copyFile(rawPath, defaultPath);
-      await quantiseEvidencePng(defaultPath);
+      await quantiseEvidencePng(defaultPath, { allowOutsideProof: true });
 
       const defaultBytes = await Deno.readFile(defaultPath);
       const defaultChunks = parsePngChunks(defaultBytes);
@@ -412,6 +479,7 @@ Deno.test({
         colors: 128,
         compressionLevel: 9,
         formatPrefix: "PNG8",
+        allowOutsideProof: true,
       });
 
       const site8Bytes = await Deno.readFile(site8Path);
