@@ -80,6 +80,7 @@ export interface Options {
   only?: string;
   timeoutMs: number;
   root: string;
+  explicitTimeout: boolean;
 }
 
 const USAGE =
@@ -87,7 +88,7 @@ const USAGE =
 
 export function parseOptions(args: string[]): Options {
   const root = resolve(fromFileUrl(new URL("../", import.meta.url)));
-  const options: Options = { list: false, timeoutMs: 300_000, root };
+  const options: Options = { list: false, timeoutMs: 300_000, root, explicitTimeout: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const value = args[i + 1];
@@ -97,12 +98,13 @@ export function parseOptions(args: string[]): Options {
       i++;
     } else if (arg === "--timeout" && value) {
       const seconds = Number(value);
-      if (!Number.isFinite(seconds) || seconds <= 0) {
+      if (!Number.isFinite(seconds) || seconds < 1) {
         throw new Error(
-          `--timeout needs a positive number of seconds, got ${JSON.stringify(value)}`,
+          `--timeout needs a positive number of seconds (>= 1), got ${JSON.stringify(value)}`,
         );
       }
       options.timeoutMs = Math.round(seconds * 1000);
+      options.explicitTimeout = true;
       i++;
     } else if (arg === "--root" && value) {
       options.root = resolve(value);
@@ -143,7 +145,14 @@ export function readDeclaration(readme: string): DeclarationInfo {
   let timeoutSec: number | null = null;
   let rawTimeout: string | null = null;
   let timeoutMalformed = false;
+  let inFence = false;
   for (const line of readme.split("\n")) {
+    if (/^\s*(?:```+|~~~+)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
     const scriptMatch = /^\s*-\s*Script:\s*(.+?)\s*$/.exec(line);
     if (scriptMatch) declared = scriptMatch[1]!.replace(/[`"']/g, "").trim();
     if (/^\s*-\s*Capture:\s*no assertions\b/.test(line)) isCapture = true;
@@ -157,7 +166,7 @@ export function readDeclaration(readme: string): DeclarationInfo {
       const numMatch = /^([0-9]+(?:\.[0-9]+)?)\s*(?:s(?:ecs?|econds?)?)?$/i.exec(rawTimeout);
       if (numMatch) {
         const sec = Number(numMatch[1]);
-        if (Number.isFinite(sec) && sec > 0) {
+        if (Number.isFinite(sec) && sec >= 1) {
           timeoutSec = sec;
         } else {
           timeoutMalformed = true;
@@ -209,12 +218,46 @@ export async function findNestedEvidence(evidenceRoot: string): Promise<string[]
   return nested;
 }
 
+export interface MalformedTimeout {
+  dir: string;
+  rawTimeout: string | null;
+}
+
+export type BoundProvenance = "flag" | "declared" | "default";
+
+export interface ResolvedBound {
+  timeoutMs: number;
+  boundSec: number;
+  provenance: BoundProvenance;
+}
+
+export function resolveBound(
+  options: Options,
+  declaration: Declaration,
+): ResolvedBound {
+  let timeoutMs: number;
+  let provenance: BoundProvenance;
+  if (options.explicitTimeout) {
+    timeoutMs = options.timeoutMs;
+    provenance = "flag";
+  } else if (declaration.timeoutMs !== undefined) {
+    timeoutMs = declaration.timeoutMs;
+    provenance = "declared";
+  } else {
+    timeoutMs = options.timeoutMs;
+    provenance = "default";
+  }
+  const boundSec = timeoutMs / 1000;
+  return { timeoutMs, boundSec, provenance };
+}
+
 export async function collect(options: Options): Promise<{
   declarations: Declaration[];
   undeclared: string[];
   withoutReadme: string[];
   refused: string[];
   symlinks: string[];
+  malformedTimeouts: MalformedTimeout[];
 }> {
   const evidenceRoot = join(options.root, "docs", "evidence");
   const declarations: Declaration[] = [];
@@ -222,6 +265,7 @@ export async function collect(options: Options): Promise<{
   const withoutReadme: string[] = [];
   const refused: string[] = [];
   const symlinks: string[] = [];
+  const malformedTimeouts: MalformedTimeout[] = [];
   const names: string[] = [];
   try {
     for await (const entry of Deno.readDir(evidenceRoot)) {
@@ -259,6 +303,9 @@ export async function collect(options: Options): Promise<{
       continue;
     }
     const info = readDeclaration(readme);
+    if (info.timeoutMalformed) {
+      malformedTimeouts.push({ dir, rawTimeout: info.rawTimeout });
+    }
     if (!info.declared) {
       undeclared.push(dir);
       continue;
@@ -300,7 +347,7 @@ export async function collect(options: Options): Promise<{
       timeoutMalformed: info.timeoutMalformed,
     });
   }
-  return { declarations, undeclared, withoutReadme, refused, symlinks };
+  return { declarations, undeclared, withoutReadme, refused, symlinks, malformedTimeouts };
 }
 
 export function stripAnsi(text: string): string {
@@ -344,13 +391,12 @@ export async function runProof(
   onChild: (pid: number | null) => void,
 ): Promise<RunResult> {
   const started = performance.now();
-  const effectiveTimeoutMs = declaration.timeoutMs ?? options.timeoutMs;
-  const seconds = Math.max(1, Math.round(effectiveTimeoutMs / 1000));
+  const { timeoutMs: effectiveTimeoutMs, boundSec } = resolveBound(options, declaration);
   const command = new Deno.Command("timeout", {
     args: [
       "-k",
       "5",
-      `${seconds}`,
+      `${boundSec}`,
       Deno.execPath(),
       "run",
       "--allow-all",
@@ -411,12 +457,12 @@ export async function runProof(
 
 export async function main(args: string[] = Deno.args): Promise<void> {
   const options = parseOptions(args);
-  const { declarations, undeclared, withoutReadme, refused, symlinks } = await collect(options);
+  const { declarations, undeclared, withoutReadme, refused, symlinks, malformedTimeouts } =
+    await collect(options);
   const unresolved = declarations.filter((declaration) => !declaration.exists);
   const unresolvedExecutors = declarations.filter(
     (declaration) => declaration.executedBy !== null && declaration.executorExists === false,
   );
-  const malformedTimeouts = declarations.filter((declaration) => declaration.timeoutMalformed);
 
   /**
    * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
@@ -593,9 +639,7 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       // because an unknown is not a pass - but calling it a failure would be this tier overclaiming.
       const verdict = result.passed ? "ok  " : result.timedOut ? "TIMEOUT" : "FAIL";
       const reasonNote = result.failureReason ? ` (${result.failureReason})` : "";
-      const effectiveTimeoutMs = declaration.timeoutMs ?? options.timeoutMs;
-      const boundSec = effectiveTimeoutMs / 1000;
-      const provenance = declaration.timeoutMs !== undefined ? "declared" : "default";
+      const { boundSec, provenance } = resolveBound(options, declaration);
       const note = result.timedOut
         ? ` UNKNOWN (exceeded the ${boundSec}s bound [${provenance}]; raise --timeout to decide it)`
         : reasonNote;
