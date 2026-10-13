@@ -115,6 +115,7 @@ Deno.test({
       const mutatedVerdict = interpretRun(mutated, {
         kind: "detector",
         expect: row.expect,
+        expectRelationship: row.expectRelationship,
         soleRed: row.soleRed,
       });
       assertEquals(

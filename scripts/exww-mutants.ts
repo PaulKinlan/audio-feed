@@ -28,7 +28,10 @@
  *      rather than silently not applied (a mutant that did not apply looks exactly like a check that
  *      does not work); and
  *   2. the expected FAIL message must itself QUOTE the mutated value - "clip was x=1000..1280" for the
- *      x-shift, "image is 640x473" for the wrong scale. Asserting that the text changed is necessary and
+ *      x-shift. A row whose expected red contains numbers that belong to the PAGE asserts a RELATIONSHIP
+ *      instead of a literal (audio-feed-yylk): the wrong-scale row checks `image == clip x the substituted
+ *      scale`, so a section that legitimately resizes cannot read as a mutant that did not react, and a
+ *      substitution that did not apply still cannot pass. Asserting that the text changed is necessary and
  *      not sufficient; the message proves the mutated value reached the assertion.
  * The md5 of every mutated file is printed as the third, independent record of what ran.
  *
@@ -45,6 +48,65 @@
 import { join, resolve } from "@std/path";
 import { createTempChromeProfile } from "./proof-helper.ts";
 
+/**
+ * The scale the wrong-scale mutant substitutes for the `04-` capture. Named ONCE, because the mutation and the
+ * expectation it must produce are two readouts of the same number rather than two copies of it: the row below
+ * substitutes this value and `wrongScaleRedDetail` requires the red to carry it.
+ */
+export const WRONG_SCALE = 0.5;
+
+/** The capture the wrong-scale mutant targets, and the sentence the proof emits about image dimensions. */
+export const CAPTURE_04 = "04-recent-failures-real-provider-error.png";
+const IMAGE_CLIP = /image is (\d+)x(\d+) for a clip of (\d+)x(\d+) at scale ([\d.]+)/;
+
+/**
+ * audio-feed-yylk: the wrong-scale mutant's expected red as a RELATIONSHIP, not as the dimensions the page
+ * happened to have when the literal was written.
+ *
+ * THE DEFECT THIS REPLACES: the row pinned `image is 640x473 for a clip of 1280x946`, but a clip's dimensions
+ * are the LIVE layout - the proof computes them from the section's own rendered box - so when a 43px link was
+ * added to that section the harness reported "MISSING the expected red ... the mutant applied and the check did
+ * not react" while the check had reddened correctly at `1280x989`. A literal standing in for a relationship
+ * reads a working predicate as a broken one, and the failure text then sends a reader looking for a bug that
+ * is not there - which is worse than a red, because it is a red that lies about what caused it.
+ *
+ * WHAT IS ASSERTED INSTEAD, read from the message the proof itself emits - `image is {w}x{h} for a clip of
+ * {cw}x{ch} at scale {s}`: the scale must be the one the MUTATION introduced, and the image must be that clip
+ * at that scale. Both numbers move with the page, so a legitimate resize cannot fail the row; the scale cannot
+ * move with the page, so a substitution that did not apply (which leaves EVIDENCE_SCALE in place) cannot pass
+ * it. Returns null when the red satisfies the relationship, or a description of the part that differs.
+ */
+export function wrongScaleRedDetail(
+  failures: string[],
+  scale: number = WRONG_SCALE,
+): string | null {
+  // `includes`, not `startsWith`: the proof's failure lines carry a leading space (the harness prefixes them),
+  // and a capture's own line reads " 04-...png covers the Recent failures section carrying the provider error
+  //  image is WxH ... " - the capture is contained, not leading. Measured, not assumed (audio-feed-yylk).
+  const line = failures.find((f) => f.includes(CAPTURE_04) && IMAGE_CLIP.test(f));
+  if (!line) {
+    return `no failure names the 04 capture's image-dimensions check (expected the shape "image is WxH for a ` +
+      `clip of CxD at scale S"): ${failures.join(" | ") || "(no failures at all)"}`;
+  }
+  const match = line.match(IMAGE_CLIP)!;
+  const imageWidth = Number(match[1]);
+  const imageHeight = Number(match[2]);
+  const clipWidth = Number(match[3]);
+  const clipHeight = Number(match[4]);
+  const observedScale = Number(match[5]);
+  if (observedScale !== scale) {
+    return `the red is at scale ${observedScale}, not the ${scale} this mutant substitutes - the substitution ` +
+      `did not reach the capture, so the check is reacting to something else`;
+  }
+  const expectedWidth = Math.round(clipWidth * scale);
+  const expectedHeight = Math.round(clipHeight * scale);
+  if (imageWidth !== expectedWidth || imageHeight !== expectedHeight) {
+    return `the red's image is ${imageWidth}x${imageHeight}, but its own clip ${clipWidth}x${clipHeight} at ` +
+      `scale ${scale} is ${expectedWidth}x${expectedHeight}`;
+  }
+  return null;
+}
+
 export interface Mutant {
   /** Row name, as `--only` spells it. */
   name: string;
@@ -56,6 +118,12 @@ export interface Mutant {
   apply: (source: string) => string;
   /** Substrings that MUST appear among the FAIL lines (mutated values included, deliberately). */
   expect: string[];
+  /**
+   * For a row whose expected red contains numbers belonging to the PAGE rather than to the mutation
+   * (audio-feed-yylk): returns null when the red satisfies the relationship, or names the part that differs.
+   * Checked IN ADDITION to `expect`, never instead of it, so the row still pins the shape of the red.
+   */
+  expectRelationship?: (failures: string[]) => string | null;
   /** When set, these are the ONLY failures allowed: the separation is enforced, not commented. */
   soleRed?: string[];
 }
@@ -176,10 +244,12 @@ export const MUTANTS: Mutant[] = [
       substitute(
         s,
         "          scale: EVIDENCE_SCALE,",
-        '          scale: name.startsWith("04-") ? 0.5 : EVIDENCE_SCALE,',
-        "04 clip scale -> 0.5",
+        `          scale: name.startsWith("04-") ? ${WRONG_SCALE} : EVIDENCE_SCALE,`,
+        `04 clip scale -> ${WRONG_SCALE}`,
       ),
-    expect: ["image is 640x473 for a clip of 1280x946"],
+    // The needles are the SHAPE of the red and are stable across a resize; the numbers are the relationship.
+    expect: [CAPTURE_04, "image is", "for a clip of"],
+    expectRelationship: wrongScaleRedDetail,
   },
   {
     name: "background-coloured-claim",
@@ -274,6 +344,11 @@ function printMatrix(): void {
     console.log(`  ${mutant.name.padEnd(26)} ${mutant.bead}`);
     console.log(`      proves: ${mutant.why}`);
     console.log(`      expects the run to redden: ${mutant.expect.join(" | ")}`);
+    if (mutant.expectRelationship) {
+      console.log(
+        `      and the red must satisfy its relationship, not a literal (audio-feed-yylk)`,
+      );
+    }
     if (mutant.soleRed) {
       console.log(
         `      and NOTHING else may fail (separation enforced): ${mutant.soleRed.join(" | ")}`,
@@ -447,7 +522,17 @@ export function exitCodeFor(summary: Summary): number {
 /** What a caller expects of a run: the BASELINE must be green, a detector row must redden its named check. */
 export type Expectation =
   | { kind: "green" }
-  | { kind: "detector"; expect: string[]; soleRed?: string[] };
+  | {
+    kind: "detector";
+    expect: string[];
+    /**
+     * For a row whose expected red contains numbers that belong to the PAGE rather than to the mutation
+     * (audio-feed-yylk): returns null when the red satisfies the relationship, or names the part that differs.
+     * Checked IN ADDITION to `expect`, never instead of it.
+     */
+    expectRelationship?: (failures: string[]) => string | null;
+    soleRed?: string[];
+  };
 
 export interface Interpretation {
   verdict: Verdict;
@@ -498,8 +583,24 @@ export function interpretRun(outcome: RunOutcome, expectation: Expectation): Int
         `MISSING the expected red: ${
           expectation.expect.join(" | ")
         } - the mutant applied and the ` +
-        `check did not react, which is the state this harness exists to make loud`,
+        `check did not react, which is the state this harness exists to make loud. Observed ${outcome.failures.length} failure(s): ${
+          outcome.failures.join(" | ") || "(none)"
+        }`,
     };
+  }
+  if (expectation.expectRelationship) {
+    const mismatch = expectation.expectRelationship(outcome.failures);
+    if (mismatch) {
+      // audio-feed-yylk: name the part that differs instead of reporting a blanket "unexpected". The row
+      // reddened, so saying only that it did not react sends a reader looking for a broken predicate.
+      return {
+        verdict: "unexpected",
+        detail:
+          `MISMATCHED the expected red - this is the part that differs: ${mismatch}. Observed: ${
+            outcome.failures.join(" | ")
+          }`,
+      };
+    }
   }
   if (!soleRedOk) {
     return {
@@ -617,6 +718,7 @@ if (import.meta.main) {
     const judged = interpretRun(outcome, {
       kind: "detector",
       expect: mutant.expect,
+      expectRelationship: mutant.expectRelationship,
       soleRed: mutant.soleRed,
     });
     const asExpected = judged.verdict === "red on the named check";
