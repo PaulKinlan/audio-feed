@@ -75,59 +75,72 @@ const PNGS = [
   "03-listen-web-player.png",
 ] as const;
 
-async function runFreshProof(dir: string): Promise<void> {
-  const source = await Deno.readTextFile(PROOF);
-  let copy = source;
-  for (
-    const [from, to] of [
-      ["../src/", new URL("../src/", import.meta.url).href],
-      ["../tests/", new URL("../tests/", import.meta.url).href],
-      ["./proof-helper.ts", new URL("../scripts/proof-helper.ts", import.meta.url).href],
-    ]
-  ) {
-    copy = copy.replaceAll(`"${from}`, `"${to}`);
-  }
-  const pngImport = 'import { quantiseEvidencePng } from "./evidence-png.ts";';
-  const outDeclaration =
-    'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
-  assertEquals(
-    copy.split(pngImport).length,
-    2,
-    "the raw capture must bypass exactly one quantiser",
-  );
-  assertEquals(copy.split(outDeclaration).length, 2, "the proof must write only into the temp dir");
-  copy = copy.replace(
-    pngImport,
-    "const quantiseEvidencePng = async (_path: string, _options?: unknown): Promise<void> => {};",
-  ).replace(outDeclaration, `const OUT = ${JSON.stringify(`${dir}/evidence/`)};`);
-  for (
-    const [anchor, file] of [
-      ['const shotAdmin = (await cdp("Page.captureScreenshot", { format: "png" }))', "01-admin"],
-      ['const shotHome = (await cdp("Page.captureScreenshot", { format: "png" }))', "02-home"],
-    ] as const
-  ) {
-    assertEquals(copy.split(anchor).length, 2, `${file} capture anchor must appear once`);
-    copy = copy.replace(
-      anchor,
-      `await Deno.writeTextFile(OUT + ${JSON.stringify(`${file}.masks.json`)}, ` +
-        `JSON.stringify(await js(${JSON.stringify(MASK_EXPRESSION)})));\n        ${anchor}`,
+async function runFreshProof(): Promise<string> {
+  // Keep the temp-dir origin in this scope so the read-relation detector classifies proof.ts
+  // as OUT-OF-REPO rather than an unresolved path that disables inert docs-only gates.
+  const dir = await Deno.makeTempDir({ prefix: "l7m1-raw-" });
+  try {
+    const source = await Deno.readTextFile(PROOF);
+    let copy = source;
+    for (
+      const [from, to] of [
+        ["../src/", new URL("../src/", import.meta.url).href],
+        ["../tests/", new URL("../tests/", import.meta.url).href],
+        ["./proof-helper.ts", new URL("../scripts/proof-helper.ts", import.meta.url).href],
+      ]
+    ) {
+      copy = copy.replaceAll(`"${from}`, `"${to}`);
+    }
+    const pngImport = 'import { quantiseEvidencePng } from "./evidence-png.ts";';
+    const outDeclaration =
+      'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
+    assertEquals(
+      copy.split(pngImport).length,
+      2,
+      "the raw capture must bypass exactly one quantiser",
     );
+    assertEquals(
+      copy.split(outDeclaration).length,
+      2,
+      "the proof must write only into the temp dir",
+    );
+    copy = copy.replace(
+      pngImport,
+      "const quantiseEvidencePng = async (_path: string, _options?: unknown): Promise<void> => {};",
+    ).replace(outDeclaration, `const OUT = ${JSON.stringify(`${dir}/evidence/`)};`);
+    for (
+      const [anchor, file] of [
+        ['const shotAdmin = (await cdp("Page.captureScreenshot", { format: "png" }))', "01-admin"],
+        ['const shotHome = (await cdp("Page.captureScreenshot", { format: "png" }))', "02-home"],
+      ] as const
+    ) {
+      assertEquals(copy.split(anchor).length, 2, `${file} capture anchor must appear once`);
+      copy = copy.replace(
+        anchor,
+        `await Deno.writeTextFile(OUT + ${JSON.stringify(`${file}.masks.json`)}, ` +
+          `JSON.stringify(await js(${JSON.stringify(MASK_EXPRESSION)})));\n        ${anchor}`,
+      );
+    }
+    const script = `${dir}/proof.ts`;
+    await Deno.writeTextFile(script, copy);
+    const output = await new Deno.Command(Deno.execPath(), {
+      args: ["run", `--config=${CONFIG.pathname}`, "--allow-all", "--unstable-kv", script],
+      cwd: REPO.pathname,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert(
+      output.success,
+      `fresh proof failed (${output.code}): ${
+        new TextDecoder().decode(output.stderr).slice(-1600)
+      }\n` +
+        new TextDecoder().decode(output.stdout).slice(-1600),
+    );
+    return dir;
+  } catch (error) {
+    await Deno.remove(dir, { recursive: true });
+    throw error;
   }
-  const script = `${dir}/proof.ts`;
-  await Deno.writeTextFile(script, copy);
-  const output = await new Deno.Command(Deno.execPath(), {
-    args: ["run", `--config=${CONFIG.pathname}`, "--allow-all", "--unstable-kv", script],
-    cwd: REPO.pathname,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  assert(
-    output.success,
-    `fresh proof failed (${output.code}): ${
-      new TextDecoder().decode(output.stderr).slice(-1600)
-    }\n` +
-      new TextDecoder().decode(output.stdout).slice(-1600),
-  );
 }
 
 function imageDimensions(png: Uint8Array): { width: number; height: number } {
@@ -218,12 +231,12 @@ export function maskedInkIsLegible(rgb: Uint8Array, width: number, boxes: Box[])
 }
 
 export async function verifyFreshCaptures(): Promise<void> {
-  const first = await Deno.makeTempDir({ prefix: "l7m1-raw-first-" });
-  const second = await Deno.makeTempDir({ prefix: "l7m1-raw-second-" });
+  let first: string | undefined;
+  let second: string | undefined;
   try {
     // Sequential by construction: never run two headless browsers at once.
-    await runFreshProof(first);
-    await runFreshProof(second);
+    first = await runFreshProof();
+    second = await runFreshProof();
     const readmeA = await Deno.readFile(`${first}/evidence/README.md`);
     const readmeB = await Deno.readFile(`${second}/evidence/README.md`);
     assertEquals(readmeA, readmeB, "two fresh generated READMEs must be byte-identical");
@@ -306,8 +319,8 @@ export async function verifyFreshCaptures(): Promise<void> {
       }
     }
   } finally {
-    await Deno.remove(first, { recursive: true });
-    await Deno.remove(second, { recursive: true });
+    if (first) await Deno.remove(first, { recursive: true });
+    if (second) await Deno.remove(second, { recursive: true });
   }
 }
 
