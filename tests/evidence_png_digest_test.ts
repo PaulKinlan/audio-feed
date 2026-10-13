@@ -17,7 +17,9 @@ async function checkCommittedEvidence(
   // Mutate only an in-memory copy: no committed evidence file is modified by this control.
   const altered = pngBytes.slice();
   altered[altered.length - 1] = altered[altered.length - 1]! ^ 1;
-  assertNotEquals(await sha256PngBytes(altered), digest);
+  const alteredDigest = await sha256PngBytes(altered);
+  console.log(`evidence PNG digest mutation: ${pngPath.pathname} sha256=${alteredDigest}`);
+  assertNotEquals(alteredDigest, digest);
   await assertRejects(
     () => assertEvidencePngDigest(readme, filename, altered),
     Error,

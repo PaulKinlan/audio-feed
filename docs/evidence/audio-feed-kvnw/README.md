@@ -38,3 +38,4 @@ PASS  the SAME shared rule also un-clips the front door's disclosure (audio-feed
 ## Screenshot
 
 - `01-account-bookmarklet-disclosure-open.png`: the bookmarklet box with the disclosure expanded, clipped to the box so the evidence is legible and the PNG stays inside the evidence size budget.
+- SHA-256 (`01-account-bookmarklet-disclosure-open.png`): `660b9c6e8ad36da8ea5cba7e1cc45c108879f57f166e6e00c60ba9a571f2eba2`
