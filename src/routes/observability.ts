@@ -79,6 +79,7 @@ function toEvent(record: LogRecord) {
     message: record.message,
     stack: record.stack ?? null,
     correlationId: record.correlationId ?? null,
+    context: record.context ?? null,
   };
 }
 

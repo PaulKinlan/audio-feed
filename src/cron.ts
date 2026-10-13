@@ -55,6 +55,7 @@ export function registerCronJobs(
   deps: {
     cron?: (name: string, schedule: string, handler: () => Promise<void>) => void;
     synthesizer?: Synthesizer;
+    feedPollDeps?: Parameters<typeof runFeedPollBatch>[1];
   } = {},
 ): CronRegistrationResult {
   const globalDeno = (globalThis as unknown as {
@@ -109,7 +110,7 @@ export function registerCronJobs(
           ctx,
           "feed-poll",
           "cron",
-          () => runFeedPollBatch(ctx),
+          () => runFeedPollBatch(ctx, deps.feedPollDeps),
           (r) => ({
             polled: r.polled,
             queued: r.queued,
@@ -120,8 +121,38 @@ export function registerCronJobs(
         console.log(
           `[audio-feed] cron feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
         );
+        // audio-feed-dvlk: emit feed-poll summary event so ingest stage counts are visible in /api/observability
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: result.failed > 0 ? "warn" : "info",
+          type: "feed.poll",
+          message:
+            `cron feeds: polled ${result.polled}, queued ${result.queued}, failed ${result.failed}`,
+          process: "cron",
+          job: "audio-feed-poll-feeds",
+          context: {
+            polled: result.polled,
+            queued: result.queued,
+            failed: result.failed,
+            errors: result.errors,
+          },
+        });
       } catch (err) {
         console.error("[audio-feed] cron feeds error:", err);
+        try {
+          const { ctx } = await resolveContext();
+          await ctx.stores.metadata.appendLog({
+            time: new Date().toISOString(),
+            severity: "error",
+            type: "feed.poll",
+            message: `cron feeds error: ${(err as Error)?.message ?? String(err)}`,
+            process: "cron",
+            job: "audio-feed-poll-feeds",
+            stack: (err as Error)?.stack,
+          });
+        } catch {
+          // ignore logging failure
+        }
       }
     },
   };
