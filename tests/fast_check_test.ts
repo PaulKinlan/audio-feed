@@ -14,6 +14,7 @@ import {
   allTestFiles,
   extractFailingTests,
   failureMarkers,
+  formatCheckStep,
   formatFailureOutput,
   ignoredSummary,
   nameMatchedTests,
@@ -454,6 +455,42 @@ Deno.test("failureMarkers emits unextracted diagnostic without fragile heuristic
     failureMarkers("", ["tests/a_test.ts", "tests/b_test.ts"]),
     ["fast-gate: failed: (unextracted test)"],
   );
+});
+
+Deno.test("audio-feed-2h5f: production fmt covers deno.json's configured include scope", async () => {
+  // Read the configured scope at the use site: neither directories nor line width belong
+  // in this assertion. Bare `deno fmt --check` delegates both to deno.json.
+  const jsonc = await Deno.readTextFile(new URL("../deno.json", import.meta.url));
+  const config = JSON.parse(
+    jsonc.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+  ) as {
+    fmt?: { include?: string[] };
+  };
+  const configuredPaths = config.fmt?.include ?? [];
+  assert(configuredPaths.length > 0, "deno.json must declare a formatting scope to compare");
+  const gateSource = await Deno.readTextFile(new URL("../scripts/fast-check.ts", import.meta.url));
+  assert(
+    /const\s+fmtStep\s*=\s*formatCheckStep\s*\(\s*fmtFixture\s*\)/.test(gateSource),
+    "the production gate must use the tested formatter command, not leave an unused helper",
+  );
+
+  const production = formatCheckStep(null);
+  assertEquals(production.slice(0, 3), ["deno", "fmt", "--check"]);
+  // Explicit paths override the configuration-derived scope. They are valid only if they
+  // cover EVERY configured path, rather than silently narrowing production to one file.
+  const explicitPaths = production.slice(3);
+  const normalize = (path: string) => path.replace(/\/+$/, "");
+  assertEquals(
+    (explicitPaths.length ? explicitPaths : configuredPaths).map(normalize).sort(),
+    configuredPaths.map(normalize).sort(),
+    `production fmt must cover every deno.json fmt.include path: ${production.join(" ")}`,
+  );
+  assertEquals(formatCheckStep("/tmp/fmt-fixture.ts"), [
+    "deno",
+    "fmt",
+    "--check",
+    "/tmp/fmt-fixture.ts",
+  ], "only the integration-test fixture may narrow formatting to one file");
 });
 
 Deno.test("the gate emits failureMarkers in the tail on both test failure paths (pkv1)", async () => {
