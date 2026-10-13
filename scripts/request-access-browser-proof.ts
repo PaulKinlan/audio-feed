@@ -213,7 +213,7 @@ await runProof("request-access-browser-proof", async (checker) => {
     );
 
     // Capture desktop submitted screenshot
-    // audio-feed-uiye: re-size to the document's FULL height before the submitted
+    // uiye: re-size to the document's FULL height before the submitted
     // capture. The metrics above were set once for the pre-submit page, so a plain
     // viewport grab crops the confirmation that submission appends below the fold -
     // which is why 03 and 04 came out byte-identical.
@@ -310,7 +310,7 @@ await runProof("request-access-browser-proof", async (checker) => {
       "mobile request submitted",
     );
 
-    // audio-feed-uiye: same re-size for the mobile pair (dsf 3), so the submitted
+    // uiye: same re-size for the mobile pair (dsf 3), so the submitted
     // confirmation is inside the frame rather than below it.
     await cdp("Emulation.setDeviceMetricsOverride", {
       width: 390,
