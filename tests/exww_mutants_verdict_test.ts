@@ -374,6 +374,10 @@ Deno.test("audio-feed-2mbx: suite and CLI failure reporting must not truncate fa
     expect: row.expect,
     expectRelationship: row.expectRelationship,
   });
+  assertEquals(judged.verdict, "unexpected");
+  assertStringIncludes(judged.detail, "640x473");
+  assertStringIncludes(judged.detail, "1280x989");
+  assertStringIncludes(judged.detail, "640x495");
   // audio-feed-2mbx: verify that any future layout drift (dimensions differing from any historical literal)
   // is accepted when the relationship holds: round(clipWidth * scale) x round(clipHeight * scale)
   const arbitraryClipW = 1340;
