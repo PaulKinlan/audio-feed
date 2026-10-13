@@ -100,6 +100,9 @@ import {
  * that follows a finished run cannot stampede the blob store. */
 const SEGMENT_DELETE_CONCURRENCY = 8;
 
+/** A stored key with different bytes must never be overwritten or retried forever. */
+class TerminalStagingConflictError extends Error {}
+
 /** Transcription of one job into the client call; injectable so tests need no network. */
 export type Synthesizer = (job: {
   article: Article;
@@ -1132,6 +1135,11 @@ async function settleTerminalPersistence(
     if (current?.status === "failed") {
       return { committed: false, failed: true };
     }
+    // A newer claim may be reusing the same content key. The old owner's retry
+    // cap cannot delete its in-flight blob or fail the new claim.
+    if (current?.status === "synthesizing" && current.claimedBy !== owner) {
+      return { committed: false, failed: false };
+    }
     // Exceeded upload retry cap: fail terminally rather than yielding back to pending (audio-feed-lqd6).
     const wrote = current && current.status === "synthesizing" && current.claimedBy === owner
       ? await metadata.completeEpisode(
@@ -1166,9 +1174,9 @@ async function settleTerminalPersistence(
     return { committed: true, episode: checkAfter };
   }
 
-  // Confirmed uncommitted: delete blob and record orphan in KV (audio-feed-fsbk)
-  await blobs.delete(stagingKey).catch(() => {});
-  await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+  // A whole-object PUT can finish in storage even after the invocation aborts.
+  // Keep its stable staging key for the next tick to verify and commit instead of
+  // deleting a completed upload. An interrupted PUT may also have left no object.
   return { committed: false, failed: false };
 }
 
@@ -1177,11 +1185,12 @@ async function settleTerminalPersistence(
  * volume argument for this instrumentation rests on the set being small and knowable, so a stage that
  * is not in this union cannot be emitted by accident.
  *
- * Three members, because three are wrapped. `read` and `script` are the next two the bead names (the
- * article fetch and runScriptStage, the LLM call) and they are NOT declared here until their wraps
- * exist - a union member with no emitter is a claim the code does not make.
+ * Four members, because four are wrapped: `verify` records the terminal HEAD plus byte comparison,
+ * even when no PUT follows. `read` and `script` are the next two the bead names (the article fetch
+ * and runScriptStage, the LLM call) and they are NOT declared here until their wraps exist - a
+ * union member with no emitter is a claim the code does not make.
  */
-type SynthesisStage = "tts" | "upload" | "yield";
+type SynthesisStage = "tts" | "verify" | "upload" | "yield";
 /** Wrap a stage so its duration is recorded on the way out, including when it throws. */
 type StageMarker = <T>(stage: SynthesisStage, fn: () => Promise<T>) => Promise<T>;
 
@@ -1882,7 +1891,26 @@ async function runSynthesisBatchCore(
     // 3. Provenance: Upload timeout uses explicit InvocationBudgetAbortError sentinel; real blob store errors fail.
     // 4. Progress: Preserves all segment checkpoints on yield so subsequent tick can complete the upload.
     const previousKey = currentEpisode.regenerating ? currentEpisode.audioKey : undefined;
-    const stagingKey = audioBlobKey(currentEpisode, "wav", opts.revision());
+    // audio-feed-avgc: the terminal key follows the bytes, not the invocation.
+    // A yielded claim re-stitches the same finalized segments and can discover a
+    // completed PUT on the next tick. Fold in the old published key so even an
+    // identical regeneration gets a new immutable URL. Explicit revisions are
+    // retained for tests that deliberately exercise repeated-key orphan handling;
+    // segment-commit keys continue to use the per-attempt revision above.
+    const audioDigest = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new Uint8Array(bytes)),
+    );
+    const audioHash = Array.from(audioDigest, (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
+    const revisionSeed = new TextEncoder().encode(`${currentEpisode.audioKey ?? ""}:${audioHash}`);
+    const revisionDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", revisionSeed));
+    const revisionHash = Array.from(revisionDigest, (byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const stagingRevision = opts.revision === DEFAULTS.revision
+      ? `sha256-${revisionHash}`
+      : opts.revision();
+    const stagingKey = audioBlobKey(currentEpisode, "wav", stagingRevision);
     const inFlightStagingKey = stagingKey;
 
     // audio-feed-i7vi: the synthesis phase ends where the terminal persistence block begins; the
@@ -1931,11 +1959,6 @@ async function runSynthesisBatchCore(
       }
       continue;
     }
-
-    // Only mark the key in-flight on paths that actually attempt the upload: the
-    // never-fits gate above continues without starting a put, and a phantom entry
-    // would make the orphan sweep skip a key nothing will ever settle (review P3).
-    inFlightUploadKeys.add(inFlightStagingKey);
 
     const currentUploadRetry = currentEpisode.uploadRetry ?? 0;
     const nextUploadRetry = currentUploadRetry + 1;
@@ -2005,36 +2028,46 @@ async function runSynthesisBatchCore(
             throw signal.reason;
           }
 
-          // Abort-aware put with settlement cleanup token (audio-feed-fsbk), and
-          // genuinely abortable since audio-feed-aqms: the wrapper's signal is
-          // threaded into blobs.put, so the invocation-budget deadline closes the
-          // socket (S3 adapter) / rejects (memory adapter) instead of leaving the
-          // isolate awaiting an uninterruptible upload past its own bound.
-          const putPromise = markStage("upload", () =>
-            blobs.put(stagingKey, bytes, {
-              contentType: "audio/wav",
-              signal,
-            }));
-          putPromise
-            .finally(async () => {
-              try {
-                if (signal?.aborted) {
-                  // Delete materialized blob when delayed put settles
-                  await blobs.delete(stagingKey).catch(() => {});
-                  // Only forget orphan record once blob is confirmed deleted
-                  await metadata.forgetOrphanBlob(stagingKey).catch(() => {});
-                }
-              } finally {
-                inFlightUploadKeys.delete(inFlightStagingKey);
+          // A whole-object PUT may have completed after the previous claim
+          // yielded. Measure the HEAD and full-byte verification as its own
+          // stage, including when nothing exists yet or a mismatch throws;
+          // never mistake the cheap reuse path for another upload.
+          let existing: BlobInfo | null = null;
+          let stored: BlobInfo | null = null;
+          await markStage("verify", async () => {
+            existing = await blobs.head(stagingKey);
+            if (existing && existing.size === bytes.length) {
+              const object = await blobs.get(stagingKey);
+              if (object) {
+                const storedBytes = await collect(object.body);
+                if (
+                  storedBytes.length === bytes.length &&
+                  storedBytes.every((byte, i) => byte === bytes[i])
+                ) stored = existing;
               }
-            })
-            .catch(() => {});
-
-          const stored = await putPromise;
-          if (signal?.aborted) {
-            await blobs.delete(stagingKey).catch(() => {});
-            throw signal.reason;
+            }
+          });
+          if (signal?.aborted) throw signal.reason;
+          if (existing && !stored) {
+            throw new TerminalStagingConflictError(
+              `terminal staging key already exists with different audio: ${stagingKey}`,
+            );
           }
+          if (!stored) {
+            // Only a real whole-object PUT receives an upload mark. Abort still
+            // closes its socket; if it committed anyway, the stable key survives
+            // for a later invocation to verify and settle.
+            inFlightUploadKeys.add(inFlightStagingKey);
+            const putPromise = markStage("upload", () =>
+              blobs.put(stagingKey, bytes, {
+                contentType: "audio/wav",
+                signal,
+              }));
+            putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
+              .catch(() => {});
+            stored = await putPromise;
+          }
+          if (signal?.aborted) throw signal.reason;
 
           const byteLength = stored.size ?? bytes.length;
           // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
@@ -2145,6 +2178,20 @@ async function runSynthesisBatchCore(
     }
 
     if (terminalOutcome.kind === "error") {
+      // A key collision/corrupt stored object must never be overwritten or
+      // deleted. Unlike a transport error it will not improve on another tick.
+      if (terminalOutcome.error instanceof TerminalStagingConflictError) {
+        const error = terminalOutcome.error.message;
+        const wrote = await metadata.completeEpisode(
+          unsynthesized(currentEpisode, error),
+          opts.owner,
+        );
+        if (wrote) {
+          result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
+          await notifyOnDemand(currentEpisode, "failed", error);
+        } else result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+        continue;
+      }
       const settle = await settleTerminalPersistence(
         metadata,
         blobs,
@@ -2297,7 +2344,12 @@ async function runSynthesisBatchCore(
         worstCaseEstimateMs: 100,
         fn: async () => {
           try {
-            await blobs.delete(audioKey);
+            // Content-addressed retries can share this key across claims. A
+            // successor still synthesizing may commit this very key after us;
+            // neither a premature delete nor an orphan sweep may race it.
+            const latest = await metadata.getEpisode(currentEpisode.userId, currentEpisode.id);
+            if (latest?.status === "pending" || latest?.status === "synthesizing") return;
+            if (latest?.audioKey !== audioKey) await blobs.delete(audioKey);
           } catch {
             await metadata.recordOrphanBlob(audioKey).catch(() => {});
           }

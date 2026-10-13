@@ -1781,14 +1781,15 @@ Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation bud
   assertEquals(ep?.status, "pending");
 });
 
-Deno.test("audio-feed-fsbk: timed-out upload cleanup cleans blob when put settles and records orphan", async () => {
+Deno.test("audio-feed-avgc: timed-out upload leaves a late completed blob for a retry", async () => {
   const { ctx, stores } = await setupEnv();
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let startedKey = "";
-  stores.blobs.put = async (...args) => {
-    startedKey = args[0];
+  stores.blobs.put = async (key, body, opts) => {
+    startedKey = key;
     await new Promise((r) => setTimeout(r, 135));
-    return oldPut(...args);
+    // Whole-object server-side completion despite the client aborting.
+    return oldPut(key, body, { contentType: opts?.contentType });
   };
   const r = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-upload-race",
@@ -1798,18 +1799,16 @@ Deno.test("audio-feed-fsbk: timed-out upload cleanup cleans blob when put settle
     flushMarginMs: 5,
   });
   assertEquals(r.yielded.length, 1);
-  // Verify orphan record is retained in KV immediately at yield while put is in flight
+  // Never mark a retryable blob as an orphan: this batch's orphan sweep could
+  // otherwise remove it before the next tick gets a chance to reuse it.
   const orphanAtYield = await stores.metadata.listOrphanBlobs(10);
-  assert(
-    orphanAtYield.includes(startedKey),
-    "orphan record must be retained in KV while put is in flight",
-  );
+  assertEquals(orphanAtYield.includes(startedKey), false);
 
-  // Wait for background delayed put to finish (135ms) + hook execution
+  // Wait for the late complete PUT, which the next tick can verify by key.
   await new Promise((r) => setTimeout(r, 160));
-  const staleBlob = await stores.blobs.get(startedKey);
+  const retainedBlob = await stores.blobs.get(startedKey);
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
-  assertEquals(staleBlob, null, "timed-out put must be cleaned up on settlement without lingering");
+  assert(retainedBlob, "a completed PUT must survive the budget yield");
   assertEquals(episode?.status, "pending");
 });
 
@@ -1982,14 +1981,14 @@ Deno.test("audio-feed-uecw: terminal completion commits episode ready and billin
   assertEquals(countAfterSuperseded, 1, "failed completion must never increment billing counters");
 });
 
-Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak uncommitted blob", async () => {
+Deno.test("audio-feed-avgc: lost yield CAS does not orphan a potentially reusable upload", async () => {
   const { ctx, stores } = await setupEnv();
   let stagingKey = "";
   const oldPut = stores.blobs.put.bind(stores.blobs);
-  stores.blobs.put = async (...args) => {
-    stagingKey = args[0];
+  stores.blobs.put = async (key, body, opts) => {
+    stagingKey = key;
     await new Promise((resolve) => setTimeout(resolve, 135));
-    return oldPut(...args);
+    return oldPut(key, body, { contentType: opts?.contentType });
   };
 
   // Simulate CAS failure during cleanupOnAbort (audio-feed-22ui)
@@ -2006,13 +2005,13 @@ Deno.test("audio-feed-n8wk: concurrent heartbeat during abort does not leak unco
   });
 
   assertEquals(result.yielded.length, 1);
-  // Verify that despite yield CAS failure, cleanupOnAbort checked durable state:
-  // Since episode was NOT ready, it deleted the uncommitted blob and recorded orphan in KV (no leak!)
+  // A failed yield CAS may mean another worker already owns this claim. The
+  // stable key remains discoverable to that worker; an orphan sweep cannot
+  // delete its whole-object PUT while it is still settling.
   const orphanBlobs = await stores.metadata.listOrphanBlobs(10);
-  assert(
-    orphanBlobs.includes(stagingKey),
-    "orphan record must be written to KV even when yield CAS fails",
-  );
+  assertEquals(orphanBlobs.includes(stagingKey), false);
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  assert(await stores.blobs.head(stagingKey), "late PUT remains available for takeover");
 });
 
 Deno.test("audio-feed-mkkb: idempotent completeEpisode replay never double charges", async () => {
