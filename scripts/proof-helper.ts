@@ -28,8 +28,8 @@ export interface SupervisedHarness {
 }
 
 /**
- * HOW LONG AN ABANDONED PROFILE MAY SIT BEFORE THE NEXT RUN OF THE SAME PREFIX RECLAIMS IT
- * (audio-feed-u8nv).
+ * HOW LONG AN ABANDONED PROFILE MAY SIT BEFORE A LATER RUN RECLAIMS IT (audio-feed-u8nv; the "same
+ * prefix" qualifier went with the name rule, audio-feed-h62q).
  *
  * THE MEASUREMENT THAT MAKES THIS A DEFECT RATHER THAN TIDINESS, taken on this VM: `/tmp` held
  * **1926 `audiofeed-*` profile directories totalling 1.5 GB**, the oldest two days old. A leaked
@@ -53,20 +53,59 @@ export interface SupervisedHarness {
 export const STALE_PROFILE_AGE_MS = 45 * 60 * 1000;
 
 /**
- * Reclaim abandoned profile directories for ONE PREFIX (audio-feed-u8nv).
+ * Reclaim abandoned profile directories WHATEVER THEY ARE CALLED (audio-feed-u8nv, widened by
+ * audio-feed-h62q).
  *
  * TWO GUARDS, AND BOTH ARE ASSERTED IN tests/proof_helper_profile_sweep_test.ts BECAUSE EACH IS A
  * DIFFERENT WAY OF DESTROYING SOMETHING THAT IS IN USE:
- *   - PREFIX SCOPING: every caller passes its own prefix, so this can never reach another proof's,
- *     another lane's, or another prefix's directory. Only `makeTempDir`-created DIRECTORIES are
- *     considered; a file that happens to share the name shape is not ours to delete.
- *   - AGE BOUND: a young directory may be a LIVE run of the same prefix, so it is left alone. The
- *     reclaim only ever removes what the declared bound has already ruled out as running.
+ *   - PROFILE SIGNATURE: `Default/` is inside, and `.git` is not. The signature is what a profile IS;
+ *     the name was only ever a guess at who made it.
+ *   - AGE BOUND: a young directory may be a LIVE run's, so it is left alone. The reclaim only ever
+ *     removes what the declared bound has already ruled out as running.
+ *
+ * WHY THE NAME RULE IS GONE, BECAUSE THIS IS THE PART THAT LOOKS LIKE A REGRESSION AND IS NOT: a
+ * prefix matches only the callers that exist now. Every directory created by a path that does not go
+ * through `createTempChromeProfile` - a new proof with its own prefix, a one-off script, a renamed
+ * one - is unreclaimable FOREVER, because no future sweep will ever ask for its name. MEASURED on this
+ * VM before this change: 82 directories under `/tmp` carry the profile signature and are >=45 minutes
+ * stale; 66 are reachable by some caller's prefix and **16 are not**, among them six `i9hq-*-prof` at
+ * ~1027 minutes, `regen-prof`, `l6tl-mutant-prof`, and five `audiofeed-txcz-*` / `audiofeed-vt-`
+ * `proof-*` directories created minutes past the bound. Those 16 are the defect: permanent precisely
+ * because nothing can name them.
+ *
+ * AND WHY THE SIGNATURE IS SAFER THAN THE NAME IT REPLACES, measured rather than asserted:
+ * `audio-feed-u8nv` found `Default/` present in 20 of 20 profiles and 0 of 22 non-profiles, and the
+ * live pile re-measures the same way - of 9408 directories >=45 minutes stale, 82 carry it and 9326 do
+ * NOT. Those 9326 are the blast radius: **a rule that matched on age alone would delete every
+ * worktree and scratch directory on the VM, 24 of the newest 22 entries under `af-*`/`audio-feed-*`
+ * being exactly that** - and a by-age sweep in fact did delete other lanes' worktrees earlier that
+ * night, sparing a gate's only because it was too young to match. `.git` is tested by EXISTENCE, not
+ * by `isDirectory`, because in a LINKED WORKTREE it is a FILE.
+ *
+ * THIS RETIRES audio-feed-3nit's OWNERSHIP GUARD RATHER THAN TUNING IT, and the difference matters:
+ * `isOwnProfileName` existed because `startsWith(prefix)` cannot tell `audiofeed-chrome-` from
+ * `audiofeed-chrome-test-`, so a name comparison was answering the wrong question ("who made this?")
+ * with too little information to be safe. The invariant it protected is kept and restated in the
+ * tests: a reclaim may remove an ABANDONED PROFILE and nothing else - never a checkout, never a plain
+ * directory, whatever its name. The two 3nit tests are replaced by that statement, not deleted.
+ *
+ * THIS RULE SHIPPED ONCE BEFORE AND WAS REVERTED (397b9ae, reverted by 3612977) - not because of the
+ * signature, which was measured then as it is now, but because the pile measurement that motivated it
+ * (`/tmp/audio-feed-*`, `/tmp/af-*`) turned out to be plain files and other lanes' WORKTREES, and the
+ * retraction was right. What is different today is the evidence for the target: 16 signature-carrying,
+ * permanently unreachable profiles, named above, that no prefix rule can ever reclaim.
  *
  * OPPORTUNISTIC BY CONSTRUCTION: every failure to read or remove is swallowed, because reclaiming
  * disk must never break allocating a profile. Returns what it actually removed so a caller, or a
  * test, can observe the work rather than trust it.
  */
+
+/** Chrome's own marker that a directory holds an initialised profile. */
+const PROFILE_MARKER = "Default";
+
+/** A checkout is never a profile. Tested by EXISTENCE: in a linked worktree this is a FILE. */
+const CHECKOUT_MARKER = ".git";
+
 /** Existence without throwing. */
 function exists(path: string): boolean {
   try {
@@ -78,34 +117,17 @@ function exists(path: string): boolean {
 }
 
 /**
- * Whether `name` is a directory THIS prefix created, rather than a sibling that merely starts with it
- * (audio-feed-3nit).
- *
- * `startsWith(prefix)` ALONE IS NOT OWNERSHIP, and the reviewer's counterexample is exact:
- * `audiofeed-chrome-test-` starts with `audiofeed-chrome-`, so a sweep for the shorter prefix ate the
- * longer prefix's directories. A guard whose job is "touch nothing that is not mine" cannot be built
- * from a prefix comparison alone.
- *
- * THE BOUNDARY, AND WHY THIS ONE IS EXACT RATHER THAN HEURISTIC: `makeTempDir` appends its random
- * characters DIRECTLY to the prefix, so an owned name is `<prefix>` plus a separator-free tail.
- * MEASURED over the whole pile on this VM: 574 names, EVERY ONE with a separator-free tail, and ZERO
- * with a `-` in the tail. So a `-` after the prefix does not mean "random characters"; it means a
- * DIFFERENT prefix that happens to start with ours.
- *
- * DECLARED LIMIT, so the next reader does not have to infer it: this requires the caller's prefix to
- * carry its own separator. Every prefix in this tree ends with `-` (measured: the nine literal ones
- * plus the computed `audiofeed-proof-exww-`), and a prefix passed WITHOUT one would reclaim nothing
- * rather than reclaim wrongly - the failure is in the safe direction.
+ * Whether `dir` is an abandoned-profile CANDIDATE by shape: Chrome's marker inside, no checkout
+ * inside. `exists` on the marker rather than `isDirectory`, because the marker's nature is Chrome's
+ * business and the exclusion's job is only to never reach a checkout.
  */
-function isOwnProfileName(name: string, prefix: string): boolean {
-  if (!name.startsWith(prefix)) return false;
-  const tail = name.slice(prefix.length);
-  if (tail.length === 0) return false;
-  return !tail.includes("-");
+function isAbandonedProfile(dir: string): boolean {
+  if (!exists(dir)) return false;
+  if (exists(`${dir}/${CHECKOUT_MARKER}`)) return false;
+  return exists(`${dir}/${PROFILE_MARKER}`);
 }
 
 export async function sweepStaleProfiles(
-  prefix: string,
   nowMs: number = Date.now(),
   ageMs: number = STALE_PROFILE_AGE_MS,
 ): Promise<string[]> {
@@ -120,13 +142,8 @@ export async function sweepStaleProfiles(
   }
   for (const entry of entries) {
     if (!entry.isDirectory) continue;
-    if (!isOwnProfileName(entry.name, prefix)) continue;
     const full = `${baseDir}/${entry.name}`;
-    // INSURANCE, NOT THE MATCHING RULE (audio-feed-u8nv, after coord measured the other /tmp piles as
-    // worktrees): a checkout is never a profile, so one that happens to sit under a profile prefix is
-    // left alone. This can only NARROW what is reclaimed. `.git` is tested by EXISTENCE because in a
-    // linked worktree it is a FILE, not a directory.
-    if (exists(`${full}/.git`)) continue;
+    if (!isAbandonedProfile(full)) continue;
     try {
       const info = await Deno.stat(full);
       const age = nowMs - (info.mtime?.getTime() ?? nowMs);
@@ -143,9 +160,10 @@ export async function sweepStaleProfiles(
 export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
 ): Promise<{ profileDir: string; cleanup: () => Promise<void>; sweptStale: number }> {
-  // Reclaim THIS prefix's abandoned directories before allocating another one, so a leak cannot
-  // accumulate across runs (audio-feed-u8nv).
-  const sweptStale = (await sweepStaleProfiles(prefix)).length;
+  // Reclaim abandoned profiles before allocating another one, so a leak cannot accumulate across runs
+  // (audio-feed-u8nv). NOT scoped to `prefix` (audio-feed-h62q): a directory whose creator never runs
+  // again cannot be named by anyone, which is how the unreachable population got permanent.
+  const sweptStale = (await sweepStaleProfiles()).length;
   const profileDir = await Deno.makeTempDir({ prefix });
   const normProfileDir = normalizeFilePath(profileDir);
   activeChromeProfiles.add(normProfileDir);
