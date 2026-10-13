@@ -213,6 +213,19 @@ await runProof("request-access-browser-proof", async (checker) => {
     );
 
     // Capture desktop submitted screenshot
+    // audio-feed-uiye: re-size to the document's FULL height before the submitted
+    // capture. The metrics above were set once for the pre-submit page, so a plain
+    // viewport grab crops the confirmation that submission appends below the fold -
+    // which is why 03 and 04 came out byte-identical.
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 1280,
+      height: Math.ceil(
+        await js("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"),
+      ),
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
     const shotDesktop2 = await cdp("Page.captureScreenshot", { format: "png" });
     const shotDesktop2Path = `${OUT}02-request-access-submitted-desktop.png`;
     await Deno.writeFile(
@@ -296,6 +309,17 @@ await runProof("request-access-browser-proof", async (checker) => {
       `document.getElementById("request-result")?.classList.contains("ok")`,
       "mobile request submitted",
     );
+
+    // audio-feed-uiye: same re-size for the mobile pair (dsf 3), so the submitted
+    // confirmation is inside the frame rather than below it.
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: Math.ceil(
+        await js("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"),
+      ),
+      deviceScaleFactor: 3,
+      mobile: true,
+    });
 
     const shotMobile2 = await cdp("Page.captureScreenshot", { format: "png" });
     const shotMobile2Path = `${OUT}04-request-access-submitted-mobile.png`;
