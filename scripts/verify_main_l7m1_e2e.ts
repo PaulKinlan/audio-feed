@@ -361,7 +361,7 @@ try {
 
         // Set the viewport height to the FULL DOCUMENT height, not the first table's
         // bottom (audio-feed-p3bv). The screened-error card and the limits card render
-        // ABOVE the retrying table, so a viewport sized to the table's bottom can never
+        // BELOW the retrying table, so a viewport sized to the table's bottom can never
         // contain them: that crop was deterministic and made the screenshot caption a
         // claim the image did not support. The 1275 floor keeps the layout from
         // collapsing below the height the caption describes.
