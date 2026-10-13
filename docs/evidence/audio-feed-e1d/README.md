@@ -4,6 +4,7 @@
 - Asserts: admin runs table renders <details class='run-errors'>; clicking summary expands the run errors log; expanded log visibly renders exact failure reasons; player renders exact download failure reason on the episode row
 
 ## Observed Behavior
+
 1. **Admin Console (/admin)**:
    - The Runs table detects failed item count (`failed > 0`) and renders an expandable `<details class="run-errors">` element.
    - Clicking the summary expands the details in place without page navigation or modal popups.
@@ -13,5 +14,6 @@
    - The error text honestly reports `Download failed: HTTP 404`.
 
 ## Screenshots
+
 - `01-admin-runs-expanded-errors.png`: Admin runs table with expanded `<details class="run-errors">` log.
 - `02-player-download-error-inline.png`: Web player with inline `.ep-download-error` on the episode row.

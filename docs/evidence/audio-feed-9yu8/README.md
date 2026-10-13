@@ -4,6 +4,7 @@
 - Asserts: production defaults synthesize narration successfully within deadline; forced timeout retries once on default policy; timeout error surfaces as transient without provider HTTP status; forced timeout with retryOn none makes exactly one HTTP attempt; provider model rejection preserves provider 404 status and marks failure permanent; loadConfig respects TTS_TIMEOUT_MS environment override
 
 ## Verification Overview
+
 Live verification for audio-feed-9yu8 — the brittleness behind the incident (audio-feed-bp6r):
 a 60s per-attempt deadline inside the real latency distribution, a deadline abort that was never retried
 per segment, and a wrapper that relabelled our own abort as a provider-looking 400.

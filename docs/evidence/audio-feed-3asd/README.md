@@ -4,6 +4,7 @@
 - Asserts: bookmarklet anchor has unified class list without duplicate attributes; bookmarklet anchor is draggable for bookmark bar installation; bookmarklet anchor carries javascript: bookmarklet payload; details disclosure exists under bookmarklet box; summary explains code option when dragging is not possible; details disclosure opens upon user interaction; code snippet in disclosure contains matching bookmarklet source; disclosure code wraps and is fully visible (not horizontally clipped); disclosure text plainly explains browser CSP refusal of javascript: links; browser console explicitly records JavaScript URL CSP refusal on bookmarklet click; zero unhandled page exceptions or unexpected console errors; page and disclosure remain open and stable after link click
 
 ## Key Verifications
+
 1. **Unified Class Attribute:** The bookmarklet anchor carries `class="bookmarklet-link u-strong-link"` without duplicate HTML class attributes.
 2. **Draggable Installation:** The anchor retains `draggable="true"` and the full `javascript:(function()...` payload for dragging to the bookmarks bar.
 3. **No-Script Disclosure Fallback:** A native HTML5 `<details class="bookmarklet-code">` disclosure provides the bookmarklet source inside a `<pre class="bookmarklet-snippet"><code>` element.
@@ -11,6 +12,7 @@
 5. **Zero Inline Script:** Operates without any un-nonced inline scripts or click interception scripts, conforming strictly to the page's Content Security Policy.
 
 ## Execution Log
+
 ```
 PASS  bookmarklet anchor has unified class list without duplicate attributes  class: 'bookmarklet-link u-strong-link'
 PASS  bookmarklet anchor is draggable for bookmark bar installation  draggable: 'true'
@@ -27,4 +29,5 @@ PASS  page and disclosure remain open and stable after link click
 ```
 
 ## Screenshots
+
 - `01-bookmarklet-disclosure-open.png`: Homepage with bookmarklet box and expanded fallback disclosure showing snippet code.
