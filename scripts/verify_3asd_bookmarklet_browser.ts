@@ -212,6 +212,14 @@ await runProof("audio-feed-3asd", async (checker) => {
             ? `snippet matches href (${codeSnippet?.length} chars)`
             : `snippet mismatch: snippet len ${codeSnippet?.length}, href len ${anchorHref?.length}`,
         );
+        check(
+          "rendered bookmarklet uses the selected proof port",
+          Boolean(codeSnippet?.includes(`localhost:${PROOF_PORT}`)) &&
+            Boolean(anchorHref?.includes(`localhost:${PROOF_PORT}`)),
+          `expected localhost:${PROOF_PORT}; rendered ${
+            codeSnippet?.match(/localhost:\d+/)?.[0] ?? "none"
+          }`,
+        );
 
         const preBox = (await js(`(() => {
         const el = document.querySelector("details.bookmarklet-code pre.bookmarklet-snippet");

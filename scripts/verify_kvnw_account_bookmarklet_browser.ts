@@ -252,6 +252,14 @@ await runProof("audio-feed-kvnw", async (checker) => {
             ? `snippet matches href (${snippetText.length} chars)`
             : `snippet ${snippetText.length} != href ${anchorHref.length}`,
         );
+        check(
+          "rendered account bookmarklet uses the selected proof port",
+          snippetText.includes(`localhost:${PROOF_PORT}`) &&
+            anchorHref.includes(`localhost:${PROOF_PORT}`),
+          `expected localhost:${PROOF_PORT}; rendered ${
+            snippetText.match(/localhost:\d+/)?.[0] ?? "none"
+          }`,
+        );
 
         // 6. Assert the wording states the CSP refusal honestly (no "click to install" falsehoods)
         const wording = String(
