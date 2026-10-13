@@ -114,7 +114,14 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   // adds a fourth and would make this 3, giving twelve suppressed - THE ROW WILL FAIL, and the failure
   // message names this line. That is the intended trade: a loud, self-diagnosing failure on the day the
   // stage set changes, rather than a hardcoded number that quietly stops meaning anything.
-  const marksPerSuccessfulEpisode = 2;
+  // ONE NAMED ASSUMPTION, and the only thing to update when the stage set moves. audio-feed-avgc moved
+  // it: by retaining completed terminal uploads across budget yields it put `yield` on the NORMAL path,
+  // so a successful episode now emits THREE marks where it used to emit two. The sites are
+  // markStage("tts", ...), markStage("yield", ...) and markStage("upload", ...) in
+  // src/worker/synthesis.ts. NOT derived from the pipeline at run time, deliberately: a derived
+  // expectation would FOLLOW a broken stage set and stop being a control, and a control has to fail
+  // when the defect it guards against is present.
+  const marksPerSuccessfulEpisode = 3;
   const ids = Array.from({ length: 9 }, (_, i) => `ep-huh4-cap-${i}`);
   const { ctx, stores } = await seedEpisodes(ids);
   const audio = fakeAudio();
