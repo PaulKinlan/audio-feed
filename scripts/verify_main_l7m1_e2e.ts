@@ -409,10 +409,23 @@ try {
           mobile: false,
         });
 
-        // -- TEST 2: Homepage Bookmarklet (/ on main) --------------------------------
+        // -- TEST 2: Logged-out front door bookmarklet (/ on main) ------------------
+        // The admin session is needed above, but signed-in visitors now redirect
+        // from / to /account. Clear ONLY this session cookie for the public page.
+        await cdp("Network.deleteCookies", { name: "__Host-af_session", url: BASE });
+        const homeCookies = (await cdp("Network.getCookies", { urls: [BASE] })) as {
+          cookies: { name: string }[];
+        };
+        check(
+          "front door has no signed-in session cookie",
+          !homeCookies.cookies.some((cookie) => cookie.name === "__Host-af_session"),
+          "Network.getCookies confirms __Host-af_session absent",
+        );
         const homeStartIndex = consoleEntries.length;
         await cdp("Page.navigate", { url: `${BASE}/` });
         await until(`document.readyState === "complete"`, "homepage loaded");
+        const homePath = await js(`location.pathname`);
+        check("front door remains on logged-out /", homePath === "/", `path: ${homePath}`);
 
         const homeCspViolations = consoleEntries.slice(homeStartIndex).filter(
           (msg) => msg.includes("Content Security Policy") || msg.includes("violates"),
@@ -726,7 +739,14 @@ try {
           `saved: ${savedPositions["ep-ready-1"]?.position}`,
         );
 
-        // E. Test /account bookmarklet disclosure
+        // E. Test /account bookmarklet disclosure. The /listen capability needs
+        // no login; restore the SAME admin session only for this account page.
+        await cdp("Network.setCookie", {
+          name: "__Host-af_session",
+          value: adminSession,
+          url: BASE,
+          secure: true,
+        });
         await cdp("Page.navigate", { url: `${BASE}/account` });
         await until(`document.readyState === "complete"`, "account page loaded");
         await until(
@@ -775,7 +795,7 @@ try {
 - **Browser Execution:** Real headless Chrome driven over CDP by the shared \`withChrome\` harness at a 1280-wide desktop viewport, with an isolated user-data-dir and automatic profile cleanup. These are live-page assertions, not a DOM shim: the CSP counters, the \`<details>\` disclosures and the \`<audio>\` element are read out of a real browser.
 - **Capture method:** Screenshots are viewport grabs sized to the content each caption names - the admin grab is sized to the full document so the screened-error and limits cards are in frame, and the bookmarklet grab is taken after the box is scrolled into view and its disclosure opened. A caption describes only states that the accompanying image actually contains.
 - **Seeded Test Fixtures:**
-  - Admin user with authenticated session cookie \`__Host-af_session\`.
+  - Admin user with authenticated session cookie \`__Host-af_session\` for observability and /account; only that cookie is removed for the logged-out / front door, then restored after the capability-based /listen check.
   - Approved subscriber with feed token \`sub-feed-token-l7m1\`.
   - Real synthesized WAV audio blob (${audioBytes.byteLength} bytes) stored at \`audio/sub-l7m1/direct/ep-ready-1.wav\`.
   - Historical flat-key episode seed \`historical-flat-key.wav\` verifying canonical redirect/404 handling.
