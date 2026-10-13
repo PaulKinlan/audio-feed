@@ -542,7 +542,6 @@ li.episode[data-current="true"] .ep-play {
 .filter-field input[type="search"],
 .filter-field select {
   font: inherit;
-  font-size: 0.9rem;
   inline-size: 100%;
   padding: 0.5rem 0.75rem;
   background: var(--surface-sunken);
@@ -964,7 +963,8 @@ input[type="range"][disabled] {
   border: 1px solid var(--border-2);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 0.8rem;
+  /* font-size comes from the iOS focus floor at the end of this file (audio-feed-rxa2); the
+     min-inline-size above is a floor of its own, so the pill widens to fit that text. */
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -1042,7 +1042,6 @@ dialog.confirm-dialog .share-copy-row {
 dialog.confirm-dialog .share-copy-row input {
   flex: 1 1 auto;
   font: inherit;
-  font-size: 0.85rem;
   padding: 0.5rem 0.6rem;
   background: var(--surface-sunken);
   color: var(--text);
@@ -1132,4 +1131,20 @@ dialog.confirm-dialog .confirm-actions {
     animation: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* audio-feed-rxa2: the iOS focus floor, by TYPE rather than by enumeration.
+   iOS Safari zooms the viewport when a focused form control computes below 16px, and this page is
+   installed as a standalone PWA (viewport-fit=cover) with no browser chrome to pinch back out of.
+   The controls above reach 16px only indirectly, through 'font: inherit' on a 1rem base, and this page
+   shipped a search box at 0.9rem, a speed control at 0.8rem and a share field at 0.85rem on top of
+   that. This is one rule for every control that takes text focus, last in the file so it is the floor
+   rather than a default. The exclusions are by platform mechanism - checkbox, radio, range, file and
+   color take no text focus and do not zoom. The home page and the kit pages have the same rule in the
+   shell's base stylesheet (shell.ts, SHELL_CSS); there is no single stylesheet all three share.
+   Modern Web Guidance, forms 5: "DO set font-size to at least 1rem (16px) to prevent iOS zoom." */
+body input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]):not([type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]),
+body select,
+body textarea {
+  font-size: max(1rem, 1em); /* >=16px, and still follows the user's own font scaling. */
 }
