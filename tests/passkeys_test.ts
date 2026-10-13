@@ -131,9 +131,10 @@ Deno.test("GET /.well-known/webauthn: serves ROR JSON origins list (audio-feed-1
     port: 8080,
     publicBaseUrl: BASE,
     adminToken: "admin-secret",
+    // Reserved .test origins exercise config serialization, not deployed hosts.
     webAuthnRelatedOrigins: [
-      "https://audio.paulkinlan.com",
-      "https://audio-feed-preview.deno.dev",
+      "https://primary.example.test",
+      "https://alternate.example.test",
     ],
   };
   const stores: Stores = memoryStores();
@@ -146,10 +147,11 @@ Deno.test("GET /.well-known/webauthn: serves ROR JSON origins list (audio-feed-1
   assertEquals(res.headers.get("cache-control"), "no-store");
 
   const data = await res.json() as { origins: string[] };
-  assert(Array.isArray(data.origins));
-  assertEquals(data.origins.includes(BASE), true);
-  assertEquals(data.origins.includes("https://audio.paulkinlan.com"), true);
-  assertEquals(data.origins.includes("https://audio-feed-preview.deno.dev"), true);
+  assertEquals(data.origins, [
+    BASE,
+    "https://primary.example.test",
+    "https://alternate.example.test",
+  ]);
 });
 
 Deno.test("GET /.well-known/webauthn: unconfigured returns empty origins with no-store (audio-feed-1o2)", async () => {
