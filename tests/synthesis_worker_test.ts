@@ -1015,6 +1015,32 @@ Deno.test("a failed episode records the unwrapped cause with mode, claim and pro
   assertStringIncludes(described, "claim 1/3");
 });
 
+Deno.test("audio-feed-zrkn: the terminal reason names zero durable progress only for the exhausted claim", () => {
+  // THE TWO CASES THAT READ ALIKE AND MUST NOT. A claim that made progress and ran out of slice has
+  // a throughput problem; one that exhausted its attempts having committed nothing has nowhere left
+  // to go. Both used to persist the same deadline string, which is what made the production
+  // measurement ambiguous until every record was read by hand.
+  const deadline = new Error("Invocation budget deadline exceeded during stage narration_tts");
+
+  // THE CONTROL: without the flag the render must be EXACTLY what it is today. This half is what
+  // fails if the reason is ever added unconditionally rather than for the exhausted case only.
+  const progressful = describeSynthesisFailure(deadline, { attempts: 1, mode: "direct" }, 3);
+  assertStringIncludes(progressful, "Invocation budget deadline exceeded");
+  assert(
+    !progressful.includes("zero durable progress"),
+    `an ordinary deadline must not claim zero progress: ${progressful}`,
+  );
+
+  // AND WITH IT: the deadline is PRESERVED and the reason APPENDED, because an operator needs to
+  // know what stopped the work as well as why it could not resume.
+  const exhausted = describeSynthesisFailure(deadline, { attempts: 3, mode: "direct" }, 3, {
+    zeroProgressExhausted: true,
+  });
+  assertStringIncludes(exhausted, "Invocation budget deadline exceeded");
+  assertStringIncludes(exhausted, "zero durable progress across all claims");
+  assertStringIncludes(exhausted, "claim 3/3");
+});
+
 Deno.test("article content exceeding maxInputBytes fails closed without spending (audio-feed-3hb)", async () => {
   const { ctx, stores } = await queued();
   // Article with 1,000 ASCII bytes, limit set to 500

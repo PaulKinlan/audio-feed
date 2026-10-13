@@ -512,6 +512,13 @@ export function describeSynthesisFailure(
   lastError: unknown,
   claimed: Pick<Episode, "attempts" | "mode">,
   maxClaims: number,
+  /**
+   * audio-feed-zrkn: a claim that ran out of ATTEMPTS having made zero durable progress used to be
+   * indistinguishable from one that made progress and ran out of SLICE, because both persisted the
+   * generic deadline. They need different responses - the first has nowhere left to go, the second
+   * is a throughput problem - so the terminal reason now says which one this was.
+   */
+  options: { zeroProgressExhausted?: boolean } = {},
 ): string {
   let root = lastError;
   while (root instanceof GeminiTtsError && root.details instanceof Error) {
@@ -525,6 +532,9 @@ export function describeSynthesisFailure(
     typeof status === "number" && rootDetails !== undefined && !(rootDetails instanceof Error)
   ) {
     parts.push(`provider status ${status}`);
+  }
+  if (options.zeroProgressExhausted) {
+    parts.push("zero durable progress across all claims");
   }
   return `${message} [${parts.join("; ")}]`;
 }
@@ -1772,6 +1782,9 @@ async function runSynthesisBatchCore(
     let audio: DecodedAudioResult | null = null;
     let lastError: unknown = null;
     let currentEpisode = claimed;
+    // audio-feed-zrkn: set ONLY by the zero-progress exhaustion break below, so the terminal reason
+    // can tell "out of road" apart from "out of slice". Those are the two cases that read alike.
+    let zeroProgressExhausted = false;
     const initialScriptTurns = claimed.scriptTurns?.length ?? 0;
     const initialSegments = (await metadata.listSynthesisSegments(claimed.userId, claimed.id))
       .filter((s) => s.finalized).length;
@@ -1822,6 +1835,10 @@ async function runSynthesisBatchCore(
 
           if (!madeProgress && (claimed.attempts ?? 1) >= opts.maxAttempts) {
             // Refuse infinite livelock: zero progress across maxAttempts must fail the episode.
+            // audio-feed-zrkn: unlike every other failure on this path, this one is NOT a budget
+            // problem - the episode is out of attempts, not out of slice - so it must not be
+            // recorded with the deadline text that the progressful failures carry.
+            zeroProgressExhausted = true;
             break;
           }
 
@@ -1892,7 +1909,9 @@ async function runSynthesisBatchCore(
         }
         continue;
       }
-      const error = describeSynthesisFailure(lastError, currentEpisode, opts.maxClaims);
+      const error = describeSynthesisFailure(lastError, currentEpisode, opts.maxClaims, {
+        zeroProgressExhausted,
+      });
       console.error(
         `[audio-feed] synthesis failed for episode "${currentEpisode.id}" ("${currentEpisode.title}"): ${error}`,
       );

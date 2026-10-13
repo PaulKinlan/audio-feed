@@ -1370,7 +1370,16 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
   assertEquals(r2.failed.length, 1, "must fail after maxAttempts zero-progress yields");
   const ep2 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
   assertEquals(ep2?.status, "failed", "episode must terminate as failed");
+  // The deadline text is PRESERVED - audio-feed-zrkn APPENDS the reason, it does not replace it,
+  // so this line is the regression guard for every reader that already depends on that wording.
   assertStringIncludes(ep2?.error ?? "", "exceeded");
+  // audio-feed-zrkn: this is the ONE terminal case that is not a budget problem - the episode is
+  // out of ATTEMPTS, having committed nothing in any of them, not out of slice - so the record has
+  // to say which. THIS ASSERTION IS THE WIRING PROOF: it can only pass if the zero-progress branch
+  // actually sets the flag AND the failure path passes it through. A unit test on
+  // describeSynthesisFailure alone cannot show that, because the formatter can render a reason the
+  // caller never supplies.
+  assertStringIncludes(ep2?.error ?? "", "zero durable progress across all claims");
   assertEquals(scriptCalls, 2, "script was called on each attempt");
 });
 
