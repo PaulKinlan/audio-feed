@@ -544,10 +544,19 @@ Deno.test("audio-feed-n16x: four target browser proofs execute inside runProof a
       content.includes("quantiseEvidencePng("),
       `${script} must process screenshots with quantiseEvidencePng`,
     );
-    assert(
-      content.includes("writeEvidenceReadme("),
-      `${script} must write evidence README with writeEvidenceReadme`,
-    );
+    // audio-feed-s9z5: landing-tooltip shares 3xq with admin-module; sole tenants write README
+    if (script !== "scripts/landing-tooltip-browser-proof.ts") {
+      assert(
+        content.includes("writeEvidenceReadme("),
+        `${script} must write evidence README with writeEvidenceReadme`,
+      );
+    } else {
+      assert(
+        !content.includes("writeEvidenceReadme("),
+        `${script} must not overwrite shared 3xq/README.md owned by admin-module (s9z5)`,
+      );
+    }
+
     assert(
       !content.includes("Deno.writeTextFile(`${OUT}README.md`"),
       `${script} must not write raw README.md directly`,
@@ -588,12 +597,15 @@ function checkProofCompliance(content: string, relative: string): string | null 
   // audio-feed-2hgp: mask comments and strings so mentions do not pass as helper calls
   const masked = maskNonCode(content);
   const hasRunProof = masked.includes("runProof(");
+  const hasQuantise = masked.includes("quantiseEvidencePng(");
   const hasReadme = masked.includes("writeEvidenceReadme(");
 
-  if (!hasRunProof || !hasReadme) {
+  // audio-feed-s9z5: proofs writing evidence must execute in runProof and use shared helpers
+  // (sole tenants write README; multi-tenant contributors use quantiseEvidencePng without clobbering README)
+  if (!hasRunProof || (!hasQuantise && !hasReadme)) {
     return `${relative} (writes: ${result.writes.join(", ")}, unresolved: ${
       result.unresolvedWrites.join(", ")
-    }, runProof: ${hasRunProof}, readme: ${hasReadme})`;
+    }, runProof: ${hasRunProof}, quantise: ${hasQuantise}, readme: ${hasReadme})`;
   }
   return null;
 }
