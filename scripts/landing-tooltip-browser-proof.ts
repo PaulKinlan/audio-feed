@@ -21,10 +21,10 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { makeUser } from "../tests/fixtures.ts";
-import { newestChrome } from "./proof-helper.ts";
+import { createTempChromeProfile, newestChrome } from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-3xq/", import.meta.url).pathname;
-const PROFILE = await Deno.makeTempDir({ prefix: "audiofeed-proof-3xq-4c-" });
+const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-proof-3xq-4c-");
 const TOKEN = "tok-landing";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await Deno.mkdir(OUT, { recursive: true });
@@ -320,7 +320,7 @@ try {
     chrome.kill("SIGKILL");
   } catch { /* already dead */ }
   await server.shutdown();
-  await Deno.remove(PROFILE, { recursive: true }).catch(() => {});
+  await cleanup();
 }
 
 const failed = checks.filter((c) => !c.pass);

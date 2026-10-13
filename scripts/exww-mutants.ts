@@ -43,6 +43,7 @@
  * being unmapped) is the bead that decides WHO invokes this; this file only makes invoking it possible.
  */
 import { join, resolve } from "@std/path";
+import { createTempChromeProfile } from "./proof-helper.ts";
 
 export interface Mutant {
   /** Row name, as `--only` spells it. */
@@ -285,11 +286,18 @@ function printMatrix(): void {
   for (const row of NOT_DETECTORS) console.log(`  NOT A DETECTOR: ${row.row}\n      ${row.why}`);
 }
 
+const scratchCleanups = new Map<string, () => Promise<void>>();
+
 /** The scratch tree: only what the proof imports and writes, so the invoking worktree stays clean. */
 export async function buildScratch(options: Pick<Options, "keep"> = {}): Promise<string> {
-  const dir = options.keep
-    ? resolve(options.keep)
-    : await Deno.makeTempDir({ prefix: "exww-mutants-" });
+  let dir: string;
+  if (options.keep) {
+    dir = resolve(options.keep);
+  } else {
+    const allocated = await createTempChromeProfile("exww-mutants-");
+    dir = allocated.profileDir;
+    scratchCleanups.set(dir, allocated.cleanup);
+  }
   // COPY WHAT THE TREE CARRIES RATHER THAN AN ENUMERATED LIST, because the enumeration went stale the moment a
   // proof imported something outside it: the exww proof imports ../tests/fixtures.ts, so every run in a scratch
   // that carried only scripts/src/deno.json died with "Module not found" in 0.1s - the baseline was never green
@@ -649,7 +657,13 @@ if (import.meta.main) {
       `(a bound killed it: not a pass, not a fail, the row was not tested), ${counts.unexpected} unexpected`,
   );
   if (!options.keep) {
-    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    const cleanupFn = scratchCleanups.get(scratch);
+    if (cleanupFn) {
+      scratchCleanups.delete(scratch);
+      await cleanupFn().catch(() => {});
+    } else {
+      await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    }
   } else {
     console.log(`[mutants] scratch kept at ${scratch} (--keep)`);
   }
