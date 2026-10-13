@@ -467,10 +467,20 @@ export interface FeedPollOptions {
   minIntervalMs?: number;
   batchSize?: number;
   maxItemsPerSource?: number;
+  userScanConcurrency?: number;
   signal?: AbortSignal;
 }
 
 const DEFAULT_MIN_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * User source scans in flight at once (audio-feed-f3aa).
+ *
+ * Bounded concurrency, matching ARTICLE_FETCH_CONCURRENCY: on an idle tick
+ * or during user traversal, user source lists are queried in bounded batches
+ * instead of a serial round-trip per user.
+ */
+export const USER_SCAN_CONCURRENCY = 4;
 
 /**
  * Poll every source that is due, across all users.
@@ -493,19 +503,63 @@ export async function runFeedPollBatch(
 ): Promise<FeedPollBatchResult> {
   const minInterval = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const batchSize = deps.batchSize ?? 5;
+  const userConcurrency = Math.max(1, deps.userScanConcurrency ?? USER_SCAN_CONCURRENCY);
   const cutoff = Date.now() - minInterval;
 
   const users = await ctx.stores.metadata.listUsers();
   const due: Source[] = [];
-  for (const user of users) {
-    for (const source of await ctx.stores.metadata.listSources(user.id)) {
-      if (!source.feedUrl) continue;
-      const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
-      if (!Number.isFinite(last) || last <= cutoff) due.push(source);
-      if (due.length >= batchSize) break;
+  const results: Source[][] = new Array(users.length);
+  let next = 0;
+  let processed = 0;
+  let inFlight = 0;
+  let stop = false;
+
+  const drain = () => {
+    while (processed < users.length && results[processed] !== undefined) {
+      if (stop) return;
+      const sources = results[processed]!;
+      for (const source of sources) {
+        if (!source.feedUrl) continue;
+        const last = source.lastPolledAt ? Date.parse(source.lastPolledAt) : 0;
+        if (!Number.isFinite(last) || last <= cutoff) due.push(source);
+        if (due.length >= batchSize) {
+          stop = true;
+          return;
+        }
+      }
+      processed++;
     }
-    if (due.length >= batchSize) break;
+  };
+
+  const startWorker = async () => {
+    while (true) {
+      if (stop || due.length >= batchSize || next >= users.length) return;
+      if (inFlight + due.length >= batchSize) return;
+      const idx = next++;
+      inFlight++;
+      try {
+        const sources = await ctx.stores.metadata.listSources(users[idx]!.id);
+        results[idx] = sources;
+        drain();
+      } catch (err) {
+        stop = true;
+        throw err;
+      } finally {
+        inFlight--;
+      }
+    }
+  };
+
+  const poolLimit = Math.min(userConcurrency, Math.max(1, batchSize - due.length));
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < poolLimit; w++) {
+    if (w > 0) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (stop || due.length >= batchSize) break;
+    workers.push(startWorker());
   }
+  await Promise.all(workers);
 
   let queued = 0;
   let failed = 0;

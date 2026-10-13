@@ -359,6 +359,291 @@ Deno.test("runFeedPollBatch captures extraction errors when article fetch fails 
   assertStringIncludes(res.errors![0]!, "403 Forbidden: Cloudflare protection");
 });
 
+Deno.test("runFeedPollBatch scans user sources with bounded concurrency, not serially (audio-feed-f3aa)", async () => {
+  const stores = memoryStores();
+  let inFlight = 0;
+  let peak = 0;
+  const originalListSources = stores.metadata.listSources.bind(stores.metadata);
+
+  stores.metadata.listSources = async (userId: string) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    try {
+      return await originalListSources(userId);
+    } finally {
+      inFlight--;
+    }
+  };
+
+  const ctx = { config: { port: 8000, adminToken: "token" }, stores };
+  // Seed 6 users with no due sources so the scan walks users.
+  for (let i = 1; i <= 6; i++) {
+    await stores.metadata.putUser(makeUser({ id: `user-${i}`, status: "approved" }));
+  }
+
+  const result = await runFeedPollBatch(ctx, { minIntervalMs: 60_000 });
+  assertEquals(result.polled, 0);
+  assert(
+    peak > 1,
+    `user source scans must overlap (peak was ${peak}); a serial loop pays the sum of every user round-trip`,
+  );
+  assert(peak <= 4, `user source scans must not exceed bounded concurrency (peak was ${peak})`);
+});
+
+Deno.test("runFeedPollBatch round-trip counts match bounded concurrency measurements for idle and due cases (audio-feed-f3aa)", async () => {
+  const dummyDeps = {
+    transport: feedTransport(RSS),
+    fetchArticle: article("A", "Body."),
+  };
+
+  const measure = async (N: number, sourcesPerUser: number, due: boolean) => {
+    const stores = memoryStores();
+    let listSourcesCalls = 0;
+    const origListSources = stores.metadata.listSources.bind(stores.metadata);
+    stores.metadata.listSources = async (userId: string) => {
+      listSourcesCalls++;
+      return await origListSources(userId);
+    };
+
+    const ctx = { config: { port: 8000, adminToken: "token" }, stores };
+    const now = Date.now();
+    for (let i = 1; i <= N; i++) {
+      const userId = `user-${i}`;
+      await stores.metadata.putUser(makeUser({ id: userId, status: "approved" }));
+      for (let s = 1; s <= sourcesPerUser; s++) {
+        await stores.metadata.putSource(
+          makeSource({
+            id: `src-${i}-${s}`,
+            userId,
+            feedUrl: `https://example.com/u${i}/f${s}.xml`,
+            lastPolledAt: due
+              ? new Date(now - 7_200_000).toISOString()
+              : new Date(now - 1_000).toISOString(),
+          }),
+        );
+      }
+    }
+
+    listSourcesCalls = 0;
+    const res = await runFeedPollBatch(ctx, { ...dummyDeps, minIntervalMs: 60_000, batchSize: 5 });
+    return { listSourcesCalls, polled: res.polled };
+  };
+
+  // Idle case: walks all N users (unbounded in N)
+  assertEquals((await measure(1, 2, false)).listSourcesCalls, 1);
+  assertEquals((await measure(3, 2, false)).listSourcesCalls, 3);
+  assertEquals((await measure(10, 2, false)).listSourcesCalls, 10);
+
+  // Early-exit case: stops once batchSize is reached
+  // 1 source per user, all due -> needs 5 users -> stops at user 5 (5 calls for N=10, not 8)
+  const due10 = await measure(10, 1, true);
+  assertEquals(due10.listSourcesCalls, 5);
+  assertEquals(due10.polled, 5);
+
+  // 5 sources per user, all due -> user 1 has 5 due -> stops at user 1 (1 call for N=10, not 4)
+  const due10Batch = await measure(10, 5, true);
+  assertEquals(due10Batch.listSourcesCalls, 1);
+  assertEquals(due10Batch.polled, 5);
+});
+
+Deno.test("runFeedPollBatch never issues more listSources calls than serial code (audio-feed-f3aa)", async () => {
+  const dummyDeps = {
+    transport: feedTransport(RSS),
+    fetchArticle: article("A", "Body."),
+  };
+
+  const measureCalls = async (
+    N: number,
+    sourcesPerUser: number,
+    due: boolean,
+    concurrency?: number,
+  ) => {
+    const stores = memoryStores();
+    let calls = 0;
+    const origList = stores.metadata.listSources.bind(stores.metadata);
+    stores.metadata.listSources = async (uid: string) => {
+      calls++;
+      return await origList(uid);
+    };
+
+    const ctx = { config: { port: 8000, adminToken: "token" }, stores };
+    const now = Date.now();
+    for (let i = 1; i <= N; i++) {
+      const userId = `user-${i}`;
+      await stores.metadata.putUser(makeUser({ id: userId, status: "approved" }));
+      for (let s = 1; s <= sourcesPerUser; s++) {
+        await stores.metadata.putSource(
+          makeSource({
+            id: `src-${i}-${s}`,
+            userId,
+            feedUrl: `https://example.com/u${i}/f${s}.xml`,
+            lastPolledAt: due
+              ? new Date(now - 7_200_000).toISOString()
+              : new Date(now - 1_000).toISOString(),
+          }),
+        );
+      }
+    }
+
+    calls = 0;
+    await runFeedPollBatch(ctx, {
+      ...dummyDeps,
+      minIntervalMs: 60_000,
+      batchSize: 5,
+      ...(concurrency !== undefined ? { userScanConcurrency: concurrency } : {}),
+    });
+    return calls;
+  };
+
+  // Three test cases:
+  // Case 1: N=10, 0 due (idle) -> serial issues 10, change must issue <= 10
+  const idleConcurrent = await measureCalls(10, 2, false);
+  const idleSerial = await measureCalls(10, 2, false, 1);
+  assert(
+    idleConcurrent <= idleSerial,
+    `idle case issued ${idleConcurrent} calls, serial was ${idleSerial}`,
+  );
+
+  // Case 2: N=10, 1 due/user -> serial issues 5, change must issue <= 5 (not 8)
+  const due10Concurrent = await measureCalls(10, 1, true);
+  const due10Serial = await measureCalls(10, 1, true, 1);
+  assert(
+    due10Concurrent <= due10Serial,
+    `1 due/user case issued ${due10Concurrent} calls, serial was ${due10Serial}`,
+  );
+
+  // Case 3: N=10, 5 due/user -> serial issues 1, change must issue <= 1 (not 4)
+  const due10BatchConcurrent = await measureCalls(10, 5, true);
+  const due10BatchSerial = await measureCalls(10, 5, true, 1);
+  assert(
+    due10BatchConcurrent <= due10BatchSerial,
+    `5 due/user case issued ${due10BatchConcurrent} calls, serial was ${due10BatchSerial}`,
+  );
+});
+
+Deno.test("runFeedPollBatch preserves exact same due sources selected and ordering as sequential scan (audio-feed-f3aa)", async () => {
+  const stores = memoryStores();
+  const polledSourceUrls: string[] = [];
+  const rssTransport = feedTransport(RSS);
+  const recordingDeps = {
+    transport: (url: URL, signal: AbortSignal) => {
+      polledSourceUrls.push(url.toString());
+      return rssTransport(url, signal);
+    },
+    fetchArticle: article("A", "Body."),
+  };
+
+  const ctx = { config: { port: 8000, adminToken: "token" }, stores };
+  const now = Date.now();
+
+  // Create 8 users with a variety of sources
+  for (let i = 1; i <= 8; i++) {
+    const userId = `user-${i}`;
+    await stores.metadata.putUser(makeUser({ id: userId, status: "approved" }));
+  }
+
+  // user-1: src-1 (due), src-2 (not due)
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-1-1",
+      userId: "user-1",
+      feedUrl: "https://example.com/u1/1",
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-1-2",
+      userId: "user-1",
+      feedUrl: "https://example.com/u1/2",
+      lastPolledAt: new Date(now - 1_000).toISOString(),
+    }),
+  );
+
+  // user-2: src-1 (no feedUrl), src-2 (due)
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-2-1",
+      userId: "user-2",
+      feedUrl: undefined,
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-2-2",
+      userId: "user-2",
+      feedUrl: "https://example.com/u2/2",
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+
+  // user-3: no sources
+
+  // user-4: src-1 (due), src-2 (due)
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-4-1",
+      userId: "user-4",
+      feedUrl: "https://example.com/u4/1",
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-4-2",
+      userId: "user-4",
+      feedUrl: "https://example.com/u4/2",
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+
+  // user-5: src-1 (due)
+  await stores.metadata.putSource(
+    makeSource({
+      id: "src-5-1",
+      userId: "user-5",
+      feedUrl: "https://example.com/u5/1",
+      lastPolledAt: new Date(now - 7_200_000).toISOString(),
+    }),
+  );
+
+  // user-6..8: src-1 (due)
+  for (let i = 6; i <= 8; i++) {
+    await stores.metadata.putSource(
+      makeSource({
+        id: `src-${i}-1`,
+        userId: `user-${i}`,
+        feedUrl: `https://example.com/u${i}/1`,
+        lastPolledAt: new Date(now - 7_200_000).toISOString(),
+      }),
+    );
+  }
+
+  // With batchSize = 5:
+  // Expected due in order:
+  // 1. user-1: src-1-1
+  // 2. user-2: src-2-2
+  // 3. user-4: src-4-1
+  // 4. user-4: src-4-2
+  // 5. user-5: src-5-1
+  // users 6, 7, 8 must NOT be polled.
+  const res = await runFeedPollBatch(ctx, {
+    ...recordingDeps,
+    minIntervalMs: 60_000,
+    batchSize: 5,
+  });
+  assertEquals(res.polled, 5);
+  assertEquals(polledSourceUrls, [
+    "https://example.com/u1/1",
+    "https://example.com/u2/2",
+    "https://example.com/u4/1",
+    "https://example.com/u4/2",
+    "https://example.com/u5/1",
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
