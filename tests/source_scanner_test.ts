@@ -262,6 +262,27 @@ const cases: Case[] = [
       obs: `readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
     }),
   },
+  {
+    // The named counterexample to "malformed input widens" (audio-feed-ywjz): an unterminated block
+    // comment is a NARROWING malformed input - the spans are empty AND everything to EOF is blanked,
+    // so a read after it is LOST and the selection can lose a suite rather than gain one.
+    //
+    // IGNORED ON PURPOSE, and that reason is the point of the row: a LIVE assertion here would have to
+    // assert the current behaviour - that the scan blanks to EOF - which is a pin that passes WITH the
+    // defect present, worse than no pin at all (audio-feed-zpud). It stays visible with its bead id
+    // until the safe fix lands: on reaching EOF still inside a lexical state, exclude nothing rather
+    // than blanking, because widening costs gate time and narrowing loses a suite.
+    name:
+      "M4 malformed: UNTERMINATED BLOCK COMMENT blanks to EOF and NARROWS (known gap, audio-feed-ywjz)",
+    src: `/* unterminated\nconst a = await Deno.readTextFile(p);\n`,
+    expect: "KNOWN GAP (audio-feed-ywjz): the read after an unterminated /* is currently LOST",
+    ignore: true,
+    check: (r) => ({
+      // Deliberately asserts the SAFE direction, so the fix is a one-word change: flip `ignore`.
+      pass: r.stripped.includes("Deno.readTextFile("),
+      obs: `spans=${r.spans.length} readSurvived=${r.stripped.includes("Deno.readTextFile(")}`,
+    }),
+  },
 ];
 for (const c of cases) {
   Deno.test({

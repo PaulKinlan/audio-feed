@@ -101,11 +101,13 @@ because the spread is machine load, not the corpus: five runs over the same 335 
 contended 2-vCPU VM gave 224.83, 248.85, 292.25, 266.96 and 405.86 ms — three of them consecutive at
 249/292/267 ms — with `steal` at 9.7M ticks. Quoting any single one as "the" cost would be the same
 defect as an unstated unit. Against the 14 s to 40 s a fast gate actually takes, the entire universe
-costs **0.6% to 2.1%** of the run, and a typical invocation is far smaller than the universe: the
-selector scans the changed suite and the modules it imports to a closure depth of 2, so **ten files
-is 7–12 ms**. Method: three warm-up passes then twenty timed, reading the same file contents for
-every scanner compared, on this VM. The corpus is walked recursively and deliberately overstates a
-single invocation, which is the safe direction for a budget.
+costs **0.6% to 2.9%** of the run, depending on which of the five runs and which end of the 14–40 s
+range is used (0.56% at the fastest run against a 40 s gate, 2.90% at the slowest against a 14 s
+one), and a typical invocation is far smaller than the universe: the selector scans the changed
+suite and the modules it imports to a closure depth of 2, so **ten files is 7–12 ms**. Method: three
+warm-up passes then twenty timed, reading the same file contents for every scanner compared, on this
+VM. The corpus is walked recursively and deliberately overstates a single invocation, which is the
+safe direction for a budget.
 
 The pre-lexer revision has no comparable function to time — `97d5552^` has no `stripComments` at
 all, and is 1813 lines against today's 2026 — so the comparison this record can honestly make is the
@@ -115,25 +117,42 @@ much room it has before it is worth taking.
 
 **Budget and trigger.** The scan is expected to stay under **250 ms per full pass on an unloaded
 VM** and **450 ms under heavy-slot contention**, with **1.5 ms per file** covering both; even the
-contended figure is still under 3.3% of a 14 s gate. If a change doubles the measured range — past
-roughly 450 ms quiet or 800 ms contended — or the open-case rate keeps climbing, the parser trade
-becomes the cheaper option and should be measured rather than assumed.
+contended figure is still under 3.2% of a 14 s gate (450 ms of 14,000). If a change doubles the
+measured range — past roughly 450 ms quiet or 800 ms contended — or the open-case rate keeps
+climbing, the parser trade becomes the cheaper option and should be measured rather than assumed.
 
-**Malformed and uncertain input, and why the failure direction is the safe one (audio-feed-pgpp).**
-The scanner has no error channel: it reports spans of text that are NOT code, and a malformed input
-produces no spans rather than a complaint. That is the behaviour to state, because "no spans" means
-NOTHING is excluded from code, so every read site survives and the selection can only WIDEN — the
-selector's safe direction, since a wider selection costs gate time and can never lose a suite. It is
-a property of the shape rather than of one case: only marking text as non-code can hide a reference,
-and malformed input marks none.
+**Malformed and uncertain input, and where the failure direction is safe and where it is not
+(audio-feed-pgpp).** The scanner has no error channel: it reports spans of text that are NOT code,
+and a malformed input produces no spans rather than a complaint. THE DIRECTION DEPENDS ON THE CASE,
+so it is stated per case rather than as a rule about malformed input in general.
 
-Measured on five inputs, each producing `spans === []` with `stripped` identical to the source and
-no read lost: a string left unterminated at EOF by a trailing escape; an unterminated string with a
-read BEFORE it and again with a read AFTER it (the order that could plausibly swallow a real site);
-and a stray close quote forming a phantom string. Boundary rows for the malformed cases are in
-`tests/source_scanner_test.ts` (M1–M3), so the next change to the scanner has to keep this direction
-deliberate rather than accidental. The two known-ambiguous lexical cases above are the same story
-with the harm named, and they stay pinned with `ignore: true` and their reasons rather than deleted.
+**Where it widens, and this is the measured set.** A string left unterminated at EOF by a trailing
+escape; an unterminated string with a read BEFORE it and again with a read AFTER it (the order that
+could plausibly swallow a real site); and a stray close quote forming a phantom string. Each
+produces `spans === []` with `stripped` identical to the source and no read lost, because nothing is
+excluded from code, every read site survives, and the selection can therefore only widen — the
+selector's safe direction, since a wider selection costs gate time and cannot lose a suite. Boundary
+rows for these are in `tests/source_scanner_test.ts` (M1–M3).
+
+**Where it NARROWS, the named counterexample: an unterminated block comment.** A `/*` with no
+closing `*/` puts the scanner into comment state for the remainder of the file, so the spans are
+empty AND everything to EOF is blanked — measured as 54 characters of source reduced to 1 — and a
+read after it is LOST. That makes the selection NARROW rather than widen, and NARROWING IS THE
+UNSAFE DIRECTION: a suite that should have been selected can be missed. This is the exception to the
+paragraph above and it is named as one, because "malformed input generally widens" would keep the
+false universal while sounding like a caveat.
+
+WHY IT IS NOT URGENT, and what would fix it: the trigger is a file that cannot parse, so
+`deno check` and the gate fail loudly on that file regardless of what the selector derived from it.
+The path that would make it reachable from VALID code — the labelled-block defect letting a `/*`
+inside a regex body open a phantom comment — was tested in three shapes and does not lose the read.
+The safe answer when the scan reaches EOF still inside any lexical state is to exclude nothing
+rather than blank to EOF, because widening costs gate time and narrowing loses a suite. It is filed
+as `audio-feed-ywjz` and pinned as ignored row M4 in `tests/source_scanner_test.ts`, so it is
+discoverable from the code.
+
+The two known-ambiguous lexical cases above are a different story again, with the harm named, and
+they stay pinned with `ignore: true` and their reasons rather than deleted.
 
 **The alternative considered and not taken:** treat an uncertain scan as "unresolved", or fall back
 to the full suite. Both are safe, and both were declined for the same reason: there is no error
