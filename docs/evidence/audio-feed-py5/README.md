@@ -4,9 +4,11 @@
 - Asserts: rendered episode row count is 5; header count text displays '5 episodes'; empty state is hidden; play button loads audio URL into #audio element; enclosure audio URL returns 200 with non-empty RIFF/WAVE bytes
 
 ## Problem & Solution
+
 listen-harness was omitting contentType on seeded episodes, filtering out episodes. Fixed by ensuring contentType: 'audio/wav', self-verifying harness startup, and asserting playlist rendering.
 
 ## Execution Log
+
 ```
 PASS  rendered episode row count is 5  found 5 rows
 PASS  header count text displays '5 episodes'  got '5 episodes'
@@ -16,4 +18,5 @@ PASS  enclosure audio URL returns 200 with non-empty RIFF/WAVE bytes  status 200
 ```
 
 ## Evidence Artifacts
+
 - 01-listen-harness-5-episodes.png: Screenshot of /listen/harness-token rendered in real headless Chrome showing 5 episode rows.

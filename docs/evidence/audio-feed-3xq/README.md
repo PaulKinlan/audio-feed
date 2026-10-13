@@ -4,6 +4,7 @@
 - Asserts: module fetched at /assets/<hash>.admin.js; module served as immutable text/javascript; #admin-data island carries the server's origin and session state; module rendered both subscriber rows; stats panel rendered seeded runs; manage pane lists the subscriber's feed; Remove raises the native confirm dialog; Cancel sends no DELETE; Confirm sends exactly one DELETE for that source; no console errors/warnings/exceptions at 1280x900; no console errors/warnings/exceptions at 390x844
 
 ## Verified Features
+
 1. The admin client is fetched as an immutable content-addressed module.
 2. #admin-data island delivers server state to client.
 3. Dynamic user list and run history auto-populate empty markup.
@@ -11,6 +12,7 @@
 5. Zero console errors/warnings at desktop (1280x900) and mobile (390x844).
 
 ## Execution Log
+
 ```
 PASS  module fetched at /assets/<hash>.admin.js  /assets/<hash>.admin.js -> 200
 PASS  module served as immutable text/javascript  immutable text/javascript with 1-year max-age
@@ -26,5 +28,6 @@ PASS  no console errors/warnings/exceptions at 390x844  clean
 ```
 
 ## Screenshots
+
 - part4a-admin-1280x900.png: Desktop admin console
 - part4a-admin-390x844.png: Mobile admin console

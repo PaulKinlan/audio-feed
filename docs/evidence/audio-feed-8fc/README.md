@@ -4,6 +4,7 @@
 - Asserts: signed-out /admin offers sign-in with token controls removed (audio-feed-0jp); setup link: secret scrubbed from the address bar; register a passkey from the setup link; sign out; sign in with the passkey; account edits persist across a reload; Send to Audio without a token; Regenerate on /account: one episode, then the outdated rest; admin reaches /admin; admin console loads subscriber data on session with token controls removed (audio-feed-0jp); admin console issues a setup link on the session; a non-admin gets 403 at /admin
 
 ## Overview
+
 Real headless Chrome for Testing, driven over CDP from a Deno script, with a CDP
 virtual authenticator (`ctap2`, `internal`, resident keys, user verification,
 verified user). The app is the real one, served by `scripts/account-harness.ts`
@@ -16,6 +17,7 @@ Reproduce:
     deno run --allow-all --unstable-kv scripts/account-browser-proof.ts
 
 ## What was driven, in order
+
 | # | Step | Result |
 |---|------|--------|
 | 1 | Signed-out `/admin` offers passkey sign-in, token behind "Use admin token instead" | 200 |
@@ -38,6 +40,7 @@ The harness now seeds its two ready episodes as published on older prompts, so
 there is something to regenerate.
 
 ## Screenshots
+
 Every page at 390px and 1280px, in light and dark (the shell supports both):
 `<page>-<width>-<scheme>.png`.
 
@@ -51,6 +54,7 @@ Every page at 390px and 1280px, in light and dark (the shell supports both):
 - `08-admin-403`: a signed-in non-admin at `/admin`
 
 ## Review fixes shown here
+
 - `07-admin-390-*`: the background-runs table keeps a minimum width
   (`table.runs { min-inline-size: 40rem; }`) and scrolls inside its card. Before
   the fix, Result wrapped one character per line at 390px.
@@ -58,6 +62,7 @@ Every page at 390px and 1280px, in light and dark (the shell supports both):
   (audio-feed-ktn).
 
 ## Found by this run
+
 The first run failed at sign-out. The account, admin and login pages send
 `Referrer-Policy: no-referrer`, and a form POST from such a page carries
 `Origin: null`, so the Origin check refused the header's sign-out form.

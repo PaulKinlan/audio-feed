@@ -4,9 +4,11 @@
 - Asserts: visibilitychange (hidden) saved position 35s to localStorage; real navigation away fires pagehide with persisted=true and saves position 42s to localStorage; history.back() restores page from bfcache with pageshow persisted=true and preserves in-memory playback time; row displays 'Resume from 0:42' badge; window.onbeforeunload is not set
 
 ## Overview
+
 Replaces the deprecated and bfcache-ineligible `beforeunload` listener with `pagehide` and `visibilitychange` (handling `visibilityState === "hidden"`) for playback position saving in `src/assets/listen.js`. Drives real browser navigation away and back to prove bfcache eligibility (`persisted === true`) and position persistence.
 
 ## Verification
+
 1. **Automated Unit Test (`tests/playback_position_test.ts`)**:
    - Asserts client script registers `pagehide` and `visibilitychange` listeners.
    - Asserts client script does NOT register any `beforeunload` listener.

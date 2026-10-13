@@ -4,6 +4,7 @@
 - Asserts: bookmarklet inspects alternate RSS/Atom feeds; bookmarklet also inspects plain feed links; without ?add= the plain send form is the only card; prefill renders exactly one unified card; prefill renders NO second send form; the one card offers Queue this single page; the one card offers Subscribe to the feed; queue single episode feedback succeeds; feed subscription feedback succeeds; no-feed prefill is still exactly one card; no-feed prefill has no second form; no-feed prefill has no duplicate input; a page with no declared feed answers with zero feeds; the discovered feed appears without a second card; the server found the page's declared feed and resolved it; the discovered feed keeps its title; a hostile feed candidate never reaches the page; subscribing to the discovered feed succeeds; mobile prefill stays one card with no second form; mobile quick add zero horizontal overflow at 390px; front door pre-fills #feed-url input from ?feed= query param
 
 ## Verified Criteria
+
 1. Draggable Bookmarklet Button: Available on /account and / with draggable="true" and accessible title.
 2. In-Browser Feed Detection: Bookmarklet extracts links and queries rel~=alternate feeds.
 3. ONE Unified Card (audio-feed-6hw): Renders exactly one card and no duplicate send form on prefill.
@@ -11,6 +12,7 @@
 5. Mobile Viewport: 390x844 layout verified with zero horizontal overflow.
 
 ## Execution Log
+
 ```
 PASS  account page renders bookmarklet button  bookmarklet present
 PASS  bookmarklet inspects alternate RSS/Atom feeds  feed detection script included
@@ -40,6 +42,7 @@ PASS  front door pre-fills #feed-url input from ?feed= query param  feed: 'https
 ```
 
 ## Screenshots
+
 - 01-unified-card-no-feed.png: Unified card with quiet feed
 - 02-unified-card-discovered-feed.png: Discovered feed inside unified card
 - 03-unified-card-subscribed.png: Subscribed from discovered feed
