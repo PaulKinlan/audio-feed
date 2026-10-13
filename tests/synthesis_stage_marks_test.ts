@@ -109,19 +109,23 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   // this row proved nothing about the cap. Nine episodes x two stages = eighteen, which exceeds the cap
   // by three.
   //
-  // THE EXACT SUPPRESSED COUNT IS COUPLED TO THE STAGE SET, so it is derived from ONE named assumption
-  // rather than written as a literal. IF A STAGE IS ADDED TO A SUCCESSFUL EPISODE - audio-feed-avgc
-  // adds a fourth and would make this 3, giving twelve suppressed - THE ROW WILL FAIL, and the failure
-  // message names this line. That is the intended trade: a loud, self-diagnosing failure on the day the
-  // stage set changes, rather than a hardcoded number that quietly stops meaning anything.
-  // ONE NAMED ASSUMPTION, and the only thing to update when the stage set moves. audio-feed-avgc moved
-  // it: by retaining completed terminal uploads across budget yields it put `yield` on the NORMAL path,
-  // so a successful episode now emits THREE marks where it used to emit two. The sites are
-  // markStage("tts", ...), markStage("yield", ...) and markStage("upload", ...) in
-  // src/worker/synthesis.ts. NOT derived from the pipeline at run time, deliberately: a derived
-  // expectation would FOLLOW a broken stage set and stop being a control, and a control has to fail
-  // when the defect it guards against is present.
-  const marksPerSuccessfulEpisode = 3;
+  // THE PER-EPISODE MARK COUNT COMES FROM A TEST-OWNED LIST OF STAGE NAMES, and both halves of that are
+  // deliberate.
+  //
+  // WHY A LIST RATHER THAN A BARE INTEGER: an integer cannot distinguish "the code changed" from "the
+  // assumption is wrong". audio-feed-avgc added the `verify` mark, and a bare count of 2 failed LOUDLY ON
+  // THE MAIN THIS BRANCH WAS GOING TO LAND ON, which is the expensive version of correct. A list forces a
+  // VISIBLE TEST EDIT when the stage set moves, and that edit is what a reviewer sees in the diff.
+  //
+  // WHY NOT DERIVED FROM src/worker/synthesis.ts: deriving it from the code under test would make this row
+  // unable to detect a MISSING mark, which is the defect it exists to catch. The literal IS the control.
+  //
+  // THE THREE ARE THE MARKS ON A SUCCESSFUL PATH. `yield` is EXCLUDED because it is the CONDITIONAL
+  // budget-yield path, which is exactly why this count was two before avgc and three after it.
+  // Sites: markStage("tts", ...), markStage("verify", ...), markStage("upload", ...) in
+  // src/worker/synthesis.ts.
+  const successfulPathStages = ["tts", "verify", "upload"] as const;
+  const marksPerSuccessfulEpisode = successfulPathStages.length;
   const ids = Array.from({ length: 9 }, (_, i) => `ep-huh4-cap-${i}`);
   const { ctx, stores } = await seedEpisodes(ids);
   const audio = fakeAudio();
@@ -166,7 +170,9 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
   assertEquals(
     suppressed,
     expectedSuppressed,
-    `with marksPerSuccessfulEpisode=${marksPerSuccessfulEpisode}, nine episodes exceed the cap by ${expectedSuppressed}: if a stage was added or removed, update marksPerSuccessfulEpisode (audio-feed-9pvk)`,
+    `with ${marksPerSuccessfulEpisode} marks per successful episode (${
+      successfulPathStages.join(", ")
+    }), nine episodes exceed the cap by ${expectedSuppressed}: if a stage was added or removed, update successfulPathStages (audio-feed-9pvk)`,
   );
   /**
    * THE CONTROL, CORRECTED AFTER REVIEW (audio-feed-9pvk). The first version asserted
