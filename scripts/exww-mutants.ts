@@ -728,7 +728,7 @@ if (import.meta.main) {
       } modified-sha ${digest} ` + judged.detail,
     );
     if (!asExpected) {
-      for (const failure of outcome.failures) console.log(`      red: ${failure.slice(0, 130)}`);
+      for (const failure of outcome.failures) console.log(`      red: ${failure}`);
       console.log(`      ${judged.detail}`);
     }
     results.push({

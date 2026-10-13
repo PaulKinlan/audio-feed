@@ -327,3 +327,55 @@ Deno.test("audio-feed-yylk: the wrong-scale mutant is not VACUOUS - its scale mu
       `which is worse than the literal it replaced`,
   );
 });
+
+Deno.test("audio-feed-2mbx: suite and CLI failure reporting must not truncate failure lines or conceal dimensions", async () => {
+  // audio-feed-2mbx: failure lines in tests/exww_mutants_test.ts and scripts/exww-mutants.ts were sliced
+  // to 120/130 characters, truncating 170+ character image dimension check failures right after "image is 640"
+  // and concealing actual clip and image dimensions.
+  const testSource = await Deno.readTextFile(
+    new URL("./exww_mutants_test.ts", import.meta.url),
+  );
+  assert(
+    !testSource.includes(".slice(0, 120)"),
+    "tests/exww_mutants_test.ts must not truncate failure strings with .slice(0, 120)",
+  );
+
+  const cliSource = await Deno.readTextFile(
+    new URL("../scripts/exww-mutants.ts", import.meta.url),
+  );
+  assert(
+    !cliSource.includes(".slice(0, 130)"),
+    "scripts/exww-mutants.ts must not truncate failure lines with .slice(0, 130)",
+  );
+
+  // Assert that a long failure line (170+ chars) retains full dimensions through interpretRun detail
+  const longFailure =
+    ` ${CAPTURE_04} covers the Recent failures section carrying the provider error  image is 640x495 ` +
+    `for a clip of 1280x989 at scale ${WRONG_SCALE}, so it should be 1280x989`;
+  assert(
+    longFailure.length > 150,
+    "repro line must be sufficiently long to exercise the old truncation bug",
+  );
+
+  const row = MUTANTS.find((m) => m.name === "wrong-scale")!;
+  const mismatchedOutcome = {
+    code: 1,
+    timedOut: false,
+    failures: [
+      ` ${CAPTURE_04} covers the Recent failures section carrying the provider error  image is 640x473 ` +
+      `for a clip of 1280x989 at scale ${WRONG_SCALE}, so it should be 1280x989`,
+    ],
+    tail: "",
+    seconds: 1,
+    passCount: 5,
+  };
+  const judged = interpretRun(mismatchedOutcome, {
+    kind: "detector",
+    expect: row.expect,
+    expectRelationship: row.expectRelationship,
+  });
+  assertEquals(judged.verdict, "unexpected");
+  assertStringIncludes(judged.detail, "640x473");
+  assertStringIncludes(judged.detail, "1280x989");
+  assertStringIncludes(judged.detail, "640x495");
+});
