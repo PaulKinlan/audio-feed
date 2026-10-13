@@ -212,6 +212,13 @@ export interface SynthesisWorkerOptions {
   estimatedTurnDurationMs?: number;
   /** Estimated worst-case duration for terminal audio upload in ms (audio-feed-dv4p). */
   estimatedUploadDurationMs?: number;
+  /**
+   * Maximum stage-level marks recorded per synthesis invocation (audio-feed-938b).
+   * Beyond this cap, subsequent stage marks are suppressed and recorded in a single
+   * terminal "capped" event detailing suppressed count, stages, and affected episode IDs.
+   * Defaults to defaultStageMarkCap(batchSize).
+   */
+  stageMarkCap?: number;
   /** Revision for a regenerated audio key. Injectable so a test can force a repeat. */
   revision?: () => string;
   /** Current time in ms since epoch; injectable so tests can advance time deterministically. */
@@ -235,6 +242,7 @@ const DEFAULTS: Required<
     | "flushMarginMs"
     | "estimatedTurnDurationMs"
     | "estimatedUploadDurationMs"
+    | "stageMarkCap"
   >
 > = {
   batchSize: 5,
@@ -1190,9 +1198,22 @@ async function settleTerminalPersistence(
  * and runScriptStage, the LLM call) and they are NOT declared here until their wraps exist - a
  * union member with no emitter is a claim the code does not make.
  */
-type SynthesisStage = "tts" | "verify" | "upload" | "yield";
+export type SynthesisStage = "tts" | "verify" | "upload" | "yield";
 /** Wrap a stage so its duration is recorded on the way out, including when it throws. */
-type StageMarker = <T>(stage: SynthesisStage, fn: () => Promise<T>) => Promise<T>;
+export type StageMarker = <T>(
+  stage: SynthesisStage,
+  fn: () => Promise<T>,
+  episodeId?: string,
+) => Promise<T>;
+
+/**
+ * Default ceiling for stage marks per synthesis invocation (audio-feed-938b).
+ * Sized to cover batchSize episodes across all four stages (tts, verify, upload, yield)
+ * with a production minimum floor of 25.
+ */
+export function defaultStageMarkCap(batchSize: number = DEFAULTS.batchSize): number {
+  return Math.max(25, batchSize * 4);
+}
 
 export async function runSynthesisBatch(
   ctx: AppContext,
@@ -1227,8 +1248,9 @@ export async function runSynthesisBatch(
   };
   await appendMark("started");
   /**
-   * Stage marks (audio-feed-huh4): how long each stage of the invocation took, and therefore how
-   * much of a stage was work rather than a wait inside KV, a Durable Object lock, or the provider.
+   * Stage marks (audio-feed-huh4, audio-feed-938b): how long each stage of the invocation took,
+   * and therefore how much of a stage was work rather than a wait inside KV, a Durable Object lock,
+   * or the provider.
    *
    * WHY THIS IS A MARK AND NOT A PHASE WRITE: a stage announces its phase on ENTRY and nothing until
    * the next one, so a stalled TTS call and a slow honest one are the same shape in the store. These
@@ -1237,15 +1259,23 @@ export async function runSynthesisBatch(
    *
    * BOUNDED BY CONSTRUCTION, because the store is a shared, time-windowed log and the cheapest way to
    * break it is to make volume a function of work: this path is per attempt per episode inside a
-   * batch, so an uncapped mark would scale with batch size times retry count. The cap is one full
-   * batch (5 episodes x 3 stages), which is the largest number of marks a healthy invocation wants;
-   * past it the marks stop and ONE `capped` event records how many were suppressed, so the loss is
-   * visible in the same store as the marks it suppressed rather than silent.
+   * batch, so an uncapped mark would scale with batch size times retry count. The cap is sized to cover
+   * healthy batches across all four stages (tts, verify, upload, yield: defaultStageMarkCap, min 25);
+   * past it the marks stop and ONE `capped` event records the suppressed count, affected episode IDs,
+   * and suppressed stages breakdown, so loss of observability is explicitly identified rather than
+   * disguised as unreached stages.
    */
-  const stageMarkCap = 15;
+  const stageMarkCap = options.stageMarkCap ??
+    defaultStageMarkCap(options.batchSize ?? DEFAULTS.batchSize);
   let stageMarksEmitted = 0;
   let stageMarksSuppressed = 0;
-  const appendStage = async (stage: SynthesisStage, durationMs: number) => {
+  const suppressedEpisodes = new Set<string>();
+  const suppressedStages: Partial<Record<SynthesisStage, number>> = {};
+  const appendStage = async (
+    stage: SynthesisStage,
+    durationMs: number,
+    episodeId?: string,
+  ) => {
     try {
       const stored = await ctx.stores.metadata.appendLog({
         time: new Date().toISOString(),
@@ -1257,7 +1287,13 @@ export async function runSynthesisBatch(
         phase: stage,
         message: `synthesis stage ${stage} took ${Math.round(durationMs)}ms`,
         durationMs: Math.max(0, Math.round(durationMs)),
-        context: { invocationId, stage: "synthesis", budgetMs, stageMark: stage },
+        context: {
+          invocationId,
+          stage: "synthesis",
+          budgetMs,
+          stageMark: stage,
+          ...(episodeId ? { episodeId } : {}),
+        },
       });
       if (!stored) console.warn("[audio-feed] synthesis stage mark was not stored");
     } catch {
@@ -1265,9 +1301,11 @@ export async function runSynthesisBatch(
       console.warn("[audio-feed] synthesis stage mark write failed");
     }
   };
-  const markStage: StageMarker = async (stage, fn) => {
+  const markStage: StageMarker = async (stage, fn, episodeId) => {
     if (stageMarksEmitted >= stageMarkCap) {
       stageMarksSuppressed++;
+      if (episodeId) suppressedEpisodes.add(episodeId);
+      suppressedStages[stage] = (suppressedStages[stage] ?? 0) + 1;
       return await fn();
     }
     stageMarksEmitted++;
@@ -1277,7 +1315,7 @@ export async function runSynthesisBatch(
     } finally {
       // finally, not after: a stage that THREW is the one whose duration is most worth having, and a
       // stalled-then-aborted TTS call is exactly the shape this instrumentation exists to expose.
-      await appendStage(stage, performance.now() - startedMarkAt);
+      await appendStage(stage, performance.now() - startedMarkAt, episodeId);
     }
   };
   let outcome: "returned" | "threw" = "threw";
@@ -1290,7 +1328,7 @@ export async function runSynthesisBatch(
     await appendMark("terminal", outcome);
     if (stageMarksSuppressed > 0) {
       // Reported as an EVENT rather than a console line: the whole point of the cap is that the loss
-      // is visible in the same store as the marks it suppressed, with the count attached.
+      // is visible in the same store as the marks it suppressed, with the count and affected episodes attached.
       try {
         await ctx.stores.metadata.appendLog({
           time: new Date().toISOString(),
@@ -1302,7 +1340,14 @@ export async function runSynthesisBatch(
           phase: "capped",
           message:
             `synthesis stage marks capped at ${stageMarkCap}; ${stageMarksSuppressed} suppressed`,
-          context: { invocationId, stage: "synthesis", budgetMs, suppressed: stageMarksSuppressed },
+          context: {
+            invocationId,
+            stage: "synthesis",
+            budgetMs,
+            suppressed: stageMarksSuppressed,
+            suppressedStages: { ...suppressedStages },
+            suppressedEpisodes: Array.from(suppressedEpisodes),
+          },
         });
       } catch {
         console.warn(
@@ -1746,7 +1791,7 @@ async function runSynthesisBatchCore(
               maxDurationMs: maxInvocationDurationMs,
               startTimeMonotonicMs: invocationStartMonotonicMs,
             },
-          }));
+          }), currentEpisode.id);
         break;
       } catch (error) {
         lastError = error;
@@ -1791,7 +1836,7 @@ async function runSynthesisBatchCore(
                 phase: yieldPhase,
                 advanceAttempts: !madeProgress,
               },
-            ));
+            ), currentEpisode.id);
           if (yielded) {
             // Same structured verdict as the terminal-upload yield (audio-feed-2sec): the
             // claim was released to resume later; no terminal write happened. Best-effort -
@@ -2046,7 +2091,7 @@ async function runSynthesisBatchCore(
                 ) stored = existing;
               }
             }
-          });
+          }, currentEpisode.id);
           if (signal?.aborted) throw signal.reason;
           if (existing && !stored) {
             throw new TerminalStagingConflictError(
@@ -2062,7 +2107,7 @@ async function runSynthesisBatchCore(
               blobs.put(stagingKey, bytes, {
                 contentType: "audio/wav",
                 signal,
-              }));
+              }), currentEpisode.id);
             putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
               .catch(() => {});
             stored = await putPromise;
