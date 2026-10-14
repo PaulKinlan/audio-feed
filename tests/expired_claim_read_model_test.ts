@@ -78,6 +78,56 @@ Deno.test("svwu: historical ownerless claim records remain genuine starts", () =
   assertEquals(attempt?.leaseExpired, null, "a legacy record cannot invent a lease duration");
 });
 
+Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every tested context key", () => {
+  // audio-feed-svdw: Pin the 9jmf docstring prose by construction.
+  // The test derives the context keys directly from isClaimStartRecord's implementation
+  // and asserts that the preceding JSDoc comment names every single one of them.
+  // A future writer who adds a key to the predicate without documenting it fails this test.
+  const fnStr = isClaimStartRecord.toString();
+  const contextKeys = [
+    ...new Set([...fnStr.matchAll(/\bcontext\.([a-zA-Z0-9_$]+)/g)].map((m) => m[1])),
+  ];
+  assert(
+    contextKeys.length >= 2,
+    `expected at least 2 context keys, got: ${contextKeys.join(", ")}`,
+  );
+
+  const source = Deno.readTextFileSync(
+    new URL("../src/observability/admin_report.ts", import.meta.url),
+  );
+  const beforeFn = source.split("export function isClaimStartRecord")[0]!;
+  const lastDocStart = beforeFn.lastIndexOf("/**");
+  const lastDocEnd = beforeFn.lastIndexOf("*/");
+  assert(
+    lastDocStart !== -1 && lastDocEnd > lastDocStart,
+    "isClaimStartRecord must be preceded by a JSDoc block",
+  );
+  const docstring = beforeFn.slice(lastDocStart, lastDocEnd + 2);
+
+  // 1. Every context key tested in code MUST be named in the docstring as `context.<key>`
+  for (const key of contextKeys) {
+    assert(
+      docstring.includes(`context.${key}`),
+      `isClaimStartRecord docstring must explicitly name context.${key}; doc was:\n${docstring}`,
+    );
+  }
+
+  // 2. Exact sentence pinning from audio-feed-9jmf:
+  const cleanText = docstring.replace(/[ \t]*\*[ \t]?/g, "").replace(/\s+/g, " ");
+  assert(
+    cleanText.includes(
+      "The KEYS are what this predicate tests, not a paraphrase of them",
+    ),
+    "docstring must retain the pinned 9jmf sentence stating keys are tested, not paraphrased",
+  );
+  assert(
+    cleanText.includes(
+      '"structured outcome" is not something a writer can write (audio-feed-9jmf)',
+    ),
+    "docstring must explain why the keys are named (audio-feed-9jmf)",
+  );
+});
+
 Deno.test("mkfe: an expiry-only window reports startedAt as UNKNOWN, not the expiry instant", () => {
   // THE RETAINED WINDOW OPENS AFTER THE START. The store prunes its oldest records, so an attempt
   // whose start has aged out first appears as its EXPIRY - and initialising startedAt from the first
