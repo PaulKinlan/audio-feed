@@ -110,9 +110,36 @@ Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every 
   // Pin three actionable limitations, not the whole paragraph: the extraction-population
   // floor is useful for all-dynamic rewrites, but is not a predicate-key completeness check.
   const testSource = Deno.readTextFileSync(new URL(import.meta.url));
-  const noteStart = testSource.indexOf("  // LIMITATION (audio-feed-r88w):");
-  const noteEnd = testSource.indexOf("\n  const contextKeys =", noteStart);
-  assert(noteStart !== -1 && noteEnd > noteStart, "r88w limitation note is missing");
+  // audio-feed-yirl: the markers must be found EXACTLY ONCE, not merely found. A presence check
+  // (`noteStart !== -1`) is satisfied by a SECOND copy of the marker, and the slice then starts at the
+  // FIRST occurrence: the claims below would run over a slice that is not the text the author intended,
+  // so this pin silently stops covering what it was written to cover while every assertion still passes.
+  // The count is asserted UNCONDITIONALLY and before the slice is taken - a guard that only runs once
+  // the marker is found would be the same defect moved one step later. The wording names the count so a
+  // failure says what was found rather than only that something was wrong.
+  //
+  // THE MARKERS ARE BUILT BY CONCATENATION ON PURPOSE, which is the other half of the idiom this copies
+  // from the selector's withoutRouteAuditFixture guard: a marker written as one literal APPEARS IN THIS
+  // VERY FILE, so a counter that scans the file finds itself and the guard fails on a defect that is not
+  // there. That is not hypothetical - the first version of this guard counted its own literal and
+  // reported two start markers for a file with one. Splitting the string keeps the source free of the
+  // text being counted, so the count is honest. Do not join these back together.
+  const noteMarker = "  // " + "LIMITATION (audio-feed-r88w):";
+  const noteEndMarker = "\n  const " + "contextKeys =";
+  const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+  const noteMarkerCount = occurrences(testSource, noteMarker);
+  const noteEndMarkerCount = occurrences(testSource, noteEndMarker);
+  assert(
+    noteMarkerCount === 1 && noteEndMarkerCount === 1,
+    `r88w limitation note must appear exactly once, found ${noteMarkerCount} start marker(s) and ` +
+      `${noteEndMarkerCount} end marker(s)`,
+  );
+  const noteStart = testSource.indexOf(noteMarker);
+  const noteEnd = testSource.indexOf(noteEndMarker, noteStart);
+  assert(
+    noteEnd > noteStart,
+    "r88w limitation note is unreadable: end marker precedes the start marker",
+  );
   const note = testSource.slice(noteStart, noteEnd).replace(/\s*\/\/\s?/g, " ").replace(
     /\s+/g,
     " ",
