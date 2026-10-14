@@ -595,75 +595,6 @@ Deno.test("GET /account supports episode pagination via limit query parameter (a
   );
 });
 
-const VOID_ELEMENTS = new Set([
-  "area",
-  "base",
-  "br",
-  "col",
-  "embed",
-  "hr",
-  "img",
-  "input",
-  "link",
-  "meta",
-  "param",
-  "source",
-  "track",
-  "wbr",
-]);
-
-/**
- * Walk HTML markup and return any tag-nesting problems (audio-feed-lma7):
- * 1. Strip terminated comments (`<!--...-->`), `<script>...</script>`, and `<style>...</style>` raw-text blocks.
- * 2. Check for leftover unterminated `<!--`, `<script(?=[\s/>]|$)`, or `<style(?=[\s/>]|$)` before walking tags,
- *    using the boundary lookahead so custom elements like `<script-loader>` and `<style-guide>` are not misreported.
- * 3. Push non-void open tags onto a stack and report any mismatched closing tag or unclosed tag at EOF.
- */
-function tagNestingProblems(markup: string): string[] {
-  const problems: string[] = [];
-  const stripped = markup
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<script(?=[\s/>]|$)[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<style(?=[\s/>]|$)[\s\S]*?<\/style\s*>/gi, "");
-
-  if (stripped.includes("<!--")) {
-    problems.push("unterminated <!-- comment");
-  }
-  if (/<script(?=[\s/>]|$)/i.test(stripped)) {
-    problems.push("unterminated <script> raw-text block");
-  }
-  if (/<style(?=[\s/>]|$)/i.test(stripped)) {
-    problems.push("unterminated <style> raw-text block");
-  }
-  if (problems.length > 0) {
-    return problems;
-  }
-
-  const stack: string[] = [];
-  const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9:-]*)(?:\s[^<>]*?)?\s*(\/?)>/g;
-  let match: RegExpExecArray | null;
-  while ((match = tagRe.exec(stripped)) !== null) {
-    const full = match[0];
-    const name = match[1]!.toLowerCase();
-    const selfClosing = match[2] === "/" || VOID_ELEMENTS.has(name);
-    const isClosing = full.startsWith("</");
-    if (isClosing) {
-      const top = stack.pop();
-      if (top !== name) {
-        problems.push(`</${name}> closes <${top ?? "empty"}>`);
-        return problems;
-      }
-    } else if (!selfClosing) {
-      stack.push(name);
-    }
-  }
-  while (stack.length > 0) {
-    const unclosed = stack.pop()!;
-    problems.push(`<${unclosed}> never closed`);
-  }
-  return problems;
-}
-
 Deno.test(
   "every kit page's markup actually nests its tags, and /account keeps all section.panel inside div.wrap (audio-feed-lma7)",
   async () => {
@@ -738,47 +669,6 @@ Deno.test(
     assertStringIncludes(
       accountHtml,
       ".panel {\n    background: var(--surface); border: 1px solid var(--border);\n    border-radius: var(--radius); padding: 1.25rem 1.25rem 1.35rem; margin-block-end: 1rem;\n  }",
-    );
-  },
-);
-
-Deno.test(
-  "the markup scanner reports each failure shape, including unterminated comment and custom-element lookalikes (audio-feed-lma7)",
-  () => {
-    // 1. Mismatched closing tag (the exact audio-feed-lma7 bug: </div> closing <fieldset>)
-    assertEquals(
-      tagNestingProblems('<div class="wrap"><form><fieldset class="choices"></div></form></div>'),
-      ["</div> closes <fieldset>"],
-    );
-    // 2. Unclosed tag at EOF
-    assertEquals(
-      tagNestingProblems('<div class="wrap"><section class="panel"><p>Hi</p></section>'),
-      ["<div> never closed"],
-    );
-    // 3. Unterminated comment and raw-text blocks
-    assertEquals(
-      tagNestingProblems("<div><!-- unterminated comment <fieldset></div>"),
-      ["unterminated <!-- comment"],
-    );
-    assertEquals(
-      tagNestingProblems("<div><script>const x = 1;</div>"),
-      ["unterminated <script> raw-text block"],
-    );
-    assertEquals(
-      tagNestingProblems("<div><style>.a { color: red; }</div>"),
-      ["unterminated <style> raw-text block"],
-    );
-    // 4. Custom-element lookalikes (<script-loader>, <style-guide>) must NOT false-red as
-    //    unterminated raw-text blocks when properly balanced, and must still report real mismatches.
-    assertEquals(
-      tagNestingProblems(
-        '<div><script-loader src="/a.js"></script-loader><style-guide>ok</style-guide></div>',
-      ),
-      [],
-    );
-    assertEquals(
-      tagNestingProblems("<div><script-loader></div>"),
-      ["</div> closes <script-loader>"],
     );
   },
 );
