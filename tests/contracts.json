@@ -31,5 +31,11 @@
   ],
   "tests/conformance/**": [
     "tests/storage_test.ts"
+  ],
+  "scripts/exww-section-measures.ts": [
+    "tests/exww_band_floor_test.ts"
+  ],
+  "scripts/exww-live-claims-browser-proof.ts": [
+    "tests/exww_mutants_test.ts"
   ]
 }

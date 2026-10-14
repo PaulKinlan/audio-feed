@@ -13,6 +13,7 @@ import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
   allTestFiles,
   changedFiles,
+  extractExecutedSuitesFromLog,
   extractFailingTests,
   failureMarkers,
   formatCheckStep,
@@ -878,7 +879,7 @@ function coverageNoteFromLog(log: string): string {
   let unknown: string | null = null;
   let none: string | null = null;
   for (const line of log.split("\n")) {
-    const passed = /fast-gate:.*?(?:passed|completed):\s*(.*)/.exec(line);
+    const passed = /^fast-gate:\s*(?:passed|completed):\s*(.*)/.exec(line);
     if (passed) { for (const f of passed[1]!.split(/\s+/)) if (f) executed.add(f); }
     const uniform = /^fast-gate: coverage:\s*(.*)$/.exec(line);
     if (uniform) {
@@ -1094,9 +1095,6 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
     const evalProc = await new Deno.Command("deno", {
       args: [
         "eval",
-        "--allow-read",
-        "--allow-run=git",
-        "--allow-env",
         `
         import { changedFiles } from "./scripts/fast-check.ts";
         import { assert, assertEquals } from "@std/assert";
@@ -1169,4 +1167,24 @@ Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programma
   // audio-feed-vdys: changedFiles accepts 0 arguments; untrackedOnly option is eliminated
   // entirely from the API so synthetic selection cannot be requested programmatically.
   assertEquals(changedFiles.length, 0, "changedFiles must accept zero arguments");
+});
+
+Deno.test("audio-feed-m4vi: failing test names in fast-gate: failed: lines are never scraped as suite names", () => {
+  const log = [
+    "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
+    "fast-gate: failed: tests/b_test.ts (some assertion with passed: words and spaces)",
+    "fast-gate: failed: lint",
+    "fast-gate: coverage: ran 2 suite(s): tests/a_test.ts tests/b_test.ts",
+  ].join("\n");
+
+  assertEquals(
+    extractExecutedSuitesFromLog(log),
+    ["tests/a_test.ts", "tests/b_test.ts"],
+    "must extract only real suite paths and never scrape words from the parenthesized failing test name",
+  );
+  assertEquals(
+    coverageNoteFromLog(log),
+    "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
+    "a failing test name containing 'passed:' must not pollute the coverage note",
+  );
 });

@@ -30,8 +30,20 @@ Deno.test("contracts.json is valid and targets real suites", () => {
   }
 });
 
-Deno.test("contracts.json covers audio-feed-ey8i storage subsystem mappings", () => {
+Deno.test("contracts.json covers audio-feed-2i3y and audio-feed-ey8i storage subsystem mappings", () => {
   const contracts = loadContracts();
+
+  // audio-feed-2i3y: scripts/exww-section-measures.ts and proof
+  assertEquals(
+    contracts["scripts/exww-section-measures.ts"],
+    ["tests/exww_band_floor_test.ts"],
+    "exww section measures must map to exww_band_floor_test",
+  );
+  assertEquals(
+    contracts["scripts/exww-live-claims-browser-proof.ts"],
+    ["tests/exww_mutants_test.ts"],
+    "exww live claims proof must map to exww_mutants_test",
+  );
 
   assertEquals(
     contracts["src/storage/kv.ts"],

@@ -403,16 +403,35 @@ Deno.test("audio-feed-q890: deriveReadRelationReport normalises root without tra
   }
 });
 
-Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in the relation, and no-reader ones still widen", async () => {
+Deno.test("audio-feed-40ch / audio-feed-tz01: assets and fixtures INSIDE src/ and tests/ are in the relation, and no-reader ones still widen", async () => {
   // The property this bead adds, asserted against the REAL tree because that is where the two halves meet:
   // the detector must produce a relation for a non-TS file under src/ or tests/ that a suite reads, and the
-  // OLD scope note (recorded nowhere) must be gone. MEASURED BEFORE: four relations, and every one of these
-  // paths was UNCLASSIFIED, i.e. all 108 suites ran for a one-line CSS change. MEASURED AFTER: fifteen.
+  // OLD scope note (recorded nowhere) must be gone.
+  // audio-feed-tz01: assetUrl(...) / assetBody(...) and text imports now derive readers for all 12 assets
+  // under src/assets/, including src/assets/home.css (which previously had no derived reader and forced
+  // the full 133-suite gate on rxa2).
   const { relations } = await deriveReadRelationReport(ROOT);
-  assert(
-    relations.has("src/assets/admin.css"),
-    "an asset inside src/ that a suite reads must be in the relation (audio-feed-40ch)",
-  );
+  for (
+    const asset of [
+      "src/assets/admin.css",
+      "src/assets/admin.js",
+      "src/assets/confirm-shared.js",
+      "src/assets/cwv-stats.js",
+      "src/assets/cwv.js",
+      "src/assets/home.css",
+      "src/assets/home.js",
+      "src/assets/listen-landing.css",
+      "src/assets/listen-landing.js",
+      "src/assets/listen.css",
+      "src/assets/listen.js",
+      "src/assets/tooltip-client.js",
+    ]
+  ) {
+    assert(
+      relations.has(asset),
+      `every shipped asset in src/assets/ must have a derived reader (audio-feed-40ch / audio-feed-tz01): ${asset}`,
+    );
+  }
   const derived = classifyNonTsChanges(["src/assets/admin.css"], relations);
   assertEquals(
     derived.unclassified,
@@ -424,13 +443,24 @@ Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in th
     relations.get("src/assets/admin.css"),
     "the suites named by the relation are the suites selected",
   );
+  const homeCssSuites = relations.get("src/assets/home.css") ?? [];
+  assert(
+    homeCssSuites.includes("tests/home_asset_test.ts"),
+    `src/assets/home.css must select tests/home_asset_test.ts (audio-feed-tz01), got: ${
+      JSON.stringify(homeCssSuites)
+    }`,
+  );
 
   // Anti-vacuity for the FALLBACK, which is the thing that makes this change safe to make: a non-TS file
   // under src/ that NOTHING is derived to read must still widen to the full suite, and must never be inert.
-  const unread = classifyNonTsChanges(["src/assets/home.css"], relations);
+  const unread = classifyNonTsChanges(["src/assets/unread.css"], relations);
   assertEquals(unread.inert, [], "an unread asset is not documentation - it may not be inert");
   assertEquals(unread.suites, [], "nothing is derived to read it");
-  assertEquals(unread.unclassified, ["src/assets/home.css"], "so it keeps the full-suite fallback");
+  assertEquals(
+    unread.unclassified,
+    ["src/assets/unread.css"],
+    "so it keeps the full-suite fallback",
+  );
 
   // AND THE DECISION ITSELF, through planTests - because the classification above is only a step. My first
   // version of this case asserted the classification and stopped there, and the PLANNER was still returning
@@ -443,13 +473,19 @@ Deno.test("audio-feed-40ch: assets and fixtures INSIDE src/ and tests/ are in th
     relations.get("src/assets/admin.css")!,
     "a src/ asset a suite reads must SELECT that suite, not the full suite",
   );
-  const unreadPlan = planTests(["src/assets/home.css"], new Map(), new Map(), relations);
+  const homeCssPlan = planTests(["src/assets/home.css"], new Map(), new Map(), relations);
+  assertEquals(
+    homeCssPlan.testFiles,
+    relations.get("src/assets/home.css")!,
+    "src/assets/home.css must select its readers rather than forcing the full gate (audio-feed-tz01)",
+  );
+  const unreadPlan = planTests(["src/assets/unread.css"], new Map(), new Map(), relations);
   assertEquals(
     unreadPlan.testFiles,
     null,
     "an unread asset must still run the FULL suite - the fallback is what makes this change safe",
   );
-  assertStringIncludes(unreadPlan.reason, "src/assets/home.css");
+  assertStringIncludes(unreadPlan.reason, "src/assets/unread.css");
 });
 
 Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {

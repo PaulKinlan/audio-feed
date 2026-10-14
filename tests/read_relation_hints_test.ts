@@ -698,44 +698,77 @@ Deno.test("audio-feed-axlt: own module constant cannot override its function par
   });
 });
 
-Deno.test("audio-feed-axlt: unsupported destructured and namespace imports report unresolved reads", async () => {
+Deno.test("audio-feed-axlt / audio-feed-wasy: destructured and namespace imports resolve exported constants, while shadowed or unresolvable ones report unresolved reads", async () => {
   await withTempTree({
     "docs/present.md": "present\n",
-    "src/dep.ts": 'export const FILE = "docs/present.md";\n',
+    "docs/ns_present.md": "ns present\n",
+    "src/dep.ts":
+      'export const FILE = "docs/present.md";\nexport const NS_FILE = "docs/ns_present.md";\n',
     "tests/destructured_test.ts": [
       'import * as x from "../src/dep.ts";',
-      'const FILE = "docs/present.md";',
-      "function read(x: { FILE: string }) { const { FILE } = x; return Deno.readTextFile(FILE); }",
-      'read({ FILE: "docs/other.md" });',
+      "function read() { const { FILE } = x; return Deno.readTextFile(FILE); }",
+      "read();",
     ].join("\n"),
-    "tests/namespace_test.ts": [
+    "tests/namespace_valid_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      "function read() { return Deno.readTextFile(x.NS_FILE); }",
+      "read();",
+    ].join("\n"),
+    "tests/namespace_shadowed_test.ts": [
       'import * as x from "../src/dep.ts";',
       "function read(x: { FILE: string }) { return Deno.readTextFile(x.FILE); }",
       'read({ FILE: "docs/other.md" });',
     ].join("\n"),
+    "tests/destructured_unresolved_test.ts": [
+      'import * as x from "../src/dep.ts";',
+      "function read() { const { MISSING } = x; return Deno.readTextFile(MISSING); }",
+      "read();",
+    ].join("\n"),
   }, async (root) => {
     const destructuredReport = await deriveReadRelationReport(root, ["tests/destructured_test.ts"]);
     assertEquals(
-      [...destructuredReport.relations],
-      [],
-      "tests/destructured_test.ts: no scope may be guessed",
+      destructuredReport.relations.get("docs/present.md"),
+      ["tests/destructured_test.ts"],
+      "tests/destructured_test.ts: valid destructured namespace import must resolve",
     );
-    assertEquals(
-      destructuredReport.unclassified,
-      ["FILE"],
-      "tests/destructured_test.ts: an unsupported import must be reported",
-    );
+    assertEquals(destructuredReport.unclassified, []);
+    assertEquals(destructuredReport.unresolved, []);
 
-    const namespaceReport = await deriveReadRelationReport(root, ["tests/namespace_test.ts"]);
+    const nsValidReport = await deriveReadRelationReport(root, ["tests/namespace_valid_test.ts"]);
+    assertEquals(
+      nsValidReport.relations.get("docs/ns_present.md"),
+      ["tests/namespace_valid_test.ts"],
+      "tests/namespace_valid_test.ts: valid namespace member access must resolve",
+    );
+    assertEquals(nsValidReport.unclassified, []);
+    assertEquals(nsValidReport.unresolved, []);
+
+    const namespaceReport = await deriveReadRelationReport(root, [
+      "tests/namespace_shadowed_test.ts",
+    ]);
     assertEquals(
       [...namespaceReport.relations],
       [],
-      "tests/namespace_test.ts: no scope may be guessed",
+      "tests/namespace_shadowed_test.ts: no scope may be guessed when shadowed",
     );
     assertEquals(
       namespaceReport.unresolved,
       ["FILE"],
-      "tests/namespace_test.ts: an unsupported import must be reported",
+      "tests/namespace_shadowed_test.ts: a shadowed namespace access must be reported",
+    );
+
+    const destructuredUnresolved = await deriveReadRelationReport(root, [
+      "tests/destructured_unresolved_test.ts",
+    ]);
+    assertEquals(
+      [...destructuredUnresolved.relations],
+      [],
+      "tests/destructured_unresolved_test.ts: unexported member cannot resolve",
+    );
+    assertEquals(
+      destructuredUnresolved.unclassified,
+      ["MISSING"],
+      "tests/destructured_unresolved_test.ts: unresolvable destructured member must be reported",
     );
   });
 });
@@ -1416,3 +1449,51 @@ Deno.test(
     });
   },
 );
+
+Deno.test("audio-feed-yxvz: join() and Deno.realPath() derived from an out-of-repo base are classified outOfRepo", async () => {
+  await withTempTree({
+    "tests/temp_join_realpath_test.ts": [
+      'import { join } from "node:path";',
+      "export async function readIt() {",
+      "  const root = await Deno.makeTempDir();",
+      "  const abs = await Deno.realPath(root);",
+      "  const f = `${abs}/ab.txt`;",
+      '  const p = join(root, "ef.txt");',
+      "  await Deno.readTextFile(f);",
+      "  await Deno.readTextFile(p);",
+      "}",
+    ].join("\n"),
+    // Control: join() with a non-out-of-repo base must NOT be suppressed as out-of-repo
+    "tests/repo_join_test.ts": [
+      'import { join } from "node:path";',
+      "export async function readIt(repoDir: string) {",
+      '  const p = join(repoDir, "missing_repo.txt");',
+      "  await Deno.readTextFile(p);",
+      "}",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, ["tests/temp_join_realpath_test.ts"]);
+    assertEquals(
+      report.unresolved,
+      [],
+      "realPath(tempDir) and join(tempDir, ...) must not produce unresolved repo hints",
+    );
+    assertEquals(
+      report.outOfRepo,
+      ["ab.txt", "ef.txt"],
+      "both realPath-derived and join-derived temp paths must be reported in outOfRepo",
+    );
+
+    const control = await deriveReadRelationReport(root, ["tests/repo_join_test.ts"]);
+    assertEquals(
+      control.outOfRepo,
+      [],
+      "join() on a parameter base that is not provably out-of-repo must never be suppressed",
+    );
+    assertEquals(
+      control.unresolved,
+      ["missing_repo.txt"],
+      "and its missing file is still reported as unresolved",
+    );
+  });
+});

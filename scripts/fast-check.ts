@@ -59,6 +59,7 @@ import {
   isDocumentation,
   isFastGateSelectable,
   isProvablyInert,
+  isTestModule,
   type ReadRelationReport,
   resolverConfigInputs,
   universeDrift,
@@ -527,6 +528,36 @@ export function extractFailingTests(output: string): FailingTest[] {
  */
 export function failureMarker(file: string, testName: string): string {
   return `fast-gate: failed: ${file} (${testName})`;
+}
+
+/**
+ * Extract the suite file paths that actually executed from a fast-gate log,
+ * ignoring parenthesized failing test names on `fast-gate: failed:` lines
+ * and cheap-step names (`fmt`, `lint`, `check`) (audio-feed-m4vi).
+ */
+export function extractExecutedSuitesFromLog(log: string): string[] {
+  const executed = new Set<string>();
+  for (const line of log.split("\n")) {
+    const suiteLine = /^fast-gate:\s*(?:passed|completed|ran):\s*(.*)$/.exec(line);
+    if (suiteLine) {
+      for (const token of suiteLine[1]!.split(/\s+/)) {
+        if (token && isTestModule(token)) executed.add(token);
+      }
+      continue;
+    }
+    const covLine = /^fast-gate:\s*coverage:\s*ran\s+\d+\s+suite\(s\)(?::\s*(.*))?$/.exec(line);
+    if (covLine && covLine[1]) {
+      for (const token of covLine[1].split(/\s+/)) {
+        if (token && isTestModule(token)) executed.add(token);
+      }
+      continue;
+    }
+    const failedLine = /^fast-gate:\s*failed:\s*([^\s(]+)\s+\(.*\)$/.exec(line);
+    if (failedLine && failedLine[1] && isTestModule(failedLine[1])) {
+      executed.add(failedLine[1]);
+    }
+  }
+  return [...executed].sort();
 }
 
 /**

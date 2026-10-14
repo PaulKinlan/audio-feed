@@ -676,6 +676,7 @@ function isOutOfRepoBinding(
 ): boolean {
   if (isOutOfRepoRhs(rhs)) return true;
   const leadingBase = /^\s*`\s*\$\{([A-Za-z_$][\w$]*)\}/.exec(rhs)?.[1] ??
+    /^\s*(?:await\s+)?(?:Deno\.)?realPath(?:Sync)?\s*\(\s*([A-Za-z_$][\w$]*)/.exec(rhs)?.[1] ??
     /^\s*(?:path\.)?(?:join|resolve)\s*\(\s*([A-Za-z_$][\w$]*)/.exec(rhs)?.[1] ??
     /^\s*([A-Za-z_$][\w$]*)\s*\+\s*["'`]/.exec(rhs)?.[1] ??
     /^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?(?:\s*\.\s*[A-Za-z_$][\w$]*\s*\(.*\))*\s*$/.exec(rhs)?.[1];
@@ -1138,8 +1139,33 @@ function staticPathHints(
 ): { paths: string[]; tailCandidates: string[] } {
   const hints: string[] = [];
   const tailCandidates: string[] = [];
+  const suppressedSpans: Array<[number, number]> = [];
+  // audio-feed-yxvz: `join(root, "ef.txt")` / `resolve(root, "ef.txt")` with an out-of-repo base
+  // is a runtime path outside the repository, so its literal segments belong in `outOfRepo` rather
+  // than being offered as repo-relative `paths`.
+  for (
+    const joinMatch of call.matchAll(
+      /\b(?:path\.)?(?:join|resolve)\s*\(\s*([A-Za-z_$][\w$]*)\s*,([^)]*)\)/g,
+    )
+  ) {
+    const base = joinMatch[1]!;
+    if (!isOutOfRepoBase(base)) continue;
+    const start = joinMatch.index ?? 0;
+    const end = start + joinMatch[0].length;
+    suppressedSpans.push([start, end]);
+    const rest = joinMatch[2] ?? "";
+    const segs = [...rest.matchAll(/"([^"]*)"|'([^']*)'/g)]
+      .map((m) => m[1] ?? m[2] ?? "")
+      .filter(Boolean);
+    if (segs.length > 0) {
+      const joined = segs.join("/").replace(/^\/+/, "");
+      if (joined) suppressed.add(joined);
+    }
+  }
   const literals = [...call.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)];
   for (const match of literals) {
+    const matchIndex = match.index ?? 0;
+    if (suppressedSpans.some(([s, e]) => matchIndex >= s && matchIndex < e)) continue;
     let text = match[1] ?? match[2] ?? match[3] ?? "";
     if (!text) continue;
     const templated = match[3] !== undefined;
@@ -1368,7 +1394,11 @@ export function unclassifiedTail(hint: string): boolean {
 }
 
 /** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
-function toRepoPath(hint: string, moduleDir: string, root: string): string | null {
+function toRepoPath(
+  hint: string,
+  moduleDir: string,
+  root: string,
+): string | null {
   let path = hint.trim();
   if (!path) return null;
   // Only path-shaped hints count. A `Deno.Command` call is full of literals that are not files: CLI flags
@@ -1802,6 +1832,29 @@ export async function deriveReadRelationReport(
     // Paths resolved at an EXECUTE call site (a spawn), kept apart because a `.ts` path is a relation here and
     // not for a read (audio-feed-4kl3).
     const executed: string[] = [];
+
+    // audio-feed-tz01: non-TypeScript assets in `src/assets/` are read by routes and suites through
+    // `assetUrl("<name>")` and `assetBody("<name>")` (and in `src/routes/shell.ts` via text imports
+    // `from "../assets/..." with { type: "text" }`) rather than `Deno.readTextFile`. Recording those
+    // edges derives the exact reader suites for each asset instead of falling back to the full gate.
+    for (const match of source.matchAll(/\b(?:assetUrl|assetBody)\s*\(\s*["']([^"']+)["']\s*\)/g)) {
+      const at = match.index ?? 0;
+      if (insideSpans(spans, at)) continue;
+      const assetPath = toRepoPath(`src/assets/${match[1]!}`, "", root);
+      if (assetPath) authored.push(assetPath);
+    }
+    if (relPath !== "src/routes/assets.ts") {
+      for (
+        const match of source.matchAll(
+          /\bfrom\s*["'](\.[^"']+)["']\s+with\s*\{\s*type:\s*["']text["']\s*\}/g,
+        )
+      ) {
+        const at = match.index ?? 0;
+        if (insideSpans(spans, at)) continue;
+        const assetPath = toRepoPath(match[1]!, dir, root);
+        if (assetPath) authored.push(assetPath);
+      }
+    }
 
     for (const call of READ_CALLS) {
       // Which call this is decides whether a resolved `.ts` path is a RELATION (a spawn) or is dropped (a
