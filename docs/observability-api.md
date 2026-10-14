@@ -277,8 +277,10 @@ produces one durable `warn` event, `synthesis.invocation.overdue`. The log's seq
 rescan if any writer, including a late terminal, commits before the warning; a per-invocation guard
 prevents concurrent readers from appending two warnings. It reports **only** that no terminal mark
 was observed as of the scan. It cannot establish that an isolate died, whether work is still
-running, or whether a terminal write failed. The normal warn/error filter returns the event, and
-summary sees it before deciding a poll is idle.
+running, or whether a terminal write failed. What it does record is the last activity it was able to
+see, which is a measurement of silence rather than a substitute for those answers (see `What the
+warning records, and what it still cannot know` below). The normal warn/error filter returns the
+event, and summary sees it before deciding a poll is idle.
 
 This is deliberately not an all-history detector. `invocationDetection.scannedFromSeq` and
 `scannedThroughSeq` say which window was actually checked; `olderStartsUnknown` is true when the
@@ -289,6 +291,35 @@ it as "zero overdue". A store read, partial sequence window, or warning-write fa
 `503 invocation_detection_unavailable` without a feed cursor or a quiet `total: 0`. A reader can
 therefore distinguish no overdue start **in the observed window** from an inability to see earlier
 starts. Older starts outside that window are not enumerated by this detector.
+
+### What the warning records, and what it still cannot know (audio-feed-fsd9)
+
+Each warning also carries **what was last SEEN of that invocation**, read from the same snapshot it
+already held, so a reader does not have to compare the scan's wall clock against a start time and
+guess whether a budget was consumed or the turn is merely long:
+
+- `context.lastSeenAt`, `lastSeenSeq`, `lastSeenType` and `lastSeenPhase` — the newest stored record
+  carrying that invocation's `correlationId`, at or after its start mark. When nothing was stored
+  after the start, these describe the start mark itself and the message says so in words.
+- `context.lastSeenAgoMs` — how long the store had been **silent** about it at scan time.
+- `context.observedActiveMs` — how far into the invocation that last observation was, which is what
+  `context.budgetMs` should be compared against. **It is a LOWER BOUND on consumption:** a killed
+  invocation stops being observed, so a small value is a fact about observation, not a claim that
+  little time passed in the isolate.
+
+These are measurements of **silence, never of death**. A large `lastSeenAgoMs` is equally consistent
+with an isolate that was killed, one that is still running something slow, and one whose writes are
+failing, and the warning's wording keeps saying so.
+
+**A surface that has no field, deliberately: the reason a platform-ended invocation ended.** There is
+no `killReason`, `oomBytes` or exit-code field on this record and there should not be one. A kill runs
+none of our code, so a field written at that moment cannot exist; the only way to populate it would be
+to write a value we never observed — a permanently `null` field that looks like coverage while
+answering nothing. The honest surface is the one above: the last stage observed, how long ago it was
+observed, the bytes attempted (`bytesAttempted`, see the terminal-upload records), and this stated
+limit. The kill reason and memory state are available **platform-side only** (Deno Deploy isolate
+logs), which is why an investigation that needs them is an operator request and not a read of this
+API.
 
 The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A scan is
 bounded, so a window larger than the bound is examined in part: `truncated: true` says so, `cursor`
