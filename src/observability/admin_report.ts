@@ -288,7 +288,8 @@ export function isFailureRecord(record: LogRecord): boolean {
  *
  *  - an abandonment carries `context.workerState === "unknown"` — the store observed the expiry and
  *    is honest that it cannot know why nobody wrote a result (audio-feed-kd5r);
- *  - a terminal write is a record with a reason or a duration and no such context.
+ *  - a terminal write carries a duration (or a reason in older records) and no such context;
+ *    its severity, not the optional reason text, identifies a current failure.
  */
 export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAttempt[] {
   const byAttempt = new Map<number, ClaimAttempt>();
@@ -334,7 +335,9 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
       row.endedWithTerminalWrite = false;
     } else if (record.reason || typeof record.durationMs === "number") {
       row.endedWithTerminalWrite = true;
-      row.outcome = record.reason ? "failed" : "finished";
+      // The store drops empty optional strings, so an error with reason: "" has no reason key.
+      // Severity is the terminal writer's failure signal; keep reason as a legacy fallback.
+      row.outcome = record.severity === "error" || Boolean(record.reason) ? "failed" : "finished";
     }
     byAttempt.set(attempt, row);
   }
