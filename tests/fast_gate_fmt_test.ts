@@ -38,6 +38,20 @@ interface GateRun {
   cleanup: () => Promise<void>;
 }
 
+/**
+ * The selector's own statement about what it selected, for failure messages (audio-feed-9bco).
+ *
+ * Extracted so the assertions can QUOTE the plan's decision instead of a re-derivation of it, and so a
+ * failure names the selection rather than only the assertion. This reads the selector's own lines; it is
+ * not a second classifier, and it never decides anything - it only reports.
+ */
+function selectionOf(stdout: string): string {
+  const lines = stdout.split("\n").filter((l) =>
+    l.includes("fast-check:") || l.includes("NO SUITES") || l.includes("coverage: ran")
+  );
+  return lines.length ? lines.join(" | ") : "(no selection line found in the gate's output)";
+}
+
 async function runGateInDisposableClone(
   fixturePath: string,
 ): Promise<GateRun> {
@@ -126,12 +140,29 @@ Deno.test({
       );
       // (c) and the selection must be HONEST rather than accidental: a formatting control that
       // widens to the full suite passes or fails with every unrelated suite (audio-feed-otc9).
+      //
+      // ASSERTED POSITIVELY, NOT AS AN ABSENCE (audio-feed-9bco). This used to be only
+      // `!stdout.includes("fast-check: FULL suite")`, which a PARTIAL widening satisfies: a selector
+      // regression selecting some other subset leaves that string out, so the row goes green while the
+      // plan is no longer the one this test exists to check. The absence of a marker is not evidence of
+      // a classification. The assertions now read what the selector POSITIVELY reports about this change
+      // set - a formatted .md inside the clone, which no suite observes - and the zero count comes from
+      // the selector's own coverage line. The negative is kept BELOW as a guard, not as the assertion.
+      assert(
+        stdout.includes("fast-check: NO SUITES SELECTED"),
+        `the fmt control must positively classify to ZERO SUITES; selection was: ${
+          selectionOf(stdout)
+        }`,
+      );
+      assert(
+        /coverage: ran 0 suite\(s\)/.test(stdout),
+        `the coverage line must positively report 0 suites, not merely omit the full-suite marker; it said: ${
+          selectionOf(stdout)
+        }`,
+      );
       assert(
         !stdout.includes("fast-check: FULL suite"),
-        `the fmt control must not widen to the FULL suite; selection was: ${
-          stdout.split("\n").filter((l) => l.includes("fast-check:") || l.includes("NO SUITES"))
-            .join(" | ")
-        }`,
+        `the fmt control must not widen to the FULL suite; selection was: ${selectionOf(stdout)}`,
       );
     } finally {
       await Deno.remove(file).catch(() => {});
@@ -150,12 +181,25 @@ Deno.test({
     try {
       const stdout = run.stdout;
       assertEquals(run.code, 0, "gate must pass on formatted file");
-      // The point of this control: the gate answers a formatting question WITHOUT the full suite.
+      // The point of this control: the gate answers a formatting question WITHOUT the full suite, and it
+      // must SAY SO POSITIVELY rather than merely not saying the opposite (audio-feed-9bco). Same
+      // reasoning as the row above: an absence check is satisfied by a partial widening.
+      assert(
+        stdout.includes("fast-check: NO SUITES SELECTED"),
+        `the formatted control must positively classify to ZERO SUITES; selection was: ${
+          selectionOf(stdout)
+        }`,
+      );
+      assert(
+        /coverage: ran 0 suite\(s\)/.test(stdout),
+        `the formatted control's coverage line must positively report 0 suites; it said: ${
+          selectionOf(stdout)
+        }`,
+      );
       assert(
         !stdout.includes("fast-check: FULL suite"),
         `the formatted control must not widen to the FULL suite; selection was: ${
-          stdout.split("\n").filter((l) => l.includes("fast-check:") || l.includes("NO SUITES"))
-            .join(" | ")
+          selectionOf(stdout)
         }`,
       );
     } finally {
