@@ -84,9 +84,21 @@ Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every 
   // and asserts that the preceding JSDoc comment names every single one of them.
   // A future writer who adds a key to the predicate without documenting it fails this test.
   const fnStr = isClaimStartRecord.toString();
+
+  // audio-feed-pipz: Extract keys directly accessed on context via dot syntax (context.<key>)
+  // or bracket literals (context["<key>"]).
+  // LIMITATION NOTE: Computed access via dynamic variables (e.g. context[k]) is not statically
+  // resolved here; if dynamic indexing is ever introduced, the keys should be declared in a shared constant.
   const contextKeys = [
-    ...new Set([...fnStr.matchAll(/\bcontext\.([a-zA-Z0-9_$]+)/g)].map((m) => m[1])),
+    ...new Set(
+      [
+        ...fnStr.matchAll(
+          /\bcontext(?:\.([a-zA-Z0-9_$]+)|\[\s*["']([a-zA-Z0-9_$]+)["']\s*\])/g,
+        ),
+      ].map((m) => m[1] ?? m[2]!),
+    ),
   ];
+
   assert(
     contextKeys.length >= 2,
     `expected at least 2 context keys, got: ${contextKeys.join(", ")}`,
