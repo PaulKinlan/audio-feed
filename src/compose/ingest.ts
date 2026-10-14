@@ -16,6 +16,7 @@ import { approvedUserFor, type ComposeDeps, forbidden, presentedToken } from "./
 import type { AppContext, AppHandlers } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import { type Article } from "../types.ts";
+import { screenErrorMessage, SUPPRESSED_MESSAGE } from "../observability/error_screen.ts";
 
 /**
  * Walk a whole-catalogue episode scan one batch at a time (audio-feed-att).
@@ -145,18 +146,41 @@ export function createIngestHandler(
           `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued:`,
           err,
         );
+        // audio-feed-l5w1: record a distinct durable warn event for post-commit auxiliary failure
+        // so degraded state (b) is distinguishable from clean success (c) without falsely reporting
+        // pre-episode dead-letter (0s2j).
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: "warn",
+          type: "ingest.source_seed_failed",
+          message: "Failed to seed inbox source after episode was queued",
+          process: "app",
+          route: "/api/ingest",
+          userId: user.id,
+          correlationId: crypto.randomUUID(),
+          reason: "source_seed_failed",
+          context: {
+            status: 202,
+            episodeId,
+            articleId,
+            sourceId: INBOX_SOURCE_ID,
+            error: screenErrorMessage(err),
+          },
+        });
       }
       return { articleId, episodeId };
     },
     onFailure: async ({ user, reason, status, mode, error, article }) => {
-      // audio-feed-r7sb, audio-feed-tm97, audio-feed-fapx: surface pre-episode ingest failures
-      // in structured logs for dead-letter visibility, preserving article URL/title and sanitized error cause.
+      // audio-feed-r7sb, audio-feed-tm97, audio-feed-fapx, audio-feed-8v53: surface pre-episode ingest failures
+      // in structured logs for dead-letter visibility, preserving article URL/title and screened error cause.
+      // Follow throw-presence discipline (k3x6, 2zik, j8n4): presence of error, not truthiness of error string.
+      const screenedError = error !== undefined ? screenErrorMessage(error) : undefined;
       await ctx.stores.metadata.appendLog({
         time: new Date().toISOString(),
         severity: "warn",
         type: "ingest.failed",
-        message: error
-          ? `Article ingest failed before episode creation: ${error}`
+        message: screenedError && screenedError !== SUPPRESSED_MESSAGE
+          ? `Article ingest failed before episode creation: ${screenedError}`
           : "Article ingest failed before episode creation",
         process: "app",
         route: "/api/ingest",
@@ -166,7 +190,7 @@ export function createIngestHandler(
         context: {
           status,
           ...(mode ? { mode } : {}),
-          ...(error ? { error } : {}),
+          ...(screenedError ? { error: screenedError } : {}),
           ...(article?.url ? { articleUrl: article.url } : {}),
           ...(article?.title ? { articleTitle: article.title } : {}),
         },

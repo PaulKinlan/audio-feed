@@ -1084,7 +1084,7 @@ export function createUrlIngestHandler(
           status: 400,
           mode: targetMode,
           error: errorDetail,
-          article: { url },
+          // audio-feed-8v53: unvalidated raw input must NOT be passed as article identity
         });
         throw error;
       }

@@ -18,6 +18,7 @@ import { memoryStores } from "../src/config.ts";
 import { pollFeedSource } from "../src/ingest/feed.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { bytes, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig } from "../src/config.ts";
 import type { ExtractedArticle } from "../src/ingest/url.ts";
@@ -313,10 +314,10 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assertEquals(failedLog.severity, "warn");
     assertEquals(failedLog.context?.status, 503);
     assertEquals(failedLog.context?.mode, "direct");
-    // audio-feed-fapx: preserved article identity and sanitized error cause
+    // audio-feed-fapx, audio-feed-8v53: preserved article identity and screened error cause
     assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
     assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
-    assertEquals(failedLog.context?.error, "kv atomic commit conflict");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
   }
 
   // 2. Enqueue failure with EMPTY message error (k3x6 / 2zik / j8n4 invariant)
@@ -335,6 +336,7 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assertEquals(failedLog.context?.status, 503);
     assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
     assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
   }
 
   // 3. Enqueue failure with non-Error / primitive throw
@@ -349,7 +351,7 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for primitive throw");
     assertEquals(failedLog.userId, "user-1");
     assertEquals(failedLog.context?.status, 503);
-    assertEquals(failedLog.context?.error, "raw string exception from storage driver");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
     assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
     assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
   }
@@ -364,7 +366,8 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assertEquals(failedLog, undefined, "success control must NOT record ingest.failed log");
   }
 
-  // 5. audio-feed-0s2j: Post-commit source lookup failure must not fail the enqueue or emit false ingest.failed
+  // 5. audio-feed-0s2j, audio-feed-l5w1: Post-commit source lookup failure must not fail the enqueue,
+  // must not emit false ingest.failed, and must record distinct ingest.source_seed_failed record
   {
     const { fetch, stores } = await seededApp();
     stores.metadata.getSource = () => Promise.reject(new Error("source read unavailable"));
@@ -384,6 +387,62 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
       failedLog,
       undefined,
       "must not emit a false pre-episode dead-letter when episode was persisted",
+    );
+    const seedFailedLog = logs.find((l) =>
+      l.type === "ingest.source_seed_failed" && l.reason === "source_seed_failed"
+    );
+    assert(
+      seedFailedLog,
+      "must emit distinct durable ingest.source_seed_failed record for post-commit auxiliary failure",
+    );
+    assertEquals(seedFailedLog.context?.status, 202);
+    assertEquals(seedFailedLog.context?.episodeId, queuedEpisode.id);
+    assertEquals(seedFailedLog.context?.sourceId, "inbox");
+    assertEquals(seedFailedLog.context?.error, SUPPRESSED_MESSAGE);
+  }
+
+  // 6. audio-feed-8v53: Error message carrying article body text / canary must be screened
+  {
+    const CANARY_BODY = "THE-CANARY-ARTICLE-BODY-TEXT-9f3ac1";
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject(
+        new Error(
+          `Unexpected token "<", "<!DOCTYPE html><html><body>${CANARY_BODY} tail of article" is not valid JSON`,
+        ),
+      );
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
+    assert(
+      !JSON.stringify(failedLog).includes(CANARY_BODY),
+      "durable record must not contain unscreened body text canary",
+    );
+  }
+
+  // 7. audio-feed-8v53: Raw unvalidated client URL input must not be stored as articleUrl
+  {
+    const CANARY_URL = "not a url qV7z52CapSECRETfd39Nd and more client text";
+    const { fetch, stores } = await seededApp();
+    const hostileBody = JSON.stringify({ url: CANARY_URL, mode: "direct" });
+    const res = await fetch(
+      req("/api/ingest", { method: "POST", headers: json, body: hostileBody }),
+    );
+    assertEquals(res.status, 400);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "url_rejected");
+    assert(failedLog, "expected ingest.failed log for url_rejected");
+    assertEquals(
+      failedLog.context?.articleUrl,
+      undefined,
+      "unvalidated raw client input must not be recorded as articleUrl",
+    );
+    assert(
+      !JSON.stringify(failedLog).includes("qV7z52CapSECRETfd39Nd"),
+      "durable record must not contain client URL canary",
     );
   }
 });
