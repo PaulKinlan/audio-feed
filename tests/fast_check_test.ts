@@ -1068,6 +1068,12 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
   // that drop committed files when executed on an empty delta (e.g. clean checkout of origin/main).
   // This test clones a shared repo fixture, pins refs/remotes/origin/main to HEAD~1, and asserts
   // that committed paths are present in baseline and survive ambient environment variables.
+  //
+  // audio-feed-kp7l / audio-feed-gw4k: A startup sweep was evaluated to clean orphaned clones
+  // left behind by SIGKILLed runs. However, process liveness inspection (/proc/<pid>) is denied
+  // under deno test sandbox permissions without --allow-all, causing an age-only sweep that could
+  // delete active sibling runs' clones under high load. The sweep was removed in favor of accepting
+  // the bounded residue (~16MB per SIGKILLed run, cleaned up normally on success/failure in finally).
   const tmpDir = await Deno.makeTempDir({ prefix: "fast-check-test-clone-" });
   try {
     const cloneProc = await new Deno.Command("git", {
@@ -1118,9 +1124,10 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
 Deno.test(
   "audio-feed-8rz5: synthetic selection fails closed with non-zero exit code 2 unconditionally",
   async () => {
-    // audio-feed-ffav: The exit-2 refusal is unconditional at script entry (scripts/fast-check.ts:839),
-    // so child execution cannot recurse into test runners. The test must NOT be 'ignore'd under
-    // ambient IN_FAST_GATE_INTEGRATION_TEST, ensuring the refusal is always exercised in every environment.
+    // audio-feed-ffav & audio-feed-45r9: The exit-2 refusal is unconditional at script entry (scripts/fast-check.ts:839),
+    // so child execution cannot recurse into test runners. We explicitly inject IN_FAST_GATE_INTEGRATION_TEST: "1"
+    // into the child environment to prove the refusal is enforced even when the ambient variable is present,
+    // while omitting any 'ignore' guard so the refusal is always exercised in every parent environment.
     const cmd = new Deno.Command("deno", {
       args: [
         "run",
@@ -1130,6 +1137,10 @@ Deno.test(
         "scripts/fast-check.ts",
         "--untracked-only",
       ],
+      env: {
+        ...Deno.env.toObject(),
+        IN_FAST_GATE_INTEGRATION_TEST: "1",
+      },
       stdout: "piped",
       stderr: "piped",
     });
