@@ -166,14 +166,31 @@ Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanl
     assertEquals(body3.deploy, "deploy-id-ciia-2");
     assertEquals(body3.deploySource, "DENO_DEPLOYMENT_ID");
 
-    // 4. audio-feed-34bo: When an alias like GIT_COMMIT is set, deploySource reports the exact alias name
-    Deno.env.delete("DENO_DEPLOYMENT_ID");
-    Deno.env.delete("GIT_COMMIT_SHA");
-    Deno.env.set("GIT_COMMIT", "commit-alias-ciia-4");
-    const body4 = await (await appFetch()(get("/health"))).json();
-    assertEquals(body4.commit, "commit-alias-ciia-4");
-    assertEquals(body4.deploy, "commit-alias-ciia-4");
-    assertEquals(body4.deploySource, "GIT_COMMIT");
+    // 4. audio-feed-dojy: table-driven verification that every supported commit variable
+    // reports its exact variable name as deploySource and carries commit/deploy to the /health route.
+    const commitVarCases = [
+      { varName: "GIT_COMMIT_SHA", value: "sha-test-git-commit-sha" },
+      { varName: "GIT_COMMIT", value: "sha-test-git-commit" },
+      { varName: "DENO_DEPLOY_GIT_COMMIT", value: "sha-test-deno-deploy-git-commit" },
+      { varName: "COMMIT_SHA", value: "sha-test-commit-sha" },
+    ] as const;
+
+    for (const { varName, value } of commitVarCases) {
+      clearAll();
+      Deno.env.set(varName, value);
+      const body = await (await appFetch()(get("/health"))).json();
+      assertEquals(body.commit, value, `commit matches for ${varName}`);
+      assertEquals(body.deploy, value, `deploy matches for ${varName}`);
+      assertEquals(body.deploySource, varName, `deploySource accurately names ${varName}`);
+    }
+
+    // 5. When DENO_DEPLOYMENT_ID is set alone without commit, deploySource is DENO_DEPLOYMENT_ID and commit is null
+    clearAll();
+    Deno.env.set("DENO_DEPLOYMENT_ID", "deploy-id-only-test");
+    const body5 = await (await appFetch()(get("/health"))).json();
+    assertEquals(body5.commit, null);
+    assertEquals(body5.deploy, "deploy-id-only-test");
+    assertEquals(body5.deploySource, "DENO_DEPLOYMENT_ID");
   } finally {
     for (const name of envVars) {
       const val = previous.get(name);
