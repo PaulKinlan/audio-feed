@@ -7,6 +7,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import * as path from "@std/path";
 import { prepushGuardStatus } from "../scripts/hooks/guard-status.ts";
+import { parseJsonc, readJsonc } from "./jsonc.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 // audio-feed-p2la: literal `new URL(...)` forms rather than templates over ROOT, so the fast gate's
@@ -740,7 +741,15 @@ Deno.test("audio-feed-p2la: the installer fails CLOSED (non-zero, by name) when 
     const stderr = new TextDecoder().decode(out.stderr);
     assert(out.code !== 0, `an installer that cannot install must not exit 0: ${stderr}`);
     assertStringIncludes(stderr, "pre-push guard installation FAILED (audio-feed-p2la)");
-    assertStringIncludes(stderr, "The guard is NOT armed");
+    // audio-feed-qqs6: and it must NOT claim a state it did not measure. This assertion used to
+    // require the text "The guard is NOT armed" here, which was a false claim in the concurrency
+    // races (the guard WAS armed, and verify said so while the installer said otherwise): a message
+    // that contradicts the state it describes teaches readers to ignore the real alarms too.
+    assert(
+      !stderr.includes("The guard is NOT armed"),
+      `a failed install must not claim the guard is unarmed: ${stderr}`,
+    );
+    assertStringIncludes(stderr, "hooks:verify");
   } finally {
     await Deno.remove(tmp, { recursive: true }).catch(() => {});
   }
@@ -840,18 +849,247 @@ Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions an
   }
 });
 
+/**
+ * audio-feed-qqs6: run the INSTALLER directly in a scratch clone, the way both gate tasks' first
+ * step does, so a test can overlap two of them. GIT_DIR is removed from the environment on purpose:
+ * the clone under test must be the one discovered by `git rev-parse`, not one the suite pointed at.
+ */
+async function runInstaller(
+  cwd: string,
+  home: string,
+  env: Record<string, string> = {},
+): Promise<{ code: number; log: string }> {
+  const inherited = { ...Deno.env.toObject() };
+  delete inherited.GIT_DIR;
+  const out = await new Deno.Command("bash", {
+    args: ["scripts/hooks/install-hooks.sh"],
+    cwd,
+    env: { ...inherited, HOME: home, ...env },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const decoder = new TextDecoder();
+  return { code: out.code, log: decoder.decode(out.stdout) + decoder.decode(out.stderr) };
+}
+
+/** A one-commit seed repository holding the two hook files, so a scratch clone can be armed. */
+async function seedRepo(scratch: string): Promise<{ seed: string; clone: string }> {
+  const seed = path.join(scratch, "seed");
+  await Deno.mkdir(path.join(seed, "scripts", "hooks"), { recursive: true });
+  await Deno.copyFile(HOOK_PATH, path.join(seed, "scripts", "hooks", "pre-push"));
+  await Deno.copyFile(INSTALL_PATH, path.join(seed, "scripts", "hooks", "install-hooks.sh"));
+  assertEquals((await gitIn(seed, ["init", "-q", "-b", "main"])).code, 0);
+  await gitIn(seed, ["config", "user.email", "guard@example.com"]);
+  await gitIn(seed, ["config", "user.name", "Guard Test"]);
+  await Deno.writeTextFile(path.join(seed, "base.txt"), "base\n");
+  await gitIn(seed, ["add", "-A"]);
+  await gitIn(seed, ["commit", "-q", "-m", "base"]);
+  const clone = path.join(scratch, "clone");
+  assertEquals((await gitIn(scratch, ["clone", "-q", seed, clone])).code, 0);
+  return { seed, clone };
+}
+
+Deno.test("audio-feed-qqs6: overlapping installs from two worktrees of ONE clone never report a named failure, and leave the guard armed", async () => {
+  // The reviewer's repro shape, bounded: two installs at once, repeatedly. A linked worktree resolves
+  // `--git-common-dir` to the same .git as the clone, which is where the guard AND the lock live, so
+  // this is exactly the contention two lanes gating on this VM produce. Before the fix this ran
+  // ~35% named failures (measured on d43c263c: 83/240), each with a message claiming the guard was
+  // NOT armed while the guard was in fact armed.
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    const { clone } = await seedRepo(scratch);
+    const wt = path.join(scratch, "wt");
+    assertEquals(
+      (await gitIn(clone, ["worktree", "add", "-q", "--detach", wt, "main"])).code,
+      0,
+    );
+    // A DIFFERENT guard in the second worktree, which is the variant that failed hardest before the
+    // fix (the reviewer measured 141/240 with one added comment line): the two installs then want
+    // different bytes in one shared file.
+    await Deno.writeTextFile(
+      path.join(wt, "scripts", "hooks", "pre-push"),
+      (await Deno.readTextFile(path.join(wt, "scripts", "hooks", "pre-push"))) +
+        "# a different worktree\n",
+    );
+
+    for (let round = 0; round < 10; round++) {
+      const [a, b] = await Promise.all([
+        runInstaller(clone, home),
+        runInstaller(wt, home),
+      ]);
+      for (const [who, run] of [["clone", a], ["worktree", b]] as const) {
+        assert(
+          !run.log.includes("FAILED"),
+          `overlapping installs must not produce a named failure (round ${round}, ${who}): ${run.log}`,
+        );
+        assert(
+          /guard (already )?armed/.test(run.log),
+          `every invocation must report an armed guard, so "no failure" cannot be a silent no-op (round ${round}, ${who}): ${run.log}`,
+        );
+        assertEquals(run.code, 0, `installer exit code (round ${round}, ${who}): ${run.log}`);
+      }
+    }
+
+    assertEquals(
+      (await prepushGuardStatus(clone)).state,
+      "armed",
+      "after overlapping installs the shared clone must still measure armed",
+    );
+    assertEquals(
+      (await prepushGuardStatus(wt)).state,
+      "armed",
+      "and so must the linked worktree that shares its hooks directory",
+    );
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-qqs6: the installer serialises on a lock, steals a DEAD holder, and fails closed by name while a live holder is in flight", async () => {
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    const { clone } = await seedRepo(scratch);
+    const lockDir = path.join(clone, ".git", "audio-feed-p2la.lock");
+    const lockPid = path.join(lockDir, "pid");
+
+    // (1) A DEAD HOLDER IS NOT A LOCK. A killed install must not wedge every later gate on this VM,
+    // so the installer removes a lock whose recorded pid is gone and installs.
+    const finished = new Deno.Command("bash", { args: ["-c", "exit 0"] }).spawn();
+    const deadPid = finished.pid;
+    await finished.status;
+    await Deno.mkdir(lockDir, { recursive: true });
+    await Deno.writeTextFile(lockPid, `${deadPid}\n`);
+    const stole = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "40" });
+    assertEquals(stole.code, 0, `a dead holder must not block an install: ${stole.log}`);
+    assertStringIncludes(stole.log, "guard armed");
+    assert(
+      !(await Deno.stat(lockDir).then(() => true).catch(() => false)),
+      "the installer must release the lock",
+    );
+
+    // (2) A LIVE HOLDER IS RESPECTED, AND THE RESULT IS A NAMED FAILURE, not a green run: the install
+    // waits, gives up, and says what it measured. It does not skip its checks to produce a pass, and
+    // it does not claim the guard is unarmed - which is the false message two findings named.
+    await Deno.mkdir(lockDir, { recursive: true });
+    await Deno.writeTextFile(lockPid, `${Deno.pid}\n`);
+    const blocked = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "2" });
+    assertEquals(blocked.code, 1, `a live holder must produce a failure: ${blocked.log}`);
+    assertStringIncludes(blocked.log, "has held the lock");
+    assertStringIncludes(blocked.log, "hooks:verify");
+    assert(
+      !blocked.log.includes("The guard is NOT armed"),
+      `the installer must not report a state it did not measure: ${blocked.log}`,
+    );
+    assertEquals(
+      (await prepushGuardStatus(clone)).state,
+      "armed",
+      "the install armed in (1) is untouched: the blocked installer wrote nothing",
+    );
+
+    // (3) Releasing the lock lets the very next install proceed.
+    await Deno.remove(lockDir, { recursive: true });
+    const after = await runInstaller(clone, home);
+    assertEquals(
+      after.code,
+      0,
+      `the same install must proceed once the lock is free: ${after.log}`,
+    );
+    assert(/guard (already )?armed/.test(after.log));
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-p2la: a second install is a verified no-op, and a failure names the cause instead of claiming a state it did not measure", async () => {
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    const { clone } = await seedRepo(scratch);
+
+    const first = await runInstaller(clone, home);
+    assertEquals(first.code, 0, first.log);
+    assertStringIncludes(first.log, "guard armed");
+
+    // Idempotent: same tree, already byte-identical, so there is nothing to write and the install says
+    // exactly that rather than rewriting the hook or claiming a fresh install.
+    const second = await runInstaller(clone, home);
+    assertEquals(second.code, 0, second.log);
+    assertStringIncludes(second.log, "already armed");
+    assertEquals((await prepushGuardStatus(clone)).state, "armed");
+
+    // The failure message must describe only what was measured. Here the tree's guard script is gone
+    // while the INSTALLED guard is still in place and still fires: the old text ("The guard is NOT
+    // armed") was therefore false at the very moment it was printed, which is the class of claim
+    // audio-feed-qqs6 and the installer's own finding both named.
+    await Deno.rename(
+      path.join(clone, "scripts", "hooks", "pre-push"),
+      path.join(clone, "scripts", "hooks", "pre-push.away"),
+    );
+    const missing = await runInstaller(clone, home);
+    assertEquals(missing.code, 1, `a missing guard script must fail: ${missing.log}`);
+    assertStringIncludes(missing.log, "the guard itself is missing");
+    assertStringIncludes(missing.log, "hooks:verify");
+    assert(
+      !missing.log.includes("The guard is NOT armed"),
+      `the installer must not report a state it did not measure: ${missing.log}`,
+    );
+    assertEquals(
+      (await prepushGuardStatus(clone)).state,
+      "armed",
+      "and the measurement disagrees with the old message on purpose: the installed guard is intact",
+    );
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-elnk: the shared reader accepts every comment placement Deno accepts, so an inline comment cannot redden the gate", () => {
+  const inline = `{
+  // whole-line
+  "tasks": { "a": "bash x" }, // inline, which the old whole-line strip left in place
+  "fmt": { "include": ["src"] }
+}`;
+  const parsed = parseJsonc<{ tasks?: Record<string, string>; fmt?: { include?: string[] } }>(
+    inline,
+  );
+  assertEquals(parsed.tasks?.a, "bash x");
+  assertEquals(parsed.fmt?.include, ["src"]);
+
+  // A `//` inside a VALUE is not a comment, and a block comment is removed.
+  const tricky = `{
+  "tasks": { "u": "echo https://example.com/x" }, /* block */
+  "fmt": { "include": [] }
+}`;
+  assertEquals(
+    parseJsonc<{ tasks: Record<string, string> }>(tricky).tasks.u,
+    "echo https://example.com/x",
+  );
+
+  const trailing = `{"tasks": {"b": "y"}}// no newline at end`;
+  assertEquals(parseJsonc<{ tasks: Record<string, string> }>(trailing).tasks.b, "y");
+});
+
+Deno.test("audio-feed-elnk: the shipped deno.json reads through the shared JSONC reader", async () => {
+  const parsed = await readJsonc<{ tasks?: Record<string, string> }>(path.join(ROOT, "deno.json"));
+  assertEquals(typeof parsed.tasks?.["hooks:install"], "string");
+});
+
 Deno.test("audio-feed-p2la: both gate tasks ARM and VERIFY the pre-push guard as their FIRST two steps", async () => {
   // The gate's own assertion (above) catches a missing guard, and this pins the wiring that makes
   // the assertion satisfiable: `deno task test:fast` and `deno task gate` must arm the guard before
   // they run anything. It is a shape assertion rather than a behavioural one because running a gate
   // from inside a gate is recursive; the behavioural half is the scratch-clone tests above plus
   // scripts/fast-check.ts's own check, which exits non-zero when this step has gone missing.
-  const denoJson = JSON.parse(
-    (await Deno.readTextFile(`${ROOT}/deno.json`))
-      .split("\n")
-      .filter((line) => !/^\s*\/\//.test(line))
-      .join("\n"),
-  ) as { tasks?: Record<string, string> };
+  // The file is read through the shared JSONC reader so a comment placement Deno accepts cannot make
+  // this assertion throw instead of naming what is wrong (audio-feed-elnk).
+  const denoJson = await readJsonc<{ tasks?: Record<string, string> }>(
+    path.join(ROOT, "deno.json"),
+  );
   const tasks = denoJson.tasks ?? {};
 
   const installer = tasks["hooks:install"];

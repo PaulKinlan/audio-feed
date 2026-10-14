@@ -26,50 +26,16 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
+import { stripJsonComments } from "./jsonc.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
 /**
  * `deno.json` is JSONC — this file's sibling config carries comments explaining why each block
- * exists — and the project deliberately takes no dependency just to read its own config.
- *
- * A string-aware scan, not a regex: a `//` inside a string value (a URL in a task command, say)
- * must survive, and a comment must not be able to swallow the next line's `"key":`. The escaper
- * state is what makes `"\\""` terminate the string rather than open a quoted region.
+ * exists — and the project deliberately takes no dependency just to read its own config. The reader
+ * is shared (tests/jsonc.ts) so that the comment forms Deno accepts cannot make one suite parse
+ * differently from another (audio-feed-elnk).
  */
-function stripJsonComments(text: string): string {
-  let out = "";
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]!;
-    if (inString) {
-      out += char;
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      out += char;
-      continue;
-    }
-    if (char === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-      continue;
-    }
-    if (char === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i++;
-      continue;
-    }
-    out += char;
-  }
-  return out;
-}
 
 async function deployConfig(): Promise<Record<string, unknown>> {
   const raw = await Deno.readTextFile(new URL("deno.json", ROOT));
