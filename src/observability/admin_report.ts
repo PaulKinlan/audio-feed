@@ -89,8 +89,10 @@ export interface ClaimAttempt {
    * `"in-flight"` — no end record yet and the lease is still live.
    */
   outcome: "finished" | "failed" | "retrying" | "abandoned" | "in-flight";
-  /** Did a terminal write happen at all? The question "it failed" cannot answer. */
+  /** Did a terminal worker write happen at all? An expiry log is not one. */
   endedWithTerminalWrite: boolean;
+  /** Whether lease expiry was observed in a lifecycle record or only inferred from elapsed time. */
+  expiryEvidence?: "recorded" | "inferred";
   /** The recorded reason, verbatim (bounded by the store's own caps). */
   reason?: string;
   /** Lease-to-terminal duration, when the terminal record carries it. */
@@ -322,9 +324,11 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
 
     if (record.reason) row.reason = record.reason;
     if (context.workerState === "unknown") {
-      // The store took the episode over. Not a terminal write, whoever wrote it.
+      // The store observed the expiry, including intermediate and max-claims endings. It did
+      // not observe a terminal worker result; keep those two kinds of evidence separate.
       row.outcome = "abandoned";
       row.endedWithTerminalWrite = false;
+      row.expiryEvidence = "recorded";
     } else if (context.claimOutcome === "yielded") {
       // audio-feed-2sec: the worker DELIBERATELY released this claim so a later invocation
       // resumes the episode. The structured verdict is the fact; the reason string on the
@@ -353,7 +357,10 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     }
     // A start with no end and an expired lease that nobody has reclaimed yet is what a stranded
     // claim looks like from outside; call it abandoned rather than in-flight, and say so.
-    if (row.outcome === "in-flight" && row.leaseExpired === true) row.outcome = "abandoned";
+    if (row.outcome === "in-flight" && row.leaseExpired === true) {
+      row.outcome = "abandoned";
+      row.expiryEvidence = "inferred";
+    }
   }
   return rows.sort((a, b) => a.attempt - b.attempt);
 }

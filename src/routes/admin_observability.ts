@@ -116,11 +116,14 @@ function outcomeLabel(attempt: ClaimAttempt): string {
         ? `retrying (upload retry ${attempt.uploadRetry})`
         : "retrying";
     case "abandoned":
-      return attempt.endedWithTerminalWrite
-        ? "abandoned"
-        : attempt.leaseExpired
-        ? "NO terminal write — lease expired"
-        : "NO terminal write";
+      if (attempt.endedWithTerminalWrite) return "abandoned";
+      if (attempt.expiryEvidence === "recorded") {
+        return "NO terminal write — lease expiry recorded";
+      }
+      if (attempt.expiryEvidence === "inferred") {
+        return "NO terminal write — lease expired (inferred)";
+      }
+      return "NO terminal write";
     default:
       return attempt.leaseExpired === false ? "in flight" : "in flight (lease unknown)";
   }
