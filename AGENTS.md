@@ -204,11 +204,12 @@ cp -rf source dest          # NOT: cp -r source dest
 ## Verifying a landing against production
 
 `GET /health` returns **`deploy`** (the identifier), **`deploySource`** (the variable that
-supplied it: `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, `GIT_COMMIT_SHA` when injected, or
-`dev`), and **`commit`** (the Git commit SHA when injected by the deployment pipeline, or `null` if
-the deploy environment supplies no commit variable). **`dev` or `commit: null` is not a match on its
-own — seeing it without an exact Deploy API mapping or a distinctive public marker means production is
-UNVERIFIED, not verified.**
+supplied it: `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, whichever commit variable supplied it
+when injected (`GIT_COMMIT_SHA`, `GIT_COMMIT`, `DENO_DEPLOY_GIT_COMMIT`, or `COMMIT_SHA`), or `dev`),
+and **`commit`** (the Git commit SHA when injected by the deployment pipeline, or `null` if the deploy
+environment supplies no commit variable). **`dev` or `commit: null` is not a match on its own — seeing
+it without an exact Deploy API mapping or a distinctive public marker means production is UNVERIFIED,
+not verified.**
 
 ```bash
 curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
@@ -220,7 +221,7 @@ curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
 deno deploy deployments list --app audio-feed --org paulkinlan-ea --json --non-interactive
 # The old deployment CLI and classic dash.deno.com API reject ddo_ organization tokens by design;
 # the classic API was retired 2026-07-20. Use the v2 deno deploy CLI above.
-# when deploySource is GIT_COMMIT_SHA the id IS the commit:
+# when deploySource is any commit variable (GIT_COMMIT_SHA, GIT_COMMIT, DENO_DEPLOY_GIT_COMMIT, or COMMIT_SHA) the id IS the commit:
 git log --oneline -1 <id>
 ```
 
