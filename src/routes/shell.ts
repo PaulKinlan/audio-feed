@@ -434,7 +434,13 @@ export const SHELL_KIT_CSS = `
   .rows > li:first-child { border-block-start: 0; padding-block-start: 0.2rem; }
   .row-head { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; align-items: baseline; justify-content: space-between; }
   .row-title { font-weight: 600; overflow-wrap: anywhere; }
-  .meta { color: var(--muted); font-size: 0.85rem; }
+  /* audio-feed-lma7: a source row's meta line carries a feed URL, and a URL is ONE unbreakable
+     token (~289px at this size). With the page column's gutter in place that min-content no longer
+     fits a 320px viewport, and the source rows are a grid whose 1fr column cannot shrink below an
+     item's min-content - so the account page scrolled 6px sideways at 320px (measured in headless
+     Chrome: documentElement.scrollWidth 326 vs clientWidth 320, the source li box 37..326).
+     Breaking inside the token is what removes that floor; nothing else moves. */
+  .meta { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
   .empty { color: var(--muted); font-size: 0.92rem; margin: 0; }
   details.more > summary { cursor: pointer; color: var(--text-2); font-size: 0.92rem; }
   details.more[open] > summary { margin-block-end: 0.6rem; }

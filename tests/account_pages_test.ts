@@ -45,6 +45,222 @@ async function get(
   return fetch(new Request(`${BASE}${path}`, { headers }));
 }
 
+/** Elements HTML lets an author leave unclosed. */
+const OPTIONAL_END_TAGS = new Set([
+  "p",
+  "li",
+  "dt",
+  "dd",
+  "option",
+  "optgroup",
+  "thead",
+  "tbody",
+  "tfoot",
+  "tr",
+  "td",
+  "th",
+  "rt",
+  "rp",
+]);
+
+/** Elements that never take an end tag. */
+const VOID_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+/**
+ * Every tag that closes the wrong element or is never closed, in document order.
+ *
+ * Comments and the bodies of `<script>`/`<style>` are dropped first: neither contributes
+ * elements to the tree and their contents are text. A scanner this small is enough because the
+ * pages are server-rendered from template literals and `deno test` has no HTML parser; it is
+ * deliberately pointed at the kit pages below rather than at arbitrary HTML.
+ *
+ * AN UNTERMINATED COMMENT OR SCRIPT IS REPORTED, NOT SKIPPED (review of audio-feed-lma7, P2). The
+ * stripping above is a no-op when the terminator is missing, and what is left behind is not "a page
+ * with a stray tag": a browser treats everything after the opener as comment or script text, so it
+ * never closes `div.wrap` at all while this scanner sees balanced elements and returns CLEAN. That
+ * is a false green on the one failure this function exists for, so a leftover opener short-circuits
+ * before the tag walk. The check is free of false positives by construction: a properly terminated
+ * comment, script or style has already been removed by the replacements above, so anything still
+ * starting one of these really is unterminated.
+ */
+export function tagNestingProblems(html: string): string[] {
+  const markup = html
+    // A COMMENT ENDS AT FOUR PLACES TO A BROWSER, not one: `-->`, the abrupt `--!>`, and `<!-->` /
+    // `<!--->` which are comments with an empty body (HTML's comment-end and
+    // abrupt-closing-of-empty-comment states). Knowing only `-->` reported the other three as
+    // "unterminated", which a browser does not agree with - reviewer counterexamples R3, R4 and the
+    // `<!-->` probe in the second round of this bead's review.
+    .replace(/<!--(?:>|->|[\s\S]*?(?:--!>|-->))/g, "")
+    .replace(/<script(?=[\s/>])[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style(?=[\s/>])[^>]*>[\s\S]*?<\/style>/gi, "");
+  const problems: string[] = [];
+  // The opener scan reads a copy with quoted ATTRIBUTE VALUES blanked, so a `<!--` that is attribute
+  // DATA is not read as a comment (reviewer counterexample R11). Only `="..."` is blanked rather than
+  // every quoted run, so a stray quote in body text cannot blank enough to hide a real opener - the
+  // direction that would produce a false GREEN.
+  const forOpeners = markup.replace(/="[^"]*"/g, '=""');
+  // The delimiter is required, not just the name: custom elements are hyphenated by spec, so
+  // `<style-guide>` and `<script-loader>` are legal element names, and a bare `includes("<script")`
+  // called both of them an unterminated `<script>`/`<style>`. Found with the scanner probe during the
+  // second round of this bead's review - a false RED, the one direction that costs a lane time for
+  // nothing. The tightened form keeps every real detection (the probe still flags unterminated
+  // `<script>`, `<script `, `<script/` and a trailing `<script`).
+  for (
+    const [opener, pattern] of [
+      ["<!--", /<!--/],
+      ["<script", /<script(?=[\s/>]|$)/i],
+      ["<style", /<style(?=[\s/>]|$)/i],
+    ] as const
+  ) {
+    if (pattern.test(forOpeners)) {
+      problems.push(`unterminated ${opener} (a browser reads the rest of the page as its text)`);
+    }
+  }
+  const open: string[] = [];
+  for (
+    const [, closing, rawTag, selfClose] of markup.matchAll(
+      /<(\/?)([a-zA-Z][\w-]*)\b[^>]*?(\/?)>/g,
+    )
+  ) {
+    const tag = rawTag!.toLowerCase();
+    if (VOID_TAGS.has(tag) || selfClose === "/") continue;
+    if (!closing) {
+      open.push(tag);
+      continue;
+    }
+    let at = open.length - 1;
+    while (at >= 0 && open[at] !== tag && OPTIONAL_END_TAGS.has(open[at]!)) at--;
+    // Either the loop found the matching open element (truncate to and including it) or it stopped
+    // on an element that is neither the closer's own element nor one whose end tag may be omitted -
+    // which is the mismatch this function exists to report. Checking only `at < 0` here let the
+    // stale `</div>` through: the loop stopped on `fieldset`, and truncating there looked like a
+    // match. The mutant run is what caught it (a check that cannot fail is a false green).
+    if (at < 0 || open[at] !== tag) {
+      problems.push(`</${tag}> closes <${open[open.length - 1] ?? "nothing"}>`);
+      continue;
+    }
+    open.length = at;
+  }
+  for (const tag of open) problems.push(`<${tag}> never closed`);
+  return problems;
+}
+
+/**
+ * RENDERED MARKUP MUST ACTUALLY NEST (audio-feed-lma7). A one-line markup error — a stale
+ * `</div>` left behind when `<div class="choices">` became `<fieldset class="choices">`
+ * (audio-feed-dc2y) — closed `div.wrap` in the middle of the send form, so every later
+ * `section.panel` on /account landed as a SIBLING of the page column: full viewport width with
+ * none of the wrap's max-width or gutter (measured at 390px: left 0, right 390, while /login and
+ * the admin pages were correct). Nothing about the response status or the page's text changes
+ * when a tag is mismatched, so the markup itself is the only place the check can live; and
+ * because the defect only shows up in the DOM, per-element string assertions cannot see it.
+ */
+Deno.test("every kit page's markup actually nests its tags (audio-feed-lma7)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, { isAdmin: true });
+  // Every page that renders through the shared shell: the account page (whose send form carried
+  // the stale closer), the login page, and the admin console with its subpages. A tag that
+  // escapes the page column breaks the layout of whatever follows it, so the whole set is walked.
+  // /login is fetched signed OUT: it redirects a signed-in visitor, so a cookie would test the
+  // redirect rather than the page.
+  const pages: Array<[string, boolean]> = [
+    ["/account", true],
+    ["/login", false],
+    ["/admin", true],
+    ["/admin/subscribers", true],
+  ];
+  for (const [path, signedIn] of pages) {
+    const res = signedIn ? await get(fetch, path, stores, "user-1") : await get(fetch, path);
+    assertEquals(res.status, 200, `${path} should render`);
+    assertEquals(tagNestingProblems(await res.text()), [], `${path} markup`);
+  }
+});
+
+/**
+ * A scanner is only worth having if the shapes it CANNOT see are pinned, so the cases that matter
+ * are asserted here rather than described (review of audio-feed-lma7, P2). The unterminated comment
+ * is the one that counted: it is a false GREEN, it was found by review rather than by the gate, and
+ * the reviewer flagged it as source-traced rather than executed - which is what this test fixes.
+ */
+Deno.test("the markup scanner reports each failure shape, including the unterminated comment (audio-feed-lma7)", () => {
+  const reports = (html: string) => tagNestingProblems(html).join(" | ");
+
+  // The reviewer's own probe, run rather than traced: a browser reads the section and the closing
+  // `</div>` as comment text, so `div.wrap` never closes, while the tags themselves are balanced.
+  const probe = `<div class="wrap"><!-- <section class="panel"></section></div>`;
+  assert(
+    reports(probe).includes("unterminated <!--"),
+    `unterminated comment must be reported: ${reports(probe)}`,
+  );
+  // The same markup with the comment TERMINATED is clean, so the check above is not just "the
+  // string contains `<!--`" - it is a check on the terminator.
+  assertEquals(tagNestingProblems(`<div class="wrap"><!-- <section class="panel"> --></div>`), []);
+  assert(reports(`<script>const a = 1;`).includes("unterminated <script"));
+  assert(reports(`<style>.a { color: red; }`).includes("unterminated <style"));
+  // A LOOKALIKE NAME IS NOT AN OPENER. Custom elements are hyphenated by spec, so <style-guide> and
+  // <script-loader> are legal names, and the first version of the check above called both of them an
+  // unterminated <script>/<style> - a false RED, the one direction that costs a lane time for
+  // nothing. Found with the scanner probe in the second round of this bead's review, and pinned here
+  // so the looseness cannot come back.
+  assertEquals(tagNestingProblems(`<style-guide>x</style-guide>`), []);
+  assertEquals(tagNestingProblems(`<script-loader src="a.js"></script-loader>`), []);
+  // A COMMENT ENDS IN FOUR PLACES, NOT ONE - the reviewer's R3/R4 counterexamples plus the `<!-->`
+  // probe. `--!>` is the abrupt comment end and `<!-->` / `<!--->` are empty-body comments, all
+  // closed as far as a browser is concerned, so reporting them as "unterminated" was three more
+  // false REDS. Only `-->` was known when this was written.
+  for (
+    const closed of [
+      `<div class="wrap"><!--x--!><section></section></div>`,
+      `<div class="wrap"><!-- <section></section> --!></div>`,
+      `<!--><div><section></section></div>`,
+      `<!---><div><section></section></div>`,
+    ]
+  ) {
+    assertEquals(tagNestingProblems(closed), [], `${JSON.stringify(closed)} is a CLOSED comment`);
+  }
+  // ...and a comment opener that is attribute DATA is not a comment (reviewer R11).
+  assertEquals(tagNestingProblems(`<div class="wrap" data-x="<!--">ok</div>`), []);
+  // The dangling case must survive all of that, or the three fixes above would have bought quiet
+  // with a false green. In this markup the FIRST comment is closed and the second never is.
+  assert(
+    reports(`<div class="wrap"><!-- closed --><section></section><!-- dangling </div>`).includes(
+      "unterminated <!--",
+    ),
+  );
+  // ...while the real openers, in every form the terminator can be missing, are still caught: the
+  // delimiter requirement must not have narrowed the detection.
+  for (const markup of ["<script>const a = 1;", "<script const a = 1;", "<script/", "<script"]) {
+    assert(
+      reports(markup).includes("unterminated <script"),
+      `${JSON.stringify(markup)} must still be reported`,
+    );
+  }
+
+  // The defect this bead exists for, as the smallest reproduction of it.
+  assert(reports(`<fieldset class="choices">x</div>`).includes("</div> closes <fieldset>"));
+  // Cross-nesting, which a per-kind tag COUNT would call balanced.
+  assert(tagNestingProblems(`<div><section></div></section>`).length > 0);
+  // A tag written inside a script body or a terminated comment is TEXT, not an element: asserting
+  // this direction matters as much as the other, or the scanner becomes a false-red generator.
+  assertEquals(tagNestingProblems(`<script>const s = "</div>";</script><p>hi</p>`), []);
+  assertEquals(tagNestingProblems(`<p>hi</p><!-- </span></div> -->`), []);
+});
+
 Deno.test("GET /account annotates the send-article form as an agent tool (audio-feed-dc2y)", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(

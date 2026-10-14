@@ -283,7 +283,7 @@ ${
                 toolparamdescription="Narration style: read aloud in one voice, or a two-voice deep dive between an expert and an interviewer">
         <label><input type="radio" name="sendMode" value="direct" checked> Read aloud</label>
         <label><input type="radio" name="sendMode" value="deepdive"> Deep dive, two voices</label>
-      </div>
+      </fieldset>
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
     <div class="bookmarklet-box">
