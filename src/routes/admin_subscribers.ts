@@ -179,11 +179,16 @@ export async function handleAdminSubscribers(
       <h2 id="directory-h">Subscriber Directory (${filteredUsers.length} of ${allUsers.length})</h2>
     </div>
 
-    <form method="GET" action="/admin/subscribers" class="filter-bar">
+    <form method="GET" action="/admin/subscribers" class="filter-bar"
+          toolname="filter_subscribers"
+          tooldescription="Search the subscriber directory by email or name and filter by account status."
+          toolautosubmit>
       <input type="search" name="q" value="${
     esc(query)
-  }" placeholder="Search by email or name…" aria-label="Search subscribers">
-      <select name="status" aria-label="Filter by status">
+  }" placeholder="Search by email or name…" aria-label="Search subscribers"
+             toolparamdescription="Subscriber email address or display name to search for">
+      <select name="status" aria-label="Filter by status"
+              toolparamdescription="Account status to include in the directory">
         <option value="all"${statusFilter === "all" ? " selected" : ""}>All statuses</option>
         <option value="approved"${statusFilter === "approved" ? " selected" : ""}>Approved</option>
         <option value="pending"${statusFilter === "pending" ? " selected" : ""}>Pending</option>

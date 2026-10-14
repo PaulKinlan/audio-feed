@@ -604,7 +604,8 @@ export function renderHeader(viewer: Viewer | null, current?: ShellSection): str
     ? `<div class="who"><span class="name" title="${esc(viewer.email)}" data-tooltip="${
       esc(viewer.email)
     }">${esc(viewer.displayName)}</span>
-      <form method="post" action="/api/auth/logout"><button class="link-button" type="submit">Sign out</button></form></div>`
+      <form method="post" action="/api/auth/logout" toolname="sign_out"
+            tooldescription="Sign out of the current Audio Feed session."><button class="link-button" type="submit">Sign out</button></form></div>`
     : `<div class="who">${
       current === "login" ? "" : `<a class="sign-in" href="/login">Sign in</a>`
     }</div>`;
