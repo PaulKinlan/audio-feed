@@ -337,6 +337,11 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const summary = summarizeRecords(
       scanned.filter((record) => parsed.severities.includes(record.severity)),
     );
+    // byType is bounded to the 25 most frequent kinds. Its counts sum to total only when
+    // every counted kind is present: a rare claim expiry can be counted as warn but cut from
+    // byType. Keep this separate from `truncated`, which is ONLY about unscanned sequences.
+    const byTypeTruncated = summary.byType.reduce((sum, entry) => sum + entry.count, 0) <
+      summary.total;
     // The boundary is the last sequence SCANNED, not the last one counted, and not the window's
     // newest: a cursor that steps over what was not examined skips events silently
     // (audio-feed-8d6r).
@@ -358,6 +363,7 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,
+      byTypeTruncated,
       // True only when UNSCANNED records lie INSIDE the requested window: the scan filled its bound
       // and did not reach the window's end. `truncated: true` is an INSTRUCTION — keep polling from
       // `cursor` — never a quiet answer, and never "nothing to see": a bound full of filtered-out

@@ -129,7 +129,11 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
 a separate id would be a second identity that could disagree with the cursor.
 
-`/summary` returns `{ cursor, since, total, bySeverity, byType, truncated, scanned, invocationDetection, window }`.
+`/summary` returns `{ cursor, since, total, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, window }`.
+`byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means
+other types were counted but omitted from that list. An absent type then means **unknown**, not
+zero — fetch `/errors` over the same cursor window to inspect it. This flag is independent of
+`truncated`, which means the scan did not yet reach all sequences in the requested window.
 `total: 0` is the cheap answer to "has anything happened since my cursor" — one bounded scan instead
 of a page of events. It applies the same cursor rules, including the `410` when retention has moved
 past the cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
