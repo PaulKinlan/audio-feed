@@ -246,6 +246,23 @@ export interface QueueSnapshot {
   drain: "empty" | "draining" | "stalled" | "unknown" | "unreadable";
 }
 
+/**
+ * Key-gated queue snapshot exposed on `GET /api/observability/summary` (audio-feed-1qac).
+ *
+ * Uses explicit `null` for optional/error fields so JSON callers get a stable key shape, and
+ * preserves the audio-feed-ciuw invariant that a failed queue read produces `claimable: null`
+ * and `drain: "unreadable"` with `readError`, never `0`.
+ */
+export interface QueueSummarySnapshot {
+  claimable: number | null;
+  claimableCapped: boolean;
+  oldestClaimableAt: string | null;
+  drain: QueueSnapshot["drain"];
+  lastSynthesisRun: RunRecord | null;
+  readError: string | null;
+  runsReadError: string | null;
+}
+
 export interface ObservabilityReport {
   generatedAt: string;
   /**
@@ -406,6 +423,97 @@ function readFailure(error: unknown): string {
   return message.slice(0, 300);
 }
 
+interface InternalQueueRead {
+  snapshot: QueueSummarySnapshot;
+  queueEpisodes: Episode[] | null;
+  queueReadError?: string;
+  runsReadError?: string;
+  lastSynthesisRun?: RunRecord;
+}
+
+async function readQueueInternal(
+  stores: Stores,
+  nowMs: number = Date.now(),
+): Promise<InternalQueueRead> {
+  // A queue read that failed is NOT an empty queue (audio-feed-ciuw). `claimable: null` carries the
+  // difference through the type so a caller cannot accidentally render it as zero, and the drain
+  // verdict is "unreadable" rather than "empty" or "unknown", both of which would be claims about
+  // a queue nobody managed to look at.
+  let queueEpisodes: Episode[] | null = null;
+  let queueReadError: string | undefined;
+  try {
+    const pending = await stores.metadata.listPendingEpisodes({
+      limit: REPORT_QUEUE_CAP + 1,
+      nowMs,
+    });
+    queueEpisodes = pending.episodes;
+  } catch (error) {
+    queueReadError = readFailure(error);
+  }
+
+  // Scoped to THIS job kind. A global newest-first page let twenty feed-poll runs crowd out the
+  // synthesis run the drain verdict depends on, so the page read "no run recorded" from a page full
+  // of unrelated jobs (audio-feed-506m).
+  let lastSynthesisRun: RunRecord | undefined;
+  let runsReadError: string | undefined;
+  try {
+    const runs = await stores.metadata.listRuns(20, "synthesis");
+    lastSynthesisRun = runs.find((run) => run.kind === "synthesis");
+  } catch (error) {
+    runsReadError = readFailure(error);
+  }
+
+  const rawClaimable = queueEpisodes ? queueEpisodes.length : null;
+  const claimableCapped = rawClaimable !== null && rawClaimable > REPORT_QUEUE_CAP;
+  const claimable = rawClaimable === null ? null : Math.min(rawClaimable, REPORT_QUEUE_CAP);
+  const oldestClaimableAt = queueEpisodes
+    ?.map((episode) => episode.createdAt)
+    .sort()[0];
+
+  let drain: QueueSnapshot["drain"];
+  if (queueEpisodes === null) drain = "unreadable";
+  else if (rawClaimable === 0) drain = "empty";
+  else if (runsReadError) drain = "unknown";
+  else if (lastSynthesisRun) {
+    const startedAgo = nowMs - Date.parse(lastSynthesisRun.startedAt);
+    const recent = Number.isFinite(startedAgo) && startedAgo <= SYNTHESIS_TICK_MS * 3;
+    drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.ready ?? 0) > 0
+      ? "draining"
+      : "stalled";
+  } else {
+    drain = "unknown";
+  }
+
+  return {
+    snapshot: {
+      claimable,
+      claimableCapped,
+      oldestClaimableAt: oldestClaimableAt ?? null,
+      drain,
+      lastSynthesisRun: lastSynthesisRun ?? null,
+      readError: queueReadError ?? null,
+      runsReadError: runsReadError ?? null,
+    },
+    queueEpisodes,
+    queueReadError,
+    runsReadError,
+    lastSynthesisRun,
+  };
+}
+
+/**
+ * Read the durable queue snapshot (`claimable`, `claimableCapped`, `oldestClaimableAt`, `drain`,
+ * `lastSynthesisRun`, `readError`, `runsReadError`) for key-gated observability endpoints
+ * (audio-feed-1qac).
+ */
+export async function readQueueSnapshot(
+  stores: Stores,
+  nowMs: number = Date.now(),
+): Promise<QueueSummarySnapshot> {
+  const { snapshot } = await readQueueInternal(stores, nowMs);
+  return snapshot;
+}
+
 /** The report, read from durable state only. */
 export async function buildObservabilityReport(
   stores: Stores,
@@ -498,20 +606,14 @@ export async function buildObservabilityReport(
     };
   }
 
-  // A queue read that failed is NOT an empty queue (audio-feed-ciuw). `claimable: null` carries the
-  // difference through the type so a caller cannot accidentally render it as zero, and the drain
-  // verdict is "unreadable" rather than "empty" or "unknown", both of which would be claims about
-  // a queue nobody managed to look at.
-  let queueEpisodes: Episode[] | null = null;
-  let queueReadError: string | undefined;
-  try {
-    const pending = await stores.metadata.listPendingEpisodes({
-      limit: REPORT_QUEUE_CAP + 1,
-      nowMs,
-    });
-    queueEpisodes = pending.episodes;
-  } catch (error) {
-    queueReadError = readFailure(error);
+  const {
+    snapshot: queueSnapshot,
+    queueEpisodes,
+    queueReadError,
+    runsReadError,
+    lastSynthesisRun,
+  } = await readQueueInternal(stores, nowMs);
+  if (queueReadError !== undefined) {
     readErrors.push({ store: "queue", message: queueReadError });
   }
 
@@ -547,16 +649,7 @@ export async function buildObservabilityReport(
     }
   }
 
-  // Scoped to THIS job kind. A global newest-first page let twenty feed-poll runs crowd out the
-  // synthesis run the drain verdict depends on, so the page read "no run recorded" from a page full
-  // of unrelated jobs (audio-feed-506m).
-  let lastSynthesisRun: RunRecord | undefined;
-  let runsReadError: string | undefined;
-  try {
-    const runs = await stores.metadata.listRuns(20, "synthesis");
-    lastSynthesisRun = runs.find((run) => run.kind === "synthesis");
-  } catch (error) {
-    runsReadError = readFailure(error);
+  if (runsReadError !== undefined) {
     readErrors.push({ store: "runs", message: runsReadError });
   }
 
@@ -571,25 +664,10 @@ export async function buildObservabilityReport(
     .flat()
     .filter((attempt) => attempt.outcome === "abandoned").length;
 
-  const claimable = queueEpisodes ? queueEpisodes.length : null;
-  const claimableCapped = claimable !== null && claimable > REPORT_QUEUE_CAP;
-  const oldestClaimableAt = queueEpisodes
-    ?.map((episode) => episode.createdAt)
-    .sort()[0];
-
-  let drain: QueueSnapshot["drain"];
-  if (queueEpisodes === null) drain = "unreadable";
-  else if (claimable === 0) drain = "empty";
-  else if (runsReadError) drain = "unknown";
-  else if (lastSynthesisRun) {
-    const startedAgo = nowMs - Date.parse(lastSynthesisRun.startedAt);
-    const recent = Number.isFinite(startedAgo) && startedAgo <= SYNTHESIS_TICK_MS * 3;
-    drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.ready ?? 0) > 0
-      ? "draining"
-      : "stalled";
-  } else {
-    drain = "unknown";
-  }
+  const claimable = queueSnapshot.claimable;
+  const claimableCapped = queueSnapshot.claimableCapped;
+  const oldestClaimableAt = queueSnapshot.oldestClaimableAt ?? undefined;
+  const drain = queueSnapshot.drain;
 
   // audio-feed-exww: the live lease rows, read from the EPISODE index rather than from the log
   // store or the worker. This is deliberately a SEPARATE read from the queue's: the queue asks a

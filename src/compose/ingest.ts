@@ -174,6 +174,14 @@ export function createIngestHandler(
             },
           });
         } catch (logErr) {
+          // audio-feed-m0sk: accepted containment trade. Once `putArticleWithEpisode` has
+          // committed, the episode is durably queued and returning 5xx would report failure for a
+          // write that already succeeded (causing a retrying client to duplicate the episode).
+          // Because `appendLog` writes to the same metadata store that just failed, no separate
+          // in-process durable fallback channel exists; if `appendLog` also fails during a store
+          // outage, only this screened operational stderr warning remains, and a reader of the
+          // durable observability feed cannot distinguish this post-commit auxiliary degradation
+          // from clean 202 success during that outage.
           const screenedLogErr = screenErrorForLogging(logErr);
           console.warn(
             `[audio-feed] failed to record source_seed_failed log for episode ${episodeId}: ${screenedLogErr.message}`,

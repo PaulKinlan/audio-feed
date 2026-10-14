@@ -12,6 +12,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, openStores, type Stores } from "../src/config.ts";
 import { normaliseRequestHost, OTHER_HOST } from "../src/http.ts";
+import { REPORT_QUEUE_CAP } from "../src/observability/admin_report.ts";
 import { MAX_LIMIT } from "../src/routes/observability.ts";
 import { bootstrap } from "../src/server.ts";
 import { abandonedClaimEvent, claimLifecycleEvent } from "../src/storage/episode_events.ts";
@@ -740,4 +741,170 @@ Deno.test("audio-feed-4y9v: claim.lifecycle events carry article/source/size met
   assertEquals(abandoned.context?.articleId, "article-meta-1");
   assertEquals(abandoned.context?.sourceId, "source-meta-1");
   assertEquals(abandoned.context?.workerState, "unknown");
+});
+
+Deno.test("audio-feed-elr5: severity=info includes info, warn, and error while excluding debug", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, 1, "debug", "http.request");
+  await seed(stores, 2, "info", "claim.lifecycle");
+  await seed(stores, 1, "warn", "claim.lifecycle");
+  await seed(stores, 1, "error", "synthesis.failed");
+
+  const defaultFeed = await (await fetch(authed("/api/observability/errors?since=0"))).json();
+  assertEquals(defaultFeed.returned, 2, "default severity=warn omits info completion records");
+  assertEquals(defaultFeed.events.map((e: { severity: string }) => e.severity), ["warn", "error"]);
+
+  const infoFeed = await (await fetch(authed("/api/observability/errors?since=0&severity=info")))
+    .json();
+  assertEquals(infoFeed.returned, 4, "severity=info includes info, warn, and error");
+  assertEquals(
+    infoFeed.events.map((e: { severity: string }) => e.severity),
+    ["info", "info", "warn", "error"],
+  );
+  assertEquals(infoFeed.scanned, 5);
+  assertEquals(infoFeed.cursor, "5");
+
+  const infoSummary =
+    await (await fetch(authed("/api/observability/summary?since=0&severity=info"))).json();
+  assertEquals(infoSummary.total, 4);
+  assertEquals(infoSummary.bySeverity.debug, 0);
+  assertEquals(infoSummary.bySeverity.info, 2);
+  assertEquals(infoSummary.bySeverity.warn, 1);
+  assertEquals(infoSummary.bySeverity.error, 1);
+});
+
+Deno.test("audio-feed-1qac: /api/observability/summary exposes queue depth, oldestClaimableAt, drain, and lastSynthesisRun", async () => {
+  const { fetch, stores } = app();
+
+  // 1. Empty queue: claimable 0, drain "empty", all optional fields null.
+  const emptySummary = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(emptySummary.queue, {
+    claimable: 0,
+    claimableCapped: false,
+    oldestClaimableAt: null,
+    drain: "empty",
+    lastSynthesisRun: null,
+    readError: null,
+    runsReadError: null,
+  });
+
+  // 2. Queued work with no synthesis run history: drain "unknown", oldestClaimableAt is the earliest.
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-queue-newer",
+      userId: "user-1",
+      sourceId: "source-1",
+      status: "pending",
+      createdAt: "2026-10-14T10:05:00.000Z",
+    }),
+  );
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-queue-oldest",
+      userId: "user-1",
+      sourceId: "source-1",
+      status: "pending",
+      createdAt: "2026-10-14T09:30:00.000Z",
+    }),
+  );
+
+  const queuedUnknown = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(queuedUnknown.queue.claimable, 2);
+  assertEquals(queuedUnknown.queue.claimableCapped, false);
+  assertEquals(queuedUnknown.queue.oldestClaimableAt, "2026-10-14T09:30:00.000Z");
+  assertEquals(queuedUnknown.queue.drain, "unknown");
+  assertEquals(queuedUnknown.queue.lastSynthesisRun, null);
+  assertEquals(queuedUnknown.queue.readError, null);
+  assertEquals(queuedUnknown.queue.runsReadError, null);
+
+  // 3. Recent synthesis run that made progress (ready > 0): drain "draining".
+  const recentStartedAt = new Date(Date.now() - 60_000).toISOString();
+  await stores.metadata.recordRun({
+    id: "syn-run-draining",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: recentStartedAt,
+    durationMs: 1_250,
+    ready: 1,
+    failed: 0,
+    deferred: 0,
+  });
+
+  const drainingSummary = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(drainingSummary.queue.claimable, 2);
+  assertEquals(drainingSummary.queue.drain, "draining");
+  assertEquals(drainingSummary.queue.lastSynthesisRun?.id, "syn-run-draining");
+  assertEquals(drainingSummary.queue.lastSynthesisRun?.ready, 1);
+
+  // 4. Newer synthesis run that made NO progress (ready: 0, failed: 1): drain "stalled".
+  const newerStartedAt = new Date(Date.now() - 10_000).toISOString();
+  await stores.metadata.recordRun({
+    id: "syn-run-stalled",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: newerStartedAt,
+    durationMs: 900,
+    ready: 0,
+    failed: 1,
+    deferred: 0,
+  });
+
+  const stalledSummary = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(stalledSummary.queue.claimable, 2);
+  assertEquals(stalledSummary.queue.drain, "stalled");
+  assertEquals(stalledSummary.queue.lastSynthesisRun?.id, "syn-run-stalled");
+
+  // 5. Queue cap: > REPORT_QUEUE_CAP pending episodes reports claimable = REPORT_QUEUE_CAP and claimableCapped = true.
+  for (let i = 0; i < REPORT_QUEUE_CAP; i++) {
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: `ep-cap-${i}`,
+        userId: "user-1",
+        sourceId: "source-1",
+        status: "pending",
+        createdAt: "2026-10-14T10:10:00.000Z",
+      }),
+    );
+  }
+  const cappedSummary = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(cappedSummary.queue.claimable, REPORT_QUEUE_CAP);
+  assertEquals(cappedSummary.queue.claimableCapped, true);
+});
+
+Deno.test("audio-feed-1qac / audio-feed-ciuw: /api/observability/summary reports unreadable queue as null (never 0) with explicit readError", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-unreadable-1",
+      userId: "user-1",
+      sourceId: "source-1",
+      status: "pending",
+      createdAt: "2026-10-14T09:00:00.000Z",
+    }),
+  );
+
+  // 1. When listPendingEpisodes rejects, claimable is null (never 0), drain is "unreadable", and readError is populated.
+  const origListPending = stores.metadata.listPendingEpisodes.bind(stores.metadata);
+  stores.metadata.listPendingEpisodes = () =>
+    Promise.reject(new Error("kv queue read unavailable"));
+
+  const { fetch } = app(stores);
+  const brokenQueue = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(brokenQueue.queue.claimable, null, "failed queue read must report null, never 0");
+  assertEquals(brokenQueue.queue.claimableCapped, false);
+  assertEquals(brokenQueue.queue.oldestClaimableAt, null);
+  assertEquals(brokenQueue.queue.drain, "unreadable");
+  assertStringIncludes(brokenQueue.queue.readError ?? "", "kv queue read unavailable");
+  assertEquals(brokenQueue.queue.runsReadError, null);
+
+  // 2. When listPendingEpisodes succeeds but listRuns rejects, claimable is preserved, drain is "unknown", and runsReadError is populated.
+  stores.metadata.listPendingEpisodes = origListPending;
+  stores.metadata.listRuns = () => Promise.reject(new Error("kv runs history unavailable"));
+
+  const brokenRuns = await (await fetch(authed("/api/observability/summary?since=0"))).json();
+  assertEquals(brokenRuns.queue.claimable, 1);
+  assertEquals(brokenRuns.queue.drain, "unknown");
+  assertEquals(brokenRuns.queue.lastSynthesisRun, null);
+  assertEquals(brokenRuns.queue.readError, null);
+  assertStringIncludes(brokenRuns.queue.runsReadError ?? "", "kv runs history unavailable");
 });

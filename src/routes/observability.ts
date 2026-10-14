@@ -51,6 +51,7 @@ import type { LogBounds, LogRecord, LogSeverity } from "../storage/mod.ts";
 import { LOG_READ_LIMIT, summarizeRecords } from "../storage/log_shape.ts";
 import { json, problem } from "../http.ts";
 import { timingSafeEqual } from "../ids.ts";
+import { readQueueSnapshot } from "../observability/admin_report.ts";
 import { detectOverdueInvocations } from "../observability/invocation_overdue.ts";
 
 /** Events returned when the caller does not say. Deliberately the store's own read bound. */
@@ -62,6 +63,7 @@ export const MAX_LIMIT = 500;
 const SEVERITY_FILTERS: Record<string, LogSeverity[]> = {
   error: ["error"],
   warn: ["warn", "error"],
+  info: ["info", "warn", "error"],
   all: ["debug", "info", "warn", "error"],
 };
 
@@ -365,6 +367,7 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       ? Math.min(parsed.until, bounds.newestSeq)
       : bounds.newestSeq;
     const ranOutOfStore = scanned.length < LOG_READ_LIMIT;
+    const queue = await readQueueSnapshot(ctx.stores);
 
     return json({
       cursor: String(lastScanned),
@@ -383,6 +386,11 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
       scanned: scanned.length,
       invocationDetection: detection,
+      // audio-feed-1qac: expose durable queue depth and synthesis drain state on the key-gated
+      // summary path so an idle log store ("nothing queued" vs "queued but stalled") is
+      // distinguishable without an admin browser session. Preserves audio-feed-ciuw: a failed
+      // queue read reports `claimable: null` and `drain: "unreadable"` with `readError`, never 0.
+      queue,
       window: window(bounds),
     });
   };

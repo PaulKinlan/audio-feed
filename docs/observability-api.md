@@ -4,9 +4,30 @@ Two authenticated endpoints over the structured log store from obs-2 (`audio-fee
 that store directly — there is no second store, no second index and no second copy of the events.
 
 ```
-GET /api/observability/errors?since=<cursor>&limit=N[&severity=error|warn|all][&until=<cursor>]
-GET /api/observability/summary?since=<cursor>[&until=<cursor>][&severity=...]
+GET /api/observability/errors?since=<cursor>&limit=N[&severity=error|warn|info|all][&until=<cursor>]
+GET /api/observability/summary?since=<cursor>[&until=<cursor>][&severity=error|warn|info|all]
 ```
+
+### Severity filter default (`warn` + `error`) (`audio-feed-elr5`)
+
+When `severity` is omitted, both `/api/observability/errors` and `/api/observability/summary`
+**default to `severity=warn`**, which includes **`warn` and `error` records only** and excludes all
+`info` and `debug` records:
+
+| `severity` query parameter | severities included              | typical use                                                         |
+| -------------------------- | -------------------------------- | ------------------------------------------------------------------- |
+| _(omitted)_ or `warn`      | `warn`, `error`                  | **Default.** Failure and warning polling (`total: 0` = no warn/err) |
+| `error`                    | `error`                          | Terminal failures and unhandled errors only                         |
+| `info`                     | `info`, `warn`, `error`          | Operational events + completions + warnings/errors (no `debug`)     |
+| `all`                      | `debug`, `info`, `warn`, `error` | Full retained event stream, including completion and stage marks    |
+
+> [!IMPORTANT]
+> **Completion and progress checks MUST pass `?severity=all` (or `?severity=info`).** Synthesis
+> completion and progress events — `claim.lifecycle` with `phase: "ready"` or
+> `phase: "synthesized_N_of_M"`, `synthesis.invocation` `started`/`terminal` marks, and successful
+> `synthesis.stage` records — are emitted at **`info`** severity. Querying `/errors` or `/summary`
+> with the default filter omits every `info` record, making a quiet error feed indistinguishable
+> from an idle pipeline where nothing ran or completed.
 
 ## Authentication
 
@@ -26,18 +47,18 @@ unauthenticated caller learns nothing about the query language.
 
 ## Reachability: these two paths are NOT behind the host gate (`audio-feed-2tbv`)
 
-**A log reader must not sit behind the switch whose position you are trying to diagnose.** During the
-live 421 incident (`audio-feed-du8w`) the deployment refused every request because its allowed-host
-set was empty, and the question "how do I read the error logs for the live deployment?" could not be
-answered by this API: the host gate refuses *before any route runs*, so `/api/observability/errors`
-answered 421 on the very host that was being diagnosed. The tool for reading the incident was itself
-refused by the incident.
+**A log reader must not sit behind the switch whose position you are trying to diagnose.** During
+the live 421 incident (`audio-feed-du8w`) the deployment refused every request because its
+allowed-host set was empty, and the question "how do I read the error logs for the live deployment?"
+could not be answered by this API: the host gate refuses _before any route runs_, so
+`/api/observability/errors` answered 421 on the very host that was being diagnosed. The tool for
+reading the incident was itself refused by the incident.
 
 So these two endpoints — and only these two — are served even when the host gate is refusing:
 
-| deployment state                                        | `/` , `/listen`, `/admin` | `/api/observability/errors` |
-| ------------------------------------------------------- | ------------------------- | --------------------------- |
-| host not in the allowed set                             | `421 misdirected_request` | served, if the key is right |
+| deployment state                                         | `/` , `/listen`, `/admin`  | `/api/observability/errors` |
+| -------------------------------------------------------- | -------------------------- | --------------------------- |
+| host not in the allowed set                              | `421 misdirected_request`  | served, if the key is right |
 | allowed set empty (no `PUBLIC_BASE_URL`/`ALLOWED_HOSTS`) | `500 server_misconfigured` | served, if the key is right |
 
 Both refusal bodies also name this endpoint, so an operator who meets a refusal is told where the
@@ -45,25 +66,25 @@ errors are instead of having to already know.
 
 Why this is not a hole, in the terms of the gate's own threat model:
 
-- **It is still authenticated.** Exemption from the *host* check is not exemption from
+- **It is still authenticated.** Exemption from the _host_ check is not exemption from
   authentication: the shared key remains the only requirement, and it is still required. An exempt
   path without the key is `401`; with no key configured it is `503 observability_not_configured`,
   which names the variable to set — including on a refused host, so the operator is never left
   reading a generic failure.
 - **It derives no origin or log content from the request host.** The host gate exists so an
   attacker-chosen `Host` never becomes the advertised origin, feed `selfUrl`/enclosure URLs, a
-  redirect or the WebAuthn RP ID (`audio-feed-fp4r`/`7lsy`/`4x4t`). After authentication, a read
-  can append a bounded overdue-invocation warning derived only from stored marks and the clock;
-  it does not persist the request host. These routes answer JSON built from the log store: no
-  redirect, no URL, no `Access-Control-Allow-Origin`. The one place a request host reaches a
-  response header is the CSP `report-uri`, and that branch is HTML-only. A test asserts the
-  attacker's host appears in neither the body nor any response header.
+  redirect or the WebAuthn RP ID (`audio-feed-fp4r`/`7lsy`/`4x4t`). After authentication, a read can
+  append a bounded overdue-invocation warning derived only from stored marks and the clock; it does
+  not persist the request host. These routes answer JSON built from the log store: no redirect, no
+  URL, no `Access-Control-Allow-Origin`. The one place a request host reaches a response header is
+  the CSP `report-uri`, and that branch is HTML-only. A test asserts the attacker's host appears in
+  neither the body nor any response header.
 - **It cannot be widened by accident.** Matching is exact against the same normalised pathname the
   router dispatches on, so `/api/observability/errors/extra`, a percent-encoded lookalike or a
   doubled slash is refused by the gate, and a test asserts every exempt path is a route the router
   actually declares.
 - **The rest stays gated, deliberately.** The homepage, feeds, listen pages, `/admin` and the admin
-  observability *page* are all still behind the gate. Only the two JSON endpoints an operator can
+  observability _page_ are all still behind the gate. Only the two JSON endpoints an operator can
   poll without a browser session are exempt, and the test suite fails if a product route is added to
   the list or the match is loosened.
 
@@ -122,10 +143,15 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
   "scanned": 1,
   "returned": 1,
   "invocationDetection": {
-    "scannedFromSeq": 1, "scannedThroughSeq": 42, "oldestRetainedSeq": 1,
-    "olderStartsUnknown": false, "retentionGap": false,
-    "incompleteMarkers": 0, "warningsWritten": 0,
-    "inspectedAttempts": 0, "moreDue": false
+    "scannedFromSeq": 1,
+    "scannedThroughSeq": 42,
+    "oldestRetainedSeq": 1,
+    "olderStartsUnknown": false,
+    "retentionGap": false,
+    "incompleteMarkers": 0,
+    "warningsWritten": 0,
+    "inspectedAttempts": 0,
+    "moreDue": false
   },
   "window": { "oldestRetained": 1, "newest": 42 }
 }
@@ -133,12 +159,12 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
 a separate id would be a second identity that could disagree with the cursor. Every event has the
-same top-level keys: absent `episodeId`, `phase`, `attempt`, and `durationMs` are `null`, not missing.
-These are structured root fields from the stored record, not values inferred from `message` or
-`context`. For `synthesis.stage`, `correlationId` names the **invocation** while `episodeId` names
-the **episode**; group failed stages by `(episodeId, phase)` with `severity=warn` (which also includes
-errors). Use `severity=all` to include successful `info` stage marks. Stage marks may be capped by
-the producer, so missing marks do not prove a stage never ran.
+same top-level keys: absent `episodeId`, `phase`, `attempt`, and `durationMs` are `null`, not
+missing. These are structured root fields from the stored record, not values inferred from `message`
+or `context`. For `synthesis.stage`, `correlationId` names the **invocation** while `episodeId`
+names the **episode**; group failed stages by `(episodeId, phase)` with `severity=warn` (which also
+includes errors). Use `severity=all` to include successful `info` stage marks. Stage marks may be
+capped by the producer, so missing marks do not prove a stage never ran.
 
 The existing `context` field remains available but is not a uniform join schema: it can contain
 nested, source-specific data including CSP reports from a public endpoint. The store caps and
@@ -153,14 +179,65 @@ reports a gap rather than silent loss. `invocationDetection.olderStartsUnknown`,
 `moreDue` already describe limits of the overdue-invocation scan; this change adds no competing
 coverage fields. Neither those indicators nor the structured event fields reconstruct pruned logs.
 
-`/summary` returns `{ cursor, since, total, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, window }`.
-`byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means
-other types were counted but omitted from that list. An absent type then means **unknown**, not
-zero — fetch `/errors` over the same cursor window to inspect it. This flag is independent of
-`truncated`, which means the scan did not yet reach all sequences in the requested window.
-`total: 0` is the cheap answer to "has anything happened since my cursor" — one bounded scan instead
-of a page of events. It applies the same cursor rules, including the `410` when retention has moved
-past the cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
+`/summary` returns
+`{ cursor, since, total, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, queue, window }`.
+`byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means other
+types were counted but omitted from that list. An absent type then means **unknown**, not zero —
+fetch `/errors` over the same cursor window to inspect it. This flag is independent of `truncated`,
+which means the scan did not yet reach all sequences in the requested window. `total: 0` is the
+cheap answer to "has anything happened since my cursor" — one bounded scan instead of a page of
+events. It applies the same cursor rules, including the `410` when retention has moved past the
+cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
+
+### Queue snapshot on `/summary` (`audio-feed-1qac`, `audio-feed-ciuw`)
+
+An idle `*/2` synthesis cron tick writes to the metadata KV run-history store rather than the log
+store, so log silence alone cannot distinguish **"nothing is queued"** from **"work is queued and
+stalled"**. `/api/observability/summary` therefore includes a `queue` snapshot read directly from
+durable episode and run-history storage:
+
+```json
+"queue": {
+  "claimable": 0,
+  "claimableCapped": false,
+  "oldestClaimableAt": null,
+  "drain": "empty",
+  "lastSynthesisRun": {
+    "id": "run-1",
+    "kind": "synthesis",
+    "trigger": "cron",
+    "startedAt": "2026-10-14T11:00:00.000Z",
+    "durationMs": 1420,
+    "ready": 1,
+    "failed": 0,
+    "deferred": 0
+  },
+  "readError": null,
+  "runsReadError": null
+}
+```
+
+- `claimable`: `number | null` — episodes claimable right now (`pending`, or a `synthesizing` claim
+  whose lease has expired), capped at `100` (`REPORT_QUEUE_CAP`). **`null` means the durable queue
+  read failed (`audio-feed-ciuw`), never `0`** — callers must never interpret `null` as an empty
+  queue.
+- `claimableCapped`: `boolean` — `true` when more than `100` episodes are claimable.
+- `oldestClaimableAt`: `string | null` — ISO 8601 `createdAt` timestamp of the oldest claimable
+  episode, or `null` when none are queued or the queue read failed.
+- `drain`: `"empty" | "draining" | "stalled" | "unknown" | "unreadable"`
+  - `"empty"` — `claimable === 0`.
+  - `"draining"` — `claimable > 0` and `lastSynthesisRun` started within `3 * SYNTHESIS_TICK_MS` (30
+    minutes), had no top-level `error`, and recorded `ready > 0`.
+  - `"stalled"` — `claimable > 0` and `lastSynthesisRun` is stale, errored, or finished `0`
+    episodes.
+  - `"unknown"` — `claimable > 0` and either no synthesis run is retained in
+    `listRuns(20, "synthesis")` or the run-history read failed (`runsReadError !== null`).
+  - `"unreadable"` — the queue read failed (`claimable === null`, `readError !== null`).
+- `lastSynthesisRun`: `RunRecord | null` — most recent synthesis run from
+  `listRuns(20, "synthesis")`, scoped to `"synthesis"` so feed-poll runs cannot crowd it out
+  (`audio-feed-506m`).
+- `readError`: `string | null` — bounded error message when `listPendingEpisodes` failed.
+- `runsReadError`: `string | null` — bounded error message when `listRuns` failed.
 
 ## Overdue synthesis invocations (audio-feed-a7i0)
 
@@ -176,13 +253,13 @@ summary sees it before deciding a poll is idle.
 
 This is deliberately not an all-history detector. `invocationDetection.scannedFromSeq` and
 `scannedThroughSeq` say which window was actually checked; `olderStartsUnknown` is true when the
-window truncated older retained records, retention pruned earlier records, or a start mark lacked
-a usable recorded budget. `retentionGap` says earlier records were pruned. `moreDue` means the
-per-request attempt/warning cap stopped with visible due work still pending: poll again, never
-read it as "zero overdue". A store read, partial sequence window, or warning-write failure
-returns `503 invocation_detection_unavailable` without a feed cursor or a quiet `total: 0`. A
-reader can therefore distinguish no overdue start **in the observed window** from an inability to
-see earlier starts. Older starts outside that window are not enumerated by this detector.
+window truncated older retained records, retention pruned earlier records, or a start mark lacked a
+usable recorded budget. `retentionGap` says earlier records were pruned. `moreDue` means the
+per-request attempt/warning cap stopped with visible due work still pending: poll again, never read
+it as "zero overdue". A store read, partial sequence window, or warning-write failure returns
+`503 invocation_detection_unavailable` without a feed cursor or a quiet `total: 0`. A reader can
+therefore distinguish no overdue start **in the observed window** from an inability to see earlier
+starts. Older starts outside that window are not enumerated by this detector.
 
 The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A scan is
 bounded, so a window larger than the bound is examined in part: `truncated: true` says so, `cursor`
@@ -191,9 +268,9 @@ newest sequence in the window instead counts part of a window while claiming all
 moves past events it was never told about — a real bug (`audio-feed-8d6r`), and the same rule as the
 errors feed's cursor advancing over what was scanned rather than what was returned.
 
-Because that cursor may sit past records the summary's filter excluded, it is a safe way to ask "what
-changed?" but not a safe durable cursor: a poller drains the errors endpoint from the cursor it last
-consumed and only then moves its own (`audio-feed-2af8`, and the recipe below).
+Because that cursor may sit past records the summary's filter excluded, it is a safe way to ask
+"what changed?" but not a safe durable cursor: a poller drains the errors endpoint from the cursor
+it last consumed and only then moves its own (`audio-feed-2af8`, and the recipe below).
 
 ## What a poller does
 
@@ -231,15 +308,99 @@ records that filter excluded. The summary counts only the records its filter mat
 advances over everything the scan EXAMINED, so a scan whose bound fills with filtered-out records
 answers `total: 0, truncated: true`. A caller that treats `total: 0` as "quiet" stops forever in
 exactly that case: the bound fills with events it did not ask for and the ones it wanted sit behind
-them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means genuinely empty, and
-a full bound means there is more.
+them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means genuinely empty,
+and a full bound means there is more.
 
 The DURABLE cursor is a different thing, and it moves only after a drain. The recipe above reads
-`/errors` from the cursor it last consumed, page by page, and assigns its own cursor only once a page
-reports `hasMore: false`; it re-polls the SUMMARY from that same durable cursor each iteration and
-never advances the probe cursor on its behalf. Following the recipe literally therefore cannot move
-the wrong cursor, and the two rules above are the reason it is written that way.
+`/errors` from the cursor it last consumed, page by page, and assigns its own cursor only once a
+page reports `hasMore: false`; it re-polls the SUMMARY from that same durable cursor each iteration
+and never advances the probe cursor on its behalf. Following the recipe literally therefore cannot
+move the wrong cursor, and the two rules above are the reason it is written that way.
 
 On `410 cursor_too_old`, the cursor cannot be resumed: re-baseline from `window.oldestRetained - 1`
 (accepting the gap, and saying so in whatever consumes the events) or from the current cursor, and
 treat the lost interval as unknown rather than as quiet.
+
+## Distribution query for synthesis & ingest outcomes (`audio-feed-dndq`, `audio-feed-m0sk`)
+
+To compute the full distribution of where articles and synthesis attempts succeed, yield, stall, or
+fail across the retained log window, run the following read sequence with
+`Authorization: Bearer $AUDIOFEED_OBSERVABILITY_KEY`:
+
+### 1. Exact requests to run
+
+1. **Snapshot the queue and log window with `severity=all`:**
+   ```
+   GET /api/observability/summary?since=0&severity=all
+   ```
+   Read `queue` (`claimable`, `claimableCapped`, `oldestClaimableAt`, `drain`, `lastSynthesisRun`,
+   `readError`, `runsReadError`), `invocationDetection`, `bySeverity`, `byType`, `byTypeTruncated`,
+   and `window` (`oldestRetained`, `newest`).
+2. **Drain the full retained event stream with `severity=all`:**
+   ```
+   GET /api/observability/errors?since=<cursor>&limit=500&severity=all
+   ```
+   Start at `cursor = String(window.oldestRetained - 1)` (or `0` when `oldestRetained === 1`) and
+   advance `cursor = page.cursor` until `page.hasMore === false`. `severity=all` (or
+   `severity=info`) is mandatory because claim starts, intermediate progress, stage completions, and
+   `phase: "ready"` events are written at `info` severity (`audio-feed-elr5`).
+
+### 2. Grouping the five distributions from structured fields
+
+- **(a) Episodes attempted vs. completed vs. retrying vs. failed (`type === "claim.lifecycle"`):**
+  Group records by `episodeId` and `attempt`:
+  - **Attempt started:** `phase === "claimed"` with no `durationMs`, no `context.claimOutcome`, and
+    no `context.workerState`.
+  - **Completed (`ready`):** `phase === "ready"` and `severity === "info"` (`durationMs` holds
+    lease-to-terminal duration).
+  - **Deliberately yielded / retrying (`audio-feed-2sec`):** `context.claimOutcome === "yielded"`
+    (e.g., `phase` `"synthesized_N_of_M"` or `"upload_retry"`, with `context.uploadRetry`).
+  - **Terminal worker failure:** `severity === "error"` with `context.workerState === undefined`.
+  - **Abandoned / expired claim lease (`audio-feed-kd5r`, `audio-feed-aueh`):**
+    `context.workerState === "unknown"` (`severity === "error"` on final abandonment) or
+    `context.claimOutcome === "expired"` (`severity === "warn"` on intermediate lease expiry).
+  - **Article, source, and input-size metadata (`audio-feed-4y9v`):** read `context.articleId`,
+    `context.sourceId`, `context.sourceTitle`, `context.mode`, `context.inputByteLength`,
+    `context.wordCount`, `context.segmentCount`, `context.scriptTurnCount`, `context.byteLength`,
+    and `context.durationSeconds`.
+- **(b) Failures by synthesis stage (`type === "synthesis.stage"`):** Group records by
+  `(episodeId, phase)` where `phase` is in `{"tts", "verify", "upload", "yield"}` and
+  `correlationId` identifies the invocation. Failed stages have `severity === "warn"` (or
+  `"error"`); completed stages have `severity === "info"`.
+- **(c) Invocations lost with no terminal record (`audio-feed-a7i0`, `audio-feed-4nbt`):** Inspect
+  `invocationDetection` (`incompleteMarkers`, `warningsWritten`, `olderStartsUnknown`,
+  `retentionGap`, `moreDue`) and events with `type === "synthesis.invocation.overdue"` or
+  `type === "synthesis.invocation"` (`context.budgetMs`).
+- **(d) Pre-episode ingest failures and post-commit degradation (`type === "ingest.failed"`,
+  `type === "ingest.source_seed_failed"`):**
+  - `ingest.failed` (`severity === "warn"`): articles rejected before episode creation, carrying
+    `context.status`, `context.mode`, `context.error` (screened), `context.articleUrl`, and
+    `context.articleTitle`.
+  - `ingest.source_seed_failed` (`severity === "warn"`): episodes that committed (`status: 202`)
+    whose auxiliary inbox source seeding failed afterward, carrying `context.episodeId`,
+    `context.articleId`, `context.sourceId`, and `context.error` (screened).
+- **(e) HTTP host and route refusals (`type === "http.request"`):** Inspect `route`,
+  `context.status`, and `context.host` (normalised hostname or `"<other>"` when screened,
+  `audio-feed-4y9v`).
+
+### 3. Three-way zero disambiguation & structural boundaries
+
+- **Retention & scan bounds:** Any `0` count is scoped to `[window.oldestRetained, window.newest]`.
+  If `window.oldestRetained > 1` or `invocationDetection.retentionGap === true`, earlier records
+  have aged out. If `invocationDetection.olderStartsUnknown === true` or `moreDue === true`, the
+  500-record overdue-invocation scan bound was reached. On `/summary`, `byTypeTruncated: true` means
+  types outside the top 25 were counted in `total` but omitted from `byType`.
+- **Queue read failures (`audio-feed-ciuw`):** `queue.claimable === 0` means the queue is empty;
+  `queue.claimable === null` (`queue.drain === "unreadable"`) means the queue read failed
+  (`queue.readError`).
+- **Deliberate privacy & containment boundaries:**
+  - `userId` and unscreened `reason` prose are excluded from the bearer-key projection.
+  - Feed items skipped as already-existing during normal feed polls do not emit error records.
+  - **Accepted post-commit containment trade (`audio-feed-m0sk`):** In `src/compose/ingest.ts`, once
+    `putArticleWithEpisode` commits, the episode is durably queued and `POST /api/ingest` must
+    return `202` so clients do not retry and duplicate the episode. If inbox source seeding fails
+    and the subsequent `appendLog` for `ingest.source_seed_failed` also fails (because the metadata
+    store is unavailable), the nested `catch` logs a screened warning to operational stderr rather
+    than failing the committed `202`. During a log-store outage, that auxiliary degradation is
+    visible on stderr (`[audio-feed] failed to record source_seed_failed log...`) and not in the
+    durable log feed.
