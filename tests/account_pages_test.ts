@@ -81,6 +81,9 @@ const VOID_TAGS = new Set([
   "wbr",
 ]);
 
+/** Root elements whose subtree is foreign content, where a trailing `/` really is self-closing. */
+const FOREIGN_ROOTS = new Set(["svg", "math"]);
+
 /**
  * Every tag that closes the wrong element or is never closed, in document order.
  *
@@ -131,32 +134,43 @@ export function tagNestingProblems(html: string): string[] {
       problems.push(`unterminated ${opener} (a browser reads the rest of the page as its text)`);
     }
   }
-  const open: string[] = [];
+  // SELF-CLOSING IS HONOURED ONLY WHERE THE PARSER HONOURS IT (audio-feed-djdp). A trailing `/`
+  // closes an element by itself in SVG/MathML, whose subtrees are foreign content; it is meaningless
+  // on a void HTML element, which has no end tag at all. On any OTHER HTML element the parser IGNORES
+  // the slash and opens the element - `<section/>` then swallows whatever follows into the section.
+  // This walk used to skip every `selfClose === "/"` tag, so `<div class="wrap"><section/></div>`
+  // came back CLEAN while a browser silently moved the tree, which is the same class of silent
+  // tree change this function exists to catch. The foreign case has to stay honoured in the other
+  // direction: these pages emit self-closing SVG children, so treating those as open elements would
+  // turn a false green into a false-red generator.
+  const open: Array<{ tag: string; foreign: boolean }> = [];
   for (
     const [, closing, rawTag, selfClose] of markup.matchAll(
       /<(\/?)([a-zA-Z][\w-]*)\b[^>]*?(\/?)>/g,
     )
   ) {
     const tag = rawTag!.toLowerCase();
-    if (VOID_TAGS.has(tag) || selfClose === "/") continue;
+    if (VOID_TAGS.has(tag)) continue;
+    const foreign = open[open.length - 1]?.foreign === true || FOREIGN_ROOTS.has(tag);
+    if (!closing && selfClose === "/" && foreign) continue;
     if (!closing) {
-      open.push(tag);
+      open.push({ tag, foreign });
       continue;
     }
     let at = open.length - 1;
-    while (at >= 0 && open[at] !== tag && OPTIONAL_END_TAGS.has(open[at]!)) at--;
+    while (at >= 0 && open[at]!.tag !== tag && OPTIONAL_END_TAGS.has(open[at]!.tag)) at--;
     // Either the loop found the matching open element (truncate to and including it) or it stopped
     // on an element that is neither the closer's own element nor one whose end tag may be omitted -
     // which is the mismatch this function exists to report. Checking only `at < 0` here let the
     // stale `</div>` through: the loop stopped on `fieldset`, and truncating there looked like a
     // match. The mutant run is what caught it (a check that cannot fail is a false green).
-    if (at < 0 || open[at] !== tag) {
-      problems.push(`</${tag}> closes <${open[open.length - 1] ?? "nothing"}>`);
+    if (at < 0 || open[at]!.tag !== tag) {
+      problems.push(`</${tag}> closes <${open[open.length - 1]?.tag ?? "nothing"}>`);
       continue;
     }
     open.length = at;
   }
-  for (const tag of open) problems.push(`<${tag}> never closed`);
+  for (const { tag } of open) problems.push(`<${tag}> never closed`);
   return problems;
 }
 
@@ -251,6 +265,35 @@ Deno.test("the markup scanner reports each failure shape, including the untermin
     );
   }
 
+  // SELF-CLOSING IS HONOURED ONLY WHERE THE PARSER HONOURS IT (audio-feed-djdp), and the closed
+  // direction matters as much as the open one. A `/` on a VOID element is inert and must stay clean;
+  // a `/` inside SVG/MathML really does close the element; and a `/` on an ordinary HTML element is
+  // IGNORED by the parser, so `<section/>` must be treated as an open section. That last case used to
+  // be a documented false green; the four kit pages below are the guard that fixing it did not turn
+  // the check into a false-red generator on real markup.
+  for (const voidElement of ["<br/>", '<img src="a.png"/>', '<input name="x"/>', "<hr/>"]) {
+    assertEquals(
+      tagNestingProblems(`<div class="wrap">${voidElement}</div>`),
+      [],
+      `${voidElement} is a void element and closes itself`,
+    );
+  }
+  assertEquals(tagNestingProblems(`<div class="wrap"><svg><circle/></svg></div>`), []);
+  assertEquals(
+    tagNestingProblems(
+      `<div class="wrap"><svg viewBox="0 0 1 1"><path/><g><rect/></g></svg></div>`,
+    ),
+    [],
+  );
+  assertEquals(tagNestingProblems(`<div class="wrap"><math><mi/></math></div>`), []);
+  assert(
+    reports(`<div class="wrap"><section/></div>`).includes("</div> closes <section>"),
+    `a self-closing non-void element is OPEN to a browser: ${
+      reports(`<div class="wrap"><section/></div>`)
+    }`,
+  );
+  assert(reports(`<div/>`).includes("<div> never closed"));
+  assert(reports(`<section class="panel"/>`).includes("<section> never closed"));
   // The defect this bead exists for, as the smallest reproduction of it.
   assert(reports(`<fieldset class="choices">x</div>`).includes("</div> closes <fieldset>"));
   // Cross-nesting, which a per-kind tag COUNT would call balanced.
