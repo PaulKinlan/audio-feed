@@ -384,9 +384,14 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
 /**
  * A genuine claim start, including historical starts with no owner or lease context.
  * `phase` is the last observed phase, not an event kind: an expired or abandoned claim can
- * still say "claimed" but carries a reason or structured outcome. A healthy completion with
- * no phase touch also says "claimed" and has no reason, but carries a terminal duration.
- * Only a record without those terminal markers can reset startedAt (audio-feed-svwu).
+ * still say "claimed" but carries a reason, a terminal duration, or one of the two CONTEXT KEYS
+ * that mark an outcome BY NAME - `context.claimOutcome` (a deliberate yield or other structured
+ * verdict) or `context.workerState` (the store's assessment of a claim it observed expire). The
+ * KEYS are what this predicate tests, not a paraphrase of them: a future writer deciding whether
+ * its record counts as a start needs the names, and "structured outcome" is not something a writer
+ * can write (audio-feed-9jmf). A healthy completion with no phase touch also says "claimed" and has
+ * no reason, but carries a terminal duration.
+ * Only a record without those terminal markers can set or reset startedAt (audio-feed-svwu).
  */
 export function isClaimStartRecord(record: LogRecord): boolean {
   if (record.type !== CLAIM_LIFECYCLE_EVENT || record.phase !== "claimed") return false;
