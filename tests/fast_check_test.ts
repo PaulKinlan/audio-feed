@@ -294,20 +294,47 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       mentions: (source: string) => source.includes("/api/reports/csp"),
     },
   ];
+  // Exclude only THIS audit's URL-literal fixture block, never the entire file:
+  // a future real HTTP test in fast_check_test.ts must still become a candidate.
+  const withoutOwnFixture = (file: string, source: string): string => {
+    if (file !== "tests/fast_check_test.ts") return source;
+    const marker = 'Deno.test("' +
+      "abh1: route registrations discover the complete HTTP test set before narrowing" +
+      '", async () => {';
+    const start = source.indexOf(marker);
+    const end = source.indexOf("\n});", start);
+    assert(start >= 0 && end > start, "route-reference audit fixture block missing");
+    assertEquals(
+      source.indexOf(marker, start + marker.length),
+      -1,
+      "duplicate audit fixture block",
+    );
+    return source.slice(0, start) + source.slice(end + 4);
+  };
   const discovered = await allTestFiles();
   assert(discovered.length > 0, "full-gate test discovery returned ZERO modules");
-  const readers = discovered.filter((file) => file !== "tests/fast_check_test.ts");
   const sources = new Map<string, string>();
-  for (const file of readers) sources.set(file, await Deno.readTextFile(file));
+  for (const file of discovered) {
+    sources.set(file, withoutOwnFixture(file, await Deno.readTextFile(file)));
+  }
   assert(sources.size > 0, "route-reference audit examined ZERO test modules");
   assertEquals(
     sources.size,
-    readers.length,
-    `route-reference audit examined ${sources.size}/${readers.length} eligible test modules (${discovered.length} discovered); no duplicate or dropped module may yield a clean scan`,
+    discovered.length,
+    `route-reference audit examined ${sources.size}/${discovered.length} discovered test modules; no duplicate or dropped module may yield a clean scan`,
   );
   const population =
-    `${accountRoutes.length} account routes; ${sources.size}/${readers.length} eligible test modules examined (${discovered.length} discovered)`;
+    `${accountRoutes.length} account routes; ${sources.size}/${discovered.length} discovered test modules examined (only this audit's fixture block redacted)`;
   console.log(`route-reference audit: ${population}`);
+  const self = await Deno.readTextFile(new URL("./fast_check_test.ts", import.meta.url));
+  const futureHandlerRequest = self +
+    '\nDeno.test("new login reader", async () => await fetch(new Request("https://example.test/login")));\n';
+  assert(
+    /(?<!\/api\/auth)\/login(?=[/?#"`])/.test(
+      withoutOwnFixture("tests/fast_check_test.ts", futureHandlerRequest),
+    ),
+    "a future HTTP test in the same module must remain visible outside the fixture block",
+  );
   for (const path of accountRoutes) {
     const stem = path.includes(":") ? path.slice(0, path.indexOf(":")) : path;
     assert(
