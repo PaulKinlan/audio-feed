@@ -529,6 +529,8 @@ Deno.test("queue failure is not reported as success and does not leak internal e
   equal(failureInfo?.reason, "enqueue_failed");
   equal(failureInfo?.status, 503);
   equal(failureInfo?.error, "private backend credential");
+  equal(failureInfo?.article?.url, article.url);
+  equal(failureInfo?.article?.title, article.title);
   equal(failureInfo?.user?.id, approved.id);
 });
 

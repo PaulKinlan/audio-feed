@@ -313,6 +313,10 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assertEquals(failedLog.severity, "warn");
     assertEquals(failedLog.context?.status, 503);
     assertEquals(failedLog.context?.mode, "direct");
+    // audio-feed-fapx: preserved article identity and sanitized error cause
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
+    assertEquals(failedLog.context?.error, "kv atomic commit conflict");
   }
 
   // 2. Enqueue failure with EMPTY message error (k3x6 / 2zik / j8n4 invariant)
@@ -329,6 +333,8 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     );
     assertEquals(failedLog.userId, "user-1");
     assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
   }
 
   // 3. Enqueue failure with non-Error / primitive throw
@@ -343,6 +349,9 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for primitive throw");
     assertEquals(failedLog.userId, "user-1");
     assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.error, "raw string exception from storage driver");
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
   }
 
   // 4. Success control: enqueue succeeds -> MUST NOT write an ingest.failed record
@@ -353,6 +362,29 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
     const logs = await stores.metadata.listLogs({ limit: 10 });
     const failedLog = logs.find((l) => l.type === "ingest.failed");
     assertEquals(failedLog, undefined, "success control must NOT record ingest.failed log");
+  }
+
+  // 5. audio-feed-0s2j: Post-commit source lookup failure must not fail the enqueue or emit false ingest.failed
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () => Promise.reject(new Error("source read unavailable"));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(
+      res.status,
+      202,
+      "post-commit source seeding failure must not fail the 202 queued response",
+    );
+    const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+    const queuedEpisode = episodes.find((e) => e.title === "An Ingested Article");
+    assert(queuedEpisode, "episode must be persisted in store");
+    assertEquals(queuedEpisode.status, "pending");
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(
+      failedLog,
+      undefined,
+      "must not emit a false pre-episode dead-letter when episode was persisted",
+    );
   }
 });
 

@@ -1007,6 +1007,10 @@ export interface IngestFailureInfo {
   status: number;
   mode?: AudioMode;
   error?: string;
+  article?: {
+    url?: string;
+    title?: string;
+  };
 }
 
 export interface IngestDependencies {
@@ -1071,7 +1075,17 @@ export function createUrlIngestHandler(
       try {
         target = articleUrl(url).href;
       } catch (error) {
-        await deps.onFailure?.({ user, reason: "url_rejected", status: 400, mode: targetMode });
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason: "url_rejected",
+          status: 400,
+          mode: targetMode,
+          error: errorDetail,
+          article: { url },
+        });
         throw error;
       }
       let article: ExtractedArticle;
@@ -1085,7 +1099,17 @@ export function createUrlIngestHandler(
           ? "extraction_failed"
           : "fetch_failed";
         const status = error instanceof IngestError ? error.status : 503;
-        await deps.onFailure?.({ user, reason, status, mode: targetMode });
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason,
+          status,
+          mode: targetMode,
+          error: errorDetail,
+          article: { url: target },
+        });
         throw error;
       }
       request.signal.throwIfAborted();
@@ -1102,6 +1126,10 @@ export function createUrlIngestHandler(
           status: 503,
           mode: targetMode,
           error: errorDetail,
+          article: {
+            url: article.url,
+            title: article.title,
+          },
         });
         throw error;
       }

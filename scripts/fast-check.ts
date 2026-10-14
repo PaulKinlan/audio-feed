@@ -127,6 +127,11 @@ async function git(...args: string[]): Promise<string | null> {
 
 /** Committed diff vs origin/main plus anything uncommitted or untracked. null = unknown. */
 async function changedFiles(): Promise<string[] | null> {
+  if (Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST")) {
+    const untracked = await git("ls-files", "--others", "--exclude-standard");
+    if (untracked === null) return null;
+    return untracked.split("\n").map((f) => f.trim()).filter(Boolean);
+  }
   const files = new Set<string>();
   const committed = await git("diff", "--name-only", "origin/main...HEAD");
   if (committed === null) return null;

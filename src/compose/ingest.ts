@@ -124,28 +124,40 @@ export function createIngestHandler(
       await ctx.stores.metadata.putArticleWithEpisode(record, episode);
       // Seed the inbox source on first use so the per-source feed route has a
       // source to resolve rather than 404ing on an empty inbox.
-      if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
-        await ctx.stores.metadata.putSource({
-          id: INBOX_SOURCE_ID,
-          userId: user.id,
-          title: "Send to Audio",
-          modes: ["direct", "deepdive"],
-          // Unspecified on purpose (audio-feed-4xt): the inbox is not a source that
-          // ever chose a voice, so hard-coding "Charon" here would shadow both the
-          // user's own preference and the operator's DEFAULT_VOICE.
-          voices: {},
-          createdAt: now,
-        });
+      // audio-feed-0s2j: post-commit source seeding must never fail the enqueue
+      // or record a false pre-episode dead-letter after the episode is already persisted.
+      try {
+        if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
+          await ctx.stores.metadata.putSource({
+            id: INBOX_SOURCE_ID,
+            userId: user.id,
+            title: "Send to Audio",
+            modes: ["direct", "deepdive"],
+            // Unspecified on purpose (audio-feed-4xt): the inbox is not a source that
+            // ever chose a voice, so hard-coding "Charon" here would shadow both the
+            // user's own preference and the operator's DEFAULT_VOICE.
+            voices: {},
+            createdAt: now,
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued:`,
+          err,
+        );
       }
       return { articleId, episodeId };
     },
-    onFailure: async ({ user, reason, status, mode }) => {
-      // audio-feed-r7sb: surface pre-episode ingest failures in structured logs for dead-letter visibility
+    onFailure: async ({ user, reason, status, mode, error, article }) => {
+      // audio-feed-r7sb, audio-feed-tm97, audio-feed-fapx: surface pre-episode ingest failures
+      // in structured logs for dead-letter visibility, preserving article URL/title and sanitized error cause.
       await ctx.stores.metadata.appendLog({
         time: new Date().toISOString(),
         severity: "warn",
         type: "ingest.failed",
-        message: "Article ingest failed before episode creation",
+        message: error
+          ? `Article ingest failed before episode creation: ${error}`
+          : "Article ingest failed before episode creation",
         process: "app",
         route: "/api/ingest",
         userId: user?.id,
@@ -154,6 +166,9 @@ export function createIngestHandler(
         context: {
           status,
           ...(mode ? { mode } : {}),
+          ...(error ? { error } : {}),
+          ...(article?.url ? { articleUrl: article.url } : {}),
+          ...(article?.title ? { articleTitle: article.title } : {}),
         },
       });
     },
