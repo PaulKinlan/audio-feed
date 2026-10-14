@@ -10,6 +10,7 @@ import {
   CLAIM_START_PHASE,
   claimLifecycleEvent,
   elapsedSince,
+  expiredClaimEvent,
 } from "../episode_events.ts";
 import type { Episode } from "../../types.ts";
 import type {
@@ -460,6 +461,23 @@ export function createEpisodesRepository(
       // A failed check means another worker won the race — the normal answer, not
       // an error. The caller moves on to the next job.
       if (ok) {
+        if (isExpired) {
+          // audio-feed-aueh: Close previous attempt's claim lifecycle so intermediate
+          // expired claims do not remain open starts-without-terminal in the log stream.
+          await host().appendLog(
+            expiredClaimEvent(found, {
+              phase: expiredPhase,
+              attempt: expiredAttempt,
+              reason: expiredMsg,
+              ...(found.claimedAt && !Number.isNaN(Date.parse(found.claimedAt))
+                ? { expiredAt: new Date(Date.parse(found.claimedAt) + claim.leaseMs).toISOString() }
+                : {}),
+              lastHeartbeat: expiredHeartbeat,
+              provenance: expiredProvenance,
+              maxClaims: claim.maxClaims,
+            }),
+          );
+        }
         // Before the worker does anything: a process killed mid-synthesis leaves this record
         // behind, and its lack of a terminal partner is what says the work died rather than never
         // started (audio-feed-siv1).

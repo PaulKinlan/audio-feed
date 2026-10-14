@@ -10,6 +10,7 @@ import {
   CLAIM_START_PHASE,
   claimLifecycleEvent,
   elapsedSince,
+  expiredClaimEvent,
 } from "../episode_events.ts";
 import type { Episode } from "../../types.ts";
 import type { ListPendingOptions, ListPendingResult } from "../mod.ts";
@@ -306,8 +307,26 @@ export function createEpisodesRepository(
         id: episodeId,
       });
       state.episodes.set(key, claimed);
-      return host()
-        .appendLog(claimLifecycleEvent(claimed, {
+      const logPromises: Promise<unknown>[] = [];
+      if (isExpired) {
+        logPromises.push(
+          host().appendLog(
+            expiredClaimEvent(found, {
+              phase: expiredPhase,
+              attempt: expiredAttempt,
+              reason: expiredMsg,
+              ...(found.claimedAt && !Number.isNaN(Date.parse(found.claimedAt))
+                ? { expiredAt: new Date(Date.parse(found.claimedAt) + claim.leaseMs).toISOString() }
+                : {}),
+              lastHeartbeat: expiredHeartbeat,
+              provenance: expiredProvenance,
+              maxClaims: claim.maxClaims,
+            }),
+          ),
+        );
+      }
+      logPromises.push(
+        host().appendLog(claimLifecycleEvent(claimed, {
           phase: CLAIM_START_PHASE,
           attempt: attempts,
           // Same fields the KV adapter writes, for the same reason (audio-feed-n6uu): the owner of
@@ -316,8 +335,9 @@ export function createEpisodesRepository(
           // Same instant the episode records as claimedAt, so the lease the page computes and the
           // lease the store enforces cannot disagree (audio-feed-n6uu).
           time: claim.now,
-        }))
-        .then(() => structuredClone(claimed));
+        })),
+      );
+      return Promise.all(logPromises).then(() => structuredClone(claimed));
     },
     touchEpisodeClaim(
       userId: string,
