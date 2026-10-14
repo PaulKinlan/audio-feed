@@ -221,7 +221,7 @@ curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
 deno deploy deployments list --app audio-feed --org paulkinlan-ea --json --non-interactive
 # The old deployment CLI and classic dash.deno.com API reject ddo_ organization tokens by design;
 # the classic API was retired 2026-07-20. Use the v2 deno deploy CLI above.
-# when deploySource is any commit variable (GIT_COMMIT_SHA, GIT_COMMIT, DENO_DEPLOY_GIT_COMMIT, or COMMIT_SHA) the id IS the commit:
+# when deploySource is any injected commit variable (see above) the id IS the commit:
 git log --oneline -1 <id>
 ```
 
