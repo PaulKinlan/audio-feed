@@ -87,8 +87,11 @@ Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every 
 
   // audio-feed-pipz: Extract keys directly accessed on context via dot syntax (context.<key>)
   // or bracket literals (context["<key>"]).
-  // LIMITATION NOTE: Computed access via dynamic variables (e.g. context[k]) is not statically
-  // resolved here; if dynamic indexing is ever introduced, the keys should be declared in a shared constant.
+  // LIMITATION (audio-feed-r88w): Only literal dot/bracket accesses are visible. The minimum floor
+  // catches an ALL-dynamic rewrite, but adding context[k] beside enough literal keys stays
+  // green even when it changes isClaimStartRecord's answer. Merely moving keys to a shared array
+  // and indexing context[k] repeats that blind spot; only a declaration consumed as data by BOTH
+  // the predicate and this doc assertion would close it. Do not mistake this scan for that check.
   const contextKeys = [
     ...new Set(
       [
