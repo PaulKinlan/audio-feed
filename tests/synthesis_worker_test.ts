@@ -11,8 +11,12 @@ import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/as
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { runSynthesisBatch, startSynthesisWorker } from "../src/worker/synthesis.ts";
-import { describeSynthesisFailure } from "../src/worker/synthesis.ts";
+import {
+  describeSynthesisFailure,
+  runSynthesisBatch,
+  startSynthesisWorker,
+  TERMINAL_STAGING_MARKER_HASH,
+} from "../src/worker/synthesis.ts";
 import {
   formatCodeForTts,
   GeminiTtsClient,
@@ -1871,3 +1875,144 @@ Deno.test("a thrown trace append cannot fail a completed synthesis (audio-feed-7
   assertEquals(failed?.severity, "warn", "and at a severity the default poller serves");
   assertEquals(failed?.episodeId, "episode-1", "so the fault is attributable to the episode");
 });
+
+Deno.test(
+  "audio-feed-dbfa/audio-feed-x221/audio-feed-sfz8: synthesis.span queueWaitMs measures pre-claim wait on both first and resumed claims (never 0 from post-claim lastHeartbeat)",
+  async () => {
+    const { ctx, stores } = await queued();
+    const now = Date.now();
+    const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    const threeMinutesAgo = new Date(now - 3 * 60 * 1000).toISOString();
+
+    // Case 1: Resumed episode created 2 hours ago, yielded 3 minutes ago (`lastHeartbeat` = 3m ago).
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "episode-1",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        createdAt: twoHoursAgo,
+        lastHeartbeat: threeMinutesAgo,
+        attempts: 1,
+      }),
+    );
+
+    // Case 2: First-attempt episode created 3 minutes ago (`lastHeartbeat` = undefined).
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "episode-first-claim",
+        userId: "user-1",
+        articleId: "article-1",
+        sourceId: "inbox",
+        status: "pending",
+        createdAt: threeMinutesAgo,
+        lastHeartbeat: undefined,
+        attempts: 0,
+      }),
+    );
+
+    const res = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+      owner: "worker-queue-wait",
+      batchSize: 5,
+    });
+    assertEquals(res.ready.length, 2);
+
+    const logs = await stores.metadata.listLogs();
+    const resumedSpan = logs.find(
+      (r) => r.type === "synthesis.span" && r.episodeId === "episode-1",
+    );
+    assert(resumedSpan, "synthesis.span must be emitted for resumed episode");
+    const resumedCtx = resumedSpan.context as {
+      queueWaitMs: number;
+      episodeAgeMs: number;
+      severityReason?: string;
+    };
+    assert(
+      resumedCtx.queueWaitMs >= 2 * 60 * 1000 && resumedCtx.queueWaitMs <= 5 * 60 * 1000,
+      `resumed queueWaitMs must reflect the ~3m wait since lastHeartbeat (not 0 and not 2h): got ${resumedCtx.queueWaitMs}ms`,
+    );
+    assertEquals(
+      resumedSpan.severity,
+      "info",
+      `3m queue wait should not trigger warn severity, got ${resumedSpan.severity} (${resumedCtx.severityReason})`,
+    );
+    assert(
+      resumedCtx.episodeAgeMs >= 110 * 60 * 1000,
+      `episodeAgeMs must preserve cumulative wall-clock age since createdAt (~2h), got ${resumedCtx.episodeAgeMs}ms`,
+    );
+
+    const firstClaimSpan = logs.find(
+      (r) => r.type === "synthesis.span" && r.episodeId === "episode-first-claim",
+    );
+    assert(firstClaimSpan, "synthesis.span must be emitted for first-claim episode");
+    const firstClaimCtx = firstClaimSpan.context as {
+      queueWaitMs: number;
+      episodeAgeMs: number;
+    };
+    assert(
+      firstClaimCtx.queueWaitMs >= 2 * 60 * 1000 && firstClaimCtx.queueWaitMs <= 5 * 60 * 1000,
+      `first-claim queueWaitMs must reflect the ~3m wait since createdAt (never 0 from claimed.lastHeartbeat): got ${firstClaimCtx.queueWaitMs}ms`,
+    );
+  },
+);
+
+Deno.test(
+  "audio-feed-091i: completed staging upload interrupted by budget records a durable cleanup marker that sweeps on subsequent failure or ready",
+  async () => {
+    const { ctx, stores } = await queued();
+
+    // Tick 1: PUT completes into blobs before the invocation budget aborts terminal_persistence.
+    const origPut = stores.blobs.put.bind(stores.blobs);
+    let stagedKey: string | undefined;
+    stores.blobs.put = async (key, data, options) => {
+      stagedKey = key;
+      // Complete the underlying store write even though the budget signal aborts.
+      const info = await origPut(key, data);
+      await new Promise((r) => setTimeout(r, 80));
+      if (options?.signal?.aborted) {
+        throw options.signal.reason;
+      }
+      return info;
+    };
+
+    const tick1 = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+      owner: "worker-091i-tick1",
+      maxInvocationDurationMs: 40,
+      estimatedTurnDurationMs: 1,
+      estimatedUploadDurationMs: 10,
+      flushMarginMs: 5,
+    });
+    stores.blobs.put = origPut;
+
+    assertEquals(tick1.yielded.length, 1, "tick 1 must yield on upload budget abort");
+    assert(stagedKey, "tick 1 must have started staging upload");
+    assert(
+      (await stores.blobs.get(stagedKey)) !== null,
+      "completed PUT remains in blob store for upload_retry",
+    );
+
+    // Durable cleanup marker is recorded in synthesis segments (not prematurely in orphanBlobs).
+    const segmentsAfterYield = await stores.metadata.listSynthesisSegments("user-1", "episode-1");
+    const marker = segmentsAfterYield.find((s) => s.textHash === TERMINAL_STAGING_MARKER_HASH);
+    assert(marker, "durable cleanup marker must be recorded before PUT starts");
+    assertEquals(marker.audioKey, stagedKey);
+
+    // Tick 2: synthesis fails permanently before reaching upload; the orphaned staging blob
+    // from tick 1 must be swept via the durable marker.
+    const tick2 = await runSynthesisBatch(
+      ctx,
+      () => Promise.reject(new GeminiTtsError("permanent provider error", 400, false)),
+      {
+        owner: "worker-091i-tick2",
+        maxAttempts: 1,
+      },
+    );
+    assertEquals(tick2.failed.length, 1, "tick 2 must fail terminally");
+    assertEquals(
+      await stores.blobs.get(stagedKey),
+      null,
+      "orphaned staging blob from prior upload_retry must be deleted when episode fails",
+    );
+  },
+);

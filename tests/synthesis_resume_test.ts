@@ -983,3 +983,150 @@ Deno.test("audio-feed-3cf0: end-to-end synthesis of a long <pre>-heavy article t
     "intermediate segment blobs must be swept after terminal commit",
   );
 });
+
+Deno.test(
+  "audio-feed-20ke: narration mid-turn deadline abort after segment 1 commits preserves durable progress (attempts=0) and resumes from segment 2 without re-synthesizing segment 1",
+  async () => {
+    const { ctx, stores } = await queued();
+
+    // Build a 3-segment narration article (~7.5 KB across 3 paragraphs).
+    const para = (n: number) =>
+      `Paragraph ${n}. ` +
+      "Real-time audio synthesis splits long articles into bounded 3 KB segments so each turn finishes well inside the invocation budget. "
+        .repeat(
+          18,
+        );
+    const content = [para(1), para(2), para(3)].join("\n\n");
+    const formatted = await formatCodeForTts(content, "skip");
+    const fullPrompt = formatNarrationPrompt({
+      title: "Mid-Turn Budget Narration",
+      author: "Paul Kinlan",
+      sourceName: "Inbox",
+      body: formatted,
+    });
+    const expectedChunks = splitTextUnderByteBudget(fullPrompt, MAX_TTS_INPUT_BYTES);
+    assert(
+      expectedChunks.length >= 3,
+      `expected at least 3 narration segments under ${MAX_TTS_INPUT_BYTES}B cap, got ${expectedChunks.length}`,
+    );
+
+    await stores.metadata.putArticle(
+      makeArticle({
+        id: "article-1",
+        userId: "user-1",
+        sourceId: "inbox",
+        title: "Mid-Turn Budget Narration",
+        author: "Paul Kinlan",
+        content,
+      }),
+    );
+
+    const synthesizedPrompts: string[] = [];
+    let abortOnSecondTurn = true;
+    const client = new GeminiTtsClient({
+      apiKey: "dummy-key",
+      timeoutRetries: 0,
+      fetchFn: async (_url, init) => {
+        const bodyJson = JSON.parse(String(init?.body ?? "{}")) as {
+          contents?: Array<{ parts?: Array<{ text?: string }> }>;
+        };
+        const text = bodyJson.contents?.[0]?.parts?.[0]?.text ?? "";
+        if (abortOnSecondTurn && synthesizedPrompts.length === 1) {
+          // Simulate turn 2 stalling until the invocation budget deadline aborts the signal mid-turn.
+          await new Promise<void>((_resolve, reject) => {
+            const sig = init?.signal;
+            if (sig?.aborted) {
+              reject(sig.reason ?? new DOMException("Aborted", "AbortError"));
+              return;
+            }
+            sig?.addEventListener(
+              "abort",
+              () => reject(sig.reason ?? new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        synthesizedPrompts.push(text);
+        const wav = segmentWav(text || `chunk-${synthesizedPrompts.length}`);
+        let binary = "";
+        for (const b of wav) binary += String.fromCharCode(b);
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                finishReason: "STOP",
+                content: {
+                  parts: [{ inlineData: { mimeType: "audio/wav", data: btoa(binary) } }],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    const synth = createGeminiSynthesizer(ctx, {
+      client,
+      scriptGenerator: null,
+      estimatedTurnDurationMs: 10,
+      flushMarginMs: 5,
+    });
+
+    // Tick 1: Segment 1 commits, then Segment 2 stalls and aborts on the 80ms invocation budget deadline.
+    const tick1 = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-20ke-tick1",
+      maxClaims: 3,
+      maxInvocationDurationMs: 80,
+      estimatedTurnDurationMs: 10,
+      estimatedUploadDurationMs: 5,
+      flushMarginMs: 5,
+    });
+
+    assertEquals(tick1.ready.length, 0, "tick 1 must yield when turn 2 aborts on deadline");
+    assertEquals(tick1.failed.length, 0, "tick 1 must not fail the episode");
+    assertEquals(tick1.yielded.length, 1, "tick 1 must yield cleanly");
+    assertEquals(tick1.yielded[0]?.completedTurns, 1, "segment 1 was durably committed");
+    assertEquals(
+      tick1.yielded[0]?.totalTurns,
+      expectedChunks.length,
+      "yielded totalTurns must reflect actual narration chunk count, not MAX_TTS_SEGMENTS",
+    );
+    assertEquals(synthesizedPrompts.length, 1, "only segment 1 completed a paid call in tick 1");
+
+    const epAfterTick1 = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(epAfterTick1?.status, "pending");
+    assertEquals(
+      epAfterTick1?.attempts,
+      0,
+      "durable segment progress must reset attempts to 0 so retries never exhaust claim 3/3",
+    );
+    assertEquals(epAfterTick1?.phase, `synthesized_1_of_${expectedChunks.length}`);
+
+    // Tick 2: Resumes with a fresh budget; segment 1 is loaded from durable cache (not re-synthesized)
+    // and remaining segments complete to ready.
+    abortOnSecondTurn = false;
+    const tick2 = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-20ke-tick2",
+      maxClaims: 3,
+      maxInvocationDurationMs: 5_000,
+      estimatedTurnDurationMs: 10,
+      estimatedUploadDurationMs: 5,
+      flushMarginMs: 5,
+    });
+
+    assertEquals(
+      tick2.ready.length,
+      1,
+      "tick 2 must finish the remaining segments and commit ready",
+    );
+    assertEquals(
+      synthesizedPrompts.length,
+      expectedChunks.length,
+      "segment 1 must NOT be re-synthesized on tick 2; each chunk is synthesized once in total",
+    );
+    const epFinal = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(epFinal?.status, "ready");
+    assertEquals(epFinal?.phase, "ready");
+  },
+);

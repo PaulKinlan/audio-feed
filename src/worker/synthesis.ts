@@ -719,7 +719,7 @@ export function createGeminiSynthesizer(
       }
     };
 
-    let getTotalTurns = () => MAX_TTS_SEGMENTS;
+    let getTotalTurns = () => observedTotalTurns ?? MAX_TTS_SEGMENTS;
     let initiatedTurnsCount = 0;
     let committedTurnsCount = 0;
     const wrappedResume = resume
@@ -953,6 +953,14 @@ export function createGeminiSynthesizer(
         },
       });
       if (dialogueOutcome.kind === "budget-yield") {
+        if (observedTotalTurns !== null) {
+          (dialogueOutcome.error as { observedTotalTurns?: number }).observedTotalTurns =
+            observedTotalTurns;
+        }
+        if (committedTurnsCount > dialogueOutcome.error.completedTurns) {
+          (dialogueOutcome.error as { completedTurns: number }).completedTurns =
+            committedTurnsCount;
+        }
         throw dialogueOutcome.error;
       }
       if (dialogueOutcome.kind === "error") {
@@ -1038,6 +1046,9 @@ export function createGeminiSynthesizer(
         (narrationOutcome.error as { observedTotalTurns?: number }).observedTotalTurns =
           observedTotalTurns;
       }
+      if (committedTurnsCount > narrationOutcome.error.completedTurns) {
+        (narrationOutcome.error as { completedTurns: number }).completedTurns = committedTurnsCount;
+      }
       throw narrationOutcome.error;
     }
     if (narrationOutcome.kind === "error") {
@@ -1076,7 +1087,7 @@ export function buildSegmentResume(
   ctx: AppContext,
   episode: Episode,
   options: { owner: string; leaseMs: number; revision: () => string; nowMs?: number },
-): { resume: SegmentResume; sweep: () => Promise<void> } {
+): { resume: SegmentResume; sweep: (excludeAudioKey?: string) => Promise<void> } {
   const { metadata, blobs } = ctx.stores;
   const now = () => options.nowMs ?? Date.now();
   let listed: Promise<SynthesisSegmentRecord[]> | null = null;
@@ -1207,9 +1218,11 @@ export function buildSegmentResume(
     }
   };
 
-  const sweep = async () => {
+  const sweep = async (excludeAudioKey?: string) => {
     const all = await metadata.listSynthesisSegments(episode.userId, episode.id);
-    const keys = all.map((record) => record.audioKey).filter((key): key is string => Boolean(key));
+    const keys = all
+      .map((record) => record.audioKey)
+      .filter((key): key is string => Boolean(key) && key !== excludeAudioKey);
     // audio-feed-ikst: bounded concurrency over the deletions. When an episode has ten
     // segments, serial deletes made the sweep the slowest part of finishing a run.
     // Each delete keeps its own failure handling, so one blob that refuses to go is
@@ -1225,6 +1238,49 @@ export function buildSegmentResume(
   };
 
   return { resume: { prepare, commit }, sweep };
+}
+
+/**
+ * Durable cleanup marker for terminal staging uploads (audio-feed-091i).
+ *
+ * When a whole-object PUT to `stagingKey` begins, an unfinalized segment record with
+ * `textHash === TERMINAL_STAGING_MARKER_HASH` and `audioKey === stagingKey` is written via
+ * `metadata.reserveSynthesisSegment`. Partial PUT bytes are non-resumable by design; only a
+ * completed whole-object PUT materializes at `stagingKey` for a subsequent tick to verify and
+ * commit. Because `finalized === false`, this marker never alters finalized TTS segment counts or
+ * segment reuse, and avoids `orphanBlobs` while the episode is actively retrying (`upload_retry`).
+ *
+ * - On terminal `ready` commit, `segmentResume.sweep(audioKey)` preserves the winning `audioKey`,
+ *   deletes any prior staging keys alongside TTS segment blobs, and clears segment records.
+ * - On terminal failure or lease-expiry abandonment, `sweepAbandonedStagingBlobs` reads this
+ *   durable marker, deletes any unreferenced completed staging object from `blobs`, and records
+ *   `metadata.recordOrphanBlob` if deletion fails so the orphan GC sweep reclaims it.
+ */
+export const TERMINAL_STAGING_MARKER_HASH = "__terminal_staging__";
+
+async function sweepAbandonedStagingBlobs(
+  metadata: MetadataStore,
+  blobs: BlobStore,
+  userId: string,
+  episodeId: string,
+  preserveAudioKey?: string,
+): Promise<void> {
+  try {
+    const records = await metadata.listSynthesisSegments(userId, episodeId);
+    const stagingKeys = records
+      .filter((r) => r.textHash === TERMINAL_STAGING_MARKER_HASH && Boolean(r.audioKey))
+      .map((r) => r.audioKey)
+      .filter((key) => key !== preserveAudioKey);
+    for (const key of stagingKeys) {
+      try {
+        await blobs.delete(key);
+      } catch {
+        await metadata.recordOrphanBlob(key).catch(() => {});
+      }
+    }
+  } catch {
+    // best-effort staging cleanup
+  }
 }
 
 /**
@@ -1260,6 +1316,7 @@ async function settleTerminalPersistence(
 
   if (options?.terminalError) {
     if (current?.status === "failed") {
+      await sweepAbandonedStagingBlobs(metadata, blobs, userId, episodeId, current.audioKey);
       return { committed: false, failed: true };
     }
     // A newer claim may be reusing the same content key. The old owner's retry
@@ -1276,6 +1333,7 @@ async function settleTerminalPersistence(
       : false;
     await blobs.delete(stagingKey).catch(() => {});
     await metadata.recordOrphanBlob(stagingKey).catch(() => {});
+    await sweepAbandonedStagingBlobs(metadata, blobs, userId, episodeId, current?.audioKey);
     return { committed: false, failed: wrote };
   }
 
@@ -1817,7 +1875,18 @@ async function runSynthesisBatchCore(
     });
     if (!claimed) {
       // Another worker holds it, or it is out of claims and the store abandoned
-      // it. Either way nothing was spent here.
+      // it. If the store just abandoned it to "failed", sweep any staged terminal
+      // upload blobs left behind by an earlier upload_retry (audio-feed-091i).
+      const afterClaim = await metadata.getEpisode(episode.userId, episode.id);
+      if (afterClaim?.status === "failed") {
+        await sweepAbandonedStagingBlobs(
+          metadata,
+          blobs,
+          episode.userId,
+          episode.id,
+          afterClaim.audioKey,
+        );
+      }
       result.skipped.push({ episodeId: episode.id, reason: "claimed elsewhere or exhausted" });
       continue;
     }
@@ -1826,16 +1895,22 @@ async function runSynthesisBatchCore(
     // episode stopped waiting for a worker and started working.
     const spanStartedAt = performance.now();
     /**
-     * How long the episode waited for a worker — a PROXY, and deliberately labelled one.
+     * How long THIS attempt waited in the queue for a worker (audio-feed-dbfa, audio-feed-x221).
      *
-     * There is no enqueue timestamp on an episode, so this measures from `createdAt`: an episode that
-     * sat in the queue after being created reads correctly, and one created long before it could be
-     * processed reads too high. Measured anyway because a total cannot separate "the queue was backed
-     * up" from "the TTS call hung", and those need different fixes; the direction of the error is
-     * written down here rather than hidden behind a number that looks exact.
+     * On a first claim (`episode.lastHeartbeat` undefined before `claimEpisode` stamps
+     * `claimed.lastHeartbeat = claimed.claimedAt`), this measures from `createdAt`. On a resumed
+     * claim after a budget yield or expired lease, the pre-claim `episode.lastHeartbeat` holds
+     * the timestamp when the previous attempt yielded or last heartbeated, so `queueWaitMs`
+     * measures only the wait since the episode re-entered the queue rather than cumulative age
+     * across every prior invocation. Cumulative wall-clock age since `createdAt` is recorded
+     * alongside as `episodeAgeMs`.
      */
-    const spanQueueWaitMs = Date.parse(claimed.claimedAt ?? claimed.createdAt) -
-      Date.parse(claimed.createdAt);
+    const claimTimeMs = Date.parse(claimed.claimedAt ?? claimed.createdAt);
+    const createdTimeMs = Date.parse(claimed.createdAt);
+    const preClaimHeartbeatMs = episode.lastHeartbeat ? Date.parse(episode.lastHeartbeat) : NaN;
+    const queueSinceMs = Number.isFinite(preClaimHeartbeatMs) ? preClaimHeartbeatMs : createdTimeMs;
+    const spanQueueWaitMs = Math.max(0, claimTimeMs - queueSinceMs);
+    const spanEpisodeAgeMs = Math.max(0, claimTimeMs - createdTimeMs);
     try {
       await checkpointEpisodeClaim(metadata, claimed.userId, claimed.id, opts.owner, {
         phase: "reading_article",
@@ -1850,6 +1925,13 @@ async function runSynthesisBatchCore(
       } else {
         const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
         if (wrote) {
+          await sweepAbandonedStagingBlobs(
+            metadata,
+            blobs,
+            claimed.userId,
+            claimed.id,
+            claimed.audioKey,
+          );
           result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
           await notifyOnDemand(claimed, "failed", error);
         } else {
@@ -1869,6 +1951,13 @@ async function runSynthesisBatchCore(
       );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
+        await sweepAbandonedStagingBlobs(
+          metadata,
+          blobs,
+          claimed.userId,
+          claimed.id,
+          claimed.audioKey,
+        );
         result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
@@ -1897,6 +1986,13 @@ async function runSynthesisBatchCore(
       );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
+        await sweepAbandonedStagingBlobs(
+          metadata,
+          blobs,
+          claimed.userId,
+          claimed.id,
+          claimed.audioKey,
+        );
         result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
@@ -1930,6 +2026,13 @@ async function runSynthesisBatchCore(
       );
       const wrote = await metadata.completeEpisode(unsynthesized(claimed, error), opts.owner);
       if (wrote) {
+        await sweepAbandonedStagingBlobs(
+          metadata,
+          blobs,
+          claimed.userId,
+          claimed.id,
+          claimed.audioKey,
+        );
         result.failed.push({ episodeId: claimed.id, error, title: claimed.title });
         await notifyOnDemand(claimed, "failed", error);
       } else {
@@ -2096,6 +2199,13 @@ async function runSynthesisBatchCore(
           opts.owner,
         );
         if (wrote) {
+          await sweepAbandonedStagingBlobs(
+            metadata,
+            blobs,
+            currentEpisode.userId,
+            currentEpisode.id,
+            currentEpisode.audioKey,
+          );
           result.failed.push({
             episodeId: currentEpisode.id,
             error,
@@ -2189,6 +2299,13 @@ async function runSynthesisBatchCore(
         opts.owner,
       );
       if (wrote) {
+        await sweepAbandonedStagingBlobs(
+          metadata,
+          blobs,
+          currentEpisode.userId,
+          currentEpisode.id,
+          currentEpisode.audioKey,
+        );
         result.failed.push({ episodeId: currentEpisode.id, error, title: currentEpisode.title });
         await notifyOnDemand(currentEpisode, "failed", error);
       } else {
@@ -2291,6 +2408,28 @@ async function runSynthesisBatchCore(
             );
           }
           if (!stored) {
+            // audio-feed-091i: record a durable cleanup marker BEFORE starting the PUT so
+            // an interrupted or retried upload that later abandons the episode leaves a
+            // discoverable key for terminal failure, lease-expiry abandonment, or source
+            // deletion to sweep.
+            await metadata.reserveSynthesisSegment(
+              currentEpisode.userId,
+              currentEpisode.id,
+              {
+                textHash: TERMINAL_STAGING_MARKER_HASH,
+                text: stagingKey,
+                promptVersion: PROMPT_VERSION,
+                voice: stagingKey,
+                audioKey: stagingKey,
+                byteLength: bytes.length,
+                owner: opts.owner,
+                claimAt: new Date(nowMs).toISOString(),
+                createdAt: new Date(nowMs).toISOString(),
+                finalized: false,
+              },
+              nowMs,
+              opts.leaseMs,
+            ).catch(() => {});
             // Only a real whole-object PUT receives an upload mark. Abort still
             // closes its socket; if it committed anyway, the stable key survives
             // for a later invocation to verify and settle.
@@ -2429,6 +2568,9 @@ async function runSynthesisBatchCore(
         } else result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
         continue;
       }
+      const isSupersededError = terminalOutcome.error instanceof GeminiTtsError &&
+        terminalOutcome.error.status === 409;
+      const error = String((terminalOutcome.error as Error)?.message ?? terminalOutcome.error);
       const settle = await settleTerminalPersistence(
         metadata,
         blobs,
@@ -2437,6 +2579,7 @@ async function runSynthesisBatchCore(
         opts.owner,
         stagingKey,
         nowMs,
+        isSupersededError ? undefined : { terminalError: error },
       );
       if (settle.committed && settle.episode) {
         // Complete won before error occurred (audio-feed-g5bi)! Blob was preserved.
@@ -2449,27 +2592,20 @@ async function runSynthesisBatchCore(
         break;
       }
 
-      const error = String((terminalOutcome.error as Error)?.message ?? terminalOutcome.error);
       console.error(
         `[audio-feed] terminal persistence failed for episode "${currentEpisode.id}": ${error}`,
       );
-      if (terminalOutcome.error instanceof GeminiTtsError && terminalOutcome.error.status === 409) {
+      if (isSupersededError) {
         result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
+      } else if (settle.failed) {
+        result.failed.push({
+          episodeId: currentEpisode.id,
+          error,
+          title: currentEpisode.title,
+        });
+        await notifyOnDemand(currentEpisode, "failed", error);
       } else {
-        const wrote = await metadata.completeEpisode(
-          unsynthesized(currentEpisode, error),
-          opts.owner,
-        );
-        if (wrote) {
-          result.failed.push({
-            episodeId: currentEpisode.id,
-            error,
-            title: currentEpisode.title,
-          });
-          await notifyOnDemand(currentEpisode, "failed", error);
-        } else {
-          result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
-        }
+        result.superseded.push(supersededEntry(currentEpisode, opts.leaseMs));
       }
       continue;
     }
@@ -2491,6 +2627,9 @@ async function runSynthesisBatchCore(
       // reject, and this guard does not assume it: a throw is caught, the episode stays ready, and
       // the failure is recorded as its own event so a broken trace path is visible instead of silent.
       const spanRecord = synthesisSpan(currentEpisode, spanPhases, spanSeverity(spanPhases));
+      if (spanRecord.context) {
+        spanRecord.context.episodeAgeMs = Math.round(spanEpisodeAgeMs);
+      }
       try {
         await metadata.appendLog(spanRecord);
       } catch (err) {
@@ -2523,7 +2662,7 @@ async function runSynthesisBatchCore(
         worstCaseEstimateMs: 200,
         fn: async () => {
           try {
-            await segmentResume.sweep();
+            await segmentResume.sweep(audioKey);
           } catch (err) {
             console.error(
               `[audio-feed] segment sweep failed for episode ${currentEpisode.id}; orphans recorded where possible:`,
