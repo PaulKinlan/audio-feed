@@ -697,6 +697,7 @@ export async function migrateLegacyAudioKeys(
             );
             if (casOk) {
               migrated++;
+              clearLegacyKeyIndexCache(metadata);
               log?.(`Migrated episode ${episode.id} audioKey: ${oldKey} -> ${newKey}`);
             } else {
               // The episode was modified concurrently or its audioKey is no longer oldKey!
@@ -744,5 +745,161 @@ export async function migrateLegacyAudioKeys(
       }
       await releaseMigrationLock(metadata, lockHolder);
     }
+  }
+}
+
+interface KeyOwnerEntry {
+  userId: string;
+  episodeId: string;
+  count: number;
+}
+
+interface LegacyKeyIndex {
+  expiresAt: number;
+  generation: number;
+  owners: Map<string, KeyOwnerEntry>;
+}
+
+const legacyKeyIndexCache = new WeakMap<MetadataStore, LegacyKeyIndex>();
+const metadataMutationGenerations = new WeakMap<MetadataStore, number>();
+const hookedMetadataStores = new WeakSet<MetadataStore>();
+const INDEX_TTL_MS = 60_000;
+
+function bumpMetadataGeneration(metadata: MetadataStore): void {
+  const next = (metadataMutationGenerations.get(metadata) ?? 0) + 1;
+  metadataMutationGenerations.set(metadata, next);
+  legacyKeyIndexCache.delete(metadata);
+}
+
+function ensureMetadataInvalidationHooks(metadata: MetadataStore): void {
+  if (hookedMetadataStores.has(metadata)) return;
+  hookedMetadataStores.add(metadata);
+
+  const mutatingMethods = [
+    "putUser",
+    "deleteUser",
+    "putEpisode",
+    "completeEpisode",
+    "updateEpisodeAudioKeyIfCurrent",
+    "claimEpisode",
+    "releaseEpisodeClaim",
+    "atomicUpdate",
+  ] as const;
+
+  const target = metadata as unknown as Record<string, unknown>;
+  for (const method of mutatingMethods) {
+    const orig = target[method];
+    if (typeof orig !== "function") continue;
+    target[method] = function (...args: unknown[]) {
+      bumpMetadataGeneration(metadata);
+      const result = (orig as (...a: unknown[]) => unknown).apply(this, args);
+      if (result && typeof (result as Promise<unknown>).finally === "function") {
+        return (result as Promise<unknown>).finally(() => {
+          bumpMetadataGeneration(metadata);
+        });
+      }
+      return result;
+    };
+  }
+}
+
+/** Normalizes a legacy audio key by removing any leading 'audio/' prefix. */
+export function normalizeLegacyAudioKey(key: string): string {
+  return key.startsWith("audio/") ? key.slice(6) : key;
+}
+
+async function buildLegacyKeyIndex(
+  metadata: MetadataStore,
+  now: number,
+): Promise<LegacyKeyIndex> {
+  const startGen = metadataMutationGenerations.get(metadata) ?? 0;
+  const owners = new Map<string, KeyOwnerEntry>();
+  const seenEpisodes = new Set<string>();
+  const users = await metadata.listUsers();
+
+  for (const user of users) {
+    let cursor: string | undefined = undefined;
+    do {
+      const page = await metadata.listEpisodePage({
+        userId: user.id,
+        cursor,
+        limit: 100,
+      });
+      for (const ep of page.episodes) {
+        const epKey = `${user.id}:${ep.id}`;
+        if (seenEpisodes.has(epKey)) continue;
+        seenEpisodes.add(epKey);
+
+        if (!ep.audioKey || isCanonicalAudioKey(ep.audioKey, ep)) {
+          continue;
+        }
+        const k = normalizeLegacyAudioKey(ep.audioKey);
+        const existing = owners.get(k);
+        if (!existing) {
+          owners.set(k, { userId: user.id, episodeId: ep.id, count: 1 });
+        } else {
+          existing.count++;
+        }
+      }
+      cursor = page.cursor;
+    } while (cursor);
+  }
+
+  const endGen = metadataMutationGenerations.get(metadata) ?? 0;
+  const index: LegacyKeyIndex = {
+    expiresAt: now + INDEX_TTL_MS,
+    generation: endGen,
+    owners,
+  };
+  if (startGen === endGen) {
+    legacyKeyIndexCache.set(metadata, index);
+  }
+  return index;
+}
+
+/**
+ * Returns the unique owner user ID of a legacy flat audio key, or null if the key
+ * is ambiguous (referenced by zero or multiple episodes globally) (audio-feed-65lf, audio-feed-ni04).
+ *
+ * Uses a bounded, in-memory cache per MetadataStore instance, invalidated immediately
+ * on any metadata mutation and re-verified before authorizing a positive owner so newly
+ * colliding tenant episodes never leak across tenants (audio-feed-ni04).
+ */
+export async function getLegacyKeyUniqueOwner(
+  metadata: MetadataStore,
+  key: string,
+  options?: { bypassCache?: boolean },
+): Promise<string | null> {
+  if (isCanonicalAudioKey(key)) return null;
+  ensureMetadataInvalidationHooks(metadata);
+  const normKey = normalizeLegacyAudioKey(key);
+  const now = Date.now();
+  const currentGen = metadataMutationGenerations.get(metadata) ?? 0;
+  let cached = legacyKeyIndexCache.get(metadata);
+
+  if (
+    !cached ||
+    now >= cached.expiresAt ||
+    cached.generation !== currentGen ||
+    options?.bypassCache
+  ) {
+    cached = await buildLegacyKeyIndex(metadata, now);
+  } else {
+    const cachedEntry = cached.owners.get(normKey);
+    // Re-verify positive cached ownership or unindexed keys so even cross-handle KV writes
+    // cannot leak a newly colliding tenant blob during the TTL window (audio-feed-ni04).
+    if (!cachedEntry || cachedEntry.count === 1) {
+      cached = await buildLegacyKeyIndex(metadata, now);
+    }
+  }
+
+  const entry = cached.owners.get(normKey);
+  return entry && entry.count === 1 ? entry.userId : null;
+}
+
+/** Invalidate cached legacy key index for test isolation. */
+export function clearLegacyKeyIndexCache(metadata?: MetadataStore): void {
+  if (metadata) {
+    bumpMetadataGeneration(metadata);
   }
 }

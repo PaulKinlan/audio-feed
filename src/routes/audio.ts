@@ -17,7 +17,8 @@ import { forbidden, notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import { redactAudioKey, type RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
-import { isAudioMode } from "../types.ts";
+import { isAudioMode, parseAudioBlobKey } from "../types.ts";
+import { getLegacyKeyUniqueOwner, isCanonicalAudioKey } from "../storage/legacy_audio.ts";
 
 /**
  * Whether this request is one the browser will apply CORS rules to.
@@ -149,8 +150,9 @@ export function isAllowedAudioKey(rawKey: string): boolean {
 async function checkUserApproval(
   ctx: RouteContext<AppContext>["ctx"],
   resolvedKey: string,
+  canonicalUserId?: string | null,
 ): Promise<Response | null> {
-  const userId = userIdFromBlobKey(resolvedKey);
+  const userId = canonicalUserId ?? userIdFromBlobKey(resolvedKey);
   if (!userId) return forbidden("Not available");
   const user = await ctx.stores.metadata.getUser(userId);
   if (!user || user.status !== "approved") {
@@ -177,16 +179,55 @@ export async function handleAudio(
   const isHead = req.method === "HEAD";
 
   // For keys not starting with "audio/", the canonical shape in storage is
-  // audio/${rawKey}. For multi-segment keys, only audio/${rawKey} is checked
-  // (blob storage never stores multi-segment audio outside the audio/ prefix).
-  // For legacy flat keys, check audio/${rawKey} first, then rawKey (audio-feed-1rx, audio-feed-vlw).
-  const candidateKeys = rawKey.startsWith("audio/")
-    ? [rawKey]
-    : rawKey.includes("/")
-    ? [`audio/${rawKey}`]
-    : isSafeBlobKey(`audio/${rawKey}`)
-    ? [`audio/${rawKey}`, rawKey]
-    : [rawKey];
+  // audio/${rawKey}.
+  const canonicalKey = rawKey.startsWith("audio/") ? rawKey : `audio/${rawKey}`;
+  const candidateKeys = [canonicalKey];
+  const canonicalUserId = userIdFromBlobKey(canonicalKey);
+
+  // Legacy blob fallback (audio-feed-rscz, audio-feed-7y8f, audio-feed-ni04):
+  // When a canonical request arrives, if the canonical blob might be absent,
+  // check whether the owning user has an episode stored with a legacy flat audioKey,
+  // and append those legacy storage candidates to the candidate list.
+  // The canonical candidate is always checked first (preferring canonical if both exist).
+  if (canonicalUserId) {
+    const parsed = parseAudioBlobKey(canonicalKey);
+    if (parsed) {
+      for (const candidateId of parsed.candidateIds) {
+        try {
+          const ep = await ctx.stores.metadata.getEpisode(parsed.userId, candidateId);
+          if (ep) {
+            if (ep.audioKey && !isCanonicalAudioKey(ep.audioKey, ep)) {
+              // Verify global uniqueness before adding to candidates to prevent cross-tenant disclosure (audio-feed-65lf, audio-feed-ni04)
+              const uniqueOwner = await getLegacyKeyUniqueOwner(
+                ctx.stores.metadata,
+                ep.audioKey,
+              );
+              if (uniqueOwner === canonicalUserId) {
+                const legacy = ep.audioKey;
+                const legacyCandidates = legacy.startsWith("audio/")
+                  ? [legacy, legacy.slice(6)]
+                  : [`audio/${legacy}`, legacy];
+                for (const cand of legacyCandidates) {
+                  if (isSafeBlobKey(cand) && !candidateKeys.includes(cand)) {
+                    candidateKeys.push(cand);
+                  }
+                }
+              } else {
+                console.warn(
+                  `[audio-feed] audio fallback refused: legacy key "${
+                    redactAudioKey(ep.audioKey)
+                  }" is ambiguous or unowned`,
+                );
+              }
+            }
+            break;
+          }
+        } catch {
+          // Metadata read failure falls through to canonical-only
+        }
+      }
+    }
+  }
 
   if (isHead) {
     let resolvedKey: string | null = null;
@@ -205,7 +246,7 @@ export async function handleAudio(
       return notFound("Unknown audio object");
     }
 
-    const refusal = await checkUserApproval(ctx, resolvedKey);
+    const refusal = await checkUserApproval(ctx, resolvedKey, canonicalUserId);
     if (refusal) return refusal;
 
     return headResponse(info.size, {
@@ -242,7 +283,7 @@ export async function handleAudio(
       }
       const info = await ctx.stores.blobs.head(key);
       if (info) {
-        const refusal = await checkUserApproval(ctx, key);
+        const refusal = await checkUserApproval(ctx, key, canonicalUserId);
         if (refusal) return refusal;
 
         // Counted when the redirect is ISSUED, not when the client finishes —
@@ -251,7 +292,7 @@ export async function handleAudio(
         // "downloads / redirects" rather than implying a completed download
         // (audio-feed-ndc).
         if (!req.headers.get("range")) {
-          await ctx.stores.metadata.recordDownload(userIdFromBlobKey(key));
+          await ctx.stores.metadata.recordDownload(canonicalUserId ?? userIdFromBlobKey(key));
         }
         return new Response(null, { status: 302, headers: { location: direct } });
       }
@@ -284,7 +325,7 @@ export async function handleAudio(
       object = await ctx.stores.blobs.get(key, range ? { range } : undefined);
     } catch (error) {
       if (error instanceof RangeNotSatisfiableError) {
-        const refusal = await checkUserApproval(ctx, key);
+        const refusal = await checkUserApproval(ctx, key, canonicalUserId);
         if (refusal) return refusal;
         return new Response(null, {
           status: 416,
@@ -309,7 +350,7 @@ export async function handleAudio(
     return notFound("Unknown audio object");
   }
 
-  const refusal = await checkUserApproval(ctx, resolvedKey);
+  const refusal = await checkUserApproval(ctx, resolvedKey, canonicalUserId);
   if (refusal) {
     await object.body.cancel?.();
     return refusal;
@@ -340,7 +381,7 @@ export async function handleAudio(
     return new Response(object.body, { status: 206, headers });
   }
 
-  await ctx.stores.metadata.recordDownload(userIdFromBlobKey(resolvedKey));
+  await ctx.stores.metadata.recordDownload(canonicalUserId ?? userIdFromBlobKey(resolvedKey));
 
   headers.set("content-length", String(object.size));
   return new Response(object.body, { status: 200, headers });

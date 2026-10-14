@@ -29,9 +29,12 @@ import {
   canonicalizeAudioKey,
   categorizeExtension,
   categorizeShape,
+  clearLegacyKeyIndexCache,
+  getLegacyKeyUniqueOwner,
   inventoryLegacyAudioKeys,
   isCanonicalAudioKey,
   migrateLegacyAudioKeys,
+  normalizeLegacyAudioKey,
   releaseMigrationLock,
   renewMigrationLock,
 } from "../src/storage/legacy_audio.ts";
@@ -975,4 +978,46 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
       await stores.metadata.close?.();
     }
   }
+});
+
+Deno.test("getLegacyKeyUniqueOwner: invalidates and re-verifies ownership when colliding tenant episode is added after cache population (audio-feed-ni04)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "alice", status: "approved" }));
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-alice",
+      userId: "alice",
+      mode: "direct",
+      status: "ready",
+      audioKey: "shared.wav",
+    }),
+  );
+
+  assertEquals(normalizeLegacyAudioKey("audio/shared.wav"), "shared.wav");
+  assertEquals(normalizeLegacyAudioKey("shared.wav"), "shared.wav");
+
+  // Populate cache: Alice is initially the unique owner
+  assertEquals(await getLegacyKeyUniqueOwner(stores.metadata, "shared.wav"), "alice");
+  assertEquals(await getLegacyKeyUniqueOwner(stores.metadata, "audio/shared.wav"), "alice");
+
+  // Before TTL expires, Bob writes an episode referencing the same legacy flat key
+  await stores.metadata.putUser(makeUser({ id: "bob", status: "approved" }));
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-bob",
+      userId: "bob",
+      mode: "direct",
+      status: "ready",
+      audioKey: "shared.wav",
+    }),
+  );
+
+  // Must NOT return stale "alice" from cache — must return null (ambiguous)
+  assertEquals(
+    await getLegacyKeyUniqueOwner(stores.metadata, "shared.wav"),
+    null,
+    "newly colliding tenant episode must invalidate stale owner cache",
+  );
+
+  clearLegacyKeyIndexCache(stores.metadata);
 });
