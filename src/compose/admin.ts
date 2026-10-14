@@ -31,7 +31,13 @@ import {
   type FailedAuthLimiter,
 } from "../auth/rate_limit.ts";
 import { isAudioMode, utcDayKey } from "../types.ts";
-import { isActiveAdmin, issueSetupLink, sameOrigin, sessionUser } from "../auth/sessions.ts";
+import {
+  isActiveAdmin,
+  issueSetupLink,
+  sameOrigin,
+  sameSiteRead,
+  sessionUser,
+} from "../auth/sessions.ts";
 import { isOutdated, PROMPT_VERSION } from "../tts/prompt_version.ts";
 import { resolveOrigin } from "../origin.ts";
 import { badRequest, type ComposeDeps, forbidden, notFound } from "./shared.ts";
@@ -56,7 +62,7 @@ import { type AudioMode, type CodeHandling, DEFAULT_CODE_HANDLING } from "../typ
  * with sliding window lockout (HTTP 429), while successful admin auth resets the
  * counter.
  */
-async function adminGate(
+export async function adminGate(
   ctx: AppContext,
   req: Request,
   remoteAddr?: string,
@@ -74,8 +80,18 @@ async function adminGate(
     if (user) {
       if (!isActiveAdmin(user)) return forbidden("Admin access required.");
       const safe = req.method === "GET" || req.method === "HEAD";
-      if (!safe && !sameOrigin(req, resolveOrigin(ctx.config, req).baseUrl)) {
-        return forbidden("Cross-origin request refused.");
+      const origin = resolveOrigin(ctx.config, req).baseUrl;
+      if (safe) {
+        // audio-feed-04oh: safe reads use sameSiteRead so legitimate same-origin GETs
+        // (which omit the Origin header) succeed while cross-site requests
+        // (Sec-Fetch-Site: cross-site / same-site, or cross-site Origin) are refused.
+        if (!sameSiteRead(req, origin)) {
+          return forbidden("Cross-origin request refused.");
+        }
+      } else {
+        if (!sameOrigin(req, origin)) {
+          return forbidden("Cross-origin request refused.");
+        }
       }
       return null;
     }

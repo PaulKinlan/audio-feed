@@ -6,12 +6,14 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
+import { adminGate } from "../src/compose/admin.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, openStores } from "../src/config.ts";
 import { renderAdminPage } from "../src/routes/admin.ts";
 import { assetBody } from "../src/routes/assets.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -1186,4 +1188,258 @@ Deno.test("GET /api/admin/outbox requires admin token and returns notifications 
     }),
   )).json();
   assertEquals(after.notifications.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-04oh: Same-site read wall for session-authenticated admin console
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-04oh: adminGate applies sameSiteRead to GET/HEAD and sameOrigin to state-changing methods", async () => {
+  const { fetch, stores, ctx } = app();
+  await stores.metadata.putUser(
+    makeUser({ id: "admin-user", status: "approved", isAdmin: true }),
+  );
+  await stores.metadata.putUser(
+    makeUser({ id: "sub-user", status: "pending", isAdmin: false }),
+  );
+  const cookie = `${SESSION_COOKIE}=${await createSession(stores.metadata, "admin-user")}`;
+
+  // 1. SAFE PATH (GET /api/admin/users)
+  // 1a. Positive controls: legitimate same-origin reads succeed
+  {
+    // Browsers omit Origin on same-origin GET
+    const resNoOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie },
+      }),
+    );
+    assertEquals(resNoOrigin.status, 200, "same-origin GET without Origin header must succeed");
+
+    // Same-origin Sec-Fetch-Site
+    const resSameOriginSite = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie, "sec-fetch-site": "same-origin" },
+      }),
+    );
+    assertEquals(
+      resSameOriginSite.status,
+      200,
+      "GET with sec-fetch-site: same-origin must succeed",
+    );
+
+    // Same-origin Origin if explicitly sent
+    const resWithOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie, origin: BASE },
+      }),
+    );
+    assertEquals(resWithOrigin.status, 200, "GET with same-origin Origin header must succeed");
+  }
+
+  // 1b. Negative controls: cross-site/cross-origin reads are refused
+  {
+    // Sec-Fetch-Site: cross-site
+    const resCrossSite = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie, "sec-fetch-site": "cross-site" },
+      }),
+    );
+    assertEquals(
+      resCrossSite.status,
+      403,
+      "GET with sec-fetch-site: cross-site must be refused 403",
+    );
+    assertEquals((await resCrossSite.json()).error, "Cross-origin request refused.");
+
+    // Sec-Fetch-Site: same-site
+    const resSameSite = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie, "sec-fetch-site": "same-site" },
+      }),
+    );
+    assertEquals(resSameSite.status, 403, "GET with sec-fetch-site: same-site must be refused 403");
+
+    // Foreign Origin
+    const resForeignOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie, origin: "https://evil.example.com" },
+      }),
+    );
+    assertEquals(resForeignOrigin.status, 403, "GET with foreign Origin must be refused 403");
+
+    // Spoofed same-origin Origin with Sec-Fetch-Site: cross-site
+    const resSpoofed = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: {
+          cookie,
+          origin: BASE,
+          "sec-fetch-site": "cross-site",
+        },
+      }),
+    );
+    assertEquals(
+      resSpoofed.status,
+      403,
+      "GET with sec-fetch-site: cross-site must be refused even with same-origin Origin",
+    );
+    // 1c. Semantics check: When NEITHER Sec-Fetch-Site NOR Origin is present (curl, script, non-browser)
+    // sameSiteRead admits the request because no hostile webpage could have steered it with credentials.
+    const resNeitherHeader = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: { cookie },
+      }),
+    );
+    assertEquals(
+      resNeitherHeader.status,
+      200,
+      "GET with neither Origin nor Sec-Fetch-Site must succeed per sameSiteRead non-browser client semantics",
+    );
+
+    // Also verify across sibling GET routes: /api/admin/stats and /api/admin/users/:id/sources
+    const resStatsCrossSite = await fetch(
+      new Request(`${BASE}/api/admin/stats`, {
+        method: "GET",
+        headers: { cookie, "sec-fetch-site": "cross-site" },
+      }),
+    );
+    assertEquals(
+      resStatsCrossSite.status,
+      403,
+      "GET /api/admin/stats cross-site must be refused 403",
+    );
+    const resSourcesCrossSite = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/sources`, {
+        method: "GET",
+        headers: { cookie, "sec-fetch-site": "cross-site" },
+      }),
+    );
+    assertEquals(
+      resSourcesCrossSite.status,
+      403,
+      "GET /api/admin/users/:id/sources cross-site must be refused 403",
+    );
+  }
+
+  // 2. STATE-CHANGING PATH (POST /api/admin/users/:id/approve)
+  // 2a. Positive controls: legitimate same-origin state changes succeed
+  {
+    const resSameOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+        method: "POST",
+        headers: { cookie, origin: BASE },
+      }),
+    );
+    assertEquals(resSameOrigin.status, 200, "POST with same-origin Origin header must succeed");
+
+    // Referrer-Policy: no-referrer sends Origin: null + sec-fetch-site: same-origin
+    const resNoReferrerForm = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+        method: "POST",
+        headers: {
+          cookie,
+          origin: "null",
+          "sec-fetch-site": "same-origin",
+        },
+      }),
+    );
+    assertEquals(
+      resNoReferrerForm.status,
+      200,
+      "POST with Origin: null and sec-fetch-site: same-origin must succeed",
+    );
+  }
+
+  // 2b. Negative controls: cross-origin or missing origin state changes are refused
+  {
+    // Missing Origin on state change is refused
+    const resNoOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+        method: "POST",
+        headers: { cookie },
+      }),
+    );
+    assertEquals(resNoOrigin.status, 403, "POST without Origin must be refused 403");
+
+    // Foreign Origin
+    const resForeignOrigin = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+        method: "POST",
+        headers: { cookie, origin: "https://evil.example.com" },
+      }),
+    );
+    assertEquals(resForeignOrigin.status, 403, "POST with foreign Origin must be refused 403");
+
+    // Origin: null without same-origin sec-fetch-site
+    const resNullCrossSite = await fetch(
+      new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+        method: "POST",
+        headers: { cookie, origin: "null", "sec-fetch-site": "cross-site" },
+      }),
+    );
+    assertEquals(
+      resNullCrossSite.status,
+      403,
+      "POST with Origin: null and cross-site must be refused 403",
+    );
+  }
+
+  // 3. BREAK-GLASS TOKEN PATH UNTOUCHED
+  {
+    const resToken = await fetch(
+      new Request(`${BASE}/api/admin/users`, {
+        method: "GET",
+        headers: {
+          "x-admin-token": "admin-secret",
+          "sec-fetch-site": "cross-site",
+        },
+      }),
+    );
+    assertEquals(
+      resToken.status,
+      200,
+      "x-admin-token requests are not subject to session CSRF checks",
+    );
+  }
+
+  // 4. GATE ENFORCEMENT DIRECT (THE MOUNTING IS NOT THE ENFORCEMENT)
+  // Assert directly on adminGate rather than solely through router dispatch.
+  {
+    // 4a. Safe GET with cross-site site: adminGate directly returns 403 Response
+    const crossSiteReq = new Request(`${BASE}/api/admin/users`, {
+      method: "GET",
+      headers: { cookie, "sec-fetch-site": "cross-site" },
+    });
+    const gateRefusal = await adminGate(ctx, crossSiteReq);
+    assert(gateRefusal !== null, "adminGate must return Response on cross-site read");
+    assertEquals(gateRefusal.status, 403);
+    assertEquals((await gateRefusal.json()).error, "Cross-origin request refused.");
+
+    // 4b. Safe GET with neither header: adminGate directly returns null (allowed)
+    const neitherReq = new Request(`${BASE}/api/admin/users`, {
+      method: "GET",
+      headers: { cookie },
+    });
+    const gateAllowed = await adminGate(ctx, neitherReq);
+    assertEquals(gateAllowed, null, "adminGate must return null on legitimate same-origin read");
+
+    // 4c. Mutating POST without Origin: adminGate directly returns 403 Response
+    const mutatingNoOriginReq = new Request(`${BASE}/api/admin/users/sub-user/approve`, {
+      method: "POST",
+      headers: { cookie },
+    });
+    const gateMutatingRefusal = await adminGate(ctx, mutatingNoOriginReq);
+    assert(
+      gateMutatingRefusal !== null,
+      "adminGate must return Response on mutating without Origin",
+    );
+    assertEquals(gateMutatingRefusal.status, 403);
+  }
 });
