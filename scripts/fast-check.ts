@@ -99,8 +99,18 @@ const BEHAVIOUR_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
     "tests/webmcp_admin_forms_test.ts",
   ]],
   ["src/routes/admin_telemetry.ts", ["tests/admin_subpages_test.ts"]],
-  ["src/routes/login.ts", ["tests/account_pages_test.ts"]],
-  ["src/routes/account_api.ts", ["tests/auth_routes_test.ts"]],
+  ["src/routes/login.ts", [
+    "tests/account_pages_test.ts",
+    "tests/security_audit_test.ts",
+    "tests/speculation_rules_test.ts",
+  ]],
+  ["src/routes/account_api.ts", [
+    "tests/account_regenerate_test.ts",
+    "tests/admin_throttle_test.ts",
+    "tests/auth_routes_test.ts",
+    "tests/feed_discovery_test.ts",
+    "tests/webmcp_admin_forms_test.ts",
+  ]],
   ["src/routes/webauthn.ts", ["tests/passkeys_test.ts"]],
   ["src/routes/reports.ts", ["tests/csp_reporting_test.ts"]],
 ]);
