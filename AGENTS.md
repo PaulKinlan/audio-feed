@@ -184,7 +184,12 @@ unrelated lane's gate. It therefore serialises and writes atomically: one `mkdir
 macOS, where this script also runs) with a bounded wait that steals a lock whose recorded pid is gone, and
 every write is a private `mktemp` file in the target directory `mv`-ed into place, so no reader can see a
 half-written hook. A second install that finds the artefacts byte-identical to what this tree would install
-reports `already armed` and writes nothing. What it never does is decline to check because it detected
+reports `already armed` and writes nothing. The lock's pid file is its identity, so a lock whose recorded
+holder is gone, or (audio-feed-pvjg) a lock directory with no recorded holder at all after the full wait, is
+stolen rather than reported as a holder that does not exist: `mkdir` and the pid write are two syscalls, so
+a kill in between leaves a directory that names nobody, and treating that as a live holder wedged every
+later gate on the VM until someone removed it by hand. What it never does is decline to check because it
+detected
 contention: that would trade a loud failure for a silent pass, which is the defect this bead exists to
 close. Measured on the reviewed tip d43c263c before the fix, 240 overlapping installs produced 83 named
 failures (35%); after it, 0 — the suite runs the overlap in two worktrees of one clone as
