@@ -166,6 +166,18 @@ names the **episode**; group failed stages by `(episodeId, phase)` with `severit
 includes errors). Use `severity=all` to include successful `info` stage marks. Stage marks may be
 capped by the producer, so missing marks do not prove a stage never ran.
 
+**The one absence that IS evidence: `synthesis.upload` (`audio-feed-n18n`).** A stage mark is
+written on the way _out_, so a terminal upload PUT that is killed mid-flight leaves no stage mark at
+all — and that absence cannot be told apart from "the stage was never reached". On 2026-10-14 the
+store held one `upload` mark while twelve episodes were killed inside the put. The producer
+therefore writes `type: "synthesis.upload"`, `phase: "entering"`, **before** it awaits the put,
+carrying `durationMs: null` and `context.bytesAttempted` (the payload size being attempted — the
+size of a FAILED upload is recorded nowhere else, because `byteLength` is written only on
+completion) plus `context.uploadRetry`. This record is not subject to the stage-mark cap: there is
+at most one per terminal upload attempt. So an episode with a `synthesis.upload` record and no
+matching `synthesis.stage` with `phase: "upload"` is a put that was **entered and never returned** —
+which is the read that locates a platform kill on the first pass.
+
 The existing `context` field remains available but is not a uniform join schema: it can contain
 nested, source-specific data including CSP reports from a public endpoint. The store caps and
 redacts context by **key name**, not by screening arbitrary user text. This bearer-key endpoint

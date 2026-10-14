@@ -1390,6 +1390,19 @@ export type StageMarker = <T>(
 ) => Promise<T>;
 
 /**
+ * Records that the terminal upload PUT is about to be ENTERED (audio-feed-n18n).
+ *
+ * A MARKER IN THE OPPOSITE DIRECTION TO `StageMarker`: that one reports a stage on the way OUT, this
+ * one reports the attempt on the way IN, so a put that is KILLED between the two is visible instead
+ * of absent. Threaded and defaulted exactly like `markStage` for the same reason - a caller that
+ * supplies no recorder loses the record, not the synthesis.
+ */
+export type UploadEnterRecorder = (
+  episodeId: string,
+  detail: { bytesAttempted?: number; uploadRetry?: number },
+) => Promise<void>;
+
+/**
  * Default ceiling for stage marks per synthesis invocation (audio-feed-938b).
  * Sized to cover batchSize episodes across all four stages (tts, verify, upload, yield)
  * with a production minimum floor of 25. The multiplier below IS the stage count, not an
@@ -1458,6 +1471,56 @@ export async function runSynthesisBatch(
   const suppressedEpisodes = new Set<string>();
   const suppressedStages: Partial<Record<SynthesisStage, number>> = {};
   const suppressedFailedStages: Partial<Record<SynthesisStage, number>> = {};
+  /**
+   * The durable "the terminal upload PUT is being entered" record (audio-feed-n18n).
+   *
+   * WHAT IT FIXES, FROM A MEASURED OUTAGE. On 2026-10-14 production showed 13 `synthesis.stage tts`
+   * marks, 13 `verify` marks and ONE `upload` mark while twelve episodes were being killed inside the
+   * terminal whole-episode-WAV put. `markStage` writes its mark on the way OUT (in a `finally`), which
+   * is exactly what huh4 needs for durations - and what makes a KILLED stage invisible: the isolate
+   * that stopped existing inside `blobs.put` never entered the `finally`, so a killed put and a put
+   * that was never reached were the same shape, and locating the kill took a night of reconstructing
+   * it from an absence. This record is written BEFORE the await, and carries the one fact no other
+   * record can: the payload size being ATTEMPTED, which `byteLength` can never supply because it is
+   * written only on completion (production holds exactly one byteLength value and no failure has one).
+   *
+   * WHY ITS OWN TYPE, RATHER THAN A SECOND `synthesis.stage` MARK. Three reasons, and the third is the
+   * one that decides it. (1) It is not a duration: a stage mark with no duration would be a lie in the
+   * shape a duration reader consumes, and a `durationMs: 0` would say the upload took no time.
+   * (2) The `synthesis.stage` vocabulary is bounded by `stageMarkCap`, and that cap is a specific
+   * contract about stage-mark volume - tests pin its exact arithmetic. This record is
+   * INVOCATION-level, one per terminal-upload attempt, which is the same shape as the
+   * `synthesis.invocation` started/terminal pair and is bounded the same way (by batch size x attempts,
+   * not by the work done), so the two contracts stay separable instead of one silently paying for the
+   * other. (3) DISCOVERABILITY: `/summary` lists event TYPES in `byType` and never lists phases, so a
+   * reader who does not already know this vocabulary sees `synthesis.upload` in the summary while the
+   * phase vocabulary that explains a failure stays invisible - which was a measured finding in its own
+   * right (audio-feed-uv5g). `phase: "entering"` mirrors the existing `synthesis.invocation`
+   * `started`/`terminal` idiom for a record that describes a transition rather than a span.
+   */
+  const recordUploadEntered = async (
+    episodeId: string,
+    detail: { bytesAttempted?: number; uploadRetry?: number },
+  ) => {
+    try {
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: "info",
+        type: "synthesis.upload",
+        process: "worker",
+        job: "synthesis",
+        correlationId: invocationId,
+        phase: "entering",
+        message: `synthesis upload ENTERING with ${detail.bytesAttempted ?? "unknown"} bytes`,
+        episodeId,
+        context: { invocationId, episodeId, budgetMs, ...detail },
+      });
+    } catch {
+      // Same contract as every other mark: losing observability must not lose synthesis.
+      console.warn("[audio-feed] synthesis upload entry record write failed");
+    }
+  };
+
   const appendStage = async (
     stage: SynthesisStage,
     durationMs: number,
@@ -1552,7 +1615,13 @@ export async function runSynthesisBatch(
   };
   let outcome: "returned" | "threw" = "threw";
   try {
-    const result = await runSynthesisBatchCore(ctx, synthesize, options, markStage);
+    const result = await runSynthesisBatchCore(
+      ctx,
+      synthesize,
+      options,
+      markStage,
+      recordUploadEntered,
+    );
     outcome = "returned";
     return result;
   } finally {
@@ -1599,6 +1668,7 @@ async function runSynthesisBatchCore(
   synthesize: Synthesizer,
   options: SynthesisWorkerOptions = {},
   markStage: StageMarker = async (_stage, fn) => await fn(),
+  recordUploadEntered: UploadEnterRecorder = async () => {},
 ): Promise<SynthesisBatchResult> {
   const opts = { ...DEFAULTS, ...options };
   /**
@@ -2486,6 +2556,13 @@ async function runSynthesisBatchCore(
             // closes its socket; if it committed anyway, the stable key survives
             // for a later invocation to verify and settle.
             inFlightUploadKeys.add(inFlightStagingKey);
+            // audio-feed-n18n: the durable "we are about to PUT" record, written BEFORE the await.
+            // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
+            // size being attempted, rather than only the absence of a completion mark.
+            await recordUploadEntered(currentEpisode.id, {
+              bytesAttempted: bytes.length,
+              uploadRetry: nextUploadRetry,
+            });
             const putPromise = markStage("upload", () =>
               blobs.put(stagingKey, bytes, {
                 contentType: "audio/wav",
