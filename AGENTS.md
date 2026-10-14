@@ -203,16 +203,20 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## Verifying a landing against production
 
-`GET /health` returns **`deploy`** (the identifier) and **`deploySource`** (the variable that
-supplied it): `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, `GIT_COMMIT_SHA` when the deploy
-injects the commit, or `dev` for a local run. **`dev` is not a match — seeing it means production is
+`GET /health` returns **`deploy`** (the identifier), **`deploySource`** (the variable that
+supplied it: `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, `GIT_COMMIT_SHA` when injected, or
+`dev`), and **`commit`** (the Git commit SHA when injected by the deployment pipeline, or `null` if
+the deploy environment supplies no commit variable). **`dev` or `commit: null` is not a match on its
+own — seeing it without an exact Deploy API mapping or a distinctive public marker means production is
 UNVERIFIED, not verified.**
 
 ```bash
 curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
-# { "status": "ok", "storage": "...", "deploy": "<id>", "deploySource": "DENO_DEPLOYMENT_ID", "time": "..." }
+# { "status": "ok", "storage": "...", "deploy": "<id>", "deploySource": "DENO_DEPLOYMENT_ID", "commit": "<sha>|null", "time": "..." }
 
-# map the id back to a revision (with DENO_DEPLOY_TOKEN set to the configured ddo_ org token):
+# when commit is present and non-null in /health, it names the exact Git commit SHA running in production.
+# when commit is null and deploySource is DENO_DEPLOYMENT_ID, map the opaque id back to a revision
+# (with DENO_DEPLOY_TOKEN set to the configured ddo_ org token):
 deno deploy deployments list --app audio-feed --org paulkinlan-ea --json --non-interactive
 # The old deployment CLI and classic dash.deno.com API reject ddo_ organization tokens by design;
 # the classic API was retired 2026-07-20. Use the v2 deno deploy CLI above.
@@ -220,17 +224,31 @@ deno deploy deployments list --app audio-feed --org paulkinlan-ea --json --non-i
 git log --oneline -1 <id>
 ```
 
-The content-addressed assets prove the bytes without any token, and cover the case where the
-fingerprint is unavailable:
+Content-addressed assets and distinctive public markup prove code presence without any token, but
+their limits must be understood:
+1. Public reads (e.g. `/assets/<hash>.<name>`, public `/login` styles and markup) prove that the
+   deployed build *contains* a commit's change set, but they do not establish a deployment identity,
+   and they do not prove authenticated behavior (authenticated routes such as `/account` or `/admin`
+   are out of scope for unauthenticated reads).
+2. Public reads cannot distinguish between commits when the net source diff across public surfaces is
+   zero: for example, across `103a2498..fc8851e0` (where the commit list is 13 entries, and a merge
+   commit's first-parent diff can touch served routes without the net diff changing), the net source
+   diff for `shell`, `account` and `assets` is zero, so public responses are byte-identical across the
+   entire window.
+3. Establishing the exact running SHA requires either the unauthenticated `/health` `commit` field (when
+   supplied by CI/deploy env) or querying the Deno Deploy API using `DENO_DEPLOY_TOKEN`.
+
+For content-addressed assets:
 `deno eval 'import {assetUrl} from "./src/routes/assets.ts"; console.log(assetUrl("listen.js"))'`
 prints the URL the landed tree expects, and that URL's `sha256sum` must equal
 `sha256sum src/assets/listen.js` at the landed commit. Caveat (measured): `listen.css` is served
 COMPOSED — design tokens prepended — so compare the tail after the token block, or fetch the file's
 own route.
 
-**Rule: landed ≠ live.** A change is verified only when the live fingerprint (or an asset hash)
-matches the landed revision. Otherwise record production as UNVERIFIED on the bead and say so in the
-handoff, rather than treating a passing gate on the landed tree as proof of what is serving.
+**Rule: landed ≠ live.** A change is verified only when the live commit field (or Deploy API mapping,
+or distinctive asset/markup hash) matches the landed revision. Otherwise record production as
+UNVERIFIED on the bead and say so in the handoff, rather than treating a passing gate on the landed
+tree as proof of what is serving.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 
