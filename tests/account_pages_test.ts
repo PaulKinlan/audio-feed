@@ -5,12 +5,27 @@
  * what each page promises.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { join } from "@std/path";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
+import {
+  CANONICAL_PROOF_ORIGIN,
+  CANONICAL_QZ3X_FEED_TOKEN,
+  isMutationScratchDir,
+  latestProfileActivityMs,
+  MUTANT_MARKER_FILE,
+  pinQz3xCaptureDeterminism,
+  PROFILE_ACTIVITY_AGE_MS,
+  STALE_PROFILE_AGE_MS,
+  sweepStaleMutationScratch,
+  sweepStaleProfiles,
+  touchProfileActivity,
+  withMutationScratch,
+} from "../scripts/proof-helper.ts";
 
 const BASE = "https://audio.example.com";
 
@@ -579,3 +594,329 @@ Deno.test("GET /account supports episode pagination via limit query parameter (a
     "no loadMoreEpisodes when all episodes fit in limit",
   );
 });
+
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+/**
+ * Walk HTML markup and return any tag-nesting problems (audio-feed-lma7):
+ * 1. Strip terminated comments (`<!--...-->`), `<script>...</script>`, and `<style>...</style>` raw-text blocks.
+ * 2. Check for leftover unterminated `<!--`, `<script(?=[\s/>]|$)`, or `<style(?=[\s/>]|$)` before walking tags,
+ *    using the boundary lookahead so custom elements like `<script-loader>` and `<style-guide>` are not misreported.
+ * 3. Push non-void open tags onto a stack and report any mismatched closing tag or unclosed tag at EOF.
+ */
+function tagNestingProblems(markup: string): string[] {
+  const problems: string[] = [];
+  const stripped = markup
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script(?=[\s/>]|$)[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style(?=[\s/>]|$)[\s\S]*?<\/style\s*>/gi, "");
+
+  if (stripped.includes("<!--")) {
+    problems.push("unterminated <!-- comment");
+  }
+  if (/<script(?=[\s/>]|$)/i.test(stripped)) {
+    problems.push("unterminated <script> raw-text block");
+  }
+  if (/<style(?=[\s/>]|$)/i.test(stripped)) {
+    problems.push("unterminated <style> raw-text block");
+  }
+  if (problems.length > 0) {
+    return problems;
+  }
+
+  const stack: string[] = [];
+  const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9:-]*)(?:\s[^<>]*?)?\s*(\/?)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = tagRe.exec(stripped)) !== null) {
+    const full = match[0];
+    const name = match[1]!.toLowerCase();
+    const selfClosing = match[2] === "/" || VOID_ELEMENTS.has(name);
+    const isClosing = full.startsWith("</");
+    if (isClosing) {
+      const top = stack.pop();
+      if (top !== name) {
+        problems.push(`</${name}> closes <${top ?? "empty"}>`);
+        return problems;
+      }
+    } else if (!selfClosing) {
+      stack.push(name);
+    }
+  }
+  while (stack.length > 0) {
+    const unclosed = stack.pop()!;
+    problems.push(`<${unclosed}> never closed`);
+  }
+  return problems;
+}
+
+Deno.test(
+  "every kit page's markup actually nests its tags, and /account keeps all section.panel inside div.wrap (audio-feed-lma7)",
+  async () => {
+    const { fetch, stores } = app();
+    const admin = await seed(stores, {
+      id: "admin-lma7",
+      email: "admin@example.com",
+      isAdmin: true,
+      displayName: "Admin Reader",
+    });
+    await stores.metadata.putSource(makeSource({ id: "src-1", userId: admin.id, title: "Daily" }));
+    await stores.metadata.putEpisode(
+      makeEpisode({ id: "ep-1", userId: admin.id, title: "Morning Brief", status: "ready" }),
+    );
+
+    const pages: Array<{ label: string; res: Promise<Response> }> = [
+      { label: "GET /account", res: get(fetch, "/account", stores, admin.id) },
+      {
+        label: "GET /account?url=...",
+        res: get(fetch, "/account?url=https%3A%2F%2Fexample.com%2Fpost", stores, admin.id),
+      },
+      { label: "GET /login", res: get(fetch, "/login", stores) },
+      { label: "GET /admin", res: get(fetch, "/admin", stores, admin.id) },
+      { label: "GET /admin/subscribers", res: get(fetch, "/admin/subscribers", stores, admin.id) },
+    ];
+
+    for (const page of pages) {
+      const res = await page.res;
+      assertEquals(res.status, 200, `${page.label} status`);
+      const html = await res.text();
+      assertEquals(
+        tagNestingProblems(html),
+        [],
+        `${page.label} must have balanced tag nesting`,
+      );
+    }
+
+    // Pin the exact /account mobile layout invariant: all 6 section.panel blocks live inside
+    // <div class="wrap"> (before its closing </div>), and the shell/account CSS carries the
+    // mobile padding and margin rules for .wrap and .panel.
+    const accountHtml = await (await get(fetch, "/account", stores, admin.id)).text();
+    assertStringIncludes(
+      accountHtml,
+      `<fieldset class="choices" aria-label="How should it sound?"`,
+    );
+    assert(
+      !accountHtml.includes(`data-minutes="15">Deep dive · ~15 min</button>\n      </div>`),
+      "choices fieldset must close with </fieldset>, never </div>",
+    );
+
+    const wrapOpenIdx = accountHtml.indexOf('<div class="wrap">');
+    const mainCloseIdx = accountHtml.indexOf("</main>");
+    assert(wrapOpenIdx > 0 && mainCloseIdx > wrapOpenIdx, "expected .wrap inside <main>");
+    const wrapRegion = accountHtml.slice(wrapOpenIdx, mainCloseIdx).trim();
+    const panelMatches = [...wrapRegion.matchAll(/<section class="panel(?:\s|")/g)];
+    assertEquals(
+      panelMatches.length,
+      6,
+      "all 6 section.panel blocks must sit inside <div class='wrap'>",
+    );
+    assertEquals(
+      tagNestingProblems(wrapRegion),
+      [],
+      "<div class='wrap'> region must close cleanly around all 6 section.panel blocks",
+    );
+
+    // Pin the .wrap and .panel CSS rules that supply mobile viewport gutters and panel spacing.
+    assertStringIncludes(
+      accountHtml,
+      ".wrap { max-inline-size: var(--page); margin-inline: auto; padding: 2rem 1rem 3.5rem; }",
+    );
+    assertStringIncludes(
+      accountHtml,
+      ".panel {\n    background: var(--surface); border: 1px solid var(--border);\n    border-radius: var(--radius); padding: 1.25rem 1.25rem 1.35rem; margin-block-end: 1rem;\n  }",
+    );
+  },
+);
+
+Deno.test(
+  "the markup scanner reports each failure shape, including unterminated comment and custom-element lookalikes (audio-feed-lma7)",
+  () => {
+    // 1. Mismatched closing tag (the exact audio-feed-lma7 bug: </div> closing <fieldset>)
+    assertEquals(
+      tagNestingProblems('<div class="wrap"><form><fieldset class="choices"></div></form></div>'),
+      ["</div> closes <fieldset>"],
+    );
+    // 2. Unclosed tag at EOF
+    assertEquals(
+      tagNestingProblems('<div class="wrap"><section class="panel"><p>Hi</p></section>'),
+      ["<div> never closed"],
+    );
+    // 3. Unterminated comment and raw-text blocks
+    assertEquals(
+      tagNestingProblems("<div><!-- unterminated comment <fieldset></div>"),
+      ["unterminated <!-- comment"],
+    );
+    assertEquals(
+      tagNestingProblems("<div><script>const x = 1;</div>"),
+      ["unterminated <script> raw-text block"],
+    );
+    assertEquals(
+      tagNestingProblems("<div><style>.a { color: red; }</div>"),
+      ["unterminated <style> raw-text block"],
+    );
+    // 4. Custom-element lookalikes (<script-loader>, <style-guide>) must NOT false-red as
+    //    unterminated raw-text blocks when properly balanced, and must still report real mismatches.
+    assertEquals(
+      tagNestingProblems(
+        '<div><script-loader src="/a.js"></script-loader><style-guide>ok</style-guide></div>',
+      ),
+      [],
+    );
+    assertEquals(
+      tagNestingProblems("<div><script-loader></div>"),
+      ["</div> closes <script-loader>"],
+    );
+  },
+);
+
+Deno.test(
+  "sweepStaleProfiles spares a stale-root profile with recent internal file activity and reclaims once activity ages out (audio-feed-upby)",
+  async () => {
+    const sandbox = await Deno.makeTempDir({ prefix: "upby-sweep-test-" });
+    const prevTmp = Deno.env.get("TMPDIR");
+    Deno.env.set("TMPDIR", sandbox);
+    try {
+      const now = Date.now();
+      const staleRootTime = new Date(now - STALE_PROFILE_AGE_MS - 10 * 60_000);
+      const oldActivityTime = new Date(now - PROFILE_ACTIVITY_AGE_MS - 5 * 60_000);
+
+      // Profile A: root directory is 60m old (> 50m STALE_PROFILE_AGE_MS), but touchProfileActivity
+      // refreshed its internal heartbeat 2 minutes ago (< 20m PROFILE_ACTIVITY_AGE_MS).
+      const activeProfile = join(sandbox, "audiofeed-active-long-run");
+      await Deno.mkdir(join(activeProfile, "Default"), { recursive: true });
+      await touchProfileActivity(activeProfile, now - 2 * 60_000);
+      await Deno.utime(activeProfile, staleRootTime, staleRootTime);
+
+      // Profile B: root directory is 60m old AND its internal file activity is 25m old (> 20m).
+      const dormantProfile = join(sandbox, "audiofeed-dormant-stale");
+      const dormantDefault = join(dormantProfile, "Default");
+      await Deno.mkdir(dormantDefault, { recursive: true });
+      const dormantPrefs = join(dormantDefault, "Preferences");
+      await Deno.writeTextFile(dormantPrefs, "{}");
+      await Deno.utime(dormantPrefs, oldActivityTime, oldActivityTime);
+      await Deno.utime(dormantDefault, staleRootTime, staleRootTime);
+      await Deno.utime(dormantProfile, staleRootTime, staleRootTime);
+
+      const activeLatest = await latestProfileActivityMs(activeProfile);
+      assertEquals(activeLatest, now - 2 * 60_000);
+
+      const swept = await sweepStaleProfiles(now);
+      assertEquals(swept, [dormantProfile]);
+
+      const activeStat = await Deno.stat(activeProfile);
+      assert(activeStat.isDirectory, "active long-running profile must be spared");
+    } finally {
+      if (prevTmp === undefined) {
+        Deno.env.delete("TMPDIR");
+      } else {
+        Deno.env.set("TMPDIR", prevTmp);
+      }
+      await Deno.remove(sandbox, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "withMutationScratch writes MUTANT-MARKER at root and sweepStaleMutationScratch reclaims stale mut* scratch while separating unreadable dirs (audio-feed-6pay)",
+  async () => {
+    const sandbox = await Deno.makeTempDir({ prefix: "6pay-scratch-test-" });
+    const prevTmp = Deno.env.get("TMPDIR");
+    Deno.env.set("TMPDIR", sandbox);
+    try {
+      let capturedScratch = "";
+      const result = await withMutationScratch("6pay-probe", async (scratchDir) => {
+        capturedScratch = scratchDir;
+        assert(isMutationScratchDir(scratchDir), "scratchDir must be recognised by MUTANT-MARKER");
+        const markerFile = join(scratchDir, MUTANT_MARKER_FILE);
+        const markerText = await Deno.readTextFile(markerFile);
+        assertStringIncludes(markerText, '"label":"6pay-probe"');
+        return 42;
+      });
+      assertEquals(result, 42);
+      const existsAfter = await Deno.stat(capturedScratch).then(() => true).catch(() => false);
+      assertEquals(existsAfter, false, "withMutationScratch must remove its scratch dir on exit");
+
+      const now = Date.now();
+      const staleTime = new Date(now - STALE_PROFILE_AGE_MS - 10 * 60_000);
+
+      // 1. Stale linked-worktree style mut* directory (.git is a file, as created by `git worktree add`)
+      const staleMutWorktree = join(sandbox, "mut-12345-M1");
+      await Deno.mkdir(staleMutWorktree, { recursive: true });
+      const gitFile = join(staleMutWorktree, ".git");
+      await Deno.writeTextFile(gitFile, "gitdir: /tmp/somewhere\n");
+      await Deno.utime(gitFile, staleTime, staleTime);
+      await Deno.utime(staleMutWorktree, staleTime, staleTime);
+      assert(isMutationScratchDir(staleMutWorktree));
+
+      // 2. Stale non-mut checkout WITHOUT MUTANT-MARKER (e.g. a real lane worktree) — must be spared!
+      const liveWorktree = join(sandbox, "audio-feed-lane-worktree");
+      await Deno.mkdir(liveWorktree, { recursive: true });
+      const liveGitFile = join(liveWorktree, ".git");
+      await Deno.writeTextFile(liveGitFile, "gitdir: /tmp/lane\n");
+      await Deno.utime(liveGitFile, staleTime, staleTime);
+      await Deno.utime(liveWorktree, staleTime, staleTime);
+      assert(!isMutationScratchDir(liveWorktree));
+
+      const report = await sweepStaleMutationScratch(now);
+      assertEquals(report.swept, [staleMutWorktree]);
+      assertEquals(report.unreadable, []);
+      const liveStillThere = await Deno.stat(liveWorktree).then(() => true).catch(() => false);
+      assert(liveStillThere, "non-mutant worktree must never be swept");
+    } finally {
+      if (prevTmp === undefined) {
+        Deno.env.delete("TMPDIR");
+      } else {
+        Deno.env.set("TMPDIR", prevTmp);
+      }
+      await Deno.remove(sandbox, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "pinQz3xCaptureDeterminism pins canonical origin and feedToken for repeatable /account dialog captures (audio-feed-te4l)",
+  () => {
+    const sampleProofSource = [
+      'import { quantiseEvidencePng } from "./evidence-png.ts";',
+      'const config: AppConfig = { port: 0, adminToken: "harness-admin" };',
+      'const user = await approveUser(stores.metadata, rawUser.id, "qz3x@example.com/feed");',
+      'const OUT = new URL("../docs/evidence/audio-feed-qz3x/", import.meta.url).pathname;',
+    ].join("\n");
+
+    const pinned = pinQz3xCaptureDeterminism(sampleProofSource, {
+      disableQuantiser: true,
+      outDir: "/tmp/te4l-run-1",
+    });
+
+    assertStringIncludes(
+      pinned,
+      `publicBaseUrl: ${JSON.stringify(CANONICAL_PROOF_ORIGIN)}`,
+    );
+    assertStringIncludes(
+      pinned,
+      `feedToken: ${JSON.stringify(CANONICAL_QZ3X_FEED_TOKEN)}`,
+    );
+    assertStringIncludes(
+      pinned,
+      "const quantiseEvidencePng = async (_path: string, _options?: unknown): Promise<void> => {};",
+    );
+    assertStringIncludes(
+      pinned,
+      'const OUT = "/tmp/te4l-run-1";',
+    );
+  },
+);

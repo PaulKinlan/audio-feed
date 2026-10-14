@@ -66,6 +66,39 @@ export interface SupervisedHarness {
 export const STALE_PROFILE_AGE_MS = 50 * 60 * 1000;
 
 /**
+ * Activity-based mtime/touch window for live Chrome profiles (audio-feed-upby).
+ *
+ * A live browser running under a long command timeout (e.g. `timeout 3600`, `boundMin = 62 min`,
+ * audio-feed-gy3x) can legitimately outlive `STALE_PROFILE_AGE_MS` (50 min), and `/proc/<pid>`
+ * inspection is denied in the `deno test` sandbox without `--allow-all` (audio-feed-gw4k).
+ * Checking internal profile file activity (`Default/` files, lock/database entries, or the
+ * periodic heartbeat file touched while `createTempChromeProfile` is live) provides a sandbox-safe
+ * liveness guard: if any file inside the profile was modified within `PROFILE_ACTIVITY_AGE_MS`
+ * (20 minutes), the sweep spares the profile even when its top-level directory creation mtime
+ * exceeds `STALE_PROFILE_AGE_MS`.
+ */
+export const PROFILE_ACTIVITY_AGE_MS = 20 * 60 * 1000;
+export const PROFILE_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+const PROFILE_ACTIVITY_MARKER = "profile-activity";
+
+/**
+ * Root marker file for disposable mutation-testing scratch directories (audio-feed-6pay).
+ *
+ * Writing `MUTANT-MARKER` at the scratch root (rather than injecting `// MUTANT` comments into
+ * tracked files like `scripts/proof-helper.ts` and leaving `/tmp/mut*` copies behind) lets
+ * start-of-run sweeps distinguish mutation scratch from live lane worktrees and reclaim abandoned
+ * scratch directories deterministically.
+ */
+export const MUTANT_MARKER_FILE = "MUTANT-MARKER";
+
+/**
+ * Canonical display origin and feed token for deterministic `/account` browser captures
+ * (audio-feed-te4l, audio-feed-3cvy, audio-feed-ifgw).
+ */
+export const CANONICAL_PROOF_ORIGIN = "http://localhost:8133";
+export const CANONICAL_QZ3X_FEED_TOKEN = "qz3x-pinned-feed-token";
+
+/**
  * Reclaim abandoned profile directories WHATEVER THEY ARE CALLED (audio-feed-u8nv, widened by
  * audio-feed-h62q).
  *
@@ -152,9 +185,77 @@ export function isAbandonedProfile(dir: string): boolean {
   return exists(`${dir}/${PROFILE_MARKER}`);
 }
 
+/**
+ * Latest mtime (in epoch ms) among regular files or symlinks inside a Chrome profile directory
+ * up to depth 3 (audio-feed-upby).
+ *
+ * Inspects non-directory entries (`Default/Preferences`, `Default/LOCK`, `Default/databases/...`,
+ * `DevToolsActivePort`, `Default/profile-activity`, etc.) without reading `/proc/<pid>`, so it is
+ * compatible with `deno test`'s restricted sandbox permissions (audio-feed-gw4k). Empty directory
+ * inodes (such as a bare `Default/` directory in a synthetic test fixture) are not counted as file
+ * activity, so aging the root directory in unit fixtures still behaves deterministically.
+ */
+export async function latestProfileActivityMs(profileDir: string): Promise<number | null> {
+  let latest: number | null = null;
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: profileDir, depth: 0 }];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    let entries: AsyncIterable<Deno.DirEntry>;
+    try {
+      entries = Deno.readDir(current.dir);
+    } catch {
+      continue;
+    }
+    try {
+      for await (const entry of entries) {
+        const childPath = join(current.dir, entry.name);
+        if (entry.isDirectory) {
+          if (current.depth < 2) {
+            queue.push({ dir: childPath, depth: current.depth + 1 });
+          }
+          continue;
+        }
+        try {
+          const info = await Deno.lstat(childPath);
+          const mtime = info.mtime?.getTime();
+          if (mtime !== undefined && (latest === null || mtime > latest)) {
+            latest = mtime;
+          }
+        } catch {
+          // Ignore disappearing transient lock/journal files
+        }
+      }
+    } catch {
+      // Ignore concurrent directory removal
+    }
+  }
+  return latest;
+}
+
+/**
+ * Touch the internal profile activity marker so an idle live browser operating under a long
+ * command timeout refreshes its activity mtime and is spared by `sweepStaleProfiles` (audio-feed-upby).
+ */
+export async function touchProfileActivity(
+  profileDir: string,
+  nowMs: number = Date.now(),
+): Promise<void> {
+  try {
+    const defaultDir = join(profileDir, PROFILE_MARKER);
+    await originalMkdir(defaultDir, { recursive: true });
+    const markerPath = join(defaultDir, PROFILE_ACTIVITY_MARKER);
+    await originalWriteTextFile(markerPath, `${nowMs}\n`);
+    const when = new Date(nowMs);
+    await Deno.utime(markerPath, when, when);
+  } catch {
+    // Best-effort heartbeat; never disrupt the caller if the profile is being torn down.
+  }
+}
+
 export async function sweepStaleProfiles(
   nowMs: number = Date.now(),
   ageMs: number = STALE_PROFILE_AGE_MS,
+  activityAgeMs: number = PROFILE_ACTIVITY_AGE_MS,
 ): Promise<string[]> {
   const swept: string[] = [];
   // The SAME base directory makeTempDir uses, or the sweep would look somewhere the profiles are not.
@@ -165,14 +266,23 @@ export async function sweepStaleProfiles(
   } catch {
     return swept;
   }
+  const effectiveActivityWindow = Math.min(ageMs, activityAgeMs);
   for (const entry of entries) {
     if (!entry.isDirectory) continue;
     const full = `${baseDir}/${entry.name}`;
+    if (activeChromeProfiles.has(normalizeFilePath(full))) continue;
     if (!isAbandonedProfile(full)) continue;
     try {
       const info = await Deno.stat(full);
       const age = nowMs - (info.mtime?.getTime() ?? nowMs);
       if (age < ageMs) continue;
+      // audio-feed-upby: before removing a profile whose root mtime exceeds ageMs, check internal
+      // profile file activity so a live browser that has written (or been touched) within the
+      // activity window is spared without needing /proc inspection.
+      const latestActivity = await latestProfileActivityMs(full);
+      if (latestActivity !== null && nowMs - latestActivity < effectiveActivityWindow) {
+        continue;
+      }
       await originalRemove(full, { recursive: true });
       swept.push(full);
     } catch {
@@ -180,6 +290,174 @@ export async function sweepStaleProfiles(
     }
   }
   return swept;
+}
+
+/**
+ * Whether `dir` is a disposable mutation-testing scratch directory (audio-feed-6pay).
+ *
+ * Matches either:
+ * 1. Any directory carrying `MUTANT-MARKER` at its root (the canonical marker convention that
+ *    avoids writing `// MUTANT` comments into tracked source files), or
+ * 2. A directory under `TMPDIR` named `mut*-M*`, `mut-*`, `mut_*`, or `mut<digits>*` from ad-hoc
+ *    mutation loops (covering both `git worktree add` linked worktrees where `.git` is a file and
+ *    plain `cp` checkout copies that have `scripts/proof-helper.ts` or `src/`).
+ *
+ * Never matches a normal non-`mut*` checkout unless it explicitly carries `MUTANT-MARKER`.
+ */
+export function isMutationScratchDir(dir: string): boolean {
+  if (!exists(dir)) return false;
+  if (exists(join(dir, MUTANT_MARKER_FILE))) return true;
+  const name = basename(dir);
+  if (!/^mut(?:[-_].*|\d+.*)$/.test(name)) return false;
+  return exists(join(dir, CHECKOUT_MARKER)) || exists(join(dir, "scripts")) ||
+    exists(join(dir, "src"));
+}
+
+/**
+ * Sweep abandoned mutation-testing scratch directories under `TMPDIR` by path/marker and age,
+ * reporting `unreadable` entries separately from clean/skipped ones (audio-feed-6pay).
+ */
+export async function sweepStaleMutationScratch(
+  nowMs: number = Date.now(),
+  ageMs: number = STALE_PROFILE_AGE_MS,
+  activityAgeMs: number = PROFILE_ACTIVITY_AGE_MS,
+): Promise<{ swept: string[]; unreadable: string[] }> {
+  const swept: string[] = [];
+  const unreadable: string[] = [];
+  const baseDir = Deno.env.get("TMPDIR") ?? "/tmp";
+  let entries: Iterable<Deno.DirEntry>;
+  try {
+    entries = Deno.readDirSync(baseDir);
+  } catch {
+    unreadable.push(baseDir);
+    return { swept, unreadable };
+  }
+  const effectiveActivityWindow = Math.min(ageMs, activityAgeMs);
+  for (const entry of entries) {
+    const full = `${baseDir}/${entry.name}`;
+    try {
+      const info = await Deno.lstat(full);
+      if (!info.isDirectory) continue;
+      // Verify the directory itself is readable so unreadable scratch dirs are reported explicitly
+      // rather than silently treated as clean (audio-feed-6pay point 3).
+      try {
+        for await (const _ of Deno.readDir(full)) {
+          break;
+        }
+      } catch {
+        unreadable.push(full);
+        continue;
+      }
+      if (!isMutationScratchDir(full)) continue;
+      const age = nowMs - (info.mtime?.getTime() ?? nowMs);
+      if (age < ageMs) continue;
+      const latestActivity = await latestProfileActivityMs(full);
+      if (latestActivity !== null && nowMs - latestActivity < effectiveActivityWindow) {
+        continue;
+      }
+      await originalRemove(full, { recursive: true });
+      swept.push(full);
+    } catch {
+      unreadable.push(full);
+    }
+  }
+  return { swept, unreadable };
+}
+
+/**
+ * Run a mutation experiment inside a self-cleaning scratch directory marked with `MUTANT-MARKER`
+ * at its root, removing the directory on normal exit AND on `SIGINT`/`SIGTERM` (audio-feed-6pay).
+ */
+export async function withMutationScratch<T>(
+  label: string,
+  body: (scratchDir: string) => Promise<T> | T,
+): Promise<T> {
+  await sweepStaleMutationScratch();
+  const safeLabel = label.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "run";
+  const scratchDir = await Deno.makeTempDir({ prefix: `mut-${safeLabel}-` });
+  const markerPath = join(scratchDir, MUTANT_MARKER_FILE);
+  await originalWriteTextFile(
+    markerPath,
+    JSON.stringify({ label, createdAt: new Date().toISOString(), pid: Deno.pid }) + "\n",
+  );
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      originalRemoveSync(scratchDir, { recursive: true });
+    } catch {
+      // Ignore if already removed
+    }
+  };
+  const onSigInt = () => {
+    cleanup();
+  };
+  const onSigTerm = () => {
+    cleanup();
+  };
+  try {
+    Deno.addSignalListener("SIGINT", onSigInt);
+    Deno.addSignalListener("SIGTERM", onSigTerm);
+  } catch {
+    // Signal listeners may be unsupported on some platforms/permissions
+  }
+  try {
+    return await body(scratchDir);
+  } finally {
+    try {
+      Deno.removeSignalListener("SIGINT", onSigInt);
+      Deno.removeSignalListener("SIGTERM", onSigTerm);
+    } catch {
+      // Ignore
+    }
+    if (!cleaned) {
+      cleaned = true;
+      await originalRemove(scratchDir, { recursive: true }).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Pin the varying `/account` render inputs in `verify_qz3x_confirm_dismiss_browser.ts`
+ * (`publicBaseUrl` and `user.feedToken`) so two fresh captures of `01-second-dialog-open.png`
+ * render identical background text behind the modal backdrop (audio-feed-te4l).
+ */
+export function pinQz3xCaptureDeterminism(
+  source: string,
+  options: {
+    origin?: string;
+    feedToken?: string;
+    disableQuantiser?: boolean;
+    outDir?: string;
+  } = {},
+): string {
+  const origin = options.origin ?? CANONICAL_PROOF_ORIGIN;
+  const feedToken = options.feedToken ?? CANONICAL_QZ3X_FEED_TOKEN;
+  let result = source.replace(
+    'const config: AppConfig = { port: 0, adminToken: "harness-admin" };',
+    `const config: AppConfig = { port: 0, adminToken: "harness-admin", publicBaseUrl: ${
+      JSON.stringify(origin)
+    } };`,
+  ).replace(
+    'const user = await approveUser(stores.metadata, rawUser.id, "qz3x@example.com/feed");',
+    `const approved = await approveUser(stores.metadata, rawUser.id, "qz3x@example.com/feed");\n` +
+      `  const user = { ...approved, feedToken: ${JSON.stringify(feedToken)} };\n` +
+      `  await stores.metadata.putUser(user);`,
+  );
+  if (options.disableQuantiser) {
+    result = result.replace(
+      'import { quantiseEvidencePng } from "./evidence-png.ts";',
+      "const quantiseEvidencePng = async (_path: string, _options?: unknown): Promise<void> => {};",
+    );
+  }
+  if (options.outDir !== undefined) {
+    result = result.replace(
+      'const OUT = new URL("../docs/evidence/audio-feed-qz3x/", import.meta.url).pathname;',
+      `const OUT = ${JSON.stringify(options.outDir)};`,
+    );
+  }
+  return result;
 }
 
 export async function createTempChromeProfile(
@@ -194,10 +472,25 @@ export async function createTempChromeProfile(
   activeChromeProfiles.add(normProfileDir);
   let cleaned = false;
 
+  // audio-feed-upby: periodically refresh the internal profile activity marker while the profile
+  // handle is open, so an idle live browser operating under a long timeout (e.g. boundMin = 62 min)
+  // keeps a fresh internal file mtime (< PROFILE_ACTIVITY_AGE_MS) until cleanup() runs.
+  const heartbeatTimer = setInterval(() => {
+    if (!cleaned) {
+      void touchProfileActivity(profileDir);
+    }
+  }, PROFILE_HEARTBEAT_INTERVAL_MS);
+  try {
+    Deno.unrefTimer(heartbeatTimer);
+  } catch {
+    // Ignore if timer unref is unavailable
+  }
+
   return {
     profileDir,
     sweptStale,
     cleanup: async () => {
+      clearInterval(heartbeatTimer);
       activeChromeProfiles.delete(normProfileDir);
       if (cleaned) return;
       const maxAttempts = 10;
