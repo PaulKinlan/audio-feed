@@ -650,11 +650,12 @@ Deno.test("audio-feed-p2la: `deno task hooks:install` arms a scratch clone, the 
   const remotes = await Deno.makeTempDir();
   const home = await Deno.makeTempDir();
   try {
-    const bare = `${remotes}/remote.git`;
+    const bare = path.join(remotes, "remote.git");
     assertEquals((await gitIn(scratch, ["init", "-q", "-b", "main"])).code, 0);
     await gitIn(scratch, ["config", "user.email", "guard@example.com"]);
     await gitIn(scratch, ["config", "user.name", "Guard Test"]);
-    await Deno.writeTextFile(`${scratch}/base.txt`, "base\n");
+    const baseFile = path.join(scratch, "base.txt");
+    await Deno.writeTextFile(baseFile, "base\n");
     await gitIn(scratch, ["add", "base.txt"]);
     await gitIn(scratch, ["commit", "-q", "-m", "base"]);
     const base = (await gitIn(scratch, ["rev-parse", "HEAD"])).stdout.trim();
@@ -664,13 +665,17 @@ Deno.test("audio-feed-p2la: `deno task hooks:install` arms a scratch clone, the 
     assertEquals((await gitIn(scratch, ["init", "-q", "--bare", bare])).code, 0);
 
     // ARM, exactly as `deno task test:fast` and `deno task gate` do.
-    const armed = await armClone(`${scratch}/.git`, home);
+    const armed = await armClone(path.join(scratch, ".git"), home);
     assertEquals(armed.code, 0, `hooks:install must arm a clone: ${armed.log}`);
     assertStringIncludes(armed.log, "pre-push guard armed");
 
-    // "Armed" is a claim about the files git will execute: read them back.
-    const hookPath = `${scratch}/.git/hooks/pre-push`;
-    const standalonePath = `${scratch}/.git/hooks/audio-feed-pre-push`;
+    // "Armed" is a claim about the files git will execute: read them back. Built with path.join over
+    // runtime variables, the idiom the 25hc test above uses: these paths are in a temp clone, and a
+    // template that LOOKS like a repo path (`<tmp>/.git/hooks/...`) is an unresolvable read hint to
+    // the fast gate's DERIVED relation, which then cannot call any file inert (audio-feed-q0ky).
+    const scratchHooks = path.join(scratch, ".git", "hooks");
+    const hookPath = path.join(scratchHooks, "pre-push");
+    const standalonePath = path.join(scratchHooks, "audio-feed-pre-push");
     assertStringIncludes(
       await Deno.readTextFile(hookPath),
       "audio-feed-p2la: chain repo pre-push hook",
@@ -756,13 +761,13 @@ Deno.test("audio-feed-p2la: the gate's guard check MEASURES the clone instead of
     // silent "armed".
     assertEquals((await prepushGuardStatus(nonRepo)).state, "not-a-worktree");
 
-    const armed = await armClone(`${scratch}/.git`, home);
+    const armed = await armClone(path.join(scratch, ".git"), home);
     assertEquals(armed.code, 0, `hooks:install must arm the scratch clone: ${armed.log}`);
     assertEquals((await prepushGuardStatus(scratch)).state, "armed");
 
     // The "installed hook was removed" mutation, detected by name: the chained hook file is left
     // intact, and only the guard it executes is gone.
-    await Deno.remove(`${scratch}/.git/hooks/audio-feed-pre-push`);
+    await Deno.remove(path.join(scratch, ".git", "hooks", "audio-feed-pre-push"));
     const stripped = await prepushGuardStatus(scratch);
     assertEquals(stripped.state, "not-armed");
     if (stripped.state === "not-armed") {
@@ -776,8 +781,8 @@ Deno.test("audio-feed-p2la: the gate's guard check MEASURES the clone instead of
 });
 
 Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions and fails closed in a clone with no installed guard", async () => {
-  // The requirement this test exists for (audio-feed-p2la, reviewer fact 4): the .git/hooks/pre-push
-  // path must be exercised under the permissions the SHIPPED step runs with, not this test process's
+  // The requirement this test exists for (audio-feed-p2la, reviewer fact 4): the installed hook path
+  // must be exercised under the permissions the SHIPPED step runs with, not this test process's
   // unrestricted ones. `deno task hooks:verify` is
   // `deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts` - fewer permissions than the
   // gate that hosts it - so the child below is spawned with exactly those flags, in a scratch clone
@@ -790,8 +795,8 @@ Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions an
     // The verify script locates the clone it guards from ITS OWN path, so the clone gets its own copy
     // and the child below runs THAT one — running the repo's copy against cwd=clone would measure the
     // repo, which is exactly the mistake this test would then fail to catch.
-    const scriptInClone = `${scratch}/scripts/hooks/guard-status.ts`;
-    await Deno.mkdir(`${scratch}/scripts/hooks`, { recursive: true });
+    const scriptInClone = path.join(scratch, "scripts", "hooks", "guard-status.ts");
+    await Deno.mkdir(path.join(scratch, "scripts", "hooks"), { recursive: true });
     await Deno.copyFile(GUARD_STATUS_PATH, scriptInClone);
     const flags = ["run", "--allow-read", "--allow-run=git", scriptInClone];
     const env = { ...Deno.env.toObject() };
@@ -814,9 +819,9 @@ Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions an
       `a clone with no installed guard must FAIL the verify step: ${unarmedOut}`,
     );
     assertStringIncludes(unarmedOut, "pre-push guard is NOT armed (audio-feed-p2la)");
-    assertStringIncludes(unarmedOut, "hooks/pre-push");
+    assertStringIncludes(unarmedOut, "does not carry the chain block");
 
-    const arm = await armClone(`${scratch}/.git`, home);
+    const arm = await armClone(path.join(scratch, ".git"), home);
     assertEquals(arm.code, 0, `arming the scratch clone must succeed: ${arm.log}`);
     const armed = await verify();
     const armedOut = new TextDecoder().decode(armed.stdout);
@@ -824,7 +829,7 @@ Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions an
     assertStringIncludes(armedOut, "pre-push guard verified");
 
     // The "installed hook was removed" mutation is caught by the shipped step itself.
-    await Deno.remove(`${scratch}/.git/hooks/audio-feed-pre-push`);
+    await Deno.remove(path.join(scratch, ".git", "hooks", "audio-feed-pre-push"));
     const stripped = await verify();
     const strippedOut = new TextDecoder().decode(stripped.stderr);
     assertEquals(stripped.code, 1, "a removed guard must fail the verify step");

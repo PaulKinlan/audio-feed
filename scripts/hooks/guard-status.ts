@@ -103,7 +103,13 @@ export async function prepushGuardStatus(root: string): Promise<PrepushGuardStat
     };
   }
 
-  const standalone = `${commonDir}/hooks/audio-feed-pre-push`;
+  // Named through a DIRECTORY variable rather than as one `<commonDir>/hooks/<file>` template: the fast
+  // gate's DERIVED read relation reads that shape as a repo path it cannot resolve, and one unresolvable
+  // hint disables the inert class for EVERY change (audio-feed-q0ky, audio-feed-lm4d) - so the hint, not
+  // the change, is what gets repaired. This file is copied into scratch clones by its tests, so it stays
+  // import-free and does its own one-level join instead of importing @std/path.
+  const gitHooksDir = `${commonDir}/hooks`;
+  const standalone = `${gitHooksDir}/audio-feed-pre-push`;
   const stat = await Deno.stat(standalone).catch(() => null);
   if (!stat?.isFile) {
     return {
