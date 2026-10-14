@@ -225,7 +225,7 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     ...app.matchAll(/router\.(?:get|post|delete)\("([^"]+)", account\("[^"]+"\)\);/g),
   ]
     .map((match) => match[1]!);
-  assertEquals(accountRoutes.length, 15, "a new account() route requires a fresh reader audit");
+  assert(accountRoutes.length > 0, "no account() route registrations were discovered");
   for (
     const [method, path, handler] of [
       ["get", "/login", "handleLogin"],
@@ -294,24 +294,44 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       mentions: (source: string) => source.includes("/api/reports/csp"),
     },
   ];
+  const discovered = await allTestFiles();
+  assert(discovered.length > 0, "full-gate test discovery returned ZERO modules");
+  const readers = discovered.filter((file) => file !== "tests/fast_check_test.ts");
   const sources = new Map<string, string>();
-  for (const file of await allTestFiles()) {
-    if (file === "tests/fast_check_test.ts") continue; // this mapping contract does not send HTTP requests
-    sources.set(file, await Deno.readTextFile(file));
+  for (const file of readers) sources.set(file, await Deno.readTextFile(file));
+  assert(sources.size > 0, "route-reference audit examined ZERO test modules");
+  assertEquals(
+    sources.size,
+    readers.length,
+    `route-reference audit examined ${sources.size}/${readers.length} eligible test modules (${discovered.length} discovered); no duplicate or dropped module may yield a clean scan`,
+  );
+  const population =
+    `${accountRoutes.length} account routes; ${sources.size}/${readers.length} eligible test modules examined (${discovered.length} discovered)`;
+  console.log(`route-reference audit: ${population}`);
+  for (const path of accountRoutes) {
+    const stem = path.includes(":") ? path.slice(0, path.indexOf(":")) : path;
+    assert(
+      [...sources.values()].some((source) => source.includes(stem)),
+      `${population}: new account route ${path} has NO test candidate; do not narrow until one exercises it`,
+    );
   }
   for (const route of spec) {
     const candidates = [...sources].filter(([, source]) => route.mentions(source))
       .map(([file]) => file).sort();
+    assert(
+      route.exercises.length > 0 && route.exercises.some((file) => candidates.includes(file)),
+      `${population}: ${route.file} has no exercising candidate suite; do not narrow`,
+    );
     assertEquals(
       candidates,
       [...route.exercises, ...route.mentionsOnly].sort(),
-      `${route.file}: new URL reference needs a real-handler audit, not silent narrow selection`,
+      `${population}: ${route.file} has a new or missing URL reference; audit its real handler before narrowing`,
     );
     const named = await nameMatchedTests([route.file]);
     assertEquals(
       (named.get(route.file) ?? []).sort(),
       [...route.exercises].sort(),
-      `${route.file}: select every exercising HTTP suite and no unrelated mention-only suite`,
+      `${population}: ${route.file} must select every exercising HTTP suite and no unrelated mention-only suite`,
     );
   }
 });
