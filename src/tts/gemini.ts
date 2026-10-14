@@ -475,6 +475,16 @@ function wrapTurnFailure(error: unknown): GeminiTtsError {
  */
 export function base64ToUint8Array(base64: string): Uint8Array {
   const clean = base64.replace(/[\s\r\n]+/g, "");
+  if (
+    typeof (Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array }).fromBase64 ===
+      "function"
+  ) {
+    try {
+      return (Uint8Array as unknown as { fromBase64: (s: string) => Uint8Array }).fromBase64(clean);
+    } catch {
+      // Fall back if fromBase64 fails on any edge case
+    }
+  }
   const binaryString = atob(clean);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
@@ -554,49 +564,47 @@ export function detectAudioFormat(
 }
 
 /**
- * Wrap raw linear PCM audio into a standard 44-byte RIFF/WAVE header
+ * Write a standard 44-byte RIFF/WAVE header into a target buffer (audio-feed-sp38)
  */
-export function pcmToWav(
-  pcmBytes: Uint8Array,
+export function writeWavHeader(
+  target: Uint8Array,
+  pcmByteLength: number,
   options: {
     sampleRate?: number;
     numChannels?: number;
     bitsPerSample?: number;
   } = {},
-): Uint8Array {
+): void {
   const sampleRate = options.sampleRate ?? 24000;
   const numChannels = options.numChannels ?? 1;
   const bitsPerSample = options.bitsPerSample ?? 16;
 
   const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
   const blockAlign = (numChannels * bitsPerSample) / 8;
-  const dataSize = pcmBytes.length;
-  const headerSize = 44;
-  const totalSize = headerSize + dataSize;
+  const dataSize = pcmByteLength;
 
-  const wavBuffer = new Uint8Array(totalSize);
-  const view = new DataView(wavBuffer.buffer);
+  const view = new DataView(target.buffer, target.byteOffset, 44);
 
   // 0-3: "RIFF"
-  wavBuffer[0] = 0x52; // R
-  wavBuffer[1] = 0x49; // I
-  wavBuffer[2] = 0x46; // F
-  wavBuffer[3] = 0x46; // F
+  target[0] = 0x52; // R
+  target[1] = 0x49; // I
+  target[2] = 0x46; // F
+  target[3] = 0x46; // F
 
   // 4-7: ChunkSize = 36 + dataSize
   view.setUint32(4, 36 + dataSize, true);
 
   // 8-11: "WAVE"
-  wavBuffer[8] = 0x57; // W
-  wavBuffer[9] = 0x41; // A
-  wavBuffer[10] = 0x56; // V
-  wavBuffer[11] = 0x45; // E
+  target[8] = 0x57; // W
+  target[9] = 0x41; // A
+  target[10] = 0x56; // V
+  target[11] = 0x45; // E
 
   // 12-15: "fmt "
-  wavBuffer[12] = 0x66; // f
-  wavBuffer[13] = 0x6d; // m
-  wavBuffer[14] = 0x74; // t
-  wavBuffer[15] = 0x20; // ' '
+  target[12] = 0x66; // f
+  target[13] = 0x6d; // m
+  target[14] = 0x74; // t
+  target[15] = 0x20; // ' '
 
   // 16-19: Subchunk1Size = 16 for PCM
   view.setUint32(16, 16, true);
@@ -620,15 +628,31 @@ export function pcmToWav(
   view.setUint16(34, bitsPerSample, true);
 
   // 36-39: "data"
-  wavBuffer[36] = 0x64; // d
-  wavBuffer[37] = 0x61; // a
-  wavBuffer[38] = 0x74; // t
-  wavBuffer[39] = 0x61; // a
+  target[36] = 0x64; // d
+  target[37] = 0x61; // a
+  target[38] = 0x74; // t
+  target[39] = 0x61; // a
 
   // 40-43: Subchunk2Size = dataSize
   view.setUint32(40, dataSize, true);
+}
 
-  // 44+: PCM raw bytes
+/**
+ * Wrap raw linear PCM audio into a standard 44-byte RIFF/WAVE header
+ */
+export function pcmToWav(
+  pcmBytes: Uint8Array,
+  options: {
+    sampleRate?: number;
+    numChannels?: number;
+    bitsPerSample?: number;
+  } = {},
+): Uint8Array {
+  const headerSize = 44;
+  const totalSize = headerSize + pcmBytes.length;
+
+  const wavBuffer = new Uint8Array(totalSize);
+  writeWavHeader(wavBuffer, pcmBytes.length, options);
   wavBuffer.set(pcmBytes, 44);
 
   return wavBuffer;
@@ -1465,7 +1489,10 @@ export function decodedFromWav(bytes: Uint8Array): DecodedAudioResult {
   };
 }
 
-function joinTtsAudio(chunks: DecodedAudioResult[], allowTruncated = false): DecodedAudioResult {
+export function joinTtsAudio(
+  chunks: DecodedAudioResult[],
+  allowTruncated = false,
+): DecodedAudioResult {
   if (chunks.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);
   if (chunks.length === 1) return chunks[0]!;
   const first = chunks[0]!;
@@ -1487,29 +1514,34 @@ function joinTtsAudio(chunks: DecodedAudioResult[], allowTruncated = false): Dec
     }
     return chunk.rawBytes.subarray(info.dataOffset, info.dataOffset + info.dataLength);
   });
-  const combined = new Uint8Array(pcm.reduce((total, bytes) => total + bytes.length, 0));
-  let offset = 0;
+  // audio-feed-sp38: allocate a single buffer for the WAV file (44-byte header + PCM)
+  // and construct rawBytes as a subarray at offset 44. This eliminates duplicate memory
+  // allocations and extra full-buffer copies during multi-segment audio stitching.
+  const totalPcmLength = pcm.reduce((total, bytes) => total + bytes.length, 0);
+  const wavBuffer = new Uint8Array(44 + totalPcmLength);
+  writeWavHeader(wavBuffer, totalPcmLength, {
+    sampleRate: first.sampleRate,
+    numChannels: first.channels,
+    bitsPerSample: first.bitsPerSample,
+  });
+  let offset = 44;
   for (const bytes of pcm) {
-    combined.set(bytes, offset);
+    wavBuffer.set(bytes, offset);
     offset += bytes.length;
   }
+  const rawBytes = wavBuffer.subarray(44);
   return {
-    rawBytes: combined,
+    rawBytes,
     mimeType: `audio/pcm;rate=${first.sampleRate}`,
     format: "pcm",
     sampleRate: first.sampleRate,
     channels: first.channels,
     bitsPerSample: first.bitsPerSample,
-    durationSeconds: combined.length /
+    durationSeconds: totalPcmLength /
       (first.sampleRate * first.channels * first.bitsPerSample / 8),
     finishReason: chunks.some((chunk) => chunk.truncated) ? "MAX_TOKENS" : "STOP",
     truncated: chunks.some((chunk) => chunk.truncated),
-    toWav: () =>
-      pcmToWav(combined, {
-        sampleRate: first.sampleRate,
-        numChannels: first.channels,
-        bitsPerSample: first.bitsPerSample,
-      }),
+    toWav: () => wavBuffer,
   };
 }
 

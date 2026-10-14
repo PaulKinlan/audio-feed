@@ -97,10 +97,17 @@ export function createSegmentsRepository(
         byteLength: audio.byteLength,
         finalized: true,
       };
+      // audio-feed-sp38: Durable progress resets attempts to 0 atomically with segment finalization,
+      // ensuring an isolate killed or lease expired on a later segment gets fresh attempts.
+      const updatedEpisode: Episode = {
+        ...episode,
+        attempts: 0,
+      };
       const committed = await core.kv.atomic()
         .check(episodeEntry)
         .check(segmentEntry)
         .set(segmentKey, finalized)
+        .set(episodeKey, updatedEpisode)
         .commit();
       return committed.ok;
     },

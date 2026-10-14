@@ -203,7 +203,7 @@ export interface SynthesisWorkerOptions {
   /**
    * Maximum duration in ms a single invocation may spend synthesizing before
    * checkpointing and yielding back to the queue (audio-feed-vqu4).
-   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (180_000ms), safely inside Deno Deploy's cron isolate lifetime.
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (90_000ms), safely inside Deno Deploy's cron isolate lifetime.
    */
   maxInvocationDurationMs?: number;
   /** Margin reserved for flushing checkpoints and yields in ms (audio-feed-9wqt, audio-feed-vvwb). */
@@ -2062,20 +2062,34 @@ async function runSynthesisBatchCore(
 
     for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
       try {
-        audio = await markStage("tts", () =>
-          synthesize({
-            article,
-            source,
-            episode: currentEpisode,
-            mode: currentEpisode.mode,
-            leaseMs: opts.leaseMs,
-            resume: segmentResume.resume,
-            invocationBudget: {
-              maxSegments: maxSegmentsPerInvocation,
-              maxDurationMs: maxInvocationDurationMs,
-              startTimeMonotonicMs: invocationStartMonotonicMs,
-            },
-          }), currentEpisode.id);
+        // audio-feed-sp38: Claim heartbeat while the TTS stage is awaited. Multi-segment synthesis
+        // runs long and can span multiple turns before completing; keep the claim lease alive so
+        // an active worker is not stolen or marked expired while actively synthesizing.
+        const stopTtsHeartbeat = startClaimHeartbeat(
+          metadata,
+          currentEpisode.userId,
+          currentEpisode.id,
+          opts.owner,
+          { leaseMs: opts.leaseMs },
+        );
+        try {
+          audio = await markStage("tts", () =>
+            synthesize({
+              article,
+              source,
+              episode: currentEpisode,
+              mode: currentEpisode.mode,
+              leaseMs: opts.leaseMs,
+              resume: segmentResume.resume,
+              invocationBudget: {
+                maxSegments: maxSegmentsPerInvocation,
+                maxDurationMs: maxInvocationDurationMs,
+                startTimeMonotonicMs: invocationStartMonotonicMs,
+              },
+            }), currentEpisode.id);
+        } finally {
+          stopTtsHeartbeat();
+        }
         break;
       } catch (error) {
         lastError = error;
@@ -2175,8 +2189,16 @@ async function runSynthesisBatchCore(
         isInvocationBudgetAbort(lastError) &&
         result.yielded.some((y) => y.episodeId === currentEpisode.id)
       ) {
-        // audio-feed-vqu4: clean yield to respect invocation budget.
-        // Check if whole batch time budget is spent before picking up another episode.
+        // audio-feed-vqu4, audio-feed-sp38: clean yield to respect invocation budget.
+        // A time-budget yield means this isolate has exhausted its safe execution window;
+        // do not claim the next episode in an isolate near its wall-clock limit.
+        // Only continue the batch loop if the yield was solely due to a per-episode segment cap.
+        const isSegmentCapYield = maxSegmentsPerInvocation !== undefined &&
+          lastError instanceof SynthesisYieldError &&
+          lastError.message.includes("segment limit");
+        if (!isSegmentCapYield) {
+          break;
+        }
         if (
           maxInvocationDurationMs &&
           performance.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
@@ -2219,7 +2241,9 @@ async function runSynthesisBatchCore(
       continue;
     }
 
+    const audioDurationSeconds = audio.durationSeconds;
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
+    audio = null; // Free decoded audio result structure and intermediate references (audio-feed-sp38)
 
     // audio-feed-aqms: the upload estimate must be honest about PAYLOAD SIZE. The flat
     // 5s floor is fine for a small blob and a lie for an episode WAV: a preflight bound
@@ -2244,8 +2268,13 @@ async function runSynthesisBatchCore(
     // identical regeneration gets a new immutable URL. Explicit revisions are
     // retained for tests that deliberately exercise repeated-key orphan handling;
     // segment-commit keys continue to use the per-attempt revision above.
+    const digestInput = bytes.buffer instanceof ArrayBuffer
+      ? (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? (bytes as unknown as BufferSource)
+        : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
+      : new Uint8Array(bytes);
     const audioDigest = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", new Uint8Array(bytes)),
+      await crypto.subtle.digest("SHA-256", digestInput),
     );
     const audioHash = Array.from(audioDigest, (byte) => byte.toString(16).padStart(2, "0")).join(
       "",
@@ -2393,11 +2422,34 @@ async function runSynthesisBatchCore(
             if (existing && existing.size === bytes.length) {
               const object = await blobs.get(stagingKey);
               if (object) {
-                const storedBytes = await collect(object.body);
-                if (
-                  storedBytes.length === bytes.length &&
-                  storedBytes.every((byte, i) => byte === bytes[i])
-                ) stored = existing;
+                // audio-feed-sp38: Stream-compare directly against bytes without allocating
+                // a duplicate 90MB array via collect(object.body) to prevent isolate OOM.
+                const reader = object.body.getReader();
+                let matched = true;
+                let offset = 0;
+                try {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (offset + value.length > bytes.length) {
+                      matched = false;
+                      break;
+                    }
+                    for (let i = 0; i < value.length; i++) {
+                      if (value[i] !== bytes[offset + i]) {
+                        matched = false;
+                        break;
+                      }
+                    }
+                    if (!matched) break;
+                    offset += value.length;
+                  }
+                } finally {
+                  reader.releaseLock();
+                }
+                if (matched && offset === bytes.length) {
+                  stored = existing;
+                }
               }
             }
           }, currentEpisode.id);
@@ -2455,7 +2507,7 @@ async function runSynthesisBatchCore(
               audioKey: stagingKey,
               byteLength,
               contentType: "audio/wav",
-              durationSeconds: audio.durationSeconds,
+              durationSeconds: audioDurationSeconds,
               readyAt: previousKey && currentEpisode.readyAt
                 ? currentEpisode.readyAt
                 : new Date().toISOString(),

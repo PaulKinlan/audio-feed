@@ -241,7 +241,7 @@ export function createEpisodesRepository(
       // Never claim "worker died" or "isolate killed" as fact when only lease expiry is known.
       const expiredPhase = found.phase ?? "claimed";
       const expiredHeartbeat = found.lastHeartbeat ?? found.claimedAt ?? "unknown";
-      const expiredAttempt = found.attempts ?? 1;
+      const expiredAttempt = Math.max(1, found.attempts ?? 1);
       const expiredProvenance = found.claimedAt
         ? `by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
         : "no claim details";
@@ -357,6 +357,13 @@ export function createEpisodesRepository(
       const previousPhase = current.phase;
       current.lastHeartbeat = update.now ?? new Date().toISOString();
       if (update.phase) current.phase = update.phase;
+      if (
+        update.scriptTurns &&
+        update.scriptTurns.length > 0 &&
+        (!current.scriptTurns || current.scriptTurns.length === 0)
+      ) {
+        current.attempts = 0;
+      }
       if (update.scriptTurns) current.scriptTurns = update.scriptTurns;
       if (update.phase && update.phase !== previousPhase) {
         return host()

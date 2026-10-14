@@ -397,7 +397,7 @@ export function createEpisodesRepository(
       // Never claim "worker died" or "isolate killed" as fact when only lease expiry is known.
       const expiredPhase = found.phase ?? "claimed";
       const expiredHeartbeat = found.lastHeartbeat ?? found.claimedAt ?? "unknown";
-      const expiredAttempt = found.attempts ?? 1;
+      const expiredAttempt = Math.max(1, found.attempts ?? 1);
       const expiredProvenance = found.claimedAt
         ? `by ${found.claimedBy ?? "unknown"} at ${found.claimedAt}`
         : "no claim details";
@@ -516,11 +516,15 @@ export function createEpisodesRepository(
       if (!current || current.status !== "synthesizing" || current.claimedBy !== owner) {
         return false;
       }
+      const madeScriptProgress = update.scriptTurns &&
+        update.scriptTurns.length > 0 &&
+        (!current.scriptTurns || current.scriptTurns.length === 0);
       const updated: Episode = {
         ...current,
         lastHeartbeat: update.now ?? new Date().toISOString(),
         phase: update.phase ?? current.phase,
         scriptTurns: update.scriptTurns ?? current.scriptTurns,
+        ...(madeScriptProgress ? { attempts: 0 } : {}),
       };
       const wrote = await atomicPutEpisode(core, updated, entry);
       if (wrote && update.phase && update.phase !== current.phase) {

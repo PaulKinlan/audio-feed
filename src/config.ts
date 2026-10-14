@@ -48,8 +48,8 @@ export const DEFAULT_DAILY_EPISODE_BUDGET = 50;
  * nobody is watching. Set GLOBAL_DAILY_EPISODE_BUDGET for the real number.
  */
 export const DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET = 500;
-/** Default maximum execution duration per synthesis invocation before yielding (audio-feed-vqu4, audio-feed-9lrl). */
-export const DEFAULT_MAX_INVOCATION_DURATION_MS = 180_000;
+/** Default maximum execution duration per synthesis invocation before yielding (audio-feed-vqu4, audio-feed-9lrl, audio-feed-sp38). */
+export const DEFAULT_MAX_INVOCATION_DURATION_MS = 90_000;
 /** Default maximum terminal-upload retry count before failing terminally (audio-feed-lqd6). */
 export const DEFAULT_MAX_UPLOAD_RETRIES = 3;
 
@@ -163,8 +163,8 @@ export interface AppConfig {
   maxSegmentsPerInvocation?: number;
   /**
    * Maximum duration in ms a single invocation may spend synthesizing before
-   * checkpointing and yielding back to the queue (audio-feed-vqu4).
-   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (180_000ms).
+   * checkpointing and yielding back to the queue (audio-feed-vqu4, audio-feed-sp38).
+   * Defaults to DEFAULT_MAX_INVOCATION_DURATION_MS (90_000ms).
    */
   maxInvocationDurationMs?: number;
   /**

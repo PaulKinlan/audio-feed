@@ -72,6 +72,9 @@ export function createSegmentsRepository(
         byteLength: audio.byteLength,
         finalized: true,
       });
+      // audio-feed-sp38: Durable progress resets attempts to 0 on segment finalization,
+      // ensuring an isolate killed or lease expired on a later segment gets fresh attempts.
+      episode.attempts = 0;
       return Promise.resolve(true);
     },
     listSynthesisSegments(userId: string, episodeId: string): Promise<SynthesisSegmentRecord[]> {

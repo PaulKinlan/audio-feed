@@ -29,10 +29,12 @@ import {
   formatNarrationPrompt,
   GeminiTtsClient,
   GeminiTtsError,
+  joinTtsAudio,
   MAX_TTS_INPUT_BYTES,
   MAX_TTS_SEGMENTS,
   parseWavHeader,
   pcmToWav,
+  writeWavHeader,
 } from "../src/tts/gemini.ts";
 import {
   ESTIMATED_TTS_TURN_DURATION_MS,
@@ -1128,5 +1130,279 @@ Deno.test(
     const epFinal = await stores.metadata.getEpisode("user-1", "episode-1");
     assertEquals(epFinal?.status, "ready");
     assertEquals(epFinal?.phase, "ready");
+  },
+);
+
+Deno.test(
+  "audio-feed-sp38: multi-segment progress across expired leases resets attempts=0 and succeeds without premature abandonment, while consecutive zero-progress expirations abandon",
+  async () => {
+    const { stores } = await queued();
+
+    let clockMs = Date.parse("2026-10-14T12:00:00.000Z");
+    const leaseMs = 10_000;
+    const maxClaims = 3;
+
+    // Simulate 4 successive claims (workers) for 4 segments where each worker
+    // finalizes a segment and then dies abruptly (isolate kill / OOM) leaving the claim
+    // uncompleted until lease expiry.
+    for (let segmentIndex = 1; segmentIndex <= 4; segmentIndex++) {
+      const owner = `worker-${segmentIndex}`;
+      const claimed = await stores.metadata.claimEpisode("user-1", "episode-1", {
+        owner,
+        now: new Date(clockMs).toISOString(),
+        leaseMs,
+        maxClaims,
+      });
+      assert(claimed, `worker-${segmentIndex} must successfully claim the episode`);
+      assertEquals(
+        claimed.attempts,
+        1,
+        `claim attempts must be 1 on segment ${segmentIndex} because prior progress reset attempts to 0`,
+      );
+
+      // Reserve and finalize segment
+      const text = SEGMENTS[segmentIndex - 1]!;
+      const textHash = await segmentTextHash(text);
+      const slot = { textHash, promptVersion: "v1", voice: "Charon" };
+      await stores.metadata.reserveSynthesisSegment(
+        "user-1",
+        "episode-1",
+        {
+          textHash,
+          text,
+          promptVersion: "v1",
+          voice: "Charon",
+          audioKey: `seg-${segmentIndex}.wav`,
+          byteLength: 100,
+          owner,
+          claimAt: new Date(clockMs).toISOString(),
+          createdAt: new Date(clockMs).toISOString(),
+          finalized: false,
+        },
+        clockMs,
+        leaseMs,
+      );
+
+      const finalized = await stores.metadata.finalizeSynthesisSegment(
+        "user-1",
+        "episode-1",
+        slot,
+        { audioKey: `seg-${segmentIndex}.wav`, byteLength: 100 },
+        owner,
+        clockMs,
+        leaseMs,
+      );
+      assert(finalized, `segment ${segmentIndex} must finalize`);
+
+      const epAfterFinalize = await stores.metadata.getEpisode("user-1", "episode-1");
+      assertEquals(
+        epAfterFinalize?.attempts,
+        0,
+        `segment ${segmentIndex} finalization must reset attempts to 0`,
+      );
+
+      // Worker dies abruptly: NO terminal write occurs, claim stays in status "synthesizing".
+      // Advance clock past leaseMs so the lease expires before the next claim.
+      clockMs += leaseMs + 1000;
+    }
+
+    // Now final worker-5 claims and completes the episode cleanly to ready
+    const finalWorker = await stores.metadata.claimEpisode("user-1", "episode-1", {
+      owner: "worker-5",
+      now: new Date(clockMs).toISOString(),
+      leaseMs,
+      maxClaims,
+    });
+    assert(finalWorker, "worker-5 must successfully claim the episode");
+    assertEquals(finalWorker.attempts, 1);
+
+    const completed = await stores.metadata.completeEpisode(
+      {
+        ...finalWorker,
+        status: "ready",
+        audioKey: "final.wav",
+        byteLength: 400,
+        contentType: "audio/wav",
+        phase: "ready",
+      },
+      "worker-5",
+      {
+        byteLength: 400,
+      },
+    );
+    assert(completed, "episode must complete to ready");
+
+    const epFinal = await stores.metadata.getEpisode("user-1", "episode-1");
+    assertEquals(epFinal?.status, "ready");
+
+    // PART 2: Zero durable progress across 3 consecutive expired leases MUST abandon.
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "episode-poison",
+        userId: "user-1",
+        sourceId: "inbox",
+        articleId: "article-1",
+        status: "pending",
+        mode: "direct",
+      }),
+    );
+
+    // Attempt 1: worker-p1 claims, makes zero progress, dies
+    const p1 = await stores.metadata.claimEpisode("user-1", "episode-poison", {
+      owner: "poison-1",
+      now: new Date(clockMs).toISOString(),
+      leaseMs,
+      maxClaims,
+    });
+    assert(p1);
+    assertEquals(p1.attempts, 1);
+
+    // Attempt 2: lease expires, worker-p2 claims, makes zero progress, dies
+    clockMs += leaseMs + 1000;
+    const p2 = await stores.metadata.claimEpisode("user-1", "episode-poison", {
+      owner: "poison-2",
+      now: new Date(clockMs).toISOString(),
+      leaseMs,
+      maxClaims,
+    });
+    assert(p2);
+    assertEquals(p2.attempts, 2);
+
+    // Attempt 3: lease expires, worker-p3 claims, makes zero progress, dies
+    clockMs += leaseMs + 1000;
+    const p3 = await stores.metadata.claimEpisode("user-1", "episode-poison", {
+      owner: "poison-3",
+      now: new Date(clockMs).toISOString(),
+      leaseMs,
+      maxClaims,
+    });
+    assert(p3);
+    assertEquals(p3.attempts, 3);
+
+    // Attempt 4: lease expires. attempts > maxClaims (3) -> claimEpisode abandons!
+    clockMs += leaseMs + 1000;
+    const p4 = await stores.metadata.claimEpisode("user-1", "episode-poison", {
+      owner: "poison-4",
+      now: new Date(clockMs).toISOString(),
+      leaseMs,
+      maxClaims,
+    });
+    assertEquals(p4, null, "claim 4 must return null because episode was abandoned");
+
+    const epPoison = await stores.metadata.getEpisode("user-1", "episode-poison");
+    assertEquals(epPoison?.status, "failed");
+    assertStringIncludes(
+      epPoison?.error ?? "",
+      "abandoned after 3 attempts; reason: claim lease expired without terminal write",
+    );
+  },
+);
+
+Deno.test(
+  "audio-feed-sp38: joinTtsAudio shares underlying ArrayBuffer between rawBytes and toWav without duplicate memory allocation",
+  () => {
+    const chunk1Pcm = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const chunk2Pcm = new Uint8Array([9, 10, 11, 12, 13, 14, 15, 16]);
+    const chunk1 = decodedFromWav(
+      pcmToWav(chunk1Pcm, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 }),
+    );
+    const chunk2 = decodedFromWav(
+      pcmToWav(chunk2Pcm, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 }),
+    );
+
+    const joined = joinTtsAudio([chunk1, chunk2]);
+    assertEquals(joined.rawBytes.length, 16);
+    assertEquals(Array.from(joined.rawBytes), [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+    ]);
+
+    const wav = joined.toWav();
+    assertEquals(wav.length, 44 + 16);
+
+    // Verify zero-copy buffer sharing: rawBytes and wav share the exact same ArrayBuffer!
+    assertEquals(joined.rawBytes.buffer, wav.buffer);
+    assertEquals(joined.rawBytes.byteOffset, 44);
+    assertEquals(wav.byteOffset, 0);
+
+    // Verify WAV header validity
+    const header = parseWavHeader(wav);
+    assertEquals(header.audioFormat, 1);
+    assertEquals(header.channels, 1);
+    assertEquals(header.sampleRate, 24000);
+    assertEquals(header.dataLength, 16);
+    assertEquals(header.dataOffset, 44);
+
+    // Verify writeWavHeader independently
+    const customWav = new Uint8Array(44 + 8);
+    writeWavHeader(customWav, 8, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+    const customHeader = parseWavHeader(customWav);
+    assertEquals(customHeader.dataLength, 8);
+  },
+);
+
+Deno.test(
+  "audio-feed-sp38: batch loop breaks immediately upon time-based budget yield and does not claim subsequent episode in an exhausted isolate",
+  async () => {
+    const { ctx, stores } = await queued();
+
+    // Create a second episode in pending
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "episode-2",
+        userId: "user-1",
+        sourceId: "inbox",
+        articleId: "article-1",
+        status: "pending",
+        mode: "direct",
+      }),
+    );
+
+    // Synthesizer that yields due to time budget on episode-1
+    const synth: Synthesizer = ({ episode }) => {
+      if (episode.id === "episode-1") {
+        throw new SynthesisYieldError(
+          1,
+          4,
+          "Synthesis yielded before paid turn 2: remaining budget 20000ms < required 50000ms",
+        );
+      }
+      return Promise.resolve(stitch([segmentWav("chunk")]));
+    };
+
+    // Run batch with maxInvocationDurationMs
+    const batchResult = await runSynthesisBatch(ctx, synth, {
+      owner: "batch-worker-1",
+      maxClaims: 3,
+      maxInvocationDurationMs: 90_000,
+      estimatedTurnDurationMs: 10,
+      flushMarginMs: 5,
+    });
+
+    assertEquals(batchResult.yielded.length, 1);
+    assertEquals(batchResult.yielded[0]?.episodeId, "episode-1");
+
+    // Episode 2 must NOT have been claimed or processed in the same batch invocation
+    const ep2 = await stores.metadata.getEpisode("user-1", "episode-2");
+    assertEquals(
+      ep2?.status,
+      "pending",
+      "episode-2 must remain pending; batch loop must not claim it",
+    );
+    assertEquals(ep2?.claimedBy, undefined);
   },
 );
