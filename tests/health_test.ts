@@ -123,19 +123,34 @@ Deno.test("1552: a deployment id set in the environment reaches the route", asyn
   }
 });
 
-Deno.test("ciia: /health exposes commit when set in env and degrades cleanly to null when unset", async () => {
-  const prevDeploy = Deno.env.get("DENO_DEPLOYMENT_ID");
-  const prevCommit = Deno.env.get("GIT_COMMIT_SHA");
+Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanly to null when unset", async () => {
+  const envVars = [
+    "DENO_DEPLOYMENT_ID",
+    "GIT_COMMIT_SHA",
+    "GIT_COMMIT",
+    "DENO_DEPLOY_GIT_COMMIT",
+    "COMMIT_SHA",
+  ] as const;
+  const previous = new Map<string, string | undefined>();
+  for (const name of envVars) {
+    previous.set(name, Deno.env.get(name));
+  }
+
+  const clearAll = () => {
+    for (const name of envVars) {
+      Deno.env.delete(name);
+    }
+  };
 
   try {
-    // 1. When unset, commit degrades cleanly to null
-    Deno.env.delete("DENO_DEPLOYMENT_ID");
-    Deno.env.delete("GIT_COMMIT_SHA");
+    // 1. When unset, commit degrades cleanly to null (audio-feed-nqhg: all alias vars isolated)
+    clearAll();
     const body1 = await (await appFetch()(get("/health"))).json();
     assertEquals(body1.commit, null);
     assertEquals(body1.deploy, "dev");
 
     // 2. When GIT_COMMIT_SHA is set alone, commit is exposed and deploySource is GIT_COMMIT_SHA
+    clearAll();
     Deno.env.set("GIT_COMMIT_SHA", "commit-sha-ciia-1");
     const body2 = await (await appFetch()(get("/health"))).json();
     assertEquals(body2.commit, "commit-sha-ciia-1");
@@ -143,7 +158,9 @@ Deno.test("ciia: /health exposes commit when set in env and degrades cleanly to 
     assertEquals(body2.deploySource, "GIT_COMMIT_SHA");
 
     // 3. When both DENO_DEPLOYMENT_ID and GIT_COMMIT_SHA are set, both are visible
+    clearAll();
     Deno.env.set("DENO_DEPLOYMENT_ID", "deploy-id-ciia-2");
+    Deno.env.set("GIT_COMMIT_SHA", "commit-sha-ciia-1");
     const body3 = await (await appFetch()(get("/health"))).json();
     assertEquals(body3.commit, "commit-sha-ciia-1");
     assertEquals(body3.deploy, "deploy-id-ciia-2");
@@ -158,10 +175,10 @@ Deno.test("ciia: /health exposes commit when set in env and degrades cleanly to 
     assertEquals(body4.deploy, "commit-alias-ciia-4");
     assertEquals(body4.deploySource, "GIT_COMMIT");
   } finally {
-    if (prevDeploy === undefined) Deno.env.delete("DENO_DEPLOYMENT_ID");
-    else Deno.env.set("DENO_DEPLOYMENT_ID", prevDeploy);
-    if (prevCommit === undefined) Deno.env.delete("GIT_COMMIT_SHA");
-    else Deno.env.set("GIT_COMMIT_SHA", prevCommit);
-    Deno.env.delete("GIT_COMMIT");
+    for (const name of envVars) {
+      const val = previous.get(name);
+      if (val === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, val);
+    }
   }
 });
