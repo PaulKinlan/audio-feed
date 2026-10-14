@@ -51,21 +51,21 @@ Deno.test("1552: the fingerprint prefers DENO_DEPLOYMENT_ID, then GIT_COMMIT_SHA
   );
 });
 
-Deno.test("ciia: deployFingerprint supports alias commit env vars and preserves commit when deploy is present", () => {
+Deno.test("ciia/34bo: deployFingerprint supports alias commit env vars, reports exact variable name, and preserves commit when deploy is present", () => {
   const from = (values: Record<string, string | undefined>) => (name: string) => values[name];
 
-  // Aliases for commit variable
+  // Aliases for commit variable: audio-feed-34bo pins exact alias variable name in source
   assertEquals(
     deployFingerprint(from({ GIT_COMMIT: "sha-alias-1" })),
-    { id: "sha-alias-1", source: "GIT_COMMIT_SHA", commit: "sha-alias-1" },
+    { id: "sha-alias-1", source: "GIT_COMMIT", commit: "sha-alias-1" },
   );
   assertEquals(
     deployFingerprint(from({ DENO_DEPLOY_GIT_COMMIT: "sha-alias-2" })),
-    { id: "sha-alias-2", source: "GIT_COMMIT_SHA", commit: "sha-alias-2" },
+    { id: "sha-alias-2", source: "DENO_DEPLOY_GIT_COMMIT", commit: "sha-alias-2" },
   );
   assertEquals(
     deployFingerprint(from({ COMMIT_SHA: "sha-alias-3" })),
-    { id: "sha-alias-3", source: "GIT_COMMIT_SHA", commit: "sha-alias-3" },
+    { id: "sha-alias-3", source: "COMMIT_SHA", commit: "sha-alias-3" },
   );
 
   // Both deploy ID and commit are retained (commit is NOT masked)
@@ -94,7 +94,14 @@ Deno.test("1552: /health carries deploy + deploySource alongside the existing fi
   // The fingerprint is present, non-empty, and consistent with what this process can see.
   assert(typeof body.deploy === "string" && body.deploy.length > 0, "deploy is a non-empty string");
   assert(
-    ["DENO_DEPLOYMENT_ID", "GIT_COMMIT_SHA", "dev"].includes(body.deploySource),
+    [
+      "DENO_DEPLOYMENT_ID",
+      "GIT_COMMIT_SHA",
+      "GIT_COMMIT",
+      "DENO_DEPLOY_GIT_COMMIT",
+      "COMMIT_SHA",
+      "dev",
+    ].includes(body.deploySource),
     `deploySource names a known source (got ${body.deploySource})`,
   );
   assertEquals(body.deploy, deployFingerprint().id);
@@ -141,10 +148,20 @@ Deno.test("ciia: /health exposes commit when set in env and degrades cleanly to 
     assertEquals(body3.commit, "commit-sha-ciia-1");
     assertEquals(body3.deploy, "deploy-id-ciia-2");
     assertEquals(body3.deploySource, "DENO_DEPLOYMENT_ID");
+
+    // 4. audio-feed-34bo: When an alias like GIT_COMMIT is set, deploySource reports the exact alias name
+    Deno.env.delete("DENO_DEPLOYMENT_ID");
+    Deno.env.delete("GIT_COMMIT_SHA");
+    Deno.env.set("GIT_COMMIT", "commit-alias-ciia-4");
+    const body4 = await (await appFetch()(get("/health"))).json();
+    assertEquals(body4.commit, "commit-alias-ciia-4");
+    assertEquals(body4.deploy, "commit-alias-ciia-4");
+    assertEquals(body4.deploySource, "GIT_COMMIT");
   } finally {
     if (prevDeploy === undefined) Deno.env.delete("DENO_DEPLOYMENT_ID");
     else Deno.env.set("DENO_DEPLOYMENT_ID", prevDeploy);
     if (prevCommit === undefined) Deno.env.delete("GIT_COMMIT_SHA");
     else Deno.env.set("GIT_COMMIT_SHA", prevCommit);
+    Deno.env.delete("GIT_COMMIT");
   }
 });
