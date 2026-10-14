@@ -1,5 +1,5 @@
 /**
- * The terminal upload's ENTRY record (audio-feed-n18n).
+ * The terminal upload's ENTRY record (audio-feed-amhn).
  *
  * WHY THIS FILE EXISTS. `markStage` records a stage on the way OUT, so a stage KILLED mid-flight
  * leaves no mark, which is the same shape as a stage that was never reached. That is what made the
@@ -63,13 +63,13 @@ async function seedEpisode(id: string) {
 
 type LogRecord = Awaited<ReturnType<Stores["metadata"]["listLogs"]>>[number];
 
-Deno.test("n18n: the terminal upload records its ENTRY, with the bytes attempted, BEFORE the put completes", async () => {
-  const id = "ep-n18n-entry";
+Deno.test("amhn: the terminal upload records its ENTRY, with the bytes attempted, BEFORE the put completes", async () => {
+  const id = "ep-amhn-entry";
   const { ctx, stores } = await seedEpisode(id);
   const audio = fakeAudio();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
     batchSize: 1,
-    owner: "n18n-entry",
+    owner: "amhn-entry",
     maxAttempts: 1,
   });
   assertEquals(run.ready.length, 1, "the seeded episode must actually have been synthesized");
@@ -123,18 +123,83 @@ Deno.test("n18n: the terminal upload records its ENTRY, with the bytes attempted
   );
 });
 
-Deno.test("n18n: an invocation that never reaches the terminal put writes no entry record (control)", async () => {
+Deno.test("amhn: the entry record is durable WHILE the PUT is in flight, not merely ordered before its mark", async () => {
+  // REVIEW FINDING 3, AND IT IS THE ROW THAT PINS THE ACTUAL PROPERTY. Asserting `entry.seq <
+  // completion.seq` would still pass if the record were written after a SUCCESSFUL put but before its
+  // stage mark - so it pins an ordering, not the claim. This holds the blob put UNRESOLVED and reads the
+  // store while the transfer is in flight: the record must already be there, which is the only shape that
+  // survives a kill, because a kill gives the code no chance to write anything afterwards.
+  const id = "ep-amhn-inflight";
+  const { ctx, stores } = await seedEpisode(id);
+  const audio = fakeAudio();
+  const origPut = stores.blobs.put.bind(stores.blobs);
+  let entered = false;
+  let markEntered!: () => void;
+  let release!: () => void;
+  const enteredSignal = new Promise<void>((resolve) => {
+    markEntered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  stores.blobs.put = async (key, data, opts) => {
+    entered = true;
+    markEntered();
+    await held;
+    return await origPut(key, data, opts);
+  };
+
+  const run = runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    batchSize: 1,
+    owner: "amhn-inflight",
+    maxAttempts: 1,
+  });
+  try {
+    // Bounded, and it RESOLVES on timeout instead of rejecting so a regression fails an assertion rather
+    // than hanging the suite.
+    await Promise.race([
+      enteredSignal,
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    assert(entered, "the terminal put must be entered by this point");
+
+    const during = await stores.metadata.listLogs();
+    const entries = during.filter((log) => log.type === "synthesis.upload");
+    assertEquals(
+      entries.length,
+      1,
+      "the entering record must ALREADY be durable while the put is still in flight",
+    );
+    const attempted = entries[0]?.context?.bytesAttempted;
+    assert(
+      typeof attempted === "number" && attempted > 0,
+      "and it must already carry the bytes attempted, which is the fact a kill would otherwise lose",
+    );
+    assertEquals(
+      during.filter((log) => log.type === "synthesis.stage" && log.phase === "upload").length,
+      0,
+      "no completion mark can exist yet: the put has not returned",
+    );
+  } finally {
+    release();
+  }
+
+  const result = await run;
+  assertEquals(result.ready.length, 1, "the episode must still complete once the put is released");
+});
+
+Deno.test("amhn: an invocation that never reaches the terminal put writes no entry record (control)", async () => {
   // THE CONTROL, AND IT IS THE HALF THAT MAKES THE ROW ABOVE MEAN SOMETHING. If the entry record were
   // written per invocation rather than at the put, the row above would pass while the record stopped
   // locating anything - it would be present for failures that never reached the upload at all.
-  const id = "ep-n18n-no-put";
+  const id = "ep-amhn-no-put";
   const { ctx, stores } = await seedEpisode(id);
   await runSynthesisBatch(
     ctx,
     () => {
       throw new Error("provider stalled inside the TTS stage");
     },
-    { batchSize: 1, owner: "n18n-no-put", maxAttempts: 1 },
+    { batchSize: 1, owner: "amhn-no-put", maxAttempts: 1 },
   );
 
   const logs = await stores.metadata.listLogs();

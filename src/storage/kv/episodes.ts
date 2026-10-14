@@ -508,6 +508,7 @@ export function createEpisodesRepository(
         phase?: string;
         now?: string;
         scriptTurns?: Array<{ speaker: string; text: string }>;
+        bytesAttempted?: number;
       },
     ): Promise<boolean> {
       const key: Deno.KvKey = ["episode", userId, episodeId];
@@ -524,6 +525,7 @@ export function createEpisodesRepository(
         lastHeartbeat: update.now ?? new Date().toISOString(),
         phase: update.phase ?? current.phase,
         scriptTurns: update.scriptTurns ?? current.scriptTurns,
+        bytesAttempted: update.bytesAttempted ?? current.bytesAttempted,
         ...(madeScriptProgress ? { attempts: 0 } : {}),
       };
       const wrote = await atomicPutEpisode(core, updated, entry);

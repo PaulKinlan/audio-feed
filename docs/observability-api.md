@@ -166,7 +166,7 @@ names the **episode**; group failed stages by `(episodeId, phase)` with `severit
 includes errors). Use `severity=all` to include successful `info` stage marks. Stage marks may be
 capped by the producer, so missing marks do not prove a stage never ran.
 
-**The one absence that IS evidence: `synthesis.upload` (`audio-feed-n18n`).** A stage mark is
+**The one absence that IS evidence: `synthesis.upload` (`audio-feed-amhn`).** A stage mark is
 written on the way _out_, so a terminal upload PUT that is killed mid-flight leaves no stage mark at
 all — and that absence cannot be told apart from "the stage was never reached". On 2026-10-14 the
 store held one `upload` mark while twelve episodes were killed inside the put. The producer
@@ -174,9 +174,26 @@ therefore writes `type: "synthesis.upload"`, `phase: "entering"`, **before** it 
 carrying `durationMs: null` and `context.bytesAttempted` (the payload size being attempted — the
 size of a FAILED upload is recorded nowhere else, because `byteLength` is written only on
 completion) plus `context.uploadRetry`. This record is not subject to the stage-mark cap: there is
-at most one per terminal upload attempt. So an episode with a `synthesis.upload` record and no
-matching `synthesis.stage` with `phase: "upload"` is a put that was **entered and never returned** —
-which is the read that locates a platform kill on the first pass.
+at most one per terminal upload attempt.
+
+**An entering record with no completion mark is a kill only when all three of these hold together**,
+because the absence of a completion mark is not on its own proof — stage marks are capped, so a
+completion mark can be suppressed even when the put succeeded, and the invocation deadline can
+expire between the entering record and the put:
+
+1. a `synthesis.upload` record with `phase: "entering"` for the episode, and
+2. no `synthesis.stage` record with `phase: "upload"` for the same `correlationId`, and no `capped`
+   event naming `upload` (which would make that absence a suppression rather than a death), and
+3. **no `synthesis.invocation` terminal record for that same `correlationId`.**
+
+Fact 3 is what separates a kill from a cancellation: an invocation that was cancelled or threw
+closes its own terminal record, while an isolate that stopped existing leaves its start unpaired
+(production pairs 864 of 889 starts). An entering record whose invocation DID close is a cancelled
+or failed attempt, not a killed transfer — so `synthesis.upload` must never be read as "bytes were
+sent" on its own. Taken together, the three facts locate a platform kill on the first pass without
+reconstructing it from a silence, which is the read that cost a night on 2026-10-14. The episode
+record carries the same size for the abandonment path: see `bytesAttempted` in `Episode` and in the
+`claim.lifecycle` `context`, written as the worker enters the terminal stage (`audio-feed-amhn`).
 
 The existing `context` field remains available but is not a uniform join schema: it can contain
 nested, source-specific data including CSP reports from a public endpoint. The store caps and

@@ -458,6 +458,11 @@ export async function checkpointEpisodeClaim(
     phase: string;
     now?: string;
     scriptTurns?: Array<{ speaker: string; text: string }>;
+    /**
+     * Size of the terminal artefact this checkpoint is about to upload (audio-feed-amhn). Passed
+     * straight through to the store; see `Episode.bytesAttempted`.
+     */
+    bytesAttempted?: number;
   },
 ): Promise<void> {
   let ok: boolean;
@@ -1390,7 +1395,7 @@ export type StageMarker = <T>(
 ) => Promise<T>;
 
 /**
- * Records that the terminal upload PUT is about to be ENTERED (audio-feed-n18n).
+ * Records that the terminal upload PUT is about to be ENTERED (audio-feed-amhn).
  *
  * A MARKER IN THE OPPOSITE DIRECTION TO `StageMarker`: that one reports a stage on the way OUT, this
  * one reports the attempt on the way IN, so a put that is KILLED between the two is visible instead
@@ -1472,7 +1477,7 @@ export async function runSynthesisBatch(
   const suppressedStages: Partial<Record<SynthesisStage, number>> = {};
   const suppressedFailedStages: Partial<Record<SynthesisStage, number>> = {};
   /**
-   * The durable "the terminal upload PUT is being entered" record (audio-feed-n18n).
+   * The durable "the terminal upload PUT is being entered" record (audio-feed-amhn).
    *
    * WHAT IT FIXES, FROM A MEASURED OUTAGE. On 2026-10-14 production showed 13 `synthesis.stage tts`
    * marks, 13 `verify` marks and ONE `upload` mark while twelve episodes were being killed inside the
@@ -2475,6 +2480,10 @@ async function runSynthesisBatchCore(
             opts.owner,
             {
               phase: "uploading_audio",
+              // audio-feed-amhn: the size about to be uploaded, durably recorded ON ENTRY so an
+              // attempt killed inside the put is diagnosable from the store alone. Read back by
+              // claimLifecycleEvent and carried on the abandonment record.
+              bytesAttempted: bytes.length,
             },
           );
           if (signal?.aborted) {
@@ -2556,13 +2565,23 @@ async function runSynthesisBatchCore(
             // closes its socket; if it committed anyway, the stable key survives
             // for a later invocation to verify and settle.
             inFlightUploadKeys.add(inFlightStagingKey);
-            // audio-feed-n18n: the durable "we are about to PUT" record, written BEFORE the await.
+            // audio-feed-amhn: the durable "we are about to PUT" record, written BEFORE the await.
             // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
             // size being attempted, rather than only the absence of a completion mark.
             await recordUploadEntered(currentEpisode.id, {
               bytesAttempted: bytes.length,
               uploadRetry: nextUploadRetry,
             });
+            // NOTE FOR A LATER READER (audio-feed-amhn, round-1 review finding 2). The invocation deadline
+            // can expire WHILE the record above is being written, because that write is an await. So the
+            // record is a claim that the terminal stage was ENTERED, not that bytes moved, and the read
+            // that separates those two is the JOINT signature in docs/observability-api.md: an entering
+            // record with no upload completion and no `synthesis.invocation` terminal for the same
+            // correlationId is a killed transfer, while one whose invocation DID close is a cancellation
+            // or a failure. What is deliberately NOT here is an abort check that skips the PUT outright:
+            // that DECIDES something, and it is filed as its own small change (audio-feed-wnv8) rather
+            // than smuggled into an observability one. The doomed request it would avoid is already
+            // aborted by its own signal - see src/storage/s3.ts:72-75 and tests/s3_abort_socket_test.ts.
             const putPromise = markStage("upload", () =>
               blobs.put(stagingKey, bytes, {
                 contentType: "audio/wav",

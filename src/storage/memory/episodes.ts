@@ -347,6 +347,7 @@ export function createEpisodesRepository(
         phase?: string;
         now?: string;
         scriptTurns?: Array<{ speaker: string; text: string }>;
+        bytesAttempted?: number;
       },
     ): Promise<boolean> {
       const key = scoped(userId, episodeId);
@@ -365,6 +366,8 @@ export function createEpisodesRepository(
         current.attempts = 0;
       }
       if (update.scriptTurns) current.scriptTurns = update.scriptTurns;
+      // audio-feed-amhn: keep the terminal artefact's size on the record so a killed upload leaves it.
+      if (update.bytesAttempted !== undefined) current.bytesAttempted = update.bytesAttempted;
       if (update.phase && update.phase !== previousPhase) {
         return host()
           .appendLog(

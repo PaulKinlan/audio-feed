@@ -106,6 +106,121 @@ for (const adapter of adapters) {
     }
   });
 
+  Deno.test(`amhn ${adapter.name}: the EXPIRY-without-terminal-write record carries them too`, async () => {
+    // THE OTHER TERMINAL SHAPE, AND IT IS NOT REDUNDANT: tonight's store had BOTH - episodes abandoned
+    // because the claim ceiling was exhausted (the row above) and episodes that expired with no terminal
+    // write while attempts remained (this row, severity warn, context.claimOutcome "expired"). A size
+    // carried on only one of them would leave half the outage undiagnosable, so both are asserted, on
+    // both storage twins.
+    const store = await adapter.create();
+    try {
+      const episode = await seed(store);
+      // maxClaims 3 in `claim`: the first reclaim EXPIRES the lease and grants another attempt, rather
+      // than exhausting the ceiling, which is what makes this the non-final shape.
+      assert(await store.claimEpisode(episode.userId, episode.id, claim));
+      assert(
+        await store.touchEpisodeClaim(episode.userId, episode.id, claim.owner, {
+          now: START,
+          phase: "uploading_audio",
+          bytesAttempted: 9_437_184,
+        }),
+      );
+      assert(
+        await store.claimEpisode(episode.userId, episode.id, {
+          ...claim,
+          owner: "worker-next",
+          now: RECLAIM,
+        }),
+        "a reclaim under maxClaims must grant a new claim",
+      );
+
+      const expired = (await store.listLogs()).find((log) =>
+        log.type === "claim.lifecycle" && log.context?.claimOutcome === "expired"
+      );
+      assert(expired, "the expiry must leave a record");
+      assertEquals(expired.phase, "uploading_audio", "the expiry must name the stage it died in");
+      assertEquals(
+        expired.severity,
+        "warn",
+        "a reclaimable expiry is a warning, not the terminal error the abandonment writes",
+      );
+      assertEquals(
+        expired.context?.bytesAttempted,
+        9_437_184,
+        "the expiry-without-terminal-write record must carry the bytes attempted, like the abandonment",
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
+  Deno.test(`amhn ${adapter.name}: an abandoned upload names the stage it died in AND the bytes attempted`, async () => {
+    // THE ACCEPTANCE TEST FOR audio-feed-amhn, DELIBERATELY AN OBSERVABILITY TEST RATHER THAN A
+    // BEHAVIOUR TEST. A platform kill inside the terminal put is the case where the worker cannot write
+    // its own failure record at all - the isolate stops existing - so the only witness is the store, and
+    // what has to be recoverable from the store ALONE is (i) WHERE it died and (ii) the SIZE it was
+    // attempting. (ii) is the fact no other record can supply: `byteLength` is written only when an
+    // episode reaches ready, which is exactly why every failed upload on 2026-10-14 had no size.
+    //
+    // Run against BOTH adapters on purpose: the field crosses a storage twin (KV and memory), and a
+    // change that lands in one and not the other is the classic drift this loop exists to catch.
+    const store = await adapter.create();
+    try {
+      const episode = await seed(store);
+      const oneClaim = { ...claim, maxClaims: 1 };
+      assert(await store.claimEpisode(episode.userId, episode.id, oneClaim));
+
+      // The worker's own checkpoint as it ENTERS the terminal stage: the phase it is in, and the size
+      // of the whole-episode artefact it is about to upload.
+      assert(
+        await store.touchEpisodeClaim(episode.userId, episode.id, oneClaim.owner, {
+          now: START,
+          phase: "uploading_audio",
+          bytesAttempted: 9_437_184,
+        }),
+        "the checkpoint carrying the attempted size must be accepted",
+      );
+      assertEquals(
+        (await store.getEpisode(episode.userId, episode.id))?.bytesAttempted,
+        9_437_184,
+        `${adapter.name} must persist the attempted size, or the storage twins have drifted`,
+      );
+
+      // Nobody ever writes a terminal result. The lease expires, and the next claim abandons it.
+      assertEquals(
+        await store.claimEpisode(episode.userId, episode.id, {
+          ...oneClaim,
+          owner: "worker-next",
+          now: RECLAIM,
+        }),
+        null,
+      );
+
+      const abandoned = (await store.listLogs()).find((log) =>
+        log.type === "claim.lifecycle" && log.severity === "error"
+      );
+      assert(abandoned, "an exhausted claim must leave a terminal failure record");
+      assertEquals(
+        abandoned.phase,
+        "uploading_audio",
+        "the terminal record must name the stage the attempt died in",
+      );
+      assertEquals(
+        abandoned.context?.bytesAttempted,
+        9_437_184,
+        "the record must carry the bytes the upload was attempting, which nothing else holds",
+      );
+      // Readable WITHOUT knowing the event type or the context key: the location is in the prose, so a
+      // reader who has never seen this store can still see where the episode stopped.
+      assert(
+        (abandoned.message ?? "").includes("uploading_audio"),
+        "the message must say where it died, not only that it did",
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
   Deno.test(`ojde ${adapter.name}: healthy live claim has no expiry evidence`, async () => {
     const store = await adapter.create();
     try {

@@ -86,6 +86,7 @@ export type ClaimLifecycleEpisode =
       | "sourceTitle"
       | "mode"
       | "byteLength"
+      | "bytesAttempted"
       | "durationSeconds"
       | "scriptTurns"
     >
@@ -173,6 +174,12 @@ export function claimLifecycleEvent(
     ...(episode.sourceTitle ? { sourceTitle: episode.sourceTitle } : {}),
     ...(episode.mode ? { mode: episode.mode } : {}),
     ...(typeof episode.byteLength === "number" ? { byteLength: episode.byteLength } : {}),
+    // audio-feed-amhn: the size the terminal upload was ABOUT to send. Present on an episode that was
+    // abandoned by a kill inside the put, where `byteLength` is structurally absent because it is only
+    // written on completion - so the failure record names the payload size instead of losing it.
+    ...(typeof episode.bytesAttempted === "number"
+      ? { bytesAttempted: episode.bytesAttempted }
+      : {}),
     ...(typeof episode.durationSeconds === "number"
       ? { durationSeconds: episode.durationSeconds }
       : {}),
