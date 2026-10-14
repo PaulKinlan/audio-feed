@@ -1402,7 +1402,12 @@ export async function runSynthesisBatch(
     stage: SynthesisStage,
     durationMs: number,
     episodeId?: string,
-    failureReason?: string,
+    // PRESENCE OF THIS OBJECT IS THE FAILURE FLAG, never the truthiness of a string inside it
+    // (audio-feed-2zik). `throw new Error("")` is a real throw whose message is empty, and testing
+    // `failureReason` for truthiness recorded it as an ordinary successful info mark - the same bug
+    // one layer down: the mark could say a stage FAILED whenever it could see a message, and an error
+    // with an empty or stripped message stayed invisible. The message may legitimately be "".
+    failure?: { message: string },
   ) => {
     try {
       const stored = await ctx.stores.metadata.appendLog({
@@ -1412,19 +1417,25 @@ export async function runSynthesisBatch(
         // "info", so this store could say a stage RAN and how long it took but never that it FAILED —
         // which is why a per-stage distribution of lost voice input was unanswerable from a warn+error
         // read, and why a fast failure was indistinguishable from a fast success.
-        severity: failureReason ? "warn" : "info",
+        severity: failure ? "warn" : "info",
         type: "synthesis.stage",
         process: "worker",
         job: "synthesis",
         correlationId: invocationId,
         phase: stage,
-        message: failureReason
-          ? `synthesis stage ${stage} FAILED after ${Math.round(durationMs)}ms: ${failureReason}`
+        message: failure
+          ? `synthesis stage ${stage} FAILED after ${Math.round(durationMs)}ms${
+            failure.message ? `: ${failure.message}` : ""
+          }`
           : `synthesis stage ${stage} took ${Math.round(durationMs)}ms`,
         durationMs: Math.max(0, Math.round(durationMs)),
         // The reason at the ROOT, where spans and claim.lifecycle already put it, so a reader that
-        // groups failures does not have to reach into context for it.
-        ...(failureReason ? { reason: failureReason } : {}),
+        // groups failures does not have to reach into context for it. BEST-EFFORT, AND THAT IS A
+        // LIMIT OF THE STORE: src/storage/log_shape.ts:154 tests `if (input.reason)`, so a falsy
+        // field is dropped and an empty error message leaves NO reason at all. THE SEVERITY IS THE
+        // LOAD-BEARING SIGNAL, not this field - which is exactly why the flag above is the presence
+        // of a failure object rather than the truthiness of a string.
+        ...(failure ? { reason: failure.message } : {}),
         // The episode at the ROOT as well as in context: spans and claim.lifecycle populate the root
         // field, so a reader joining on it silently missed stage marks while the key sat one level
         // down. Same value, promoted, not a second identity.
@@ -1452,19 +1463,21 @@ export async function runSynthesisBatch(
     }
     stageMarksEmitted++;
     const startedMarkAt = performance.now();
-    let failureReason: string | undefined;
+    // An EXPLICIT flag object, not the message: what the catch knows is THAT IT THREW, and the
+    // message is only what it threw. Conflating the two is the defect audio-feed-2zik records.
+    let failure: { message: string } | undefined;
     try {
       return await fn();
     } catch (err) {
       // Captured BEFORE the finally so the mark can say the stage DIED rather than only that it
       // ended (audio-feed-k3x6). The error is rethrown UNCHANGED: observability must not alter
       // synthesis behaviour, the same contract the store write itself keeps below.
-      failureReason = err instanceof Error ? err.message : String(err);
+      failure = { message: err instanceof Error ? err.message : String(err) };
       throw err;
     } finally {
       // finally, not after: a stage that THREW is the one whose duration is most worth having, and a
       // stalled-then-aborted TTS call is exactly the shape this instrumentation exists to expose.
-      await appendStage(stage, performance.now() - startedMarkAt, episodeId, failureReason);
+      await appendStage(stage, performance.now() - startedMarkAt, episodeId, failure);
     }
   };
   let outcome: "returned" | "threw" = "threw";

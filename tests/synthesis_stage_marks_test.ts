@@ -161,6 +161,48 @@ Deno.test("audio-feed-k3x6: a stage that SUCCEEDS is not recorded as a failure (
   assertEquals(run.ready.length, 1, "the seeded episode must actually have been synthesized");
 });
 
+Deno.test("audio-feed-2zik: a stage that throws an EMPTY-message error is still a FAILED stage", async () => {
+  // THE ROW rev-71 IMPLIED BY MUTATING THE MESSAGE TO "" IN A SCRATCH COPY, AND THE HOLE IT FOUND WAS
+  // REAL: the first version of this fix tested `failureReason` for TRUTHINESS, so an empty-message
+  // exception was a real throw recorded as an ordinary successful info mark - the same bug one layer
+  // down, because an empty or stripped message is exactly what some thrown primitives produce.
+  // The flag is now the PRESENCE of a failure object, not whether a string inside it is non-empty.
+  const { ctx, stores } = await seedEpisodes(["ep-2zik-empty"]);
+  const run = await runSynthesisBatch(
+    ctx,
+    () => {
+      throw new Error("");
+    },
+    { batchSize: 1, owner: "2zik-empty", maxAttempts: 1 },
+  );
+
+  const marks = stageMarks(await stores.metadata.listLogs()).filter((log) =>
+    log.phase !== "capped"
+  );
+  assert(marks.length > 0, "a stage that threw must still leave a mark even with an empty message");
+  assertEquals(marks[0]?.phase, "tts");
+  assertEquals(
+    marks[0]?.severity,
+    "warn",
+    "an EMPTY-message throw is still a throw, so the mark must be a failure",
+  );
+  assertEquals(
+    marks[0]?.reason,
+    undefined,
+    // NOT "" - AND THAT IS THE STORE'S RULE, NOT THIS CODE'S. src/storage/log_shape.ts:154 is
+    // `if (input.reason) record.reason = cleanString(...)`, a TRUTHINESS test, so a falsy field is
+    // DROPPED and "present but empty" cannot be recorded at all. This is why SEVERITY is the
+    // load-bearing signal for this row and the reason can only ever be best-effort. Asserted as
+    // undefined because that is what the store guarantees, not because this code wrote it.
+  );
+  assert(
+    (marks[0]?.message ?? "").includes("FAILED"),
+    "the same warn/FAILED shape as any other throw, with whatever the message is",
+  );
+  assertEquals(marks[0]?.episodeId, "ep-2zik-empty");
+  assertEquals(run.considered, 1, "the seeded episode must actually have been considered");
+});
+
 Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rather than silently dropped", async () => {
   // NINE EPISODES, AND THE NUMBER IS THE POINT (audio-feed-9pvk): a SUCCESSFUL episode emits THREE
   // stage marks - tts, verify and upload - because the yield mark is only reached when the invocation
