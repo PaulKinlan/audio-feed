@@ -13,18 +13,28 @@ import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
   allTestFiles,
   changedFiles,
+  classifyChangedFileCoverage,
+  detectStaleRun,
+  evaluateGateCoverageRecord,
   extractExecutedSuitesFromLog,
   extractFailingTests,
   failureMarkers,
+  findCandidateTestsForFile,
+  findHiddenTrackedMutations,
   formatCheckStep,
   formatFailureOutput,
+  hasExecReference,
+  hasImportReference,
   ignoredSummary,
   nameMatchedTests,
   planTests,
   reachableTests,
   reverseGraph,
   run,
+  staleMarker,
+  stripCapturedTestOutput,
   suiteMarker,
+  testSuiteSummary,
   withoutRouteAuditFixture,
 } from "../scripts/fast-check.ts";
 
@@ -1187,4 +1197,331 @@ Deno.test("audio-feed-m4vi: failing test names in fast-gate: failed: lines are n
     "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
     "a failing test name containing 'passed:' must not pollute the coverage note",
   );
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-97m0: Cached fast-gate log surfaces per-suite test output on
+// clean success while stripping inner captured test output blocks.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-97m0: testSuiteSummary surfaces per-suite running headers and ok summary while stripping inner captured output", () => {
+  const stdout = [
+    "running 58 tests from ./tests/fast_check_test.ts",
+    "a passing test ... ok (4ms)",
+    "audio-feed-48b7: run surfaces the ignored count ...",
+    "------- output -------",
+    "$ deno eval console.log('UNRELATED_PASSING_TEST_DETAILS'); console.log('ok | 0 passed | 0 failed | 2 ignored (6ms)');",
+    "ok | 0 passed | 0 failed | 2 ignored (6ms)",
+    "----- output end -----",
+    "audio-feed-48b7: run surfaces the ignored count ... ok (65ms)",
+    "running 8 tests from ./tests/fast_gate_subset_test.ts",
+    "subset test ... ok (12ms)",
+    "",
+    "ok | 66 passed | 0 failed (412ms)",
+  ].join("\n");
+
+  // 1. stripCapturedTestOutput removes the inner ------- output ------- block completely
+  const stripped = stripCapturedTestOutput(stdout);
+  assert(!stripped.includes("UNRELATED_PASSING_TEST_DETAILS"));
+  assert(!stripped.includes("$ deno eval"));
+
+  // 2. ignoredSummary does not match the inner captured `$ deno eval ... | 2 ignored` line
+  assertEquals(ignoredSummary(stdout), "");
+  assertEquals(
+    ignoredSummary(
+      "$ deno eval console.log('ok | 0 passed | 0 failed | 2 ignored (6ms)');",
+    ),
+    "",
+  );
+
+  // 3. testSuiteSummary surfaces each suite's `running N tests from ...` line and the `ok | ...` summary
+  assertEquals(
+    testSuiteSummary(stdout),
+    [
+      "running 58 tests from ./tests/fast_check_test.ts",
+      "running 8 tests from ./tests/fast_gate_subset_test.ts",
+      "ok | 66 passed | 0 failed (412ms)",
+    ].join("\n"),
+  );
+});
+
+Deno.test("audio-feed-97m0: run surfaces per-suite running headers and final ok summary on clean test success", async () => {
+  const logged: string[] = [];
+  const res = await run(
+    [
+      "deno",
+      "eval",
+      [
+        "console.log('running 3 tests from ./tests/alpha_test.ts');",
+        "console.log('test one ... ok (2ms)');",
+        "console.log('------- output -------');",
+        "console.log('$ deno eval inner_command | 2 ignored');",
+        "console.log('----- output end -----');",
+        "console.log('running 2 tests from ./tests/beta_test.ts');",
+        "console.log('ok | 5 passed | 0 failed (14ms)');",
+      ].join(" "),
+    ],
+    { onOutput: (msg) => logged.push(msg) },
+  );
+  assertEquals(res.code, 0);
+  assertEquals(logged, [
+    [
+      "running 3 tests from ./tests/alpha_test.ts",
+      "running 2 tests from ./tests/beta_test.ts",
+      "ok | 5 passed | 0 failed (14ms)",
+    ].join("\n"),
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-bycd: A STALE fast-gate run emits no false failure line and no
+// coverage suite list parsed from a torn log.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-bycd: detectStaleRun and failureMarkers emit STALE marker without false failure line", () => {
+  const before = {
+    headSha: "1bf1129",
+    headTree: "aaaaaaaa11111111222222223333333344444444",
+    status: "",
+  };
+  const afterSuperseded = {
+    headSha: "b1ffbe0",
+    headTree: "bbbbbbbb11111111222222223333333344444444",
+    status: "",
+  };
+  const reason = detectStaleRun(before, afterSuperseded);
+  assertEquals(reason, "superseded by b1ffbe0 (started on 1bf1129)");
+
+  // Even when stdout contains a test failure from a torn worktree, failureMarkers with staleReason
+  // emits ONLY the STALE marker and never a false `fast-gate: failed:` line.
+  const tornStdout = [
+    "failures:",
+    "\t torn assertion => ./tests/fast_check_test.ts:42:5",
+  ].join("\n");
+  const markers = failureMarkers(tornStdout, ["tests/fast_check_test.ts"], reason);
+  assertEquals(markers, [
+    "fast-gate: STALE: superseded by b1ffbe0 (started on 1bf1129), verdict not evaluated",
+  ]);
+  assert(
+    markers.every((m) => !m.startsWith("fast-gate: failed:")),
+    "STALE run must never emit a false fast-gate: failed: marker",
+  );
+});
+
+Deno.test("audio-feed-bycd: extractExecutedSuitesFromLog returns empty list when log is marked STALE or coverage UNKNOWN", () => {
+  const tornStaleLog = [
+    "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
+    "fast-gate: coverage: UNKNOWN - run was invalidated while tests were executing (superseded by b1ffbe0 (started on 1bf1129))",
+    staleMarker("superseded by b1ffbe0 (started on 1bf1129)"),
+  ].join("\n");
+  assertEquals(
+    extractExecutedSuitesFromLog(tornStaleLog),
+    [],
+    "STALE log must not produce a coverage suite list from a torn run",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-dp30: Candidate finder avoids false positives from directory path
+// segments or string literal values, and distinguishes omitted from unmapped.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-dp30: candidate finder does not treat directory segment or string literal value as a dependency on src/worker/synthesis.ts", async () => {
+  const seamSource = await Deno.readTextFile(
+    new URL("../tests/seam_boundaries_test.ts", import.meta.url),
+  );
+  const adminStatsSource = await Deno.readTextFile(
+    new URL("../tests/admin_stats_test.ts", import.meta.url),
+  );
+
+  // Neither tests/seam_boundaries_test.ts (which imports ../src/synthesis/limits.ts)
+  // nor tests/admin_stats_test.ts (which passes { kind: "synthesis" } to its local run() helper)
+  // references src/worker/synthesis.ts.
+  assertEquals(
+    hasImportReference(
+      "tests/seam_boundaries_test.ts",
+      seamSource,
+      "src/worker/synthesis.ts",
+    ),
+    false,
+  );
+  assertEquals(
+    hasExecReference(
+      "tests/admin_stats_test.ts",
+      adminStatsSource,
+      "src/worker/synthesis.ts",
+    ),
+    false,
+  );
+
+  // Positive controls: real imports in those same files ARE matched accurately.
+  assertEquals(
+    hasImportReference(
+      "tests/seam_boundaries_test.ts",
+      seamSource,
+      "src/synthesis/limits.ts",
+    ),
+    true,
+  );
+  assertEquals(
+    hasImportReference(
+      "tests/seam_boundaries_test.ts",
+      seamSource,
+      "src/worker/script.ts",
+    ),
+    true,
+  );
+
+  const testSources = new Map<string, string>([
+    ["tests/seam_boundaries_test.ts", seamSource],
+    ["tests/admin_stats_test.ts", adminStatsSource],
+  ]);
+  assertEquals(
+    findCandidateTestsForFile("src/worker/synthesis.ts", testSources),
+    [],
+    "neither seam_boundaries_test.ts nor admin_stats_test.ts is a candidate for src/worker/synthesis.ts",
+  );
+  assertEquals(
+    findCandidateTestsForFile("src/synthesis/limits.ts", testSources),
+    ["tests/seam_boundaries_test.ts"],
+  );
+});
+
+Deno.test("audio-feed-dp30: classifyChangedFileCoverage distinguishes unmapped files from files with omitted candidate suites", () => {
+  const candidatesByFile = new Map<string, readonly string[]>([
+    ["src/worker/synthesis.ts", ["tests/synthesis_worker_test.ts", "tests/worker_loop_test.ts"]],
+    ["docs/notes.md", []],
+  ]);
+
+  const report = classifyChangedFileCoverage(
+    ["src/worker/synthesis.ts", "docs/notes.md"],
+    ["tests/synthesis_worker_test.ts"],
+    candidatesByFile,
+  );
+
+  assertEquals(
+    report.unmapped,
+    ["docs/notes.md"],
+    "only files with zero candidate suites are unmapped ('no mapping exists')",
+  );
+  assertEquals(
+    report.omitted,
+    ["tests/worker_loop_test.ts"],
+    "suites that mapped to a changed file but did not run are reported in omitted ('candidate suites did not run')",
+  );
+  assertEquals(
+    report.omittedByFile.get("src/worker/synthesis.ts"),
+    ["tests/worker_loop_test.ts"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-43lf (plus 0l3a / tyt5): Gate coverage record evaluation never
+// hides omitted/unmapped suites or nested PARTIAL reasons behind a shallow
+// coverage_verified=true.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-43lf: evaluateGateCoverageRecord falsifies coverage_verified and lifts qualifiers on both real repro records", () => {
+  // Record 1 (a958570bde05ec97a334663532639f67e19c4b0e.fast.json):
+  // unmapped + omitted non-empty alongside shallow coverage_verified=true
+  const recA95 = evaluateGateCoverageRecord({
+    state: "PASS",
+    kind: "fast",
+    tree: "a958570bde05ec97a334663532639f67e19c4b0e",
+    coverage_verified: true,
+    partial_reason:
+      "changed file(s) not placed in any suite: src/worker/synthesis.ts; 2 candidate suite(s) did not run",
+    unmapped: ["src/worker/synthesis.ts"],
+    omitted: ["tests/admin_stats_test.ts", "tests/seam_boundaries_test.ts"],
+    coverage: {
+      indeterminate: false,
+      coverage: "PARTIAL",
+      partial_reason:
+        "changed file(s) not placed in any suite: src/worker/synthesis.ts; 2 candidate suite(s) did not run",
+      unmapped: ["src/worker/synthesis.ts"],
+      omitted: ["tests/admin_stats_test.ts", "tests/seam_boundaries_test.ts"],
+    },
+  });
+  assertEquals(recA95.coverageVerified, false);
+  assertEquals(recA95.normalizedRecord.coverage_verified, false);
+  assert(
+    recA95.statusLabel !== "PASS (fast gate)",
+    `must never render unqualified PASS (fast gate): got ${recA95.statusLabel}`,
+  );
+  assert(recA95.statusLabel.includes("coverage PARTIAL"));
+
+  // Record 2 (aa29d46de2eb2c8e1837352f41677944dd714645.fast.json):
+  // top-level coverage_verified=true and partial_reason=null while nested coverage is PARTIAL
+  const recAa2 = evaluateGateCoverageRecord({
+    state: "PASS",
+    kind: "fast",
+    tree: "aa29d46de2eb2c8e1837352f41677944dd714645",
+    coverage_verified: true,
+    partial_reason: null,
+    unmapped: [],
+    omitted: [],
+    coverage: {
+      indeterminate: false,
+      coverage: "PARTIAL",
+      partial_reason:
+        "changed file(s) not placed in any suite: scripts/hooks/install-hooks.sh, scripts/hooks/pre-push",
+      unmapped: ["scripts/hooks/install-hooks.sh", "scripts/hooks/pre-push"],
+      omitted: [],
+    },
+  });
+  assertEquals(recAa2.coverageVerified, false);
+  assertEquals(recAa2.normalizedRecord.coverage_verified, false);
+  assertEquals(
+    recAa2.normalizedRecord.partial_reason,
+    "changed file(s) not placed in any suite: scripts/hooks/install-hooks.sh, scripts/hooks/pre-push",
+  );
+  assertEquals(recAa2.normalizedRecord.unmapped, [
+    "scripts/hooks/install-hooks.sh",
+    "scripts/hooks/pre-push",
+  ]);
+  assert(
+    recAa2.statusLabel !== "PASS (fast gate)",
+    `must never render unqualified PASS (fast gate): got ${recAa2.statusLabel}`,
+  );
+
+  // Control: a genuinely verified record renders PASS (fast gate)
+  const cleanRec = evaluateGateCoverageRecord({
+    state: "PASS",
+    kind: "fast",
+    coverage_verified: true,
+    partial_reason: null,
+    unmapped: [],
+    omitted: [],
+    coverage: {
+      indeterminate: false,
+      coverage: "FULL",
+      partial_reason: null,
+      unmapped: [],
+      omitted: [],
+    },
+  });
+  assertEquals(cleanRec.coverageVerified, true);
+  assertEquals(cleanRec.statusLabel, "PASS (fast gate)");
+
+  // Control (audio-feed-0l3a): a synthetic record never verifies as PASS
+  const syntheticRec = evaluateGateCoverageRecord({
+    state: "PASS",
+    kind: "fast",
+    synthetic: true,
+  });
+  assertEquals(syntheticRec.coverageVerified, false);
+  assertEquals(syntheticRec.statusLabel, "SYNTHETIC (fast gate)");
+});
+
+Deno.test("audio-feed-tyt5: findHiddenTrackedMutations detects assume-unchanged and skip-worktree index flags", () => {
+  const lsOutput = [
+    "H README.md",
+    "h src/routes/admin.ts",
+    "S scripts/fast-check.ts",
+    "H tests/fast_check_test.ts",
+  ].join("\n");
+  assertEquals(findHiddenTrackedMutations(lsOutput), [
+    "scripts/fast-check.ts",
+    "src/routes/admin.ts",
+  ]);
 });

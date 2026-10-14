@@ -389,3 +389,210 @@ Deno.test("audio-feed-25hc / audio-feed-iewo: chained hook executes standalone c
     await Deno.remove(scratchWorktree, { recursive: true }).catch(() => {});
   }
 });
+
+Deno.test("audio-feed-bfkm / audio-feed-shan: pre-push hook permits amended or rebased commit whose tree matches the gated commit", async () => {
+  const featureTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+  // Pre-amend / pre-rebase commit with featureTree
+  const origCommitOut = await new Deno.Command("git", {
+    args: ["commit-tree", featureTree, "-m", "original gated commit"],
+    cwd: ROOT,
+  }).output();
+  const origSha = new TextDecoder().decode(origCommitOut.stdout).trim();
+
+  // Amended / rebased commit with the exact same featureTree
+  const amendedCommitOut = await new Deno.Command("git", {
+    args: ["commit-tree", featureTree, "-m", "amended commit message (bfkm / shan)"],
+    cwd: ROOT,
+  }).output();
+  const amendedSha = new TextDecoder().decode(amendedCommitOut.stdout).trim();
+  assert(origSha !== amendedSha, "Original and amended commit SHAs must differ");
+
+  const tmpHome = await Deno.makeTempDir();
+  try {
+    const checksDir = `${tmpHome}/.fleet/checks`;
+    await Deno.mkdir(checksDir, { recursive: true });
+    // Check record was written before the amend/rebase, so .sha is origSha.slice(0, 7)
+    // and .tree is featureTree.
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.json`,
+      JSON.stringify({
+        state: "PASS",
+        tree: featureTree,
+        sha: origSha.slice(0, 7),
+      }),
+    );
+
+    const line =
+      `refs/heads/fleet/test-feature ${amendedSha} refs/heads/fleet/test-feature 0000000000000000000000000000000000000000\n`;
+    const result = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+
+    assertEquals(
+      result.code,
+      0,
+      `Tree-preserving amend/rebase should be permitted: ${result.stderr}`,
+    );
+
+    // Also verify .shas array matching (shan) when record stores multiple shas
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.json`,
+      JSON.stringify({
+        state: "PASS",
+        tree: featureTree,
+        sha: "0000000",
+        shas: [origSha.slice(0, 7), amendedSha.slice(0, 7)],
+      }),
+    );
+    const shasResult = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+    assertEquals(
+      shasResult.code,
+      0,
+      `Commit listed in .shas array should be permitted: ${shasResult.stderr}`,
+    );
+
+    // Negative control: if rec_sha is a valid commit in git with a DIFFERENT tree, hook must refuse
+    const mainShaOut = await new Deno.Command("git", {
+      args: ["rev-parse", "HEAD"],
+      cwd: ROOT,
+    }).output();
+    const headSha = new TextDecoder().decode(mainShaOut.stdout).trim();
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.json`,
+      JSON.stringify({
+        state: "PASS",
+        tree: featureTree,
+        sha: headSha.slice(0, 7),
+      }),
+    );
+    const mismatchResult = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+    assertEquals(
+      mismatchResult.code,
+      1,
+      "Hook must refuse when rec_sha resolves to a commit with a different tree",
+    );
+  } finally {
+    await Deno.remove(tmpHome, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-zpm2: pre-push hook refuses commit whose gate record is still RUNNING", async () => {
+  const featureTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+  const commitOut = await new Deno.Command("git", {
+    args: ["commit-tree", featureTree, "-m", "commit with running gate"],
+    cwd: ROOT,
+  }).output();
+  const featureSha = new TextDecoder().decode(commitOut.stdout).trim();
+
+  const tmpHome = await Deno.makeTempDir();
+  try {
+    const checksDir = `${tmpHome}/.fleet/checks`;
+    await Deno.mkdir(checksDir, { recursive: true });
+
+    // Case 1: standalone RUNNING record
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.fast.json`,
+      JSON.stringify({
+        state: "RUNNING",
+        tree: featureTree,
+        sha: featureSha.slice(0, 7),
+      }),
+    );
+
+    const line =
+      `refs/heads/fleet/test-feature ${featureSha} refs/heads/fleet/test-feature 0000000000000000000000000000000000000000\n`;
+    const standaloneResult = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+    assertEquals(
+      standaloneResult.code,
+      1,
+      "Hook must refuse push when gate record is RUNNING",
+    );
+    assertStringIncludes(
+      standaloneResult.stderr,
+      "gate still RUNNING",
+    );
+
+    // Case 2: RUNNING full-gate record alongside an older PASS fast-gate record for the same tree
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.fast.json`,
+      JSON.stringify({
+        state: "PASS",
+        tree: featureTree,
+        sha: featureSha.slice(0, 7),
+      }),
+    );
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.json`,
+      JSON.stringify({
+        state: "RUNNING",
+        tree: featureTree,
+        sha: featureSha.slice(0, 7),
+      }),
+    );
+
+    const mixedResult = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+    assertEquals(
+      mixedResult.code,
+      1,
+      "Hook must refuse push when any gate record for the tree is still RUNNING, even if an older PASS exists",
+    );
+    assertStringIncludes(
+      mixedResult.stderr,
+      "gate still RUNNING",
+    );
+  } finally {
+    await Deno.remove(tmpHome, { recursive: true });
+  }
+});
+
+Deno.test("audio-feed-0l3a: pre-push hook refuses synthetic PASS check record", async () => {
+  const featureTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+  const commitOut = await new Deno.Command("git", {
+    args: ["commit-tree", featureTree, "-m", "synthetic record commit"],
+    cwd: ROOT,
+  }).output();
+  const featureSha = new TextDecoder().decode(commitOut.stdout).trim();
+
+  const tmpHome = await Deno.makeTempDir();
+  try {
+    const checksDir = `${tmpHome}/.fleet/checks`;
+    await Deno.mkdir(checksDir, { recursive: true });
+    await Deno.writeTextFile(
+      `${checksDir}/${featureTree}.fast.json`,
+      JSON.stringify({
+        state: "PASS",
+        tree: featureTree,
+        sha: featureSha.slice(0, 7),
+        synthetic: true,
+      }),
+    );
+
+    const line =
+      `refs/heads/fleet/test-feature ${featureSha} refs/heads/fleet/test-feature 0000000000000000000000000000000000000000\n`;
+    const result = await runHook(line, {
+      HOME: tmpHome,
+      FLEET_REQUIRE_GATED_PUSH: "1",
+    });
+    assertEquals(
+      result.code,
+      1,
+      "Hook must refuse push when check record has synthetic: true",
+    );
+  } finally {
+    await Deno.remove(tmpHome, { recursive: true });
+  }
+});

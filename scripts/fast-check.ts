@@ -531,13 +531,89 @@ export function failureMarker(file: string, testName: string): string {
 }
 
 /**
+ * Machine-readable STALE marker emitted when the worktree or HEAD changes
+ * underneath a running gate (audio-feed-bycd). Prefixes the verdict unmistakably
+ * so a superseded run is never mistaken for a test failure.
+ */
+export function staleMarker(reason: string): string {
+  return `fast-gate: STALE: ${reason}, verdict not evaluated`;
+}
+
+export interface WorktreeSnapshot {
+  headSha: string | null;
+  headTree: string | null;
+  status: string | null;
+}
+
+export async function captureWorktreeSnapshot(): Promise<WorktreeSnapshot> {
+  const [headSha, headTree, status] = await Promise.all([
+    git("rev-parse", "--short", "HEAD"),
+    git("rev-parse", "HEAD^{tree}"),
+    git("status", "--porcelain"),
+  ]);
+  return {
+    headSha: headSha?.trim() || null,
+    headTree: headTree?.trim() || null,
+    status: status !== null ? status : null,
+  };
+}
+
+/**
+ * Detect whether the repository HEAD, tree, or worktree status changed while the
+ * gate was executing (audio-feed-bycd).
+ */
+export function detectStaleRun(
+  before: WorktreeSnapshot,
+  after: WorktreeSnapshot,
+): string | null {
+  if (before.headSha && after.headSha && before.headSha !== after.headSha) {
+    return `superseded by ${after.headSha} (started on ${before.headSha})`;
+  }
+  if (before.headTree && after.headTree && before.headTree !== after.headTree) {
+    return `tree changed to ${after.headTree.slice(0, 7)} (started on ${
+      before.headTree.slice(0, 7)
+    })`;
+  }
+  if (before.status !== null && after.status !== null && before.status !== after.status) {
+    return "worktree modified during gate run";
+  }
+  return null;
+}
+
+/**
+ * Detect tracked files with assume-unchanged ('h ') or skip-worktree ('S ')
+ * index flags from `git ls-files -v` output (audio-feed-tyt5).
+ */
+export function findHiddenTrackedMutations(lsFilesVOutput: string): string[] {
+  const hidden: string[] = [];
+  for (const line of lsFilesVOutput.split("\n")) {
+    const m = /^[hS]\s+(.+)$/.exec(line.trimEnd());
+    if (m && m[1]) {
+      hidden.push(m[1].trim());
+    }
+  }
+  return hidden.sort();
+}
+
+/**
  * Extract the suite file paths that actually executed from a fast-gate log,
  * ignoring parenthesized failing test names on `fast-gate: failed:` lines
- * and cheap-step names (`fmt`, `lint`, `check`) (audio-feed-m4vi).
+ * and cheap-step names (`fmt`, `lint`, `check`) (audio-feed-m4vi), and
+ * omitting coverage entirely when the run is marked STALE or coverage UNKNOWN
+ * (audio-feed-bycd).
  */
 export function extractExecutedSuitesFromLog(log: string): string[] {
+  const lines = log.split("\n");
+  for (const line of lines) {
+    if (
+      /^fast-gate:\s*STALE:/.test(line) ||
+      /^fast-gate:\s*coverage:\s*UNKNOWN\b/.test(line)
+    ) {
+      return [];
+    }
+  }
   const executed = new Set<string>();
-  for (const line of log.split("\n")) {
+  for (const line of lines) {
     const suiteLine = /^fast-gate:\s*(?:passed|completed|ran):\s*(.*)$/.exec(line);
     if (suiteLine) {
       for (const token of suiteLine[1]!.split(/\s+/)) {
@@ -563,12 +639,17 @@ export function extractExecutedSuitesFromLog(log: string): string[] {
 /**
  * Emit failure markers for all failing tests identified in stdout.
  * If no specific failing test could be parsed reliably, emit a diagnostic
- * marker without guessing.
+ * marker without guessing. If `staleReason` is provided (audio-feed-bycd),
+ * emit the STALE marker instead of a false failure line.
  */
 export function failureMarkers(
   stdout: string,
   fallbackFiles?: string[],
+  staleReason?: string | null,
 ): string[] {
+  if (staleReason) {
+    return [staleMarker(staleReason)];
+  }
   const failures = extractFailingTests(stdout);
   if (failures.length > 0) {
     return failures.map((f) => {
@@ -605,6 +686,34 @@ export function formatFailureOutput(stdout: string, stderr: string): string {
 }
 
 /**
+ * Strip ANSI escape sequences, carriage-return progress prefixes, and inner
+ * per-test captured stdout blocks (`------- output ------- ... ----- output end -----`)
+ * so inner test evaluations (like `$ deno eval ...` inside `fast_check_test.ts`)
+ * never leak into outer runner summaries (audio-feed-97m0).
+ */
+export function stripCapturedTestOutput(stdout: string): string {
+  // deno-lint-ignore no-control-regex
+  const noAnsi = stdout.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  const out: string[] = [];
+  let inCapturedBlock = false;
+  for (const rawLine of noAnsi.split("\n")) {
+    const line = rawLine.replace(/^.*\r/, "");
+    if (/^\s*-{5,}\s*output\s*-{5,}\s*$/.test(line)) {
+      inCapturedBlock = true;
+      continue;
+    }
+    if (/^\s*-{5,}\s*output end\s*-{5,}\s*$/.test(line)) {
+      inCapturedBlock = false;
+      continue;
+    }
+    if (!inCapturedBlock) {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
+/**
  * The summary line(s) Deno prints when it SKIPS tests rather than running them:
  *
  *     ok | 0 passed | 0 failed | 2 ignored (6ms)
@@ -620,14 +729,349 @@ export function formatFailureOutput(stdout: string, stderr: string): string {
  * happens to contain one ignored test (audio-feed-48b7 review: "preserve bounded
  * output where possible"). `[1-9]` and not `\d`: a run with zero ignored tests is
  * an ordinary quiet pass and must stay quiet.
+ * Anchored to `^\s*ok\s*\|` outside captured test output blocks so an echoed
+ * `$ deno eval ...` command line is never matched as a test summary (audio-feed-97m0).
  */
 export function ignoredSummary(stdout: string): string {
-  const ignored = /\|\s*[1-9]\d*\s+ignored\b/;
-  return stdout
+  const ignored = /^\s*ok\s*\|.*\|\s*[1-9]\d*\s+ignored\b/;
+  return stripCapturedTestOutput(stdout)
     .split("\n")
     .filter((line) => ignored.test(line))
     .join("\n")
     .trim();
+}
+
+/**
+ * Bounded per-suite test output for a clean `deno test` pass (audio-feed-97m0).
+ *
+ * Surfaces each suite's `running N test(s) from ...` header line and the final
+ * `ok | ...` summary line (while stripping inner `------- output -------` blocks
+ * and individual passing test lines). For non-test commands (where no `running N
+ * test(s) from ...` header exists), falls back to `ignoredSummary(stdout)` so
+ * ordinary non-test commands remain completely quiet on success (pkv1, 48b7).
+ */
+export function testSuiteSummary(stdout: string): string {
+  const cleaned = stripCapturedTestOutput(stdout);
+  const suiteLines: string[] = [];
+  const summaryLines: string[] = [];
+  for (const line of cleaned.split("\n")) {
+    const trimmed = line.trim();
+    if (/^running\s+\d+\s+tests?\s+from\s+\S+/.test(trimmed)) {
+      suiteLines.push(trimmed);
+    } else if (/^ok\s*\|/.test(trimmed)) {
+      summaryLines.push(trimmed);
+    }
+  }
+  if (suiteLines.length > 0) {
+    return [...suiteLines, ...summaryLines].join("\n").trim();
+  }
+  return ignoredSummary(stdout);
+}
+
+/**
+ * audio-feed-dp30: Check whether `testFile` has a real static or dynamic relative
+ * import/export reference to `targetFile`, resolving specifiers to normalized
+ * repo-relative paths rather than matching bare stems against directory segments.
+ */
+export function hasImportReference(
+  testFile: string,
+  testSource: string,
+  targetFile: string,
+): boolean {
+  const normTest = normalise(testFile);
+  const normTarget = normalise(targetFile);
+  const code = testSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  for (
+    const m of code.matchAll(
+      /(?:import|export)[^'"]*?from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']/g,
+    )
+  ) {
+    const spec = m[1] ?? m[2] ?? m[3];
+    if (!spec?.startsWith(".")) continue;
+    if (resolveImport(normTest, spec) === normTarget) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * audio-feed-dp30: Check whether `testFile` genuinely executes or reads `targetFile`
+ * by path (or via derived `readRelations`), rather than matching a bare stem inside
+ * an arbitrary function call such as `run({ id: "s1", kind: "synthesis" })`.
+ */
+export function hasExecReference(
+  testFile: string,
+  testSource: string,
+  targetFile: string,
+  readRelations: DataReadRelations = new Map(),
+): boolean {
+  const normTest = normalise(testFile);
+  const normTarget = normalise(targetFile);
+  if (readRelations.get(normTarget)?.includes(normTest)) {
+    return true;
+  }
+  const code = testSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  // Match explicit URL or file-read/Command string literals that resolve to normTarget
+  for (
+    const m of code.matchAll(
+      /new\s+URL\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url\s*\)|(?:Deno\.(?:Command|readTextFile|readTextFileSync|readFile|readFileSync|stat|statSync)|run)\s*\(\s*(?:\[\s*)?["']([^"']+)["']/g,
+    )
+  ) {
+    const rawPath = m[1] ?? m[2];
+    if (!rawPath) continue;
+    const resolved = rawPath.startsWith(".")
+      ? resolveImport(normTest, rawPath)
+      : normalise(rawPath);
+    if (resolved === normTarget) {
+      return true;
+    }
+  }
+  // Also check explicit repo-relative path literal (with at least one slash and extension)
+  // passed inside a Deno.Command args array or script constant when targetFile is in scripts/
+  if (
+    normTarget.includes("/") && (normTarget.startsWith("scripts/") || !normTarget.endsWith(".ts"))
+  ) {
+    const escaped = normTarget.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const repoPathRegex = new RegExp(`["'\`/]${escaped}["'\`]`);
+    if (repoPathRegex.test(code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface CandidateSearchOptions {
+  reverse?: Map<string, string[]>;
+  named?: Map<string, string[]>;
+  readRelations?: DataReadRelations;
+}
+
+/**
+ * audio-feed-dp30: Find candidate test suites for `targetFile` without false positives
+ * from directory path segments (`../src/synthesis/limits.ts`) or string literal values
+ * (`run({ kind: "synthesis" })`).
+ */
+export function findCandidateTestsForFile(
+  targetFile: string,
+  testSources: ReadonlyMap<string, string>,
+  options: CandidateSearchOptions = {},
+): string[] {
+  const normTarget = normalise(targetFile);
+  const candidates = new Set<string>();
+
+  if (isTestModule(normTarget) && testSources.has(normTarget)) {
+    candidates.add(normTarget);
+  }
+  if (options.reverse) {
+    const { tests } = reachableTests(options.reverse, [normTarget]);
+    for (const t of tests) {
+      if (testSources.has(t)) candidates.add(t);
+    }
+  }
+  for (const t of options.named?.get(normTarget) ?? []) {
+    if (testSources.has(t)) candidates.add(t);
+  }
+  for (const t of options.readRelations?.get(normTarget) ?? []) {
+    if (testSources.has(t)) candidates.add(t);
+  }
+
+  for (const [suite, source] of testSources.entries()) {
+    const normSuite = normalise(suite);
+    if (hasImportReference(normSuite, source, normTarget)) {
+      candidates.add(normSuite);
+      continue;
+    }
+    if (hasExecReference(normSuite, source, normTarget, options.readRelations)) {
+      candidates.add(normSuite);
+    }
+  }
+
+  return [...candidates].sort();
+}
+
+export interface ChangedFileCoverageReport {
+  /** Changed files with zero candidate test suites ("no mapping exists"). */
+  unmapped: string[];
+  /** Candidate suites that did not execute ("candidate suites did not run"). */
+  omitted: string[];
+  /** Map from changed file to its omitted candidate suites. */
+  omittedByFile: Map<string, string[]>;
+  /** Changed files whose candidate suites all executed. */
+  covered: string[];
+}
+
+/**
+ * audio-feed-dp30: Distinguish "no mapping exists" (`unmapped`: zero candidate suites)
+ * from "candidate suites did not run" (`omitted` / `omittedByFile`), rather than
+ * reporting files with omitted candidate suites as unmapped.
+ */
+export function classifyChangedFileCoverage(
+  changed: readonly string[],
+  executedSuites: readonly string[],
+  candidatesByFile: ReadonlyMap<string, readonly string[]>,
+): ChangedFileCoverageReport {
+  const executedSet = new Set(executedSuites.map(normalise));
+  const unmapped: string[] = [];
+  const omittedSet = new Set<string>();
+  const omittedByFile = new Map<string, string[]>();
+  const covered: string[] = [];
+
+  for (const rawFile of changed) {
+    const file = normalise(rawFile);
+    const candidates = (candidatesByFile.get(file) ?? candidatesByFile.get(rawFile) ?? []).map(
+      normalise,
+    );
+    if (candidates.length === 0) {
+      unmapped.push(file);
+      continue;
+    }
+    const missing = candidates.filter((suite) => !executedSet.has(suite));
+    if (missing.length > 0) {
+      omittedByFile.set(file, missing);
+      for (const m of missing) omittedSet.add(m);
+    } else {
+      covered.push(file);
+    }
+  }
+
+  return {
+    unmapped,
+    omitted: [...omittedSet].sort(),
+    omittedByFile,
+    covered,
+  };
+}
+
+export interface GateCoverageSubrecord {
+  indeterminate?: boolean;
+  coverage?: string;
+  partial_reason?: string | null;
+  unmapped?: string[];
+  omitted?: string[];
+}
+
+export interface GateCheckRecord {
+  state?: string;
+  kind?: string;
+  tree?: string;
+  sha?: string;
+  shas?: string[];
+  synthetic?: boolean;
+  coverage_verified?: boolean;
+  partial_reason?: string | null;
+  unmapped?: string[];
+  omitted?: string[];
+  coverage?: GateCoverageSubrecord | string;
+}
+
+export interface EvaluatedGateCoverage {
+  coverageVerified: boolean;
+  indeterminate: boolean;
+  coverageState: string;
+  partialReason: string | null;
+  unmapped: string[];
+  omitted: string[];
+  statusLabel: string;
+  normalizedRecord: GateCheckRecord;
+}
+
+/**
+ * audio-feed-43lf: Derive the authoritative four-way `coverage_verified` predicate
+ * (`!indeterminate && omitted.length === 0 && unmapped.length === 0 && coverage !== "UNKNOWN" && coverage !== "PARTIAL"`)
+ * across both shallow and nested `.coverage` fields, raising nested qualifiers
+ * (`partial_reason`, `unmapped`, `omitted`, `coverage`) to the top level so a
+ * consumer reading either depth never renders an unqualified `PASS (fast gate)`
+ * when suites were omitted or files were unmapped.
+ */
+export function evaluateGateCoverageRecord(record: GateCheckRecord): EvaluatedGateCoverage {
+  const nested = typeof record.coverage === "object" && record.coverage !== null
+    ? record.coverage
+    : undefined;
+
+  const indeterminate = Boolean(nested?.indeterminate) || false;
+  const unmapped = [
+    ...new Set([...(record.unmapped ?? []), ...(nested?.unmapped ?? [])]),
+  ];
+  const omitted = [
+    ...new Set([...(record.omitted ?? []), ...(nested?.omitted ?? [])]),
+  ];
+  const rawCoverageState = typeof record.coverage === "string"
+    ? record.coverage
+    : (nested?.coverage ?? "KNOWN");
+
+  const reasons: string[] = [];
+  const rawPartialReason = record.partial_reason ?? nested?.partial_reason ?? null;
+  if (rawPartialReason) reasons.push(rawPartialReason);
+  if (
+    unmapped.length > 0 && !rawPartialReason?.includes("unmapped") &&
+    !rawPartialReason?.includes("not placed")
+  ) {
+    reasons.push(`unmapped: ${unmapped.join(", ")}`);
+  }
+  if (omitted.length > 0 && !rawPartialReason?.includes("omitted")) {
+    reasons.push(`omitted: ${omitted.join(", ")}`);
+  }
+  const partialReason = reasons.length > 0 ? reasons.join("; ") : null;
+
+  const coverageState = indeterminate || rawCoverageState === "UNKNOWN"
+    ? "UNKNOWN"
+    : (rawCoverageState === "PARTIAL" || unmapped.length > 0 || omitted.length > 0 ||
+        partialReason !== null)
+    ? "PARTIAL"
+    : rawCoverageState;
+
+  const coverageVerified = !indeterminate &&
+    omitted.length === 0 &&
+    unmapped.length === 0 &&
+    coverageState !== "UNKNOWN" &&
+    coverageState !== "PARTIAL" &&
+    partialReason === null &&
+    !record.synthetic;
+
+  const gateKindLabel = record.kind === "full" ? "full gate" : "fast gate";
+  const baseState = record.synthetic ? "SYNTHETIC" : (record.state ?? "UNKNOWN");
+  let statusLabel: string;
+  if (baseState !== "PASS") {
+    statusLabel = `${baseState} (${gateKindLabel})`;
+  } else if (coverageVerified) {
+    statusLabel = `PASS (${gateKindLabel})`;
+  } else if (coverageState === "UNKNOWN") {
+    statusLabel = `PASS (${gateKindLabel}, coverage UNKNOWN${
+      partialReason ? `: ${partialReason}` : ""
+    })`;
+  } else {
+    statusLabel = `PASS (${gateKindLabel}, coverage PARTIAL: ${
+      partialReason ?? "incomplete coverage"
+    })`;
+  }
+
+  const normalizedRecord: GateCheckRecord = {
+    ...record,
+    coverage_verified: coverageVerified,
+    partial_reason: partialReason,
+    unmapped,
+    omitted,
+    coverage: {
+      ...(nested ?? {}),
+      indeterminate,
+      coverage: coverageState,
+      partial_reason: partialReason,
+      unmapped,
+      omitted,
+    },
+  };
+
+  return {
+    coverageVerified,
+    indeterminate,
+    coverageState,
+    partialReason,
+    unmapped,
+    omitted,
+    statusLabel,
+    normalizedRecord,
+  };
 }
 
 export interface RunResult {
@@ -660,15 +1104,15 @@ export async function run(
       }
     }
   } else {
-    // audio-feed-48b7: on success the gate stays quiet, so a suite whose tests
-    // were IGNORED was indistinguishable from one that ran and passed. Surface
-    // the ignored-count summary line - and only that line.
-    const ignored = ignoredSummary(stdout);
-    if (ignored.length > 0) {
+    // audio-feed-48b7 / audio-feed-97m0: surface bounded per-suite test output
+    // (`running N tests from ...` + `ok | ...`) for test runs, and ignored-count
+    // summary lines otherwise, while keeping non-test commands quiet on success.
+    const summary = testSuiteSummary(stdout);
+    if (summary.length > 0) {
       if (options.onOutput) {
-        options.onOutput(ignored);
+        options.onOutput(summary);
       } else {
-        console.log(ignored);
+        console.log(summary);
       }
     }
   }
@@ -1177,14 +1621,22 @@ ${auditUniverseDrift}`);
     }
   }
 
+  const snapshotBefore = await captureWorktreeSnapshot();
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
     const wholeSuite = fastUniverse;
     const res = await run(["deno", "test", ...TEST_FLAGS]);
-    if (res.code !== 0) {
-      console.log(suiteMarker("ran", wholeSuite));
-      console.log(coverageMarker(coverageRan(wholeSuite)));
-      for (const m of failureMarkers(res.stdout, wholeSuite)) {
+    const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
+    if (res.code !== 0 || staleReason !== null) {
+      if (!staleReason) console.log(suiteMarker("ran", wholeSuite));
+      console.log(
+        coverageMarker(
+          staleReason
+            ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
+            : coverageRan(wholeSuite),
+        ),
+      );
+      for (const m of failureMarkers(res.stdout, wholeSuite, staleReason)) {
         console.log(m);
       }
       Deno.exit(1);
@@ -1210,10 +1662,17 @@ ${auditUniverseDrift}`);
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);
     const res = await run(["deno", "test", ...TEST_FLAGS, ...testFiles]);
-    if (res.code !== 0) {
-      console.log(suiteMarker("ran", testFiles));
-      console.log(coverageMarker(coverageRan(testFiles)));
-      for (const m of failureMarkers(res.stdout, testFiles)) {
+    const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
+    if (res.code !== 0 || staleReason !== null) {
+      if (!staleReason) console.log(suiteMarker("ran", testFiles));
+      console.log(
+        coverageMarker(
+          staleReason
+            ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
+            : coverageRan(testFiles),
+        ),
+      );
+      for (const m of failureMarkers(res.stdout, testFiles, staleReason)) {
         console.log(m);
       }
       Deno.exit(1);
