@@ -97,15 +97,18 @@ export interface ClaimLifecycleFields {
   /** Present only when the attempt ended. The observable cause. */
   reason?: string;
   /**
-   * Structured verdict for how a claim ENDED, when the writer knows (audio-feed-2sec).
+   * Structured verdict for how a claim ENDED, when the writer knows (audio-feed-2sec, audio-feed-aueh).
    *
    * `"yielded"` says the claim was DELIBERATELY released so a later invocation can resume the
    * episode: no terminal write happened, and any `reason` on the same record is explanation,
    * not verdict. Without this field the record's prose is the only signal, and a reader that
    * treats "has a reason" as "ended terminally" reports a yielded claim as a failure with a
    * terminal write - a false statement about the episode's durable state.
+   *
+   * `"expired"` says the claim lease expired without a terminal write and was reclaimed for a
+   * subsequent attempt; the previous attempt's claim lifecycle is closed with severity "warn".
    */
-  claimOutcome?: "yielded";
+  claimOutcome?: "yielded" | "expired";
   /** Terminal-upload retry count recorded by the worker when yielding (audio-feed-lqd6). */
   uploadRetry?: number;
   /** Which attempt this record is about, when the caller knows better than the episode does. */
@@ -192,6 +195,44 @@ export function abandonedClaimEvent(
     // incident siv1 was, and obs-1's consumer is looking for exactly this.
     severity: "error",
     context: {
+      workerState: "unknown",
+      ...(observed.expiredAt ? { expiredAt: observed.expiredAt } : {}),
+      ...(observed.lastHeartbeat ? { lastHeartbeat: observed.lastHeartbeat } : {}),
+      ...(observed.provenance ? { provenance: observed.provenance } : {}),
+      ...(observed.maxClaims !== undefined ? { maxClaims: observed.maxClaims } : {}),
+    },
+  });
+}
+
+/**
+ * An attempt whose lease expired without a terminal write before being reclaimed for another attempt
+ * (audio-feed-aueh).
+ *
+ * Emitted when an expired claim is reclaimed while attempts <= maxClaims. Unlike abandonedClaimEvent
+ * (which is final and writes severity "error"), this writes severity "warn" and context claimOutcome
+ * "expired", giving the expired attempt a terminal record in the log stream while preserving observed facts:
+ * phase reached, expiry timestamp, last heartbeat, attempt number, and provenance.
+ */
+export function expiredClaimEvent(
+  episode: Pick<Episode, "id" | "userId" | "attempts">,
+  observed: {
+    phase: string;
+    attempt: number;
+    reason: string;
+    expiredAt?: string;
+    lastHeartbeat?: string;
+    provenance?: string;
+    maxClaims?: number;
+  },
+): Omit<LogRecord, "seq"> {
+  return claimLifecycleEvent(episode, {
+    phase: observed.phase,
+    attempt: observed.attempt,
+    reason: observed.reason,
+    severity: "warn",
+    ...(observed.expiredAt ? { time: observed.expiredAt } : {}),
+    context: {
+      claimOutcome: "expired",
       workerState: "unknown",
       ...(observed.expiredAt ? { expiredAt: observed.expiredAt } : {}),
       ...(observed.lastHeartbeat ? { lastHeartbeat: observed.lastHeartbeat } : {}),

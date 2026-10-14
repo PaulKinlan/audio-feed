@@ -306,7 +306,8 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
       endedWithTerminalWrite: false,
       phases: [],
     };
-    row.startedAt = existing && record.phase === "claimed" ? record.time : row.startedAt;
+    const context = (record.context ?? {}) as Record<string, unknown>;
+    if (existing && isClaimStartRecord(record)) row.startedAt = record.time;
     if (existing) row.lastHeartbeat = record.time;
     if (record.phase) {
       row.phase = record.phase;
@@ -314,7 +315,6 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     }
     if (typeof record.durationMs === "number") row.durationMs = record.durationMs;
 
-    const context = (record.context ?? {}) as Record<string, unknown>;
     if (typeof context.owner === "string") row.owner = context.owner;
     if (typeof context.leaseMs === "number") row.leaseMs = context.leaseMs;
     if (typeof context.lastHeartbeat === "string") row.lastHeartbeat = context.lastHeartbeat;
@@ -356,6 +356,20 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     if (row.outcome === "in-flight" && row.leaseExpired === true) row.outcome = "abandoned";
   }
   return rows.sort((a, b) => a.attempt - b.attempt);
+}
+
+/**
+ * A genuine claim start, including historical starts with no owner or lease context.
+ * `phase` is the last observed phase, not an event kind: an expired or abandoned claim can
+ * still say "claimed" but carries a reason or structured outcome. A healthy completion with
+ * no phase touch also says "claimed" and has no reason, but carries a terminal duration.
+ * Only a record without those terminal markers can reset startedAt (audio-feed-svwu).
+ */
+export function isClaimStartRecord(record: LogRecord): boolean {
+  if (record.type !== CLAIM_LIFECYCLE_EVENT || record.phase !== "claimed") return false;
+  const context = (record.context ?? {}) as Record<string, unknown>;
+  return record.reason === undefined && record.durationMs === undefined &&
+    context.claimOutcome === undefined && context.workerState === undefined;
 }
 
 /** A failure message from a store, bounded and safe to render (the reader escapes it). */

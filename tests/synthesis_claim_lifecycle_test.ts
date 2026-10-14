@@ -2285,3 +2285,114 @@ Deno.test("audio-feed-jb99: (2) genuinely-not-resumable mode yields before turn 
   assertEquals((yieldErr as SynthesisYieldError).completedTurns, 0, "completed turns must be 0");
   assertEquals(paidCalls, 0, "0 paid calls made");
 });
+
+Deno.test("audio-feed-aueh: intermediate claim lease expiry records claim.lifecycle event with phase, attempt, and expiredOutcome", async () => {
+  const { stores } = await setupEnv();
+
+  // 1. Fresh claim (attempt 1): Worker A claims and touches to phase synthesizing_segment_1_of_4
+  const claim1 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-a",
+    now: "2026-10-14T12:00:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claim1);
+  await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "worker-a", {
+    phase: "synthesizing_segment_1_of_4",
+    now: "2026-10-14T12:02:00.000Z",
+  });
+
+  // Fresh control: zero expired events before expiry
+  const initialLogs = await stores.metadata.listLogs({ limit: 50 });
+  const prematureExpired = initialLogs.find((l) =>
+    l.type === "claim.lifecycle" &&
+    (l.context as Record<string, unknown>)?.claimOutcome === "expired"
+  );
+  assertEquals(prematureExpired, undefined, "fresh claim must not log an expired claim event");
+
+  // 2. Intermediate Expiry 1 (Attempt 1 expires, Worker B claims attempt 2)
+  const claim2 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-b",
+    now: "2026-10-14T12:16:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claim2);
+  assertEquals(claim2.attempts, 2);
+
+  const logsAfterExpiry1 = await stores.metadata.listLogs({ limit: 50 });
+  const expiry1 = logsAfterExpiry1.find((l) =>
+    l.type === "claim.lifecycle" &&
+    (l.context as Record<string, unknown>)?.claimOutcome === "expired" &&
+    l.attempt === 1
+  );
+  assert(expiry1, "expected claim.lifecycle event with claimOutcome=expired for attempt 1");
+  assertEquals(expiry1.phase, "synthesizing_segment_1_of_4");
+  assertEquals(expiry1.severity, "warn");
+  assertEquals(expiry1.episodeId, "episode-1");
+  assertEquals((expiry1.context as Record<string, unknown>)?.workerState, "unknown");
+  assertEquals(
+    (expiry1.context as Record<string, unknown>)?.lastHeartbeat,
+    "2026-10-14T12:02:00.000Z",
+  );
+  assertEquals((expiry1.context as Record<string, unknown>)?.expiredAt, "2026-10-14T12:15:00.000Z");
+  assertStringIncludes(
+    String((expiry1.context as Record<string, unknown>)?.provenance),
+    "worker-a",
+  );
+
+  // Worker B advances to uploading_audio, then vanishes
+  await stores.metadata.touchEpisodeClaim("user-1", "episode-1", "worker-b", {
+    phase: "uploading_audio",
+    now: "2026-10-14T12:20:00.000Z",
+  });
+
+  // 3. Intermediate Expiry 2 (Attempt 2 expires, Worker C claims attempt 3 with different phase)
+  const claim3 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-c",
+    now: "2026-10-14T12:32:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assert(claim3);
+  assertEquals(claim3.attempts, 3);
+
+  const logsAfterExpiry2 = await stores.metadata.listLogs({ limit: 50 });
+  const expiry2 = logsAfterExpiry2.find((l) =>
+    l.type === "claim.lifecycle" &&
+    (l.context as Record<string, unknown>)?.claimOutcome === "expired" &&
+    l.attempt === 2
+  );
+  assert(expiry2, "expected claim.lifecycle event with claimOutcome=expired for attempt 2");
+  assertEquals(expiry2.phase, "uploading_audio");
+  assertEquals(expiry2.severity, "warn");
+  assertEquals(expiry2.episodeId, "episode-1");
+  assertEquals((expiry2.context as Record<string, unknown>)?.workerState, "unknown");
+  assertEquals(
+    (expiry2.context as Record<string, unknown>)?.lastHeartbeat,
+    "2026-10-14T12:20:00.000Z",
+  );
+  assertEquals((expiry2.context as Record<string, unknown>)?.expiredAt, "2026-10-14T12:31:00.000Z");
+  assertStringIncludes(
+    String((expiry2.context as Record<string, unknown>)?.provenance),
+    "worker-b",
+  );
+
+  // 4. Abandonment control (Attempt 3 expires, attempt 4 exceeds maxClaims=3 -> abandoned)
+  const claim4 = await stores.metadata.claimEpisode("user-1", "episode-1", {
+    owner: "worker-d",
+    now: "2026-10-14T12:48:00.000Z",
+    leaseMs: 15 * 60_000,
+    maxClaims: 3,
+  });
+  assertEquals(claim4, null, "attempt 4 must be refused and abandoned");
+
+  const logsAfterAbandonment = await stores.metadata.listLogs({ limit: 50 });
+  const abandonedLog = logsAfterAbandonment.find((l) =>
+    l.type === "claim.lifecycle" &&
+    l.severity === "error" &&
+    (l.context as Record<string, unknown>)?.workerState === "unknown"
+  );
+  assert(abandonedLog, "expected abandoned claim event with severity=error for final attempt");
+  assertEquals(abandonedLog.attempt, 3);
+});
