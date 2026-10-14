@@ -978,6 +978,9 @@ Deno.test("audio-feed-qqs6: the installer serialises on a lock, steals a DEAD ho
     const blocked = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "2" });
     assertEquals(blocked.code, 1, `a live holder must produce a failure: ${blocked.log}`);
     assertStringIncludes(blocked.log, "has held the lock");
+    // The message names the holder it MEASURED, so a reader can tell this state from a lock that records
+    // nobody at all (audio-feed-pvjg).
+    assertStringIncludes(blocked.log, `(pid ${Deno.pid})`);
     assertStringIncludes(blocked.log, "hooks:verify");
     assert(
       !blocked.log.includes("The guard is NOT armed"),
@@ -1072,6 +1075,72 @@ Deno.test("audio-feed-elnk: the shared reader accepts every comment placement De
 
   const trailing = `{"tasks": {"b": "y"}}// no newline at end`;
   assertEquals(parseJsonc<{ tasks: Record<string, string> }>(trailing).tasks.b, "y");
+});
+
+Deno.test("audio-feed-pvjg: a lock directory with NO recorded holder is stolen after the bounded wait instead of naming a holder that does not exist", async () => {
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    const { clone } = await seedRepo(scratch);
+    const lockDir = path.join(clone, ".git", "audio-feed-p2la.lock");
+    // The state a kill leaves behind: `mkdir` and the pid write are two syscalls, so a creator killed in
+    // between leaves a lock directory that names nobody. Before this fix that directory wedged every
+    // later install on this VM for good (& the reviewer showed it never self-healed), and each one failed
+    // with "another install has held the lock" - naming a holder the installer never measured. A live
+    // creator records its pid within microseconds, so the absence of one after a full bounded wait IS the
+    // evidence, and the lock is stolen.
+    await Deno.mkdir(lockDir, { recursive: true });
+    const stolen = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "4" });
+    assertEquals(
+      stolen.code,
+      0,
+      `a lock with no recorded holder must be stolen, not wedge the install: ${stolen.log}`,
+    );
+    assertStringIncludes(stolen.log, "guard armed");
+    assert(
+      !stolen.log.includes("has held the lock"),
+      `the message must not name a holder it did not measure: ${stolen.log}`,
+    );
+    const lockLeft = await Deno.stat(lockDir).then(() => true).catch(() => false);
+    assert(!lockLeft, "the stolen lock directory must not be left behind");
+    assertEquals((await prepushGuardStatus(clone)).state, "armed");
+
+    // Self-healed: the very next install is an ordinary no-op on an armed clone.
+    const again = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "4" });
+    assertEquals(again.code, 0, `the lock must be gone for good: ${again.log}`);
+    assertStringIncludes(again.log, "already armed");
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-pvjg: a holderless lock that CANNOT be stolen fails by name without inventing a holder", async () => {
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    const { clone } = await seedRepo(scratch);
+    const gitDir = path.join(clone, ".git");
+    await Deno.mkdir(path.join(gitDir, "audio-feed-p2la.lock"), { recursive: true });
+    // Make the steal impossible without making the state ambiguous: a read-only .git still supports the
+    // reads the installer does, and nothing can be unlinked from it, so the one steal attempt fails.
+    await Deno.chmod(gitDir, 0o500);
+    try {
+      const blocked = await runInstaller(clone, home, { AF_INSTALL_LOCK_WAIT_STEPS: "2" });
+      assertEquals(blocked.code, 1, `the install must fail closed: ${blocked.log}`);
+      assertStringIncludes(blocked.log, "NO recorded holder");
+      assert(
+        !blocked.log.includes("has held the lock"),
+        `the message must not invent a holder: ${blocked.log}`,
+      );
+      assertStringIncludes(blocked.log, "hooks:verify");
+    } finally {
+      await Deno.chmod(gitDir, 0o755);
+    }
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
 });
 
 Deno.test("audio-feed-elnk: the shipped deno.json reads through the shared JSONC reader", async () => {

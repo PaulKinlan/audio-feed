@@ -17,7 +17,9 @@
 # under one lock and every write is an atomic rename, and the message says what was measured:
 #   * LOCK: mkdir on "$GIT_DIR/audio-feed-p2la.lock" (atomic on every POSIX filesystem, no extra
 #     tooling) with a bounded wait, plus a dead-holder steal. flock(1) was rejected: it is absent on
-#     macOS, where this script also runs.
+#     macOS, where this script also runs. The lock's pid file is its identity: a lock whose recorded
+#     holder is gone, or (audio-feed-pvjg) a lock directory with NO recorded holder at all after the
+#     full wait, is stolen rather than reported as a holder that does not exist.
 #   * ATOMIC WRITES: each write goes to a private `mktemp` file IN THE TARGET DIRECTORY and is
 #     `mv`-ed into place (a rename), so no reader can observe a half-written hook. A fixed
 #     "$HOOK_FILE.tmp" name or a bare `cp -f` (open, truncate, write) is what let one installer's
@@ -126,11 +128,15 @@ LOCK_DIR="$GIT_DIR/audio-feed-p2la.lock"
 LOCK_WAIT_STEPS="${AF_INSTALL_LOCK_WAIT_STEPS:-600}" # 600 x 25ms = 15s
 
 acquire_lock() {
-  local waited=0 holder=""
+  local waited=0 holder="" pidless_steals=0
   while :; do
     if mkdir "$LOCK_DIR" 2>/dev/null; then
-      printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+      # lock_held BEFORE the pid write: cleanup then removes a lock dir this process created even if
+      # that write fails. A directory with no pid file is a lock nobody can reason about.
       lock_held=1
+      if ! printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null; then
+        fail "the lock directory '$LOCK_DIR' was created but recording this install's pid in it failed, so this install cannot hold a lock another install could reason about"
+      fi
       return 0
     fi
     holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")"
@@ -140,7 +146,25 @@ acquire_lock() {
       continue
     fi
     if [ "$waited" -ge "$LOCK_WAIT_STEPS" ]; then
-      fail "another install${holder:+ (pid $holder)} has held the lock '$LOCK_DIR' for ~$((LOCK_WAIT_STEPS * 25))ms. This install did not write, so it cannot claim the guard is installed — and it does not skip the checks below to produce a green run anyway."
+      if [ -z "$holder" ] && [ "$pidless_steals" = 0 ]; then
+        # A LOCK WITH NO RECORDED HOLDER, after a full bounded wait, is a lock whose creator is gone.
+        # `mkdir` and the pid write are two syscalls, so a kill in between leaves a directory that names
+        # nobody - and audio-feed-pvjg showed that it then wedged EVERY later install on the VM until
+        # someone removed it by hand. A live creator records its pid within microseconds, so the
+        # absence after the full wait IS the evidence. Steal once; if another install takes it meanwhile,
+        # the loop keeps waiting on a real, recorded, living holder and still fails closed if it stays.
+        pidless_steals=1
+        waited=0
+        rm -rf "$LOCK_DIR" 2>/dev/null || true
+        continue
+      fi
+      # The message reports what was MEASURED, and the two states are different facts: one names a
+      # holder (its pid was recorded and its process is alive), the other says plainly that no holder
+      # was recorded at all. The old text claimed "another install has held the lock" in both.
+      if [ -z "$holder" ]; then
+        fail "the lock '$LOCK_DIR' exists with NO recorded holder after ~$((LOCK_WAIT_STEPS * 25))ms of waiting and one attempt to steal it, so this install did not write"
+      fi
+      fail "another install (pid $holder) has held the lock '$LOCK_DIR' for ~$((LOCK_WAIT_STEPS * 25))ms and that process is still alive, so this install did not write"
     fi
     waited=$((waited + 1))
     sleep 0.025
