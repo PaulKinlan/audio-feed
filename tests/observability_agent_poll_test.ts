@@ -1363,3 +1363,42 @@ Deno.test("the runner propagates a cap refusal instead of reporting success (aud
     }
   });
 });
+
+Deno.test("the runner defaults AUDIOFEED_OBSERVABILITY_AGENT_ENABLED=1 and honours explicit 0 (audio-feed-nx2j)", async () => {
+  await withTempDir(async (dir) => {
+    const bin = await Deno.makeTempDir();
+    try {
+      await Deno.writeTextFile(
+        `${bin}/deno`,
+        '#!/bin/sh\necho "ENABLED=$AUDIOFEED_OBSERVABILITY_AGENT_ENABLED"\nexit 0\n',
+      );
+      await Deno.chmod(`${bin}/deno`, 0o755);
+
+      const defaultOut = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          `unset AUDIOFEED_OBSERVABILITY_AGENT_ENABLED; PATH="${bin}:$PATH" AUDIOFEED_AGENT_STATE_DIR="${dir}/default" sh scripts/observability-agent-run.sh --interval-seconds 0`,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(defaultOut.code, 0);
+      const defaultLog = await Deno.readTextFile(`${dir}/default/last-run.log`);
+      assertEquals(defaultLog.trim(), "ENABLED=1");
+
+      const disabledOut = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          `AUDIOFEED_OBSERVABILITY_AGENT_ENABLED=0 PATH="${bin}:$PATH" AUDIOFEED_AGENT_STATE_DIR="${dir}/disabled" sh scripts/observability-agent-run.sh --interval-seconds 0`,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(disabledOut.code, 0);
+      const disabledLog = await Deno.readTextFile(`${dir}/disabled/last-run.log`);
+      assertEquals(disabledLog.trim(), "ENABLED=0");
+    } finally {
+      await Deno.remove(bin, { recursive: true });
+    }
+  });
+});

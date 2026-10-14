@@ -75,8 +75,24 @@ export const CLAIM_LIFECYCLE_EVENT = "claim.lifecycle";
 /** The phase recorded when an attempt starts. siv1 persists this same value on the episode. */
 export const CLAIM_START_PHASE = "claimed";
 
+/** Episode identity and optional article/source/size metadata carried onto claim lifecycle records (audio-feed-4y9v). */
+export type ClaimLifecycleEpisode =
+  & Pick<Episode, "id" | "userId" | "attempts">
+  & Partial<
+    Pick<
+      Episode,
+      | "articleId"
+      | "sourceId"
+      | "sourceTitle"
+      | "mode"
+      | "byteLength"
+      | "durationSeconds"
+      | "scriptTurns"
+    >
+  >;
+
 /** Facts every lifecycle record carries, from the episode it is about. */
-function identity(episode: Pick<Episode, "id" | "userId" | "attempts">): Omit<LogRecord, "seq"> {
+function identity(episode: ClaimLifecycleEpisode): Omit<LogRecord, "seq"> {
   return {
     time: new Date().toISOString(),
     severity: "info",
@@ -111,6 +127,10 @@ export interface ClaimLifecycleFields {
   claimOutcome?: "yielded" | "expired";
   /** Terminal-upload retry count recorded by the worker when yielding (audio-feed-lqd6). */
   uploadRetry?: number;
+  /** Optional article/synthesis size facts when known to the caller (audio-feed-4y9v). */
+  inputByteLength?: number;
+  wordCount?: number;
+  segmentCount?: number;
   /** Which attempt this record is about, when the caller knows better than the episode does. */
   attempt?: number;
   severity?: "info" | "warn" | "error";
@@ -128,7 +148,7 @@ export interface ClaimLifecycleFields {
  * no URL — an episode id and a phase are what a reader needs, and nothing here is user-controlled.
  */
 export function claimLifecycleEvent(
-  episode: Pick<Episode, "id" | "userId" | "attempts">,
+  episode: ClaimLifecycleEpisode,
   fields: ClaimLifecycleFields,
 ): Omit<LogRecord, "seq"> {
   const attempt = fields.attempt ?? episode.attempts ?? 1;
@@ -145,9 +165,26 @@ export function claimLifecycleEvent(
       fields.severity === "error" ? "failed" : "finished"
     } in ${fields.durationMs}ms`
     : subject;
+  // Article, source, and size facts from the episode record (audio-feed-4y9v), merged before
+  // caller-supplied `fields.context` so explicit overrides win.
+  const episodeContext: Record<string, unknown> = {
+    ...(episode.articleId ? { articleId: episode.articleId } : {}),
+    ...(episode.sourceId ? { sourceId: episode.sourceId } : {}),
+    ...(episode.sourceTitle ? { sourceTitle: episode.sourceTitle } : {}),
+    ...(episode.mode ? { mode: episode.mode } : {}),
+    ...(typeof episode.byteLength === "number" ? { byteLength: episode.byteLength } : {}),
+    ...(typeof episode.durationSeconds === "number"
+      ? { durationSeconds: episode.durationSeconds }
+      : {}),
+    ...(Array.isArray(episode.scriptTurns) ? { scriptTurnCount: episode.scriptTurns.length } : {}),
+    ...(fields.inputByteLength !== undefined ? { inputByteLength: fields.inputByteLength } : {}),
+    ...(fields.wordCount !== undefined ? { wordCount: fields.wordCount } : {}),
+    ...(fields.segmentCount !== undefined ? { segmentCount: fields.segmentCount } : {}),
+  };
   // The structured verdict merges into `context`, which survives the log sanitiser's
   // key passthrough (only key NAMES matching the redaction pattern are stripped).
   const context = {
+    ...episodeContext,
     ...fields.context,
     ...(fields.claimOutcome ? { claimOutcome: fields.claimOutcome } : {}),
     ...(fields.uploadRetry !== undefined ? { uploadRetry: fields.uploadRetry } : {}),
@@ -176,7 +213,7 @@ export function claimLifecycleEvent(
  * believed later by someone who cannot tell it was a guess (audio-feed-kd5r).
  */
 export function abandonedClaimEvent(
-  episode: Pick<Episode, "id" | "userId" | "attempts">,
+  episode: ClaimLifecycleEpisode,
   observed: {
     phase: string;
     attempt: number;
@@ -214,7 +251,7 @@ export function abandonedClaimEvent(
  * phase reached, expiry timestamp, last heartbeat, attempt number, and provenance.
  */
 export function expiredClaimEvent(
-  episode: Pick<Episode, "id" | "userId" | "attempts">,
+  episode: ClaimLifecycleEpisode,
   observed: {
     phase: string;
     attempt: number;

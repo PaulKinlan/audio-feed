@@ -23,6 +23,7 @@ import type { Stores } from "./config.ts";
 import { registerCronJobs } from "./cron.ts";
 import { type AudioInventoryResult, inventoryLegacyAudioKeys } from "./storage/legacy_audio.ts";
 import { screenErrorMessage, screenErrorName } from "./observability/error_screen.ts";
+import { normaliseRequestHost } from "./http.ts";
 import { createLogger, isHighVolumeRoute, isObservabilityRoute, normaliseMethod } from "./log.ts";
 
 const isDeploy = Boolean(Deno.env.get("DENO_REGION") || Deno.env.get("DENO_DEPLOYMENT_ID"));
@@ -153,6 +154,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // request. The correlation id is minted per request below, so this hook does not have it; the route
   // pattern is recorded instead, which is a constant from the route table.
   const onUnhandledError = async (error: unknown, req: Request): Promise<void> => {
+    const host = normaliseRequestHost(req, config.trustProxyHeaders);
     await appLog.error(
       "http.request",
       `unhandled ${errorName(error)} on ${
@@ -162,7 +164,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       }`,
       {
         route: router.routePatternFor(new URL(req.url)),
-        context: { error: errorName(error), errorMessage: screenErrorMessage(error) },
+        context: { error: errorName(error), errorMessage: screenErrorMessage(error), host },
       },
     );
   };
@@ -214,11 +216,12 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         // Nothing else about the request is recorded: no headers, no query string, no body, no
         // client address. The invariant test fuzzes each of those surfaces independently.
         const method = normaliseMethod(req.method);
+        const host = normaliseRequestHost(req, config.trustProxyHeaders);
         const fields = {
           correlationId,
           route,
           durationMs: durationMs(),
-          context: { method, status: res.status },
+          context: { method, status: res.status, host },
         };
         const line = `${method} ${route} -> ${res.status}`;
         if (res.status >= 500) await appLog.error("http.request", line, fields);
@@ -233,6 +236,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       // and stores a header-only stack without caller frames; this request record intentionally
       // stores no stack at all. The raw unhandled message can quote client-chosen request text,
       // so the separate context.errorMessage below is screened before it is recorded.
+      const host = normaliseRequestHost(req, config.trustProxyHeaders);
       await appLog.error("http.request", `unhandled ${errorName(error)} on ${route}`, {
         correlationId,
         route,
@@ -242,7 +246,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
         // phrases this codebase throws and the original is discarded. See src/observability/error_screen.ts;
         // the canary invariant test drives a request that THROWS with an attacker-chosen query string and
         // asserts the canary is absent from the whole durable record.
-        context: { error: errorName(error), errorMessage: screenErrorMessage(error) },
+        context: { error: errorName(error), errorMessage: screenErrorMessage(error), host },
       });
       throw error;
     }

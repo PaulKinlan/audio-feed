@@ -11,8 +11,12 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, openStores, type Stores } from "../src/config.ts";
+import { normaliseRequestHost, OTHER_HOST } from "../src/http.ts";
 import { MAX_LIMIT } from "../src/routes/observability.ts";
+import { bootstrap } from "../src/server.ts";
+import { abandonedClaimEvent, claimLifecycleEvent } from "../src/storage/episode_events.ts";
 import type { LogSeverity } from "../src/storage/mod.ts";
+import { makeEpisode } from "./fixtures.ts";
 
 const BASE = "https://audio.example";
 const KEY = "observability-key-under-test";
@@ -591,4 +595,148 @@ Deno.test("a bounded summary window is complete, not truncated (audio-feed-bx1q)
     .json();
   assertEquals(uncapped.total, 5);
   assertEquals(uncapped.truncated, false, "the store was exhausted, not bounded");
+});
+
+Deno.test("audio-feed-4y9v: http.request records and /api/observability/errors carry a validated host and screen capability tokens", async () => {
+  const stores = await openStores({ kvPath: ":memory:" });
+  const srv = await bootstrap({
+    port: 0,
+    stores,
+    isDeploy: true,
+    synthesizer: null,
+    inventory: false,
+    config: {
+      publicBaseUrl: BASE,
+      observabilityKey: KEY,
+    },
+  });
+  try {
+    // 1. A 421 misdirected request on wrong.example.com records host="wrong.example.com".
+    const misdirected = await srv.fetch(new Request("https://wrong.example.com/"));
+    assertEquals(misdirected.status, 421);
+
+    // 2. A host carrying a capability-shaped or canary-shaped label is screened to "<other>".
+    const canary = "qV7z52CapSECRETfd39Nd";
+    const tokenHost = await srv.fetch(new Request(`https://${canary}.example.com/`));
+    assertEquals(tokenHost.status, 421);
+
+    const feedRes = await srv.fetch(
+      new Request(`${BASE}/api/observability/errors?since=0&severity=warn`, {
+        headers: { authorization: `Bearer ${KEY}` },
+      }),
+    );
+    assertEquals(feedRes.status, 200);
+    const feed = await feedRes.json();
+    assertEquals(feed.events.length, 2);
+
+    assertEquals(feed.events[0].type, "http.request");
+    assertEquals(feed.events[0].context?.host, "wrong.example.com");
+    assertEquals(feed.events[0].context?.status, 421);
+
+    assertEquals(feed.events[1].type, "http.request");
+    assertEquals(feed.events[1].context?.host, OTHER_HOST);
+    assert(!JSON.stringify(feed).toLowerCase().includes(canary.toLowerCase()));
+
+    // Direct unit checks on normaliseRequestHost for proxy headers and deploy preview hosts.
+    assertEquals(
+      normaliseRequestHost(
+        new Request("https://audio-feed-8b9c1d2e3f4a.paulkinlan-ea.deno.net/"),
+      ),
+      "audio-feed-8b9c1d2e3f4a.paulkinlan-ea.deno.net",
+    );
+    assertEquals(
+      normaliseRequestHost(
+        new Request("https://localhost/account", {
+          headers: { "x-forwarded-host": "staging.audio.example.com" },
+        }),
+        false,
+      ),
+      "localhost",
+    );
+    assertEquals(
+      normaliseRequestHost(
+        new Request("https://localhost/account", {
+          headers: { "x-forwarded-host": "staging.audio.example.com" },
+        }),
+        true,
+      ),
+      "staging.audio.example.com",
+    );
+  } finally {
+    await srv.shutdown();
+  }
+});
+
+Deno.test("audio-feed-4y9v: claim.lifecycle events carry article/source/size metadata and toEvent projects full lifecycle fields", async () => {
+  const { fetch, stores } = app();
+  const episode = makeEpisode({
+    id: "episode-meta-1",
+    userId: "user-1",
+    articleId: "article-meta-1",
+    sourceId: "source-meta-1",
+    sourceTitle: "Stratechery Daily Update",
+    mode: "deepdive",
+    byteLength: 48_000_000,
+    durationSeconds: 912,
+    attempts: 2,
+    scriptTurns: [
+      { speaker: "Host", text: "Turn 1" },
+      { speaker: "Guest", text: "Turn 2" },
+      { speaker: "Host", text: "Turn 3" },
+    ],
+  });
+
+  await stores.metadata.appendLog(
+    claimLifecycleEvent(episode, {
+      phase: "uploading_audio",
+      attempt: 2,
+      severity: "warn",
+      claimOutcome: "yielded",
+      uploadRetry: 1,
+      durationMs: 44_200,
+      inputByteLength: 31_400,
+      wordCount: 4_850,
+      segmentCount: 12,
+      reason: "invocation budget reached with 8 of 12 segments committed",
+    }),
+  );
+  await stores.metadata.appendLog(
+    abandonedClaimEvent(episode, {
+      phase: "narration_tts",
+      attempt: 3,
+      reason: "claim lease expired in narration_tts",
+      expiredAt: "2026-10-14T08:15:00.000Z",
+    }),
+  );
+
+  const page = await (await fetch(authed("/api/observability/errors?since=0&severity=warn"))).json();
+  assertEquals(page.events.length, 2);
+
+  const yielded = page.events[0];
+  assertEquals(yielded.type, "claim.lifecycle");
+  assertEquals(yielded.episodeId, "episode-meta-1");
+  assertEquals(yielded.phase, "uploading_audio");
+  assertEquals(yielded.attempt, 2);
+  assertEquals(yielded.durationMs, 44_200);
+  assertEquals(yielded.context?.articleId, "article-meta-1");
+  assertEquals(yielded.context?.sourceId, "source-meta-1");
+  assertEquals(yielded.context?.sourceTitle, "Stratechery Daily Update");
+  assertEquals(yielded.context?.mode, "deepdive");
+  assertEquals(yielded.context?.byteLength, 48_000_000);
+  assertEquals(yielded.context?.durationSeconds, 912);
+  assertEquals(yielded.context?.scriptTurnCount, 3);
+  assertEquals(yielded.context?.inputByteLength, 31_400);
+  assertEquals(yielded.context?.wordCount, 4_850);
+  assertEquals(yielded.context?.segmentCount, 12);
+  assertEquals(yielded.context?.claimOutcome, "yielded");
+  assertEquals(yielded.context?.uploadRetry, 1);
+
+  const abandoned = page.events[1];
+  assertEquals(abandoned.type, "claim.lifecycle");
+  assertEquals(abandoned.episodeId, "episode-meta-1");
+  assertEquals(abandoned.phase, "narration_tts");
+  assertEquals(abandoned.attempt, 3);
+  assertEquals(abandoned.context?.articleId, "article-meta-1");
+  assertEquals(abandoned.context?.sourceId, "source-meta-1");
+  assertEquals(abandoned.context?.workerState, "unknown");
 });

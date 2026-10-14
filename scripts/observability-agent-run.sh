@@ -11,10 +11,12 @@
 #   2. Writes nothing when there is nothing to do. An idle hour exits immediately and silently.
 #
 # Usage: observability-agent-run.sh [--interval-seconds N] [--dry-run]
-#   Env: AUDIOFEED_OBSERVABILITY_AGENT_ENABLED=1 and AUDIOFEED_OBSERVABILITY_KEY are required, or the
-#        poll exits having done nothing at all (it makes no network call and no model call when disabled).
+#   Env: AUDIOFEED_OBSERVABILITY_AGENT_ENABLED defaults to 1 (audio-feed-nx2j; set to 0 to disable)
+#        and AUDIOFEED_OBSERVABILITY_KEY is required, or the poll exits having done nothing at all
+#        (it makes no network call and no model call when disabled or unconfigured).
 set -eu
 
+export AUDIOFEED_OBSERVABILITY_AGENT_ENABLED="${AUDIOFEED_OBSERVABILITY_AGENT_ENABLED:-1}"
 INTERVAL=3600
 DRY_RUN=""
 STATE_DIR="${AUDIOFEED_AGENT_STATE_DIR:-$HOME/.local/state/audio-feed-observability-agent}"
