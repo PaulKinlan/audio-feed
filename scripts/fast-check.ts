@@ -84,8 +84,9 @@ const CORE = new Set([
 ]);
 
 // These HTTP route tests boot the app through a hub, so the graph's hub
-// cut cannot attribute their handler coverage. Add a suite ONLY if discovered
-// in this tree; an unknown route or a missing sole reader still widens to FULL.
+// cut cannot attribute their handler coverage. These are verified minimum
+// readers, supplemented by URL candidates below; unknown routes and routes
+// with no present reader still widen to FULL.
 // The host reporter's "unmapped" warning is NOT the selector's distinct
 // "fast-check: FULL suite (no test reaches: ...)" fallback: observability.ts
 // and log.ts were already selected by direct importers without this table.
@@ -114,6 +115,57 @@ const BEHAVIOUR_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
   ["src/routes/webauthn.ts", ["tests/passkeys_test.ts"]],
   ["src/routes/reports.ts", ["tests/csp_reporting_test.ts"]],
 ]);
+
+// The five hub-cut routes have URL candidates outside their verified HTTP suites.
+// Conservatively select EVERY candidate: if a formerly mention-only test starts
+// calling the handler, the selector already includes it without a table edit.
+const CANDIDATE_ROUTES = new Set([
+  "src/routes/admin_telemetry.ts",
+  "src/routes/login.ts",
+  "src/routes/account_api.ts",
+  "src/routes/webauthn.ts",
+  "src/routes/reports.ts",
+]);
+
+function accountRoutePaths(app: string): string[] {
+  const paths = [...app.matchAll(/router\.(?:get|post|delete)\("([^"]+)", account\("[^"]+"\)\);/g)]
+    .map((match) => match[1]!);
+  if (!paths.length) throw new Error("account() route registration discovery is empty");
+  return paths;
+}
+
+/** Redact fixture literals, not the selector-test module: new real HTTP tests there remain candidates. */
+export function withoutRouteAuditFixture(file: string, source: string): string {
+  if (file !== "tests/fast_check_test.ts") return source;
+  const marker = 'Deno.test("' +
+    "abh1: route registrations discover the complete HTTP test set before narrowing" +
+    '", async () => {';
+  const start = source.indexOf(marker);
+  const end = source.indexOf("\n});", start);
+  if (start < 0 || end <= start || source.indexOf(marker, start + marker.length) !== -1) {
+    throw new Error("route-reference audit fixture block missing or duplicated");
+  }
+  return source.slice(0, start) + source.slice(end + 4);
+}
+
+function mentionsRouteUrl(file: string, source: string, accountPaths: readonly string[]): boolean {
+  switch (file) {
+    case "src/routes/account_api.ts":
+      return accountPaths.some((path) =>
+        source.includes(path.includes(":") ? path.slice(0, path.indexOf(":")) : path)
+      );
+    case "src/routes/login.ts":
+      return /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(source);
+    case "src/routes/admin_telemetry.ts":
+      return source.includes("/admin/observability/telemetry");
+    case "src/routes/webauthn.ts":
+      return source.includes("/.well-known/webauthn");
+    case "src/routes/reports.ts":
+      return source.includes("/api/reports/csp");
+    default:
+      return false;
+  }
+}
 
 const TEST_FLAGS = [
   "--allow-net",
@@ -295,8 +347,9 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
 }
 
 /**
- * The name-convention complement to the graph: src/routes/listen.ts is covered
- * by tests/listen_test.ts and tests/listen_*_test.ts; src/auth/passkeys.ts
+ * Complements the graph with filename conventions, verified handler bindings,
+ * and conservative URL candidates for five hub-cut routes. src/routes/listen.ts
+ * is covered by tests/listen_test.ts and tests/listen_*_test.ts; src/auth/passkeys.ts
  * additionally by everything in the mirrored tests/auth/ directory.
  */
 export async function nameMatchedTests(
@@ -316,15 +369,23 @@ export async function nameMatchedTests(
   }
   if (!stems.length) return matched;
 
+  const candidateFiles = stems.map(({ file }) => file).filter((file) => CANDIDATE_ROUTES.has(file));
+  const accountPaths = candidateFiles.includes("src/routes/account_api.ts")
+    ? accountRoutePaths(await Deno.readTextFile(`${ROOT}src/app.ts`))
+    : [];
   for await (const f of tsFiles(testsDir)) {
     const rel = f.slice(testsDir.length - "tests".length); // tests/...
     if (!rel.endsWith("_test.ts") && !rel.endsWith("-test.ts")) continue;
     const base = rel.split("/").pop()!;
     const testStem = base.replace(/(_test|\.test|\.spec|-test)\.ts$/, "");
+    const source = candidateFiles.length
+      ? withoutRouteAuditFixture(rel, await Deno.readTextFile(f))
+      : "";
     for (const { file, stem, subdir } of stems) {
       const normStem = stem.replace(/[-_]/g, "_");
       const normTestStem = testStem.replace(/[-_]/g, "_");
       const hit = BEHAVIOUR_SUITES.get(file)?.includes(rel) ||
+        (CANDIDATE_ROUTES.has(file) && mentionsRouteUrl(file, source, accountPaths)) ||
         normTestStem === normStem ||
         normTestStem.startsWith(`${normStem}_`) ||
         (subdir !== null && rel.startsWith(`tests/${subdir}/`));
