@@ -92,62 +92,55 @@ old "a script NOTHING imports selects none, the type-check is its gate" carve-ou
 `scripts/smoke.ts` runs the full suite.
 
 AN INCOMPLETE RELATION MAKES THE INERT CLASS UNREACHABLE (audio-feed-q0ky, coord's decision (b)). An
-unread `.md` was inert, so a markdown read the detector could not resolve left the file inert and
-selected NOTHING - and the gate DESCRIBED that as a fact ("no suite is derived to read it") when the
-truth was "some suite reads something here and I could not confirm what". That is the same defect as
-the reporter printing `unmapped` for a run that executed every suite, and the same as a blank admin
-cell: A REPORT MUST NOT RENDER AN INABILITY TO KNOW AS A FACT. So: while the detector has UNRESOLVED
-read hints - path hints the scan produced that name nothing in the tree - NO file may be classified
-inert, and a change otherwise treated as inert widens to the FULL suite. The run says so twice, in
-words an operator can act on: the audit line
-`fast-gate: read relation INCOMPLETE: N read path hint(s) do not name anything in the tree (...)`
-and the plan's own reason
-(`the read relation is INCOMPLETE (...), so no file may be called inert: <files>`). A resolvable
-markdown read is still caught by the derived relation, and a COMPLETE relation still allows the
+unread `.md` was inert, so a markdown read the detector could not resolve left the file inert and selected
+NOTHING - and the gate DESCRIBED that as a fact ("no suite is derived to read it") when the truth was "some
+suite reads something here and I could not confirm what". That is the same defect as the reporter printing
+`unmapped` for a run that executed every suite, and the same as a blank admin cell: A REPORT MUST NOT RENDER
+AN INABILITY TO KNOW AS A FACT. So: while the detector has UNRESOLVED read hints - path hints the scan
+produced that name nothing in the tree - NO file may be classified inert, and a change otherwise treated as
+inert widens to the FULL suite. The run says so twice, in words an operator can act on: the audit line
+`fast-gate: read relation INCOMPLETE: N read path hint(s) do not name anything in the tree (...)` and the
+plan's own reason (`the read relation is INCOMPLETE (...), so no file may be called inert: <files>`). A
+resolvable markdown read is still caught by the derived relation, and a COMPLETE relation still allows the
 inert class, so the rule keys on incompleteness rather than on markdown.
 
-THE HINTS THEREFORE HAVE TO BE ACCURATE, WHICH IS WHAT MAKES THE RULE USABLE (audio-feed-lm4d). The
-rule above was right and the hints were wrong: this tree carried ELEVEN hints that named nothing, so
-no change could ever be inert and a one-line docs edit paid the full suite (measured: 112 suites,
-125s, for one line in `docs/ingest.md`). Each was a mis-parse, and each is now removed where it is
-produced, not by relaxing the rule: (1) a read call that exists only inside STRING CONTENT is data,
-not a read site - the detector's own fixture suite was contributing its fixtures' reads as its own;
-a read inside a `${}` interpolation is CODE and is still found. (2) A base bound OUTSIDE the
-repository (`Deno.makeTempDir()`, `$HOME`, `TMPDIR`) is not a repo path, so `${dir}/state.json` is
-no longer offered as `state.json`: it is REPORTED in the `outOfRepo` bucket (reported, never
-silent - q0ky's lesson), and does not disable the inert class, because a hint based outside the repo
-cannot name a file a change touches. That classification belongs to a BINDING and is resolved by
-LEXICAL SCOPE (audio-feed-7l9m): the read's INNERMOST binding of the name decides, so a SHADOWED
-name that holds a repo path keeps its relation (rev-27's fixture - a `home` bound to `$HOME` at
-module scope and to a repo path inside the reader - now selects that reader exactly), a PARAMETER is
-its own binding and never inherits an out-of-repo name, and when a value cannot be PROVED
-out-of-repo the hint is OFFERED as a fragment rather than suppressed: the same safe direction as the
-guard, because an extra relation costs a test run and a missing one costs a skipped test. (3) A
-SUFFIX after an interpolation is a candidate, not the path an author wrote, so when it names nothing
-it is reported in the `unattributed` bucket rather than counted as a read the detector could not
-resolve. The guard is NOT weakened by (3): `unresolved` hints still disable the inert class, and a
-fragment blocks only when it could hide an INERT-ELIGIBLE read AND could BE the file being changed -
-markdown, or an extension-less prefix that could be a directory of it, whose basename matches a
-changed file (`couldHideInertRead` and `couldBeTheChangedFile` in `scripts/fast-check.ts`). Both
-reasons are printed, so no fragment is dropped in silence. (4) A runtime-assembled suffix that NO
-OTHER BUCKET accounts for is printed in the `unclassified` bucket (audio-feed-snww, audio-feed-3ttu)
-and, like `outOfRepo`, it neither enters the relation nor disables the inert class: it is not a repo
-path, so the tree cannot be searched for it, and it has no extension, so it cannot be the markdown
-file a change touches. THE RULE IS "UNACCOUNTED FOR", NOT "MATCHES A SHAPE": the first version asked
-whether a candidate looked like a bare name (`[\w@.-]+`, no slash, no extension), and rev-27
-measured its complement - a name containing `+`, `#`, an accent or a space - landing in NO bucket at
-all, which is exactly the silence q0ky forbids. A shape test always leaves a silent complement; "is
-this accounted for?" does not. The reported value is the WHOLE candidate, never a prefix the
-whitespace split cut, because a bucket that reports the wrong thing looks like a bucket that works.
-The boundary that keeps it readable is the CLASS, not a pattern - tail candidates are the text after
-an interpolation in a path-shaped token, so a literal argument (a command name, a CLI flag, an
-encoding, a URL) is rejected before a candidate exists and stays silent on purpose. Measured on this
-tree: one member (`DevToolsActivePort`) against eight out-of-repo and two fragments. The relation
-itself is asserted UNCHANGED by the fix (byte-identical on this tree, same 18 entries and
-observers), and `tests/read_relation_hints_test.ts` pins both directions: an inert change IS inert,
-and a change touching something a suite reads STILL selects it. If a lane ever sees a docs-only
-change pay the full suite again, READ THE AUDIT LINE - it names the hints that did it, and they are
-now a signal about the tree rather than background noise.
+THE HINTS THEREFORE HAVE TO BE ACCURATE, WHICH IS WHAT MAKES THE RULE USABLE (audio-feed-lm4d). The rule
+above was right and the hints were wrong: this tree carried ELEVEN hints that named nothing, so no change
+could ever be inert and a one-line docs edit paid the full suite (measured: 112 suites, 125s, for one line
+in `docs/ingest.md`). Each was a mis-parse, and each is now removed where it is produced, not by relaxing
+the rule: (1) a read call that exists only inside STRING CONTENT is data, not a read site - the detector's
+own fixture suite was contributing its fixtures' reads as its own; a read inside a `${}` interpolation is
+CODE and is still found. (2) A base bound OUTSIDE the repository (`Deno.makeTempDir()`, `$HOME`, `TMPDIR`) is not a repo path, so
+`${dir}/state.json` is no longer offered as `state.json`: it is REPORTED in the `outOfRepo` bucket (reported,
+never silent - q0ky's lesson), and does not disable the inert class, because a hint based outside the repo
+cannot name a file a change touches. That classification belongs to a BINDING and is resolved by LEXICAL
+SCOPE (audio-feed-7l9m): the read's INNERMOST binding of the name decides, so a SHADOWED name that holds a
+repo path keeps its relation (rev-27's fixture - a `home` bound to `$HOME` at module scope and to a repo path
+inside the reader - now selects that reader exactly), a PARAMETER is its own binding and never inherits an
+out-of-repo name, and when a value cannot be PROVED out-of-repo the hint is OFFERED as a fragment rather than
+suppressed: the same safe direction as the guard, because an extra relation costs a test run and a missing
+one costs a skipped test. (3) A SUFFIX after an interpolation is a candidate, not the path an author wrote,
+so when it names nothing it is reported in the `unattributed` bucket rather than counted as a read the
+detector could not resolve. The guard is NOT weakened by (3): `unresolved` hints still disable the inert
+class, and a fragment blocks only when it could hide an INERT-ELIGIBLE read AND could BE the file being
+changed - markdown, or an extension-less prefix that could be a directory of it, whose basename matches a
+changed file (`couldHideInertRead` and `couldBeTheChangedFile` in `scripts/fast-check.ts`). Both reasons are
+printed, so no fragment is dropped in silence. (4) A runtime-assembled suffix that NO OTHER BUCKET accounts for is printed in the `unclassified` bucket
+(audio-feed-snww, audio-feed-3ttu) and, like `outOfRepo`, it neither enters the relation nor disables the inert
+class: it is not a repo path, so the tree cannot be searched for it, and it has no extension, so it cannot be the
+markdown file a change touches. THE RULE IS "UNACCOUNTED FOR", NOT "MATCHES A SHAPE": the first version asked
+whether a candidate looked like a bare name (`[\w@.-]+`, no slash, no extension), and rev-27 measured its
+complement - a name containing `+`, `#`, an accent or a space - landing in NO bucket at all, which is exactly the
+silence q0ky forbids. A shape test always leaves a silent complement; "is this accounted for?" does not. The
+reported value is the WHOLE candidate, never a prefix the whitespace split cut, because a bucket that reports the
+wrong thing looks like a bucket that works. The boundary that keeps it readable is the CLASS, not a pattern - tail
+candidates are the text after an interpolation in a path-shaped token, so a literal argument (a command name, a
+CLI flag, an encoding, a URL) is rejected before a candidate exists and stays silent on purpose. Measured on this
+tree: one member (`DevToolsActivePort`) against eight out-of-repo and two fragments. The relation itself is asserted UNCHANGED by the fix
+(byte-identical on this tree, same 18 entries and observers), and `tests/read_relation_hints_test.ts` pins
+both directions: an inert change IS inert, and a change touching something a suite reads STILL selects it.
+If a lane ever sees a docs-only change pay the full suite again, READ THE AUDIT LINE - it names the hints
+that did it, and they are now a signal about the tree rather than background noise.
 
 The fast tier is an ITERATION aid. The merger still runs the full gate on the merged union before
 anything lands, so a selection miss is caught there, not shipped.
@@ -158,23 +151,22 @@ fast command, re-add the line — the durable deliverable is the repo task, not 
 
 ## The pre-push guard is armed by the gates (audio-feed-p2la)
 
-`scripts/hooks/pre-push` refuses an ungated push and a copy of `origin/main` onto a `fleet/*`
-branch. A hook that is not INSTALLED protects nothing, and until audio-feed-p2la the only
-installation path was a best-effort call inside `scripts/fast-check.ts` — behind
-`Deno.permissions.querySync`, which is always DENIED under `test:fast`'s `--allow-run=git,deno`,
-with the child's exit status and every error discarded. The installer existed, the guard did not,
-and the gate went green saying nothing.
+`scripts/hooks/pre-push` refuses an ungated push and a copy of `origin/main` onto a `fleet/*` branch.
+A hook that is not INSTALLED protects nothing, and until audio-feed-p2la the only installation path
+was a best-effort call inside `scripts/fast-check.ts` — behind `Deno.permissions.querySync`, which is
+always DENIED under `test:fast`'s `--allow-run=git,deno`, with the child's exit status and every error
+discarded. The installer existed, the guard did not, and the gate went green saying nothing.
 
 Both gates now ARM it (`deno task hooks:install`, a shell step in the task string, so no Deno
 permission list is widened for the installer) and then VERIFY it (`deno task hooks:verify` →
-`deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts`, fewer permissions than the
-gate that hosts it) as their FIRST two steps. Verification reads what git will actually execute: the
-hooks directory git will use (`--git-path hooks`, so `core.hooksPath` cannot make it claim a guard
-that would never run), the chain marker in that directory's `pre-push`, and the executable guard the
-chain block runs. If the guard is not armed the verify step exits 1 naming the missing file, because
-the gate must not vouch for a tree whose pushes are unguarded, and `scripts/fast-check.ts` repeats
-the same measurement in-process so a deleted wiring step still reddens the fast path. A tree that is
-not a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
+`deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts`, fewer permissions than the gate
+that hosts it) as their FIRST two steps. Verification reads what git will actually execute: the hooks
+directory git will use (`--git-path hooks`, so `core.hooksPath` cannot make it claim a guard that
+would never run), the chain marker in that directory's `pre-push`, and the executable guard the chain
+block runs. If the guard is not armed the verify step exits 1 naming the missing file, because the
+gate must not vouch for a tree whose pushes are unguarded, and `scripts/fast-check.ts` repeats the
+same measurement in-process so a deleted wiring step still reddens the fast path. A tree that is not
+a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
 failure. `scripts/hooks/install-hooks.sh` fails closed the same way: a clone it cannot arm exits
 non-zero by name instead of exiting 0 quietly. Run `deno task hooks:install` alone to arm a clone by
 hand, `deno task hooks:verify` to ask whether a clone is armed. A `core.hooksPath` that moves git's
@@ -185,25 +177,24 @@ first (`git clone` copies no hooks) — tests/fast_gate_fmt_test.ts does exactly
 
 ### Concurrency: several lanes gate at once on one VM (audio-feed-qqs6)
 
-Every lane's gate runs the installer, lanes share a VM, and a linked worktree's hooks directory is
-the common git dir — so two installs overlap routinely, and an installer that only usually works
-reddens an unrelated lane's gate. It therefore serialises and writes atomically: one `mkdir` lock at
-`$GIT_DIR/audio-feed-p2la.lock` (atomic on every POSIX filesystem, no extra tooling; `flock` is
-absent on macOS, where this script also runs) with a bounded wait that steals a lock whose recorded
-pid is gone, and every write to a private `mktemp` file in the target directory that is `mv`-ed into
-place so no reader can see a half-written hook. A second install that finds the artefacts
-byte-identical to what this tree would install reports `already armed` and writes nothing. What it
-never does is decline to check because it detected contention: that would trade a loud failure for a
-silent pass, which is the defect this bead exists to close. Measured on the reviewed tip d43c263c
-before the fix, 240 overlapping installs produced 83 named failures (35%); after it, 0 — the suite
-runs the overlap in two worktrees of one clone as `audio-feed-qqs6`.
+Every lane's gate runs the installer, lanes share a VM, and a linked worktree's hooks directory is the
+common git dir — so two installs overlap routinely, and an installer that only usually works reddens an
+unrelated lane's gate. It therefore serialises and writes atomically: one `mkdir` lock at
+`$GIT_DIR/audio-feed-p2la.lock` (atomic on every POSIX filesystem, no extra tooling; `flock` is absent on
+macOS, where this script also runs) with a bounded wait that steals a lock whose recorded pid is gone, and
+every write is a private `mktemp` file in the target directory `mv`-ed into place, so no reader can see a
+half-written hook. A second install that finds the artefacts byte-identical to what this tree would install
+reports `already armed` and writes nothing. What it never does is decline to check because it detected
+contention: that would trade a loud failure for a silent pass, which is the defect this bead exists to
+close. Measured on the reviewed tip d43c263c before the fix, 240 overlapping installs produced 83 named
+failures (35%); after it, 0 — the suite runs the overlap in two worktrees of one clone as
+`audio-feed-qqs6`.
 
-Failure messages say what was measured and nothing more. The old text asserted "The guard is NOT
-armed" on every failure, including races in which the guard WAS armed and the very next verify step
-said so: a message that contradicts the state it describes is a false alarm, and readers who see
-false alarms stop believing the real ones. A failed install now names its cause, states that it did
-not establish the guard's state, and points at `deno task hooks:verify` as the authority, which is
-the next step of both gate tasks.
+Failure messages say what was measured and nothing more. The old text asserted "The guard is NOT armed" on
+every failure, including races in which the guard WAS armed and the very next verify step said so: a
+message that contradicts the state it describes is a false alarm, and readers who see false alarms stop
+believing the real ones. A failed install now names its cause, states that it did not establish the guard's
+state, and points at `deno task hooks:verify` as the authority, which is the next step of both gate tasks.
 
 ## Modern-web bead closures record a premise verdict
 
@@ -259,13 +250,13 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## Verifying a landing against production
 
-`GET /health` returns **`deploy`** (the identifier), **`deploySource`** (the variable that supplied
-it: `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, whichever commit variable supplied it when
-injected (`GIT_COMMIT_SHA`, `GIT_COMMIT`, `DENO_DEPLOY_GIT_COMMIT`, or `COMMIT_SHA`), or `dev`), and
-**`commit`** (the Git commit SHA when injected by the deployment pipeline, or `null` if the deploy
-environment supplies no commit variable). **`dev` or `commit: null` is not a match on its own —
-seeing it without an exact Deploy API mapping or a distinctive public marker means production is
-UNVERIFIED, not verified.**
+`GET /health` returns **`deploy`** (the identifier), **`deploySource`** (the variable that
+supplied it: `DENO_DEPLOYMENT_ID` on a Deno Deploy deployment, whichever commit variable supplied it
+when injected (`GIT_COMMIT_SHA`, `GIT_COMMIT`, `DENO_DEPLOY_GIT_COMMIT`, or `COMMIT_SHA`), or `dev`),
+and **`commit`** (the Git commit SHA when injected by the deployment pipeline, or `null` if the deploy
+environment supplies no commit variable). **`dev` or `commit: null` is not a match on its own — seeing
+it without an exact Deploy API mapping or a distinctive public marker means production is UNVERIFIED,
+not verified.**
 
 ```bash
 curl -s https://audio-feed.paulkinlan-ea.deno.net/health | python3 -m json.tool
@@ -283,18 +274,17 @@ git log --oneline -1 <id>
 
 Content-addressed assets and distinctive public markup prove code presence without any token, but
 their limits must be understood:
-
 1. Public reads (e.g. `/assets/<hash>.<name>`, public `/login` styles and markup) prove that the
-   deployed build _contains_ a commit's change set, but they do not establish a deployment identity,
+   deployed build *contains* a commit's change set, but they do not establish a deployment identity,
    and they do not prove authenticated behavior (authenticated routes such as `/account` or `/admin`
    are out of scope for unauthenticated reads).
-2. Public reads cannot distinguish between commits when the net source diff across public surfaces
-   is zero: for example, across `103a2498..fc8851e0` (where the commit list is 13 entries, and a
-   merge commit's first-parent diff can touch served routes without the net diff changing), the net
-   source diff for `shell`, `account` and `assets` is zero, so public responses are byte-identical
-   across the entire window.
-3. Establishing the exact running SHA requires either the unauthenticated `/health` `commit` field
-   (when supplied by CI/deploy env) or querying the Deno Deploy API using `DENO_DEPLOY_TOKEN`.
+2. Public reads cannot distinguish between commits when the net source diff across public surfaces is
+   zero: for example, across `103a2498..fc8851e0` (where the commit list is 13 entries, and a merge
+   commit's first-parent diff can touch served routes without the net diff changing), the net source
+   diff for `shell`, `account` and `assets` is zero, so public responses are byte-identical across the
+   entire window.
+3. Establishing the exact running SHA requires either the unauthenticated `/health` `commit` field (when
+   supplied by CI/deploy env) or querying the Deno Deploy API using `DENO_DEPLOY_TOKEN`.
 
 For content-addressed assets:
 `deno eval 'import {assetUrl} from "./src/routes/assets.ts"; console.log(assetUrl("listen.js"))'`
@@ -303,10 +293,10 @@ prints the URL the landed tree expects, and that URL's `sha256sum` must equal
 COMPOSED — design tokens prepended — so compare the tail after the token block, or fetch the file's
 own route.
 
-**Rule: landed ≠ live.** A change is verified only when the live commit field (or Deploy API
-mapping, or distinctive asset/markup hash) matches the landed revision. Otherwise record production
-as UNVERIFIED on the bead and say so in the handoff, rather than treating a passing gate on the
-landed tree as proof of what is serving.
+**Rule: landed ≠ live.** A change is verified only when the live commit field (or Deploy API mapping,
+or distinctive asset/markup hash) matches the landed revision. Otherwise record production as
+UNVERIFIED on the bead and say so in the handoff, rather than treating a passing gate on the landed
+tree as proof of what is serving.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 
