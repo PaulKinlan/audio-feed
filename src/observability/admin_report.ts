@@ -65,8 +65,14 @@ export interface ClaimAttempt {
   attempt: number;
   /** Opaque worker id, from the start record's context. Absent for records written before n6uu. */
   owner?: string;
-  /** The claim instant. */
-  startedAt: string;
+  /**
+   * The claim instant, or `null` when it is UNKNOWN because the attempt's start record has aged out
+   * of the retained log window. THREE-VALUED ON PURPOSE, mirroring `leaseExpired` below: `null` is
+   * "not retained" rather than "no start happened". Reporting the first RETAINED record's time here
+   * was how an attempt whose only surviving record is its EXPIRY rendered Started as the expiry
+   * instant, inventing a zero-length claim that never existed (audio-feed-mkfe).
+   */
+  startedAt: string | null;
   /** The last heartbeat or phase transition time seen for this attempt. */
   lastHeartbeat?: string;
   /** The last phase this attempt reached. The field the incident needed. */
@@ -301,7 +307,11 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
     const existing = byAttempt.get(attempt);
     const row: ClaimAttempt = existing ?? {
       attempt,
-      startedAt: record.time,
+      // UNKNOWN, NOT "the first record we still happen to have" (audio-feed-mkfe). The store prunes
+      // its oldest records, so an attempt that started before the retained window opens first appears
+      // as its heartbeat, its expiry or its terminal write - and stamping startedAt from that record
+      // reports the END as the START. It stays null unless a genuine start record is seen below.
+      startedAt: null,
       lastHeartbeat: undefined,
       leaseExpired: null,
       outcome: "in-flight",
@@ -309,7 +319,10 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
       phases: [],
     };
     const context = (record.context ?? {}) as Record<string, unknown>;
-    if (existing && isClaimStartRecord(record)) row.startedAt = record.time;
+    // No `existing &&` guard: setting startedAt from a START record is correct for the first one seen
+    // as well as for a re-anchor after a later phase, and the guard is what let a non-start first
+    // record stand in as the start (audio-feed-mkfe).
+    if (isClaimStartRecord(record)) row.startedAt = record.time;
     if (existing) row.lastHeartbeat = record.time;
     if (record.phase) {
       row.phase = record.phase;
@@ -349,7 +362,10 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
   const rows = [...byAttempt.values()];
   for (const row of rows) {
     if (row.leaseMs !== undefined) {
-      const start = Date.parse(row.startedAt);
+      // startedAt may be null here if a lease context survived without a start record. Date.parse
+      // would coerce that to NaN, which the isFinite guard already rejects, but the explicit check
+      // says why rather than relying on the coercion.
+      const start = row.startedAt === null ? Number.NaN : Date.parse(row.startedAt);
       if (Number.isFinite(start)) {
         row.leaseExpiresAt = new Date(start + row.leaseMs).toISOString();
         row.leaseExpired = nowMs - start >= row.leaseMs;
