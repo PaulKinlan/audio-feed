@@ -42,6 +42,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import type { Episode, Source } from "../src/types.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
@@ -78,23 +79,31 @@ await runProof("audio-feed-lma7", async (checker) => {
   const stores: Stores = memoryStores();
   const ctx = { config, stores };
 
+  // TWO SOURCES AND ONE READY EPISODE, because that is what this proof's README claims and what the
+  // committed screenshots show. An earlier revision seeded only a user while the README described
+  // the richer fixture, and the screenshots said "No sources yet." - a README claiming more than the
+  // fixture holds (review of audio-feed-lma7, P2). The shapes mirror scripts/account-harness.ts.
+  const baseInstant = "2026-10-12T03:30:00.000Z";
   const rawUser = await createUser(stores.metadata, {
     email: "paul@example.com",
     displayName: "Paul Kinlan",
   });
-  const user = await approveUser(stores.metadata, rawUser.id, "admin");
+  // EVERY INSTANT ON THE SEEDED USER IS PINNED, NOT JUST THE TOKEN (audio-feed-8dp2). createUser()
+  // stamps a live createdAt (src/auth/users.ts:105) and approveUser() a live decidedAt, so an earlier
+  // revision of this file claimed "every instant is fixed" while two instants on the user were the wall
+  // clock. Neither is rendered on /account today, which is why the screenshots never moved and the
+  // review's P3 was about the CLAIM rather than the bytes - but a sentence like that has to be
+  // literally true, or it teaches the next reader to trust a determinism claim nobody checks. The
+  // fixture is asserted below, so unpinning either one fails the proof rather than silently
+  // invalidating the README.
+  const approved = await approveUser(stores.metadata, rawUser.id, "admin");
+  const user = { ...approved, createdAt: baseInstant, decidedAt: baseInstant };
   // The feed URL is rendered on the page, so its token must be PINNED or every run produces
   // different bytes and the committed screenshots are not reproducible (audio-feed-5sei).
   user.feedToken = "feedtokenpaul0000000000000000001";
   await stores.metadata.putUser(user);
   const sessionSecret = await createSession(stores.metadata, user.id);
-
-  // TWO SOURCES AND ONE READY EPISODE, because that is what this proof's README claims and what the
-  // committed screenshots show. An earlier revision seeded only a user while the README described
-  // the richer fixture, and the screenshots said "No sources yet." - a README claiming more than the
-  // fixture holds (review of audio-feed-lma7, P2). The shapes mirror scripts/account-harness.ts, and
-  // every instant is fixed so the rendered page stays byte-reproducible.
-  const baseInstant = "2026-10-12T03:30:00.000Z";
+  const sources: Source[] = [];
   for (
     const [id, title, feedUrl, modes] of [
       ["stratechery", "Stratechery", "https://stratechery.com/feed/", ["direct"]],
@@ -106,7 +115,7 @@ await runProof("audio-feed-lma7", async (checker) => {
       ],
     ] as const
   ) {
-    await stores.metadata.putSource({
+    const source: Source = {
       id,
       userId: user.id,
       title,
@@ -115,9 +124,11 @@ await runProof("audio-feed-lma7", async (checker) => {
       voices: {},
       createdAt: baseInstant,
       lastPolledAt: baseInstant,
-    });
+    };
+    sources.push(source);
+    await stores.metadata.putSource(source);
   }
-  await stores.metadata.putEpisode({
+  const episode: Episode = {
     id: "ep-0",
     userId: user.id,
     sourceId: "stratechery",
@@ -135,7 +146,8 @@ await runProof("audio-feed-lma7", async (checker) => {
     // harness sets it (audio-feed-ktn). It is also what makes the episodes panel render its
     // section-title buttons rather than an empty state.
     promptVersion: "old-prompts",
-  });
+  };
+  await stores.metadata.putEpisode(episode);
 
   const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
   let server: Deno.HttpServer<Deno.NetAddr>;
@@ -165,6 +177,38 @@ await runProof("audio-feed-lma7", async (checker) => {
     checker.check(name, pass, detail);
     if (!pass) throw new Error(`step failed: ${name}`);
   }
+
+  // THE README'S DETERMINISM CLAIM, CHECKED RATHER THAN DESCRIBED (audio-feed-8dp2). The fixture is
+  // read from the objects this proof seeded, so removing any pin below turns this red: createUser()
+  // and approveUser() stamp the wall clock into createdAt/decidedAt, and the episode and sources are
+  // pinned by hand. The claim is about the FIXTURE, which is why it is asserted here and not by
+  // reading the page - none of these instants is rendered on /account, and that is exactly how a
+  // determinism claim drifts away from the truth without anyone noticing.
+  const liveInstants = [
+    ["user.createdAt", user.createdAt],
+    ["user.decidedAt", user.decidedAt],
+    ["user.feedToken", user.feedToken],
+    ...sources.flatMap((s, i) =>
+      [[`sources[${i}].createdAt`, s.createdAt], [
+        `sources[${i}].lastPolledAt`,
+        s.lastPolledAt,
+      ]] as const
+    ),
+    ["episode.createdAt", episode.createdAt],
+    ["episode.readyAt", episode.readyAt],
+  ] as ReadonlyArray<readonly [string, string | undefined]>;
+  const unpinned = liveInstants.filter(([name, value]) =>
+    name.endsWith("feedToken")
+      ? value !== "feedtokenpaul0000000000000000001"
+      : value !== baseInstant
+  );
+  check(
+    "every instant (and the token) in the fixture is pinned, so the committed screenshots cannot drift with the clock or a random token",
+    unpinned.length === 0,
+    unpinned.length === 0
+      ? `${liveInstants.length} values pinned to ${baseInstant} (the token to its fixed value)`
+      : `UNPINNED: ${unpinned.map(([name, value]) => `${name}=${value}`).join(", ")}`,
+  );
 
   // The served markup, taken as TEXT so the control below can carry the one-line revert: the DOM a
   // browser builds is already normalised, so a broken tag cannot be re-injected through it.
@@ -480,7 +524,7 @@ await runProof("audio-feed-lma7", async (checker) => {
               body:
                 `- **Browser:** Headless Chrome over CDP, mobile emulation at 390x844 and 320x720, desktop at 1280x900\n` +
                 `- **Page:** \`GET /account\` from the real app on memory stores, signed in with a seeded session cookie, on the canonical proof port\n` +
-                `- **Data:** one approved user, two sources and one ready episode - enough for every panel to render, and the exact fixture this page describes. The user's feed token is PINNED and every instant is fixed, because both are rendered on the page and a random token or a live clock would make the committed screenshots irreproducible (audio-feed-5sei)`,
+                `- **Data:** one approved user, two sources and one ready episode - enough for every panel to render, and the exact fixture this page describes. The user's feed token is PINNED, and every instant on the seeded user (\`createdAt\`, \`decidedAt\`), both sources (\`createdAt\`, \`lastPolledAt\`) and the episode (\`createdAt\`, \`readyAt\`) is PINNED to one timestamp, because a random token or a live clock would make the committed screenshots irreproducible. The pins are ASSERTED by this proof, not merely described here - see the "every instant in the fixture is pinned" check (audio-feed-5sei, audio-feed-8dp2)`,
             },
             {
               heading: "What the bug was",
