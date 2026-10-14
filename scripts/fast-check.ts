@@ -83,7 +83,7 @@ const CORE = new Set([
   "src/origin.ts",
 ]);
 
-// These two HTTP route tests boot the app through a hub, so the graph's hub
+// These HTTP route tests boot the app through a hub, so the graph's hub
 // cut cannot attribute their handler coverage. Add a suite ONLY if discovered
 // in this tree; an unknown route or a missing sole reader still widens to FULL.
 // The host reporter's "unmapped" warning is NOT the selector's distinct
@@ -98,6 +98,11 @@ const BEHAVIOUR_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
     "tests/admin_subpages_test.ts",
     "tests/webmcp_admin_forms_test.ts",
   ]],
+  ["src/routes/admin_telemetry.ts", ["tests/admin_subpages_test.ts"]],
+  ["src/routes/login.ts", ["tests/account_pages_test.ts"]],
+  ["src/routes/account_api.ts", ["tests/auth_routes_test.ts"]],
+  ["src/routes/webauthn.ts", ["tests/passkeys_test.ts"]],
+  ["src/routes/reports.ts", ["tests/csp_reporting_test.ts"]],
 ]);
 
 const TEST_FLAGS = [

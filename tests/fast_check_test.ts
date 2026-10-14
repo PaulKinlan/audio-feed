@@ -194,20 +194,18 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
     "src/routes/admin_subscribers.ts",
   ];
   const reverse = await reverseGraph();
-  const named = await nameMatchedTests(paths);
+  const selectedFor = async (path: string) =>
+    planTests([path], reverse, await nameMatchedTests([path])).testFiles;
   // These two were ALREADY graph-reachable; a host reporter's "unmapped" warning
   // must not be mistaken for the selector's "no test reaches" full-suite fallback.
   assert(reverse.get("src/routes/observability.ts")?.includes("tests/observability_api_test.ts"));
   assert(reverse.get("src/log.ts")?.includes("tests/log_test.ts"));
   for (const path of paths) {
-    const selected = planTests([path], reverse, named);
-    assert(
-      selected.testFiles !== null,
-      `${path} must not widen to the full suite: ${selected.reason}`,
-    );
+    const selected = await selectedFor(path);
+    assert(selected !== null, `${path} must not widen to the full suite`);
   }
   for (const path of paths.slice(2)) {
-    const selected = planTests([path], reverse, named).testFiles;
+    const selected = await selectedFor(path);
     assert(selected !== null, `${path} must not widen`);
     assert(
       selected.includes("tests/admin_subpages_test.ts"),
@@ -216,11 +214,61 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
     assert(selected.length < 20, `${path} should not consume the full suite: ${selected.length}`);
   }
   assert(
-    planTests(["src/routes/observability.ts"], reverse, named).testFiles?.includes(
-      "tests/observability_api_test.ts",
-    ),
+    (await selectedFor("src/routes/observability.ts"))?.includes("tests/observability_api_test.ts"),
   );
-  assert(planTests(["src/log.ts"], reverse, named).testFiles?.includes("tests/log_test.ts"));
+  assert((await selectedFor("src/log.ts"))?.includes("tests/log_test.ts"));
+});
+
+Deno.test("vfe9: five hub-cut routes select only present, genuine HTTP handler suites", async () => {
+  const dir = await Deno.makeTempDir();
+  const mappings = [
+    ["src/routes/admin_telemetry.ts", "tests/admin_subpages_test.ts"],
+    ["src/routes/login.ts", "tests/account_pages_test.ts"],
+    ["src/routes/account_api.ts", "tests/auth_routes_test.ts"],
+    ["src/routes/webauthn.ts", "tests/passkeys_test.ts"],
+    ["src/routes/reports.ts", "tests/csp_reporting_test.ts"],
+  ] as const;
+  const paths = mappings.map(([path]) => path);
+  const graph = new Map<string, string[]>(paths.map((path) => [path, ["src/app.ts"]]));
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    for (const [, suite] of mappings) await Deno.writeTextFile(`${dir}/${suite}`, "");
+    for (const [path, suite] of mappings) {
+      const named = await nameMatchedTests([path], `${dir}/tests`);
+      assertEquals(named.get(path), [suite], `${path} must name its own present handler suite`);
+      assertEquals(planTests([path], graph, named).testFiles, [suite]);
+    }
+
+    // Every binding must fail safely if its reader disappears, not yield a narrow green.
+    for (const [path, suite] of mappings) {
+      await Deno.remove(`${dir}/${suite}`);
+      const missing = await nameMatchedTests([path], `${dir}/tests`);
+      assertEquals(missing.has(path), false);
+      assertEquals(planTests([path], graph, missing).testFiles, null);
+      await Deno.writeTextFile(`${dir}/${suite}`, "");
+    }
+    assertEquals(planTests(["src/routes/new_unmapped.ts"], graph, new Map()).testFiles, null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("vfe9: real graph includes each route's exercised HTTP suite without a full fallback", async () => {
+  const mappings = [
+    ["src/routes/admin_telemetry.ts", "tests/admin_subpages_test.ts"],
+    ["src/routes/login.ts", "tests/account_pages_test.ts"],
+    ["src/routes/account_api.ts", "tests/auth_routes_test.ts"],
+    ["src/routes/webauthn.ts", "tests/passkeys_test.ts"],
+    ["src/routes/reports.ts", "tests/csp_reporting_test.ts"],
+  ] as const;
+  const reverse = await reverseGraph();
+  for (const [path, suite] of mappings) {
+    const plan = planTests([path], reverse, await nameMatchedTests([path]));
+    assert(plan.testFiles !== null, `${path} must not force FULL: ${plan.reason}`);
+    assert(plan.testFiles.includes(suite), `${path} must run its HTTP handler suite ${suite}`);
+    assert(plan.testFiles.length < 25, `${path} must stay a bounded subset, not most of the suite`);
+  }
+  assertEquals(planTests(["src/routes/new_unmapped.ts"], reverse, new Map()).testFiles, null);
 });
 
 // ---------------------------------------------------------------------------
