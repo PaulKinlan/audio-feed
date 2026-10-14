@@ -184,7 +184,7 @@ Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanl
   }
 });
 
-Deno.test("likz/lq6c: AGENTS.md documents exactly the set of DEPLOY_COMMIT_ENV_VARS with no duplicate enumerations", async () => {
+Deno.test("likz/lq6c/fciz: AGENTS.md documents exactly the set of DEPLOY_COMMIT_ENV_VARS with no duplicate enumerations", async () => {
   const agentsDoc = await Deno.readTextFile(new URL("../AGENTS.md", import.meta.url));
 
   // 1. Extract all backticked names in the single authoritative injection clause in AGENTS.md
@@ -199,15 +199,14 @@ Deno.test("likz/lq6c: AGENTS.md documents exactly the set of DEPLOY_COMMIT_ENV_V
     "AGENTS.md documentation must match DEPLOY_COMMIT_ENV_VARS exactly",
   );
 
-  // 2. audio-feed-lq6c: Ensure no unverified duplicate enumerations exist elsewhere in AGENTS.md.
-  // Each variable name (as a backticked identifier) must appear in AGENTS.md exactly once (in the checked injection clause above).
+  // 2. audio-feed-fciz: Ensure no duplicate enumeration (backticked or unbackticked) exists outside
+  // the single authoritative clause above. Strip match[0] and assert none of DEPLOY_COMMIT_ENV_VARS
+  // appears in the remainder of AGENTS.md.
+  const stripped = agentsDoc.replace(match[0], "");
   for (const varName of DEPLOY_COMMIT_ENV_VARS) {
-    const token = `\`${varName}\``;
-    const occurrences = agentsDoc.split(token).length - 1;
-    assertEquals(
-      occurrences,
-      1,
-      `AGENTS.md must not contain duplicate enumerations of ${token} (expected 1, found ${occurrences})`,
+    assert(
+      !stripped.includes(varName),
+      `AGENTS.md must not contain duplicate enumeration of ${varName} outside the authoritative clause`,
     );
   }
 });
