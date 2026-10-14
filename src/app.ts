@@ -404,18 +404,25 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
  * visible in /health.
  * audio-feed-34bo: report the exact variable name in `source` when a commit alias supplies
  * the deployment identity (e.g. `GIT_COMMIT` instead of misreporting `GIT_COMMIT_SHA`).
+ * audio-feed-likz: export the supported commit variables as a frozen array so tests and documentation
+ * derive from the exact runtime source of truth.
  */
+export const DEPLOY_COMMIT_ENV_VARS = Object.freeze(
+  [
+    "GIT_COMMIT_SHA",
+    "GIT_COMMIT",
+    "DENO_DEPLOY_GIT_COMMIT",
+    "COMMIT_SHA",
+  ] as const,
+);
+
+export type DeployCommitEnvVar = (typeof DEPLOY_COMMIT_ENV_VARS)[number];
+
 export function deployFingerprint(
   env: (name: string) => string | undefined = (name) => Deno.env.get(name),
 ): {
   id: string;
-  source:
-    | "DENO_DEPLOYMENT_ID"
-    | "GIT_COMMIT_SHA"
-    | "GIT_COMMIT"
-    | "DENO_DEPLOY_GIT_COMMIT"
-    | "COMMIT_SHA"
-    | "dev";
+  source: "DENO_DEPLOYMENT_ID" | DeployCommitEnvVar | "dev";
   commit: string | null;
 } {
   const pick = <T extends readonly string[]>(
@@ -428,7 +435,7 @@ export function deployFingerprint(
     return undefined;
   };
   const deployment = pick("DENO_DEPLOYMENT_ID");
-  const commit = pick("GIT_COMMIT_SHA", "GIT_COMMIT", "DENO_DEPLOY_GIT_COMMIT", "COMMIT_SHA");
+  const commit = pick(...DEPLOY_COMMIT_ENV_VARS);
 
   if (deployment) {
     return {

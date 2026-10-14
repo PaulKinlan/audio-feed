@@ -10,7 +10,7 @@
  */
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { createApp, deployFingerprint } from "../src/app.ts";
+import { createApp, DEPLOY_COMMIT_ENV_VARS, deployFingerprint } from "../src/app.ts";
 import { memoryStores } from "../src/config.ts";
 import type { AppConfig } from "../src/config.ts";
 
@@ -94,14 +94,7 @@ Deno.test("1552: /health carries deploy + deploySource alongside the existing fi
   // The fingerprint is present, non-empty, and consistent with what this process can see.
   assert(typeof body.deploy === "string" && body.deploy.length > 0, "deploy is a non-empty string");
   assert(
-    [
-      "DENO_DEPLOYMENT_ID",
-      "GIT_COMMIT_SHA",
-      "GIT_COMMIT",
-      "DENO_DEPLOY_GIT_COMMIT",
-      "COMMIT_SHA",
-      "dev",
-    ].includes(body.deploySource),
+    ["DENO_DEPLOYMENT_ID", ...DEPLOY_COMMIT_ENV_VARS, "dev"].includes(body.deploySource),
     `deploySource names a known source (got ${body.deploySource})`,
   );
   assertEquals(body.deploy, deployFingerprint().id);
@@ -126,10 +119,7 @@ Deno.test("1552: a deployment id set in the environment reaches the route", asyn
 Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanly to null when unset", async () => {
   const envVars = [
     "DENO_DEPLOYMENT_ID",
-    "GIT_COMMIT_SHA",
-    "GIT_COMMIT",
-    "DENO_DEPLOY_GIT_COMMIT",
-    "COMMIT_SHA",
+    ...DEPLOY_COMMIT_ENV_VARS,
   ] as const;
   const previous = new Map<string, string | undefined>();
   for (const name of envVars) {
@@ -166,21 +156,15 @@ Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanl
     assertEquals(body3.deploy, "deploy-id-ciia-2");
     assertEquals(body3.deploySource, "DENO_DEPLOYMENT_ID");
 
-    // 4. audio-feed-dojy: table-driven verification that every supported commit variable
+    // 4. audio-feed-likz: table-driven verification that every supported commit variable
     // reports its exact variable name as deploySource and carries commit/deploy to the /health route.
-    const commitVarCases = [
-      { varName: "GIT_COMMIT_SHA", value: "sha-test-git-commit-sha" },
-      { varName: "GIT_COMMIT", value: "sha-test-git-commit" },
-      { varName: "DENO_DEPLOY_GIT_COMMIT", value: "sha-test-deno-deploy-git-commit" },
-      { varName: "COMMIT_SHA", value: "sha-test-commit-sha" },
-    ] as const;
-
-    for (const { varName, value } of commitVarCases) {
+    for (const varName of DEPLOY_COMMIT_ENV_VARS) {
       clearAll();
-      Deno.env.set(varName, value);
+      const testVal = `sha-test-${varName.toLowerCase().replace(/_/g, "-")}`;
+      Deno.env.set(varName, testVal);
       const body = await (await appFetch()(get("/health"))).json();
-      assertEquals(body.commit, value, `commit matches for ${varName}`);
-      assertEquals(body.deploy, value, `deploy matches for ${varName}`);
+      assertEquals(body.commit, testVal, `commit matches for ${varName}`);
+      assertEquals(body.deploy, testVal, `deploy matches for ${varName}`);
       assertEquals(body.deploySource, varName, `deploySource accurately names ${varName}`);
     }
 
@@ -198,4 +182,20 @@ Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanl
       else Deno.env.set(name, val);
     }
   }
+});
+
+Deno.test("likz: AGENTS.md documents exactly the set of DEPLOY_COMMIT_ENV_VARS", async () => {
+  const agentsDoc = await Deno.readTextFile(new URL("../AGENTS.md", import.meta.url));
+
+  // Extract all backticked names in the injection clause in AGENTS.md
+  // e.g. "when injected (`GIT_COMMIT_SHA`, `GIT_COMMIT`, `DENO_DEPLOY_GIT_COMMIT`, or `COMMIT_SHA`)"
+  const match = agentsDoc.match(/when injected \(([^)]+)\)/);
+  assert(match && match[1], "AGENTS.md must document the injected commit variables clause");
+  const documentedVars = Array.from(match[1].matchAll(/`([^`]+)`/g)).map((m) => m[1]);
+
+  assertEquals(
+    documentedVars,
+    [...DEPLOY_COMMIT_ENV_VARS],
+    "AGENTS.md documentation must match DEPLOY_COMMIT_ENV_VARS exactly",
+  );
 });
