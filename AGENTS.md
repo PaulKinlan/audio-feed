@@ -149,6 +149,27 @@ Fleet wiring: the VM-local `~/.fleet/check.conf` carries `CHECK_FAST_CMD="deno t
 (with `CHECK_FAST_TIMEOUT=600`). That file is reprovisioned, so if `fleet-check --fast` reports no
 fast command, re-add the line — the durable deliverable is the repo task, not the VM file.
 
+## The pre-push guard is armed by the gates (audio-feed-p2la)
+
+`scripts/hooks/pre-push` refuses an ungated push and a copy of `origin/main` onto a `fleet/*` branch.
+A hook that is not INSTALLED protects nothing, and until audio-feed-p2la the only installation path
+was a best-effort call inside `scripts/fast-check.ts` — behind `Deno.permissions.querySync`, which is
+always DENIED under `test:fast`'s `--allow-run=git,deno`, with the child's exit status and every error
+discarded. The installer existed, the guard did not, and the gate went green saying nothing.
+
+Both gates now arm it as their FIRST step (`deno task hooks:install`, a shell step in the task
+string, so no Deno permission list is widened for it) and `scripts/fast-check.ts` MEASURES the
+result: it reads the hooks directory git will actually use (`--git-path hooks`, so `core.hooksPath`
+cannot make it claim a guard that would never run), the chain marker in that directory's `pre-push`,
+and the executable guard the chain block runs. If the guard is not armed the gate exits 1 naming the
+missing file, because the gate must not vouch for a tree whose pushes are unguarded; a tree that is
+not a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
+failure. `scripts/hooks/install-hooks.sh` fails closed the same way: a clone it cannot arm exits
+non-zero by name instead of exiting 0 quietly. Run `deno task hooks:install` alone to arm a clone by
+hand. A `core.hooksPath` that moves git's hooks directory elsewhere is a named installation failure,
+not something the installer will write around: it will not write into a hooks directory shared with
+other repositories.
+
 ## Modern-web bead closures record a premise verdict
 
 Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title (the
