@@ -86,6 +86,54 @@ await runProof("audio-feed-lma7", async (checker) => {
   await stores.metadata.putUser(user);
   const sessionSecret = await createSession(stores.metadata, user.id);
 
+  // TWO SOURCES AND ONE READY EPISODE, because that is what this proof's README claims and what the
+  // committed screenshots show. An earlier revision seeded only a user while the README described
+  // the richer fixture, and the screenshots said "No sources yet." - a README claiming more than the
+  // fixture holds (review of audio-feed-lma7, P2). The shapes mirror scripts/account-harness.ts, and
+  // every instant is fixed so the rendered page stays byte-reproducible.
+  const baseInstant = "2026-10-12T03:30:00.000Z";
+  for (
+    const [id, title, feedUrl, modes] of [
+      ["stratechery", "Stratechery", "https://stratechery.com/feed/", ["direct"]],
+      [
+        "simonw",
+        "Simon Willison's Weblog",
+        "https://simonwillison.net/atom/everything/",
+        ["direct", "deepdive"],
+      ],
+    ] as const
+  ) {
+    await stores.metadata.putSource({
+      id,
+      userId: user.id,
+      title,
+      feedUrl,
+      modes: [...modes],
+      voices: {},
+      createdAt: baseInstant,
+      lastPolledAt: baseInstant,
+    });
+  }
+  await stores.metadata.putEpisode({
+    id: "ep-0",
+    userId: user.id,
+    sourceId: "stratechery",
+    sourceTitle: "Stratechery",
+    articleId: "a-0",
+    mode: "direct",
+    status: "ready",
+    title: "The end of the beginning",
+    createdAt: baseInstant,
+    audioKey: `audio/${user.id}/direct/ep-0.wav`,
+    contentType: "audio/wav",
+    byteLength: 4,
+    readyAt: baseInstant,
+    // Published on older prompts, so /account offers Regenerate - the same reason the account
+    // harness sets it (audio-feed-ktn). It is also what makes the episodes panel render its
+    // section-title buttons rather than an empty state.
+    promptVersion: "old-prompts",
+  });
+
   const { fetch: appFetch } = createApp(ctx, createHandlers(ctx));
   let server: Deno.HttpServer<Deno.NetAddr>;
   try {
@@ -417,7 +465,7 @@ await runProof("audio-feed-lma7", async (checker) => {
               body:
                 `- **Browser:** Headless Chrome over CDP, mobile emulation at 390x844 and 320x720, desktop at 1280x900\n` +
                 `- **Page:** \`GET /account\` from the real app on memory stores, signed in with a seeded session cookie, on the canonical proof port\n` +
-                `- **Data:** one approved user, two sources, one ready episode - enough for every panel to render; the user's feed token is PINNED, because it is rendered on the page and a random one would make the committed screenshots irreproducible`,
+                `- **Data:** one approved user, two sources and one ready episode - enough for every panel to render, and the exact fixture this page describes. The user's feed token is PINNED and every instant is fixed, because both are rendered on the page and a random token or a live clock would make the committed screenshots irreproducible (audio-feed-5sei)`,
             },
             {
               heading: "What the bug was",

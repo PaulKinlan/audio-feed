@@ -88,6 +88,15 @@ const VOID_TAGS = new Set([
  * elements to the tree and their contents are text. A scanner this small is enough because the
  * pages are server-rendered from template literals and `deno test` has no HTML parser; it is
  * deliberately pointed at the kit pages below rather than at arbitrary HTML.
+ *
+ * AN UNTERMINATED COMMENT OR SCRIPT IS REPORTED, NOT SKIPPED (review of audio-feed-lma7, P2). The
+ * stripping above is a no-op when the terminator is missing, and what is left behind is not "a page
+ * with a stray tag": a browser treats everything after the opener as comment or script text, so it
+ * never closes `div.wrap` at all while this scanner sees balanced elements and returns CLEAN. That
+ * is a false green on the one failure this function exists for, so a leftover opener short-circuits
+ * before the tag walk. The check is free of false positives by construction: a properly terminated
+ * comment, script or style has already been removed by the replacements above, so anything still
+ * starting one of these really is unterminated.
  */
 export function tagNestingProblems(html: string): string[] {
   const markup = html
@@ -95,6 +104,11 @@ export function tagNestingProblems(html: string): string[] {
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
   const problems: string[] = [];
+  for (const opener of ["<!--", "<script", "<style"]) {
+    if (markup.includes(opener)) {
+      problems.push(`unterminated ${opener} (a browser reads the rest of the page as its text)`);
+    }
+  }
   const open: string[] = [];
   for (
     const [, closing, rawTag, selfClose] of markup.matchAll(
@@ -153,6 +167,38 @@ Deno.test("every kit page's markup actually nests its tags (audio-feed-lma7)", a
     assertEquals(res.status, 200, `${path} should render`);
     assertEquals(tagNestingProblems(await res.text()), [], `${path} markup`);
   }
+});
+
+/**
+ * A scanner is only worth having if the shapes it CANNOT see are pinned, so the cases that matter
+ * are asserted here rather than described (review of audio-feed-lma7, P2). The unterminated comment
+ * is the one that counted: it is a false GREEN, it was found by review rather than by the gate, and
+ * the reviewer flagged it as source-traced rather than executed - which is what this test fixes.
+ */
+Deno.test("the markup scanner reports each failure shape, including the unterminated comment (audio-feed-lma7)", () => {
+  const reports = (html: string) => tagNestingProblems(html).join(" | ");
+
+  // The reviewer's own probe, run rather than traced: a browser reads the section and the closing
+  // `</div>` as comment text, so `div.wrap` never closes, while the tags themselves are balanced.
+  const probe = `<div class="wrap"><!-- <section class="panel"></section></div>`;
+  assert(
+    reports(probe).includes("unterminated <!--"),
+    `unterminated comment must be reported: ${reports(probe)}`,
+  );
+  // The same markup with the comment TERMINATED is clean, so the check above is not just "the
+  // string contains `<!--`" - it is a check on the terminator.
+  assertEquals(tagNestingProblems(`<div class="wrap"><!-- <section class="panel"> --></div>`), []);
+  assert(reports(`<script>const a = 1;`).includes("unterminated <script"));
+  assert(reports(`<style>.a { color: red; }`).includes("unterminated <style"));
+
+  // The defect this bead exists for, as the smallest reproduction of it.
+  assert(reports(`<fieldset class="choices">x</div>`).includes("</div> closes <fieldset>"));
+  // Cross-nesting, which a per-kind tag COUNT would call balanced.
+  assert(tagNestingProblems(`<div><section></div></section>`).length > 0);
+  // A tag written inside a script body or a terminated comment is TEXT, not an element: asserting
+  // this direction matters as much as the other, or the scanner becomes a false-red generator.
+  assertEquals(tagNestingProblems(`<script>const s = "</div>";</script><p>hi</p>`), []);
+  assertEquals(tagNestingProblems(`<p>hi</p><!-- </span></div> -->`), []);
 });
 
 Deno.test("GET /account annotates the send-article form as an agent tool (audio-feed-dc2y)", async () => {

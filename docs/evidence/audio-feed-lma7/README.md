@@ -7,7 +7,7 @@
 
 - **Browser:** Headless Chrome over CDP, mobile emulation at 390x844 and 320x720, desktop at 1280x900
 - **Page:** `GET /account` from the real app on memory stores, signed in with a seeded session cookie, on the canonical proof port
-- **Data:** one approved user, two sources, one ready episode - enough for every panel to render; the user's feed token is PINNED, because it is rendered on the page and a random one would make the committed screenshots irreproducible
+- **Data:** one approved user, two sources and one ready episode - enough for every panel to render, and the exact fixture this page describes. The user's feed token is PINNED and every instant is fixed, because both are rendered on the page and a random token or a live clock would make the committed screenshots irreproducible (audio-feed-5sei)
 
 ## What the bug was
 
@@ -20,7 +20,7 @@ The control document is the served response with the one closer flipped, so it i
 ## Execution Log
 
 ```
-PASS  exactly one closer for the send form's radio group was found in the served markup, and the control flips it  served 80964 bytes closing the group with `</fieldset>`; control 80959 bytes
+PASS  exactly one closer for the send form's radio group was found in the served markup, and the control flips it  served 83146 bytes closing the group with `</fieldset>`; control 83141 bytes
 PASS  the browser is on the served /account page, not redirected to /login  pathname: /account
 PASS  ONE CLOSER IS THE WHOLE BUG: the control markup puts panels outside the page column and the served markup puts none  control: 5 of 6 outside div.wrap (feeds-h x=0 w=390, profile-h x=0 w=390, passkeys-h x=0 w=390, episodes-h x=0 w=390, rotate-h x=0 w=390); served: 0 outside
 PASS  and the escaped panel in the control sits hard against the viewport edge, which is Paul's report  feeds-h: left 0, right 0; profile-h: left 0, right 0; passkeys-h: left 0, right 0; episodes-h: left 0, right 0; rotate-h: left 0, right 0
@@ -31,10 +31,10 @@ PASS  at 390x844 the page does not scroll horizontally  document scrollWidth 390
 PASS  at 390x844 the two-column pair is ONE column (Profile stacked over Passkeys)  profile and passkeys share a left edge and stack vertically
 PASS  at 320x720 the page column exists, so a panel has somewhere to be contained BY  wrap present: true, 6 section.panel
 PASS  at 320x720 EVERY section.panel is a descendant of div.wrap  send-h: inside, feeds-h: inside, profile-h: inside, passkeys-h: inside, episodes-h: inside, rotate-h: inside
-PASS  at 320x720 every panel is inset by the page column's 16px gutter  send-h: left 16, right 16; feeds-h: left 16, right 16; profile-h: left 16, right 16; passkeys-h: left 16, right 16; episodes-h: left 16, right 16; rotate-h: left 16, right 16
-PASS  at 320x720 the page does not scroll horizontally  document scrollWidth 320 vs viewport 320
+PASS  at 320x720 every panel is inset by the page column's 16px gutter  send-h: left 16, right 22; feeds-h: left 16, right 22; profile-h: left 16, right 22; passkeys-h: left 16, right 22; episodes-h: left 16, right 22; rotate-h: left 16, right 22
+PASS  at 320x720 the page does not scroll horizontally  document scrollWidth 326 vs viewport 326
 PASS  at 320x720 the two-column pair is ONE column (Profile stacked over Passkeys)  profile and passkeys share a left edge and stack vertically
-PASS  the 'Your feeds' panel was found on the served page to frame the screenshot  {"x":0,"y":932,"width":390,"height":722}
+PASS  the 'Your feeds' panel was found on the served page to frame the screenshot  {"x":0,"y":932,"width":390,"height":779}
 PASS  at 1280x900 the panels sit inside the 58rem column, not the full window  send-h: left 185, width 896; feeds-h: left 185, width 896; profile-h: left 185, width 440; passkeys-h: left 641, width 440; episodes-h: left 185, width 896; rotate-h: left 185, width 896
 PASS  at 1280x900 Profile and Passkeys pair into two columns  passkeys sits to the right of profile on the same row
 ```
@@ -44,6 +44,6 @@ PASS  at 1280x900 Profile and Passkeys pair into two columns  passkeys sits to t
 - `01-before-390x844.png`: the control - the served markup with the one closer reverted, framed on "Your feeds". The panel runs to both viewport edges.
 - `02-after-390x844.png`: the same frame on the served page. The panel is inset by the page column's gutter.
 - `03-after-1280x900.png`: the desktop column, where Profile and Passkeys still pair.
-- SHA-256 (`01-before-390x844.png`): `1c9a01b279e07e68719b40439c36ecbaceb3e324429904f3a3d88b0e8befdd0c`
-- SHA-256 (`02-after-390x844.png`): `39572a1931b32c020c631d212220477f5838b9b38b4646ab214d88848dfffb14`
-- SHA-256 (`03-after-1280x900.png`): `cfdec1db5e5edafb3d7bf28743ef9cc7b96b863e72009a0c14baa209d50074f7`
+- SHA-256 (`01-before-390x844.png`): `cb6d6eb29b5c297171847b4279704877d93f6184043e0f8deb8de37d4062b5af`
+- SHA-256 (`02-after-390x844.png`): `cff65beb58265c21bcdf9bcbcee6f684ec42ecab010ac1b913f143caf023879b`
+- SHA-256 (`03-after-1280x900.png`): `7efb10c758b7bc2483b28f65bb83c45c44353d77da75ca516abbdb65ae10470d`
