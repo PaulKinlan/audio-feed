@@ -1132,6 +1132,7 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
 Deno.test("audio-feed-hkco: flagged tracked mutation makes changedFiles unknown, not empty", async () => {
   const tmpDir = await Deno.makeTempDir({ prefix: "fast-check-index-flag-" });
   const path = "src/observability/error_screen.ts";
+  let cloneReady = false;
   try {
     const clone = await new Deno.Command("git", {
       args: ["clone", "--shared", "-q", ".", tmpDir],
@@ -1139,6 +1140,7 @@ Deno.test("audio-feed-hkco: flagged tracked mutation makes changedFiles unknown,
       stderr: "piped",
     }).output();
     assertEquals(clone.code, 0, new TextDecoder().decode(clone.stderr));
+    cloneReady = true;
     const baseline = await new Deno.Command("git", {
       args: ["update-ref", "refs/remotes/origin/main", "HEAD"],
       cwd: tmpDir,
@@ -1190,6 +1192,11 @@ Deno.test("audio-feed-hkco: flagged tracked mutation makes changedFiles unknown,
           console.log = originalLog;
           await git("update-index", "--no-assume-unchanged", path);
           await git("update-index", "--no-skip-worktree", path);
+          assertEquals(
+            await git("ls-files", "-v", path),
+            "H " + path,
+            "child finally must leave the clone's tracked file with neither index flag",
+          );
           await Deno.writeTextFile(path, original);
         }
       `,
@@ -1205,16 +1212,33 @@ Deno.test("audio-feed-hkco: flagged tracked mutation makes changedFiles unknown,
       `index-flag widening must be explicit and name the path: ${stdout}`,
     );
   } finally {
-    // Defence if the child exits before its finally: never leave a flagged clone, even temporarily.
-    for (const flag of ["--no-assume-unchanged", "--no-skip-worktree"]) {
-      await new Deno.Command("git", {
-        args: ["update-index", flag, path],
-        cwd: tmpDir,
-        stdout: "null",
-        stderr: "null",
-      }).output().catch(() => {});
+    try {
+      if (cloneReady) {
+        // Defence if the child exits before its finally; verify the CLONE, never the lane checkout.
+        for (const flag of ["--no-assume-unchanged", "--no-skip-worktree"]) {
+          await new Deno.Command("git", {
+            args: ["update-index", flag, path],
+            cwd: tmpDir,
+            stdout: "null",
+            stderr: "null",
+          }).output().catch(() => {});
+        }
+        const index = await new Deno.Command("git", {
+          args: ["ls-files", "-v", path],
+          cwd: tmpDir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assertEquals(index.code, 0, new TextDecoder().decode(index.stderr));
+        assertEquals(
+          new TextDecoder().decode(index.stdout).trim(),
+          `H ${path}`,
+          "parent finally must leave the disposable clone with neither index flag",
+        );
+      }
+    } finally {
+      await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
     }
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
   }
 });
 
