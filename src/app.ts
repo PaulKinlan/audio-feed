@@ -402,18 +402,28 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
  * audio-feed-ciia: expose `commit` alongside `id` and `source` so when a pipeline supplies
  * both `DENO_DEPLOYMENT_ID` and `GIT_COMMIT_SHA`, the Git commit is not masked and is
  * visible in /health.
+ * audio-feed-34bo: report the exact variable name in `source` when a commit alias supplies
+ * the deployment identity (e.g. `GIT_COMMIT` instead of misreporting `GIT_COMMIT_SHA`).
  */
 export function deployFingerprint(
   env: (name: string) => string | undefined = (name) => Deno.env.get(name),
 ): {
   id: string;
-  source: "DENO_DEPLOYMENT_ID" | "GIT_COMMIT_SHA" | "dev";
+  source:
+    | "DENO_DEPLOYMENT_ID"
+    | "GIT_COMMIT_SHA"
+    | "GIT_COMMIT"
+    | "DENO_DEPLOY_GIT_COMMIT"
+    | "COMMIT_SHA"
+    | "dev";
   commit: string | null;
 } {
-  const pick = (...names: string[]) => {
+  const pick = <T extends readonly string[]>(
+    ...names: T
+  ): { name: T[number]; value: string } | undefined => {
     for (const name of names) {
       const value = env(name);
-      if (value && value.trim()) return value.trim();
+      if (value && value.trim()) return { name, value: value.trim() };
     }
     return undefined;
   };
@@ -422,16 +432,16 @@ export function deployFingerprint(
 
   if (deployment) {
     return {
-      id: deployment,
+      id: deployment.value,
       source: "DENO_DEPLOYMENT_ID",
-      commit: commit ?? null,
+      commit: commit?.value ?? null,
     };
   }
   if (commit) {
     return {
-      id: commit,
-      source: "GIT_COMMIT_SHA",
-      commit,
+      id: commit.value,
+      source: commit.name,
+      commit: commit.value,
     };
   }
   return { id: "dev", source: "dev", commit: null };
