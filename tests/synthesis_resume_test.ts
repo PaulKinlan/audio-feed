@@ -16,19 +16,29 @@
  */
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { DEFAULT_MAX_INVOCATION_DURATION_MS, memoryStores } from "../src/config.ts";
-import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import {
+  checkpointEpisodeClaim,
+  createGeminiSynthesizer,
+  runSynthesisBatch,
+} from "../src/worker/synthesis.ts";
 import { deleteUserSource } from "../src/compose/account.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
 import {
   decodedFromWav,
+  formatCodeForTts,
+  formatNarrationPrompt,
+  GeminiTtsClient,
   GeminiTtsError,
   MAX_TTS_INPUT_BYTES,
+  MAX_TTS_SEGMENTS,
   parseWavHeader,
   pcmToWav,
 } from "../src/tts/gemini.ts";
 import {
   ESTIMATED_TTS_TURN_DURATION_MS,
   INVOCATION_FLUSH_MARGIN_MS,
+  splitTextUnderByteBudget,
+  SynthesisYieldError,
 } from "../src/synthesis/limits.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
@@ -663,5 +673,313 @@ Deno.test("audio-feed-chx6: a cap-sized TTS turn fits its estimate and the invoc
   assert(
     !fits({ ...defaults, rateMsPerByte: 10.5 }),
     "a slower measured provider must invalidate an estimate that no longer covers one cap-sized call",
+  );
+});
+
+Deno.test("audio-feed-uet6: resumed invocation advancing scriptTurns from N>0 to M>N counts as madeProgress=true (attempts reset to 0), while zero script growth advances attempts", async () => {
+  const { ctx, stores } = await queued();
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-1",
+      userId: "user-1",
+      sourceId: "inbox",
+      articleId: "article-1",
+      status: "pending",
+      mode: "deepdive",
+      // Pre-seeded with N=2 scriptTurns from a prior invocation (resumed state: initialScriptTurns > 0)
+      scriptTurns: [
+        { speaker: "Alex", text: "Turn 1" },
+        { speaker: "Sam", text: "Turn 2" },
+      ],
+    }),
+  );
+
+  // Resumed invocation 1: advances scriptTurns from N=2 to M=4, then yields on invocation budget
+  // without finalizing any TTS segment (finalSegments === initialSegments === 0).
+  const advancingScriptSynth: Synthesizer = async ({ episode }) => {
+    const nextTurns = [
+      ...(episode.scriptTurns ?? []),
+      { speaker: "Alex", text: "Turn 3" },
+      { speaker: "Sam", text: "Turn 4" },
+    ];
+    await checkpointEpisodeClaim(
+      stores.metadata,
+      episode.userId,
+      episode.id,
+      episode.claimedBy ?? "worker-uet6-1",
+      {
+        phase: "script_generated",
+        scriptTurns: nextTurns,
+      },
+    );
+    throw new SynthesisYieldError(0, nextTurns.length, "budget reached after script continuation");
+  };
+
+  const r1 = await runSynthesisBatch(ctx, advancingScriptSynth, {
+    owner: "worker-uet6-1",
+    maxAttempts: 2,
+  });
+  assertEquals(r1.yielded.length, 1, "resumed script continuation must yield cleanly");
+  assertEquals(r1.failed.length, 0);
+
+  const afterResume1 = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(afterResume1?.status, "pending");
+  assertEquals(afterResume1?.scriptTurns?.length, 4, "scriptTurns advanced from 2 to 4");
+  assertEquals(
+    afterResume1?.attempts,
+    0,
+    "advancing scriptTurns from N=2 to M=4 on a resumed invocation is durable progress (advanceAttempts: false -> attempts === 0)",
+  );
+
+  // Control: if a subsequent resumed invocation with initialScriptTurns=4 yields WITHOUT adding
+  // any script turns or segments (finalScriptTurns === initialScriptTurns === 4), madeProgress
+  // is false and attempts advance until failing at maxAttempts.
+  const stalledScriptSynth: Synthesizer = ({ episode }) => {
+    throw new SynthesisYieldError(
+      0,
+      episode.scriptTurns?.length ?? 4,
+      "budget reached with zero new script turns",
+    );
+  };
+
+  const r2 = await runSynthesisBatch(ctx, stalledScriptSynth, {
+    owner: "worker-uet6-2",
+    maxAttempts: 2,
+  });
+  assertEquals(r2.yielded.length, 1);
+  const afterStall1 = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(afterStall1?.attempts, 1, "zero-progress resume must advance attempts to 1");
+
+  const r3 = await runSynthesisBatch(ctx, stalledScriptSynth, {
+    owner: "worker-uet6-3",
+    maxAttempts: 2,
+  });
+  assertEquals(r3.yielded.length, 0);
+  assertEquals(r3.failed.length, 1, "exhausting maxAttempts with zero progress must fail");
+  const afterStall2 = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(afterStall2?.status, "failed");
+});
+
+Deno.test("audio-feed-8905: narration_tts sizes withInvocationBudget totalTurns against the article's actual segment count instead of MAX_TTS_SEGMENTS", async () => {
+  const { ctx, stores } = await queued();
+  // Build a multi-segment narration article whose prompt splits into 6 segments (< MAX_TTS_SEGMENTS = 24).
+  const paragraph = `${"Narrating a detailed technical section with clear prose. ".repeat(35)}`;
+  const sixSegmentBody = Array.from({ length: 6 }, (_, i) => `Section ${i + 1}: ${paragraph}`).join(
+    "\n\n",
+  );
+  const article = makeArticle({
+    id: "article-1",
+    userId: "user-1",
+    sourceId: "inbox",
+    title: "Six Segment Article",
+    content: sixSegmentBody,
+  });
+  await stores.metadata.putArticle(article);
+
+  const expectedPrompt = formatNarrationPrompt({
+    title: article.title,
+    author: article.author,
+    publishedAt: article.publishedAt,
+    sourceName: "Inbox",
+    body: sixSegmentBody,
+  });
+  const expectedSegments = splitTextUnderByteBudget(expectedPrompt, MAX_TTS_INPUT_BYTES);
+  assert(
+    expectedSegments.length > 1 && expectedSegments.length < MAX_TTS_SEGMENTS,
+    `expected multi-segment plan strictly below MAX_TTS_SEGMENTS (${MAX_TTS_SEGMENTS}), got ${expectedSegments.length}`,
+  );
+
+  // Case 1: In-flight deadline abort during segment 2 after segment 1 commits.
+  let callCount = 0;
+  const client = new GeminiTtsClient({
+    apiKey: "dummy-key",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      callCount++;
+      if (callCount === 1) {
+        const wav = segmentWav("seg-1");
+        let binary = "";
+        for (const b of wav) binary += String.fromCharCode(b);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  finishReason: "STOP",
+                  content: {
+                    parts: [{ inlineData: { mimeType: "audio/wav", data: btoa(binary) } }],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      // Segment 2 hangs until the invocation budget deadline aborts it in-flight.
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  const batch1 = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-8905-1",
+    maxInvocationDurationMs: 80,
+    estimatedTurnDurationMs: 1,
+    flushMarginMs: 5,
+  });
+
+  assertEquals(batch1.yielded.length, 1);
+  assertEquals(batch1.yielded[0]?.completedTurns, 1);
+  assertEquals(
+    batch1.yielded[0]?.totalTurns,
+    expectedSegments.length,
+    "yielded totalTurns must equal actual narration segment count, never hardcoded MAX_TTS_SEGMENTS",
+  );
+
+  const ep1 = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(ep1?.status, "pending");
+  assertEquals(ep1?.phase, `synthesized_1_of_${expectedSegments.length}`);
+  assertEquals(ep1?.attempts, 0, "committing segment 1 before deadline abort resets attempts to 0");
+});
+
+Deno.test("audio-feed-3cf0: end-to-end synthesis of a long <pre>-heavy article through chunked TTS synthesis to ready state", async () => {
+  const { ctx, stores } = await queued();
+
+  // Construct a long <pre>-heavy technical article whose raw byte length exceeds MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS
+  // before code stripping, and whose spoken prose spans multiple 3KB TTS segments.
+  const proseSection = (n: number) =>
+    `Chapter ${n}. ${
+      "Modern distributed audio pipelines bound each synthesis invocation and checkpoint completed segments durably. "
+        .repeat(
+          18,
+        )
+    }`;
+  const preBlock = (n: number) =>
+    `<pre><code class="language-ts">${
+      `const buffer_${n} = new Uint8Array(4096); // raw code block ${n}\n`.repeat(120)
+    }</code></pre>`;
+  const unterminatedTail = "<pre unclosed-attr";
+
+  const longPreHeavyContent = [
+    proseSection(1),
+    preBlock(1),
+    proseSection(2),
+    preBlock(2),
+    proseSection(3),
+    preBlock(3),
+    proseSection(4),
+    preBlock(4),
+    unterminatedTail,
+  ].join("\n\n");
+
+  const stripped = await formatCodeForTts(longPreHeavyContent, "skip");
+  assert(!stripped.includes("Uint8Array(4096)"), "code blocks must be stripped from spoken text");
+  const prompt = formatNarrationPrompt({
+    title: "Long Pre-Heavy Systems Article",
+    author: "Paul Kinlan",
+    sourceName: "Inbox",
+    body: stripped,
+  });
+  const expectedChunks = splitTextUnderByteBudget(prompt, MAX_TTS_INPUT_BYTES);
+  assert(
+    expectedChunks.length >= 3,
+    `expected at least 3 TTS chunks after stripping <pre> blocks, got ${expectedChunks.length}`,
+  );
+
+  await stores.metadata.putArticle(
+    makeArticle({
+      id: "article-1",
+      userId: "user-1",
+      sourceId: "inbox",
+      title: "Long Pre-Heavy Systems Article",
+      author: "Paul Kinlan",
+      content: longPreHeavyContent,
+    }),
+  );
+
+  const requestedPrompts: string[] = [];
+  const client = new GeminiTtsClient({
+    apiKey: "dummy-key",
+    timeoutRetries: 0,
+    fetchFn: (_url, init) => {
+      const bodyJson = JSON.parse(String(init?.body ?? "{}")) as {
+        contents?: Array<{ parts?: Array<{ text?: string }> }>;
+      };
+      const text = bodyJson.contents?.[0]?.parts?.[0]?.text ?? "";
+      requestedPrompts.push(text);
+      const wav = segmentWav(text || `chunk-${requestedPrompts.length}`);
+      let binary = "";
+      for (const b of wav) binary += String.fromCharCode(b);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                finishReason: "STOP",
+                content: {
+                  parts: [{ inlineData: { mimeType: "audio/wav", data: btoa(binary) } }],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    },
+  });
+
+  const synth = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+  });
+
+  // Drive through bounded ticks (max 2 segments per invocation) until terminal ready state
+  let ticks = 0;
+  while (ticks < 10) {
+    ticks++;
+    const batch = await runSynthesisBatch(ctx, synth, {
+      owner: `worker-3cf0-tick-${ticks}`,
+      maxSegmentsPerInvocation: 2,
+    });
+    if (batch.ready.length === 1) {
+      break;
+    }
+    assertEquals(batch.yielded.length, 1, `tick ${ticks} should yield cleanly with progress`);
+    assertEquals(batch.yielded[0]?.totalTurns, expectedChunks.length);
+  }
+
+  const finalEpisode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assert(finalEpisode);
+  assertEquals(finalEpisode.status, "ready", "long <pre>-heavy article must reach ready state");
+  assertEquals(finalEpisode.phase, "ready");
+  assertEquals(finalEpisode.error, undefined);
+  assertEquals(
+    requestedPrompts.length,
+    expectedChunks.length,
+    "each chunk must be synthesized exactly once across resumed ticks",
+  );
+  for (const sentText of requestedPrompts) {
+    assert(!sentText.includes("Uint8Array(4096)"), "no raw <pre> code may reach TTS requests");
+  }
+  assert(finalEpisode.audioKey);
+  const finalBlob = await stores.blobs.get(finalEpisode.audioKey);
+  assert(finalBlob && (finalBlob.size ?? 0) > 44, "stitched WAV blob must be persisted");
+  assertEquals(
+    await stores.metadata.listSynthesisSegments("user-1", "episode-1"),
+    [],
+    "intermediate segment blobs must be swept after terminal commit",
   );
 });
