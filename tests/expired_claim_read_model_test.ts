@@ -87,8 +87,11 @@ Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every 
 
   // audio-feed-pipz: Extract keys directly accessed on context via dot syntax (context.<key>)
   // or bracket literals (context["<key>"]).
-  // LIMITATION NOTE: Computed access via dynamic variables (e.g. context[k]) is not statically
-  // resolved here; if dynamic indexing is ever introduced, the keys should be declared in a shared constant.
+  // LIMITATION (audio-feed-r88w): Only literal dot/bracket accesses are visible. The minimum floor
+  // catches an ALL-dynamic rewrite, but adding context[k] beside enough literal keys stays
+  // green even when it changes isClaimStartRecord's answer. Merely moving keys to a shared constant
+  // and indexing context[k] repeats that blind spot; only a declaration consumed as data by BOTH
+  // the predicate and this doc assertion would close it. Do not mistake this scan for that check.
   const contextKeys = [
     ...new Set(
       [
@@ -103,6 +106,32 @@ Deno.test("audio-feed-svdw: isClaimStartRecord docstring dynamically pins every 
     contextKeys.length >= 2,
     `expected at least 2 context keys, got: ${contextKeys.join(", ")}`,
   );
+
+  // Pin three actionable limitations, not the whole paragraph: the extraction-population
+  // floor is useful for all-dynamic rewrites, but is not a predicate-key completeness check.
+  const testSource = Deno.readTextFileSync(new URL(import.meta.url));
+  const noteStart = testSource.indexOf("  // LIMITATION (audio-feed-r88w):");
+  const noteEnd = testSource.indexOf("\n  const contextKeys =", noteStart);
+  assert(noteStart !== -1 && noteEnd > noteStart, "r88w limitation note is missing");
+  const note = testSource.slice(noteStart, noteEnd).replace(/\s*\/\/\s?/g, " ").replace(
+    /\s+/g,
+    " ",
+  );
+  for (
+    const [claim, missing] of [
+      ["Only literal dot/bracket accesses are visible", "static literal-only extraction"],
+      [
+        "adding context[k] beside enough literal keys stays green",
+        "mixed literal/dynamic stays-green case",
+      ],
+      [
+        "shared constant and indexing context[k] repeats that blind spot",
+        "shared-constant dynamic-indexing repeats the hole",
+      ],
+    ] as const
+  ) {
+    assert(note.includes(claim), `r88w limitation note must state ${missing}`);
+  }
 
   const source = Deno.readTextFileSync(
     new URL("../src/observability/admin_report.ts", import.meta.url),
