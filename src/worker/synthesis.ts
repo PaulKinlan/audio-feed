@@ -1396,8 +1396,10 @@ export async function runSynthesisBatch(
     defaultStageMarkCap(options.batchSize ?? DEFAULTS.batchSize);
   let stageMarksEmitted = 0;
   let stageMarksSuppressed = 0;
+  let stageMarksSuppressedFailures = 0;
   const suppressedEpisodes = new Set<string>();
   const suppressedStages: Partial<Record<SynthesisStage, number>> = {};
+  const suppressedFailedStages: Partial<Record<SynthesisStage, number>> = {};
   const appendStage = async (
     stage: SynthesisStage,
     durationMs: number,
@@ -1459,7 +1461,17 @@ export async function runSynthesisBatch(
       stageMarksSuppressed++;
       if (episodeId) suppressedEpisodes.add(episodeId);
       suppressedStages[stage] = (suppressedStages[stage] ?? 0) + 1;
-      return await fn();
+      // PRESENCE OF A THROW IS THE FAILURE FLAG, never the truthiness of an error message
+      // (audio-feed-j8n4, following audio-feed-2zik and audio-feed-k3x6). Even under cap pressure,
+      // a suppressed failure must be counted so a suppressed failure is not disguised as a
+      // suppressed success in the terminal capped event.
+      try {
+        return await fn();
+      } catch (err) {
+        stageMarksSuppressedFailures++;
+        suppressedFailedStages[stage] = (suppressedFailedStages[stage] ?? 0) + 1;
+        throw err;
+      }
     }
     stageMarksEmitted++;
     const startedMarkAt = performance.now();
@@ -1501,19 +1513,23 @@ export async function runSynthesisBatch(
           correlationId: invocationId,
           phase: "capped",
           message:
-            `synthesis stage marks capped at ${stageMarkCap}; ${stageMarksSuppressed} suppressed`,
+            `synthesis stage marks capped at ${stageMarkCap}; ${stageMarksSuppressed} suppressed` +
+            (stageMarksSuppressedFailures > 0 ? ` (${stageMarksSuppressedFailures} failed)` : ""),
           context: {
             invocationId,
             stage: "synthesis",
             budgetMs,
             suppressed: stageMarksSuppressed,
+            suppressedFailures: stageMarksSuppressedFailures,
             suppressedStages: { ...suppressedStages },
+            suppressedFailedStages: { ...suppressedFailedStages },
             suppressedEpisodes: Array.from(suppressedEpisodes),
           },
         });
       } catch {
         console.warn(
-          `[audio-feed] synthesis stage marks capped; ${stageMarksSuppressed} suppressed`,
+          `[audio-feed] synthesis stage marks capped; ${stageMarksSuppressed} suppressed` +
+            (stageMarksSuppressedFailures > 0 ? ` (${stageMarksSuppressedFailures} failed)` : ""),
         );
       }
     }

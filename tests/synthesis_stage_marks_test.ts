@@ -339,6 +339,22 @@ Deno.test("audio-feed-huh4: stage marks are capped, and the cap is reported rath
     expectedSuppressed,
     "sum of suppressedStages must equal total suppressed",
   );
+
+  // audio-feed-j8n4: healthy suppressed stages report 0 failures and empty suppressedFailedStages
+  assertEquals(
+    capped[0]?.context?.suppressedFailures,
+    0,
+    "healthy suppressed episodes must report 0 failures",
+  );
+  assertEquals(
+    capped[0]?.context?.suppressedFailedStages,
+    {},
+    "healthy suppressed episodes must have empty suppressedFailedStages",
+  );
+  assert(
+    !capped[0]?.message.includes("failed"),
+    "capped message must not report failures when none occurred",
+  );
 });
 
 Deno.test("audio-feed-938b: production default stage mark cap formula and cron invocation override invariant", async () => {
@@ -500,5 +516,158 @@ Deno.test("audio-feed-a73i/audio-feed-4att: each markStage call site (tts, verif
       ["ep-yield-0"],
       "yield site must thread currentEpisode.id",
     );
+  }
+});
+
+Deno.test("audio-feed-j8n4: capped event is failure-aware and aggregates suppressed failures and failed stages", async () => {
+  // Test Case 1: A MIX of suppressed successes and suppressed failures
+  // Seed 3 episodes. Episode 0 emits 3 marks (tts, verify, upload) to exhaust stageMarkCap = 3.
+  // Episode 1's TTS throws an error (1 suppressed failure in tts).
+  // Episode 2's TTS succeeds, verify succeeds, upload throws (1 suppressed failure in upload).
+  // Total suppressed: 4 (tts: 2, verify: 1, upload: 1).
+  // Total suppressed failures: 2 (tts: 1, upload: 1).
+  {
+    const ids = ["ep-j8n4-mix-0", "ep-j8n4-mix-1", "ep-j8n4-mix-2"];
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+
+    const origPut = stores.blobs.put.bind(stores.blobs);
+    stores.blobs.put = (key, data, opts) => {
+      if (key.includes("ep-j8n4-mix-2")) {
+        return Promise.reject(new Error("upload failure on suppressed episode"));
+      }
+      return origPut(key, data, opts);
+    };
+
+    await runSynthesisBatch(
+      ctx,
+      (req) => {
+        if (req.episode.id === "ep-j8n4-mix-1") {
+          throw new Error("tts failure on suppressed episode");
+        }
+        return Promise.resolve(audio);
+      },
+      { batchSize: 3, maxAttempts: 1, owner: "j8n4-mix", stageMarkCap: 3 },
+    );
+
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1, "must emit exactly one capped event");
+    assertEquals(capped[0]?.context?.suppressed, 4, "total suppressed marks");
+    assertEquals(capped[0]?.context?.suppressedFailures, 2, "must count 2 suppressed failures");
+    assertEquals(
+      capped[0]?.context?.suppressedStages,
+      { tts: 2, verify: 1, upload: 1 },
+      "suppressedStages must record all suppressed stage attempts",
+    );
+    assertEquals(
+      capped[0]?.context?.suppressedFailedStages,
+      { tts: 1, upload: 1 },
+      "suppressedFailedStages must record exact stages that threw while suppressed",
+    );
+    assert(
+      capped[0]?.message.includes("4 suppressed (2 failed)"),
+      `message must summarize suppressed and failed counts: ${capped[0]?.message}`,
+    );
+  }
+
+  // Test Case 2: ALL suppressed stages fail
+  // Seed 2 episodes with stageMarkCap = 1.
+  // Ep 0 TTS runs and emits 1 mark (cap exhausted).
+  // Ep 0 Verify throws (suppressed failure in verify).
+  // Ep 1 TTS throws (suppressed failure in tts).
+  // Total suppressed: 2. Total suppressed failures: 2.
+  {
+    const ids = ["ep-j8n4-allfail-0", "ep-j8n4-allfail-1"];
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+
+    const origHead = stores.blobs.head.bind(stores.blobs);
+    stores.blobs.head = (key) => {
+      if (key.includes("ep-j8n4-allfail-0")) {
+        throw new Error("verify failure on ep 0");
+      }
+      return origHead(key);
+    };
+
+    await runSynthesisBatch(
+      ctx,
+      (req) => {
+        if (req.episode.id === "ep-j8n4-allfail-1") {
+          throw new Error("tts failure on ep 1");
+        }
+        return Promise.resolve(audio);
+      },
+      { batchSize: 2, maxAttempts: 1, owner: "j8n4-allfail", stageMarkCap: 1 },
+    );
+
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressed, 2);
+    assertEquals(capped[0]?.context?.suppressedFailures, 2, "all suppressed stages failed");
+    assertEquals(capped[0]?.context?.suppressedFailedStages, { verify: 1, tts: 1 });
+    assert(capped[0]?.message.includes("2 suppressed (2 failed)"));
+  }
+
+  // Test Case 3: Empty-message error (throw new Error("")) under cap
+  // Verifies that throw presence triggers failure detection rather than error message truthiness.
+  {
+    const ids = ["ep-j8n4-empty-0", "ep-j8n4-empty-1"];
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+
+    await runSynthesisBatch(
+      ctx,
+      (req) => {
+        if (req.episode.id === "ep-j8n4-empty-1") {
+          throw new Error(""); // empty message
+        }
+        return Promise.resolve(audio);
+      },
+      { batchSize: 2, maxAttempts: 1, owner: "j8n4-empty", stageMarkCap: 3 },
+    );
+
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressed, 1);
+    assertEquals(
+      capped[0]?.context?.suppressedFailures,
+      1,
+      "empty message error must still count as a suppressed failure",
+    );
+    assertEquals(capped[0]?.context?.suppressedFailedStages, { tts: 1 });
+    assert(capped[0]?.message.includes("1 suppressed (1 failed)"));
+  }
+
+  // Test Case 4: Non-Error throw (e.g. primitive throw) under cap
+  {
+    const ids = ["ep-j8n4-primitive-0", "ep-j8n4-primitive-1"];
+    const { ctx, stores } = await seedEpisodes(ids);
+    const audio = fakeAudio();
+
+    await runSynthesisBatch(
+      ctx,
+      (req) => {
+        if (req.episode.id === "ep-j8n4-primitive-1") {
+          throw "raw string exception";
+        }
+        return Promise.resolve(audio);
+      },
+      { batchSize: 2, maxAttempts: 1, owner: "j8n4-primitive", stageMarkCap: 3 },
+    );
+
+    const logs = await stores.metadata.listLogs();
+    const capped = stageMarks(logs).filter((l) => l.phase === "capped");
+    assertEquals(capped.length, 1);
+    assertEquals(capped[0]?.context?.suppressed, 1);
+    assertEquals(
+      capped[0]?.context?.suppressedFailures,
+      1,
+      "primitive throw must count as a suppressed failure",
+    );
+    assertEquals(capped[0]?.context?.suppressedFailedStages, { tts: 1 });
+    assert(capped[0]?.message.includes("1 suppressed (1 failed)"));
   }
 });
