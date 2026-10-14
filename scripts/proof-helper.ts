@@ -43,14 +43,27 @@ export interface SupervisedHarness {
  * `finally` AT ALL, so the directory outlives the process that would have removed it, and nothing
  * sweeps what is left behind.
  *
- * THE BOUND IS THE REAPER'S OWN, AND THAT IS WHY IT IS PROVABLY SAFE RATHER THAN CONVENIENT: the
- * reaper's documented rule on every fleet VM is "browsers older than 45 min (orphaned ones after 5)",
- * so NO LIVE BROWSER CAN OWN A PROFILE OLDER THAN 45 MINUTES. Anything past that bound is therefore
- * not merely probably abandoned, it CANNOT be running. The earlier 2-hour figure was empirical
- * ("no legitimate run holds one for more than minutes") and that is a weaker argument for the same
- * decision, so it is replaced by the derivation.
+ * REAPER INTERACTION AND HEURISTIC AGE BOUND (audio-feed-hu1s, audio-feed-gy3x):
+ * The default reaper rule on fleet VMs is "browsers older than 45 min (orphaned ones after 5)"
+ * (reaper.mjs:54 BROWSER_MIN = 45), polled on a 2-minute timer (fleet-reaper.timer OnUnitActiveSec=2min).
+ * However, the reaper explicitly spares any browser operating inside its own declared command timeout
+ * (reaper.mjs:224; pinned and tested in ~/fleet/tests/reaper.test.sh:155-173, test 10). A long-running command
+ * (e.g. `timeout 3600` or `fleet-heavy`) yields boundMin = 62 min, sparing its browser past 45 or 50 minutes.
+ *
+ * Therefore, NO age threshold derived from BROWSER_MIN is guaranteed safe against live browsers. Because
+ * Deno.remove(recursive) succeeds on directories held open by active processes on Linux, this sweep CAN
+ * remove a profile that a live browser is still actively using if that browser runs past the age bound.
+ *
+ * STALE_PROFILE_AGE_MS is set to 50 minutes as an empirical heuristic (45m default threshold + 2m timer poll
+ * + 3m margin). This trade-off is accepted for this test helper because:
+ *   1. Chrome profiles allocated here are disposable scratch directories for automated headless proof tests,
+ *      not durable sessions or persistent user data.
+ *   2. Legitimate proof tests finish in seconds or minutes; only pathological or unusually long-timeout runs
+ *      exceed 50 minutes.
+ *   3. The worst-case consequence is a broken in-flight test in an already-abnormal run, rather than data loss,
+ *      which is preferable to allowing unbounded accumulation of orphaned /tmp profiles across VM runs.
  */
-export const STALE_PROFILE_AGE_MS = 45 * 60 * 1000;
+export const STALE_PROFILE_AGE_MS = 50 * 60 * 1000;
 
 /**
  * Reclaim abandoned profile directories WHATEVER THEY ARE CALLED (audio-feed-u8nv, widened by
@@ -60,8 +73,8 @@ export const STALE_PROFILE_AGE_MS = 45 * 60 * 1000;
  * DIFFERENT WAY OF DESTROYING SOMETHING THAT IS IN USE:
  *   - PROFILE SIGNATURE: `Default/` is inside, and `.git` is not. The signature is what a profile IS;
  *     the name was only ever a guess at who made it.
- *   - AGE BOUND: a young directory may be a LIVE run's, so it is left alone. The reclaim only ever
- *     removes what the declared bound has already ruled out as running.
+ *   - AGE BOUND: a young directory may be a LIVE run's, so it is left alone. The reclaim removes
+ *     directories exceeding the heuristic age bound.
  *
  * WHY THE NAME RULE IS GONE, BECAUSE THIS IS THE PART THAT LOOKS LIKE A REGRESSION AND IS NOT: a
  * prefix matches only the callers that exist now. Every directory created by a path that does not go
@@ -163,7 +176,7 @@ export async function sweepStaleProfiles(
       await originalRemove(full, { recursive: true });
       swept.push(full);
     } catch {
-      // A live run, a concurrent reclaim, or a permission we do not have: leave it, never throw.
+      // Concurrent reclaim or filesystem permission error: leave it, never throw.
     }
   }
   return swept;
