@@ -45,6 +45,116 @@ async function get(
   return fetch(new Request(`${BASE}${path}`, { headers }));
 }
 
+/** Elements HTML lets an author leave unclosed. */
+const OPTIONAL_END_TAGS = new Set([
+  "p",
+  "li",
+  "dt",
+  "dd",
+  "option",
+  "optgroup",
+  "thead",
+  "tbody",
+  "tfoot",
+  "tr",
+  "td",
+  "th",
+  "rt",
+  "rp",
+]);
+
+/** Elements that never take an end tag. */
+const VOID_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+/**
+ * Every tag that closes the wrong element or is never closed, in document order.
+ *
+ * Comments and the bodies of `<script>`/`<style>` are dropped first: neither contributes
+ * elements to the tree and their contents are text. A scanner this small is enough because the
+ * pages are server-rendered from template literals and `deno test` has no HTML parser; it is
+ * deliberately pointed at the kit pages below rather than at arbitrary HTML.
+ */
+export function tagNestingProblems(html: string): string[] {
+  const markup = html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+  const problems: string[] = [];
+  const open: string[] = [];
+  for (
+    const [, closing, rawTag, selfClose] of markup.matchAll(
+      /<(\/?)([a-zA-Z][\w-]*)\b[^>]*?(\/?)>/g,
+    )
+  ) {
+    const tag = rawTag!.toLowerCase();
+    if (VOID_TAGS.has(tag) || selfClose === "/") continue;
+    if (!closing) {
+      open.push(tag);
+      continue;
+    }
+    let at = open.length - 1;
+    while (at >= 0 && open[at] !== tag && OPTIONAL_END_TAGS.has(open[at]!)) at--;
+    // Either the loop found the matching open element (truncate to and including it) or it stopped
+    // on an element that is neither the closer's own element nor one whose end tag may be omitted -
+    // which is the mismatch this function exists to report. Checking only `at < 0` here let the
+    // stale `</div>` through: the loop stopped on `fieldset`, and truncating there looked like a
+    // match. The mutant run is what caught it (a check that cannot fail is a false green).
+    if (at < 0 || open[at] !== tag) {
+      problems.push(`</${tag}> closes <${open[open.length - 1] ?? "nothing"}>`);
+      continue;
+    }
+    open.length = at;
+  }
+  for (const tag of open) problems.push(`<${tag}> never closed`);
+  return problems;
+}
+
+/**
+ * RENDERED MARKUP MUST ACTUALLY NEST (audio-feed-lma7). A one-line markup error — a stale
+ * `</div>` left behind when `<div class="choices">` became `<fieldset class="choices">`
+ * (audio-feed-dc2y) — closed `div.wrap` in the middle of the send form, so every later
+ * `section.panel` on /account landed as a SIBLING of the page column: full viewport width with
+ * none of the wrap's max-width or gutter (measured at 390px: left 0, right 390, while /login and
+ * the admin pages were correct). Nothing about the response status or the page's text changes
+ * when a tag is mismatched, so the markup itself is the only place the check can live; and
+ * because the defect only shows up in the DOM, per-element string assertions cannot see it.
+ */
+Deno.test("every kit page's markup actually nests its tags (audio-feed-lma7)", async () => {
+  const { fetch, stores } = app();
+  await seed(stores, { isAdmin: true });
+  // Every page that renders through the shared shell: the account page (whose send form carried
+  // the stale closer), the login page, and the admin console with its subpages. A tag that
+  // escapes the page column breaks the layout of whatever follows it, so the whole set is walked.
+  // /login is fetched signed OUT: it redirects a signed-in visitor, so a cookie would test the
+  // redirect rather than the page.
+  const pages: Array<[string, boolean]> = [
+    ["/account", true],
+    ["/login", false],
+    ["/admin", true],
+    ["/admin/subscribers", true],
+  ];
+  for (const [path, signedIn] of pages) {
+    const res = signedIn ? await get(fetch, path, stores, "user-1") : await get(fetch, path);
+    assertEquals(res.status, 200, `${path} should render`);
+    assertEquals(tagNestingProblems(await res.text()), [], `${path} markup`);
+  }
+});
+
 Deno.test("GET /account annotates the send-article form as an agent tool (audio-feed-dc2y)", async () => {
   const { fetch, stores } = app();
   await stores.metadata.putUser(
