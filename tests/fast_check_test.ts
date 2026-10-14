@@ -24,6 +24,7 @@ import {
   reverseGraph,
   run,
   suiteMarker,
+  withoutRouteAuditFixture,
 } from "../scripts/fast-check.ts";
 
 // A miniature of the repo's real shape: routes flow through the compose/app
@@ -273,7 +274,7 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
         "tests/share_target_test.ts",
       ],
       // The non-HTTP references above are links, redirect assertions, or a Host-gate 421 before the handler.
-      mentions: (source: string) => /(?<!\/api\/auth)\/login(?=[/?#"`])/.test(source),
+      mentions: (source: string) => /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(source),
     },
     {
       file: "src/routes/admin_telemetry.ts",
@@ -296,26 +297,11 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   ];
   // Exclude only THIS audit's URL-literal fixture block, never the entire file:
   // a future real HTTP test in fast_check_test.ts must still become a candidate.
-  const withoutOwnFixture = (file: string, source: string): string => {
-    if (file !== "tests/fast_check_test.ts") return source;
-    const marker = 'Deno.test("' +
-      "abh1: route registrations discover the complete HTTP test set before narrowing" +
-      '", async () => {';
-    const start = source.indexOf(marker);
-    const end = source.indexOf("\n});", start);
-    assert(start >= 0 && end > start, "route-reference audit fixture block missing");
-    assertEquals(
-      source.indexOf(marker, start + marker.length),
-      -1,
-      "duplicate audit fixture block",
-    );
-    return source.slice(0, start) + source.slice(end + 4);
-  };
   const discovered = await allTestFiles();
   assert(discovered.length > 0, "full-gate test discovery returned ZERO modules");
   const sources = new Map<string, string>();
   for (const file of discovered) {
-    sources.set(file, withoutOwnFixture(file, await Deno.readTextFile(file)));
+    sources.set(file, withoutRouteAuditFixture(file, await Deno.readTextFile(file)));
   }
   assert(sources.size > 0, "route-reference audit examined ZERO test modules");
   assertEquals(
@@ -330,8 +316,8 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
   const futureHandlerRequest = self +
     '\nDeno.test("new login reader", async () => await fetch(new Request("https://example.test/login")));\n';
   assert(
-    /(?<!\/api\/auth)\/login(?=[/?#"`])/.test(
-      withoutOwnFixture("tests/fast_check_test.ts", futureHandlerRequest),
+    /(?<!\/api\/auth)\/login(?=[/?#"'`])/.test(
+      withoutRouteAuditFixture("tests/fast_check_test.ts", futureHandlerRequest),
     ),
     "a future HTTP test in the same module must remain visible outside the fixture block",
   );
@@ -357,10 +343,26 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     const named = await nameMatchedTests([route.file]);
     assertEquals(
       (named.get(route.file) ?? []).sort(),
-      [...route.exercises].sort(),
-      `${population}: ${route.file} must select every exercising HTTP suite and no unrelated mention-only suite`,
+      candidates,
+      `${population}: ${route.file} must select the entire URL candidate UNION, including mention-only suites that could grow real handler tests`,
     );
   }
+});
+
+Deno.test("wb7h: conservative URL candidate union includes existing mention-only modules", async () => {
+  const reverse = await reverseGraph();
+  const login = "src/routes/login.ts";
+  const reports = "src/routes/reports.ts";
+  const loginPlan = planTests([login], reverse, await nameMatchedTests([login]));
+  const reportsPlan = planTests([reports], reverse, await nameMatchedTests([reports]));
+  assert(
+    loginPlan.testFiles?.includes("tests/bookmarklet_test.ts"),
+    "a new login exerciser within bookmarklet_test.ts must not be silently omitted",
+  );
+  assert(
+    reportsPlan.testFiles?.includes("tests/admin_subpages_test.ts"),
+    "a future CSP-report handler test inside this already-mentioned module must run",
+  );
 });
 
 const VFE9_EXERCISING_SUITES = [
@@ -424,17 +426,51 @@ Deno.test("vfe9: five hub-cut routes select all present HTTP readers or widen wh
   }
 });
 
-Deno.test("vfe9: the real repo graph selects the complete route-specific HTTP suite set", async () => {
+Deno.test("wb7h: an added URL reader is selected, including within an already-mentioned module", async () => {
+  const dir = await Deno.makeTempDir();
+  const login = "src/routes/login.ts";
+  const newSuite = "tests/new_candidate_test.ts";
+  const mentioned = "tests/bookmarklet_test.ts";
+  const url = "/lo" + "gin"; // Do not make this selector test itself a route candidate.
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/${newSuite}`, "unrelated route");
+    await Deno.writeTextFile(`${dir}/${mentioned}`, "unrelated route");
+    assertEquals((await nameMatchedTests([login], `${dir}/tests`)).get(login), undefined);
+
+    await Deno.writeTextFile(`${dir}/${mentioned}`, `const href = '${url}';`);
+    assertEquals((await nameMatchedTests([login], `${dir}/tests`)).get(login), [mentioned]);
+
+    await Deno.writeTextFile(
+      `${dir}/${mentioned}`,
+      `await fetch(new Request('https://example.test${url}'));`,
+    );
+    assertEquals((await nameMatchedTests([login], `${dir}/tests`)).get(login), [mentioned]);
+
+    await Deno.writeTextFile(
+      `${dir}/${newSuite}`,
+      `await fetch(new Request('https://example.test${url}'));`,
+    );
+    assertEquals(
+      (await nameMatchedTests([login], `${dir}/tests`)).get(login)?.sort(),
+      [mentioned, newSuite].sort(),
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("wb7h: real graph keeps verified readers and additional URL candidates bounded", async () => {
   const reverse = await reverseGraph();
-  for (const [path, suites] of VFE9_EXERCISING_SUITES) {
+  const discovered = await allTestFiles();
+  assert(discovered.length > 0, "no test modules discovered");
+  for (const [path, verifiedExercisers] of VFE9_EXERCISING_SUITES) {
     const plan = planTests([path], reverse, await nameMatchedTests([path]));
     assert(plan.testFiles !== null, `${path} must not force FULL: ${plan.reason}`);
-    assertEquals(
-      plan.testFiles,
-      [...suites].sort(),
-      `${path} must include every HTTP handler exerciser`,
-    );
-    assert(plan.testFiles.length < 25, `${path} must stay a bounded subset, not most of the suite`);
+    for (const suite of verifiedExercisers) {
+      assert(plan.testFiles.includes(suite), `${path}: lost verified handler exerciser ${suite}`);
+    }
+    assert(plan.testFiles.length < discovered.length, `${path}: must remain narrower than FULL`);
   }
   assertEquals(planTests(["src/routes/new_unmapped.ts"], reverse, new Map()).testFiles, null);
 });
