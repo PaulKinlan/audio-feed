@@ -239,9 +239,18 @@ export interface QueueSnapshot {
   /** The run-history read's failure; `lastSynthesisRun` being absent is then NOT "it never ran". */
   runsReadError?: string;
   /**
-   * `"empty"` nothing queued; `"draining"` work queued and the last run made progress;
-   * `"stalled"` work queued and the last run did not; `"unknown"` no run history at all;
+   * `"empty"` nothing is claimable AND the last synthesis run is either absent or recent, error-free
+   * and failure-free - no evidence against the queue being genuinely drained; `"draining"` work queued
+   * and the last run made progress; `"stalled"` work queued and the last run did not, OR nothing
+   * claimable while the last run errored, recorded a failure, or went stale (audio-feed-n1f7);
+   * `"unknown"` the run history could not be read, or work is queued with no run history at all;
    * `"unreadable"` the queue could not be read, so nothing about it can be claimed.
+   *
+   * THE LIMIT, stated rather than implied: this verdict is derived from the pending queue and the last
+   * synthesis run ONLY. It cannot see a claim held past its budget, nor an episode abandoned at
+   * maxClaims, because both leave nothing claimable and make a healthy run correctly report nothing
+   * ready - which is indistinguishable here from a genuinely empty queue. `liveClaims` and `abandoned`
+   * on the ADMIN report name those states; this snapshot does not carry them.
    */
   drain: "empty" | "draining" | "stalled" | "unknown" | "unreadable";
 }
@@ -471,17 +480,37 @@ async function readQueueInternal(
     .sort()[0];
 
   let drain: QueueSnapshot["drain"];
-  if (queueEpisodes === null) drain = "unreadable";
-  else if (rawClaimable === 0) drain = "empty";
+  // The failed-read arm is written on the COUNT rather than on `queueEpisodes`, so that TypeScript
+  // narrows `rawClaimable` to a number for every arm below it and no later arm has to treat a failed
+  // read as a zero. The two conditions are the same by construction: `rawClaimable` is `null` if and
+  // only if `queueEpisodes` is.
+  if (rawClaimable === null) drain = "unreadable";
   else if (runsReadError) drain = "unknown";
   else if (lastSynthesisRun) {
     const startedAgo = nowMs - Date.parse(lastSynthesisRun.startedAt);
     const recent = Number.isFinite(startedAgo) && startedAgo <= SYNTHESIS_TICK_MS * 3;
-    drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.ready ?? 0) > 0
-      ? "draining"
-      : "stalled";
+    if (rawClaimable > 0) {
+      drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.ready ?? 0) > 0
+        ? "draining"
+        : "stalled";
+    } else {
+      // NOTHING CLAIMABLE IS NOT THE SAME AS NOTHING TO DO (audio-feed-n1f7). This arm used to be
+      // `rawClaimable === 0 -> "empty"` evaluated BEFORE the run history was consulted, so a failed,
+      // failing or stale last run could never be reported whenever the queue happened to be empty -
+      // and "empty" is what a human reads as "all is well". Negative evidence is now allowed to speak:
+      // `"empty"` is EARNED by a recent, error-free, failure-free run, and any run that failed, was
+      // recorded with an error, or went stale reports `"stalled"`, which was previously unreachable
+      // for an empty queue. Deliberately NOT extended to the no-run-history case below: with no run
+      // recorded there is no evidence being masked, and the pinned contract for a fresh store stays.
+      drain = recent && !lastSynthesisRun.error && (lastSynthesisRun.failed ?? 0) === 0
+        ? "empty"
+        : "stalled";
+    }
   } else {
-    drain = "unknown";
+    // No run history at all. Nothing claimable is then still an empty queue - there is no evidence
+    // against it, and `lastSynthesisRun: null` sits in the same object for a reader who wants the
+    // caveat. Work queued with no run history remains `"unknown"`, as it always has.
+    drain = rawClaimable === 0 ? "empty" : "unknown";
   }
 
   return {

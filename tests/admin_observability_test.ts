@@ -16,7 +16,7 @@
  * are the ones production writes — not hand-built fixtures that would pass while the real writer
  * changed shape.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -407,6 +407,110 @@ Deno.test("audio-feed-n6uu: the queue section counts claimable work and says whe
   assertStringIncludes(body, "Claimable now");
   assertStringIncludes(body, "queued work is NOT being processed");
   assertStringIncludes(body, "episode-q".length > 0 ? "Queue" : "Queue");
+});
+
+Deno.test("audio-feed-n1f7: an empty queue is EARNED, not assumed from claimable === 0", async () => {
+  // ACCEPTANCE, WITH THE EXPECTED FAILURE SIGNATURE NAMED IN ADVANCE rather than discovered afterwards:
+  // with the fix reverted (the old `rawClaimable === 0 -> "empty"` arm restored ahead of the run
+  // history), the FIRST assertion to fail is the one carrying
+  // "REGRESSION GUARD: a failed last run with nothing claimable is not an empty queue", reported as
+  // expected "stalled" against actual "empty". The controls that still pass in that state are the
+  // caught-up control at the top of this test and every other drain assertion in this file, which is
+  // what makes the red evidence about the new arm rather than about a broken verdict in general.
+  const { stores } = await setup();
+  const at = Date.parse("2026-10-11T10:00:00.000Z");
+
+  // CONTROL THAT PASSES: nothing claimable and a recent, error-free, failure-free run. This is the
+  // ordinary "all caught up" state, and it must stay `empty` - a fix that made everything stalled
+  // would be as wrong as the bug.
+  await stores.metadata.recordRun({
+    id: "run-caught-up",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: "2026-10-11T09:59:30.000Z",
+    durationMs: 50,
+    ready: 0,
+    failed: 0,
+    deferred: 0,
+  });
+  const caughtUp = await buildObservabilityReport(stores, at);
+  assertEquals(caughtUp.queue.claimable, 0);
+  assertEquals(
+    caughtUp.queue.drain,
+    "empty",
+    "CONTROL: a healthy recent run with nothing claimable is a genuinely empty queue",
+  );
+
+  // THE DEFECT (audio-feed-n1f7): nothing claimable, and the last synthesis run RECORDED A FAILURE.
+  // Before the fix this reported `empty`, because `claimable === 0` short-circuited the verdict before
+  // the run history was consulted - so a human reading "empty" was told all was well at the exact
+  // moment the drain had failed. This is also the closest this signal gets to an abandoned episode.
+  await stores.metadata.recordRun({
+    id: "run-failed",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: "2026-10-11T09:59:40.000Z",
+    durationMs: 50,
+    ready: 0,
+    failed: 1,
+    deferred: 0,
+  });
+  const failed = await buildObservabilityReport(stores, at);
+  assertEquals(failed.queue.claimable, 0, "nothing is claimable in every case here");
+  assertEquals(
+    failed.queue.drain,
+    "stalled",
+    "REGRESSION GUARD: a failed last run with nothing claimable is not an empty queue",
+  );
+  assertNotEquals(
+    failed.queue.drain,
+    "empty",
+    "and it must never be readable as 'all is well' while the last run failed",
+  );
+
+  // A run with a top-level error, and then a stale one: both are evidence against "empty" too.
+  await stores.metadata.recordRun({
+    id: "run-errored",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: "2026-10-11T09:59:50.000Z",
+    durationMs: 50,
+    ready: 0,
+    failed: 0,
+    deferred: 0,
+    error: "synthesis batch threw",
+  });
+  assertEquals(
+    (await buildObservabilityReport(stores, at)).queue.drain,
+    "stalled",
+    "an errored last run with nothing claimable is not an empty queue",
+  );
+  await stores.metadata.recordRun({
+    id: "run-stale",
+    kind: "synthesis",
+    trigger: "cron",
+    startedAt: "2026-10-11T09:00:00.000Z",
+    durationMs: 50,
+    ready: 0,
+    failed: 0,
+    deferred: 0,
+  });
+  assertEquals(
+    (await buildObservabilityReport(stores, at)).queue.drain,
+    "stalled",
+    "a stale last run with nothing claimable is not an empty queue",
+  );
+
+  // AND THE UNREADABLE-RUN-HISTORY ARM: a failed run read must not render as a healthy verdict, so it
+  // is checked BEFORE the `claimable === 0` arm (the same rule as a failed queue read, audio-feed-ciuw).
+  stores.metadata.listRuns = () => Promise.reject(new Error("injected run read failure"));
+  const unknown = await buildObservabilityReport(stores, at);
+  assertEquals(unknown.queue.claimable, 0);
+  assertEquals(
+    unknown.queue.drain,
+    "unknown",
+    "a run history that could not be read is not evidence of a healthy drain",
+  );
 });
 
 Deno.test("audio-feed-n6uu: the claimable count is capped and says so rather than reporting a total it did not measure", async () => {
