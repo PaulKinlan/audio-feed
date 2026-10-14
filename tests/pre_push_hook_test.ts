@@ -6,11 +6,16 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import * as path from "@std/path";
-import { prepushGuardStatus } from "../scripts/fast-check.ts";
+import { prepushGuardStatus } from "../scripts/hooks/guard-status.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
-const HOOK_PATH = `${ROOT}/scripts/hooks/pre-push`;
-const INSTALL_PATH = `${ROOT}/scripts/hooks/install-hooks.sh`;
+const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+// audio-feed-p2la: literal `new URL(...)` forms rather than templates over ROOT, so the fast gate's
+// DERIVED read relation can see that this suite executes both hook files. While they were templates
+// over a pathname constant, a change to either was reported as an unmapped path with no coverage -
+// which is how this suite came to be running them while being invisible to the relation.
+const HOOK_PATH = new URL("../scripts/hooks/pre-push", import.meta.url).pathname;
+const INSTALL_PATH = new URL("../scripts/hooks/install-hooks.sh", import.meta.url).pathname;
+const GUARD_STATUS_PATH = new URL("../scripts/hooks/guard-status.ts", import.meta.url).pathname;
 
 async function runHook(
   input: string,
@@ -770,7 +775,67 @@ Deno.test("audio-feed-p2la: the gate's guard check MEASURES the clone instead of
   }
 });
 
-Deno.test("audio-feed-p2la: both gate tasks arm the pre-push guard as their FIRST step", async () => {
+Deno.test("audio-feed-p2la: the verify STEP runs with the shipped permissions and fails closed in a clone with no installed guard", async () => {
+  // The requirement this test exists for (audio-feed-p2la, reviewer fact 4): the .git/hooks/pre-push
+  // path must be exercised under the permissions the SHIPPED step runs with, not this test process's
+  // unrestricted ones. `deno task hooks:verify` is
+  // `deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts` - fewer permissions than the
+  // gate that hosts it - so the child below is spawned with exactly those flags, in a scratch clone
+  // that has no installed guard. A previous attempt was green because it ran the INSTALLER directly
+  // with unrestricted permissions: it proved the installer works, not that the gate is guarded.
+  const scratch = await Deno.makeTempDir();
+  const home = await Deno.makeTempDir();
+  try {
+    assertEquals((await gitIn(scratch, ["init", "-q", "-b", "main"])).code, 0);
+    // The verify script locates the clone it guards from ITS OWN path, so the clone gets its own copy
+    // and the child below runs THAT one — running the repo's copy against cwd=clone would measure the
+    // repo, which is exactly the mistake this test would then fail to catch.
+    const scriptInClone = `${scratch}/scripts/hooks/guard-status.ts`;
+    await Deno.mkdir(`${scratch}/scripts/hooks`, { recursive: true });
+    await Deno.copyFile(GUARD_STATUS_PATH, scriptInClone);
+    const flags = ["run", "--allow-read", "--allow-run=git", scriptInClone];
+    const env = { ...Deno.env.toObject() };
+    delete env.GIT_DIR; // the scratch clone must be discovered, not overridden
+    const verify = async () =>
+      await new Deno.Command("deno", {
+        args: flags,
+        cwd: scratch,
+        env,
+        stdout: "piped",
+        stderr: "piped",
+      })
+        .output();
+
+    const unarmed = await verify();
+    const unarmedOut = new TextDecoder().decode(unarmed.stderr);
+    assertEquals(
+      unarmed.code,
+      1,
+      `a clone with no installed guard must FAIL the verify step: ${unarmedOut}`,
+    );
+    assertStringIncludes(unarmedOut, "pre-push guard is NOT armed (audio-feed-p2la)");
+    assertStringIncludes(unarmedOut, "hooks/pre-push");
+
+    const arm = await armClone(`${scratch}/.git`, home);
+    assertEquals(arm.code, 0, `arming the scratch clone must succeed: ${arm.log}`);
+    const armed = await verify();
+    const armedOut = new TextDecoder().decode(armed.stdout);
+    assertEquals(armed.code, 0, `the verify step must pass in an armed clone: ${armedOut}`);
+    assertStringIncludes(armedOut, "pre-push guard verified");
+
+    // The "installed hook was removed" mutation is caught by the shipped step itself.
+    await Deno.remove(`${scratch}/.git/hooks/audio-feed-pre-push`);
+    const stripped = await verify();
+    const strippedOut = new TextDecoder().decode(stripped.stderr);
+    assertEquals(stripped.code, 1, "a removed guard must fail the verify step");
+    assertStringIncludes(strippedOut, "audio-feed-pre-push");
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-p2la: both gate tasks ARM and VERIFY the pre-push guard as their FIRST two steps", async () => {
   // The gate's own assertion (above) catches a missing guard, and this pins the wiring that makes
   // the assertion satisfiable: `deno task test:fast` and `deno task gate` must arm the guard before
   // they run anything. It is a shape assertion rather than a behavioural one because running a gate
@@ -788,12 +853,16 @@ Deno.test("audio-feed-p2la: both gate tasks arm the pre-push guard as their FIRS
   assert(installer, "the hooks:install task exists");
   assertStringIncludes(installer, "install-hooks.sh");
 
+  const verifier = tasks["hooks:verify"];
+  assert(verifier, "the hooks:verify task exists");
+  assertStringIncludes(verifier, "scripts/hooks/guard-status.ts");
+
   for (const task of ["test:fast", "gate"]) {
     const command = tasks[task];
     assert(command, `the ${task} task exists`);
     assert(
-      command.startsWith("deno task hooks:install && "),
-      `the ${task} task must arm the pre-push guard BEFORE it runs anything: ${command} (audio-feed-p2la)`,
+      command.startsWith("deno task hooks:install && deno task hooks:verify && "),
+      `the ${task} task must arm AND verify the pre-push guard BEFORE it runs anything: ${command} (audio-feed-p2la)`,
     );
   }
 });

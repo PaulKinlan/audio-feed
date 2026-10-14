@@ -157,18 +157,23 @@ was a best-effort call inside `scripts/fast-check.ts` — behind `Deno.permissio
 always DENIED under `test:fast`'s `--allow-run=git,deno`, with the child's exit status and every error
 discarded. The installer existed, the guard did not, and the gate went green saying nothing.
 
-Both gates now arm it as their FIRST step (`deno task hooks:install`, a shell step in the task
-string, so no Deno permission list is widened for it) and `scripts/fast-check.ts` MEASURES the
-result: it reads the hooks directory git will actually use (`--git-path hooks`, so `core.hooksPath`
-cannot make it claim a guard that would never run), the chain marker in that directory's `pre-push`,
-and the executable guard the chain block runs. If the guard is not armed the gate exits 1 naming the
-missing file, because the gate must not vouch for a tree whose pushes are unguarded; a tree that is
-not a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
+Both gates now ARM it (`deno task hooks:install`, a shell step in the task string, so no Deno
+permission list is widened for the installer) and then VERIFY it (`deno task hooks:verify` →
+`deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts`, fewer permissions than the gate
+that hosts it) as their FIRST two steps. Verification reads what git will actually execute: the hooks
+directory git will use (`--git-path hooks`, so `core.hooksPath` cannot make it claim a guard that
+would never run), the chain marker in that directory's `pre-push`, and the executable guard the chain
+block runs. If the guard is not armed the verify step exits 1 naming the missing file, because the
+gate must not vouch for a tree whose pushes are unguarded, and `scripts/fast-check.ts` repeats the
+same measurement in-process so a deleted wiring step still reddens the fast path. A tree that is not
+a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
 failure. `scripts/hooks/install-hooks.sh` fails closed the same way: a clone it cannot arm exits
 non-zero by name instead of exiting 0 quietly. Run `deno task hooks:install` alone to arm a clone by
-hand. A `core.hooksPath` that moves git's hooks directory elsewhere is a named installation failure,
-not something the installer will write around: it will not write into a hooks directory shared with
-other repositories.
+hand, `deno task hooks:verify` to ask whether a clone is armed. A `core.hooksPath` that moves git's
+hooks directory elsewhere is a named installation failure, not something the installer will write
+around: it will not write into a hooks directory shared with other repositories. Since a clone the
+gate cannot arm does not gate green, a fixture that runs the selector in a disposable clone arms it
+first (`git clone` copies no hooks) — tests/fast_gate_fmt_test.ts does exactly that.
 
 ## Modern-web bead closures record a premise verdict
 

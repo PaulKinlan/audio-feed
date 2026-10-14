@@ -65,6 +65,7 @@ import {
   universeDrift,
 } from "./test-selection.ts";
 import { evidenceReadmesAmong, findUnselectedExecutors } from "./evidence-selection.ts";
+import { guardNotArmedMessage, prepushGuardStatus } from "./hooks/guard-status.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
 // (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
@@ -208,92 +209,6 @@ async function git(...args: string[]): Promise<string | null> {
   // run that tested nothing.
   if (!out.success) return null;
   return new TextDecoder().decode(out.stdout);
-}
-
-/**
- * audio-feed-p2la: the marker scripts/hooks/install-hooks.sh writes into the chained hook. Read
- * here, never generated here — one installer, one marker.
- */
-const PREPUSH_CHAIN_MARKER = "# audio-feed-p2la: chain repo pre-push hook";
-
-/** What measuring this clone's pre-push guard found (audio-feed-p2la). */
-export type PrepushGuardStatus =
-  | { state: "armed"; hooksDir: string }
-  | { state: "not-a-worktree" }
-  | { state: "not-armed"; hooksDir: string; detail: string };
-
-/**
- * audio-feed-p2la: MEASURE — never assume — that this clone's pre-push guard is armed.
- *
- * Both gate tasks arm it before this script runs (`deno task hooks:install` is the first step of
- * `deno task test:fast` and `deno task gate`), so "armed" is the expected answer. The check exists
- * because the shape it replaced was the opposite: an installation attempt behind
- * `Deno.permissions.querySync` — always DENIED under test:fast's `--allow-run=git,deno` — whose
- * child's exit status and every error were discarded, so a clone with no guard gated green and said
- * nothing about it. Deleting the install step, the installer, or the installed hook has to turn the
- * gate RED by name; this is the measurement that makes it so.
- *
- * It reads what git will actually execute: the hooks directory from `--git-path hooks` (so a
- * core.hooksPath that moves it cannot be mistaken for armed), the chain marker in that directory's
- * pre-push, and the executable standalone guard the chain block runs. It deliberately does NOT
- * compare the standalone copy against this tree's scripts/hooks/pre-push: that freshness check
- * belongs to the installer, because doing it here would make one worktree's gate depend on the last
- * install performed by a different worktree.
- */
-export async function prepushGuardStatus(root: string = ROOT): Promise<PrepushGuardStatus> {
-  const runGit = async (args: string[]): Promise<Deno.CommandOutput | null> =>
-    await new Deno.Command("git", { args, cwd: root, stdout: "piped", stderr: "null" })
-      .output().catch(() => null);
-
-  const revParse = async (...args: string[]): Promise<string | null> => {
-    const out = await runGit(["rev-parse", "--path-format=absolute", ...args]);
-    return out?.success ? new TextDecoder().decode(out.stdout).trim() : null;
-  };
-
-  const commonDir = await revParse("--git-common-dir");
-  const hooksDir = await revParse("--git-path", "hooks");
-  if (!commonDir || !hooksDir) {
-    // Distinguish "git cannot resolve absolute paths here" (a failure to verify: fail closed) from
-    // "this is not a worktree" (cannot push, so there is nothing to guard: a stated limit).
-    const inside = await runGit(["rev-parse", "--is-inside-work-tree"]);
-    const isWorkTree = inside?.success === true &&
-      new TextDecoder().decode(inside.stdout).trim() === "true";
-    if (!isWorkTree) return { state: "not-a-worktree" };
-    return {
-      state: "not-armed",
-      hooksDir: "",
-      detail:
-        "git reported no absolute hooks directory (is --path-format=absolute unsupported here?), so the guard cannot be verified as armed",
-    };
-  }
-
-  const chainHook = `${hooksDir}/pre-push`;
-  const chain = await Deno.readTextFile(chainHook).catch(() => null);
-  if (chain === null || !chain.includes(PREPUSH_CHAIN_MARKER)) {
-    return {
-      state: "not-armed",
-      hooksDir,
-      detail: `'${chainHook}' does not carry the chain block ('${PREPUSH_CHAIN_MARKER}')`,
-    };
-  }
-
-  const standalone = `${commonDir}/hooks/audio-feed-pre-push`;
-  const stat = await Deno.stat(standalone).catch(() => null);
-  if (!stat?.isFile) {
-    return {
-      state: "not-armed",
-      hooksDir,
-      detail: `'${standalone}' (the guard the chain block runs) is missing`,
-    };
-  }
-  if (((stat.mode ?? 0) & 0o111) === 0) {
-    return {
-      state: "not-armed",
-      hooksDir,
-      detail: `'${standalone}' (the guard the chain block runs) is not executable`,
-    };
-  }
-  return { state: "armed", hooksDir };
 }
 
 /**
@@ -1502,17 +1417,16 @@ export function formatCheckStep(fmtFixture?: string | null): string[] {
 }
 
 if (import.meta.main) {
-  // audio-feed-p2la: the guard is armed by `deno task hooks:install`, the first step of test:fast
-  // and gate. Assert it BEFORE any gate work — a gate that goes green while the guard is absent is
-  // the exact defect this check closes. (This used to be a silent installation attempt here, gated
-  // on a permission that test:fast never grants and discarding the child's exit status.)
-  const prepushGuard = await prepushGuardStatus();
+  // audio-feed-p2la: the guard is armed and verified by the FIRST steps of both gate tasks
+  // (`deno task hooks:install && deno task hooks:verify`). Assert it here as well — a gate that goes
+  // green while the guard is absent is the exact defect this check closes — because THIS is the call
+  // site that covers a bare `deno run scripts/fast-check.ts` and a gate task whose verify step has
+  // been deleted, both of which the task-level step cannot speak for. (The block that used to sit
+  // here launched the installer behind a permission test:fast never grants and discarded the child's
+  // exit status, so nothing was ever installed and nothing was ever said about it.)
+  const prepushGuard = await prepushGuardStatus(ROOT);
   if (prepushGuard.state === "not-armed") {
-    console.error(
-      `fast-gate: failed: the pre-push guard is NOT armed (audio-feed-p2la): ${prepushGuard.detail}. ` +
-        "The gate refuses to vouch for a tree whose pushes are unguarded; run 'deno task hooks:install' " +
-        "(the first step of 'deno task test:fast' and 'deno task gate') and fix whatever made it fail.",
-    );
+    console.error(`fast-gate: failed: ${guardNotArmedMessage(prepushGuard)}`);
     Deno.exit(1);
   }
   if (prepushGuard.state === "not-a-worktree") {

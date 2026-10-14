@@ -69,6 +69,25 @@ async function runGateInDisposableClone(
     throw new Error("git clone --shared must succeed");
   }
 
+  // audio-feed-p2la: THE SELECTOR REFUSES TO RUN IN A CLONE WHOSE PRE-PUSH GUARD IS NOT ARMED — a
+  // gate must not vouch for a tree whose pushes are unguarded — and a fresh clone has no installed
+  // hooks (`git clone` does not copy them). So arm it first, with the same step both gate tasks run
+  // (`deno task hooks:install`). This is a precondition of the selector now, not an extra assertion:
+  // without it the run below stops with "the pre-push guard is NOT armed" and reports no selection
+  // at all, which this suite would otherwise read as a formatting regression.
+  const armed = await new Deno.Command("deno", {
+    args: ["task", "hooks:install"],
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...Deno.env.toObject(), GIT_DIR: `${dir}/.git` },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!armed.success) {
+    const detail = new TextDecoder().decode(armed.stdout) + new TextDecoder().decode(armed.stderr);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    throw new Error(`arming the clone's pre-push guard must succeed: ${detail}`);
+  }
+
   // Pin origin/main to the clone's own HEAD: the committed diff is then EMPTY by construction, so no
   // other branch's commits can reach the selection this test is about to assert a property of.
   const pinned = await git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
