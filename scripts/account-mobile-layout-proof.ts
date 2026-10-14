@@ -23,7 +23,10 @@
  *      `closest()`, not inferred from the markup.
  *   3. At a real mobile viewport (390x844 and again at 320x720) every panel is inset from both
  *      viewport edges by the page column's own gutter (>= 16px), and the document does not scroll
- *      horizontally.
+ *      sideways - read from `clientWidth` and a real `scrollTo(20, 0)`, because a mobile layout
+ *      viewport EXPANDS to its overflowing content and `scrollWidth <= innerWidth` is therefore a
+ *      check that cannot fail (review of audio-feed-lma7; it did pass while the page was 6px too
+ *      wide at 320px).
  *   4. The two-column pair still pairs: at 390px Profile/Passkeys are ONE column (stacked), and at
  *      1280px they are side by side inside the page column - so the fix restores the mobile
  *      behaviour without flattening the desktop layout.
@@ -239,9 +242,15 @@ await runProof("audio-feed-lma7", async (checker) => {
        */
       const MEASURE = `(() => {
         const panels = [...document.querySelectorAll("section.panel")];
+        const scrolling = document.scrollingElement || document.documentElement;
+        scrolling.scrollTo(20, 0);
+        const scrollX = Math.round(scrolling.scrollLeft);
+        scrolling.scrollTo(0, 0);
         return {
           viewportWidth: window.innerWidth,
+          clientWidth: document.documentElement.clientWidth,
           documentScrollWidth: document.documentElement.scrollWidth,
+          scrollXAfterScrollTo20: scrollX,
           wrapPresent: document.querySelector("div.wrap") !== null,
           panels: panels.map((panel) => {
             const box = panel.getBoundingClientRect();
@@ -249,7 +258,7 @@ await runProof("audio-feed-lma7", async (checker) => {
               label: panel.getAttribute("aria-labelledby") || panel.className,
               insideWrap: panel.closest("div.wrap") !== null,
               left: Math.round(box.left),
-              right: Math.round(window.innerWidth - box.right),
+              right: Math.round(document.documentElement.clientWidth - box.right),
               width: Math.round(box.width),
             };
           }),
@@ -259,7 +268,9 @@ await runProof("audio-feed-lma7", async (checker) => {
       async function measure() {
         return (await js(MEASURE)) as {
           viewportWidth: number;
+          clientWidth: number;
           documentScrollWidth: number;
+          scrollXAfterScrollTo20: number;
           wrapPresent: boolean;
           panels: Array<{
             label: string;
@@ -381,9 +392,13 @@ await runProof("audio-feed-lma7", async (checker) => {
             at.panels.map((p) => `${p.label}: left ${p.left}, right ${p.right}`).join("; "),
           );
           check(
-            `at ${width}x${height} the page does not scroll horizontally`,
-            at.documentScrollWidth <= at.viewportWidth,
-            `document scrollWidth ${at.documentScrollWidth} vs viewport ${at.viewportWidth}`,
+            `at ${width}x${height} the page does not scroll sideways - measured against clientWidth and a real scrollTo, not innerWidth`,
+            at.documentScrollWidth <= at.clientWidth && at.scrollXAfterScrollTo20 === 0,
+            `scrollWidth ${at.documentScrollWidth} vs clientWidth ${at.clientWidth}; scrollX after scrollTo(20,0) is ${at.scrollXAfterScrollTo20}; innerWidth ${at.viewportWidth}${
+              at.viewportWidth > at.clientWidth
+                ? " (the layout viewport EXPANDED - innerWidth alone would have hidden this)"
+                : ""
+            }`,
           );
           check(
             `at ${width}x${height} the two-column pair is ONE column (Profile stacked over Passkeys)`,

@@ -100,10 +100,20 @@ const VOID_TAGS = new Set([
  */
 export function tagNestingProblems(html: string): string[] {
   const markup = html
-    .replace(/<!--[\s\S]*?-->/g, "")
+    // A COMMENT ENDS AT FOUR PLACES TO A BROWSER, not one: `-->`, the abrupt `--!>`, and `<!-->` /
+    // `<!--->` which are comments with an empty body (HTML's comment-end and
+    // abrupt-closing-of-empty-comment states). Knowing only `-->` reported the other three as
+    // "unterminated", which a browser does not agree with - reviewer counterexamples R3, R4 and the
+    // `<!-->` probe in the second round of this bead's review.
+    .replace(/<!--(?:>|->|[\s\S]*?(?:--!>|-->))/g, "")
     .replace(/<script(?=[\s/>])[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style(?=[\s/>])[^>]*>[\s\S]*?<\/style>/gi, "");
   const problems: string[] = [];
+  // The opener scan reads a copy with quoted ATTRIBUTE VALUES blanked, so a `<!--` that is attribute
+  // DATA is not read as a comment (reviewer counterexample R11). Only `="..."` is blanked rather than
+  // every quoted run, so a stray quote in body text cannot blank enough to hide a real opener - the
+  // direction that would produce a false GREEN.
+  const forOpeners = markup.replace(/="[^"]*"/g, '=""');
   // The delimiter is required, not just the name: custom elements are hyphenated by spec, so
   // `<style-guide>` and `<script-loader>` are legal element names, and a bare `includes("<script")`
   // called both of them an unterminated `<script>`/`<style>`. Found with the scanner probe during the
@@ -117,7 +127,7 @@ export function tagNestingProblems(html: string): string[] {
       ["<style", /<style(?=[\s/>]|$)/i],
     ] as const
   ) {
-    if (pattern.test(markup)) {
+    if (pattern.test(forOpeners)) {
       problems.push(`unterminated ${opener} (a browser reads the rest of the page as its text)`);
     }
   }
@@ -209,6 +219,29 @@ Deno.test("the markup scanner reports each failure shape, including the untermin
   // so the looseness cannot come back.
   assertEquals(tagNestingProblems(`<style-guide>x</style-guide>`), []);
   assertEquals(tagNestingProblems(`<script-loader src="a.js"></script-loader>`), []);
+  // A COMMENT ENDS IN FOUR PLACES, NOT ONE - the reviewer's R3/R4 counterexamples plus the `<!-->`
+  // probe. `--!>` is the abrupt comment end and `<!-->` / `<!--->` are empty-body comments, all
+  // closed as far as a browser is concerned, so reporting them as "unterminated" was three more
+  // false REDS. Only `-->` was known when this was written.
+  for (
+    const closed of [
+      `<div class="wrap"><!--x--!><section></section></div>`,
+      `<div class="wrap"><!-- <section></section> --!></div>`,
+      `<!--><div><section></section></div>`,
+      `<!---><div><section></section></div>`,
+    ]
+  ) {
+    assertEquals(tagNestingProblems(closed), [], `${JSON.stringify(closed)} is a CLOSED comment`);
+  }
+  // ...and a comment opener that is attribute DATA is not a comment (reviewer R11).
+  assertEquals(tagNestingProblems(`<div class="wrap" data-x="<!--">ok</div>`), []);
+  // The dangling case must survive all of that, or the three fixes above would have bought quiet
+  // with a false green. In this markup the FIRST comment is closed and the second never is.
+  assert(
+    reports(`<div class="wrap"><!-- closed --><section></section><!-- dangling </div>`).includes(
+      "unterminated <!--",
+    ),
+  );
   // ...while the real openers, in every form the terminator can be missing, are still caught: the
   // delimiter requirement must not have narrowed the detection.
   for (const markup of ["<script>const a = 1;", "<script const a = 1;", "<script/", "<script"]) {
