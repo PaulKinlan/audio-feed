@@ -2,8 +2,13 @@
 
 ## Executed contract
 
-- Implementers use `fleet-check --fast` and the merger runs `fleet-check` once on the merged union
-  (see `AGENTS.md`, “Fast test tier”, and `deno.json` tasks `test:fast` and `gate`).
+- On this VM, implementers run
+  `FLEET_CHECK_CONF=$HOME/.fleet/check-audio-feed.conf fleet-check --fast`; the merger uses the same
+  override with `fleet-check` once on the merged union (`AGENTS.md`, “Fast test tier”).
+  `~/.fleet/check-audio-feed.conf` sets `CHECK_FAST_CMD="deno task test:fast"` and
+  `CHECK_CMD="deno task gate"` (both tasks exist in `deno.json:30,34`). The fleet default
+  `~/.fleet/check.conf` names `tools/fast-gate.sh` and `tools/full-gate.sh`, which do **not** exist
+  in this repository; unqualified `fleet-check` is not this repo's gate.
 - `deno task test:fast` audits the discovered test-module universe, runs `deno fmt --check`,
   `deno lint`, and `deno task check`, then selects tests by code reachability and derived read
   relations (`scripts/fast-check.ts:942-1053,1066-1191`; `scripts/test-selection.ts:164-213`). A
