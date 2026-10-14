@@ -1002,9 +1002,15 @@ export interface IngestFailureInfo {
     | "payload_too_large"
     | "unsupported_media"
     | "invalid_input"
-    | "internal_error";
+    | "internal_error"
+    | "enqueue_failed";
   status: number;
   mode?: AudioMode;
+  error?: string;
+  article?: {
+    url?: string;
+    title?: string;
+  };
 }
 
 export interface IngestDependencies {
@@ -1069,7 +1075,17 @@ export function createUrlIngestHandler(
       try {
         target = articleUrl(url).href;
       } catch (error) {
-        await deps.onFailure?.({ user, reason: "url_rejected", status: 400, mode: targetMode });
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason: "url_rejected",
+          status: 400,
+          mode: targetMode,
+          error: errorDetail,
+          // audio-feed-8v53: unvalidated raw input must NOT be passed as article identity
+        });
         throw error;
       }
       let article: ExtractedArticle;
@@ -1083,11 +1099,40 @@ export function createUrlIngestHandler(
           ? "extraction_failed"
           : "fetch_failed";
         const status = error instanceof IngestError ? error.status : 503;
-        await deps.onFailure?.({ user, reason, status, mode: targetMode });
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason,
+          status,
+          mode: targetMode,
+          error: errorDetail,
+          article: { url: target },
+        });
         throw error;
       }
       request.signal.throwIfAborted();
-      const job = await deps.enqueue({ article, mode, user });
+      let job: { articleId: string; episodeId: string };
+      try {
+        job = await deps.enqueue({ article, mode, user });
+      } catch (error) {
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason: "enqueue_failed",
+          status: 503,
+          mode: targetMode,
+          error: errorDetail,
+          article: {
+            url: article.url,
+            title: article.title,
+          },
+        });
+        throw error;
+      }
       return json({ ...job, status: "queued", mode, article }, 202);
     } catch (error) {
       return error instanceof IngestError

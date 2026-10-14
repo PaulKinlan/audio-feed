@@ -8,6 +8,7 @@ import {
   extractArticle,
   fetchArticle,
   IngestError,
+  type IngestFailureInfo,
   isBareUrlText,
   isPublicAddress,
   publicLookup,
@@ -513,14 +514,24 @@ Deno.test("bad methods, JSON, modes, private URLs and large request bodies canno
 });
 
 Deno.test("queue failure is not reported as success and does not leak internal errors", async () => {
+  let failureInfo: IngestFailureInfo | undefined;
   const handler = createUrlIngestHandler({
     authorize: () => Promise.resolve(approved),
     fetchArticle: () => Promise.resolve(article),
     enqueue: () => Promise.reject(new Error("private backend credential")),
+    onFailure: (info) => {
+      failureInfo = info;
+    },
   });
   const response = await handler(post({ url: source }));
   equal(response.status, 503);
   equal((await response.text()).includes("credential"), false);
+  equal(failureInfo?.reason, "enqueue_failed");
+  equal(failureInfo?.status, 503);
+  equal(failureInfo?.error, "private backend credential");
+  equal(failureInfo?.article?.url, article.url);
+  equal(failureInfo?.article?.title, article.title);
+  equal(failureInfo?.user?.id, approved.id);
 });
 
 Deno.test("extractArticle refuses article content exceeding MAX_ARTICLE_CONTENT_CHARS (audio-feed-9yk, audio-feed-cei)", () => {

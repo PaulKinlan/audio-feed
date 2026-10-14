@@ -18,6 +18,7 @@ import { memoryStores } from "../src/config.ts";
 import { pollFeedSource } from "../src/ingest/feed.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { bytes, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import type { MetadataStore } from "../src/storage/mod.ts";
 import type { AppConfig } from "../src/config.ts";
 import type { ExtractedArticle } from "../src/ingest/url.ts";
@@ -292,6 +293,222 @@ Deno.test("ingest queues for an approved user and refuses everyone else", async 
     403,
     "a pending user must not be able to spend synthesis money",
   );
+});
+
+Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.failed log with varied error shapes and success control", async () => {
+  const json = { "content-type": "application/json", "x-feed-token": "token-user-1" };
+  const body = JSON.stringify({ url: "https://example.com/an-article", mode: "direct" });
+
+  // 1. Enqueue failure with error carrying message
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject(new Error("kv atomic commit conflict"));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for standard error");
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.route, "/api/ingest");
+    assertEquals(failedLog.severity, "warn");
+    assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.mode, "direct");
+    // audio-feed-fapx, audio-feed-8v53: preserved article identity and screened error cause
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
+  }
+
+  // 2. Enqueue failure with EMPTY message error (k3x6 / 2zik / j8n4 invariant)
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () => Promise.reject(new Error(""));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(
+      failedLog,
+      "expected ingest.failed log with reason=enqueue_failed for empty-message error",
+    );
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
+  }
+
+  // 3. Enqueue failure with non-Error / primitive throw
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject("raw string exception from storage driver");
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for primitive throw");
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
+    assertEquals(failedLog.context?.articleUrl, "https://example.com/an-article");
+    assertEquals(failedLog.context?.articleTitle, "An Ingested Article");
+  }
+
+  // 4. Success control: enqueue succeeds -> MUST NOT write an ingest.failed record
+  {
+    const { fetch, stores } = await seededApp();
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 202);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(failedLog, undefined, "success control must NOT record ingest.failed log");
+  }
+
+  // 5. audio-feed-0s2j, audio-feed-l5w1: Post-commit source lookup failure must not fail the enqueue,
+  // must not emit false ingest.failed, and must record distinct ingest.source_seed_failed record
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () => Promise.reject(new Error("source read unavailable"));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(
+      res.status,
+      202,
+      "post-commit source seeding failure must not fail the 202 queued response",
+    );
+    const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+    const queuedEpisode = episodes.find((e) => e.title === "An Ingested Article");
+    assert(queuedEpisode, "episode must be persisted in store");
+    assertEquals(queuedEpisode.status, "pending");
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(
+      failedLog,
+      undefined,
+      "must not emit a false pre-episode dead-letter when episode was persisted",
+    );
+    const seedFailedLog = logs.find((l) =>
+      l.type === "ingest.source_seed_failed" && l.reason === "source_seed_failed"
+    );
+    assert(
+      seedFailedLog,
+      "must emit distinct durable ingest.source_seed_failed record for post-commit auxiliary failure",
+    );
+    assertEquals(seedFailedLog.context?.status, 202);
+    assertEquals(seedFailedLog.context?.episodeId, queuedEpisode.id);
+    assertEquals(seedFailedLog.context?.sourceId, "inbox");
+    assertEquals(seedFailedLog.context?.error, SUPPRESSED_MESSAGE);
+  }
+
+  // 6. audio-feed-8v53: Error message carrying article body text / canary must be screened
+  {
+    const CANARY_BODY = "THE-CANARY-ARTICLE-BODY-TEXT-9f3ac1";
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject(
+        new Error(
+          `Unexpected token "<", "<!DOCTYPE html><html><body>${CANARY_BODY} tail of article" is not valid JSON`,
+        ),
+      );
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log");
+    assertEquals(failedLog.context?.error, SUPPRESSED_MESSAGE);
+    assert(
+      !JSON.stringify(failedLog).includes(CANARY_BODY),
+      "durable record must not contain unscreened body text canary",
+    );
+  }
+
+  // 7. audio-feed-8v53: Raw unvalidated client URL input must not be stored as articleUrl
+  {
+    const CANARY_URL = "not a url qV7z52CapSECRETfd39Nd and more client text";
+    const { fetch, stores } = await seededApp();
+    const hostileBody = JSON.stringify({ url: CANARY_URL, mode: "direct" });
+    const res = await fetch(
+      req("/api/ingest", { method: "POST", headers: json, body: hostileBody }),
+    );
+    assertEquals(res.status, 400);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "url_rejected");
+    assert(failedLog, "expected ingest.failed log for url_rejected");
+    assertEquals(
+      failedLog.context?.articleUrl,
+      undefined,
+      "unvalidated raw client input must not be recorded as articleUrl",
+    );
+    assert(
+      !JSON.stringify(failedLog).includes("qV7z52CapSECRETfd39Nd"),
+      "durable record must not contain client URL canary",
+    );
+  }
+
+  // 8. audio-feed-16jq: Post-commit log-write failure must not escape enqueue or become a 503 false dead-letter
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () => Promise.reject(new Error("source read unavailable"));
+    const origAppendLog = stores.metadata.appendLog.bind(stores.metadata);
+    let rejectedOnce = false;
+    stores.metadata.appendLog = (record) => {
+      if (!rejectedOnce && record.type === "ingest.source_seed_failed") {
+        rejectedOnce = true;
+        return Promise.reject(new Error("kv log append conflict"));
+      }
+      return origAppendLog(record);
+    };
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 202, "post-commit log write failure must NOT escalate to 503");
+    const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+    const queuedEpisode = episodes.find((e) => e.title === "An Ingested Article");
+    assert(queuedEpisode, "episode must remain persisted");
+    assertEquals(queuedEpisode.status, "pending");
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(
+      failedLog,
+      undefined,
+      "must NOT emit false pre-episode dead-letter when post-commit logging fails",
+    );
+  }
+
+  // 9. audio-feed-0xdm: Post-commit source seeding failure must not leak article text/canary to console.warn
+  {
+    const CANARY_STDERR = "PRIVATE-BODY-CANARY-38bb";
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () =>
+      Promise.reject(new Error(`source read unavailable ${CANARY_STDERR}`));
+    const origWarn = console.warn;
+    const captured: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      captured.push(
+        args.map((a) =>
+          a instanceof Error
+            ? `${a.message} ${a.stack}`
+            : typeof a === "object"
+            ? JSON.stringify(a)
+            : String(a)
+        ).join(" "),
+      );
+    };
+    try {
+      const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+      assertEquals(res.status, 202);
+      const output = captured.join("\n");
+      assert(
+        !output.includes(CANARY_STDERR),
+        `console.warn leaked canary to operational stderr: ${output}`,
+      );
+      assert(
+        output.includes(SUPPRESSED_MESSAGE),
+        "console.warn must use screened error message",
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+  }
 });
 
 Deno.test("admin approval requires the admin token and refuses unknown users", async () => {
