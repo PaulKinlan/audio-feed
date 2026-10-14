@@ -125,17 +125,28 @@ async function git(...args: string[]): Promise<string | null> {
   return new TextDecoder().decode(out.stdout);
 }
 
+/**
+ * Fast-check exit-code contract (audio-feed-8rz5):
+ * - 0 = REAL selection ran and passed (all selected test suites passed, cheap steps passed).
+ * - 1 = REAL selection ran and FAILED (a test suite assertion failed, or a cheap step like fmt/lint failed; fix the code).
+ * - 2 = REFUSED / SYNTHETIC / UNKNOWN (selection issue: committed changes exist in git when --untracked-only was requested,
+ *       or synthetic selection active; not a test failure; fix the invocation).
+ *       Exiting 2 fails closed so fleet-check (which treats rc=0 as PASS) can NEVER record or cache a synthetic run as PASS.
+ *       DO NOT turn 2 into 0.
+ * - Note: The script's own tests (tests/fast_check_test.ts) are the ONLY place --untracked-only is passed;
+ *   it is an internal test assertion flag, not a supported user invocation. Ambient environment variable
+ *   names (IN_FAST_GATE_INTEGRATION_TEST, FAST_GATE_FMT_FIXTURE) are completely absent from executable code.
+ */
+
 /** Committed diff vs origin/main plus anything uncommitted or untracked. null = unknown. */
-async function changedFiles(): Promise<string[] | null> {
-  if (Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST")) {
-    const untracked = await git("ls-files", "--others", "--exclude-standard");
-    if (untracked === null) return null;
-    return untracked.split("\n").map((f) => f.trim()).filter(Boolean);
-  }
-  const files = new Set<string>();
+export async function changedFiles(): Promise<string[] | null> {
+  // audio-feed-8rz5 / audio-feed-vdys: Ambient environment variables and programmatic options
+  // CANNOT short-circuit changedFiles. All changes (committed, uncommitted, untracked) are always included.
   const committed = await git("diff", "--name-only", "origin/main...HEAD");
   if (committed === null) return null;
-  for (const f of committed.split("\n")) f.trim() && files.add(f.trim());
+  const files = new Set<string>(
+    committed.split("\n").map((f) => f.trim()).filter(Boolean),
+  );
   const uncommitted = await git("diff", "--name-only", "HEAD");
   if (uncommitted === null) return null;
   for (const f of uncommitted.split("\n")) f.trim() && files.add(f.trim());
@@ -825,6 +836,15 @@ if (import.meta.main) {
   const forceAll = Deno.args.includes("--all");
   const started = performance.now();
 
+  if (Deno.args.includes("--untracked-only")) {
+    // audio-feed-8rz5: Any synthetic selection must fail closed immediately with exit code 2
+    // so no automated gate or reader (e.g. fleet-check:430) can ever record or cache it as PASS.
+    console.error(
+      "fast-gate: failed: synthetic selection refused — --untracked-only is not a supported gate mode (audio-feed-8rz5)",
+    );
+    Deno.exit(2);
+  }
+
   // audio-feed-es8y property 2, checked BEFORE anything else so a selection gap is a NAMED failure at the
   // start of the run rather than a suite that quietly never runs again. The full gate runs this audit too
   // (first step of `deno task gate`), so drift cannot survive in either direction.
@@ -943,8 +963,11 @@ ${auditUniverseDrift}`);
   let cheapStepsFailed = false;
   // The integration test checks an OS-temp fixture explicitly, so SIGKILL cannot leave an
   // untracked, unformatted test file behind to fail the next gate in this worktree.
-  const fmtFixture = Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST")
-    ? Deno.env.get("FAST_GATE_FMT_FIXTURE")
+  // audio-feed-8rz5: explicit --fmt-fixture on argv is the ONLY way to pass an external fixture;
+  // ambient environment variables are completely removed so they have zero effect.
+  const fmtFixtureIdx = Deno.args.indexOf("--fmt-fixture");
+  const fmtFixture = fmtFixtureIdx !== -1 && fmtFixtureIdx + 1 < Deno.args.length
+    ? Deno.args[fmtFixtureIdx + 1]
     : null;
   const fmtStep = formatCheckStep(fmtFixture);
   for (const step of [fmtStep, ["deno", "lint"], ["deno", "task", "check"]]) {

@@ -12,6 +12,7 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
   allTestFiles,
+  changedFiles,
   extractFailingTests,
   failureMarkers,
   formatCheckStep,
@@ -684,4 +685,110 @@ Deno.test("audio-feed-48b7: nothing ignored means the success path stays silent"
   );
   assertEquals(res.code, 0);
   assertEquals(logged, [], "no ignored tests means the pkv1 quiet contract is intact");
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-8otq & audio-feed-8rz5: Gate-integrity checks for synthetic selection.
+// ---------------------------------------------------------------------------
+
+Deno.test("audio-feed-8rz5: old ambient env var names are completely absent from scripts/fast-check.ts executable code", () => {
+  const content = Deno.readTextFileSync(new URL("../scripts/fast-check.ts", import.meta.url));
+  const code = content.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  assert(
+    !code.includes("IN_FAST_GATE_INTEGRATION_TEST"),
+    "IN_FAST_GATE_INTEGRATION_TEST must be absent from scripts/fast-check.ts code",
+  );
+  assert(
+    !code.includes("FAST_GATE_FMT_FIXTURE"),
+    "FAST_GATE_FMT_FIXTURE must be absent from scripts/fast-check.ts code",
+  );
+});
+
+Deno.test("audio-feed-8rz5: ambient environment variables (IN_FAST_GATE_INTEGRATION_TEST and FAST_GATE_FMT_FIXTURE) NEVER short-circuit changedFiles", async () => {
+  // rev-81 & audio-feed-ktvu: Make test completely independent of ambient git state (delta vs origin/main).
+  // A scratch untracked file ensures changedFiles returns non-empty output on any tree (including clean main).
+  const scratch = await Deno.makeTempFile({
+    dir: ".",
+    prefix: ".fast-gate-scratch-",
+    suffix: ".txt",
+  });
+  const prevIntegration = Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST");
+  const prevFixture = Deno.env.get("FAST_GATE_FMT_FIXTURE");
+  try {
+    const baseline = await changedFiles();
+    assert(baseline !== null, "changedFiles must return an array");
+    const scratchRel = scratch.replace(/^\.\//, "");
+    assert(
+      baseline.includes(scratchRel),
+      `baseline must include scratch untracked file: ${scratchRel}`,
+    );
+
+    Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", "1");
+    Deno.env.set("FAST_GATE_FMT_FIXTURE", "/tmp/audio-feed-fmt-fixture.ts");
+
+    const withEnv = await changedFiles();
+    assertEquals(
+      withEnv,
+      baseline,
+      "changedFiles must be identical whether ambient env vars are present or not",
+    );
+  } finally {
+    await Deno.remove(scratch).catch(() => {});
+    if (prevIntegration !== undefined) {
+      Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", prevIntegration);
+    } else Deno.env.delete("IN_FAST_GATE_INTEGRATION_TEST");
+    if (prevFixture !== undefined) Deno.env.set("FAST_GATE_FMT_FIXTURE", prevFixture);
+    else Deno.env.delete("FAST_GATE_FMT_FIXTURE");
+  }
+});
+
+Deno.test({
+  name:
+    "audio-feed-8rz5: synthetic selection fails closed with non-zero exit code 2 unconditionally",
+  ignore: !!Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST"),
+  fn: async () => {
+    // If --untracked-only is passed on argv, fast-check must refuse immediately and exit non-zero (code 2),
+    // regardless of whether committed changes exist or not, so fleet-check can never cache PASS.
+    // audio-feed-ktvu: Guarded with IN_FAST_GATE_INTEGRATION_TEST to prevent recursive suite re-entry.
+    const cmd = new Deno.Command("deno", {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-run=git,deno",
+        "--allow-env",
+        "scripts/fast-check.ts",
+        "--untracked-only",
+      ],
+      env: {
+        ...Deno.env.toObject(),
+        IN_FAST_GATE_INTEGRATION_TEST: "1",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const out = await cmd.output();
+    const stdout = new TextDecoder().decode(out.stdout);
+    const stderr = new TextDecoder().decode(out.stderr);
+
+    // Must fail closed with non-zero exit code (code 2)
+    assertEquals(
+      out.code,
+      2,
+      "synthetic selection must exit non-zero (code 2)",
+    );
+    assert(
+      stderr.includes("fast-gate: failed: synthetic selection refused"),
+      `stderr must report refusal: ${stderr}`,
+    );
+    assert(
+      !stdout.includes("fast-check: ok in"),
+      `stdout must NOT contain passing verdict: ${stdout}`,
+    );
+  },
+});
+
+Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programmatically", () => {
+  // audio-feed-vdys: changedFiles accepts 0 arguments; untrackedOnly option is eliminated
+  // entirely from the API so synthetic selection cannot be requested programmatically.
+  assertEquals(changedFiles.length, 0, "changedFiles must accept zero arguments");
 });
