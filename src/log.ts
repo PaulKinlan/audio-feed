@@ -4,7 +4,7 @@
  *
  * Its job is to make the record shape impossible to get wrong at a call site. Caps, redaction and
  * the record's fields live in the store, but a caller that hand-rolls an object can still omit the
- * correlation id, forget the stack on an error, or pass a secret. This API takes the fields that
+ * correlation id, forget screened error attribution, or pass a secret. This API takes the fields that
  * vary and nothing else.
  *
  * It depends on one method of one repository (`appendLog`) rather than the whole store, so a
@@ -33,9 +33,12 @@ export interface LogFields {
   /** How far the work got (siv1): what the next reader needs when a process died here. */
   phase?: string;
   attempt?: number;
-  /** Why something ended. On a failure path this is the error's message. */
+  /** Why something ended. `failure()` stores only a screened error message here. */
   reason?: string;
-  /** Errors only: the stack, verbatim. Set by `failure()`, or explicitly by a caller. */
+  /**
+   * `failure()` stores only a screened `Name: message` header, with no caller frames.
+   * Other methods can pass an explicit stack, which is not screened by this writer.
+   */
   stack?: string;
   durationMs?: number;
   context?: Record<string, unknown>;
@@ -47,8 +50,9 @@ export interface Logger {
   warn(type: string, message: string, fields?: LogFields): Promise<LogRecord | null>;
   error(type: string, message: string, fields?: LogFields): Promise<LogRecord | null>;
   /**
-   * An error record that keeps the stack, which is the difference between a log an operator can
-   * act on and one that only says something broke. Prefer this over `error()` on a caught value.
+   * An error record with a screened message and reason, a header-only `Name: message` stack
+   * (caller frames discarded), and a screened classification in `context.errorName`.
+   * Prefer this over `error()` for caught values: it screens their text while retaining the name.
    */
   failure(type: string, error: unknown, fields?: LogFields): Promise<LogRecord | null>;
   /** A writer with the correlation id (and any other binding) carried into every record. */

@@ -229,9 +229,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
       headers.set("x-correlation-id", correlationId);
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
     } catch (error) {
-      // The error's NAME only. `failure()` would store the message and stack, and an unhandled
-      // error's message can quote the request that caused it — which is how a client-chosen string
-      // reaches a record through a field nobody thought of as request-derived.
+      // The error's NAME only in the main message. `failure()` now screens the thrown message
+      // and stores a header-only stack without caller frames; this request record intentionally
+      // stores no stack at all. The raw unhandled message can quote client-chosen request text,
+      // so the separate context.errorMessage below is screened before it is recorded.
       await appLog.error("http.request", `unhandled ${errorName(error)} on ${route}`, {
         correlationId,
         route,
