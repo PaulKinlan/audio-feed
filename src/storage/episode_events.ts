@@ -18,6 +18,7 @@
 
 import type { Episode } from "../types.ts";
 import type { LogRecord } from "./mod.ts";
+import { cleanString, MAX_LOG_MESSAGE_LENGTH } from "./log_shape.ts";
 
 /**
  * How long the claim ran, for the terminal record's `durationMs` (obs-4 reads this as a trace:
@@ -129,10 +130,17 @@ export function claimLifecycleEvent(
 ): Omit<LogRecord, "seq"> {
   const attempt = fields.attempt ?? episode.attempts ?? 1;
   const subject = `claim ${attempt} of episode ${episode.id} is in phase "${fields.phase}"`;
-  const message = fields.reason
+  // An error can have a reason that is empty, whitespace-only, or erased by the store's cleaner.
+  // Only error prose needs this check; preserve genuine completions and readable reasons as written.
+  const readableReason = fields.severity === "error" && fields.reason
+    ? cleanString(fields.reason, MAX_LOG_MESSAGE_LENGTH).trim()
+    : fields.reason;
+  const message = readableReason
     ? `${subject}: ${fields.reason}`
     : fields.durationMs !== undefined
-    ? `${subject}: synthesis finished in ${fields.durationMs}ms`
+    ? `${subject}: synthesis ${
+      fields.severity === "error" ? "failed" : "finished"
+    } in ${fields.durationMs}ms`
     : subject;
   // The structured verdict merges into `context`, which survives the log sanitiser's
   // key passthrough (only key NAMES matching the redaction pattern are stripped).
