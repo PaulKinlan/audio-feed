@@ -254,14 +254,30 @@ durable episode and run-history storage:
 - `oldestClaimableAt`: `string | null` — ISO 8601 `createdAt` timestamp of the oldest claimable
   episode, or `null` when none are queued or the queue read failed.
 - `drain`: `"empty" | "draining" | "stalled" | "unknown" | "unreadable"`
-  - `"empty"` — `claimable === 0`.
+  - `"empty"` — `claimable === 0` AND the last synthesis run is either absent, or started within
+    `3 * SYNTHESIS_TICK_MS` (30 minutes) with no top-level `error` and `failed === 0`. **`"empty"` is
+    EARNED, not assumed** (`audio-feed-n1f7`): negative evidence is allowed to speak, so a run that
+    failed, was recorded with an error, or went stale reports `"stalled"` instead - which was
+    impossible before, because `claimable === 0` short-circuited the verdict ahead of the run history.
+    No run history at all is still `"empty"` when nothing is claimable: there is no evidence to mask,
+    and `lastSynthesisRun: null` carries the caveat.
   - `"draining"` — `claimable > 0` and `lastSynthesisRun` started within `3 * SYNTHESIS_TICK_MS` (30
     minutes), had no top-level `error`, and recorded `ready > 0`.
   - `"stalled"` — `claimable > 0` and `lastSynthesisRun` is stale, errored, or finished `0`
-    episodes.
-  - `"unknown"` — `claimable > 0` and either no synthesis run is retained in
-    `listRuns(20, "synthesis")` or the run-history read failed (`runsReadError !== null`).
+    episodes, **or `claimable === 0` while the last run is stale, errored, or recorded a failure**
+    (`audio-feed-n1f7`). This second arm is the one that was unreachable before.
+  - `"unknown"` — the run-history read failed (`runsReadError !== null`), **or** `claimable > 0` with
+    no synthesis run retained in `listRuns(20, "synthesis")`. The read-failure case is checked BEFORE
+    the `claimable === 0` arm, because a run history that could not be read is not evidence of a
+    healthy drain (`audio-feed-ciuw`: a failed read must never render as a healthy value).
   - `"unreadable"` — the queue read failed (`claimable === null`, `readError !== null`).
+
+  **The limit, stated rather than implied:** `drain` is derived from the pending queue and the last
+  synthesis run only. It cannot see a claim held past its budget, nor an episode abandoned at
+  `maxClaims`: both leave nothing claimable and make a healthy run correctly report nothing ready,
+  which this field cannot distinguish from a genuinely empty queue. Those two states stay answerable
+  through the admin report's `liveClaims` and `abandoned` counts, which are not part of this
+  key-gated snapshot.
 - `lastSynthesisRun`: `RunRecord | null` — most recent synthesis run from
   `listRuns(20, "synthesis")`, scoped to `"synthesis"` so feed-poll runs cannot crowd it out
   (`audio-feed-506m`).
