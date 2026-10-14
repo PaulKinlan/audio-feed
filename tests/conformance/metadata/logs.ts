@@ -10,6 +10,7 @@
 import type { MetadataHarness } from "./harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { makeEpisode, makeUser } from "../../fixtures.ts";
+import { isClaimStartRecord } from "../../../src/observability/admin_report.ts";
 import {
   MAX_LOG_CONTEXT_LENGTH,
   MAX_LOG_MESSAGE_LENGTH,
@@ -332,9 +333,19 @@ export function registerLifecycleLogCases(suite: MetadataHarness) {
     assert(typeof context?.expiredAt === "string", "the expiry instant is an observed fact");
     assert(typeof context?.lastHeartbeat === "string", "and so is the last heartbeat");
     // And the three claims are still visible, which is what turns "no cause" into a timeline. The
-    // abandonment record reuses the phase the claim was last known in, so a start is identified by
-    // having no reason rather than by its phase.
-    assertEquals(records.filter((r) => r.phase === "claimed" && r.reason === undefined).length, 3);
+    // abandonment record reuses the phase the claim was last known in, which is exactly why a start
+    // cannot be identified by its phase alone.
+    //
+    // THIS ASKS THE PREDICATE INSTEAD OF RESTATING ITS RULE (audio-feed-lq3z). The form here used to
+    // be `phase === "claimed" && reason === undefined` - a SECOND COPY of a rule that lives in one
+    // place - so a future change to isClaimStartRecord would have left this row quietly asserting the
+    // OLD rule while the production reader applied the new one, which is the failure mode where a
+    // green test certifies a behaviour nothing uses any more.
+    assertEquals(
+      records.filter((r) => isClaimStartRecord(r)).length,
+      3,
+      "a start is whatever the predicate says it is, not a second reading of the same rule",
+    );
   });
 }
 
