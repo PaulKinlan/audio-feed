@@ -18,6 +18,7 @@
  */
 
 import type { LogProcess, LogRecord, LogRepository, LogSeverity } from "./storage/mod.ts";
+import { screenErrorForLogging, screenErrorMessage } from "./observability/error_screen.ts";
 
 /** The narrow slice of the store the writer needs. */
 export type LogSink = Pick<LogRepository, "appendLog">;
@@ -119,12 +120,17 @@ export function createLogger(options: LoggerOptions): Logger {
     warn: (type, message, fields) => write("warn", type, message, fields),
     error: (type, message, fields) => write("error", type, message, fields),
     failure: (type, error, fields) => {
-      const described = describeError(error);
-      return write("error", type, described.message, {
+      // audio-feed-8pjp: screen raw thrown text using closed-set screenErrorForLogging
+      // so client/user canaries never enter message, reason, or stack.
+      const screened = screenErrorForLogging(error);
+      const reason = fields?.reason !== undefined
+        ? screenErrorMessage(fields.reason)
+        : screened.message;
+      return write("error", type, screened.message, {
         ...fields,
-        reason: fields?.reason ?? described.message,
-        context: { ...fields?.context, errorName: described.name },
-        ...(described.stack ? { stack: described.stack } : {}),
+        reason,
+        context: { ...fields?.context, errorName: screened.name },
+        stack: screened.stack,
       });
     },
     withCorrelation: (correlationId, extra) =>
