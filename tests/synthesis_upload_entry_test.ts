@@ -99,6 +99,26 @@ Deno.test("amhn: the terminal upload records its ENTRY, with the bytes attempted
     "the bytes ATTEMPTED must match the bytes actually written, so a failed attempt's size is a fact",
   );
 
+  // audio-feed-g7s1: THE WORKER CALL SITE, PINNED INDEPENDENTLY OF THE STORAGE PLUMBING. Measured with
+  // the reviewer's revert test: with `bytesAttempted: bytes.length` deleted from the worker's terminal
+  // checkpoint, every row in this file AND in tests/claim_expiry_evidence_test.ts stays green while the
+  // size silently stops reaching the abandonment and expiry records. Those rows cannot catch it - they
+  // call `touchEpisodeClaim` directly, so they prove the store CAN carry the value and say nothing about
+  // whether the worker ever passes it. This record is written by the WORKER's own checkpoint call, so
+  // the assertion below fails the moment the worker stops passing the value, and only then.
+  const terminalCheckpoint = logs.find(
+    (log) => log.type === "claim.lifecycle" && log.phase === "uploading_audio",
+  );
+  assert(
+    terminalCheckpoint,
+    "the worker's terminal checkpoint must leave a claim.lifecycle record",
+  );
+  assertEquals(
+    terminalCheckpoint.context?.bytesAttempted,
+    attempted,
+    "the size the worker CHECKPOINTED must reach the record, not merely be expressible by the store",
+  );
+
   // THE WHOLE POINT, ASSERTED AS AN ORDER: the entry record exists, and it comes BEFORE the stage mark
   // that only a COMPLETED put can produce. If the put had been killed between them, the entry record
   // would still be there - that is the evidence the 2026-10-14 reconstruction had to infer.
