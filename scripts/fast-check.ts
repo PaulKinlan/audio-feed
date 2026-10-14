@@ -83,6 +83,23 @@ const CORE = new Set([
   "src/origin.ts",
 ]);
 
+// These two HTTP route tests boot the app through a hub, so the graph's hub
+// cut cannot attribute their handler coverage. Add a suite ONLY if discovered
+// in this tree; an unknown route or a missing sole reader still widens to FULL.
+// The host reporter's "unmapped" warning is NOT the selector's distinct
+// "fast-check: FULL suite (no test reaches: ...)" fallback: observability.ts
+// and log.ts were already selected by direct importers without this table.
+const BEHAVIOUR_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
+  ["src/routes/admin_issues.ts", [
+    "tests/admin_subpages_test.ts",
+    "tests/webmcp_admin_forms_test.ts",
+  ]],
+  ["src/routes/admin_subscribers.ts", [
+    "tests/admin_subpages_test.ts",
+    "tests/webmcp_admin_forms_test.ts",
+  ]],
+]);
+
 const TEST_FLAGS = [
   "--allow-net",
   "--allow-env",
@@ -170,7 +187,7 @@ async function importsOf(path: string): Promise<string[]> {
 }
 
 /** Reverse import graph over the repo: importer -> imported is inverted. */
-async function reverseGraph(): Promise<Map<string, string[]>> {
+export async function reverseGraph(): Promise<Map<string, string[]>> {
   const reverse = new Map<string, string[]>();
   const add = (imported: string, importer: string) => {
     const list = reverse.get(imported) ?? [];
@@ -281,7 +298,8 @@ export async function nameMatchedTests(
     for (const { file, stem, subdir } of stems) {
       const normStem = stem.replace(/[-_]/g, "_");
       const normTestStem = testStem.replace(/[-_]/g, "_");
-      const hit = normTestStem === normStem ||
+      const hit = BEHAVIOUR_SUITES.get(file)?.includes(rel) ||
+        normTestStem === normStem ||
         normTestStem.startsWith(`${normStem}_`) ||
         (subdir !== null && rel.startsWith(`tests/${subdir}/`));
       if (hit) matched.set(file, [...matched.get(file) ?? [], rel]);

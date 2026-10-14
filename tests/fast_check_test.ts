@@ -20,6 +20,7 @@ import {
   nameMatchedTests,
   planTests,
   reachableTests,
+  reverseGraph,
   run,
   suiteMarker,
 } from "../scripts/fast-check.ts";
@@ -113,6 +114,112 @@ Deno.test("the name convention finds the route's own whole-app test", async () =
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("hqer: known route and logger changes select their behaviour suites without crossing hubs", async () => {
+  const dir = await Deno.makeTempDir();
+  const paths = [
+    "src/routes/observability.ts",
+    "src/log.ts",
+    "src/routes/admin_issues.ts",
+    "src/routes/admin_subscribers.ts",
+  ] as const;
+  const expected = new Map([
+    [paths[0], "tests/observability_api_test.ts"],
+    [paths[1], "tests/log_test.ts"],
+    [paths[2], "tests/admin_subpages_test.ts"],
+    [paths[3], "tests/admin_subpages_test.ts"],
+  ]);
+  const graph = new Map<string, string[]>(paths.map((path) => [path, ["src/compose.ts"]]));
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    for (const suite of new Set(expected.values())) {
+      await Deno.writeTextFile(`${dir}/${suite}`, "");
+    }
+    const matched = await nameMatchedTests([...paths], `${dir}/tests`);
+    for (const path of paths.slice(2)) {
+      assertEquals(
+        matched.get(path),
+        ["tests/admin_subpages_test.ts"],
+        "missing optional WebMCP reader is not invented",
+      );
+    }
+    for (const [path, suite] of expected) {
+      assert(
+        matched.get(path)?.includes(suite),
+        `${path} must remain mapped to a present suite exercising its actual behaviour`,
+      );
+      const plan = planTests([path], graph, matched);
+      assert(
+        plan.testFiles?.includes(suite),
+        `${path} must select ${suite}, not widen: ${plan.reason}`,
+      );
+    }
+
+    // The separate WebMCP branch adds a second real reader of both admin forms.
+    // Select it once present without requiring that branch to land before this fix.
+    await Deno.writeTextFile(`${dir}/tests/webmcp_admin_forms_test.ts`, "");
+    const withWebmcp = await nameMatchedTests([paths[2], paths[3]], `${dir}/tests`);
+    for (const path of paths.slice(2)) {
+      assertEquals(
+        withWebmcp.get(path)?.sort(),
+        ["tests/admin_subpages_test.ts", "tests/webmcp_admin_forms_test.ts"],
+      );
+    }
+    await Deno.remove(`${dir}/tests/webmcp_admin_forms_test.ts`);
+
+    // Never mistake a removed target test or an unrecognised route for a narrow green run.
+    await Deno.remove(`${dir}/tests/admin_subpages_test.ts`);
+    const missing = await nameMatchedTests([paths[2], paths[3]], `${dir}/tests`);
+    for (const path of paths.slice(2)) {
+      assertEquals(missing.has(path), false, "missing map target is not treated as coverage");
+      assertEquals(
+        planTests([path], graph, missing).testFiles,
+        null,
+        "no present reader means FULL",
+      );
+    }
+    assertEquals(planTests(["src/routes/unmapped.ts"], graph, matched).testFiles, null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("hqer: the real repo graph selects the admin route's exercising suite, not everything", async () => {
+  const paths = [
+    "src/routes/observability.ts",
+    "src/log.ts",
+    "src/routes/admin_issues.ts",
+    "src/routes/admin_subscribers.ts",
+  ];
+  const reverse = await reverseGraph();
+  const named = await nameMatchedTests(paths);
+  // These two were ALREADY graph-reachable; a host reporter's "unmapped" warning
+  // must not be mistaken for the selector's "no test reaches" full-suite fallback.
+  assert(reverse.get("src/routes/observability.ts")?.includes("tests/observability_api_test.ts"));
+  assert(reverse.get("src/log.ts")?.includes("tests/log_test.ts"));
+  for (const path of paths) {
+    const selected = planTests([path], reverse, named);
+    assert(
+      selected.testFiles !== null,
+      `${path} must not widen to the full suite: ${selected.reason}`,
+    );
+  }
+  for (const path of paths.slice(2)) {
+    const selected = planTests([path], reverse, named).testFiles;
+    assert(selected !== null, `${path} must not widen`);
+    assert(
+      selected.includes("tests/admin_subpages_test.ts"),
+      `${path} must run its HTTP route test`,
+    );
+    assert(selected.length < 20, `${path} should not consume the full suite: ${selected.length}`);
+  }
+  assert(
+    planTests(["src/routes/observability.ts"], reverse, named).testFiles?.includes(
+      "tests/observability_api_test.ts",
+    ),
+  );
+  assert(planTests(["src/log.ts"], reverse, named).testFiles?.includes("tests/log_test.ts"));
 });
 
 // ---------------------------------------------------------------------------
