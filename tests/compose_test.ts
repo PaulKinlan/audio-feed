@@ -294,6 +294,68 @@ Deno.test("ingest queues for an approved user and refuses everyone else", async 
   );
 });
 
+Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.failed log with varied error shapes and success control", async () => {
+  const json = { "content-type": "application/json", "x-feed-token": "token-user-1" };
+  const body = JSON.stringify({ url: "https://example.com/an-article", mode: "direct" });
+
+  // 1. Enqueue failure with error carrying message
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject(new Error("kv atomic commit conflict"));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for standard error");
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.route, "/api/ingest");
+    assertEquals(failedLog.severity, "warn");
+    assertEquals(failedLog.context?.status, 503);
+    assertEquals(failedLog.context?.mode, "direct");
+  }
+
+  // 2. Enqueue failure with EMPTY message error (k3x6 / 2zik / j8n4 invariant)
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () => Promise.reject(new Error(""));
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(
+      failedLog,
+      "expected ingest.failed log with reason=enqueue_failed for empty-message error",
+    );
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.context?.status, 503);
+  }
+
+  // 3. Enqueue failure with non-Error / primitive throw
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.putArticleWithEpisode = () =>
+      Promise.reject("raw string exception from storage driver");
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 503);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed" && l.reason === "enqueue_failed");
+    assert(failedLog, "expected ingest.failed log with reason=enqueue_failed for primitive throw");
+    assertEquals(failedLog.userId, "user-1");
+    assertEquals(failedLog.context?.status, 503);
+  }
+
+  // 4. Success control: enqueue succeeds -> MUST NOT write an ingest.failed record
+  {
+    const { fetch, stores } = await seededApp();
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 202);
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(failedLog, undefined, "success control must NOT record ingest.failed log");
+  }
+});
+
 Deno.test("admin approval requires the admin token and refuses unknown users", async () => {
   const { fetch, stores } = await seededApp();
 

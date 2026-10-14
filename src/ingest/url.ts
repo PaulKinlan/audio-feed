@@ -1002,9 +1002,11 @@ export interface IngestFailureInfo {
     | "payload_too_large"
     | "unsupported_media"
     | "invalid_input"
-    | "internal_error";
+    | "internal_error"
+    | "enqueue_failed";
   status: number;
   mode?: AudioMode;
+  error?: string;
 }
 
 export interface IngestDependencies {
@@ -1087,7 +1089,22 @@ export function createUrlIngestHandler(
         throw error;
       }
       request.signal.throwIfAborted();
-      const job = await deps.enqueue({ article, mode, user });
+      let job: { articleId: string; episodeId: string };
+      try {
+        job = await deps.enqueue({ article, mode, user });
+      } catch (error) {
+        const errorDetail = error instanceof Error
+          ? error.message
+          : (typeof error === "string" ? error : "");
+        await deps.onFailure?.({
+          user,
+          reason: "enqueue_failed",
+          status: 503,
+          mode: targetMode,
+          error: errorDetail,
+        });
+        throw error;
+      }
       return json({ ...job, status: "queued", mode, article }, 202);
     } catch (error) {
       return error instanceof IngestError
