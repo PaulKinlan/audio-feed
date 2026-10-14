@@ -78,6 +78,36 @@ Deno.test("svwu: historical ownerless claim records remain genuine starts", () =
   assertEquals(attempt?.leaseExpired, null, "a legacy record cannot invent a lease duration");
 });
 
+Deno.test("mkfe: an expiry-only window reports startedAt as UNKNOWN, not the expiry instant", () => {
+  // THE RETAINED WINDOW OPENS AFTER THE START. The store prunes its oldest records, so an attempt
+  // whose start has aged out first appears as its EXPIRY - and initialising startedAt from the first
+  // record seen reported that expiry as the claim's start, inventing a zero-length claim that never
+  // happened. This is the shape rev-77 measured at the aueh tip: startedAt equal to the expiry
+  // instant against a nowMs one minute later.
+  const expiryOnly: LogRecord = {
+    seq: 90,
+    time: EXPIRES,
+    severity: "warn",
+    type: "claim.lifecycle",
+    process: "worker",
+    message: "claim 1 (owner worker-first) lease expired",
+    phase: "claimed",
+    attempt: 1,
+    reason: "lease expired",
+    context: { claimOutcome: "expired", expiredAt: EXPIRES, workerState: "unknown" },
+  };
+  assertEquals(isClaimStartRecord(expiryOnly), false, "an expiry is not a start");
+  const [attempt] = claimAttemptsFrom([expiryOnly], Date.parse(NEXT));
+  assertEquals(
+    attempt?.startedAt,
+    null,
+    "an unknown start must be UNKNOWN, not the first surviving record's instant",
+  );
+  assertEquals(attempt?.outcome, "abandoned", "an expired lease nobody reclaimed is abandoned");
+  assertEquals(attempt?.leaseExpired, null, "with no start there is no lease arithmetic to do");
+  assertEquals(attempt?.phase, "claimed", "the last observed phase is still reported");
+});
+
 for (const adapter of adapters) {
   Deno.test(`svwu/5f1o ${adapter.name}: expired while still claimed does not shift start`, async () => {
     const store = await adapter.create();

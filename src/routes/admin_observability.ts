@@ -90,7 +90,11 @@ function notAuthorised(
   return page(main, nonce, viewer, 403, originIsExplicit);
 }
 
-function timeCell(value: string | undefined): string {
+function timeCell(value: string | null | undefined): string {
+  // null widens this signature because ClaimAttempt.startedAt is three-valued: null means the start
+  // aged out of the retained window and is UNKNOWN, not absent-by-mistake (audio-feed-mkfe). The
+  // body already rendered falsy as an em-dash, so the value was always handled; only the type said
+  // otherwise.
   if (!value) return `<span class="muted">—</span>`;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return esc(value);
