@@ -194,20 +194,18 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
     "src/routes/admin_subscribers.ts",
   ];
   const reverse = await reverseGraph();
-  const named = await nameMatchedTests(paths);
+  const selectedFor = async (path: string) =>
+    planTests([path], reverse, await nameMatchedTests([path])).testFiles;
   // These two were ALREADY graph-reachable; a host reporter's "unmapped" warning
   // must not be mistaken for the selector's "no test reaches" full-suite fallback.
   assert(reverse.get("src/routes/observability.ts")?.includes("tests/observability_api_test.ts"));
   assert(reverse.get("src/log.ts")?.includes("tests/log_test.ts"));
   for (const path of paths) {
-    const selected = planTests([path], reverse, named);
-    assert(
-      selected.testFiles !== null,
-      `${path} must not widen to the full suite: ${selected.reason}`,
-    );
+    const selected = await selectedFor(path);
+    assert(selected !== null, `${path} must not widen to the full suite`);
   }
   for (const path of paths.slice(2)) {
-    const selected = planTests([path], reverse, named).testFiles;
+    const selected = await selectedFor(path);
     assert(selected !== null, `${path} must not widen`);
     assert(
       selected.includes("tests/admin_subpages_test.ts"),
@@ -216,11 +214,229 @@ Deno.test("hqer: the real repo graph selects the admin route's exercising suite,
     assert(selected.length < 20, `${path} should not consume the full suite: ${selected.length}`);
   }
   assert(
-    planTests(["src/routes/observability.ts"], reverse, named).testFiles?.includes(
-      "tests/observability_api_test.ts",
-    ),
+    (await selectedFor("src/routes/observability.ts"))?.includes("tests/observability_api_test.ts"),
   );
-  assert(planTests(["src/log.ts"], reverse, named).testFiles?.includes("tests/log_test.ts"));
+  assert((await selectedFor("src/log.ts"))?.includes("tests/log_test.ts"));
+});
+
+Deno.test("abh1: route registrations discover the complete HTTP test set before narrowing", async () => {
+  const app = await Deno.readTextFile(new URL("../src/app.ts", import.meta.url));
+  const accountRoutes = [
+    ...app.matchAll(/router\.(?:get|post|delete)\("([^"]+)", account\("[^"]+"\)\);/g),
+  ]
+    .map((match) => match[1]!);
+  assert(accountRoutes.length > 0, "no account() route registrations were discovered");
+  for (
+    const [method, path, handler] of [
+      ["get", "/login", "handleLogin"],
+      ["get", "/admin/observability/telemetry", "handleAdminTelemetry"],
+      ["get", "/.well-known/webauthn", "handleWebAuthnRelatedOrigins"],
+    ]
+  ) {
+    assert(
+      app.includes(`router.${method}("${path}", ${handler})`),
+      `route ownership moved: ${path}`,
+    );
+  }
+  assert(app.includes('router.post("/api/reports/csp", handlers.cspReports ?? handleCspReports)'));
+
+  const spec = [
+    {
+      file: "src/routes/account_api.ts",
+      exercises: [
+        "tests/account_regenerate_test.ts",
+        "tests/admin_throttle_test.ts",
+        "tests/auth_routes_test.ts",
+        "tests/feed_discovery_test.ts",
+        "tests/webmcp_admin_forms_test.ts",
+      ],
+      mentionsOnly: [],
+      mentions: (source: string) =>
+        accountRoutes.some((path) =>
+          source.includes(path.includes(":") ? path.slice(0, path.indexOf(":")) : path)
+        ),
+    },
+    {
+      file: "src/routes/login.ts",
+      exercises: [
+        "tests/account_pages_test.ts",
+        "tests/security_audit_test.ts",
+        "tests/speculation_rules_test.ts",
+      ],
+      mentionsOnly: [
+        "tests/admin_session_test.ts",
+        "tests/auth_routes_test.ts",
+        "tests/bookmarklet_test.ts",
+        "tests/csp_reporting_test.ts",
+        "tests/home_test.ts",
+        "tests/origin_test.ts",
+        "tests/share_target_test.ts",
+      ],
+      // The non-HTTP references above are links, redirect assertions, or a Host-gate 421 before the handler.
+      mentions: (source: string) => /(?<!\/api\/auth)\/login(?=[/?#"`])/.test(source),
+    },
+    {
+      file: "src/routes/admin_telemetry.ts",
+      exercises: ["tests/admin_subpages_test.ts"],
+      mentionsOnly: [],
+      mentions: (source: string) => source.includes("/admin/observability/telemetry"),
+    },
+    {
+      file: "src/routes/webauthn.ts",
+      exercises: ["tests/passkeys_test.ts"],
+      mentionsOnly: [],
+      mentions: (source: string) => source.includes("/.well-known/webauthn"),
+    },
+    {
+      file: "src/routes/reports.ts",
+      exercises: ["tests/csp_reporting_test.ts"],
+      mentionsOnly: ["tests/admin_subpages_test.ts"], // seeded report log; no POST to handler
+      mentions: (source: string) => source.includes("/api/reports/csp"),
+    },
+  ];
+  // Exclude only THIS audit's URL-literal fixture block, never the entire file:
+  // a future real HTTP test in fast_check_test.ts must still become a candidate.
+  const withoutOwnFixture = (file: string, source: string): string => {
+    if (file !== "tests/fast_check_test.ts") return source;
+    const marker = 'Deno.test("' +
+      "abh1: route registrations discover the complete HTTP test set before narrowing" +
+      '", async () => {';
+    const start = source.indexOf(marker);
+    const end = source.indexOf("\n});", start);
+    assert(start >= 0 && end > start, "route-reference audit fixture block missing");
+    assertEquals(
+      source.indexOf(marker, start + marker.length),
+      -1,
+      "duplicate audit fixture block",
+    );
+    return source.slice(0, start) + source.slice(end + 4);
+  };
+  const discovered = await allTestFiles();
+  assert(discovered.length > 0, "full-gate test discovery returned ZERO modules");
+  const sources = new Map<string, string>();
+  for (const file of discovered) {
+    sources.set(file, withoutOwnFixture(file, await Deno.readTextFile(file)));
+  }
+  assert(sources.size > 0, "route-reference audit examined ZERO test modules");
+  assertEquals(
+    sources.size,
+    discovered.length,
+    `route-reference audit examined ${sources.size}/${discovered.length} discovered test modules; no duplicate or dropped module may yield a clean scan`,
+  );
+  const population =
+    `${accountRoutes.length} account routes; ${sources.size}/${discovered.length} discovered test modules examined (only this audit's fixture block redacted)`;
+  console.log(`route-reference audit: ${population}`);
+  const self = await Deno.readTextFile(new URL("./fast_check_test.ts", import.meta.url));
+  const futureHandlerRequest = self +
+    '\nDeno.test("new login reader", async () => await fetch(new Request("https://example.test/login")));\n';
+  assert(
+    /(?<!\/api\/auth)\/login(?=[/?#"`])/.test(
+      withoutOwnFixture("tests/fast_check_test.ts", futureHandlerRequest),
+    ),
+    "a future HTTP test in the same module must remain visible outside the fixture block",
+  );
+  for (const path of accountRoutes) {
+    const stem = path.includes(":") ? path.slice(0, path.indexOf(":")) : path;
+    assert(
+      [...sources.values()].some((source) => source.includes(stem)),
+      `${population}: new account route ${path} has NO test candidate; do not narrow until one exercises it`,
+    );
+  }
+  for (const route of spec) {
+    const candidates = [...sources].filter(([, source]) => route.mentions(source))
+      .map(([file]) => file).sort();
+    assert(
+      route.exercises.length > 0 && route.exercises.some((file) => candidates.includes(file)),
+      `${population}: ${route.file} has no exercising candidate suite; do not narrow`,
+    );
+    assertEquals(
+      candidates,
+      [...route.exercises, ...route.mentionsOnly].sort(),
+      `${population}: ${route.file} has a new or missing URL reference; audit its real handler before narrowing`,
+    );
+    const named = await nameMatchedTests([route.file]);
+    assertEquals(
+      (named.get(route.file) ?? []).sort(),
+      [...route.exercises].sort(),
+      `${population}: ${route.file} must select every exercising HTTP suite and no unrelated mention-only suite`,
+    );
+  }
+});
+
+const VFE9_EXERCISING_SUITES = [
+  ["src/routes/admin_telemetry.ts", ["tests/admin_subpages_test.ts"]],
+  ["src/routes/login.ts", [
+    "tests/account_pages_test.ts",
+    "tests/security_audit_test.ts",
+    "tests/speculation_rules_test.ts",
+  ]],
+  ["src/routes/account_api.ts", [
+    "tests/account_regenerate_test.ts",
+    "tests/admin_throttle_test.ts",
+    "tests/auth_routes_test.ts",
+    "tests/feed_discovery_test.ts",
+    "tests/webmcp_admin_forms_test.ts",
+  ]],
+  ["src/routes/webauthn.ts", ["tests/passkeys_test.ts"]],
+  ["src/routes/reports.ts", ["tests/csp_reporting_test.ts"]],
+] as const;
+
+Deno.test("vfe9: five hub-cut routes select all present HTTP readers or widen when none remain", async () => {
+  const dir = await Deno.makeTempDir();
+  const paths = VFE9_EXERCISING_SUITES.map(([path]) => path);
+  const graph = new Map<string, string[]>(paths.map((path) => [path, ["src/app.ts"]]));
+  try {
+    await Deno.mkdir(`${dir}/tests`, { recursive: true });
+    for (const [, suites] of VFE9_EXERCISING_SUITES) {
+      for (const suite of suites) await Deno.writeTextFile(`${dir}/${suite}`, "");
+    }
+    for (const [path, suites] of VFE9_EXERCISING_SUITES) {
+      const named = await nameMatchedTests([path], `${dir}/tests`);
+      assertEquals(
+        named.get(path)?.sort(),
+        [...suites].sort(),
+        `${path} must name ALL present readers`,
+      );
+      assertEquals(planTests([path], graph, named).testFiles, [...suites].sort());
+
+      // A lost reader cannot remain listed as covered. Other existing readers still run;
+      // once every reader is gone, the route must widen to FULL, never a narrow green.
+      for (const missingSuite of suites) {
+        await Deno.remove(`${dir}/${missingSuite}`);
+        const remaining = [...suites].filter((suite) => suite !== missingSuite).sort();
+        const withoutOne = await nameMatchedTests([path], `${dir}/tests`);
+        assertEquals(withoutOne.get(path)?.sort(), remaining.length ? remaining : undefined);
+        assertEquals(
+          planTests([path], graph, withoutOne).testFiles,
+          remaining.length ? remaining : null,
+        );
+        await Deno.writeTextFile(`${dir}/${missingSuite}`, "");
+      }
+      for (const suite of suites) await Deno.remove(`${dir}/${suite}`);
+      const none = await nameMatchedTests([path], `${dir}/tests`);
+      assertEquals(none.has(path), false);
+      assertEquals(planTests([path], graph, none).testFiles, null);
+      for (const suite of suites) await Deno.writeTextFile(`${dir}/${suite}`, "");
+    }
+    assertEquals(planTests(["src/routes/new_unmapped.ts"], graph, new Map()).testFiles, null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("vfe9: the real repo graph selects the complete route-specific HTTP suite set", async () => {
+  const reverse = await reverseGraph();
+  for (const [path, suites] of VFE9_EXERCISING_SUITES) {
+    const plan = planTests([path], reverse, await nameMatchedTests([path]));
+    assert(plan.testFiles !== null, `${path} must not force FULL: ${plan.reason}`);
+    assertEquals(
+      plan.testFiles,
+      [...suites].sort(),
+      `${path} must include every HTTP handler exerciser`,
+    );
+    assert(plan.testFiles.length < 25, `${path} must stay a bounded subset, not most of the suite`);
+  }
+  assertEquals(planTests(["src/routes/new_unmapped.ts"], reverse, new Map()).testFiles, null);
 });
 
 // ---------------------------------------------------------------------------
