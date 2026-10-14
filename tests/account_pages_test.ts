@@ -101,11 +101,23 @@ const VOID_TAGS = new Set([
 export function tagNestingProblems(html: string): string[] {
   const markup = html
     .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+    .replace(/<script(?=[\s/>])[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style(?=[\s/>])[^>]*>[\s\S]*?<\/style>/gi, "");
   const problems: string[] = [];
-  for (const opener of ["<!--", "<script", "<style"]) {
-    if (markup.includes(opener)) {
+  // The delimiter is required, not just the name: custom elements are hyphenated by spec, so
+  // `<style-guide>` and `<script-loader>` are legal element names, and a bare `includes("<script")`
+  // called both of them an unterminated `<script>`/`<style>`. Found with the scanner probe during the
+  // second round of this bead's review - a false RED, the one direction that costs a lane time for
+  // nothing. The tightened form keeps every real detection (the probe still flags unterminated
+  // `<script>`, `<script `, `<script/` and a trailing `<script`).
+  for (
+    const [opener, pattern] of [
+      ["<!--", /<!--/],
+      ["<script", /<script(?=[\s/>]|$)/i],
+      ["<style", /<style(?=[\s/>]|$)/i],
+    ] as const
+  ) {
+    if (pattern.test(markup)) {
       problems.push(`unterminated ${opener} (a browser reads the rest of the page as its text)`);
     }
   }
@@ -190,6 +202,21 @@ Deno.test("the markup scanner reports each failure shape, including the untermin
   assertEquals(tagNestingProblems(`<div class="wrap"><!-- <section class="panel"> --></div>`), []);
   assert(reports(`<script>const a = 1;`).includes("unterminated <script"));
   assert(reports(`<style>.a { color: red; }`).includes("unterminated <style"));
+  // A LOOKALIKE NAME IS NOT AN OPENER. Custom elements are hyphenated by spec, so <style-guide> and
+  // <script-loader> are legal names, and the first version of the check above called both of them an
+  // unterminated <script>/<style> - a false RED, the one direction that costs a lane time for
+  // nothing. Found with the scanner probe in the second round of this bead's review, and pinned here
+  // so the looseness cannot come back.
+  assertEquals(tagNestingProblems(`<style-guide>x</style-guide>`), []);
+  assertEquals(tagNestingProblems(`<script-loader src="a.js"></script-loader>`), []);
+  // ...while the real openers, in every form the terminator can be missing, are still caught: the
+  // delimiter requirement must not have narrowed the detection.
+  for (const markup of ["<script>const a = 1;", "<script const a = 1;", "<script/", "<script"]) {
+    assert(
+      reports(markup).includes("unterminated <script"),
+      `${JSON.stringify(markup)} must still be reported`,
+    );
+  }
 
   // The defect this bead exists for, as the smallest reproduction of it.
   assert(reports(`<fieldset class="choices">x</div>`).includes("</div> closes <fieldset>"));
