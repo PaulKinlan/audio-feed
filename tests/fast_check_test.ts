@@ -1129,6 +1129,95 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
   }
 });
 
+Deno.test("audio-feed-hkco: flagged tracked mutation makes changedFiles unknown, not empty", async () => {
+  const tmpDir = await Deno.makeTempDir({ prefix: "fast-check-index-flag-" });
+  const path = "src/observability/error_screen.ts";
+  try {
+    const clone = await new Deno.Command("git", {
+      args: ["clone", "--shared", "-q", ".", tmpDir],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assertEquals(clone.code, 0, new TextDecoder().decode(clone.stderr));
+    const baseline = await new Deno.Command("git", {
+      args: ["update-ref", "refs/remotes/origin/main", "HEAD"],
+      cwd: tmpDir,
+      stderr: "piped",
+    }).output();
+    assertEquals(baseline.code, 0, new TextDecoder().decode(baseline.stderr));
+    const child = await new Deno.Command("deno", {
+      args: [
+        "eval",
+        `
+        import { changedFiles } from "./scripts/fast-check.ts";
+        import { assert, assertEquals } from "@std/assert";
+        const path = "${path}";
+        const git = async (...args: string[]) => {
+          const out = await new Deno.Command("git", { args, stdout: "piped" }).output();
+          assertEquals(out.code, 0, args.join(" "));
+          return new TextDecoder().decode(out.stdout).trim();
+        };
+        const original = await Deno.readTextFile(path);
+        const diagnostics: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => {
+          diagnostics.push(args.map(String).join(" "));
+          originalLog(...args);
+        };
+        try {
+          assertEquals(await changedFiles(), [], "a clean tree must retain its empty selection");
+          assertEquals(diagnostics, [], "a clean tree must emit NO index-flag diagnostic");
+          await git("update-index", "--assume-unchanged", path);
+          await Deno.writeTextFile(path, original + "\\n// hkco mutant\\n");
+          assertEquals(await git("status", "--porcelain"), "", "Git must hide this mutation");
+          assertEquals(await git("diff", "--name-only", "HEAD"), "", "git diff must miss it");
+          assertEquals((await git("ls-files", "-v", path)).slice(0, 2), "h ");
+          assertEquals(await changedFiles(), null, "a lowercase tag means UNKNOWN, not no change");
+          assert(
+            diagnostics.some((line) => line.includes("tracked index flag(s)") && line.includes(path)),
+            "the assume-unchanged diagnostic must NAME the hidden path",
+          );
+          await git("update-index", "--no-assume-unchanged", path);
+          assertEquals(await changedFiles(), [path], "the visible mutation must still be selected");
+          await git("update-index", "--skip-worktree", path);
+          const beforeSkip = diagnostics.length;
+          assertEquals(await changedFiles(), null, "skip-worktree also means UNKNOWN");
+          assert(
+            diagnostics.slice(beforeSkip).some((line) => line.includes(path)),
+            "the skip-worktree diagnostic must NAME the hidden path",
+          );
+        } finally {
+          console.log = originalLog;
+          await git("update-index", "--no-assume-unchanged", path);
+          await git("update-index", "--no-skip-worktree", path);
+          await Deno.writeTextFile(path, original);
+        }
+      `,
+      ],
+      cwd: tmpDir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const stdout = new TextDecoder().decode(child.stdout);
+    assertEquals(child.code, 0, new TextDecoder().decode(child.stderr));
+    assert(
+      stdout.includes("tracked index flag(s) may hide mutations") && stdout.includes(path),
+      `index-flag widening must be explicit and name the path: ${stdout}`,
+    );
+  } finally {
+    // Defence if the child exits before its finally: never leave a flagged clone, even temporarily.
+    for (const flag of ["--no-assume-unchanged", "--no-skip-worktree"]) {
+      await new Deno.Command("git", {
+        args: ["update-index", flag, path],
+        cwd: tmpDir,
+        stdout: "null",
+        stderr: "null",
+      }).output().catch(() => {});
+    }
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test(
   "audio-feed-8rz5: synthetic selection fails closed with non-zero exit code 2 unconditionally",
   async () => {
@@ -1518,10 +1607,17 @@ Deno.test("audio-feed-tyt5: findHiddenTrackedMutations detects assume-unchanged 
     "H README.md",
     "h src/routes/admin.ts",
     "S scripts/fast-check.ts",
+    "s src/combined flag.ts",
     "H tests/fast_check_test.ts",
   ].join("\n");
   assertEquals(findHiddenTrackedMutations(lsOutput), [
     "scripts/fast-check.ts",
+    "src/combined flag.ts",
     "src/routes/admin.ts",
   ]);
+  assertEquals(
+    findHiddenTrackedMutations("H README.md\0h src/multi\nline.ts\0S src/skip.ts\0"),
+    ["src/multi\nline.ts", "src/skip.ts"],
+    "NUL-separated Git output must not split a tracked path containing a newline",
+  );
 });

@@ -225,6 +225,28 @@ async function git(...args: string[]): Promise<string | null> {
 
 /** Committed diff vs origin/main plus anything uncommitted or untracked. null = unknown. */
 export async function changedFiles(): Promise<string[] | null> {
+  // audio-feed-hkco: assume-unchanged and skip-worktree can conceal a tracked mutation from
+  // git diff/status. A flagged path is UNKNOWN, not an empty change set, so planTests widens to FULL.
+  // -z preserves filenames containing newlines; a failed index query also cannot prove cleanliness.
+  const index = await git("ls-files", "-v", "-z");
+  if (index === null) {
+    console.log(
+      "fast-check: change set UNKNOWN (git ls-files -v -z failed); widening to FULL suite",
+    );
+    return null;
+  }
+  const hidden = findHiddenTrackedMutations(index);
+  if (hidden.length) {
+    // The detector existed (audio-feed-tyt5), but was not on the path that decides selection.
+    // Print a bounded, escaped sample so a slow full-suite run names its cause without log injection.
+    const sample = hidden.slice(0, 3).map((path) => JSON.stringify(path)).join(", ");
+    console.log(
+      `fast-check: change set UNKNOWN (${hidden.length} tracked index flag(s) may hide mutations: ${sample}${
+        hidden.length > 3 ? ", ..." : ""
+      }); widening to FULL suite`,
+    );
+    return null;
+  }
   // audio-feed-8rz5 / audio-feed-vdys: Ambient environment variables and programmatic options
   // CANNOT short-circuit changedFiles. All changes (committed, uncommitted, untracked) are always included.
   const committed = await git("diff", "--name-only", "origin/main...HEAD");
@@ -581,16 +603,16 @@ export function detectStaleRun(
 }
 
 /**
- * Detect tracked files with assume-unchanged ('h ') or skip-worktree ('S ')
- * index flags from `git ls-files -v` output (audio-feed-tyt5).
+ * Detect tracked files with non-standard index flags: 'S' is skip-worktree and any
+ * lowercase tag indicates assume-unchanged (including 'h' and combined 's').
+ * Accept NUL-separated `git ls-files -v -z` without splitting filenames on newlines;
+ * newline-separated input remains supported for the original audio-feed-tyt5 fixture.
  */
 export function findHiddenTrackedMutations(lsFilesVOutput: string): string[] {
   const hidden: string[] = [];
-  for (const line of lsFilesVOutput.split("\n")) {
-    const m = /^[hS]\s+(.+)$/.exec(line.trimEnd());
-    if (m && m[1]) {
-      hidden.push(m[1].trim());
-    }
+  for (const entry of lsFilesVOutput.split(lsFilesVOutput.includes("\0") ? "\0" : "\n")) {
+    const m = /^[a-zS] (.+)$/s.exec(entry);
+    if (m) hidden.push(m[1]!);
   }
   return hidden.sort();
 }
@@ -1572,7 +1594,10 @@ ${auditUniverseDrift}`);
     plan = planForFailedRelation(relationFailure);
   } else if (changed === null) {
     // Never silently green: an unknown change set gets the full suite.
-    plan = { testFiles: null, reason: "git diff failed (stale or missing origin/main?)" };
+    plan = {
+      testFiles: null,
+      reason: "change set UNKNOWN (git query failed or tracked index flags may hide mutations)",
+    };
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
