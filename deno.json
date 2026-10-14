@@ -27,11 +27,23 @@
     "evidence": "deno run --allow-read --allow-run=deno,timeout --allow-env scripts/evidence-run.ts",
     "evidence:mutants": "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env scripts/exww-mutants.ts",
     "proof": "deno run --allow-all --unstable-kv",
-    "test:fast": "deno run --allow-read --allow-run=git,deno --allow-env scripts/fast-check.ts",
+    // audio-feed-p2la: the pre-push guard (scripts/hooks/pre-push) refuses an ungated push and a
+    // copy of main onto a fleet/* branch, and a guard that is not INSTALLED silently protects
+    // nothing — the installation used to be a best-effort call inside scripts/fast-check.ts, gated
+    // on a permission test:fast never grants, with its child's exit status discarded. Both gates now
+    // ARM it (`hooks:install`) and then VERIFY it where git will actually look (`hooks:verify`), as
+    // their FIRST two steps; scripts/fast-check.ts asserts the same thing in-process (exit 1, by
+    // name, otherwise) so a deleted wiring step still reddens the fast path. Both steps run in the
+    // shell, so no Deno permission list is widened for the installer, and hooks:verify runs with
+    // FEWER permissions than the gate that hosts it. They fail CLOSED: a clone they cannot arm does
+    // not gate green.
+    "hooks:install": "bash scripts/hooks/install-hooks.sh",
+    "hooks:verify": "deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts",
+    "test:fast": "deno task hooks:install && deno task hooks:verify && deno run --allow-read --allow-run=git,deno --allow-env scripts/fast-check.ts",
     "inventory": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/legacy-audio-inventory.ts",
     "migrate-legacy-audio": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
     "migrate:audio-keys": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/migrate-legacy-audio.ts",
-    "gate": "deno run --allow-read --allow-write --allow-env --allow-run=deno scripts/test-selection.ts --prove-discovery && deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv"
+    "gate": "deno task hooks:install && deno task hooks:verify && deno run --allow-read --allow-write --allow-env --allow-run=deno scripts/test-selection.ts --prove-discovery && deno fmt --check && deno lint && deno check main.ts src tests scripts && deno test --allow-net --allow-env --allow-read --allow-write --allow-run --unstable-kv"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@^1.0.10",

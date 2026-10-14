@@ -149,6 +149,53 @@ Fleet wiring: the VM-local `~/.fleet/check.conf` carries `CHECK_FAST_CMD="deno t
 (with `CHECK_FAST_TIMEOUT=600`). That file is reprovisioned, so if `fleet-check --fast` reports no
 fast command, re-add the line — the durable deliverable is the repo task, not the VM file.
 
+## The pre-push guard is armed by the gates (audio-feed-p2la)
+
+`scripts/hooks/pre-push` refuses an ungated push and a copy of `origin/main` onto a `fleet/*` branch.
+A hook that is not INSTALLED protects nothing, and until audio-feed-p2la the only installation path
+was a best-effort call inside `scripts/fast-check.ts` — behind `Deno.permissions.querySync`, which is
+always DENIED under `test:fast`'s `--allow-run=git,deno`, with the child's exit status and every error
+discarded. The installer existed, the guard did not, and the gate went green saying nothing.
+
+Both gates now ARM it (`deno task hooks:install`, a shell step in the task string, so no Deno
+permission list is widened for the installer) and then VERIFY it (`deno task hooks:verify` →
+`deno run --allow-read --allow-run=git scripts/hooks/guard-status.ts`, fewer permissions than the gate
+that hosts it) as their FIRST two steps. Verification reads what git will actually execute: the hooks
+directory git will use (`--git-path hooks`, so `core.hooksPath` cannot make it claim a guard that
+would never run), the chain marker in that directory's `pre-push`, and the executable guard the chain
+block runs. If the guard is not armed the verify step exits 1 naming the missing file, because the
+gate must not vouch for a tree whose pushes are unguarded, and `scripts/fast-check.ts` repeats the
+same measurement in-process so a deleted wiring step still reddens the fast path. A tree that is not
+a git worktree is a stated limit (it cannot push, so there is nothing to guard) rather than a
+failure. `scripts/hooks/install-hooks.sh` fails closed the same way: a clone it cannot arm exits
+non-zero by name instead of exiting 0 quietly. Run `deno task hooks:install` alone to arm a clone by
+hand, `deno task hooks:verify` to ask whether a clone is armed. A `core.hooksPath` that moves git's
+hooks directory elsewhere is a named installation failure, not something the installer will write
+around: it will not write into a hooks directory shared with other repositories. Since a clone the
+gate cannot arm does not gate green, a fixture that runs the selector in a disposable clone arms it
+first (`git clone` copies no hooks) — tests/fast_gate_fmt_test.ts does exactly that.
+
+### Concurrency: several lanes gate at once on one VM (audio-feed-qqs6)
+
+Every lane's gate runs the installer, lanes share a VM, and a linked worktree's hooks directory is the
+common git dir — so two installs overlap routinely, and an installer that only usually works reddens an
+unrelated lane's gate. It therefore serialises and writes atomically: one `mkdir` lock at
+`$GIT_DIR/audio-feed-p2la.lock` (atomic on every POSIX filesystem, no extra tooling; `flock` is absent on
+macOS, where this script also runs) with a bounded wait that steals a lock whose recorded pid is gone, and
+every write is a private `mktemp` file in the target directory `mv`-ed into place, so no reader can see a
+half-written hook. A second install that finds the artefacts byte-identical to what this tree would install
+reports `already armed` and writes nothing. What it never does is decline to check because it detected
+contention: that would trade a loud failure for a silent pass, which is the defect this bead exists to
+close. Measured on the reviewed tip d43c263c before the fix, 240 overlapping installs produced 83 named
+failures (35%); after it, 0 — the suite runs the overlap in two worktrees of one clone as
+`audio-feed-qqs6`.
+
+Failure messages say what was measured and nothing more. The old text asserted "The guard is NOT armed" on
+every failure, including races in which the guard WAS armed and the very next verify step said so: a
+message that contradicts the state it describes is a false alarm, and readers who see false alarms stop
+believing the real ones. A failed install now names its cause, states that it did not establish the guard's
+state, and points at `deno task hooks:verify` as the authority, which is the next step of both gate tasks.
+
 ## Modern-web bead closures record a premise verdict
 
 Every `[modern-web]` bead the daily audit creates carries its canonical feature id in the title (the

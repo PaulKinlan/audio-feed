@@ -65,6 +65,7 @@ import {
   universeDrift,
 } from "./test-selection.ts";
 import { evidenceReadmesAmong, findUnselectedExecutors } from "./evidence-selection.ts";
+import { guardNotArmedMessage, prepushGuardStatus } from "./hooks/guard-status.ts";
 
 // The script lives in <repo>/scripts/ by definition; strip that segment.
 // (normalise() below is for repo-RELATIVE paths and drops the leading slash.)
@@ -214,6 +215,9 @@ async function git(...args: string[]): Promise<string | null> {
  * Fast-check exit-code contract (audio-feed-8rz5):
  * - 0 = REAL selection ran and passed (all selected test suites passed, cheap steps passed).
  * - 1 = REAL selection ran and FAILED (a test suite assertion failed, or a cheap step like fmt/lint failed; fix the code).
+ * - 1 also covers the gate REFUSING to run because this clone's pre-push guard is not armed
+ *       (audio-feed-p2la): that is a failure of the tree the gate is asked to vouch for, not an
+ *       unhonourable invocation, so it is 1 and not 2.
  * - 2 = REFUSED / SYNTHETIC / UNKNOWN (selection issue: committed changes exist in git when --untracked-only was requested,
  *       or synthetic selection active; not a test failure; fix the invocation).
  *       Exiting 2 fails closed so fleet-check (which treats rc=0 as PASS) can NEVER record or cache a synthetic run as PASS.
@@ -1413,18 +1417,22 @@ export function formatCheckStep(fmtFixture?: string | null): string[] {
 }
 
 if (import.meta.main) {
-  // audio-feed-p2la: ensure repo git pre-push hook is installed and chained into git hooks
-  try {
-    const installScript = `${ROOT}scripts/hooks/install-hooks.sh`;
-    const perm = Deno.permissions.querySync({ name: "run", command: installScript });
-    if (perm.state === "granted") {
-      const stat = await Deno.stat(installScript).catch(() => null);
-      if (stat) {
-        await new Deno.Command(installScript, { cwd: ROOT }).output();
-      }
-    }
-  } catch {
-    // non-fatal if outside git repo
+  // audio-feed-p2la: the guard is armed and verified by the FIRST steps of both gate tasks
+  // (`deno task hooks:install && deno task hooks:verify`). Assert it here as well — a gate that goes
+  // green while the guard is absent is the exact defect this check closes — because THIS is the call
+  // site that covers a bare `deno run scripts/fast-check.ts` and a gate task whose verify step has
+  // been deleted, both of which the task-level step cannot speak for. (The block that used to sit
+  // here launched the installer behind a permission test:fast never grants and discarded the child's
+  // exit status, so nothing was ever installed and nothing was ever said about it.)
+  const prepushGuard = await prepushGuardStatus(ROOT);
+  if (prepushGuard.state === "not-armed") {
+    console.error(`fast-gate: failed: ${guardNotArmedMessage(prepushGuard)}`);
+    Deno.exit(1);
+  }
+  if (prepushGuard.state === "not-a-worktree") {
+    console.error(
+      "fast-gate: pre-push guard NOT armed (audio-feed-p2la): not a git worktree, so this tree cannot push and there is nothing to guard; continuing.",
+    );
   }
 
   const forceAll = Deno.args.includes("--all");

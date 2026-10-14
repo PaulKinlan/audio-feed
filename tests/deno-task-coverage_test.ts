@@ -14,22 +14,16 @@
  * not written here because it contains a comment-closing sequence — discovered the hard way.)
  */
 import { assert, assertEquals } from "@std/assert";
+import { parseJsonc } from "./jsonc.ts";
 
 /**
- * deno.json is JSONC — it carries whole-line comments explaining the fmt scope. Stripped here
- * rather than worked around: only lines whose first non-space characters are `//`, so a `//`
- * inside a value (a URL, for instance) survives. A tolerant parser would be better still, but
- * there is no public one in the runtime, and this file's own shape is the thing under test.
+ * deno.json is JSONC — it carries comments explaining the fmt scope — and the reader is shared
+ * (tests/jsonc.ts): the previous whole-line-only stripper here was the weak variant of it, and a
+ * valid inline comment in deno.json made JSON.parse throw in the sibling suite that copied it
+ * (audio-feed-elnk).
  */
-function stripLineComments(jsonc: string): string {
-  return jsonc
-    .split("\n")
-    .filter((line) => !/^\s*\/\//.test(line))
-    .join("\n");
-}
-
-const denoJson = JSON.parse(
-  stripLineComments(await Deno.readTextFile(new URL("../deno.json", import.meta.url))),
+const denoJson = parseJsonc<{ tasks?: Record<string, string>; fmt?: { include?: string[] } }>(
+  await Deno.readTextFile(new URL("../deno.json", import.meta.url)),
 );
 const tasks: Record<string, string> = denoJson.tasks ?? {};
 
