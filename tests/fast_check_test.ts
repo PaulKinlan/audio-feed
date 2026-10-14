@@ -811,52 +811,64 @@ Deno.test("audio-feed-8rz5: old ambient env var names are completely absent from
   );
 });
 
-Deno.test("audio-feed-8rz5: ambient environment variables (IN_FAST_GATE_INTEGRATION_TEST and FAST_GATE_FMT_FIXTURE) NEVER short-circuit changedFiles", async () => {
-  // rev-81 & audio-feed-ktvu: Make test completely independent of ambient git state (delta vs origin/main).
-  // A scratch untracked file ensures changedFiles returns non-empty output on any tree (including clean main).
-  const scratch = await Deno.makeTempFile({
-    dir: ".",
-    prefix: ".fast-gate-scratch-",
-    suffix: ".txt",
-  });
-  const prevIntegration = Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST");
-  const prevFixture = Deno.env.get("FAST_GATE_FMT_FIXTURE");
+Deno.test("audio-feed-ylg6: committed paths survive ambient environment variables even on clean main", async () => {
+  // rev-91 & audio-feed-ylg6: A dynamic test using only untracked files is blind to mutations
+  // that drop committed files when executed on an empty delta (e.g. clean checkout of origin/main).
+  // This test clones a shared repo fixture, pins refs/remotes/origin/main to HEAD~1, and asserts
+  // that committed paths are present in baseline and survive ambient environment variables.
+  const tmpDir = await Deno.makeTempDir({ prefix: "fast-check-test-clone-" });
   try {
-    const baseline = await changedFiles();
-    assert(baseline !== null, "changedFiles must return an array");
-    const scratchRel = scratch.replace(/^\.\//, "");
-    assert(
-      baseline.includes(scratchRel),
-      `baseline must include scratch untracked file: ${scratchRel}`,
-    );
+    const cloneProc = await new Deno.Command("git", {
+      args: ["clone", "--shared", "-q", ".", tmpDir],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(cloneProc.success, "git clone --shared must succeed");
 
-    Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", "1");
-    Deno.env.set("FAST_GATE_FMT_FIXTURE", "/tmp/audio-feed-fmt-fixture.ts");
+    const updateRefProc = await new Deno.Command("git", {
+      args: ["update-ref", "refs/remotes/origin/main", "HEAD~1"],
+      cwd: tmpDir,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(updateRefProc.success, "update-ref to HEAD~1 must succeed");
 
-    const withEnv = await changedFiles();
-    assertEquals(
-      withEnv,
-      baseline,
-      "changedFiles must be identical whether ambient env vars are present or not",
-    );
+    const evalProc = await new Deno.Command("deno", {
+      args: [
+        "eval",
+        "--allow-read",
+        "--allow-run=git",
+        "--allow-env",
+        `
+        import { changedFiles } from "./scripts/fast-check.ts";
+        import { assert, assertEquals } from "@std/assert";
+        const baseline = await changedFiles();
+        assert(baseline !== null && baseline.length > 0, "baseline must contain committed files vs HEAD~1");
+        
+        Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", "1");
+        Deno.env.set("FAST_GATE_FMT_FIXTURE", "/tmp/nonexistent-fixture.ts");
+        const withEnv = await changedFiles();
+        assertEquals(withEnv, baseline, "committed files must not be dropped by ambient env vars");
+        `,
+      ],
+      cwd: tmpDir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+
+    const stderr = new TextDecoder().decode(evalProc.stderr);
+    assertEquals(evalProc.code, 0, `eval failed with code ${evalProc.code}: ${stderr}`);
   } finally {
-    await Deno.remove(scratch).catch(() => {});
-    if (prevIntegration !== undefined) {
-      Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", prevIntegration);
-    } else Deno.env.delete("IN_FAST_GATE_INTEGRATION_TEST");
-    if (prevFixture !== undefined) Deno.env.set("FAST_GATE_FMT_FIXTURE", prevFixture);
-    else Deno.env.delete("FAST_GATE_FMT_FIXTURE");
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
   }
 });
 
-Deno.test({
-  name:
-    "audio-feed-8rz5: synthetic selection fails closed with non-zero exit code 2 unconditionally",
-  ignore: !!Deno.env.get("IN_FAST_GATE_INTEGRATION_TEST"),
-  fn: async () => {
-    // If --untracked-only is passed on argv, fast-check must refuse immediately and exit non-zero (code 2),
-    // regardless of whether committed changes exist or not, so fleet-check can never cache PASS.
-    // audio-feed-ktvu: Guarded with IN_FAST_GATE_INTEGRATION_TEST to prevent recursive suite re-entry.
+Deno.test(
+  "audio-feed-8rz5: synthetic selection fails closed with non-zero exit code 2 unconditionally",
+  async () => {
+    // audio-feed-ffav: The exit-2 refusal is unconditional at script entry (scripts/fast-check.ts:839),
+    // so child execution cannot recurse into test runners. The test must NOT be 'ignore'd under
+    // ambient IN_FAST_GATE_INTEGRATION_TEST, ensuring the refusal is always exercised in every environment.
     const cmd = new Deno.Command("deno", {
       args: [
         "run",
@@ -866,10 +878,6 @@ Deno.test({
         "scripts/fast-check.ts",
         "--untracked-only",
       ],
-      env: {
-        ...Deno.env.toObject(),
-        IN_FAST_GATE_INTEGRATION_TEST: "1",
-      },
       stdout: "piped",
       stderr: "piped",
     });
@@ -892,7 +900,7 @@ Deno.test({
       `stdout must NOT contain passing verdict: ${stdout}`,
     );
   },
-});
+);
 
 Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programmatically", () => {
   // audio-feed-vdys: changedFiles accepts 0 arguments; untrackedOnly option is eliminated
