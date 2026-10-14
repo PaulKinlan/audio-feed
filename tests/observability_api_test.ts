@@ -709,7 +709,8 @@ Deno.test("audio-feed-4y9v: claim.lifecycle events carry article/source/size met
     }),
   );
 
-  const page = await (await fetch(authed("/api/observability/errors?since=0&severity=warn"))).json();
+  const page = await (await fetch(authed("/api/observability/errors?since=0&severity=warn")))
+    .json();
   assertEquals(page.events.length, 2);
 
   const yielded = page.events[0];

@@ -350,6 +350,130 @@ Deno.test("CONFIRM_DIALOG_CLIENT: provides light-dismiss fallback and resolves p
   );
 });
 
+Deno.test("CONFIRM_DIALOG_CLIENT: real shipped script resolves askConfirm(false) on Escape / light-dismiss (returnValue !== 'confirm') (audio-feed-qz3x)", async () => {
+  type Listener = (e: { target?: unknown; clientX?: number; clientY?: number }) => void;
+  const listeners: Record<string, Listener[]> = {};
+  const okListeners: Record<string, Listener[]> = {};
+  const cancelListeners: Record<string, Listener[]> = {};
+
+  const confirmDialog = {
+    returnValue: "",
+    open: false,
+    getBoundingClientRect() {
+      return { left: 100, right: 300, top: 100, bottom: 250, width: 200, height: 150 };
+    },
+    showModal() {
+      confirmDialog.open = true;
+    },
+    close(val?: string) {
+      confirmDialog.open = false;
+      if (val !== undefined) confirmDialog.returnValue = val;
+      for (const fn of [...(listeners["close"] ?? [])]) fn({});
+    },
+    addEventListener(event: string, fn: Listener) {
+      (listeners[event] ??= []).push(fn);
+    },
+    removeEventListener(event: string, fn: Listener) {
+      listeners[event] = (listeners[event] ?? []).filter((l) => l !== fn);
+    },
+  };
+
+  const elements: Record<string, Record<string, unknown>> = {
+    confirmDialog,
+    confirmTitle: { textContent: "" },
+    confirmMessage: { textContent: "" },
+    confirmOkBtn: {
+      textContent: "",
+      className: "",
+      addEventListener(event: string, fn: Listener) {
+        (okListeners[event] ??= []).push(fn);
+      },
+      removeEventListener(event: string, fn: Listener) {
+        okListeners[event] = (okListeners[event] ?? []).filter((l) => l !== fn);
+      },
+    },
+    confirmCancelBtn: {
+      textContent: "",
+      addEventListener(event: string, fn: Listener) {
+        (cancelListeners[event] ??= []).push(fn);
+      },
+      removeEventListener(event: string, fn: Listener) {
+        cancelListeners[event] = (cancelListeners[event] ?? []).filter((l) => l !== fn);
+      },
+    },
+  };
+
+  const docStub = {
+    getElementById(id: string) {
+      return elements[id] ?? null;
+    },
+  };
+
+  // Run with closedBy absent on HTMLDialogElement.prototype so the fallback light-dismiss
+  // click listener is also wired and exercised alongside native onClose.
+  const dialogCtorWithoutClosedBy = { prototype: {} };
+  const askConfirm = new Function(
+    "document",
+    "HTMLDialogElement",
+    "confirm",
+    `${CONFIRM_DIALOG_CLIENT}\nreturn askConfirm;`,
+  )(docStub, dialogCtorWithoutClosedBy, () => {
+    throw new Error("window.confirm fallback must not run when #confirmDialog is present");
+  }) as (
+    message: string,
+    options?: { title?: string; confirmText?: string; cancelText?: string; danger?: boolean },
+  ) => Promise<boolean>;
+
+  // 1. Escape key dismissal: native <dialog> fires "close" without touching button click
+  //    handlers and leaves returnValue as "".
+  const escapePromise = askConfirm("Delete feed?");
+  confirmDialog.close();
+  assertEquals(await escapePromise, false, "Escape (returnValue === '') must resolve to false");
+  assertEquals((listeners["close"] ?? []).length, 0, "onClose must remove its close listener");
+  assertEquals((okListeners["click"] ?? []).length, 0, "onClose must remove onOk click listener");
+  assertEquals(
+    (cancelListeners["click"] ?? []).length,
+    0,
+    "onClose must remove onCancel click listener",
+  );
+
+  // 2. Backdrop light-dismiss via fallback click listener (e.target === confirmDialog):
+  //    clicking inside the bounding rect keeps the dialog open; clicking outside calls
+  //    confirmDialog.close("cancel"), firing onClose with returnValue === "cancel".
+  const backdropPromise = askConfirm("Rotate token?");
+  for (const fn of [...(listeners["click"] ?? [])]) {
+    fn({ target: confirmDialog, clientX: 200, clientY: 150 });
+  }
+  assertEquals(confirmDialog.open, true, "clicking inside dialog rect must not light-dismiss");
+  for (const fn of [...(listeners["click"] ?? [])]) {
+    fn({ target: confirmDialog, clientX: 10, clientY: 10 });
+  }
+  assertEquals(
+    await backdropPromise,
+    false,
+    "light-dismiss backdrop click (returnValue === 'cancel') must resolve to false",
+  );
+
+  // 3. Native closedby="any" light-dismiss or explicit non-"confirm" returnValue on close event.
+  const dismissPromise = askConfirm("Delete account?");
+  confirmDialog.close("dismiss");
+  assertEquals(
+    await dismissPromise,
+    false,
+    "any non-'confirm' returnValue on close must resolve to false",
+  );
+
+  // 4. Positive control: native <form method="dialog"> submit with returnValue === "confirm"
+  //    reaching onClose directly resolves to true.
+  const confirmPromise = askConfirm("Confirm action?");
+  confirmDialog.close("confirm");
+  assertEquals(
+    await confirmPromise,
+    true,
+    "onClose with returnValue === 'confirm' must resolve to true",
+  );
+});
+
 Deno.test("confirmClientFromSource rejects malformed sources loudly (audio-feed-0r0s review nit)", () => {
   const wrap = (body: string) => `// #confirm-shared-begin\n${body}\n// #confirm-shared-end\n`;
   // happy path: a minimal well-formed region derives cleanly

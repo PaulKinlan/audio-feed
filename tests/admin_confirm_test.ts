@@ -256,6 +256,77 @@ Deno.test("a dismissed dialog leaves the button usable (audio-feed-05b)", async 
   assertEquals(deletes(harness).length, 1);
 });
 
+Deno.test("closing confirmDialog via Escape or light-dismiss (onClose with returnValue !== 'confirm') sends no destructive request (audio-feed-qz3x)", async () => {
+  const harness = await openConsole();
+  const dialog = harness.byId("confirmDialog");
+  const msgEl = harness.byId("confirmMessage");
+
+  // Drive the dialog through its native "close" event (onClose in confirm-shared.js)
+  // rather than clicking #confirmOkBtn or #confirmCancelBtn, so the test directly proves
+  // that `resolve(confirmDialog.returnValue === "confirm")` guards destructive actions
+  // when the user presses Escape (returnValue === "") or light-dismisses (returnValue === "cancel").
+  let closeReturnValue: string | undefined = undefined;
+  dialog.showModal = () => {
+    dialog.open = true;
+    harness.confirms.push({
+      message: msgEl.textContent,
+      answer: closeReturnValue === "confirm",
+    });
+    queueMicrotask(() => {
+      dialog.close!(closeReturnValue);
+    });
+  };
+
+  const remove = harness.buttons(harness.byId("manageSourcesBody"), "Remove");
+  assertEquals(remove.length, 1);
+
+  // 1. Escape on Remove (close() with no arg -> returnValue is "")
+  dialog.returnValue = "";
+  closeReturnValue = undefined;
+  remove[0]!.click();
+  await harness.flush();
+  assertEquals(harness.confirms.length, 1, "Remove must open confirmDialog");
+  assertEquals(dialog.returnValue, "", "Escape leaves returnValue as ''");
+  assertEquals(deletes(harness).length, 0, "Escape on Remove must not send DELETE");
+
+  // 2. Light-dismiss on Remove (returnValue === "cancel")
+  closeReturnValue = "cancel";
+  remove[0]!.click();
+  await harness.flush();
+  assertEquals(harness.confirms.length, 2);
+  assertEquals(deletes(harness).length, 0, "light-dismiss on Remove must not send DELETE");
+
+  // 3. Escape on Rotate token (returnValue === "")
+  dialog.returnValue = "";
+  closeReturnValue = undefined;
+  harness.byId("rotateManageToken").click();
+  await harness.flush();
+  assertEquals(harness.confirms.length, 3, "Rotate must open confirmDialog");
+  assertEquals(rotations(harness).length, 0, "Escape on Rotate must not send POST /rotate-token");
+
+  // 4. Light-dismiss on Rotate token (returnValue === "cancel")
+  closeReturnValue = "cancel";
+  harness.byId("rotateManageToken").click();
+  await harness.flush();
+  assertEquals(harness.confirms.length, 4);
+  assertEquals(
+    rotations(harness).length,
+    0,
+    "light-dismiss on Rotate must not send POST /rotate-token",
+  );
+
+  // 5. Positive control: closing via native form[method=dialog] confirm submit
+  //    (returnValue === "confirm" reaching onClose directly) DOES send the requests.
+  closeReturnValue = "confirm";
+  harness.byId("rotateManageToken").click();
+  await harness.flush();
+  assertEquals(rotations(harness).length, 1, "returnValue === 'confirm' on close must rotate once");
+
+  remove[0]!.click();
+  await harness.flush();
+  assertEquals(deletes(harness).length, 1, "returnValue === 'confirm' on close must delete once");
+});
+
 Deno.test("clicking Poll Feeds Now triggers POST /api/admin/poll-now and updates feedback (audio-feed-dsn)", async () => {
   const harness = await runAdminScript({
     storedToken: "admin-secret",
