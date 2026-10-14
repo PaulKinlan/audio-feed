@@ -232,6 +232,9 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
       // "Verifying a landing against production".
       deploy: deploy.id,
       deploySource: deploy.source,
+      // audio-feed-ciia: expose the source commit SHA alongside the deploy ID so
+      // production revision questions are answerable directly without Deploy API tokens.
+      commit: deploy.commit,
       time: new Date().toISOString(),
     });
   });
@@ -395,19 +398,43 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
  *
  * An empty or whitespace-only variable counts as ABSENT: `??` alone would return "" and
  * quietly make every deployment look identical.
+ *
+ * audio-feed-ciia: expose `commit` alongside `id` and `source` so when a pipeline supplies
+ * both `DENO_DEPLOYMENT_ID` and `GIT_COMMIT_SHA`, the Git commit is not masked and is
+ * visible in /health.
  */
 export function deployFingerprint(
   env: (name: string) => string | undefined = (name) => Deno.env.get(name),
-): { id: string; source: "DENO_DEPLOYMENT_ID" | "GIT_COMMIT_SHA" | "dev" } {
-  const pick = (name: string) => {
-    const value = env(name);
-    return value && value.trim() ? value.trim() : undefined;
+): {
+  id: string;
+  source: "DENO_DEPLOYMENT_ID" | "GIT_COMMIT_SHA" | "dev";
+  commit: string | null;
+} {
+  const pick = (...names: string[]) => {
+    for (const name of names) {
+      const value = env(name);
+      if (value && value.trim()) return value.trim();
+    }
+    return undefined;
   };
   const deployment = pick("DENO_DEPLOYMENT_ID");
-  if (deployment) return { id: deployment, source: "DENO_DEPLOYMENT_ID" };
-  const commit = pick("GIT_COMMIT_SHA");
-  if (commit) return { id: commit, source: "GIT_COMMIT_SHA" };
-  return { id: "dev", source: "dev" };
+  const commit = pick("GIT_COMMIT_SHA", "GIT_COMMIT", "DENO_DEPLOY_GIT_COMMIT", "COMMIT_SHA");
+
+  if (deployment) {
+    return {
+      id: deployment,
+      source: "DENO_DEPLOYMENT_ID",
+      commit: commit ?? null,
+    };
+  }
+  if (commit) {
+    return {
+      id: commit,
+      source: "GIT_COMMIT_SHA",
+      commit,
+    };
+  }
+  return { id: "dev", source: "dev", commit: null };
 }
 
 export function createApp(
