@@ -16,7 +16,11 @@ import { approvedUserFor, type ComposeDeps, forbidden, presentedToken } from "./
 import type { AppContext, AppHandlers } from "../app.ts";
 import { newArticleId, newEpisodeId } from "../ids.ts";
 import { type Article } from "../types.ts";
-import { screenErrorMessage, SUPPRESSED_MESSAGE } from "../observability/error_screen.ts";
+import {
+  screenErrorForLogging,
+  screenErrorMessage,
+  SUPPRESSED_MESSAGE,
+} from "../observability/error_screen.ts";
 
 /**
  * Walk a whole-catalogue episode scan one batch at a time (audio-feed-att).
@@ -123,10 +127,10 @@ export function createIngestHandler(
       // re-queues here, since this write is deliberately blind; what it can no longer do
       // is half-succeed.
       await ctx.stores.metadata.putArticleWithEpisode(record, episode);
-      // Seed the inbox source on first use so the per-source feed route has a
-      // source to resolve rather than 404ing on an empty inbox.
-      // audio-feed-0s2j: post-commit source seeding must never fail the enqueue
-      // or record a false pre-episode dead-letter after the episode is already persisted.
+      // audio-feed-0s2j, audio-feed-16jq: once the pair write commits, the episode IS
+      // persisted in KV as pending. Nothing in the post-commit auxiliary path (source seeding,
+      // degradation logging, stderr warnings) must ever throw or escape enqueue to fail the 202
+      // response or emit a false pre-episode dead-letter log.
       try {
         if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
           await ctx.stores.metadata.putSource({
@@ -142,31 +146,39 @@ export function createIngestHandler(
           });
         }
       } catch (err) {
+        // audio-feed-0xdm: screen operational stderr logs to eliminate unscreened error/stack/article text
+        const screened = screenErrorForLogging(err);
         console.warn(
-          `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued:`,
-          err,
+          `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued: ${screened.message}`,
         );
-        // audio-feed-l5w1: record a distinct durable warn event for post-commit auxiliary failure
-        // so degraded state (b) is distinguishable from clean success (c) without falsely reporting
-        // pre-episode dead-letter (0s2j).
-        await ctx.stores.metadata.appendLog({
-          time: new Date().toISOString(),
-          severity: "warn",
-          type: "ingest.source_seed_failed",
-          message: "Failed to seed inbox source after episode was queued",
-          process: "app",
-          route: "/api/ingest",
-          userId: user.id,
-          correlationId: crypto.randomUUID(),
-          reason: "source_seed_failed",
-          context: {
-            status: 202,
-            episodeId,
-            articleId,
-            sourceId: INBOX_SOURCE_ID,
-            error: screenErrorMessage(err),
-          },
-        });
+        // audio-feed-l5w1, audio-feed-16jq: record a distinct durable warn event for post-commit
+        // auxiliary failure; wrap in nested try/catch so a failure to record degradation cannot
+        // fail the enqueue or escalate to an enqueue_failed 503 dead-letter.
+        try {
+          await ctx.stores.metadata.appendLog({
+            time: new Date().toISOString(),
+            severity: "warn",
+            type: "ingest.source_seed_failed",
+            message: "Failed to seed inbox source after episode was queued",
+            process: "app",
+            route: "/api/ingest",
+            userId: user.id,
+            correlationId: crypto.randomUUID(),
+            reason: "source_seed_failed",
+            context: {
+              status: 202,
+              episodeId,
+              articleId,
+              sourceId: INBOX_SOURCE_ID,
+              error: screened.message,
+            },
+          });
+        } catch (logErr) {
+          const screenedLogErr = screenErrorForLogging(logErr);
+          console.warn(
+            `[audio-feed] failed to record source_seed_failed log for episode ${episodeId}: ${screenedLogErr.message}`,
+          );
+        }
       }
       return { articleId, episodeId };
     },

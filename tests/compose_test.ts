@@ -445,6 +445,70 @@ Deno.test("audio-feed-tm97: enqueue failure in real handler records ingest.faile
       "durable record must not contain client URL canary",
     );
   }
+
+  // 8. audio-feed-16jq: Post-commit log-write failure must not escape enqueue or become a 503 false dead-letter
+  {
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () => Promise.reject(new Error("source read unavailable"));
+    const origAppendLog = stores.metadata.appendLog.bind(stores.metadata);
+    let rejectedOnce = false;
+    stores.metadata.appendLog = (record) => {
+      if (!rejectedOnce && record.type === "ingest.source_seed_failed") {
+        rejectedOnce = true;
+        return Promise.reject(new Error("kv log append conflict"));
+      }
+      return origAppendLog(record);
+    };
+    const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+    assertEquals(res.status, 202, "post-commit log write failure must NOT escalate to 503");
+    const episodes = await stores.metadata.listEpisodes({ userId: "user-1" });
+    const queuedEpisode = episodes.find((e) => e.title === "An Ingested Article");
+    assert(queuedEpisode, "episode must remain persisted");
+    assertEquals(queuedEpisode.status, "pending");
+    const logs = await stores.metadata.listLogs({ limit: 10 });
+    const failedLog = logs.find((l) => l.type === "ingest.failed");
+    assertEquals(
+      failedLog,
+      undefined,
+      "must NOT emit false pre-episode dead-letter when post-commit logging fails",
+    );
+  }
+
+  // 9. audio-feed-0xdm: Post-commit source seeding failure must not leak article text/canary to console.warn
+  {
+    const CANARY_STDERR = "PRIVATE-BODY-CANARY-38bb";
+    const { fetch, stores } = await seededApp();
+    stores.metadata.getSource = () =>
+      Promise.reject(new Error(`source read unavailable ${CANARY_STDERR}`));
+    const origWarn = console.warn;
+    const captured: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      captured.push(
+        args.map((a) =>
+          a instanceof Error
+            ? `${a.message} ${a.stack}`
+            : typeof a === "object"
+            ? JSON.stringify(a)
+            : String(a)
+        ).join(" "),
+      );
+    };
+    try {
+      const res = await fetch(req("/api/ingest", { method: "POST", headers: json, body }));
+      assertEquals(res.status, 202);
+      const output = captured.join("\n");
+      assert(
+        !output.includes(CANARY_STDERR),
+        `console.warn leaked canary to operational stderr: ${output}`,
+      );
+      assert(
+        output.includes(SUPPRESSED_MESSAGE),
+        "console.warn must use screened error message",
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+  }
 });
 
 Deno.test("admin approval requires the admin token and refuses unknown users", async () => {
