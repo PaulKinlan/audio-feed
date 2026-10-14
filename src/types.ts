@@ -283,6 +283,18 @@ export interface Episode {
   audioKey?: string;
   /** Enclosure length in bytes — RSS `<enclosure length>` requires it. */
   byteLength?: number;
+  /**
+   * The size of the terminal whole-episode artefact the last invocation was about to upload
+   * (audio-feed-amhn), written when the worker checkpoints its entry into the terminal stage.
+   *
+   * WHY IT IS A SEPARATE FIELD AND NOT `byteLength`: `byteLength` is the size of the audio the episode
+   * actually HAS, and it is written only when the episode reaches ready — which is precisely why no
+   * failed upload in production had a recorded size at all, and why the 2026-10-14 investigation could
+   * not say whether the put died on a large payload or a small one. This field is set BEFORE the put is
+   * attempted, so an attempt that is KILLED inside it leaves its size behind for the abandonment record
+   * to carry (see abandonedClaimEvent/expiredClaimEvent in src/storage/episode_events.ts).
+   */
+  bytesAttempted?: number;
   durationSeconds?: number;
   /** e.g. `audio/mpeg`. */
   contentType?: string;

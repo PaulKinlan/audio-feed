@@ -460,6 +460,13 @@ export interface EpisodeRepository {
       phase?: string;
       now?: string;
       scriptTurns?: Array<{ speaker: string; text: string }>;
+      /**
+       * Size of the terminal whole-episode artefact this checkpoint is about to upload
+       * (audio-feed-amhn; see `Episode.bytesAttempted`). Optional and additive: a caller that supplies
+       * nothing behaves exactly as before, and the value survives the claim so the abandonment record
+       * can carry the size of an upload that never finished.
+       */
+      bytesAttempted?: number;
     },
   ): Promise<boolean>;
 
