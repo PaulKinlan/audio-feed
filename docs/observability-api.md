@@ -105,13 +105,18 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
     "id": "42",
     "seq": 42,
     "time": "2026-10-11T12:00:42.000Z",
-    "severity": "error",
-    "type": "synthesis.failed",
+    "severity": "warn",
+    "type": "synthesis.stage",
     "route": null,
     "job": "synthesis",
-    "message": "…",
+    "message": "synthesis stage tts FAILED after 123ms",
     "stack": null,
-    "correlationId": "epi-1"
+    "correlationId": "invocation-1",
+    "episodeId": "epi-1",
+    "phase": "tts",
+    "attempt": null,
+    "durationMs": 123,
+    "context": { "invocationId": "invocation-1", "stageMark": "tts", "episodeId": "epi-1" }
   }],
   "hasMore": false,
   "scanned": 1,
@@ -127,7 +132,26 @@ not in a clock, a cursor also survives a restart: a redeploy continues the same 
 ```
 
 `id` is the sequence in string form: it is the identity the store guarantees unique and ordered, and
-a separate id would be a second identity that could disagree with the cursor.
+a separate id would be a second identity that could disagree with the cursor. Every event has the
+same top-level keys: absent `episodeId`, `phase`, `attempt`, and `durationMs` are `null`, not missing.
+These are structured root fields from the stored record, not values inferred from `message` or
+`context`. For `synthesis.stage`, `correlationId` names the **invocation** while `episodeId` names
+the **episode**; group failed stages by `(episodeId, phase)` with `severity=warn` (which also includes
+errors). Use `severity=all` to include successful `info` stage marks. Stage marks may be capped by
+the producer, so missing marks do not prove a stage never ran.
+
+The existing `context` field remains available but is not a uniform join schema: it can contain
+nested, source-specific data including CSP reports from a public endpoint. The store caps and
+redacts context by **key name**, not by screening arbitrary user text. This bearer-key endpoint
+therefore does not newly project `userId` (a subscriber identifier) or `reason` (potentially
+free-form error text); admin-session pages expose those fields separately. The existing `message`
+and `stack` projection and its writer-side text screening are unchanged. Do not treat a bearer key
+as permission to redistribute free-form log text.
+
+The existing `window.oldestRetained` reports the retention boundary; if a cursor is older, `410`
+reports a gap rather than silent loss. `invocationDetection.olderStartsUnknown`, `retentionGap`, and
+`moreDue` already describe limits of the overdue-invocation scan; this change adds no competing
+coverage fields. Neither those indicators nor the structured event fields reconstruct pruned logs.
 
 `/summary` returns `{ cursor, since, total, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, window }`.
 `byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means

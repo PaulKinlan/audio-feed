@@ -80,6 +80,15 @@ function toEvent(record: LogRecord) {
     message: record.message,
     stack: record.stack ?? null,
     correlationId: record.correlationId ?? null,
+    // Bounded structured root fields let a poller join a stage to its episode and group failures
+    // without per-type context parsing or interpreting prose. A stage correlationId names its
+    // invocation, not its episode. Keep optional keys present as null for a stable event shape.
+    episodeId: record.episodeId ?? null,
+    phase: record.phase ?? null,
+    attempt: record.attempt ?? null,
+    durationMs: record.durationMs ?? null,
+    // Pre-existing exposure: do not add userId (subscriber identity) or reason (free-form text)
+    // to this bearer-key projection. Admin-session log views can show those separately.
     context: record.context ?? null,
   };
 }
