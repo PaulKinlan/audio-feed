@@ -257,7 +257,10 @@ export async function handleAdminIssues({ ctx, req }: RouteContext<AppContext>):
 
   ${renderAdminNav("issues")}
 
-  <form method="GET" action="/admin/observability/issues" class="filter-form">
+  <form method="GET" action="/admin/observability/issues" class="filter-form"
+        toolname="filter_observability_issues"
+        tooldescription="Filter observability issues by severity, event type, route, correlation ID or episode ID."
+        toolautosubmit>
     <div class="filter-field">
       <label for="filterSeverity">Severity</label>
       <select id="filterSeverity" name="severity">
