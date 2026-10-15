@@ -72,7 +72,14 @@ import {
   utcDayKey,
 } from "../types.ts";
 import type { Article, AudioMode, Episode, Source, SynthesisSegmentRecord } from "../types.ts";
-import { type BlobInfo, type BlobStore, collect, type MetadataStore } from "../storage/mod.ts";
+import {
+  type BlobInfo,
+  type BlobStore,
+  collect,
+  detachUint8Array,
+  type MetadataStore,
+} from "../storage/mod.ts";
+import { S3BlobStore } from "../storage/s3.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import {
   DEFAULT_DAILY_EPISODE_BUDGET,
@@ -2426,6 +2433,7 @@ async function runSynthesisBatchCore(
 
     const audioDurationSeconds = audio.durationSeconds;
     const bytes = audio.format === "wav" ? audio.rawBytes : audio.toWav();
+    const audioByteLength = bytes.byteLength;
     audio = null; // Free decoded audio result structure and intermediate references (audio-feed-sp38)
 
     // audio-feed-aqms: the upload estimate must be honest about PAYLOAD SIZE. The flat
@@ -2437,7 +2445,7 @@ async function runSynthesisBatchCore(
     // resumably instead: the next 2-minute tick retries with a fresh budget and the
     // durable segment cache, converting a lost episode into lost minutes.
     const uploadEstimate = opts.estimatedUploadDurationMs ?? ESTIMATED_UPLOAD_DURATION_MS;
-    const sizeScaledUploadEstimate = estimateUploadDurationMs(bytes.length, uploadEstimate);
+    const sizeScaledUploadEstimate = estimateUploadDurationMs(audioByteLength, uploadEstimate);
 
     // FOUR-PROPERTY INVARIANT COVERS TERMINAL PERSISTENCE (audio-feed-dv4p):
     // 1. Bound: Invocation bound covers terminal audio blob write and metadata completion.
@@ -2451,14 +2459,32 @@ async function runSynthesisBatchCore(
     // identical regeneration gets a new immutable URL. Explicit revisions are
     // retained for tests that deliberately exercise repeated-key orphan handling;
     // segment-commit keys continue to use the per-attempt revision above.
-    const digestInput = bytes.buffer instanceof ArrayBuffer
-      ? (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-        ? (bytes as unknown as BufferSource)
-        : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
-      : new Uint8Array(bytes);
-    const audioDigest = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", digestInput),
-    );
+    let audioDigest: Uint8Array;
+    if (audioByteLength > 4 * 1024 * 1024) {
+      // audio-feed-1ib3: Chunked hashing for large payloads (>4 MB) to prevent V8 external-memory spikes in crypto.subtle.digest
+      const CHUNK_SIZE = 2 * 1024 * 1024;
+      const numChunks = Math.ceil(audioByteLength / CHUNK_SIZE);
+      const intermediateDigests = new Uint8Array(numChunks * 32);
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, audioByteLength);
+        const chunk = bytes.subarray(start, end);
+        const digest = await crypto.subtle.digest("SHA-256", chunk as unknown as BufferSource);
+        intermediateDigests.set(new Uint8Array(digest), i * 32);
+      }
+      audioDigest = new Uint8Array(
+        await crypto.subtle.digest("SHA-256", intermediateDigests),
+      );
+    } else {
+      const digestInput = bytes.buffer instanceof ArrayBuffer
+        ? (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+          ? (bytes as unknown as BufferSource)
+          : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength))
+        : new Uint8Array(bytes);
+      audioDigest = new Uint8Array(
+        await crypto.subtle.digest("SHA-256", digestInput),
+      );
+    }
     const audioHash = Array.from(audioDigest, (byte) => byte.toString(16).padStart(2, "0")).join(
       "",
     );
@@ -2607,7 +2633,7 @@ async function runSynthesisBatchCore(
           let stored: BlobInfo | null = null;
           await markStage("verify", async () => {
             existing = await blobs.head(stagingKey);
-            if (existing && existing.size === bytes.length) {
+            if (existing && existing.size === audioByteLength) {
               const object = await blobs.get(stagingKey);
               if (object) {
                 // audio-feed-sp38: Stream-compare directly against bytes without allocating
@@ -2619,7 +2645,7 @@ async function runSynthesisBatchCore(
                   while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    if (offset + value.length > bytes.length) {
+                    if (offset + value.length > audioByteLength) {
                       matched = false;
                       break;
                     }
@@ -2635,8 +2661,11 @@ async function runSynthesisBatchCore(
                 } finally {
                   reader.releaseLock();
                 }
-                if (matched && offset === bytes.length) {
+                if (matched && offset === audioByteLength) {
                   stored = existing;
+                  if (ctx.stores.blobs instanceof S3BlobStore) {
+                    detachUint8Array(bytes);
+                  }
                 }
               }
             }
@@ -2661,7 +2690,7 @@ async function runSynthesisBatchCore(
                 promptVersion: PROMPT_VERSION,
                 voice: stagingKey,
                 audioKey: stagingKey,
-                byteLength: bytes.length,
+                byteLength: audioByteLength,
                 owner: opts.owner,
                 claimAt: new Date(nowMs).toISOString(),
                 createdAt: new Date(nowMs).toISOString(),
@@ -2680,7 +2709,7 @@ async function runSynthesisBatchCore(
             // a gap where an attempt would have been.
             if (signal?.aborted) {
               await recordUploadSkipped(currentEpisode.id, {
-                bytesAttempted: bytes.length,
+                bytesAttempted: audioByteLength,
                 uploadRetry: nextUploadRetry,
                 abortReason: signal.reason instanceof Error ? signal.reason.name : undefined,
               });
@@ -2697,7 +2726,7 @@ async function runSynthesisBatchCore(
               // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
               // size being attempted, rather than only the absence of a completion mark.
               await recordUploadEntered(currentEpisode.id, {
-                bytesAttempted: bytes.length,
+                bytesAttempted: audioByteLength,
                 uploadRetry: nextUploadRetry,
               });
               // NOTE FOR A LATER READER (audio-feed-amhn, round-1 review finding 2). The invocation
@@ -2718,11 +2747,14 @@ async function runSynthesisBatchCore(
               putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
                 .catch(() => {});
               stored = await putPromise;
+              if (ctx.stores.blobs instanceof S3BlobStore) {
+                detachUint8Array(bytes);
+              }
             }
           }
           if (signal?.aborted) throw signal.reason;
 
-          const byteLength = stored.size ?? bytes.length;
+          const byteLength = stored.size ?? audioByteLength;
           // Atomic terminal billing (audio-feed-thrs, audio-feed-pqo8):
           // Billing mutations are appended to the exact same atomic transaction as episode completion.
           const wrote = await metadata.completeEpisode(
@@ -2774,7 +2806,7 @@ async function runSynthesisBatchCore(
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,
-          byteLength: settle.episode.byteLength ?? bytes.length,
+          byteLength: settle.episode.byteLength ?? audioByteLength,
         });
         break;
       }
@@ -2820,7 +2852,7 @@ async function runSynthesisBatchCore(
             claimOutcome: "yielded",
             uploadRetry: nextUploadRetry,
             reason: `terminal upload interrupted by invocation budget (${
-              Math.round(bytes.length / 1024)
+              Math.round(audioByteLength / 1024)
             } KB); retrying on a later tick (retry ${nextUploadRetry}/${maxRetries})`,
           }),
         );
@@ -2864,7 +2896,7 @@ async function runSynthesisBatchCore(
         result.ready.push({
           episodeId: currentEpisode.id,
           audioKey: stagingKey,
-          byteLength: settle.episode.byteLength ?? bytes.length,
+          byteLength: settle.episode.byteLength ?? audioByteLength,
         });
         break;
       }

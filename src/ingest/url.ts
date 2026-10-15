@@ -78,7 +78,7 @@ export function publicLookup(
       const family = typeof options === "number" ? options : options.family;
       const selected = addresses.filter((item) => !family || item.family === family);
       const first = selected[0];
-      if (!first) throw new IngestError(502, "Article hostname has no usable address.");
+      if (!first) throw new IngestError(422, "Article hostname has no usable address.");
       if (typeof options === "object" && options.all) {
         callback(null, selected);
       } else {
@@ -102,7 +102,7 @@ export const requestPublic: Transport = (url, signal, init) => {
       lookup: publicLookup(),
       signal,
       agent: false,
-      maxHeaderSize: 16 * 1024,
+      maxHeaderSize: 64 * 1024,
       headers: {
         "Accept": "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
         "Accept-Encoding": "gzip, identity",
@@ -277,7 +277,7 @@ export async function fetchArticle(
   } catch (error) {
     if (signal.aborted) throw new IngestError(504, "Article fetch timed out or was cancelled.");
     if (error instanceof IngestError) throw error;
-    throw new IngestError(502, "Unable to fetch the article.");
+    throw new IngestError(422, "Unable to fetch the article.");
   } finally {
     clearTimeout(timeout);
   }
@@ -381,7 +381,7 @@ export async function fetchFeedDocument(
   } catch (error) {
     if (signal.aborted) throw new IngestError(504, "Feed fetch timed out or was cancelled.");
     if (error instanceof IngestError) throw error;
-    throw new IngestError(502, "Unable to fetch the feed.");
+    throw new IngestError(422, "Unable to fetch the feed.");
   } finally {
     clearTimeout(timeout);
   }
@@ -572,7 +572,7 @@ export async function discoverFeeds(
   } catch (error) {
     if (signal.aborted) throw new IngestError(504, "Feed discovery timed out or was cancelled.");
     if (error instanceof IngestError) throw error;
-    throw new IngestError(502, "Unable to discover feeds on that page.");
+    throw new IngestError(422, "Unable to discover feeds on that page.");
   } finally {
     clearTimeout(timeout);
   }

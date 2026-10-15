@@ -62,7 +62,7 @@ export class MemoryBlobStore implements BlobStore {
     body: Uint8Array | ReadableStream<Uint8Array>,
     opts?: { contentType?: string; signal?: AbortSignal },
   ): Promise<BlobInfo> {
-    const bytes = body instanceof Uint8Array ? body : await collect(body);
+    const bytes = body instanceof Uint8Array ? body.slice() : await collect(body);
     const contentType = opts?.contentType ?? "application/octet-stream";
     // audio-feed-aqms: honour the abort signal so the in-memory adapter mirrors
     // the S3 adapter's genuinely-abortable put for tests.
@@ -91,7 +91,7 @@ export class MemoryBlobStore implements BlobStore {
     if (this.#objects.has(key)) {
       return null;
     }
-    const bytes = body instanceof Uint8Array ? body : await collect(body);
+    const bytes = body instanceof Uint8Array ? body.slice() : await collect(body);
     const contentType = opts?.contentType ?? "application/octet-stream";
     if (this.#objects.has(key)) {
       return null;

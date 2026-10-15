@@ -818,3 +818,13 @@ Deno.test("byline chrome is stripped so narration says only the name (audio-feed
   equal(cleanBylineName("Authored by Pat!"), "Pat");
   equal(cleanBylineName(""), "");
 });
+
+Deno.test("audio-feed-u58d: unreachable external article URL returns 422 rather than 502 server failure", async () => {
+  await rejects(
+    () =>
+      fetchArticle(source, {
+        transport: () => Promise.reject(new Error("connect ECONNREFUSED")),
+      }),
+    (error: unknown) => error instanceof IngestError && error.status === 422,
+  );
+});

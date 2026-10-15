@@ -33,6 +33,23 @@ export const KNOWN_ERROR_PHRASES: readonly string[] = [
   "Synthesis turn boundary lost or duplicated transcript turns",
   "Invalid WAV: missing RIFF/WAVE container header",
   "Unauthorized: admin token required",
+  "Provide an absolute HTTP or HTTPS article URL.",
+  "Only public HTTP(S) article URLs on standard ports are allowed.",
+  "Article hostname must resolve only to public addresses.",
+  "Article hostname has no usable address.",
+  "Request or article exceeds the size limit.",
+  "Article has an invalid or excessive redirect chain.",
+  "Article is unavailable or requires a subscription.",
+  "Article must be an HTML page or a PDF document.",
+  "PDF exceeds the 10 MiB size limit.",
+  "Article exceeds the 2 MiB size limit.",
+  "Article uses an unsupported character encoding.",
+  "Article could not be fetched.",
+  "Article fetch timed out or was cancelled.",
+  "Unable to fetch the article.",
+  "No readable article found; login and script-only pages are not supported.",
+  "Invalid PDF: document does not start with %PDF- header.",
+  "No readable text found in PDF document; scanned image or password-protected PDFs are not supported.",
 ];
 
 /** The screen. Returns a phrase from KNOWN_ERROR_PHRASES, or SUPPRESSED_MESSAGE - never anything else. */

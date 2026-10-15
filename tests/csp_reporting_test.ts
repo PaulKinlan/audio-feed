@@ -470,3 +470,40 @@ Deno.test("audio-feed-r49r: uncommitted budget CAS write fails closed with 429 a
     "no report logs must be stored when budget write did not commit",
   );
 });
+
+Deno.test("audio-feed-u58d: benign client-side NEL reports (abandoned, dns.address_changed, /api/reports/csp status=0) log at info severity", async () => {
+  const { app, stores } = await setupApp();
+
+  const reports = [
+    {
+      type: "network-error",
+      url: `${BASE}/`,
+      body: { type: "abandoned", phase: "application", status_code: 0 },
+    },
+    {
+      type: "network-error",
+      url: `${BASE}/api/reports/csp`,
+      body: { type: "dns.address_changed", phase: "dns", status_code: 0 },
+    },
+    {
+      type: "network-error",
+      url: `${BASE}/api/reports/csp`,
+      body: { type: "dns.name_not_resolved", phase: "dns", status_code: 0 },
+    },
+  ];
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: { "content-type": "application/reports+json" },
+      body: JSON.stringify(reports),
+    }),
+  );
+  assertEquals(res.status, 204);
+
+  const logs = (await stores.metadata.listLogs()).filter((l) => l.type === "report.network-error");
+  assertEquals(logs.length, 3);
+  for (const log of logs) {
+    assertEquals(log.severity, "info");
+  }
+});

@@ -72,6 +72,30 @@ export const REPORT_SEVERITY: Record<string, LogSeverity> = {
 };
 
 /**
+ * Determine the log severity for a sanitized browser report (audio-feed-u58d).
+ * Client-side NEL events caused by user navigation cancellation (`abandoned`),
+ * local device network switches (`dns.address_changed`), or offline background
+ * report flushes to `/api/reports/csp` with `status_code: 0` are informational
+ * client telemetry rather than server warnings.
+ */
+export function classifyReportSeverity(report: SanitizedReport): LogSeverity {
+  if (report.type === "network-error") {
+    const nelType = typeof report.body["type"] === "string" ? report.body["type"] : "";
+    const statusCode = report.body["status_code"];
+    const isSelfReport = typeof report.url === "string" &&
+      report.url.includes("/api/reports/csp");
+    if (
+      nelType === "abandoned" ||
+      nelType === "dns.address_changed" ||
+      (isSelfReport && statusCode === 0)
+    ) {
+      return "info";
+    }
+  }
+  return REPORT_SEVERITY[report.type] ?? "warn";
+}
+
+/**
  * Filter out prototype-pollution vectors and clean primitive values in a report body.
  */
 export function sanitizeReportBody(raw: unknown): Record<string, unknown> {
@@ -404,7 +428,7 @@ export function createCspReportsHandler(
         raw.user_agent = defaultUserAgent;
       }
       const report = sanitizeReport(raw);
-      const severity = REPORT_SEVERITY[report.type] ?? "warn";
+      const severity = classifyReportSeverity(report);
       const type = `report.${report.type}`;
       const message = buildReportMessage(report);
 

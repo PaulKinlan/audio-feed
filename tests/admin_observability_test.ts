@@ -28,7 +28,7 @@ import {
   REPORT_QUEUE_CAP,
 } from "../src/observability/admin_report.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
-import { claimLifecycleEvent } from "../src/storage/episode_events.ts";
+import { CLAIM_LIFECYCLE_EVENT, claimLifecycleEvent } from "../src/storage/episode_events.ts";
 import { DEFAULT_CLAIM_LEASE_MS } from "../src/types.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { LogRecord } from "../src/storage/mod.ts";
@@ -1500,4 +1500,112 @@ Deno.test("audio-feed-exww: the default-lease label appears only when the claim'
   )).text();
   assertStringIncludes(body, "ep-lease-unknown");
   assertStringIncludes(body, "computed from the deployment lease");
+});
+
+Deno.test("audio-feed-8amo: attempt-history folding resets phases and outcome when an attempt starts again", () => {
+  const base = {
+    process: "worker" as const,
+    type: CLAIM_LIFECYCLE_EVENT,
+    userId: "user-1",
+    episodeId: "ep-retry",
+    correlationId: "ep-retry",
+  };
+  const records: LogRecord[] = [
+    {
+      ...base,
+      seq: 1,
+      time: "2026-10-14T10:00:00.000Z",
+      severity: "info",
+      message: "claim started",
+      phase: "claimed",
+      attempt: 1,
+      context: { owner: "worker-1", leaseMs: 60_000 },
+    },
+    {
+      ...base,
+      seq: 2,
+      time: "2026-10-14T10:00:10.000Z",
+      severity: "info",
+      message: "drafting",
+      phase: "drafting_script",
+      attempt: 1,
+    },
+    {
+      ...base,
+      seq: 3,
+      time: "2026-10-14T10:00:30.000Z",
+      severity: "info",
+      message: "yielded",
+      phase: "upload_retry",
+      attempt: 1,
+      context: { claimOutcome: "yielded" },
+    },
+    // Attempt restarts (e.g. after attempt counter reset on script progress)
+    {
+      ...base,
+      seq: 4,
+      time: "2026-10-14T10:02:00.000Z",
+      severity: "info",
+      message: "claim restarted",
+      phase: "claimed",
+      attempt: 1,
+      context: { owner: "worker-2", leaseMs: 60_000 },
+    },
+    {
+      ...base,
+      seq: 5,
+      time: "2026-10-14T10:02:10.000Z",
+      severity: "info",
+      message: "synthesizing",
+      phase: "uploading_audio",
+      attempt: 1,
+    },
+  ];
+
+  const attempts = claimAttemptsFrom(records, Date.parse("2026-10-14T10:02:20.000Z"));
+  assertEquals(attempts.length, 1);
+  const att = attempts[0];
+  assertEquals(att?.attempt, 1);
+  assertEquals(att?.startedAt, "2026-10-14T10:02:00.000Z");
+  assertEquals(att?.owner, "worker-2");
+  assertEquals(att?.outcome, "in-flight");
+  assertEquals(att?.phase, "uploading_audio");
+  assertEquals(
+    att?.phases,
+    ["claimed", "uploading_audio"],
+    "previous phases from before the restart must be cleared",
+  );
+});
+
+Deno.test("audio-feed-8amo: duplicate episode failures produce unique card ids and link to latest above", async () => {
+  const { stores, page } = await setup();
+  await stores.metadata.appendLog({
+    time: "2026-10-14T11:00:00.000Z",
+    severity: "error",
+    type: "synthesis.failure",
+    process: "worker",
+    message: "Failure event 1",
+    episodeId: "ep-dupe",
+    userId: "user-1",
+  });
+  await stores.metadata.appendLog({
+    time: "2026-10-14T11:05:00.000Z",
+    severity: "error",
+    type: "synthesis.failure",
+    process: "worker",
+    message: "Failure event 2",
+    episodeId: "ep-dupe",
+    userId: "user-1",
+  });
+
+  const response = await page(`${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`);
+  const body = await response.text();
+  assertEquals(response.status, 200);
+
+  // Checks admin.css stylesheet inclusion
+  assertStringIncludes(body, "admin.css");
+  // First failure card has id="ep-ep-dupe"
+  assertStringIncludes(body, 'id="ep-ep-dupe"');
+  // Second failure card has a unique id and links to #ep-ep-dupe
+  assertStringIncludes(body, 'href="#ep-ep-dupe"');
 });

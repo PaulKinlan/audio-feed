@@ -329,7 +329,7 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
   const byAttempt = new Map<number, ClaimAttempt>();
   for (const record of records) {
     if (record.type !== CLAIM_LIFECYCLE_EVENT) continue;
-    const attempt = record.attempt ?? 1;
+    const attempt = Math.max(1, record.attempt ?? 1);
     const existing = byAttempt.get(attempt);
     const row: ClaimAttempt = existing ?? {
       attempt,
@@ -345,11 +345,22 @@ export function claimAttemptsFrom(records: LogRecord[], nowMs: number): ClaimAtt
       phases: [],
     };
     const context = (record.context ?? {}) as Record<string, unknown>;
-    // No `existing &&` guard: setting startedAt from a START record is correct for the first one seen
-    // as well as for a re-anchor after a later phase, and the guard is what let a non-start first
-    // record stand in as the start (audio-feed-mkfe).
-    if (isClaimStartRecord(record)) row.startedAt = record.time;
-    if (existing) row.lastHeartbeat = record.time;
+    // audio-feed-8amo: When a new claim start is recorded for this attempt (e.g. after a retry or
+    // attempt-counter reset on progress), reset the attempt's in-flight state and clear previous phases.
+    if (isClaimStartRecord(record)) {
+      row.startedAt = record.time;
+      row.lastHeartbeat = undefined;
+      row.leaseExpired = null;
+      row.leaseExpiresAt = undefined;
+      row.outcome = "in-flight";
+      row.endedWithTerminalWrite = false;
+      row.expiryEvidence = undefined;
+      row.reason = undefined;
+      row.durationMs = undefined;
+      row.phases = [];
+    } else if (existing) {
+      row.lastHeartbeat = record.time;
+    }
     if (record.phase) {
       row.phase = record.phase;
       if (row.phases[row.phases.length - 1] !== record.phase) row.phases.push(record.phase);

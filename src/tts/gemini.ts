@@ -1490,7 +1490,7 @@ export function decodedFromWav(bytes: Uint8Array): DecodedAudioResult {
 }
 
 export function joinTtsAudio(
-  chunks: DecodedAudioResult[],
+  chunks: readonly DecodedAudioResult[],
   allowTruncated = false,
 ): DecodedAudioResult {
   if (chunks.length === 0) throw new GeminiTtsError("Narration contained no spoken text", 400);

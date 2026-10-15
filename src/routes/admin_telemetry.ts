@@ -264,7 +264,7 @@ export async function handleAdminTelemetry(
     logsError ? "Unavailable" : browserReports.length
   })</h2>
     </div>
-    <p class="muted">Reports collected via W3C Reporting API and CSP endpoint (<code>/api/reports/csp</code>):</p>
+    <p class="muted">Reports collected via W3C Reporting API and CSP endpoint (<code>/api/reports/csp</code>). Note: NEL <code>phase=dns status=0</code> and <code>type=abandoned status=0</code> events reflect client-side offline/DNS blips or cancelled browser navigations, not origin server errors.</p>
 
     ${
     logsError
@@ -287,14 +287,24 @@ export async function handleAdminTelemetry(
           ? `<tr><td colspan="4" class="muted text-center">No browser security or crash reports recorded.</td></tr>`
           : browserReports.slice(0, 25).map((r) => {
             const repType = r.type.replace(/^report\./, "");
-            const blockedUrl = r.context?.url ? String(r.context.url) : "—";
+            const body = (r.context?.body && typeof r.context.body === "object")
+              ? r.context.body as Record<string, unknown>
+              : {};
+            const blockedUri = String(
+              body["blockedURL"] ?? body["blocked-uri"] ?? r.context?.url ?? "—",
+            );
+            const isClientNel = repType === "network-error" &&
+              (body["status_code"] === 0 || body["phase"] === "dns" ||
+                body["type"] === "abandoned");
             return `<tr>
               <td><time datetime="${esc(r.time)}">${
               esc(r.time.slice(0, 19).replace("T", " "))
             }Z</time></td>
-              <td><code>${esc(repType)}</code></td>
+              <td><code>${esc(repType)}</code>${
+              isClientNel ? ` <span class="muted u-fs-xs">(client network/nav)</span>` : ""
+            }</td>
               <td>${esc(r.message)}</td>
-              <td><span class="mono u-fs-xs">${esc(blockedUrl)}</span></td>
+              <td><span class="mono u-fs-xs">${esc(blockedUri)}</span></td>
             </tr>`;
           }).join("")
       }

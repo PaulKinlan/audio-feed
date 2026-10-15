@@ -6,7 +6,7 @@
  * rather than relying solely on client-side promise rejection.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { S3BlobStore } from "../src/storage/s3.ts";
 
 Deno.test("S3BlobStore.put terminates underlying socket and server stream on abort (audio-feed-q3d7)", async () => {
@@ -176,6 +176,83 @@ Deno.test("S3BlobStore.putIfAbsent terminates underlying socket and server strea
     );
   } finally {
     controller.abort();
+    await server.shutdown();
+  }
+});
+
+Deno.test("S3BlobStore.put performs multipart upload with 8 MB parts for payloads > 20 MB (audio-feed-1ib3)", async () => {
+  const PAYLOAD_BYTES = 22 * 1024 * 1024; // 22 MB -> 3 parts: 8 MB, 8 MB, 6 MB
+  const uploadsInitiated: string[] = [];
+  const partsReceived: Array<{ partNumber: string; uploadId: string; bytes: number }> = [];
+  let completePayload = "";
+
+  const server = Deno.serve({ port: 0, onListen: () => {} }, async (req) => {
+    const url = new URL(req.url);
+    if (req.method === "POST" && url.searchParams.has("uploads")) {
+      uploadsInitiated.push(url.pathname);
+      return new Response(
+        `<InitiateMultipartUploadResult><UploadId>test-upload-123</UploadId></InitiateMultipartUploadResult>`,
+        { status: 200, headers: { "content-type": "application/xml" } },
+      );
+    }
+    if (req.method === "PUT" && url.searchParams.has("partNumber")) {
+      const partNumber = url.searchParams.get("partNumber")!;
+      const uploadId = url.searchParams.get("uploadId")!;
+      const bodyBytes = (await req.arrayBuffer()).byteLength;
+      partsReceived.push({ partNumber, uploadId, bytes: bodyBytes });
+      return new Response(null, {
+        status: 200,
+        headers: { etag: `"etag-part-${partNumber}"` },
+      });
+    }
+    if (req.method === "POST" && url.searchParams.has("uploadId")) {
+      completePayload = await req.text();
+      return new Response(
+        `<CompleteMultipartUploadResult><ETag>"final-etag"</ETag></CompleteMultipartUploadResult>`,
+        { status: 200, headers: { "content-type": "application/xml" } },
+      );
+    }
+    return new Response(null, { status: 404 });
+  });
+
+  const port = (server.addr as { port: number }).port;
+  const store = new S3BlobStore({
+    bucket: "test-bucket",
+    endpoint: `http://127.0.0.1:${port}`,
+    accessKeyId: "test-key",
+    secretAccessKey: "test-secret",
+  });
+
+  try {
+    const body = new Uint8Array(PAYLOAD_BYTES);
+    const result = await store.put("test/large.wav", body, { contentType: "audio/wav" });
+
+    assertEquals(result.key, "test/large.wav");
+    assertEquals(result.size, PAYLOAD_BYTES);
+    assertEquals(result.etag, '"final-etag"');
+
+    assertEquals(uploadsInitiated.length, 1);
+    assertEquals(partsReceived.length, 3);
+    assertEquals(partsReceived[0], {
+      partNumber: "1",
+      uploadId: "test-upload-123",
+      bytes: 8 * 1024 * 1024,
+    });
+    assertEquals(partsReceived[1], {
+      partNumber: "2",
+      uploadId: "test-upload-123",
+      bytes: 8 * 1024 * 1024,
+    });
+    assertEquals(partsReceived[2], {
+      partNumber: "3",
+      uploadId: "test-upload-123",
+      bytes: 6 * 1024 * 1024,
+    });
+
+    assertStringIncludes(completePayload, '<PartNumber>1</PartNumber><ETag>"etag-part-1"</ETag>');
+    assertStringIncludes(completePayload, '<PartNumber>2</PartNumber><ETag>"etag-part-2"</ETag>');
+    assertStringIncludes(completePayload, '<PartNumber>3</PartNumber><ETag>"etag-part-3"</ETag>');
+  } finally {
     await server.shutdown();
   }
 });

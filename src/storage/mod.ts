@@ -1071,6 +1071,8 @@ export function parseRangeHeader(header: string | null): ByteRange | undefined {
     : { start: Number(rawStart), end: Number(rawEnd) };
 }
 
+export { detachUint8Array } from "./detach.ts";
+
 export async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let size = 0;

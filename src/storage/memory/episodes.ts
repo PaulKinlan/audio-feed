@@ -373,7 +373,7 @@ export function createEpisodesRepository(
           .appendLog(
             claimLifecycleEvent(current, {
               phase: update.phase,
-              attempt: current.attempts ?? 1,
+              attempt: Math.max(1, current.attempts ?? 1),
               time: current.lastHeartbeat,
             }),
           )
@@ -475,7 +475,7 @@ export function createEpisodesRepository(
         .appendLog(
           claimLifecycleEvent(episode, {
             phase: episode.phase ?? CLAIM_START_PHASE,
-            attempt: episode.attempts ?? 1,
+            attempt: Math.max(1, episode.attempts ?? 1),
             durationMs: elapsedSince(current.claimedAt),
             // The outcome lives in the reason so the terminal moment does not need its own event
             // type: a clean finish states no reason, a failure states the episode's own error.
@@ -492,7 +492,13 @@ export function createEpisodesRepository(
     retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const key = scoped(userId, id);
       const found = state.episodes.get(key);
-      if (!found || found.status !== "failed") return Promise.resolve(null);
+      if (!found) return Promise.resolve(null);
+      const isFailed = found.status === "failed";
+      const isStaleSynthesizing = found.status === "synthesizing" && (
+        isClaimExpired(found, Date.now()) ||
+        (Date.now() - Date.parse(found.lastHeartbeat ?? found.claimedAt ?? "") >= 2 * 60_000)
+      );
+      if (!isFailed && !isStaleSynthesizing) return Promise.resolve(null);
       const queued: Episode = {
         ...structuredClone(found),
         status: "pending",
@@ -502,8 +508,8 @@ export function createEpisodesRepository(
         error: undefined,
         phase: undefined,
         lastHeartbeat: undefined,
-        scriptTurns: undefined,
-        regenerating: undefined,
+        scriptTurns: isStaleSynthesizing ? found.scriptTurns : undefined,
+        regenerating: isStaleSynthesizing ? found.regenerating : undefined,
         uploadRetry: undefined,
       };
       // No await between the read and the write, so this is as single-stepped as the KV

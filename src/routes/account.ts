@@ -17,7 +17,7 @@ import { resolveOrigin } from "../origin.ts";
 import { base64url, sessionUser } from "../auth/sessions.ts";
 import { relyingParty } from "../auth/passkeys.ts";
 import { GEMINI_TTS_VOICES, VOICE_PROFILES } from "../tts/gemini.ts";
-import { INBOX_SOURCE_ID } from "../types.ts";
+import { INBOX_SOURCE_ID, isClaimExpired } from "../types.ts";
 import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { CONFIRM_DIALOG_CLIENT, PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
@@ -145,11 +145,17 @@ export function renderAccountPage(d: AccountPageData): string {
     const audioUrl = e.status === "ready" && e.audioKey
       ? `/audio/${e.audioKey.replace(/^\/+/, "")}`
       : null;
+    const isStaleSynthesizing = e.status === "synthesizing" && (
+      isClaimExpired(e, Date.now()) ||
+      (Date.now() - Date.parse(e.lastHeartbeat ?? e.claimedAt ?? "") >= 2 * 60_000)
+    );
     return `<li><div class="row-head"><span class="row-title">${esc(e.title)}</span>
       <span class="ep-status" data-status="${esc(e.status)}">${esc(e.status)}</span></div>
       <div class="meta">${e.mode === "direct" ? "Read aloud" : "Deep dive"} · ${
       esc(e.sourceTitle ?? e.sourceId)
-    } · ${when(e.createdAt)}</div>
+    } · ${when(e.createdAt)}${
+      e.status === "synthesizing" && e.phase ? ` · synthesizing (${esc(e.phase)})` : ""
+    }</div>
 ${audioUrl ? `<audio controls preload="none" class="ep-audio" src="${esc(audioUrl)}"></audio>` : ""}
 ${e.status === "failed" && e.error ? `<div class="error-detail">${esc(e.error)}</div>` : ""}
 ${
@@ -160,7 +166,7 @@ ${
         }" data-title="${esc(e.title)}" data-tooltip="Regenerate ${
           esc(e.title)
         }">Regenerate</button></div>`
-        : approved && e.status === "failed"
+        : approved && (e.status === "failed" || isStaleSynthesizing)
         ? `
       <div class="actions"><button class="btn quiet small" type="button" data-retry-episode="${
           esc(e.id)
@@ -680,8 +686,8 @@ ${CONFIRM_DIALOG_CLIENT}
 
   for (const button of document.querySelectorAll("[data-retry-episode]")) {
     button.addEventListener("click", async () => {
-      const ok = await askConfirm("Retry failed episode " + button.dataset.title + "? This will re-queue it for synthesis.", {
-        title: "Retry Failed Episode",
+      const ok = await askConfirm("Retry episode " + button.dataset.title + "? This will re-queue it for synthesis.", {
+        title: "Retry Episode",
         confirmText: "Retry",
       });
       if (!ok) return;

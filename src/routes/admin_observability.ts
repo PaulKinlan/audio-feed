@@ -29,6 +29,7 @@ import { renderShell, viewerOf } from "./shell.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { resolveOrigin } from "../origin.ts";
 import { ADMIN_NAV_CSS, renderAdminNav } from "./admin_nav.ts";
+import { assetUrl } from "./assets.ts";
 import {
   buildObservabilityReport,
   type ClaimAttempt,
@@ -36,6 +37,20 @@ import {
   type LiveClaimRow,
   type ObservabilityReport,
 } from "../observability/admin_report.ts";
+
+export const OBSERVABILITY_PAGE_CSS = `
+.obs-dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1rem; align-items: baseline; }
+.obs-dl dt { font-weight: 600; color: var(--text-muted); }
+.obs-dl dd { margin: 0; }
+.failure-card { margin-bottom: 1.5rem; }
+.failure-card h3 { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.severity-pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+.severity-error { background: #fee2e2; color: #991b1b; }
+.severity-warn { background: #fef3c7; color: #92400e; }
+.severity-info { background: #e0f2fe; color: #075985; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1rem 0; }
+.phase-pill { display: inline-block; padding: 0.1rem 0.4rem; background: var(--bg-subtle, #f3f4f6); border-radius: 4px; font-size: 0.85em; font-family: monospace; }
+`;
 
 /** Same headers as the admin console: never cached, never indexed, no referrer. */
 function baseHeaders(originIsExplicit: boolean): HeadersInit {
@@ -58,7 +73,8 @@ function page(
     title: "Observability — Audio Feed",
     viewer,
     current: "admin",
-    css: ADMIN_NAV_CSS,
+    stylesheets: [assetUrl("admin.css")],
+    css: ADMIN_NAV_CSS + OBSERVABILITY_PAGE_CSS,
     head: `<meta name="robots" content="noindex, nofollow">`,
     main,
     nonce,
@@ -137,7 +153,7 @@ function attemptsTableHtml(attempts: ClaimAttempt[]): string {
   if (attempts.length === 0) {
     return `<p class="muted">No claim-lifecycle records are retained for this episode.</p>`;
   }
-  return `<table>
+  return `<div class="table-wrap"><table>
   <caption>Attempt history for this episode — every claim, the phase it reached, and whether it ended with a terminal write</caption>
   <thead><tr>
     <th scope="col">Attempt</th><th scope="col">Owner</th><th scope="col">Started</th>
@@ -154,7 +170,9 @@ function attemptsTableHtml(attempts: ClaimAttempt[]): string {
     <td>${timeCell(attempt.lastHeartbeat)}</td>
     <td>${
         attempt.phases.length > 0
-          ? attempt.phases.map((phase) => esc(phase)).join(" → ")
+          ? attempt.phases.map((phase) => `<span class="phase-pill">${esc(phase)}</span>`).join(
+            " → ",
+          )
           : cell(attempt.phase)
       }</td>    <td>${timeCell(attempt.leaseExpiresAt)}${
         attempt.leaseExpired === true ? ` <strong>(expired)</strong>` : ""
@@ -164,10 +182,14 @@ function attemptsTableHtml(attempts: ClaimAttempt[]): string {
   </tr>`
     ).join("")
   }</tbody>
-</table>`;
+</table></div>`;
 }
 
-function failureRowHtml(failure: FailureRow, report: ObservabilityReport): string {
+function failureRowHtml(
+  failure: FailureRow,
+  report: ObservabilityReport,
+  seenEpisodes: Set<string>,
+): string {
   const episode = failure.episodeId ? report.episodes[failure.episodeId] : undefined;
   const attempts = failure.episodeId ? report.attempts[failure.episodeId] ?? [] : [];
   const history = attemptsTableHtml(attempts);
@@ -176,8 +198,44 @@ function failureRowHtml(failure: FailureRow, report: ObservabilityReport): strin
     ? `<p><strong>Episode record:</strong> <code>${esc(episode.error)}</code></p>`
     : "";
 
-  return `<section class="card" id="ep-${esc(failure.episodeId ?? String(failure.seq))}">
-  <h3>${cell(failure.severity)} · ${cell(failure.type)} · ${timeCell(failure.time)}</h3>
+  const isDuplicate = failure.episodeId ? seenEpisodes.has(failure.episodeId) : false;
+  const cardId = failure.episodeId
+    ? (isDuplicate ? `ep-${esc(failure.episodeId)}-${failure.seq}` : `ep-${esc(failure.episodeId)}`)
+    : `ep-${failure.seq}`;
+  if (failure.episodeId) seenEpisodes.add(failure.episodeId);
+
+  const repeatedNotice = isDuplicate && failure.episodeId
+    ? `<p class="muted">Repeated failure event for episode <code>${
+      esc(failure.episodeId)
+    }</code> — see <a href="#ep-${esc(failure.episodeId)}">latest failure event above</a>.</p>`
+    : "";
+
+  const severityPill = failure.severity
+    ? `<span class="severity-pill severity-${esc(failure.severity)}">${
+      esc(failure.severity)
+    }</span>`
+    : cell(failure.severity);
+
+  const dlItems: string[] = [];
+  if (failure.route) dlItems.push(`<dt>Route</dt><dd>${cell(failure.route)}</dd>`);
+  if (failure.status !== undefined) dlItems.push(`<dt>Status</dt><dd>${cell(failure.status)}</dd>`);
+  dlItems.push(`<dt>Correlation id</dt><dd><code>${cell(failure.correlationId)}</code>
+    <span class="muted">— copy this to find every record and log line for the request</span></dd>`);
+  dlItems.push(
+    `<dt>Episode</dt><dd>${cell(failure.episodeId)}${
+      episode?.title ? ` — ${esc(episode.title)}` : ""
+    }${episode ? ` (status: ${esc(episode.status)})` : ""}</dd>`,
+  );
+  dlItems.push(
+    `<dt>Attempt / phase</dt><dd>${cell(failure.attempt)} / ${cell(failure.phase)}</dd>`,
+  );
+  if (failure.durationMs !== undefined) {
+    dlItems.push(`<dt>Duration</dt><dd>${failure.durationMs}ms</dd>`);
+  }
+
+  return `<section class="card" id="${cardId}">
+  <h3>${severityPill} <span>${cell(failure.type)}</span> · ${timeCell(failure.time)}</h3>
+  ${repeatedNotice}
   <p><strong>${esc(failure.message)}</strong></p>
   ${
     failure.errorMessage
@@ -187,16 +245,8 @@ function failureRowHtml(failure: FailureRow, report: ObservabilityReport): strin
   (audio-feed-sw1r).</span></p>`
       : ""
   }
-  <dl>
-    <dt>Route</dt><dd>${cell(failure.route)}</dd>
-    <dt>Status</dt><dd>${cell(failure.status)}</dd>
-    <dt>Correlation id</dt><dd><code>${cell(failure.correlationId)}</code>
-      <span class="muted">— copy this to find every record and log line for the request</span></dd>
-    <dt>Episode</dt><dd>${cell(failure.episodeId)}${
-    episode?.title ? ` — ${esc(episode.title)}` : ""
-  }${episode ? ` (status: ${esc(episode.status)})` : ""}</dd>
-    <dt>Attempt / phase</dt><dd>${cell(failure.attempt)} / ${cell(failure.phase)}</dd>
-    <dt>Duration</dt><dd>${failure.durationMs === undefined ? "—" : `${failure.durationMs}ms`}</dd>
+  <dl class="obs-dl">
+    ${dlItems.join("\n    ")}
   </dl>
   ${episodeError}
   ${history}
@@ -430,7 +480,7 @@ export async function handleAdminObservability(
         logsUnreadable
           ? `<p><strong>The log store could not be read</strong>, so a missing reason below means "could not read", not "none recorded".</p>`
           : ""
-      }<table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Upload retries</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
+      }<div class="table-wrap"><table><thead><tr><th>Episode</th><th>Phase</th><th>Attempts</th><th>Upload retries</th><th>Waiting since</th><th>Last recorded reason</th></tr></thead><tbody>${
         report.retries.map((retry) => {
           const age = retry.waitingMs >= 60_000
             ? `${Math.round(retry.waitingMs / 60_000)} min`
@@ -451,7 +501,7 @@ export async function handleAdminObservability(
             retryReasonCell(retry)
           }${historyHtml}</td></tr>`;
         }).join("")
-      }</tbody></table>`
+      }</tbody></table></div>`
   }
   </section>
 
@@ -471,7 +521,12 @@ export async function handleAdminObservability(
       were no failures — see the notice above.</p>`
       : report.failures.length === 0
       ? `<p>No warn/error records in the retained window.</p>`
-      : report.failures.map((failure) => failureRowHtml(failure, report)).join("")
+      : (() => {
+        const seenEpisodes = new Set<string>();
+        return report.failures.map((failure) => failureRowHtml(failure, report, seenEpisodes)).join(
+          "",
+        );
+      })()
   }
     <p class="u-mt-4">
       <a href="/admin/observability/issues" class="btn secondary">Browse all issues, filter by route / correlation ID, and dead letters &rarr;</a>

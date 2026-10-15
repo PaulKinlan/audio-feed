@@ -455,8 +455,8 @@ export function createAccountHandlers(ctx: AppContext, deps: AccountDeps): Accou
       if (!ep) {
         return reply({ error: "Unknown episode." }, 404);
       }
-      // audio-feed-6y9: retry failed episodes or requeue ready episodes
-      const queued = ep.status === "failed"
+      // audio-feed-6y9: retry failed episodes or requeue ready episodes (audio-feed-1ib3: retry stale synthesizing claims)
+      const queued = (ep.status === "failed" || ep.status === "synthesizing")
         ? await store.retryEpisode(user.id, episodeId)
         : await store.requeueEpisode(user.id, episodeId);
       return reply({ ok: true, queued: queued ? 1 : 0 });

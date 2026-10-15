@@ -534,7 +534,7 @@ export function createEpisodesRepository(
         await host().appendLog(
           claimLifecycleEvent(updated, {
             phase: update.phase,
-            attempt: updated.attempts ?? 1,
+            attempt: Math.max(1, updated.attempts ?? 1),
             time: updated.lastHeartbeat,
           }),
         );
@@ -624,7 +624,7 @@ export function createEpisodesRepository(
         await host().appendLog(
           claimLifecycleEvent(episode, {
             phase: episode.phase ?? CLAIM_START_PHASE,
-            attempt: episode.attempts ?? 1,
+            attempt: Math.max(1, episode.attempts ?? 1),
             durationMs: elapsedSince(current.claimedAt),
             // The outcome lives in the reason so the terminal moment does not need its own event
             // type: a clean finish states no reason, a failure states the episode's own error.
@@ -642,9 +642,13 @@ export function createEpisodesRepository(
     async retryEpisode(userId: string, id: string): Promise<Episode | null> {
       const entry = await core.kv.get<Episode>(["episode", userId, id]);
       const found = entry.value;
-      // `failed` only, and the versionstamp check makes a concurrent claim or requeue win
-      // rather than interleave.
-      if (!found || found.status !== "failed") return null;
+      if (!found) return null;
+      const isFailed = found.status === "failed";
+      const isStaleSynthesizing = found.status === "synthesizing" && (
+        isClaimExpired(found, Date.now()) ||
+        (Date.now() - Date.parse(found.lastHeartbeat ?? found.claimedAt ?? "") >= 2 * 60_000)
+      );
+      if (!isFailed && !isStaleSynthesizing) return null;
       const queued: Episode = {
         ...found,
         status: "pending",
@@ -654,11 +658,11 @@ export function createEpisodesRepository(
         error: undefined,
         phase: undefined,
         lastHeartbeat: undefined,
-        scriptTurns: undefined,
+        scriptTurns: isStaleSynthesizing ? found.scriptTurns : undefined,
         uploadRetry: undefined,
-        // regenerating is NOT set: a failed render has no audio worth playing while it retries,
+        // regenerating is NOT set for failed: a failed render has no audio worth playing while it retries,
         // and setting it would put those bytes back into the subscriber's feed.
-        regenerating: undefined,
+        regenerating: isStaleSynthesizing ? found.regenerating : undefined,
       };
       return (await atomicPutEpisode(core, queued, entry)) ? queued : null;
     },

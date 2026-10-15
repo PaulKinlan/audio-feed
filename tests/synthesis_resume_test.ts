@@ -1520,3 +1520,46 @@ Deno.test(
     assertEquals(ep2?.claimedBy, undefined);
   },
 );
+
+Deno.test(
+  "audio-feed-1ib3: retryEpisode allows retrying stale synthesizing claims and preserves scriptTurns",
+  async () => {
+    const { stores } = await queued();
+
+    // 1. Fresh synthesizing episode cannot be retried
+    await stores.metadata.putEpisode(makeEpisode({
+      id: "fresh-syn",
+      userId: "user-1",
+      status: "synthesizing",
+      claimedAt: new Date().toISOString(),
+      lastHeartbeat: new Date().toISOString(),
+      scriptTurns: [{ speaker: "Host", text: "Hello" }],
+    }));
+    assertEquals(await stores.metadata.retryEpisode("user-1", "fresh-syn"), null);
+
+    // 2. Stale synthesizing episode (claim expired / heartbeat stalled) CAN be retried
+    const staleTime = new Date(Date.now() - 3 * 60_000).toISOString();
+    await stores.metadata.putEpisode(makeEpisode({
+      id: "stale-syn",
+      userId: "user-1",
+      status: "synthesizing",
+      claimedAt: staleTime,
+      lastHeartbeat: staleTime,
+      scriptTurns: [{ speaker: "Host", text: "Hello from previous run" }],
+    }));
+
+    const retried = await stores.metadata.retryEpisode("user-1", "stale-syn");
+    assert(retried, "stale synthesizing episode must be retryable");
+    assertEquals(retried.status, "pending");
+    assertEquals(retried.claimedAt, undefined);
+    assertEquals(retried.claimedBy, undefined);
+    assertEquals(
+      retried.scriptTurns,
+      [{ speaker: "Host", text: "Hello from previous run" }],
+      "script turns must be preserved",
+    );
+
+    const pending = (await stores.metadata.listPendingEpisodes({ limit: 10 })).episodes;
+    assert(pending.some((e) => e.id === "stale-syn"));
+  },
+);

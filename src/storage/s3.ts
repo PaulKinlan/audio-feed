@@ -13,6 +13,7 @@ import {
   type BlobObject,
   type BlobStore,
   type ByteRange,
+  detachUint8Array,
   RangeNotSatisfiableError,
 } from "./mod.ts";
 
@@ -69,15 +70,28 @@ export class S3BlobStore implements BlobStore {
     const bytes = toBodyBytes(body instanceof Uint8Array ? body : await collectStream(body));
     headers["content-length"] = String(bytes.byteLength);
 
+    // audio-feed-1ib3: S3 Multipart Upload for large payloads (> 20 MB) using 8 MB chunks
+    if (bytes.byteLength > 20 * 1024 * 1024) {
+      const multipart = await this.#putMultipart(key, bytes, contentType, opts);
+      if (multipart) return multipart;
+    }
+
     // audio-feed-aqms: the signal is threaded to the underlying fetch (aws4fetch
     // carries RequestInit.signal onto the signed Request), which makes the put
     // GENUINELY ABORTABLE: the invocation-budget deadline closes the socket and
     // the promise rejects with the abort reason instead of the isolate sitting in
     // an await it cannot exit. A bound by construction, not by estimate.
-    const res = await this.#client.fetch(this.#objectUrl(key), {
+    // audio-feed-1ib3: Use UNSIGNED-PAYLOAD and sign only URL/headers to prevent aws4fetch
+    // hashing and duplicating large audio payloads in V8 memory.
+    headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD";
+    const signed = await this.#client.sign(this.#objectUrl(key), {
       method: "PUT",
-      body: bytes,
       headers,
+    });
+    const res = await fetch(signed.url, {
+      method: "PUT",
+      headers: signed.headers,
+      body: bytes,
       signal: opts?.signal,
     });
     if (!res.ok) {
@@ -101,15 +115,20 @@ export class S3BlobStore implements BlobStore {
     const headers: Record<string, string> = {
       "content-type": contentType,
       "if-none-match": "*",
+      "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
     };
 
     const bytes = toBodyBytes(body instanceof Uint8Array ? body : await collectStream(body));
     headers["content-length"] = String(bytes.byteLength);
 
-    const res = await this.#client.fetch(this.#objectUrl(key), {
+    const signed = await this.#client.sign(this.#objectUrl(key), {
       method: "PUT",
-      body: bytes,
       headers,
+    });
+    const res = await fetch(signed.url, {
+      method: "PUT",
+      headers: signed.headers,
+      body: bytes,
       signal: opts?.signal,
     });
     if (res.status === 412 || res.status === 409) {
@@ -126,6 +145,165 @@ export class S3BlobStore implements BlobStore {
       contentType,
       etag: res.headers.get("etag") ?? undefined,
     };
+  }
+
+  async #putMultipart(
+    key: string,
+    bytes: Uint8Array,
+    contentType: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<BlobInfo | null> {
+    const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
+    const initiateUrl = new URL(this.#objectUrl(key));
+    initiateUrl.searchParams.set("uploads", "");
+
+    const initiateHeaders: Record<string, string> = {
+      "content-type": contentType,
+      "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+    };
+    const signedInitiate = await this.#client.sign(initiateUrl.toString(), {
+      method: "POST",
+      headers: initiateHeaders,
+    });
+
+    const initiateRes = await fetch(signedInitiate.url, {
+      method: "POST",
+      headers: signedInitiate.headers,
+      signal: opts?.signal,
+    });
+
+    if (
+      initiateRes.status === 404 ||
+      initiateRes.status === 405 ||
+      initiateRes.status === 501
+    ) {
+      await initiateRes.body?.cancel();
+      return null;
+    }
+
+    if (!initiateRes.ok) {
+      throw new Error(
+        `S3 initiate multipart upload failed (${initiateRes.status}): ${await safeText(
+          initiateRes,
+        )}`,
+      );
+    }
+
+    const initiateXml = await initiateRes.text();
+    const uploadIdMatch = /<UploadId>([^<]+)<\/UploadId>/.exec(initiateXml);
+    const uploadId = uploadIdMatch?.[1];
+    if (!uploadId) {
+      throw new Error(
+        `S3 initiate multipart upload returned no UploadId: ${initiateXml.slice(0, 300)}`,
+      );
+    }
+
+    const parts: Array<{ partNumber: number; etag: string }> = [];
+    try {
+      let partNumber = 1;
+      for (
+        let offset = 0;
+        offset < bytes.byteLength;
+        offset += MULTIPART_PART_BYTES, partNumber++
+      ) {
+        const end = Math.min(offset + MULTIPART_PART_BYTES, bytes.byteLength);
+        const partSlice = toBodyBytes(bytes.subarray(offset, end));
+        const partUrl = new URL(this.#objectUrl(key));
+        partUrl.searchParams.set("partNumber", String(partNumber));
+        partUrl.searchParams.set("uploadId", uploadId);
+
+        const partHeaders: Record<string, string> = {
+          "content-length": String(partSlice.byteLength),
+          "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+        };
+        const signedPart = await this.#client.sign(partUrl.toString(), {
+          method: "PUT",
+          headers: partHeaders,
+        });
+
+        const partRes = await fetch(signedPart.url, {
+          method: "PUT",
+          headers: signedPart.headers,
+          body: partSlice,
+          signal: opts?.signal,
+        });
+
+        if (!partRes.ok) {
+          throw new Error(
+            `S3 upload part ${partNumber} failed (${partRes.status}): ${await safeText(partRes)}`,
+          );
+        }
+        const etag = partRes.headers.get("etag");
+        await partRes.body?.cancel();
+        if (!etag) {
+          throw new Error(`S3 upload part ${partNumber} returned no ETag`);
+        }
+        parts.push({ partNumber, etag });
+      }
+
+      const completeUrl = new URL(this.#objectUrl(key));
+      completeUrl.searchParams.set("uploadId", uploadId);
+
+      const completeXml = `<CompleteMultipartUpload>${
+        parts
+          .map((p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`)
+          .join("")
+      }</CompleteMultipartUpload>`;
+
+      const completeHeaders: Record<string, string> = {
+        "content-type": "application/xml",
+        "content-length": String(new TextEncoder().encode(completeXml).byteLength),
+        "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+      };
+
+      const signedComplete = await this.#client.sign(completeUrl.toString(), {
+        method: "POST",
+        headers: completeHeaders,
+      });
+
+      const completeRes = await fetch(signedComplete.url, {
+        method: "POST",
+        headers: signedComplete.headers,
+        body: completeXml,
+        signal: opts?.signal,
+      });
+
+      if (!completeRes.ok) {
+        throw new Error(
+          `S3 complete multipart upload failed (${completeRes.status}): ${await safeText(
+            completeRes,
+          )}`,
+        );
+      }
+
+      const completeResText = await completeRes.text();
+      const etagMatch = /<ETag>([^<]+)<\/ETag>/.exec(completeResText);
+      const finalEtag = completeRes.headers.get("etag") ?? (etagMatch ? etagMatch[1] : undefined);
+
+      return {
+        key,
+        size: bytes.byteLength,
+        contentType,
+        etag: finalEtag,
+      };
+    } catch (err) {
+      try {
+        const abortUrl = new URL(this.#objectUrl(key));
+        abortUrl.searchParams.set("uploadId", uploadId);
+        const signedAbort = await this.#client.sign(abortUrl.toString(), {
+          method: "DELETE",
+          headers: { "x-amz-content-sha256": "UNSIGNED-PAYLOAD" },
+        });
+        const abortRes = await fetch(signedAbort.url, {
+          method: "DELETE",
+          headers: signedAbort.headers,
+        });
+        await abortRes.body?.cancel();
+      } catch {
+        // ignore cleanup error
+      }
+      throw err;
+    }
   }
 
   async get(key: string, opts?: { range?: ByteRange }): Promise<BlobObject | null> {
@@ -254,6 +432,7 @@ async function collectStream(stream: ReadableStream<Uint8Array>): Promise<Uint8A
   for (const chunk of chunks) {
     out.set(chunk, offset);
     offset += chunk.byteLength;
+    detachUint8Array(chunk);
   }
   return out;
 }
