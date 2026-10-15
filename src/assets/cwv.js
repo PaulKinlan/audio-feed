@@ -14,7 +14,13 @@
 (function () {
   "use strict";
   if (typeof PerformanceObserver !== "function") return;
-  if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return;
+  if (typeof navigator === "undefined") return;
+  // audio-feed-mpmc: DO NOT bail out when sendBeacon is missing. Both holes this closes were silent:
+  // a browser or context without sendBeacon used to leave this whole script and report NOTHING, and a
+  // beacon the browser REFUSED (sendBeacon returns false) was indistinguishable from one accepted, so
+  // beacon loss could not be measured from either side. The transport is chosen per beacon in send()
+  // and every choice is counted, because a beacon path that cannot say whether it sent is the
+  // confident-empty-answer failure in miniature.
 
   const label = (() => {
     const path = location.pathname;
@@ -66,13 +72,43 @@
     }).observe({ type: "event", buffered: true, durationThreshold: 16 });
   } catch (_) { /* as above */ }
 
+  // Which transport carried each beacon, so a refusal is visible FROM THE PAGE rather than only as an
+  // absence on the server: `beacon` + `fallback` are attempts, and `failed` counts fallbacks the
+  // browser rejected (or that could not be started) - the attempts that are known to have been lost.
+  const transports = { beacon: 0, fallback: 0, failed: 0 };
+
   const send = (metric, value) => {
+    const body = JSON.stringify({ metric: metric, value: value, page: label });
+    // PRIMARY: sendBeacon. Its boolean return is the browser's answer to "did you take this?", and
+    // `false` means it did not - so it is read rather than discarded (audio-feed-mpmc).
+    if (typeof navigator.sendBeacon === "function") {
+      try {
+        if (navigator.sendBeacon("/api/cwv", new Blob([body], { type: "application/json" }))) {
+          transports.beacon++;
+          return;
+        }
+      } catch (_) {
+        // A throw is a refusal too: fall through to the fallback instead of losing the metric.
+      }
+    }
+    // FALLBACK: a keepalive fetch, which is the same fire-and-forget shape - the response is not read,
+    // because there is nothing useful to do with it from here. `keepalive` is Baseline widely
+    // available, so this needs no feature guard and no TODO(baseline/...) comment.
+    transports.fallback++;
     try {
-      const body = JSON.stringify({ metric: metric, value: value, page: label });
-      navigator.sendBeacon("/api/cwv", new Blob([body], { type: "application/json" }));
+      fetch("/api/cwv", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body,
+        keepalive: true,
+      }).then(
+        () => {},
+        () => {
+          transports.failed++;
+        },
+      );
     } catch (_) {
-      // A metric that cannot be sent is not a reason to break the page, and there is nothing
-      // useful to do about it from here.
+      transports.failed++;
     }
   };
 
@@ -114,6 +150,11 @@
     keyStarts: () => keyStarts,
     isTrusted: () => allEventsTrusted,
     observed: () => interactionLatencies(interactions),
+    transports: () => ({
+      beacon: transports.beacon,
+      fallback: transports.fallback,
+      failed: transports.failed,
+    }),
   };
 
   const flush = () => {

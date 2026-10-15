@@ -3,7 +3,10 @@
 - Script: scripts/verify_i7vi_browser.ts
 - Asserts: the collector is inlined in the served page; a real browser sent at least one CWV report;
   an LCP value arrived from the browser; the arrived value is inside the plausible range; the beacon
-  never became a request-log field; a page label came with it
+  never became a request-log field; a page label came with it; a REFUSED beacon still arrives as a
+  CWV report; a refused beacon is recorded as a keepalive fallback rather than an accepted one; an
+  ABSENT sendBeacon still arrives as a CWV report; a missing sendBeacon does not leave the page
+  without a transport
 
 `audio-feed-i7vi`. Branch `fleet/i7vi`.
 
