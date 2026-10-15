@@ -16,7 +16,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
-import { runSynthesisBatch } from "../src/worker/synthesis.ts";
+import { runSynthesisBatch, TERMINAL_STAGING_MARKER_HASH } from "../src/worker/synthesis.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
@@ -289,6 +289,164 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   const ep2 = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep2?.status, "ready");
   assertEquals(ep2?.uploadRetry, undefined, "uploadRetry cleared on completion");
+});
+
+Deno.test("audio-feed-wnv8: a terminal PUT whose invocation deadline already expired is SKIPPED, and the skip carries the deadline and the observed time", async () => {
+  // ACCEPTANCE, WITH THE EXPECTED FAILURE SIGNATURE NAMED IN ADVANCE. This test asserts BEHAVIOUR (a PUT
+  // that is not made) and not a record alone. With the fix reverted - the abort check removed and the
+  // PUT attempted as before - the FIRST assertion to fail is
+  // "THE BEHAVIOUR: a PUT whose invocation deadline had already passed must not be attempted",
+  // reported as expected 0 against an actual 1 on `putCalls`. The control at the end of this test still
+  // passes in that state (a healthy invocation performs its PUT, writes `entering`, and writes no skip
+  // record), which is what makes the red evidence about the new decision rather than about a broken
+  // terminal path.
+  const episodeId = "ep-wnv8-expired-deadline";
+  const { ctx, stores } = await setupEnv(episodeId);
+  const audio = fakeAudio(1_024);
+  let putCalls = 0;
+  const realPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = (...args) => {
+    putCalls++;
+    return realPut(...args);
+  };
+
+  // PARK THE WINDOW RATHER THAN RACE IT: the deadline expires inside the durable reservation of the
+  // terminal staging key - the slowest await between the last abort check and the transfer. Holding it
+  // open until the test releases it makes the expiry deterministic instead of a sleep that has to be
+  // longer than the budget. Only the TERMINAL reservation is parked; per-segment reservations during
+  // synthesis run normally.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const realReserve = stores.metadata.reserveSynthesisSegment.bind(stores.metadata);
+  let parked = 0;
+  stores.metadata.reserveSynthesisSegment = async (...args: Parameters<typeof realReserve>) => {
+    const segment = args[2] as { textHash?: string } | undefined;
+    if (segment?.textHash === TERMINAL_STAGING_MARKER_HASH) {
+      parked++;
+      await gate;
+    }
+    return await realReserve(...args);
+  };
+
+  type Row = {
+    type?: string;
+    phase?: string;
+    severity?: string;
+    message?: string;
+    context?: Record<string, unknown>;
+  };
+  const readLogs = async () => (await stores.metadata.listLogs({ limit: 200 })) as unknown as Row[];
+  // A BOUNDED wait for the resumed worker to finish writing, so the assertion sees the real store rather
+  // than a sleep long enough to be believed. On expiry it returns what it has and lets the assertions
+  // report the truth, rather than turning a missing record into a timeout.
+  const untilSettled = async (done: (rows: Row[]) => boolean): Promise<Row[]> => {
+    const limit = Date.now() + 2_000;
+    for (;;) {
+      const rows = await readLogs();
+      if (done(rows) || Date.now() > limit) return rows;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  const running = runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+    owner: "wnv8-expired-1",
+    maxInvocationDurationMs: 500,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 10,
+    flushMarginMs: 5,
+  });
+  const result = await running;
+  assertEquals(parked, 1, "the terminal reservation is the await the deadline expires inside");
+  release();
+  const logs = await untilSettled((rows) => rows.some((row) => row.phase === "skipped"));
+
+  // (1) THE BEHAVIOUR. This is the assertion the acceptance names, and it is about a decision rather
+  // than a record: the doomed transfer is never handed to the storage layer.
+  assertEquals(
+    putCalls,
+    0,
+    "THE BEHAVIOUR: a PUT whose invocation deadline had already passed must not be attempted",
+  );
+
+  // (2) THE RECORD. A skip with no trace would be the silence this bead exists to end, and the two
+  // numbers are what make it auditable: the deadline it was measured against and the time it observed.
+  const skip = logs.find((row) => row.type === "synthesis.upload" && row.phase === "skipped");
+  assert(
+    skip,
+    "the skip must be RECORDED, not silent: a skipped attempt and a never-attempted one must not look alike",
+  );
+  assertEquals(skip.severity, "warn", "a terminal upload abandoned to the deadline is a finding");
+  assertEquals(skip.context?.deadlineMs, 500, "the invocation deadline it was measured against");
+  const observed = skip.context?.observedMs as number | undefined;
+  assert(
+    typeof observed === "number" && observed >= 400,
+    `observedMs must show the invocation had nearly spent its budget when the check ran (got ${observed})`,
+  );
+  // WHAT HAD ALREADY FIRED, by name, and the fact that matters more than the arithmetic: a stage's own
+  // cutoff is the budget minus its flush margin (`flushMarginMs`), so observedMs can legitimately sit a
+  // few milliseconds BELOW deadlineMs here. The abort reason is what makes this a skip.
+  assertEquals(
+    skip.context?.abortReason,
+    "InvocationBudgetAbortError",
+    "the record names the deadline that had already fired",
+  );
+  assertEquals(
+    typeof skip.context?.bytesAttempted === "number" && skip.context.bytesAttempted > 0,
+    true,
+    "and what it was about to send",
+  );
+  assertStringIncludes(skip.message ?? "", "synthesis upload SKIPPED");
+  assertStringIncludes(skip.message ?? "", "the invocation had already aborted");
+  assertStringIncludes(skip.message ?? "", "InvocationBudgetAbortError");
+
+  // (3) THE JOINT SIGNATURE KEEPS ITS MEANING: no `entering` record for a PUT that was never attempted,
+  // so `entering` still means bytes were handed to storage (the read amhn depends on).
+  assertEquals(
+    logs.filter((row) => row.type === "synthesis.upload" && row.phase === "entering").length,
+    0,
+    "an `entering` record must not be written for an attempt that was refused",
+  );
+
+  // The claim is yielded resumably, exactly as the aborted transfer would have left it: this decision
+  // changes what is attempted, not how a spent invocation ends.
+  assertEquals(result.yielded.length, 1, "the claim yields rather than being abandoned");
+  const episode = await stores.metadata.getEpisode("user-1", episodeId);
+  assertEquals(episode?.status, "pending");
+  assertEquals(episode?.phase, "upload_retry");
+
+  // (4) CONTROL THAT PASSES - a deadline that has NOT expired performs the transfer, writes `entering`,
+  // and writes no skip record. Without this the assertions above could be satisfied by a terminal path
+  // that simply no longer works.
+  const healthyId = "ep-wnv8-healthy";
+  const healthy = await setupEnv(healthyId);
+  let healthyPuts = 0;
+  const realHealthyPut = healthy.stores.blobs.put.bind(healthy.stores.blobs);
+  healthy.stores.blobs.put = (...args) => {
+    healthyPuts++;
+    return realHealthyPut(...args);
+  };
+  const completed = await runSynthesisBatch(healthy.ctx, () => Promise.resolve(fakeAudio(1_024)), {
+    owner: "wnv8-healthy-1",
+    maxInvocationDurationMs: 10_000,
+    estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 10,
+    flushMarginMs: 5,
+  });
+  const healthyLogs = (await healthy.stores.metadata.listLogs({ limit: 200 })) as unknown as Row[];
+  assertEquals(healthyPuts, 1, "CONTROL: a healthy invocation still performs its transfer");
+  assertEquals(
+    healthyLogs.filter((row) => row.type === "synthesis.upload" && row.phase === "entering").length,
+    1,
+    "CONTROL: `entering` is still written when an attempt IS made",
+  );
+  assertEquals(
+    healthyLogs.filter((row) => row.phase === "skipped").length,
+    0,
+    "CONTROL: nothing is skipped when nothing expires",
+  );
+  assertEquals(completed.ready.length, 1, "CONTROL: and the episode completes");
 });
 
 Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budget fails terminally with a legible reason", async () => {

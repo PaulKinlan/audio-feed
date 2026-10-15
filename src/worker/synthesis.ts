@@ -1408,6 +1408,22 @@ export type UploadEnterRecorder = (
 ) => Promise<void>;
 
 /**
+ * The account of a terminal PUT that was NOT attempted because the invocation deadline had already
+ * passed (audio-feed-wnv8), threaded and defaulted exactly like the other two seams.
+ *
+ * THIS ONE IS BEHAVIOUR, NOT OBSERVABILITY. The other two seams report what happened; this one exists
+ * because the worker DECIDED not to hand a doomed transfer to the storage layer, and a decision that
+ * leaves no record is the shape this whole thread exists to end: a skipped PUT and a PUT that was
+ * never reached must not look alike in the store. The clock facts come from the caller because the
+ * invocation owns them - the deadline it was given and when it started - and the worker only knows the
+ * abort reason it was handed.
+ */
+export type UploadSkipRecorder = (
+  episodeId: string,
+  detail: { bytesAttempted?: number; uploadRetry?: number; abortReason?: string },
+) => Promise<void>;
+
+/**
  * Default ceiling for stage marks per synthesis invocation (audio-feed-938b).
  * Sized to cover batchSize episodes across all four stages (tts, verify, upload, yield)
  * with a production minimum floor of 25. The multiplier below IS the stage count, not an
@@ -1526,6 +1542,69 @@ export async function runSynthesisBatch(
     }
   };
 
+  /**
+   * The durable "the terminal PUT was SKIPPED because the invocation deadline had already passed"
+   * record (audio-feed-wnv8). Its sibling above reports an attempt; this one reports the refusal to
+   * make one, and it is written on the way to the same place: nowhere near the storage layer.
+   *
+   * WHY THIS IS RECORDED RATHER THAN SILENT. A skip is the one decision that would otherwise be
+   * invisible in exactly the wrong way: with no entering record and no completion, a skipped attempt
+   * and an attempt that never got that far are identical in the store, and "we chose not to try" reads
+   * as "nothing happened here". The two facts that make the decision auditable are the deadline it was
+   * measured against and the time it had actually observed, and BOTH are recorded because either alone
+   * is ambiguous: `deadlineMs` is what the invocation was allowed, `observedMs` is how long it had been
+   * running when the worker reached the check, and `abortReason` names what had already fired. A reader
+   * must not expect `observedMs >= deadlineMs`: a stage's own cutoff is the budget minus its flush
+   * margin, so a legitimate skip can sit a few milliseconds inside the deadline.
+   *
+   * WHY THE CHANGE IS SMALL, SAID PLAINLY RATHER THAN IMPLIED: the transfer this avoids was already
+   * aborted by its own signal (`src/storage/s3.ts:72-75`, `tests/s3_abort_socket_test.ts`), so what
+   * this buys is a CLEANER RECORD and a request that never leaves the isolate - NOT a rescued upload.
+   * Anyone reading this expecting saved bytes or saved time has the wrong expectation, and the honest
+   * version of the claim is smaller than it looks.
+   */
+  const recordUploadSkipped: UploadSkipRecorder = async (
+    episodeId,
+    detail,
+  ) => {
+    try {
+      const observedMs = Math.max(0, performance.now() - startedAt);
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        // A skipped terminal upload is a FINDING - the invocation ran out of budget before its last
+        // and most expensive step - so it follows the stage-failure severity rule (audio-feed-k3x6)
+        // rather than being filed as ordinary progress.
+        severity: "warn",
+        type: "synthesis.upload",
+        process: "worker",
+        job: "synthesis",
+        correlationId: invocationId,
+        phase: "skipped",
+        message: `synthesis upload SKIPPED after ${Math.round(observedMs)}ms: the invocation had ` +
+          `already aborted${detail.abortReason ? ` (${detail.abortReason})` : ""}, so the ${
+            detail.bytesAttempted ?? "unknown"
+          }-byte PUT was not attempted`,
+        episodeId,
+        context: {
+          invocationId,
+          episodeId,
+          // The deadline and the observed time, both named, because either alone is ambiguous. NOTE THE
+          // ARITHMETIC A READER MUST NOT GET WRONG: `observedMs` can sit a few milliseconds BELOW
+          // `deadlineMs`, because a stage's own cutoff is the budget minus its flush margin
+          // (`flushMarginMs`). What makes this a skip is not `observedMs >= deadlineMs` but the fact that
+          // the signal had already aborted when the worker reached the transfer, which `abortReason` names.
+          deadlineMs: budgetMs,
+          observedMs,
+          ...detail,
+        },
+      });
+    } catch {
+      // Same contract as every other mark: losing observability must not lose synthesis. The skip
+      // itself already happened and is not conditional on this record being stored.
+      console.warn("[audio-feed] synthesis upload skip record write failed");
+    }
+  };
+
   const appendStage = async (
     stage: SynthesisStage,
     durationMs: number,
@@ -1626,6 +1705,7 @@ export async function runSynthesisBatch(
       options,
       markStage,
       recordUploadEntered,
+      recordUploadSkipped,
     );
     outcome = "returned";
     return result;
@@ -1674,6 +1754,7 @@ async function runSynthesisBatchCore(
   options: SynthesisWorkerOptions = {},
   markStage: StageMarker = async (_stage, fn) => await fn(),
   recordUploadEntered: UploadEnterRecorder = async () => {},
+  recordUploadSkipped: UploadSkipRecorder = async () => {},
 ): Promise<SynthesisBatchResult> {
   const opts = { ...DEFAULTS, ...options };
   /**
@@ -2561,35 +2642,55 @@ async function runSynthesisBatchCore(
               nowMs,
               opts.leaseMs,
             ).catch(() => {});
-            // Only a real whole-object PUT receives an upload mark. Abort still
-            // closes its socket; if it committed anyway, the stable key survives
-            // for a later invocation to verify and settle.
-            inFlightUploadKeys.add(inFlightStagingKey);
-            // audio-feed-amhn: the durable "we are about to PUT" record, written BEFORE the await.
-            // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
-            // size being attempted, rather than only the absence of a completion mark.
-            await recordUploadEntered(currentEpisode.id, {
-              bytesAttempted: bytes.length,
-              uploadRetry: nextUploadRetry,
-            });
-            // NOTE FOR A LATER READER (audio-feed-amhn, round-1 review finding 2). The invocation deadline
-            // can expire WHILE the record above is being written, because that write is an await. So the
-            // record is a claim that the terminal stage was ENTERED, not that bytes moved, and the read
-            // that separates those two is the JOINT signature in docs/observability-api.md: an entering
-            // record with no upload completion and no `synthesis.invocation` terminal for the same
-            // correlationId is a killed transfer, while one whose invocation DID close is a cancellation
-            // or a failure. What is deliberately NOT here is an abort check that skips the PUT outright:
-            // that DECIDES something, and it is filed as its own small change (audio-feed-wnv8) rather
-            // than smuggled into an observability one. The doomed request it would avoid is already
-            // aborted by its own signal - see src/storage/s3.ts:72-75 and tests/s3_abort_socket_test.ts.
-            const putPromise = markStage("upload", () =>
-              blobs.put(stagingKey, bytes, {
-                contentType: "audio/wav",
-                signal,
-              }), currentEpisode.id);
-            putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
-              .catch(() => {});
-            stored = await putPromise;
+            // audio-feed-wnv8, AND THIS IS BEHAVIOUR: the check sits BEFORE the entry record and the
+            // transfer, so that an `entering` record keeps meaning "a PUT was actually handed to the
+            // storage layer". The deadline usually expires during the durable reservation above - a
+            // store write, the slowest await between the last abort check and the transfer - and a PUT
+            // started after that moment is handed over already doomed, to be aborted by its own signal
+            // mid-flight. The worker therefore does not attempt it, and accounts for that decision with
+            // the deadline it was measured against and the time actually observed, rather than leaving
+            // a gap where an attempt would have been.
+            if (signal?.aborted) {
+              await recordUploadSkipped(currentEpisode.id, {
+                bytesAttempted: bytes.length,
+                uploadRetry: nextUploadRetry,
+                abortReason: signal.reason instanceof Error ? signal.reason.name : undefined,
+              });
+              // The stage ends here, exactly where the doomed transfer would have ended it: throwing the
+              // abort reason this signal already carries is what the PUT's own rejection produced, so
+              // the wrapper classifies this as a budget abort by provenance rather than by estimate.
+              throw signal.reason;
+            } else {
+              // Only a real whole-object PUT receives an upload mark. Abort still
+              // closes its socket; if it committed anyway, the stable key survives
+              // for a later invocation to verify and settle.
+              inFlightUploadKeys.add(inFlightStagingKey);
+              // audio-feed-amhn: the durable "we are about to PUT" record, written BEFORE the await.
+              // A platform kill inside `blobs.put` then leaves evidence of the entry AND the payload
+              // size being attempted, rather than only the absence of a completion mark.
+              await recordUploadEntered(currentEpisode.id, {
+                bytesAttempted: bytes.length,
+                uploadRetry: nextUploadRetry,
+              });
+              // NOTE FOR A LATER READER (audio-feed-amhn, round-1 review finding 2). The invocation
+              // deadline can expire WHILE the record above is being written, because that write is an
+              // await. So the record is a claim that the terminal stage was ENTERED, not that bytes
+              // moved, and the read that separates those two is the JOINT signature in
+              // docs/observability-api.md: an entering record with no upload completion and no
+              // `synthesis.invocation` terminal for the same correlationId is a killed transfer, while
+              // one whose invocation DID close is a cancellation or a failure. The residual window
+              // between that record and the PUT below is deliberately NOT guarded: it is a log append,
+              // and a transfer started inside it is aborted by its own signal
+              // (src/storage/s3.ts:72-75), which is the path the joint signature was built to read.
+              const putPromise = markStage("upload", () =>
+                blobs.put(stagingKey, bytes, {
+                  contentType: "audio/wav",
+                  signal,
+                }), currentEpisode.id);
+              putPromise.finally(() => inFlightUploadKeys.delete(inFlightStagingKey))
+                .catch(() => {});
+              stored = await putPromise;
+            }
           }
           if (signal?.aborted) throw signal.reason;
 
