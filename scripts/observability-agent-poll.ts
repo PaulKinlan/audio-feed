@@ -520,7 +520,7 @@ export interface LogEvent {
  * Both endpoints speak the store's contract, verified against src/routes/observability.ts rather than
  * assumed: cursor and `since` are decimal STRINGS (the sequence of the last record SCANNED), `byType` is
  * a list of {type, count}, and the summary's `truncated` means UNSCANNED records lie inside the window -
- * a `total: 0, truncated: true` answer means "more behind a filter", not "nothing".
+ * a `totalMatches: 0, truncated: true` answer means "more behind a filter", not "nothing".
  */
 export interface ErrorsPage {
   events: LogEvent[];
@@ -542,6 +542,13 @@ export interface SummaryBody {
   };
   cursor: string;
   since: string;
+  /**
+   * audio-feed-nwc1: the honest name - the number of records that MATCHED the filter within the
+   * SCANNED page, not a store-wide count of events. This is what the idle gate below reads.
+   * Optional because a response from a deployment that predates the name carries only `total`.
+   */
+  totalMatches?: number;
+  /** The original name for the same number; see `totalMatches`. Read only as the fallback. */
   total: number;
   bySeverity: Record<string, number>;
   byType: Array<{ type: string; count: number }>;
@@ -1081,13 +1088,21 @@ export async function runOnce(
       return { artifact: await finish("failed"), state };
     }
   }
-  // THE idle test, and it has to be both terms. `total` alone is not enough: the API documents
-  // that a bound full of FILTERED-OUT records reports total 0 with truncated true, and a caller
-  // that stops there never reaches the records behind them. So nothing new means no matching
-  // records AND nothing unscanned. An earlier version compared a `newest` field that does not
-  // exist on this response at all, so the gate never fired and every run would have spent a call -
-  // the tests missed it because their stubs were built from the same wrong type.
-  if (summary.ok && summary.body.total === 0 && !summary.body.truncated) {
+  // THE idle test, and it has to be both terms. A count alone is not enough: the API documents that a
+  // bound full of FILTERED-OUT records reports zero matches with truncated true, and a caller that
+  // stops there never reaches the records behind them. So nothing new means no matching records AND
+  // nothing unscanned. An earlier version compared a `newest` field that does not exist on this
+  // response at all, so the gate never fired and every run would have spent a call - the tests missed
+  // it because their stubs were built from the same wrong type.
+  //
+  // audio-feed-nwc1: the count is read by its honest name, `totalMatches`, falling back to `total` for
+  // a response from a deployment that predates the name. That fallback is not politeness - it is the
+  // same checkout skew the `newest` incident came from, in the direction that must never spend a call
+  // quietly, and tests/observability_agent_poll_test.ts pins both spellings.
+  if (
+    summary.ok && (summary.body.totalMatches ?? summary.body.total) === 0 &&
+    !summary.body.truncated
+  ) {
     artifact.reason = "idle";
     const detection = summary.body.invocationDetection;
     artifact.note =

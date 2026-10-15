@@ -372,6 +372,15 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     return json({
       cursor: String(lastScanned),
       since: String(parsed.since),
+      // audio-feed-nwc1: `totalMatches` is the honest name for the number below - records that
+      // MATCHED the filter within the SCANNED page, never a count of events in the store. `total` is
+      // kept beside it as its alias carrying the same number, because a consumer can be deployed from
+      // its own checkout (scripts/observability-agent-run.sh runs the poller from $REPO_DIR while this
+      // API is served by Deno Deploy), and a renamed field would read `undefined` there: the poller's
+      // idle gate would stop firing and every quiet hour would spend a model call - the incident
+      // observability-agent-poll.ts records for a `newest` field that never existed. Both names carry
+      // one number, asserted in tests/observability_api_test.ts.
+      totalMatches: summary.total,
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,

@@ -337,6 +337,14 @@ Deno.test("a summary cursor never skips what it did not count (audio-feed-8d6r)"
   const first = await (await fetch(authed("/api/observability/summary?since=0"))).json();
   assertEquals(first.total, 500, "the count covers exactly what the scan could read");
   assertEquals(first.truncated, true, "and says the window is larger than that");
+  // audio-feed-nwc1: both names carry that one number, and it is the SCAN's matches - 500 here while
+  // the store holds 501. A "fix" that made the field a store-wide count turns these red.
+  assertEquals(first.totalMatches, first.total, "the alias carries the same number");
+  assertEquals(first.totalMatches, first.scanned, "one page's matches, bounded by the read");
+  assert(
+    first.totalMatches < first.window.newest,
+    "never the store-wide count the old name invited",
+  );
   assertEquals(
     first.cursor,
     "500",
@@ -368,6 +376,35 @@ Deno.test("a summary that counted the whole window is not marked truncated", asy
   assertEquals(body.total, 3);
   assertEquals(body.truncated, false);
   assertEquals(body.cursor, "3");
+});
+
+Deno.test("nwc1: totalMatches is the honest name and total is its alias, on one response", async () => {
+  // The value was never wrong - the name invited a store-wide reading. So both fields come from the one
+  // scan and the alias may not drift from the honest name.
+  const { fetch, stores } = app();
+  await seed(stores, 3, "error", "synthesis.failed");
+  const body = await (await fetch(authed("/api/observability/summary?since=0&severity=all")))
+    .json();
+  assertEquals(body.totalMatches, 3);
+  assertEquals(body.total, body.totalMatches, "the alias carries the same number");
+  assertEquals(body.scanned, 3, "and here the scan did reach the end of the window");
+});
+
+Deno.test("nwc1: the API doc defines totalMatches as the scan-bounded count, in its own words", async () => {
+  // A field-name defect is fixed by the definition a reader lands on, so this pins the SENTENCE rather
+  // than the presence of a word: deleting "within the scanned page", the "not a store-wide count"
+  // clause, or either bounding field turns it red. The doc's line wrapping is normalised - rewrapping
+  // is not a change of meaning, rewording is.
+  const doc = (await Deno.readTextFile(new URL("../docs/observability-api.md", import.meta.url)))
+    .replace(/\s+/g, " ");
+  assertStringIncludes(
+    doc,
+    "**`totalMatches` is the number of records that MATCHED the filter within the scanned page — it is not a store-wide count of events.**",
+  );
+  assertStringIncludes(
+    doc,
+    "Two fields in the same response bound it: `scanned` says how many records the scan examined, and `truncated: true` says unscanned records remain inside the requested window, so a scan that filled its bound reports one page's matches.",
+  );
 });
 
 Deno.test("the summary honours severity instead of answering a different question (audio-feed-ijuc)", async () => {
