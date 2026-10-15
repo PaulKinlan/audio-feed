@@ -433,6 +433,13 @@ export async function nameMatchedTests(
  *
  * "passed" is emitted only after a run that actually passed; a failing run emits "ran", so the log still
  * says which suites were attempted without ever claiming a pass.
+ *
+ * The HOST owns coverage classification (hub ruling, 2026-10-15): `bin/fleet-check` computes the
+ * authoritative headline verdict, and a repository must NOT keep a diverging classifier or a second parser
+ * of this log. The local parser that used to live below this block was deleted with audio-feed-toxg for
+ * exactly that reason - do not re-add one. If the host's parse of this log is wrong, that is a host defect
+ * to report (audio-feed-toxg filed fleet-zq9cc for one: the `failed:` line's parenthesised test name leaks
+ * its words into the recorded suite list).
  */
 export function suiteMarker(kind: "passed" | "ran" | "unmapped", files: string[]): string {
   return `fast-gate: ${kind}: ${files.join(" ")}`;
@@ -619,47 +626,6 @@ export function findHiddenTrackedMutations(lsFilesVOutput: string): string[] {
     if (m) hidden.push(m[1]!);
   }
   return hidden.sort();
-}
-
-/**
- * Extract the suite file paths that actually executed from a fast-gate log,
- * ignoring parenthesized failing test names on `fast-gate: failed:` lines
- * and cheap-step names (`fmt`, `lint`, `check`) (audio-feed-m4vi), and
- * omitting coverage entirely when the run is marked STALE or coverage UNKNOWN
- * (audio-feed-bycd).
- */
-export function extractExecutedSuitesFromLog(log: string): string[] {
-  const lines = log.split("\n");
-  for (const line of lines) {
-    if (
-      /^fast-gate:\s*STALE:/.test(line) ||
-      /^fast-gate:\s*coverage:\s*UNKNOWN\b/.test(line)
-    ) {
-      return [];
-    }
-  }
-  const executed = new Set<string>();
-  for (const line of lines) {
-    const suiteLine = /^fast-gate:\s*(?:passed|completed|ran):\s*(.*)$/.exec(line);
-    if (suiteLine) {
-      for (const token of suiteLine[1]!.split(/\s+/)) {
-        if (token && isTestModule(token)) executed.add(token);
-      }
-      continue;
-    }
-    const covLine = /^fast-gate:\s*coverage:\s*ran\s+\d+\s+suite\(s\)(?::\s*(.*))?$/.exec(line);
-    if (covLine && covLine[1]) {
-      for (const token of covLine[1].split(/\s+/)) {
-        if (token && isTestModule(token)) executed.add(token);
-      }
-      continue;
-    }
-    const failedLine = /^fast-gate:\s*failed:\s*([^\s(]+)\s+\(.*\)$/.exec(line);
-    if (failedLine && failedLine[1] && isTestModule(failedLine[1])) {
-      executed.add(failedLine[1]);
-    }
-  }
-  return [...executed].sort();
 }
 
 /**

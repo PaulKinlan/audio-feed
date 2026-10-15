@@ -16,7 +16,6 @@ import {
   classifyChangedFileCoverage,
   detectStaleRun,
   evaluateGateCoverageRecord,
-  extractExecutedSuitesFromLog,
   extractFailingTests,
   failureMarkers,
   findCandidateTestsForFile,
@@ -31,7 +30,6 @@ import {
   reachableTests,
   reverseGraph,
   run,
-  staleMarker,
   stripCapturedTestOutput,
   suiteMarker,
   testSuiteSummary,
@@ -1292,7 +1290,7 @@ Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programma
   assertEquals(changedFiles.length, 0, "changedFiles must accept zero arguments");
 });
 
-Deno.test("audio-feed-m4vi: failing test names in fast-gate: failed: lines are never scraped as suite names", () => {
+Deno.test("audio-feed-m4vi: a failing test name containing 'passed:' never pollutes the coverage note", () => {
   const log = [
     "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
     "fast-gate: failed: tests/b_test.ts (some assertion with passed: words and spaces)",
@@ -1300,11 +1298,10 @@ Deno.test("audio-feed-m4vi: failing test names in fast-gate: failed: lines are n
     "fast-gate: coverage: ran 2 suite(s): tests/a_test.ts tests/b_test.ts",
   ].join("\n");
 
-  assertEquals(
-    extractExecutedSuitesFromLog(log),
-    ["tests/a_test.ts", "tests/b_test.ts"],
-    "must extract only real suite paths and never scrape words from the parenthesized failing test name",
-  );
+  // The other half of this bead's expectation - "the failing test's name is never scraped as a suite name" -
+  // belonged to a local parser of the gate log. That parser is gone: the HOST owns coverage classification
+  // (hub ruling, 2026-10-15; deleted with audio-feed-toxg). What stays is the half this repo still owns: the
+  // log WE emit has to render one clean note, with no word of a test name in it.
   assertEquals(
     coverageNoteFromLog(log),
     "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
@@ -1418,19 +1415,6 @@ Deno.test("audio-feed-bycd: detectStaleRun and failureMarkers emit STALE marker 
   assert(
     markers.every((m) => !m.startsWith("fast-gate: failed:")),
     "STALE run must never emit a false fast-gate: failed: marker",
-  );
-});
-
-Deno.test("audio-feed-bycd: extractExecutedSuitesFromLog returns empty list when log is marked STALE or coverage UNKNOWN", () => {
-  const tornStaleLog = [
-    "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
-    "fast-gate: coverage: UNKNOWN - run was invalidated while tests were executing (superseded by b1ffbe0 (started on 1bf1129))",
-    staleMarker("superseded by b1ffbe0 (started on 1bf1129)"),
-  ].join("\n");
-  assertEquals(
-    extractExecutedSuitesFromLog(tornStaleLog),
-    [],
-    "STALE log must not produce a coverage suite list from a torn run",
   );
 });
 
