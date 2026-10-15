@@ -313,7 +313,11 @@ Deno.test("a7i0: summary fires default warn feed; partial history and log failur
   assert(partial.invocationDetection.scannedFromSeq > 1);
   stores.metadata.listLogs = () => Promise.reject(new Error("injected log read failure"));
   const refused = await fetchApi(stores, "/api/observability/summary?since=0");
-  assertEquals(refused.status, 503, "read failure must not return idle total 0 or cursor");
+  assertEquals(
+    refused.status,
+    503,
+    "read failure must not return idle `totalMatches: 0` or a cursor",
+  );
   const failure = await refused.json();
   assertEquals(failure.error, "invocation_detection_unavailable");
   assertEquals(failure.cursor, undefined);

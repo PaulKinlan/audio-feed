@@ -232,10 +232,11 @@ coverage fields. Neither those indicators nor the structured event fields recons
 a store-wide count of events.** Two fields in the same response bound it: `scanned` says how many
 records the scan examined, and `truncated: true` says unscanned records remain inside the requested
 window, so a scan that filled its bound reports one page's matches. Measured on the live deployment,
-`?since=0&severity=all` answered `totalMatches: 500` with `scanned: 500` and `truncated: true` while
+`?since=0&severity=all` answered `total: 500` with `scanned: 500` and `truncated: true` while
 `window.newest` was 3071: that response says 500 and 3071 at once, and 500 is the answer to "what did
-this scan see", never to "how much is there". `total` carries the same number under its original name,
-kept so a consumer running from an older checkout keeps working; new readers should use `totalMatches`.
+this scan see", never to "how much is there". The measurement predates this field's name - 500 is the
+number the response now carries as `totalMatches`, and as `total`, the original name it keeps for a
+consumer running from an older checkout; new readers should use `totalMatches`.
 `byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means other
 types were counted but omitted from that list. An absent type then means **unknown**, not zero —
 fetch `/errors` over the same cursor window to inspect it. This flag is independent of `truncated`,

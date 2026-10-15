@@ -331,8 +331,9 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const bounds = await ctx.stores.metadata.logBounds();
     if (cursorExpired(parsed.since, bounds)) return tooOld(parsed.since, bounds);
 
-    // The point of this endpoint: `total: 0` is the cheap answer to "anything new since my cursor",
-    // one bounded scan instead of a page of events.
+    // The point of this endpoint: `totalMatches: 0` (aliased as `total` for a consumer running from an
+    // older checkout - audio-feed-nwc1) is the cheap answer to "anything new since my cursor", one
+    // bounded scan instead of a page of events.
     //
     // The scan is done HERE rather than through the store's `summarizeLogs`, because the severity
     // filter has to apply to what is COUNTED (audio-feed-ijuc). The store aggregates everything in
@@ -388,11 +389,12 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       // True only when UNSCANNED records lie INSIDE the requested window: the scan filled its bound
       // and did not reach the window's end. `truncated: true` is an INSTRUCTION — keep polling from
       // `cursor` — never a quiet answer, and never "nothing to see": a bound full of filtered-out
-      // records reports total 0 with truncated true, and a caller that stops there never reaches the
-      // records behind them (audio-feed-36qa).
+      // records reports `totalMatches: 0` with truncated true, and a caller that stops there never
+      // reaches the records behind them (audio-feed-36qa).
       truncated: !ranOutOfStore && lastScanned < windowEnd,
       // How many records the scan examined, regardless of the filter. Reported because it is what
-      // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
+      // makes a `totalMatches: 0` answer diagnosable: zero scanned means empty, a full bound means
+      // "more".
       scanned: scanned.length,
       invocationDetection: detection,
       // audio-feed-1qac: expose durable queue depth and synthesis drain state on the key-gated

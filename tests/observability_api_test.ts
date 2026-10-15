@@ -405,6 +405,10 @@ Deno.test("nwc1: the API doc defines totalMatches as the scan-bounded count, in 
     doc,
     "Two fields in the same response bound it: `scanned` says how many records the scan examined, and `truncated: true` says unscanned records remain inside the requested window, so a scan that filled its bound reports one page's matches.",
   );
+  // The measurement was taken under the field's ORIGINAL name - the live deployment did not have
+  // `totalMatches` yet. A review finding (openai-codex/gpt-6-sol, P3) caught an earlier draft
+  // re-attributing it to the new name, so the attribution is pinned too.
+  assertStringIncludes(doc, "answered `total: 500` with `scanned: 500` and `truncated: true`");
 });
 
 Deno.test("the summary honours severity instead of answering a different question (audio-feed-ijuc)", async () => {
@@ -571,8 +575,8 @@ Deno.test("every matched event is delivered exactly once, whatever the poll shap
 });
 
 Deno.test("the filtered truncated case still terminates and still delivers its event (audio-feed-2af8)", async () => {
-  // The 36qa shape, now under the corrected recipe: the probe reports total 0 with a full scan bound,
-  // and the matching event sits behind records the filter excluded.
+  // The 36qa shape, now under the corrected recipe: the probe reports `totalMatches: 0` with a full
+  // scan bound, and the matching event sits behind records the filter excluded.
   const { fetch, stores } = app();
   await seed(stores, 500, "debug", "http.request");
   const errorSeq = (await seed(stores, 1, "error", "synthesis.failed"))[0]!;
