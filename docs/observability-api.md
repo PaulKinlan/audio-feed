@@ -16,7 +16,7 @@ When `severity` is omitted, both `/api/observability/errors` and `/api/observabi
 
 | `severity` query parameter | severities included              | typical use                                                         |
 | -------------------------- | -------------------------------- | ------------------------------------------------------------------- |
-| _(omitted)_ or `warn`      | `warn`, `error`                  | **Default.** Failure and warning polling (`total: 0` = no warn/err) |
+| _(omitted)_ or `warn`      | `warn`, `error`                  | **Default.** Failure and warning polling (`totalMatches: 0` = no warn/err) |
 | `error`                    | `error`                          | Terminal failures and unhandled errors only                         |
 | `info`                     | `info`, `warn`, `error`          | Operational events + completions + warnings/errors (no `debug`)     |
 | `all`                      | `debug`, `info`, `warn`, `error` | Full retained event stream, including completion and stage marks    |
@@ -227,11 +227,20 @@ reports a gap rather than silent loss. `invocationDetection.olderStartsUnknown`,
 coverage fields. Neither those indicators nor the structured event fields reconstruct pruned logs.
 
 `/summary` returns
-`{ cursor, since, total, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, queue, window }`.
+`{ cursor, since, total, totalMatches, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, queue, window }`.
+**`totalMatches` is the number of records that MATCHED the filter within the scanned page — it is not
+a store-wide count of events.** Two fields in the same response bound it: `scanned` says how many
+records the scan examined, and `truncated: true` says unscanned records remain inside the requested
+window, so a scan that filled its bound reports one page's matches. Measured on the live deployment,
+`?since=0&severity=all` answered `total: 500` with `scanned: 500` and `truncated: true` while
+`window.newest` was 3071: that response says 500 and 3071 at once, and 500 is the answer to "what did
+this scan see", never to "how much is there". The measurement predates this field's name - 500 is the
+number the response now carries as `totalMatches`, and as `total`, the original name it keeps for a
+consumer running from an older checkout; new readers should use `totalMatches`.
 `byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means other
 types were counted but omitted from that list. An absent type then means **unknown**, not zero —
 fetch `/errors` over the same cursor window to inspect it. This flag is independent of `truncated`,
-which means the scan did not yet reach all sequences in the requested window. `total: 0` is the
+which means the scan did not yet reach all sequences in the requested window. `totalMatches: 0` is the
 cheap answer to "has anything happened since my cursor" — one bounded scan instead of a page of
 events. It applies the same cursor rules, including the `410` when retention has moved past the
 cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
@@ -340,7 +349,7 @@ window truncated older retained records, retention pruned earlier records, or a 
 usable recorded budget. `retentionGap` says earlier records were pruned. `moreDue` means the
 per-request attempt/warning cap stopped with visible due work still pending: poll again, never read
 it as "zero overdue". A store read, partial sequence window, or warning-write failure returns
-`503 invocation_detection_unavailable` without a feed cursor or a quiet `total: 0`. A reader can
+`503 invocation_detection_unavailable` without a feed cursor or a quiet `totalMatches: 0`. A reader can
 therefore distinguish no overdue start **in the observed window** from an inability to see earlier
 starts. Older starts outside that window are not enumerated by this detector.
 
@@ -390,7 +399,7 @@ it last consumed and only then moves its own (`audio-feed-2af8`, and the recipe 
 durable = "0"
 loop:
   s = GET /api/observability/summary?since=<durable>    # PROBE: is there anything?
-  if s.total == 0 and not s.truncated:
+  if s.totalMatches == 0 and not s.truncated:
       # No new matching EVENTS; inspect s.invocationDetection before claiming history is clear.
       continue                                          # no newly emitted warning in this page
   # DRAIN FIRST, from the cursor you last consumed, and only then move it. A probe may look past
@@ -404,7 +413,7 @@ loop:
   durable = cursor                                      # past everything READ, never past a count
 ```
 
-A truncated probe is a reason to drain even when `total` is 0: the scan bound filled with records
+A truncated probe is a reason to drain even when `totalMatches` is 0: the scan bound filled with records
 the filter excluded and the ones you asked for sit behind it (`audio-feed-36qa`).
 
 The rule for the consumer is the same one the API holds itself to: **a cursor may only advance over
@@ -418,7 +427,7 @@ and the durable cursor belongs to the reading, not to the check.
 `cursor` on a summary response is where the next SUMMARY call continues from, and it may sit past
 records that filter excluded. The summary counts only the records its filter matched, but its cursor
 advances over everything the scan EXAMINED, so a scan whose bound fills with filtered-out records
-answers `total: 0, truncated: true`. A caller that treats `total: 0` as "quiet" stops forever in
+answers `totalMatches: 0, truncated: true`. A caller that treats `totalMatches: 0` as "quiet" stops forever in
 exactly that case: the bound fills with events it did not ask for and the ones it wanted sit behind
 them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means genuinely empty,
 and a full bound means there is more.
@@ -501,7 +510,7 @@ fail across the retained log window, run the following read sequence with
   If `window.oldestRetained > 1` or `invocationDetection.retentionGap === true`, earlier records
   have aged out. If `invocationDetection.olderStartsUnknown === true` or `moreDue === true`, the
   500-record overdue-invocation scan bound was reached. On `/summary`, `byTypeTruncated: true` means
-  types outside the top 25 were counted in `total` but omitted from `byType`.
+  types outside the top 25 were counted in `totalMatches` but omitted from `byType`.
 - **Queue read failures (`audio-feed-ciuw`):** `queue.claimable === 0` means the queue is empty;
   `queue.claimable === null` (`queue.drain === "unreadable"`) means the queue read failed
   (`queue.readError`).

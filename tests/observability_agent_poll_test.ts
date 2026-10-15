@@ -69,9 +69,9 @@ function config(dir: string, over: Partial<PollConfig> = {}): PollConfig {
 
 function summary(over: Partial<SummaryBody> = {}): SummaryBody {
   // Mirrors the REAL response (src/routes/observability.ts): decimal-string cursors, byType as a list,
-  // and the idle signal expressed as total + truncated. The first version of this stub invented a
-  // top-level `newest`, which is how a broken idle gate passed the tests.
-  return {
+  // and the idle signal expressed as totalMatches + truncated. The first version of this stub invented
+  // a top-level `newest`, which is how a broken idle gate passed the tests.
+  const body: SummaryBody = {
     cursor: "10",
     since: "0",
     total: 1,
@@ -82,6 +82,10 @@ function summary(over: Partial<SummaryBody> = {}): SummaryBody {
     window: { oldestRetained: 1, newest: 10 },
     ...over,
   };
+  // audio-feed-nwc1: the real response carries `totalMatches` beside `total` with the SAME number, so
+  // the stub keeps them equal unless a test overrides one deliberately.
+  body.totalMatches ??= body.total;
+  return body;
 }
 
 function page(events: LogEvent[], over: Partial<ErrorsPage> = {}): ErrorsPage {
@@ -375,10 +379,11 @@ Deno.test("every run writes an artifact, including the ones that did nothing (au
   });
 });
 
-Deno.test("a summary with total 0 but truncated true is NOT idle: it must fetch (audio-feed-yl6b)", async () => {
-  // The API documents that a bound full of FILTERED-OUT records reports total 0 WITH truncated true, and
-  // that a caller which stops there never reaches the records behind them. So idleness needs BOTH terms,
-  // and this test pins the second: a gate that looked at total alone would skip a page of real errors.
+Deno.test("a summary with totalMatches 0 but truncated true is NOT idle: it must fetch (audio-feed-yl6b)", async () => {
+  // The API documents that a bound full of FILTERED-OUT records reports zero matches WITH truncated
+  // true, and that a caller which stops there never reaches the records behind them. So idleness needs
+  // BOTH terms, and this test pins the second: a gate that looked at the count alone would skip a page
+  // of real errors.
   await withTempDir(async (dir) => {
     const d = deps({
       fetchSummary: () =>
@@ -395,6 +400,46 @@ Deno.test("a summary with total 0 but truncated true is NOT idle: it must fetch 
     const { artifact } = await runOnce(config(dir), d);
     assertEquals(d.calls.fetchErrors, 1, "a truncated summary must not be read as nothing new");
     assert(artifact.reason !== "idle", `this run is not idle; got ${artifact.reason}`);
+  });
+});
+
+Deno.test("nwc1: the idle gate reads the honest name - totalMatches 1 is not idle, whatever a legacy total says", async () => {
+  // The two names carry one number, so this pair is only reachable in a test - which is the point: it
+  // pins that the gate reads `totalMatches` FIRST. A gate still reading the old name alone would treat a
+  // quiet hour as busy and spend a model call, which is exactly the failure mode
+  // observability-agent-poll.ts records for a field that never existed.
+  await withTempDir(async (dir) => {
+    const d = deps({
+      fetchSummary: () =>
+        Promise.resolve({
+          ok: true as const,
+          body: summary({ total: 0, totalMatches: 1, scanned: 1 }),
+        }),
+      fetchErrors: () => Promise.resolve({ ok: true as const, body: page([event()]) }),
+      openFingerprints: () => Promise.resolve(new Set<string>()),
+      callModel: () =>
+        Promise.resolve({ ok: true, text: "[]", inputTokens: 5, outputTokens: 2, error: null }),
+      fileBead: () => Promise.resolve("audio-feed-fake1"),
+    });
+    const { artifact } = await runOnce(config(dir), d);
+    assert(artifact.reason !== "idle", `not idle: got ${artifact.reason}`);
+  });
+});
+
+Deno.test("nwc1: a response from a deployment that predates the name is still read as idle", async () => {
+  // The fallback exists because the API is served by Deno Deploy while the poller runs from its own
+  // checkout (observability-agent-run.sh: REPO_DIR), so the two can be a commit apart. An older
+  // response carries only `total`, and it must still be able to say "nothing new" - the alternative is
+  // an idle hour that spends a model call.
+  await withTempDir(async (dir) => {
+    const legacy = { ...summary({ total: 0, truncated: false, scanned: 0 }) };
+    delete legacy.totalMatches;
+    const d = deps({
+      fetchSummary: () => Promise.resolve({ ok: true as const, body: legacy }),
+    });
+    const { artifact } = await runOnce(config(dir), d);
+    assertEquals(artifact.reason, "idle");
+    assertEquals(d.calls.fetchErrors, undefined, "and an idle hour still fetches nothing");
   });
 });
 

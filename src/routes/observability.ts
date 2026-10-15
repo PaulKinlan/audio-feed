@@ -331,8 +331,9 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const bounds = await ctx.stores.metadata.logBounds();
     if (cursorExpired(parsed.since, bounds)) return tooOld(parsed.since, bounds);
 
-    // The point of this endpoint: `total: 0` is the cheap answer to "anything new since my cursor",
-    // one bounded scan instead of a page of events.
+    // The point of this endpoint: `totalMatches: 0` (aliased as `total` for a consumer running from an
+    // older checkout - audio-feed-nwc1) is the cheap answer to "anything new since my cursor", one
+    // bounded scan instead of a page of events.
     //
     // The scan is done HERE rather than through the store's `summarizeLogs`, because the severity
     // filter has to apply to what is COUNTED (audio-feed-ijuc). The store aggregates everything in
@@ -348,9 +349,10 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const summary = summarizeRecords(
       scanned.filter((record) => parsed.severities.includes(record.severity)),
     );
-    // byType is bounded to the 25 most frequent kinds. Its counts sum to total only when
-    // every counted kind is present: a rare claim expiry can be counted as warn but cut from
-    // byType. Keep this separate from `truncated`, which is ONLY about unscanned sequences.
+    // byType is bounded to the 25 most frequent kinds. Its counts sum to the reported count
+    // (`totalMatches`) only when every counted kind is present: a rare claim expiry can be counted as
+    // warn but cut from byType. Keep this separate from `truncated`, which is ONLY about unscanned
+    // sequences.
     const byTypeTruncated = summary.byType.reduce((sum, entry) => sum + entry.count, 0) <
       summary.total;
     // The boundary is the last sequence SCANNED, not the last one counted, and not the window's
@@ -372,6 +374,15 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     return json({
       cursor: String(lastScanned),
       since: String(parsed.since),
+      // audio-feed-nwc1: `totalMatches` is the honest name for the number below - records that
+      // MATCHED the filter within the SCANNED page, never a count of events in the store. `total` is
+      // kept beside it as its alias carrying the same number, because a consumer can be deployed from
+      // its own checkout (scripts/observability-agent-run.sh runs the poller from $REPO_DIR while this
+      // API is served by Deno Deploy), and a renamed field would read `undefined` there: the poller's
+      // idle gate would stop firing and every quiet hour would spend a model call - the incident
+      // observability-agent-poll.ts records for a `newest` field that never existed. Both names carry
+      // one number, asserted in tests/observability_api_test.ts.
+      totalMatches: summary.total,
       total: summary.total,
       bySeverity: summary.bySeverity,
       byType: summary.byType,
@@ -379,11 +390,12 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
       // True only when UNSCANNED records lie INSIDE the requested window: the scan filled its bound
       // and did not reach the window's end. `truncated: true` is an INSTRUCTION — keep polling from
       // `cursor` — never a quiet answer, and never "nothing to see": a bound full of filtered-out
-      // records reports total 0 with truncated true, and a caller that stops there never reaches the
-      // records behind them (audio-feed-36qa).
+      // records reports `totalMatches: 0` with truncated true, and a caller that stops there never
+      // reaches the records behind them (audio-feed-36qa).
       truncated: !ranOutOfStore && lastScanned < windowEnd,
       // How many records the scan examined, regardless of the filter. Reported because it is what
-      // makes a `total: 0` answer diagnosable: zero scanned means empty, a full bound means "more".
+      // makes a `totalMatches: 0` answer diagnosable: zero scanned means empty, a full bound means
+      // "more".
       scanned: scanned.length,
       invocationDetection: detection,
       // audio-feed-1qac: expose durable queue depth and synthesis drain state on the key-gated
