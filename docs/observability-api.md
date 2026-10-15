@@ -293,9 +293,27 @@ durable episode and run-history storage:
   **The limit, stated rather than implied:** `drain` is derived from the pending queue and the last
   synthesis run only. It cannot see a claim held past its budget, nor an episode abandoned at
   `maxClaims`: both leave nothing claimable and make a healthy run correctly report nothing ready,
-  which this field cannot distinguish from a genuinely empty queue. Those two states stay answerable
-  through the admin report's `liveClaims` and `abandoned` counts, which are not part of this
-  key-gated snapshot.
+  which this field cannot distinguish from a genuinely empty queue.
+
+  Those two states are counted for the operator page — `liveClaims` and `abandoned` on the ADMIN
+  report — from a **window of the newest `REPORT_WINDOW` (400) records**, not from the whole store,
+  and they are not part of this key-gated snapshot. **State that reach as a function of RECORD
+  VOLUME, never as a duration:** the bound is "the newest 400 records", and what that equals in wall
+  clock moves with cadence. Measured on 2026-10-15 it was about 3.3 hours, because roughly half of
+  those records were the `synthesis.invocation` marks a two-minute synthesis cron writes — change the
+  cron frequency or the log volume and the reach changes with it, so no duration belongs in this
+  document.
+
+  **And state the FAILURE MODE, not the absence:** an episode abandoned earlier than that window
+  reads as `abandoned: 0`, and **a zero here is indistinguishable from a clean state**. That is the
+  cost of not exposing these counts on this endpoint, and it is the reason the counts are deliberately
+  left off rather than approximated: a cheap field that answers `0` for an episode abandoned an hour
+  before the window is worse than a documented gap, because it ends the question a blank column would
+  have started. If a consumer appears that ACTS on the state rather than rendering it — an alert rule,
+  a monitor, a page an operator is told to check — the cheap shape is to derive these counts from the
+  scan this endpoint already performs for overdue invocations (the newest `LOG_READ_LIMIT` records,
+  which contain the report's window in full), at a marginal cost that is CPU-only; that is a deliberate
+  fallback held until a consumer needs it, not an oversight.
 - `lastSynthesisRun`: `RunRecord | null` — most recent synthesis run from
   `listRuns(20, "synthesis")`, scoped to `"synthesis"` so feed-poll runs cannot crowd it out
   (`audio-feed-506m`).
