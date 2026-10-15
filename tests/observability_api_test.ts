@@ -407,7 +407,10 @@ Deno.test("nwc1: the API doc defines totalMatches as the scan-bounded count, in 
   );
   // The measurement was taken under the field's ORIGINAL name - the live deployment did not have
   // `totalMatches` yet. A review finding (openai-codex/gpt-6-sol, P3) caught an earlier draft
-  // re-attributing it to the new name, so the attribution is pinned too.
+  // re-attributing it to the new name, so the attribution is pinned too. This pin is deliberate and
+  // it DOES lock the historical wording: it is the one number in this doc whose field name cannot be
+  // reworded, because re-attributing it is the defect above. Recording a newer measurement, or
+  // dropping this sentence, means updating the pin in the same commit - it is a lock, not a bug.
   assertStringIncludes(doc, "answered `total: 500` with `scanned: 500` and `truncated: true`");
 });
 
@@ -498,7 +501,7 @@ Deno.test("a truncated summary is an instruction, not a quiet answer (audio-feed
   );
 
   // Polling again from the returned cursor reaches the record, which is the property a caller that
-  // treats total==0 as quiet would lose.
+  // treats a zero `totalMatches` as quiet would lose.
   const second = await (await fetch(authed(`/api/observability/summary?since=${first.cursor}`)))
     .json();
   assertEquals(second.total, 1);
@@ -552,7 +555,7 @@ Deno.test("every matched event is delivered exactly once, whatever the poll shap
     const summary =
       await (await fetch(authed(`/api/observability/summary?since=${durable}&severity=error`)))
         .json();
-    if (summary.total === 0 && !summary.truncated) break;
+    if (summary.totalMatches === 0 && !summary.truncated) break;
     let cursor = durable;
     while (true) {
       const page =
@@ -588,7 +591,7 @@ Deno.test("the filtered truncated case still terminates and still delivers its e
     const summary =
       await (await fetch(authed(`/api/observability/summary?since=${durable}&severity=error`)))
         .json();
-    if (summary.total === 0 && !summary.truncated) break;
+    if (summary.totalMatches === 0 && !summary.truncated) break;
     let cursor = durable;
     while (true) {
       const page =

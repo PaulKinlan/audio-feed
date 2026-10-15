@@ -349,9 +349,10 @@ export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppC
     const summary = summarizeRecords(
       scanned.filter((record) => parsed.severities.includes(record.severity)),
     );
-    // byType is bounded to the 25 most frequent kinds. Its counts sum to total only when
-    // every counted kind is present: a rare claim expiry can be counted as warn but cut from
-    // byType. Keep this separate from `truncated`, which is ONLY about unscanned sequences.
+    // byType is bounded to the 25 most frequent kinds. Its counts sum to the reported count
+    // (`totalMatches`) only when every counted kind is present: a rare claim expiry can be counted as
+    // warn but cut from byType. Keep this separate from `truncated`, which is ONLY about unscanned
+    // sequences.
     const byTypeTruncated = summary.byType.reduce((sum, entry) => sum + entry.count, 0) <
       summary.total;
     // The boundary is the last sequence SCANNED, not the last one counted, and not the window's
