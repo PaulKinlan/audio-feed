@@ -195,6 +195,24 @@ reconstructing it from a silence, which is the read that cost a night on 2026-10
 record carries the same size for the abandonment path: see `bytesAttempted` in `Episode` and in the
 `claim.lifecycle` `context`, written as the worker enters the terminal stage (`audio-feed-amhn`).
 
+**The second phase of that type: `synthesis.upload` with `phase: "skipped"` (`audio-feed-wnv8`).**
+When the invocation deadline has already expired by the time the worker reaches the transfer, the PUT
+is **not attempted at all** — the worker records `phase: "skipped"`, `severity: "warn"`, and ends the
+stage with the abort reason it was already carrying. The record exists because a skip that left no
+trace would be indistinguishable from an attempt that never got that far, which is the shape this
+whole read exists to end; and it carries the two numbers that make the decision auditable rather than
+asserted: **`context.deadlineMs`** (the invocation budget it was measured against) and
+**`context.observedMs`** (how long the invocation had actually been running when the check ran), plus
+`context.abortReason` naming what fired. Note the arithmetic a reader must not get wrong: a stage's
+own cutoff is the budget minus its flush margin, so `observedMs` can legitimately sit a few
+milliseconds BELOW `deadlineMs` — `abortReason` is what turns those numbers into a reason, not the
+comparison between them. An `entering` record still means a PUT was handed to the storage layer: the check sits
+BEFORE it, so this phase never appears alongside one.
+
+Note what this does and does not buy, because the honest claim is small: the transfer it avoids was
+already aborted by its own signal (`src/storage/s3.ts`), so the value is a cleaner record and a
+request that never leaves the isolate — **not** a rescued upload or a saved transfer.
+
 The existing `context` field remains available but is not a uniform join schema: it can contain
 nested, source-specific data including CSP reports from a public endpoint. The store caps and
 redacts context by **key name**, not by screening arbitrary user text. This bearer-key endpoint
