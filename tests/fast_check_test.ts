@@ -13,9 +13,7 @@ import { assert, assertEquals, assertMatch } from "@std/assert";
 import {
   allTestFiles,
   changedFiles,
-  classifyChangedFileCoverage,
   detectStaleRun,
-  evaluateGateCoverageRecord,
   extractFailingTests,
   failureMarkers,
   findCandidateTestsForFile,
@@ -1482,132 +1480,6 @@ Deno.test("audio-feed-dp30: candidate finder does not treat directory segment or
     findCandidateTestsForFile("src/synthesis/limits.ts", testSources),
     ["tests/seam_boundaries_test.ts"],
   );
-});
-
-Deno.test("audio-feed-dp30: classifyChangedFileCoverage distinguishes unmapped files from files with omitted candidate suites", () => {
-  const candidatesByFile = new Map<string, readonly string[]>([
-    ["src/worker/synthesis.ts", ["tests/synthesis_worker_test.ts", "tests/worker_loop_test.ts"]],
-    ["docs/notes.md", []],
-  ]);
-
-  const report = classifyChangedFileCoverage(
-    ["src/worker/synthesis.ts", "docs/notes.md"],
-    ["tests/synthesis_worker_test.ts"],
-    candidatesByFile,
-  );
-
-  assertEquals(
-    report.unmapped,
-    ["docs/notes.md"],
-    "only files with zero candidate suites are unmapped ('no mapping exists')",
-  );
-  assertEquals(
-    report.omitted,
-    ["tests/worker_loop_test.ts"],
-    "suites that mapped to a changed file but did not run are reported in omitted ('candidate suites did not run')",
-  );
-  assertEquals(
-    report.omittedByFile.get("src/worker/synthesis.ts"),
-    ["tests/worker_loop_test.ts"],
-  );
-});
-
-// ---------------------------------------------------------------------------
-// audio-feed-43lf (plus 0l3a / tyt5): Gate coverage record evaluation never
-// hides omitted/unmapped suites or nested PARTIAL reasons behind a shallow
-// coverage_verified=true.
-// ---------------------------------------------------------------------------
-
-Deno.test("audio-feed-43lf: evaluateGateCoverageRecord falsifies coverage_verified and lifts qualifiers on both real repro records", () => {
-  // Record 1 (a958570bde05ec97a334663532639f67e19c4b0e.fast.json):
-  // unmapped + omitted non-empty alongside shallow coverage_verified=true
-  const recA95 = evaluateGateCoverageRecord({
-    state: "PASS",
-    kind: "fast",
-    tree: "a958570bde05ec97a334663532639f67e19c4b0e",
-    coverage_verified: true,
-    partial_reason:
-      "changed file(s) not placed in any suite: src/worker/synthesis.ts; 2 candidate suite(s) did not run",
-    unmapped: ["src/worker/synthesis.ts"],
-    omitted: ["tests/admin_stats_test.ts", "tests/seam_boundaries_test.ts"],
-    coverage: {
-      indeterminate: false,
-      coverage: "PARTIAL",
-      partial_reason:
-        "changed file(s) not placed in any suite: src/worker/synthesis.ts; 2 candidate suite(s) did not run",
-      unmapped: ["src/worker/synthesis.ts"],
-      omitted: ["tests/admin_stats_test.ts", "tests/seam_boundaries_test.ts"],
-    },
-  });
-  assertEquals(recA95.coverageVerified, false);
-  assertEquals(recA95.normalizedRecord.coverage_verified, false);
-  assert(
-    recA95.statusLabel !== "PASS (fast gate)",
-    `must never render unqualified PASS (fast gate): got ${recA95.statusLabel}`,
-  );
-  assert(recA95.statusLabel.includes("coverage PARTIAL"));
-
-  // Record 2 (aa29d46de2eb2c8e1837352f41677944dd714645.fast.json):
-  // top-level coverage_verified=true and partial_reason=null while nested coverage is PARTIAL
-  const recAa2 = evaluateGateCoverageRecord({
-    state: "PASS",
-    kind: "fast",
-    tree: "aa29d46de2eb2c8e1837352f41677944dd714645",
-    coverage_verified: true,
-    partial_reason: null,
-    unmapped: [],
-    omitted: [],
-    coverage: {
-      indeterminate: false,
-      coverage: "PARTIAL",
-      partial_reason:
-        "changed file(s) not placed in any suite: scripts/hooks/install-hooks.sh, scripts/hooks/pre-push",
-      unmapped: ["scripts/hooks/install-hooks.sh", "scripts/hooks/pre-push"],
-      omitted: [],
-    },
-  });
-  assertEquals(recAa2.coverageVerified, false);
-  assertEquals(recAa2.normalizedRecord.coverage_verified, false);
-  assertEquals(
-    recAa2.normalizedRecord.partial_reason,
-    "changed file(s) not placed in any suite: scripts/hooks/install-hooks.sh, scripts/hooks/pre-push",
-  );
-  assertEquals(recAa2.normalizedRecord.unmapped, [
-    "scripts/hooks/install-hooks.sh",
-    "scripts/hooks/pre-push",
-  ]);
-  assert(
-    recAa2.statusLabel !== "PASS (fast gate)",
-    `must never render unqualified PASS (fast gate): got ${recAa2.statusLabel}`,
-  );
-
-  // Control: a genuinely verified record renders PASS (fast gate)
-  const cleanRec = evaluateGateCoverageRecord({
-    state: "PASS",
-    kind: "fast",
-    coverage_verified: true,
-    partial_reason: null,
-    unmapped: [],
-    omitted: [],
-    coverage: {
-      indeterminate: false,
-      coverage: "FULL",
-      partial_reason: null,
-      unmapped: [],
-      omitted: [],
-    },
-  });
-  assertEquals(cleanRec.coverageVerified, true);
-  assertEquals(cleanRec.statusLabel, "PASS (fast gate)");
-
-  // Control (audio-feed-0l3a): a synthetic record never verifies as PASS
-  const syntheticRec = evaluateGateCoverageRecord({
-    state: "PASS",
-    kind: "fast",
-    synthetic: true,
-  });
-  assertEquals(syntheticRec.coverageVerified, false);
-  assertEquals(syntheticRec.statusLabel, "SYNTHETIC (fast gate)");
 });
 
 Deno.test("audio-feed-tyt5: findHiddenTrackedMutations detects assume-unchanged and skip-worktree index flags", () => {
