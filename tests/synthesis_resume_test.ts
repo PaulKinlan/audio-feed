@@ -39,6 +39,7 @@ import {
 import {
   ESTIMATED_TTS_TURN_DURATION_MS,
   INVOCATION_FLUSH_MARGIN_MS,
+  InvocationClock,
   splitTextUnderByteBudget,
   SynthesisYieldError,
 } from "../src/synthesis/limits.ts";
@@ -80,6 +81,91 @@ function stitch(wavs: Uint8Array[]): DecodedAudioResult {
   const wav = pcmToWav(joined, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
   const decoded = decodedFromWav(wav);
   return decoded;
+}
+
+/**
+ * A clock the TEST owns (audio-feed-ugak).
+ *
+ * The invocation budget reads `now()` and arms its deadline through `setTimeout` on the SAME timeline,
+ * so advancing this object is the only thing that can move the deadline: the test decides where the
+ * deadline lands instead of the machine's speed deciding it. Before this, the two tests below armed a
+ * real 80ms deadline and hoped the machine reached segment 1's commit first - measured 4 red in 20
+ * runs on an idle box and 10 red in 10 runs under CPU starvation, with turn 1's own preflight
+ * observed anywhere between 7ms and 91ms of real elapsed time.
+ *
+ * `advance()` moves the clock and fires every timer that comes due, earliest first, letting each
+ * one's awaiters run before the next: a timer armed as a CONSEQUENCE of one firing (the next stage's
+ * deadline) therefore fires too if it comes due inside the same window, which is what makes the
+ * ordering the code path observes the ordering of virtual time.
+ */
+function controlledInvocationClock(startMs = 1_000_000) {
+  let nowMs = startMs;
+  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+  const armedDeadlines: number[] = [];
+  const clock: InvocationClock = {
+    now: () => nowMs,
+    setTimeout: (fn, ms) => {
+      const timer = { at: nowMs + ms, fn, live: true };
+      timers.push(timer);
+      armedDeadlines.push(ms);
+      return () => {
+        timer.live = false;
+      };
+    },
+  };
+  return {
+    clock,
+    /** Every deadline the code path armed, in order, so the derivation can be pinned not assumed. */
+    armedDeadlines,
+    get nowMs() {
+      return nowMs;
+    },
+    async advance(ms: number): Promise<void> {
+      const target = nowMs + ms;
+      for (;;) {
+        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        due.live = false;
+        nowMs = Math.max(nowMs, due.at);
+        due.fn();
+        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      nowMs = target;
+    },
+  };
+}
+
+/**
+ * Hold a paid call open until the invocation budget's deadline fires, and fail BY NAME if it never
+ * does: a deadline that cannot fire is the audio-feed-uv5g failure mode, so the test that waits for
+ * one must not be able to pass by hanging.
+ */
+function heldPastBudgetDeadline(
+  time: ReturnType<typeof controlledInvocationClock>,
+  signal: AbortSignal | null | undefined,
+  budgetMs = 2_000,
+): Promise<Response> {
+  return new Promise<Response>((_resolve, reject) => {
+    let aborted = false;
+    signal?.addEventListener("abort", () => {
+      aborted = true;
+      reject(signal.reason ?? new Error("aborted"));
+    }, { once: true });
+    (async () => {
+      for (let waited = 0; waited < budgetMs && !aborted && !signal?.aborted; waited += 5) {
+        await time.advance(5);
+      }
+      if (!aborted && !signal?.aborted) {
+        reject(
+          new Error(
+            "audio-feed-ugak: the invocation budget's deadline did not fire within " +
+              `${budgetMs}ms of virtual time while a paid call was outstanding; the abort path is ` +
+              "dead (audio-feed-uv5g)",
+          ),
+        );
+      }
+    })();
+  });
 }
 
 /**
@@ -792,6 +878,14 @@ Deno.test("audio-feed-8905: narration_tts sizes withInvocationBudget totalTurns 
   );
 
   // Case 1: In-flight deadline abort during segment 2 after segment 1 commits.
+  //
+  // audio-feed-ugak: the BUDGET's clock belongs to this test. Before the seam, this test armed an
+  // 80ms real deadline and hoped the machine reached segment 1's commit before it fired: on an idle
+  // box that was red in 4 of 20 runs, under CPU starvation 10 of 10, because turn 1's preflight alone
+  // was measured anywhere in 7-91ms of real time. The budget, the margin and every assertion about
+  // product behaviour are unchanged - the test now decides when the deadline arrives, so what is
+  // asserted is the DECISION (commit turn 1, then end turn 2's spend in flight) rather than the box.
+  const time = controlledInvocationClock();
   let callCount = 0;
   const client = new GeminiTtsClient({
     apiKey: "dummy-key",
@@ -818,14 +912,10 @@ Deno.test("audio-feed-8905: narration_tts sizes withInvocationBudget totalTurns 
           ),
         );
       }
-      // Segment 2 hangs until the invocation budget deadline aborts it in-flight.
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener(
-          "abort",
-          () => reject(init.signal?.reason ?? new Error("aborted")),
-          { once: true },
-        );
-      });
+      // Segment 2's paid call is held open until the invocation budget's OWN deadline ends it: the
+      // timer and the AbortController are the code path's, the test only decides WHEN virtual time
+      // reaches the deadline (audio-feed-ugak).
+      return heldPastBudgetDeadline(time, init?.signal);
     },
   });
 
@@ -841,9 +931,19 @@ Deno.test("audio-feed-8905: narration_tts sizes withInvocationBudget totalTurns 
     maxInvocationDurationMs: 80,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
 
   assertEquals(batch1.yielded.length, 1);
+  // THE DEADLINE FIRED IN FLIGHT, which used to be the machine's decision: turn 2's paid call was
+  // entered (callCount 2) and then ended by the budget's own timer - not refused by a preflight
+  // before it started, and not missed entirely (audio-feed-ugak).
+  assertEquals(callCount, 2, "turn 2's paid call must be entered before the deadline ends it");
+  assertEquals(
+    time.armedDeadlines[0],
+    75,
+    "the armed deadline IS the derivation: 80ms budget - 0ms spent - 5ms flush margin",
+  );
   assertEquals(batch1.yielded[0]?.completedTurns, 1);
   assertEquals(
     batch1.yielded[0]?.totalTurns,
@@ -1023,6 +1123,11 @@ Deno.test(
       }),
     );
 
+    // audio-feed-ugak: this test owns the invocation budget's clock, so where the deadline lands is
+    // the test's decision and not the machine's. Budget, margin and every product assertion below
+    // are unchanged (see controlledInvocationClock).
+    const time = controlledInvocationClock();
+    let turnTwoEnteredAtMs = -1;
     const synthesizedPrompts: string[] = [];
     let abortOnSecondTurn = true;
     const client = new GeminiTtsClient({
@@ -1034,19 +1139,11 @@ Deno.test(
         };
         const text = bodyJson.contents?.[0]?.parts?.[0]?.text ?? "";
         if (abortOnSecondTurn && synthesizedPrompts.length === 1) {
-          // Simulate turn 2 stalling until the invocation budget deadline aborts the signal mid-turn.
-          await new Promise<void>((_resolve, reject) => {
-            const sig = init?.signal;
-            if (sig?.aborted) {
-              reject(sig.reason ?? new DOMException("Aborted", "AbortError"));
-              return;
-            }
-            sig?.addEventListener(
-              "abort",
-              () => reject(sig.reason ?? new DOMException("Aborted", "AbortError")),
-              { once: true },
-            );
-          });
+          // Turn 2's paid call is held open until the budget's OWN deadline ends it: the timer and the
+          // AbortController are the code path's, the test only decides WHEN virtual time reaches the
+          // deadline (audio-feed-ugak).
+          turnTwoEnteredAtMs = time.nowMs;
+          await heldPastBudgetDeadline(time, init?.signal);
         }
         synthesizedPrompts.push(text);
         const wav = segmentWav(text || `chunk-${synthesizedPrompts.length}`);
@@ -1083,11 +1180,27 @@ Deno.test(
       estimatedTurnDurationMs: 10,
       estimatedUploadDurationMs: 5,
       flushMarginMs: 5,
+      clock: time.clock,
     });
 
     assertEquals(tick1.ready.length, 0, "tick 1 must yield when turn 2 aborts on deadline");
     assertEquals(tick1.failed.length, 0, "tick 1 must not fail the episode");
     assertEquals(tick1.yielded.length, 1, "tick 1 must yield cleanly");
+    // THE DEADLINE'S PLACEMENT, which used to be the machine's decision (audio-feed-ugak): turn 2's
+    // paid call began with the budget unspent, the armed deadline is the derivation exactly
+    // (80ms budget - 0ms spent - 5ms flush margin), and the abort was observed at that instant of
+    // virtual time - so the spend really was ended in flight rather than refused beforehand.
+    assertEquals(
+      turnTwoEnteredAtMs,
+      1_000_000,
+      "turn 2's paid call must begin with the budget unspent",
+    );
+    assertEquals(
+      time.armedDeadlines[0],
+      75,
+      "the armed deadline IS the derivation: 80ms budget - 0ms spent - 5ms flush margin",
+    );
+    assertEquals(time.nowMs, 1_000_075, "the deadline must fire at the derived instant, in flight");
     assertEquals(tick1.yielded[0]?.completedTurns, 1, "segment 1 was durably committed");
     assertEquals(
       tick1.yielded[0]?.totalTurns,
@@ -1115,6 +1228,7 @@ Deno.test(
       estimatedTurnDurationMs: 10,
       estimatedUploadDurationMs: 5,
       flushMarginMs: 5,
+      clock: time.clock,
     });
 
     assertEquals(

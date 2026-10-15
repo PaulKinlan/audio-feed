@@ -107,6 +107,25 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The invocation budget's clock belongs to whoever drives it, so the deadline is a decision rather
+  than a property of the machine (audio-feed-ugak)**: two suites in `tests/synthesis_resume_test.ts`
+  asserted that an 80ms *real* deadline landed after segment 1 committed and before turn 2 finished —
+  a race the machine won or lost (measured: 8 PASS / 2 FAIL idle, 0 PASS / 10 FAIL under CPU
+  starvation, with turn 1's own preflight observed anywhere between 7ms and 91ms of real elapsed
+  time). Because a gate runs test modules concurrently, contention is its normal case, so every
+  landing that touched those suites carried a coin flip. `src/synthesis/limits.ts` now reads the time
+  and arms the deadline through one injectable `InvocationClock`, defaulting to `REAL_INVOCATION_CLOCK`
+  (process monotonic time plus the platform scheduler) so **no production path passes one and no
+  behaviour changed**; the two suites pass a clock they drive, keep every product assertion, and pin
+  the decision instead (the armed deadline is exactly 75ms = 80ms budget − 5ms flush margin, and the
+  abort is observed in flight with turn 2's paid call entered). Measured after: 10/10 green idle, 10/10
+  green whole-file under 16 CPU hogs, and 10/10 green in the starvation condition whose before was
+  0/10. A deadline that cannot fire is a named failure, not a hang. Rejected, by measurement: a
+  derived or raised budget (10x it — 800ms, ~50-100x the real per-segment work — still failed 2/5
+  under the same load and 4/5 at 24 hogs), and a virtual timer alone (`@std/testing` `FakeTime`
+  patches `Date.now` and `setTimeout` but **not** `performance.now`, which is what a budget measures
+  elapsed time with).
+
 - **The Deno Deploy entrypoint is pinned in the repo (audio-feed-w55i)**: the live project failed a
   build with `Entrypoint at '/tmp/build/src/src/server.ts' not found` (`src/` applied twice) because
   the entrypoint existed only in the Deploy dashboard, out of sight of the repo. `deno.json` now

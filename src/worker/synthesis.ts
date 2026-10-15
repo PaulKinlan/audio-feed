@@ -91,7 +91,10 @@ import {
   estimateUploadDurationMs,
   INVOCATION_FLUSH_MARGIN_MS,
   InvocationBudgetAbortError,
+  InvocationBudgetSpec,
+  InvocationClock,
   isInvocationBudgetAbort,
+  REAL_INVOCATION_CLOCK,
   SynthesisYieldError,
   withInvocationBudget,
 } from "../synthesis/limits.ts";
@@ -126,6 +129,8 @@ export type Synthesizer = (job: {
     maxSegments?: number;
     maxDurationMs?: number;
     startTimeMonotonicMs?: number;
+    /** The budget's clock; a test injects one it drives (audio-feed-ugak). */
+    clock?: InvocationClock;
     estimatedTurnDurationMs?: number;
     estimatedScriptDurationMs?: number;
     flushMarginMs?: number;
@@ -223,6 +228,14 @@ export interface SynthesisWorkerOptions {
   revision?: () => string;
   /** Current time in ms since epoch; injectable so tests can advance time deterministically. */
   nowMs?: number;
+  /**
+   * The clock this invocation's BUDGET reads and arms its deadline on (audio-feed-ugak). Defaults to
+   * REAL_INVOCATION_CLOCK - process monotonic time plus the platform scheduler, which is what every
+   * production caller gets. A test injects a clock it drives so the deadline is a decision the test
+   * makes instead of a property of how busy the machine was; the epoch clock above (`nowMs`) stamps
+   * stored records and is a different thing.
+   */
+  clock?: InvocationClock;
 }
 
 /**
@@ -243,6 +256,7 @@ const DEFAULTS: Required<
     | "estimatedTurnDurationMs"
     | "estimatedUploadDurationMs"
     | "stageMarkCap"
+    | "clock"
   >
 > = {
   batchSize: 5,
@@ -606,17 +620,22 @@ export const DEFAULT_SCRIPT_STAGE_TIMEOUT_MS = 360_000;
 async function runScriptStage(
   generator: ScriptGenerator | null,
   input: GroundedScriptInput,
-  budget?: { maxDurationMs?: number; startTimeMonotonicMs?: number },
+  budget?: InvocationBudgetSpec,
   flushMarginMs?: number,
   estimateMs = ESTIMATED_SCRIPT_STAGE_DURATION_MS,
   defaultTimeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
+  // The unbounded fallback arms its own deadline, on the same clock the caller supplied so a test
+  // that owns the invocation's clock owns this one too (audio-feed-ugak).
+  const fallbackClock = budget?.clock ?? REAL_INVOCATION_CLOCK;
   const outcome = await withInvocationBudget({
     name: "script_generation",
-    budget: budget?.maxDurationMs
-      ? budget
-      : { maxDurationMs: defaultTimeoutMs, startTimeMonotonicMs: performance.now() },
+    budget: budget?.maxDurationMs ? budget : {
+      maxDurationMs: defaultTimeoutMs,
+      startTimeMonotonicMs: fallbackClock.now(),
+      clock: fallbackClock,
+    },
     flushMarginMs: budget?.maxDurationMs ? flushMarginMs : 0,
     worstCaseEstimateMs: budget?.maxDurationMs ? estimateMs : 0,
     fn: (signal) => generator(input, { signal }),
@@ -707,6 +726,10 @@ export function createGeminiSynthesizer(
     }
     const leaseSignal = remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs);
     const claimedBy = episode.claimedBy ?? "";
+    // audio-feed-ugak: the invocation budget's readings, taken from the invocation's own clock when it
+    // supplied one, so the three preflight checks below and the timer in withInvocationBudget cannot
+    // disagree about how much budget is left.
+    const budgetNow = () => (invocationBudget?.clock ?? REAL_INVOCATION_CLOCK).now();
     // audio-feed-8905: `total` is the REAL plan size, published by the client from its
     // own split (gemini.ts onProgress(turn, total)). Captured so the yield label and the
     // abort message report the plan rather than MAX_TTS_SEGMENTS.
@@ -748,7 +771,7 @@ export function createGeminiSynthesizer(
             // Evaluated specifically before paid synthesis so cached turns can be restored in milliseconds
             // without being blocked by the 50s turn estimate.
             if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-              const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+              const elapsed = budgetNow() - invocationBudget.startTimeMonotonicMs;
               const remaining = invocationBudget.maxDurationMs - elapsed;
               const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
                 deps.estimatedTurnDurationMs ??
@@ -806,7 +829,7 @@ export function createGeminiSynthesizer(
         invocationBudget?.maxDurationMs &&
         invocationBudget?.startTimeMonotonicMs
       ) {
-        const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+        const elapsed = budgetNow() - invocationBudget.startTimeMonotonicMs;
         const remaining = invocationBudget.maxDurationMs - elapsed;
         const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
           deps.estimatedTurnDurationMs ??
@@ -899,7 +922,7 @@ export function createGeminiSynthesizer(
           // audio-feed-9wqt, audio-feed-vvwb: preflight check before first dialogue turn:
           // ensure remaining time fits at least one turn + flush margin
           if (invocationBudget?.maxDurationMs && invocationBudget?.startTimeMonotonicMs) {
-            const elapsed = performance.now() - invocationBudget.startTimeMonotonicMs;
+            const elapsed = budgetNow() - invocationBudget.startTimeMonotonicMs;
             const remaining = invocationBudget.maxDurationMs - elapsed;
             const turnEstimate = invocationBudget.estimatedTurnDurationMs ??
               deps.estimatedTurnDurationMs ??
@@ -1826,7 +1849,10 @@ async function runSynthesisBatchCore(
   const blobs = boundedBlobStore(ctx.stores.blobs);
   const boundedCtx: AppContext = { ...ctx, stores: { ...ctx.stores, blobs } };
   const nowMs = options.nowMs ?? Date.now();
-  const invocationStartMonotonicMs = performance.now();
+  // audio-feed-ugak: the clock this invocation's budget reads. Real unless a caller injected one, so
+  // production behaviour is unchanged and a test owns when the deadline arrives.
+  const clock = options.clock ?? REAL_INVOCATION_CLOCK;
+  const invocationStartMonotonicMs = clock.now();
   const maxSegmentsPerInvocation = options.maxSegmentsPerInvocation ??
     ctx.config.maxSegmentsPerInvocation;
   const maxInvocationDurationMs = options.maxInvocationDurationMs ??
@@ -2010,7 +2036,7 @@ async function runSynthesisBatchCore(
 
     // Preflight check before claiming: ensure remaining batch time fits at least one turn + flush margin (audio-feed-9wqt)
     if (maxInvocationDurationMs) {
-      const elapsed = performance.now() - invocationStartMonotonicMs;
+      const elapsed = clock.now() - invocationStartMonotonicMs;
       const remaining = maxInvocationDurationMs - elapsed;
       const requiredBatchMargin =
         (options.estimatedTurnDurationMs ?? ESTIMATED_TTS_TURN_DURATION_MS) +
@@ -2241,6 +2267,7 @@ async function runSynthesisBatchCore(
                 maxSegments: maxSegmentsPerInvocation,
                 maxDurationMs: maxInvocationDurationMs,
                 startTimeMonotonicMs: invocationStartMonotonicMs,
+                clock,
               },
             }), currentEpisode.id);
         } finally {
@@ -2357,7 +2384,7 @@ async function runSynthesisBatchCore(
         }
         if (
           maxInvocationDurationMs &&
-          performance.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
+          clock.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
         ) {
           break;
         }
@@ -2532,6 +2559,7 @@ async function runSynthesisBatchCore(
         budget: {
           maxDurationMs: maxInvocationDurationMs,
           startTimeMonotonicMs: invocationStartMonotonicMs,
+          clock,
         },
         flushMarginMs: flushMargin,
         worstCaseEstimateMs: terminalEstimate,
@@ -2906,6 +2934,7 @@ async function runSynthesisBatchCore(
         budget: {
           maxDurationMs: maxInvocationDurationMs,
           startTimeMonotonicMs: invocationStartMonotonicMs,
+          clock,
         },
         flushMarginMs: flushMargin,
         worstCaseEstimateMs: 200,
@@ -2926,6 +2955,7 @@ async function runSynthesisBatchCore(
         budget: {
           maxDurationMs: maxInvocationDurationMs,
           startTimeMonotonicMs: invocationStartMonotonicMs,
+          clock,
         },
         flushMarginMs: flushMargin,
         worstCaseEstimateMs: 200,
@@ -2938,6 +2968,7 @@ async function runSynthesisBatchCore(
           budget: {
             maxDurationMs: maxInvocationDurationMs,
             startTimeMonotonicMs: invocationStartMonotonicMs,
+            clock,
           },
           flushMarginMs: flushMargin,
           worstCaseEstimateMs: 100,
@@ -2954,7 +2985,7 @@ async function runSynthesisBatchCore(
       // audio-feed-vqu4: stop batch if invocation time budget has expired
       if (
         maxInvocationDurationMs &&
-        performance.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
+        clock.now() - invocationStartMonotonicMs >= maxInvocationDurationMs
       ) {
         break;
       }
@@ -2964,6 +2995,7 @@ async function runSynthesisBatchCore(
         budget: {
           maxDurationMs: maxInvocationDurationMs,
           startTimeMonotonicMs: invocationStartMonotonicMs,
+          clock,
         },
         flushMarginMs: flushMargin,
         worstCaseEstimateMs: 100,

@@ -159,9 +159,45 @@ export type BudgetedOutcome<T> =
   | { kind: "budget-yield"; error: InvocationBudgetAbortError }
   | { kind: "error"; error: unknown };
 
+/**
+ * The clock an invocation budget reads, and the one that fires its deadline (audio-feed-ugak).
+ *
+ * ONE OBJECT RATHER THAN TWO HOOKS, because the reading and the timer have to be the same timeline:
+ * the deadline is armed for `remaining - flushMargin` ms measured by `now()`, so a reading and a
+ * scheduler drawn from different timelines disagree about when the budget is spent - and that
+ * disagreement is the defect this seam exists to remove. Measured on the test that motivated it: the
+ * same 80ms budget with the same work was 0 PASS / 10 FAIL under CPU starvation while the deadline
+ * it arms is derived from a reading the machine, not the test, produced.
+ *
+ * WHO OWNS THE CLOCK: production owns it (REAL_INVOCATION_CLOCK - process monotonic time and the
+ * platform scheduler, neither of which a caller can influence); a test supplies a clock it drives
+ * and therefore decides where the deadline lands. No production path passes one.
+ */
+export interface InvocationClock {
+  /** Monotonic reading in ms. Must never go backwards. */
+  now(): number;
+  /** Arm a one-shot timer ON THE SAME TIMELINE as `now()`. Returns an idempotent cancel. */
+  setTimeout(fn: () => void, ms: number): () => void;
+}
+
+/** The production clock. The only implementation any non-test caller should use. */
+export const REAL_INVOCATION_CLOCK: InvocationClock = {
+  now: () => performance.now(),
+  setTimeout: (fn, ms) => {
+    const handle = setTimeout(fn, ms);
+    return () => clearTimeout(handle);
+  },
+};
+
 export interface InvocationBudgetSpec {
   maxDurationMs?: number;
   startTimeMonotonicMs?: number;
+  /**
+   * Where this budget reads the time and arms its deadline. Defaults to REAL_INVOCATION_CLOCK, which
+   * is what every production caller gets; a test injects a clock it owns so the deadline is a
+   * decision the test makes rather than a property of how busy the machine was (audio-feed-ugak).
+   */
+  clock?: InvocationClock;
 }
 
 /**
@@ -201,9 +237,10 @@ export async function withInvocationBudget<T>(
 ): Promise<BudgetedOutcome<T>> {
   const { budget } = options;
   if (budget?.maxDurationMs !== undefined && budget?.maxDurationMs > 0) {
-    const startTime = budget.startTimeMonotonicMs ?? performance.now();
+    const clock = budget.clock ?? REAL_INVOCATION_CLOCK;
+    const startTime = budget.startTimeMonotonicMs ?? clock.now();
     const flushMargin = options.flushMarginMs ?? INVOCATION_FLUSH_MARGIN_MS;
-    const elapsed = performance.now() - startTime;
+    const elapsed = clock.now() - startTime;
     const remaining = budget.maxDurationMs - elapsed;
     const available = remaining - flushMargin;
 
@@ -237,7 +274,9 @@ export async function withInvocationBudget<T>(
       }ms) exceeded during stage "${options.name}"`,
     );
 
-    const timer = setTimeout(() => {
+    // The deadline is armed on the budget's own clock, so a test that owns the clock also owns when
+    // this fires - and a test that owns NOTHING gets the real scheduler (audio-feed-ugak).
+    const cancelTimer = clock.setTimeout(() => {
       // (c) Passes AbortSignal tagged with InvocationBudgetAbortError (automatic provenance)
       controller.abort(abortErr);
     }, timeoutMs);
@@ -297,7 +336,7 @@ export async function withInvocationBudget<T>(
       // (d) Typed outcome: error
       return { kind: "error", error };
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      cancelTimer();
     }
   }
 
