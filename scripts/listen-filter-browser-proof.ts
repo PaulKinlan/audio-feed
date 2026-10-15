@@ -14,6 +14,10 @@
  *      - Extracts a11y tree for filter controls.
  *   3. Mobile (390x844):
  *      - Verifies zero horizontal overflow (scrollWidth <= clientWidth).
+ *      - Asserts the iOS focus floor (audio-feed-nmw3) on the rendered page: every control a reader
+ *        can put text into computes >= 16px; the floor outweighs a page-level 0.9rem size; and with
+ *        the floor's declarations removed that same rule puts the search box below 16px, so the
+ *        assertion is falsifiable and the floor is what holds the value.
  *   4. Screenshots saved to docs/evidence/audio-feed-3h1/.
  *
  *   deno run --allow-all --unstable-kv scripts/listen-filter-browser-proof.ts
@@ -33,6 +37,9 @@ const ASSERTS = [
   "filter state is scoped per-user",
   "a11y tree includes search role landmark",
   "mobile layout has zero horizontal overflow at 390px",
+  "at 390x844 every text control computes at least 16px, so focusing one cannot make iOS zoom the standalone PWA",
+  "the floor outweighs a page-level control size: with a 0.9rem page rule on the search box inserted into the page's own stylesheet, it still computes 16px",
+  "the floor is what holds it: with the floor's declarations removed and that page rule left in place, the search box computes below 16px, so the check above is falsifiable",
 ];
 
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -301,6 +308,150 @@ try {
           Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
         );
         console.log(`Saved screenshot to ${OUT}02-listen-filter-mobile-390.png`);
+
+        // ------------------------------------------------- 10. THE iOS FOCUS FLOOR (audio-feed-nmw3)
+        //
+        // WHY IT IS HERE AND NOT IN A SCRIPT OF ITS OWN. The floor `font-size: max(1rem, 1em)` exists
+        // in three places (listen.css's `body input/select/textarea`, shell.ts's `.shell` kit rule and
+        // home.css's url/password rule) and, before this, NOTHING asserted it: no proof script and no
+        // verify_* script touched font size. A proof nobody runs would be that same defect over again,
+        // so the assertion goes inside the mobile pass this proof already runs - 390x844, on the page
+        // installed as a standalone PWA (no browser chrome, so no pinch to escape an iOS focus zoom),
+        // whose own comment records the history (a search box at 0.9rem, a speed control at 0.8rem, a
+        // share field at 0.85rem) and whose selector `.filter-field input[type="search"]` the floor
+        // was raised to outweigh.
+        //
+        // IT READS THE RENDERED VALUE. Grepping the stylesheets for `max(1rem, 1em)` would stay green
+        // if the rule were never applied to the element or were outweighed by a page rule, so what is
+        // read here is `getComputedStyle(...).fontSize` on the served page, for every control a reader
+        // can put text into - the platform's type list, not the floor's selector, so the check does
+        // not go blind exactly when the declaration does.
+        //
+        // AND IT IS A CHECK THAT CAN BE SEEN TO FAIL (docs/evidence/README.md, "Honesty"): on this
+        // page, one mutation later - the floor's declarations deleted and the pre-audio-feed-rxa2
+        // 0.9rem page rule put back - the same measurement must read BELOW 16px, and it is asserted
+        // to. Served 16px against mutant 14.4px is the difference between asserting the outcome and
+        // asserting the source text.
+        const TEXT_CONTROLS =
+          'input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="hidden"]), select, textarea';
+        const FLOOR_PX = 16;
+
+        /** Every control a reader can put text into, with the font-size the browser actually used. */
+        async function controlFontSizes() {
+          return (await js(
+            `[...document.querySelectorAll(${JSON.stringify(TEXT_CONTROLS)})].map((el) => ({` +
+              ` control: "#" + (el.id || el.tagName.toLowerCase()),` +
+              ` fontSizePx: Math.round(parseFloat(getComputedStyle(el).fontSize) * 100) / 100 }))`,
+          )) as Array<{ control: string; fontSizePx: number }>;
+        }
+        const fontSizeReport = (rows: Array<{ control: string; fontSizePx: number }>) =>
+          rows.map((r) => `${r.control} ${r.fontSizePx}px`).join(", ");
+
+        /**
+         * Deletes every rule whose font-size declaration IS the floor, and counts what it removed.
+         *
+         * The declaration is tested before descending: in a browser with CSS nesting, `rule.cssRules`
+         * is an EMPTY (but truthy) list on a plain style rule, so testing it first makes every rule
+         * look like a grouping rule and removes nothing - which the caller asserts against, because a
+         * mutation that did not happen would otherwise leave this check reading green for nothing.
+         */
+        const DELETE_FLOOR_RULES = `(() => {
+          let removed = 0;
+          const walk = (rules) => {
+            for (let i = rules.length - 1; i >= 0; i--) {
+              const rule = rules[i];
+              const declared = rule.style ? String(rule.style.getPropertyValue("font-size")) : "";
+              if (/max\\(\\s*1rem/i.test(declared)) {
+                const owner = rule.parentRule || rule.parentStyleSheet;
+                if (owner) { owner.deleteRule(i); removed++; }
+                continue;
+              }
+              if (rule.cssRules && rule.cssRules.length) walk(rule.cssRules);
+            }
+          };
+          for (const sheet of document.styleSheets) {
+            try { walk(sheet.cssRules); } catch { /* a cross-origin sheet cannot be read */ }
+          }
+          return removed;
+        })()`;
+
+        // The filter controls are revealed by the page's own script, but a control has no rendered
+        // box while it is display:none, and this check is about a value a reader actually gets.
+        await js(`document.getElementById("filterSection").classList.remove("hidden")`);
+        const servedFontSizes = await controlFontSizes();
+        checker.check(
+          "at 390x844 every text control computes at least 16px, so focusing one cannot make iOS zoom the standalone PWA",
+          servedFontSizes.length >= 3 && servedFontSizes.every((r) => r.fontSizePx >= FLOOR_PX),
+          fontSizeReport(servedFontSizes),
+        );
+
+        // The page rule the floor was built to outweigh: a page-level control size below 1rem, the
+        // shape listen.css shipped before audio-feed-rxa2, which the floor's two :not() groups
+        // outweigh on specificity. It goes into the SAME sheet as the floor, through the CSSOM, for
+        // two reasons: an appended <style> is blocked by this page's nonce-only `style-src` (measured
+        // - the rule silently did not apply and the check below passed for nothing), and being after
+        // `.filter-field input[type="search"] { font: inherit }` in the cascade is what makes it the
+        // winner once the floor is gone.
+        const pageLevelRule = await js(`(() => {
+          const RULE = '.filter-field input[type="search"] { font-size: 0.9rem; }';
+          for (const sheet of document.styleSheets) {
+            let rules = null;
+            try { rules = sheet.cssRules; } catch { continue; }
+            const hasFloor = [...rules].some((rule) =>
+              rule.style && /max\\(\\s*1rem/i.test(String(rule.style.getPropertyValue("font-size")))
+            );
+            if (!hasFloor) continue;
+            sheet.insertRule(RULE, rules.length);
+            return RULE;
+          }
+          return "";
+        })()`) as string;
+        const floorPresent = await controlFontSizes();
+        checker.check(
+          "the floor outweighs a page-level control size: with a 0.9rem page rule on the search box inserted into the page's own stylesheet, it still computes 16px",
+          // Read with the counterexample below, which is what proves this rule has any effect at all.
+          pageLevelRule !== "" && floorPresent.every((r) => r.fontSizePx >= FLOOR_PX),
+          pageLevelRule === ""
+            ? "the page-level rule could not be inserted into any same-origin sheet"
+            : `${pageLevelRule} | ${fontSizeReport(floorPresent)}`,
+        );
+
+        // THE COUNTEREXAMPLE, measured with the same instrument that just passed: the floor's
+        // declarations gone is what "an override or a removed declaration" looks like in the served
+        // document, and on that document the check above must be red. `removed` is asserted because a
+        // renamed or restructured rule would otherwise turn this into a no-op that still reads green.
+        const removedWithPageRule = await js(DELETE_FLOOR_RULES) as number;
+        const mutantFontSizes = await controlFontSizes();
+
+        // What the floor is actually holding on today's page, measured rather than assumed: reload to
+        // drop the page rule, delete the floor alone, read the same controls again.
+        await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 3`,
+          "mobile reload for the floor-only measure",
+        );
+        await js(`document.getElementById("filterSection").classList.remove("hidden")`);
+        const removedAlone = await js(DELETE_FLOOR_RULES) as number;
+        const floorOnlySizes = await controlFontSizes();
+        checker.check(
+          "the floor is what holds it: with the floor's declarations removed and that page rule left in place, the search box computes below 16px, so the check above is falsifiable",
+          removedWithPageRule >= 1 && removedAlone >= 1 &&
+            mutantFontSizes.some((r) => r.fontSizePx < FLOOR_PX),
+          `floor + page rule: ${
+            fontSizeReport(floorPresent)
+          } | floor removed (${removedWithPageRule} rule(s)) + page rule: ` +
+            `${fontSizeReport(mutantFontSizes)} | floor removed alone (${removedAlone} rule(s)): ${
+              fontSizeReport(floorOnlySizes)
+            }`,
+        );
+
+        // Leave the document as the page served it, so anything appended here later cannot inherit a
+        // mutation this check made.
+        await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 3`,
+          "mobile reload after the floor measurements",
+        );
       }, { prefix: "audiofeed-listen-filter-" });
     } finally {
       await writeEvidenceReadme({
