@@ -143,6 +143,42 @@ try {
         counted ? JSON.stringify(counted.observed) : "none"
       }`,
     );
+    // Fire the collector's OWN flush without tearing the document down (audio-feed-mpmc). The transport
+    // counters live inside the page, so they are only readable between the flush and the teardown — and
+    // `Page.navigate` does both at once, so reading them after it reads the blank page's and reading
+    // before it reads zeroes (both measured, both wrong). The collector flushes on pagehide and on
+    // visibilitychange-to-hidden; this drives the second, and `flush`'s `sent` guard means the pagehide
+    // that follows is a no-op rather than a second beacon.
+    const flushInPage = async () => {
+      await cdp("Runtime.evaluate", {
+        expression:
+          'Object.defineProperty(document, "visibilityState", { get: () => "hidden", configurable: true });' +
+          ' window.dispatchEvent(new Event("visibilitychange")); "flushed"',
+        returnByValue: true,
+      });
+      await wait(1000);
+    };
+    const readTransports = async () => {
+      const read = await cdp("Runtime.evaluate", {
+        expression:
+          "JSON.stringify(globalThis.cwvState && globalThis.cwvState.transports ? cwvState.transports() : null)",
+        returnByValue: true,
+      }) as { result?: { value?: string } };
+      return JSON.parse(read.result?.value ?? "null") as
+        | { beacon: number; fallback: number; failed: number }
+        | null;
+    };
+
+    // The CONTROL for the transport assertions further down: on the normal path the browser ACCEPTED the
+    // beacons, so the fallback must not have run. Without it, a change that always used the fallback
+    // would satisfy the refused and absent scenarios below.
+    await flushInPage();
+    const controlTransports = await readTransports();
+    check(
+      "the normal path uses sendBeacon and does not fall back",
+      (controlTransports?.beacon ?? 0) >= 1 && controlTransports?.fallback === 0,
+      JSON.stringify(controlTransports),
+    );
     // The invariant that matters: an OVERCOUNT understates INP, which is the dangerous direction. An
     // undercount only degrades the value to the upper bound the interaction count exists to remove.
 
@@ -194,6 +230,76 @@ try {
       `  INP: ${
         inp ? `${inp.context?.value}ms (warn/error band applied to it)` : "not observed in this run"
       }`,
+    );
+
+    // ---- audio-feed-mpmc: the two silent losses, DRIVEN rather than reasoned about --------------
+    // Each scenario stubs the page's transport BEFORE it loads, flushes by leaving the page, and reads
+    // the STORE back. THE EVIDENCE IS THE RECORD'S PRESENCE, and that is deliberate: a refused beacon
+    // has no server-side observer, so with the keepalive fallback removed the only trace of it is the
+    // ABSENCE of a cwv.report, and an absent record is what these checks name. A test that only showed
+    // the fallback branch executing would test the fix rather than the consequence. The control is the
+    // run above, which asserts the record arrives on the normal path.
+    const countReports = async () =>
+      (await stores.metadata.listLogs()).filter((r) => r.type === "cwv.report").length;
+    let stubId: string | undefined;
+    const scenario = async (name: string, stub: string) => {
+      if (stubId) {
+        await cdp("Page.removeScriptToEvaluateOnNewDocument", { identifier: stubId });
+        stubId = undefined;
+      }
+      const added = await cdp("Page.addScriptToEvaluateOnNewDocument", { source: stub }) as {
+        identifier?: string;
+      };
+      stubId = added.identifier;
+      const before = await countReports();
+      await cdp("Page.navigate", { url: pageUrl });
+      await wait(2500);
+      // One interaction, so the run has at least one beacon to send even if this load reports no LCP.
+      await press(60, 60);
+      await release(60, 60);
+      await wait(500);
+      // Flush and read the counters while the document is still alive; see flushInPage above for why
+      // neither reading before the flush nor after a navigation works.
+      await flushInPage();
+      const t = await readTransports();
+      const arrived = (await countReports()) - before;
+      console.log(
+        `  ${name}: ${arrived} cwv.report record(s) arrived, transports=${JSON.stringify(t)}`,
+      );
+      return { arrived, transports: t };
+    };
+
+    // LITERAL check labels on purpose (docs/evidence/README.md, assertion census): a label assembled by
+    // interpolation is not a call site the census can match against the README's `- Asserts:` line, so
+    // the measurement goes in the detail argument and only the log line above interpolates the name.
+    const refused = await scenario(
+      "sendBeacon REFUSED",
+      "Object.defineProperty(navigator, 'sendBeacon', { value: () => false, configurable: true });",
+    );
+    check(
+      "a REFUSED beacon still arrives as a CWV report",
+      refused.arrived > 0,
+      `${refused.arrived} new record(s), transports=${JSON.stringify(refused.transports)}`,
+    );
+    check(
+      "a refused beacon is recorded as a keepalive fallback rather than an accepted one",
+      refused.transports?.beacon === 0 && (refused.transports?.fallback ?? 0) >= 1,
+      JSON.stringify(refused.transports),
+    );
+
+    const absent = await scenario(
+      "sendBeacon ABSENT",
+      "Object.defineProperty(navigator, 'sendBeacon', { value: undefined, configurable: true });",
+    );
+    check(
+      "an ABSENT sendBeacon still arrives as a CWV report",
+      absent.arrived > 0,
+      `${absent.arrived} new record(s), transports=${JSON.stringify(absent.transports)}`,
+    );
+    check(
+      "a missing sendBeacon does not leave the page without a transport",
+      absent.transports?.beacon === 0 && (absent.transports?.fallback ?? 0) >= 1,
+      JSON.stringify(absent.transports),
     );
 
     try {
