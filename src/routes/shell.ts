@@ -85,7 +85,7 @@ export const SHELL_TOKENS = DESIGN_TOKENS;
 /** Header, footer and the components the account and login pages share. */
 export const SHELL_CSS = `
   *, *::before, *::after { box-sizing: border-box; }
-  html { scrollbar-color: var(--surface-3) var(--bg); }
+  html { scrollbar-color: var(--surface-3) var(--bg); scrollbar-width: thin; }
   ::selection { background: var(--accent); color: var(--accent-ink); }
   body.shell {
     margin: 0;
