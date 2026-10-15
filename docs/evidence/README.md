@@ -182,7 +182,12 @@ making the gate red by derivation is audio-feed-4kl3.
   proof scripts that import them, and any hand-back citing a proof run must name a commit ref
   reachable from the branch (`audio-feed-avlk`).
 - **Mobile form-control font-size floor (`audio-feed-lzhx`):** Both document roots (the main shell
-  in `src/routes/shell.ts` and the standalone player in `src/assets/listen.css`) keep form controls
-  at `>= 16px` (`1rem`) on mobile viewports to prevent iOS Safari auto-zoom on focus; this is a
-  descriptive cross-root check (`scripts/mobile-overflow-browser-proof.ts`) rather than a Claim-B
-  shared-token unification.
+  in `src/routes/shell.ts` and the standalone player in `src/assets/listen.css`) keep every
+  text-focus form control at `>= 16px` (`1rem`) on mobile viewports to prevent iOS Safari auto-zoom
+  on focus. The floor is the declaration itself — `font-size: max(1rem, 1em)`, with its reason and
+  the Modern Web Guidance forms reference inline — in `src/routes/shell.ts` (every text-focus
+  control in the main shell), `src/assets/listen.css` (the same for the standalone player) and
+  `src/assets/home.css` (the home page's url/password inputs). It is a per-root rule rather than a
+  Claim-B shared-token unification (there is no single stylesheet all three share), and **no proof
+  script asserts it** (`audio-feed-jb1k`: this bullet previously cited
+  `scripts/mobile-overflow-browser-proof.ts`, which exists in no commit).
