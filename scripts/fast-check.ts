@@ -176,6 +176,12 @@ const TEST_FLAGS = [
   "--allow-write",
   "--allow-run",
   "--unstable-kv",
+  // audio-feed-pnw73: `deno check main.ts src tests scripts` runs as an unconditional cheap step
+  // ABOVE every call site of TEST_FLAGS in this file, so the type-check `deno test` would repeat
+  // inside each module is the same one, over the same tree. Measured on deno 2.9.7 with 2267
+  // tests: 201.4s / 259.8s with the duplicate, 191.6s / 187.5s without it, same result. This is
+  // only sound while the check step stays unconditional - tests/fast_check_test.ts pins that.
+  "--no-check",
 ];
 
 /**

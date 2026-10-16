@@ -107,6 +107,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The gate type-checks the tree once per run, not twice (audio-feed-pnw73)**: `deno task gate` ran
+  `deno check main.ts src tests scripts` and then `deno test`, which type-checked the same tree over the
+  same roots a second time — and the fast tier did the same through `TEST_FLAGS`, whose cheap steps always
+  run `deno task check` first. The test step in both now carries `--no-check`; measured on Deno 2.9.7 with
+  this repo's 2267 tests, removing the duplicate takes the full suite from 201.4s / 259.8s to 191.6s /
+  187.5s with an identical result. `--no-check` is sound **only** directly after that whole-tree check, so
+  the bare `deno test` task (which runs no check first) keeps type-checking, and `tests/fast_check_test.ts`
+  pins all three halves — both the flag's presence in the gate and its absence from the bare task — so a
+  future edit cannot quietly leave a tree unverified. `deno test --parallel`, the other half of the same
+  bead, is measured at ~4x (187s to 48s) but needs 3-4 suites made parallel-safe first and is tracked as
+  audio-feed-e4udd.
 - **The invocation budget's clock belongs to whoever drives it, so the deadline is a decision rather
   than a property of the machine (audio-feed-ugak)**: two suites in `tests/synthesis_resume_test.ts`
   asserted that an 80ms *real* deadline landed after segment 1 committed and before turn 2 finished —

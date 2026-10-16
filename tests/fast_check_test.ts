@@ -860,6 +860,55 @@ Deno.test("audio-feed-2h5f: production fmt covers deno.json's configured include
   ], "only the integration-test fixture may narrow formatting to one file");
 });
 
+Deno.test("audio-feed-pnw73: the gate type-checks the tree once per run, never twice", async () => {
+  // Two facts have to hold together, and either one alone would be a silent loss of coverage:
+  //   (1) the gate's test step carries --no-check, i.e. the duplicate type-check is gone;
+  //   (2) the step IMMEDIATELY BEFORE it is the whole-tree `deno check`, so nothing is unverified.
+  // The bare `test` task is asserted the other way round: it runs no check first, so a --no-check
+  // added there would type-check nothing at all. Measured on deno 2.9.7, 2267 tests: removing the
+  // duplicate took 201.4s/259.8s down to 191.6s/187.5s with an identical result.
+  const jsonc = await Deno.readTextFile(new URL("../deno.json", import.meta.url));
+  const config = JSON.parse(
+    jsonc.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n"),
+  ) as { tasks?: Record<string, string> };
+  const tasks = config.tasks ?? {};
+  const gateTask = tasks.gate ?? "";
+  assert(gateTask.length > 0, "deno.json must define the gate task");
+
+  const gate = gateTask.split(/\s*&&\s*/);
+  const testStep = gate.findIndex((step) => step.startsWith("deno test"));
+  assert(testStep > 0, "the gate must still run a test step, after its cheap steps");
+  const testStepText = gate[testStep] ?? "";
+  assert(
+    testStepText.includes("--no-check"),
+    `the gate's test step must not repeat the whole-tree type check: ${testStepText}`,
+  );
+  assertEquals(
+    gate[testStep - 1],
+    tasks.check ?? "",
+    "--no-check is sound only directly after the whole-tree deno check that covers the same roots",
+  );
+  assert(
+    !(tasks.test ?? "").includes("--no-check"),
+    "the bare `test` task runs no deno check first, so it must keep type-checking",
+  );
+
+  // The fast tier takes the same shortcut for the same reason, and its cheap steps are unconditional
+  // (the loop over `[fmtStep, lint, check]` above every TEST_FLAGS call site) - assert both halves.
+  const src = await Deno.readTextFile(new URL("../scripts/fast-check.ts", import.meta.url));
+  const flags = src.match(/const TEST_FLAGS = \[([^\]]*)\]/)?.[1] ?? "";
+  assert(flags.length > 0, "TEST_FLAGS must be a literal array in scripts/fast-check.ts");
+  assert(
+    flags.includes('"--no-check"'),
+    "the fast tier must not repeat the type check its cheap steps already ran",
+  );
+  assertMatch(
+    src,
+    /for \(const step of \[fmtStep, \["deno", "lint"\], \["deno", "task", "check"\]\]\)/,
+    "the cheap steps must stay unconditional: --no-check is only sound while they always run",
+  );
+});
+
 Deno.test("the gate emits failureMarkers in the tail on both test failure paths (pkv1)", async () => {
   const src = await Deno.readTextFile(new URL("../scripts/fast-check.ts", import.meta.url));
   const failureCalls = src.match(/for \(const \w+ of failureMarkers\(/g) ?? [];
