@@ -260,6 +260,11 @@ Deno.test({
 </html>`;
 
     const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    // A PROFILE PER LAUNCH (audio-feed-e4udd). Without --user-data-dir Chrome opens the machine's DEFAULT
+    // profile, which only one process can hold at a time, so this suite collided with any other Chrome in
+    // the run - the one place in the repo that ignored the isolation scripts/proof-helper.ts documents
+    // ("Profile collisions: allocates unique isolated Chrome user-data-dir via Deno.makeTempDir").
+    const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
@@ -267,6 +272,7 @@ Deno.test({
         args: [
           "--headless=new",
           "--disable-gpu",
+          `--user-data-dir=${profileDir}`,
           "--allow-file-access-from-files",
           "--dump-dom",
           `file://${tempHtmlFile}`,
@@ -319,6 +325,7 @@ Deno.test({
       );
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
     }
   },
 });
@@ -400,6 +407,11 @@ Deno.test({
 </html>`;
 
     const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    // A PROFILE PER LAUNCH (audio-feed-e4udd). Without --user-data-dir Chrome opens the machine's DEFAULT
+    // profile, which only one process can hold at a time, so this suite collided with any other Chrome in
+    // the run - the one place in the repo that ignored the isolation scripts/proof-helper.ts documents
+    // ("Profile collisions: allocates unique isolated Chrome user-data-dir via Deno.makeTempDir").
+    const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
@@ -407,6 +419,7 @@ Deno.test({
         args: [
           "--headless=new",
           "--disable-gpu",
+          `--user-data-dir=${profileDir}`,
           "--allow-file-access-from-files",
           "--window-size=1000,900",
           "--dump-dom",
@@ -451,6 +464,7 @@ Deno.test({
       );
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
     }
   },
 });
@@ -534,6 +548,11 @@ Deno.test({
 </html>`;
 
     const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    // A PROFILE PER LAUNCH (audio-feed-e4udd). Without --user-data-dir Chrome opens the machine's DEFAULT
+    // profile, which only one process can hold at a time, so this suite collided with any other Chrome in
+    // the run - the one place in the repo that ignored the isolation scripts/proof-helper.ts documents
+    // ("Profile collisions: allocates unique isolated Chrome user-data-dir via Deno.makeTempDir").
+    const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
     await Deno.writeTextFile(tempHtmlFile, testHtml);
 
     try {
@@ -541,6 +560,7 @@ Deno.test({
         args: [
           "--headless=new",
           "--disable-gpu",
+          `--user-data-dir=${profileDir}`,
           "--allow-file-access-from-files",
           "--window-size=1000,900",
           "--dump-dom",
@@ -572,6 +592,7 @@ Deno.test({
       );
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
     }
   },
 });
