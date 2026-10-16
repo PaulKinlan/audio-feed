@@ -256,10 +256,14 @@ export async function sweepStaleProfiles(
   nowMs: number = Date.now(),
   ageMs: number = STALE_PROFILE_AGE_MS,
   activityAgeMs: number = PROFILE_ACTIVITY_AGE_MS,
+  // WHICH DIRECTORY TO SWEEP IS A PARAMETER, not process state (audio-feed-oyf3g). It defaults to the SAME
+  // base directory makeTempDir uses, so production behaviour is unchanged; a caller that wants to sweep a
+  // sandbox passes it explicitly instead of mutating the process-global TMPDIR, which under
+  // `deno test --parallel` captured and then deleted OTHER concurrent modules' live temp dirs.
+  rootDir: string = Deno.env.get("TMPDIR") ?? "/tmp",
 ): Promise<string[]> {
   const swept: string[] = [];
-  // The SAME base directory makeTempDir uses, or the sweep would look somewhere the profiles are not.
-  const baseDir = Deno.env.get("TMPDIR") ?? "/tmp";
+  const baseDir = rootDir;
   let entries: Iterable<Deno.DirEntry>;
   try {
     entries = Deno.readDirSync(baseDir);
@@ -321,10 +325,13 @@ export async function sweepStaleMutationScratch(
   nowMs: number = Date.now(),
   ageMs: number = STALE_PROFILE_AGE_MS,
   activityAgeMs: number = PROFILE_ACTIVITY_AGE_MS,
+  // See sweepStaleProfiles: the swept root is a parameter rather than the process-global TMPDIR
+  // (audio-feed-oyf3g), defaulting to the base makeTempDir uses so production behaviour is unchanged.
+  rootDir: string = Deno.env.get("TMPDIR") ?? "/tmp",
 ): Promise<{ swept: string[]; unreadable: string[] }> {
   const swept: string[] = [];
   const unreadable: string[] = [];
-  const baseDir = Deno.env.get("TMPDIR") ?? "/tmp";
+  const baseDir = rootDir;
   let entries: Iterable<Deno.DirEntry>;
   try {
     entries = Deno.readDirSync(baseDir);
@@ -371,10 +378,18 @@ export async function sweepStaleMutationScratch(
 export async function withMutationScratch<T>(
   label: string,
   body: (scratchDir: string) => Promise<T> | T,
+  // The root this run sweeps and allocates in; an explicit root keeps a caller (a test) from mutating the
+  // process-global TMPDIR to contain the scratch (audio-feed-oyf3g).
+  rootDir: string = Deno.env.get("TMPDIR") ?? "/tmp",
 ): Promise<T> {
-  await sweepStaleMutationScratch();
+  await sweepStaleMutationScratch(
+    Date.now(),
+    STALE_PROFILE_AGE_MS,
+    PROFILE_ACTIVITY_AGE_MS,
+    rootDir,
+  );
   const safeLabel = label.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "run";
-  const scratchDir = await Deno.makeTempDir({ prefix: `mut-${safeLabel}-` });
+  const scratchDir = await Deno.makeTempDir({ prefix: `mut-${safeLabel}-`, dir: rootDir });
   const markerPath = join(scratchDir, MUTANT_MARKER_FILE);
   await originalWriteTextFile(
     markerPath,

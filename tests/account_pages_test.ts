@@ -677,8 +677,8 @@ Deno.test(
   "sweepStaleProfiles spares a stale-root profile with recent internal file activity and reclaims once activity ages out (audio-feed-upby)",
   async () => {
     const sandbox = await Deno.makeTempDir({ prefix: "upby-sweep-test-" });
-    const prevTmp = Deno.env.get("TMPDIR");
-    Deno.env.set("TMPDIR", sandbox);
+    // The fixtures below are built inside `sandbox` by explicit path, so the sweep is aimed at that root as an
+    // argument instead of the process-global TMPDIR (audio-feed-oyf3g).
     try {
       const now = Date.now();
       const staleRootTime = new Date(now - STALE_PROFILE_AGE_MS - 10 * 60_000);
@@ -704,17 +704,17 @@ Deno.test(
       const activeLatest = await latestProfileActivityMs(activeProfile);
       assertEquals(activeLatest, now - 2 * 60_000);
 
-      const swept = await sweepStaleProfiles(now);
+      const swept = await sweepStaleProfiles(
+        now,
+        STALE_PROFILE_AGE_MS,
+        PROFILE_ACTIVITY_AGE_MS,
+        sandbox,
+      );
       assertEquals(swept, [dormantProfile]);
 
       const activeStat = await Deno.stat(activeProfile);
       assert(activeStat.isDirectory, "active long-running profile must be spared");
     } finally {
-      if (prevTmp === undefined) {
-        Deno.env.delete("TMPDIR");
-      } else {
-        Deno.env.set("TMPDIR", prevTmp);
-      }
       await Deno.remove(sandbox, { recursive: true }).catch(() => {});
     }
   },
@@ -724,8 +724,8 @@ Deno.test(
   "withMutationScratch writes MUTANT-MARKER at root and sweepStaleMutationScratch reclaims stale mut* scratch while separating unreadable dirs (audio-feed-6pay)",
   async () => {
     const sandbox = await Deno.makeTempDir({ prefix: "6pay-scratch-test-" });
-    const prevTmp = Deno.env.get("TMPDIR");
-    Deno.env.set("TMPDIR", sandbox);
+    // Every path this test builds lives inside `sandbox`, and both the scratch allocation and the sweep are
+    // aimed at it explicitly rather than through the process-global TMPDIR (audio-feed-oyf3g).
     try {
       let capturedScratch = "";
       const result = await withMutationScratch("6pay-probe", async (scratchDir) => {
@@ -735,7 +735,7 @@ Deno.test(
         const markerText = await Deno.readTextFile(markerFile);
         assertStringIncludes(markerText, '"label":"6pay-probe"');
         return 42;
-      });
+      }, sandbox);
       assertEquals(result, 42);
       const existsAfter = await Deno.stat(capturedScratch).then(() => true).catch(() => false);
       assertEquals(existsAfter, false, "withMutationScratch must remove its scratch dir on exit");
@@ -761,17 +761,17 @@ Deno.test(
       await Deno.utime(liveWorktree, staleTime, staleTime);
       assert(!isMutationScratchDir(liveWorktree));
 
-      const report = await sweepStaleMutationScratch(now);
+      const report = await sweepStaleMutationScratch(
+        now,
+        STALE_PROFILE_AGE_MS,
+        PROFILE_ACTIVITY_AGE_MS,
+        sandbox,
+      );
       assertEquals(report.swept, [staleMutWorktree]);
       assertEquals(report.unreadable, []);
       const liveStillThere = await Deno.stat(liveWorktree).then(() => true).catch(() => false);
       assert(liveStillThere, "non-mutant worktree must never be swept");
     } finally {
-      if (prevTmp === undefined) {
-        Deno.env.delete("TMPDIR");
-      } else {
-        Deno.env.set("TMPDIR", prevTmp);
-      }
       await Deno.remove(sandbox, { recursive: true }).catch(() => {});
     }
   },
