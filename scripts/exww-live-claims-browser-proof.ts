@@ -28,6 +28,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
+import { CLAIM_LIFECYCLE_EVENT } from "../src/storage/episode_events.ts";
 import { makeArticle, makeEpisode, makeSource } from "../tests/fixtures.ts";
 import { runSynthesisBatch, type Synthesizer } from "../src/worker/synthesis.ts";
 import { GeminiTtsClient } from "../src/tts/gemini.ts";
@@ -125,6 +126,10 @@ function assertClockRestored(): void {
 console.log(`exww: injected proof clock ${new Date(FROZEN_NOW_MS).toISOString()}`);
 console.log("exww: injected worker owner worker-proof");
 
+// The user this proof writes its fixtures as. Set inside the setup below and read by phase D
+// (audio-feed-ja7zp), which writes its own fixtures after the server has started.
+let proofUserId = "";
+
 const proof = runProof("audio-feed-exww", async (checker) => {
   const { stores, config, sessionSecret, liveExpiryIso, liveExpiryDisplay, expiredExpiryIso } =
     await withFrozenClock(async () => {
@@ -141,6 +146,7 @@ const proof = runProof("audio-feed-exww", async (checker) => {
         isAdmin: true,
       });
       const user = await approveUser(stores.metadata, rawUser.id, "admin");
+      proofUserId = user.id;
       const sessionSecret = await createSession(stores.metadata, user.id);
       await stores.metadata.putSource(makeSource({ id: "src-1", userId: user.id }));
       await stores.metadata.putArticle(
@@ -892,12 +898,153 @@ const proof = runProof("audio-feed-exww", async (checker) => {
         "Unavailable — the episode store could not be read",
       );
 
+      // ---------------------------------------------------------------------
+      // D. THE COMBINATION THE v1 EXISTS FOR (audio-feed-ja7zp): the queue is WEDGED and the LOG STORE
+      // IS READABLE, so ONE page has to carry both the wedged verdict AND the failed episode's full
+      // attempt history. A proves a real failure with the queue not wedged; B proves the wedged verdict
+      // with the traces UNAVAILABLE, where the failures section cannot render at all; C proves the
+      // store-unreachable case. The state a user actually hits is this one - workers evicted, traces
+      // written, work still queued - and it is the state Paul was looking at when he asked for the page:
+      // three claims by three workers, heartbeats stopping just after each claim, a 15-minute lease, and
+      // "worker state unknown".
+      // ---------------------------------------------------------------------
+      failureMode = "healthy";
+      const attemptEpisodeId = "ep-three-attempts";
+      const attemptLeaseMs = 15 * 60_000;
+      const attemptSpacingMs = 20 * 60_000;
+      await stores.metadata.putEpisode(
+        makeEpisode({
+          id: attemptEpisodeId,
+          userId: proofUserId,
+          sourceId: "src-1",
+          articleId: "art-failing",
+          title: "Three attempts, none of which came back",
+          status: "pending",
+          audioKey: undefined,
+          mode: "direct",
+          createdAt: new Date(FROZEN_NOW_MS - 3 * attemptSpacingMs).toISOString(),
+        }),
+      );
+      const attemptClaimedAt: string[] = [];
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        // Each attempt claims, heartbeats ONCE two seconds later, then goes quiet - the shape Paul
+        // reported - through the REAL storage transitions, so this is a history the store produces
+        // rather than one the test invents.
+        const at = new Date(FROZEN_NOW_MS - (4 - attempt) * attemptSpacingMs).toISOString();
+        attemptClaimedAt.push(at);
+        const taken = await stores.metadata.claimEpisode(proofUserId, attemptEpisodeId, {
+          owner: `worker-attempt-${attempt}`,
+          now: at,
+          leaseMs: attemptLeaseMs,
+          maxClaims: 3,
+        });
+        if (!taken) throw new Error(`the proof could not take attempt ${attempt}`);
+        await stores.metadata.touchEpisodeClaim(
+          proofUserId,
+          attemptEpisodeId,
+          `worker-attempt-${attempt}`,
+          {
+            phase: attempt < 3 ? "claimed" : "uploading_audio",
+            now: new Date(Date.parse(at) + 2_000).toISOString(),
+          },
+        );
+      }
+      // The record that puts the episode in the failures section at all: `isFailureRecord` is severity
+      // warn|error, and `context.workerState === "unknown"` is what the folder reads as an ABANDONMENT
+      // (audio-feed-kd5r) instead of inferring one.
+      await stores.metadata.appendLog({
+        time: new Date(FROZEN_NOW_MS - attemptSpacingMs).toISOString(),
+        severity: "error",
+        type: CLAIM_LIFECYCLE_EVENT,
+        process: "worker",
+        message:
+          `claim 3 of episode ${attemptEpisodeId} is in phase "uploading_audio": lease expired without a terminal write`,
+        episodeId: attemptEpisodeId,
+        userId: proofUserId,
+        attempt: 3,
+        phase: "uploading_audio",
+        correlationId: "corr-ja7zp-wedged",
+        context: { workerState: "unknown" },
+      });
+      const lastAttemptExpiryIso = new Date(
+        Date.parse(attemptClaimedAt[2]!) + attemptLeaseMs,
+      ).toISOString();
+      const lastAttemptExpiryDisplay = `${lastAttemptExpiryIso.replace("T", " ").slice(0, 19)}Z`;
+
+      await load();
+      const bodyD = String(await js(`document.body.textContent`));
+      const failuresD = await failuresSectionText();
+      console.log(
+        `  PHASE D queue verdict rendered: ${bodyD.includes("queued work is NOT being processed")}`,
+      );
+      console.log(`  PHASE D failures section: ${failuresD.slice(0, 900)}`);
+      checker.check(
+        "with the queue WEDGED and the log store readable the page renders both sections",
+        bodyD.includes("queued work is NOT being processed") && failuresD.length > 0,
+        `verdict=${
+          bodyD.includes("queued work is NOT being processed")
+        } failures=${failuresD.length} chars`,
+      );
+      checker.check(
+        "the wedged verdict and a real provider failure are on ONE page",
+        failuresD.includes("provider status 500"),
+        `failures=${failuresD.slice(0, 200)}`,
+      );
+      checker.check(
+        "the failed episode's attempt history is rendered, not just its last attempt",
+        failuresD.includes("Three attempts, none of which came back") &&
+          failuresD.includes("claimed") &&
+          failuresD.includes("uploading_audio"),
+        `failures=${failuresD.slice(0, 320)}`,
+      );
+      checker.check(
+        "the attempt history carries the last attempt's lease expiry",
+        failuresD.includes(lastAttemptExpiryDisplay),
+        `expected ${lastAttemptExpiryDisplay}`,
+      );
+      // The evidence for this combination is the PAINTED text, not another PNG: the failures section in
+      // this state is 5060px tall (a real provider failure plus a three-attempt history), which measured
+      // 329KB against the 160KB per-file budget. `claimVisibility` is the stronger assertion anyway - it
+      // requires the text to be inside THIS section, the deepest element containing it visibly rendered,
+      // and a non-empty box, so a section hidden with opacity 0 (rev-27) cannot satisfy it.
+      const paintedAttempt = await claimVisibility(
+        "failures-h",
+        "worker state unknown (stopped, evicted, or running)",
+      );
+      checker.check(
+        "the attempt history is PAINTED in the failures section, with the worker state unknown",
+        paintedAttempt.found && paintedAttempt.visible,
+        paintedAttempt.reason,
+      );
+      const paintedPhase = await claimVisibility("failures-h", 'in phase "claimed"');
+      checker.check(
+        "the attempt history names the phase each attempt died in, painted in the section",
+        paintedPhase.found && paintedPhase.visible,
+        paintedPhase.reason,
+      );
+      const paintedCorrelation = await claimVisibility("failures-h", "corr-ja7zp-wedged");
+      checker.check(
+        "a failure in that state carries its correlation id, painted in the section",
+        paintedCorrelation.found && paintedCorrelation.visible,
+        paintedCorrelation.reason,
+      );
+
       await writeEvidenceReadme({
+        notes: [
+          "The height-band floor control (tests/exww_band_floor_test.ts) used to import 01-live-lease-expiries-worker-healthy.png from THIS directory, so refreshing this evidence silently re-baselined an executable floor: when this change was first merged, the refreshed capture measured an occluded deviation of 0.089 against the 0.12 retention floor and reddened a change that touched no src/ file. The control now reads its own immutable copy at tests/fixtures/exww-band-floor-control.png, so a refresh here can no longer move what it measures.",
+        ],
         dir: OUT,
         title: "Live claim-lease expiries on /admin/observability (audio-feed-exww)",
         script: "scripts/exww-live-claims-browser-proof.ts",
         asserts: [
           "the worker recorded a REAL provider failure for ep-failing",
+          "with the queue WEDGED and the log store readable the page renders both sections",
+          "the wedged verdict and a real provider failure are on ONE page",
+          "the failed episode's attempt history is rendered, not just its last attempt",
+          "the attempt history carries the last attempt's lease expiry",
+          "the attempt history is PAINTED in the failures section, with the worker state unknown",
+          "the attempt history names the phase each attempt died in, painted in the section",
+          "a failure in that state carries its correlation id, painted in the section",
           "the page serves 200 to the admin session",
           "the live lease row for the held upload is rendered with its phase",
           "the lease expiry shown is claimedAt + the claim's own lease",

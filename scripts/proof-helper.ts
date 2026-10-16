@@ -3920,6 +3920,11 @@ export interface EvidenceReadmeOptions {
   allowLocalhost?: boolean;
   executedBy?: string;
   checker?: Checker;
+  /**
+   * Free-text notes the generated README carries. For facts that must survive regeneration - e.g. a
+   * coupling this evidence directory broke, which no assert expresses.
+   */
+  notes?: string[];
   /** Explicit opt-out for maintenance tools or tests running outside a proof transaction. */
   allowOutsideProof?: boolean;
 }
@@ -3976,6 +3981,11 @@ export function formatEvidenceReadme(options: EvidenceReadmeOptions): string {
 
   if (options.executedBy?.trim()) {
     lines.push(`- Executed by: ${options.executedBy.trim()}`);
+  }
+
+  if (options.notes) {
+    const cleanedNotes = options.notes.map((n) => n.trim()).filter((n) => n.length > 0);
+    if (cleanedNotes.length > 0) lines.push(`- Notes: ${cleanedNotes.join("; ")}`);
   }
 
   if (isCapture) {

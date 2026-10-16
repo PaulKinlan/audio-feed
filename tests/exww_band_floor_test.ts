@@ -14,6 +14,15 @@
  * (1) is why the floor was added rather than tuned, (2) is that it works, and (3) is that it is
  * not a false-red generator. The mutant is written to a temp dir: nothing in docs/evidence is
  * touched, so the control cannot depend on or disturb another run.
+ *
+ * WHY IT OWNS ITS INPUT (audio-feed-ja7zp, found by the merger's full gate): this control used to import
+ * docs/evidence/audio-feed-exww/01-live-lease-expiries-worker-healthy.png directly, so a lane that
+ * refreshed that evidence silently re-baselined an executable floor - the refreshed capture measured an
+ * occluded deviation of 0.0892047 against the 0.12 retention floor, and the full gate went red for a
+ * change that touched no src/ file. A capture that is ALSO a fixture is a coupling nobody declared, and
+ * the failure mode is the bad one: the test would have agreed with whatever the page looked like on the
+ * day. The image below is therefore an immutable copy this control owns, so refreshing evidence can no
+ * longer move what it measures.
  */
 import { assert, assertFalse } from "@std/assert";
 import {
@@ -26,10 +35,12 @@ import {
   sectionRetainsInk,
 } from "../scripts/exww-section-measures.ts";
 
-const CAPTURE = new URL(
-  "../docs/evidence/audio-feed-exww/01-live-lease-expiries-worker-healthy.png",
-  import.meta.url,
-).pathname;
+/**
+ * The control's OWN immutable copy, not a path into docs/evidence (see the header): byte-identical to
+ * the evidence capture at the tip that added it, pinned here so an evidence refresh cannot re-baseline
+ * the floor.
+ */
+const CAPTURE = new URL("./fixtures/exww-band-floor-control.png", import.meta.url).pathname;
 
 /**
  * True when ImageMagick is runnable. DENO THROWS NotFound RATHER THAN RETURNING A FAILED STATUS when
