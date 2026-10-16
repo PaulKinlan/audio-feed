@@ -339,15 +339,36 @@ Deno.test("audio-feed-wnv8: a terminal PUT whose invocation deadline already exp
   };
   const readLogs = async () => (await stores.metadata.listLogs({ limit: 200 })) as unknown as Row[];
   // A BOUNDED wait for the resumed worker to finish writing, so the assertion sees the real store rather
-  // than a sleep long enough to be believed. On expiry it returns what it has and lets the assertions
-  // report the truth, rather than turning a missing record into a timeout.
-  const untilSettled = async (done: (rows: Row[]) => boolean): Promise<Row[]> => {
-    const limit = Date.now() + 2_000;
-    for (;;) {
-      const rows = await readLogs();
-      if (done(rows) || Date.now() > limit) return rows;
+  // than a sleep long enough to be believed. The bound stays (2s is ~100x a KV write), but the EXPIRY IS
+  // LOUD (audio-feed-5mwy). It used to `return rows` and let the assertions below interpret whatever the
+  // short list implied, which cost two things: a record that was never written and a machine that was too
+  // slow produced the SAME failure text, and the negative assertion below - no `entering` record for a
+  // refused PUT - was vacuously TRUE on an empty list. A wait that gives up quietly can therefore read as
+  // coverage without asserting anything. Same shape as the poll in tests/view_transitions_test.ts: throw,
+  // and name both what was expected and what was seen.
+  const untilSettled = async (
+    done: (rows: Row[]) => boolean,
+    waitingFor: string,
+  ): Promise<Row[]> => {
+    const budgetMs = 2_000;
+    const limit = Date.now() + budgetMs;
+    let rows = await readLogs();
+    while (!done(rows)) {
+      if (Date.now() > limit) {
+        const phases = [...new Set(rows.map((row) => row.phase).filter((p) => p !== undefined))];
+        throw new Error(
+          `the store did not settle within ${budgetMs}ms while waiting for ${waitingFor}: read ` +
+            `${rows.length} record(s), phases seen ${
+              JSON.stringify(phases)
+            }. A missing record and a ` +
+            `loaded machine must not look alike - re-run on an idle VM before reading this as a product ` +
+            `defect (audio-feed-5mwy).`,
+        );
+      }
       await new Promise((resolve) => setTimeout(resolve, 20));
+      rows = await readLogs();
     }
+    return rows;
   };
 
   const running = runSynthesisBatch(ctx, () => Promise.resolve(audio), {
@@ -360,7 +381,10 @@ Deno.test("audio-feed-wnv8: a terminal PUT whose invocation deadline already exp
   const result = await running;
   assertEquals(parked, 1, "the terminal reservation is the await the deadline expires inside");
   release();
-  const logs = await untilSettled((rows) => rows.some((row) => row.phase === "skipped"));
+  const logs = await untilSettled(
+    (rows) => rows.some((row) => row.phase === "skipped"),
+    "the resumed worker to write the synthesis.upload|skipped record",
+  );
 
   // (1) THE BEHAVIOUR. This is the assertion the acceptance names, and it is about a decision rather
   // than a record: the doomed transfer is never handed to the storage layer.
