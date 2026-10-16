@@ -120,6 +120,9 @@ export interface AppHandlers {
   extra?: (router: Router<AppContext>) => void;
 }
 
+/** The admin observability route pattern, named once so the route table and its two consumers agree. */
+export const ADMIN_OBSERVABILITY_ROUTE = "/admin/observability";
+
 export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   const router = new Router<AppContext>();
 
@@ -135,7 +138,10 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get("/admin/subscribers/:id", handleAdminSubscriberDetail);
   // audio-feed-n6uu: the observability page. Same session + isActiveAdmin gate as /admin (the
   // handler applies it); registered as its own route so the console shell stays data-free.
-  router.get("/admin/observability", handleAdminObservability);
+  // Exported because two other places must name this exact pattern and must not drift from the table:
+  // src/server.ts decides whether to hand the request's correlation id to the app, and the handler uses it
+  // as the record's route and as the page's own id (audio-feed-xapat).
+  router.get(ADMIN_OBSERVABILITY_ROUTE, handleAdminObservability);
   router.get("/admin/observability/issues", handleAdminIssues);
   router.get("/admin/observability/telemetry", handleAdminTelemetry);
   // audio-feed-8fc: passkey sign-in and the signed-in subscriber's own page.

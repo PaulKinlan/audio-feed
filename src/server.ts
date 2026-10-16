@@ -8,7 +8,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { type AppContext, createApp } from "./app.ts";
+import { ADMIN_OBSERVABILITY_ROUTE, type AppContext, createApp } from "./app.ts";
 import { createHandlers } from "./compose.ts";
 import { allowedHostSet, isUnusableOrigin } from "./origin.ts";
 import { type AppConfig, loadConfig, openStores } from "./config.ts";
@@ -181,6 +181,17 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // Only the class name of a throw, screened to KNOWN_ERROR_NAMES (audio-feed-z1gs), so an
   // attacker-chosen custom error name cannot reach a record.
   const errorName = (error: unknown): string => screenErrorName(error);
+  // The id minted here is handed to the app on the request so the ADMIN PAGE can render the same value this
+  // request's own record carries (audio-feed-xapat): an operator looking at the page can quote the id and find
+  // its log line, which is the manual copy-and-paste step Paul asked us to remove. `set()` overwrites, so the
+  // invariant above is unchanged - a client-supplied x-correlation-id is still never adopted, here or in the
+  // record. It is applied to the admin route ALONE: every other request reaches the app untouched, so no
+  // upload body, no other route and no shared path changes at all.
+  const withMintedCorrelationId = (headers: Headers, id: string): Headers => {
+    const next = new Headers(headers);
+    next.set("x-correlation-id", id);
+    return next;
+  };
   const serverFetch = async (
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },
@@ -193,7 +204,12 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
     const route = router.routePatternFor(new URL(req.url));
     const durationMs = () => Math.round(performance.now() - started);
     try {
-      const res = await appFetch(req, info);
+      const res = await appFetch(
+        route === ADMIN_OBSERVABILITY_ROUTE
+          ? new Request(req, { headers: withMintedCorrelationId(req.headers, correlationId) })
+          : req,
+        info,
+      );
       // A successful asset or enclosure fetch is deliberately not recorded — see
       // isHighVolumeAssetPath — because podcast clients hammer it and each line would cost a
       // write for nothing. Its failures still are.

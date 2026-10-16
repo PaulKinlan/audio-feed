@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **The admin page's own view has an id you can quote (audio-feed-xapat)**: the page rendered correlation ids
+  for FAILURE ROWS, but the page's own view had none - `src/app.ts`, `src/router.ts` and `src/http.ts` carried
+  no request id at all - so an operator looking at the page could not go from what was in front of them to the
+  log line that produced it, which is the copy-and-paste step Paul asked us to remove. The id the edge already
+  mints for every request (`src/server.ts`) is now handed to the app on the request for THIS ROUTE ALONE and
+  rendered as "View correlation id", and the page writes its own `admin.view` record under the same id. It is
+  additive: no routing, caching, auth or response-body change, `x-correlation-id` is already a response header,
+  and a client-supplied value is still never adopted. The record is written fire-and-forget through the logger,
+  which resolves to null rather than throwing, so a wedged log store cannot stop this page rendering - the
+  browser proof asserts the id still renders in its unreadable-store phase and asserts the join (the id on the
+  page resolving to a record) in the wedged-with-traces phase, while a test through the real edge pins the
+  three-way join page id == response header == the request's own `http.request` record.
+
 ### Added
 
 - **The fast gate's selection is now a proven subset of the full gate, and the gap that let a fast

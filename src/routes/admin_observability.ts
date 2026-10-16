@@ -21,13 +21,14 @@
  * audio-feed-2tbv is the complementary read path that is not behind the gate.
  */
 
-import type { AppContext } from "../app.ts";
+import { ADMIN_OBSERVABILITY_ROUTE, type AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
 import { esc } from "./html.ts";
 import { renderShell, viewerOf } from "./shell.ts";
 import { isActiveAdmin, sessionUser } from "../auth/sessions.ts";
 import { resolveOrigin } from "../origin.ts";
+import { createLogger } from "../log.ts";
 import { ADMIN_NAV_CSS, renderAdminNav } from "./admin_nav.ts";
 import { assetUrl } from "./assets.ts";
 import {
@@ -253,6 +254,12 @@ function failureRowHtml(
 </section>`;
 }
 
+/**
+ * The shape the edge's correlation ids have, so a value that did not come from `src/server.ts` cannot put
+ * arbitrary text on this page (audio-feed-xapat). Anything else is replaced with a fresh id.
+ */
+const VIEW_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function handleAdminObservability(
   { ctx, req }: RouteContext<AppContext>,
 ): Promise<Response> {
@@ -263,6 +270,25 @@ export async function handleAdminObservability(
   if (!user || !isActiveAdmin(user)) {
     return notAuthorised(user?.email ?? null, nonce, viewer, origin.explicit);
   }
+
+  // audio-feed-xapat: the id THIS PAGE VIEW is logged under, so an operator reading the page can quote one
+  // value and find its log line instead of copying the page out and pasting it to the fleet (Paul's original
+  // complaint). The edge mints it and hands it over on the request (src/server.ts); the fallback covers
+  // embedders and proofs that call this app directly, and the shape check means a caller cannot put arbitrary
+  // text on the page even there.
+  const viewHeaderId = req.headers.get("x-correlation-id") ?? "";
+  const viewCorrelationId = VIEW_ID_RE.test(viewHeaderId) ? viewHeaderId : crypto.randomUUID();
+
+  // The page's own view, written as a record, so the id rendered below resolves to something. Written through
+  // the logger, whose sink resolves to null rather than throwing - "a thrown log must not become a thrown
+  // request" (src/log.ts) - and deliberately NOT awaited: waiting on the store would put this page behind the
+  // machinery it exists to report on, and this page must render while that machinery is wedged (ja7zp).
+  // `route` is set so the report's own exclusion keeps this view out of the failures this page renders.
+  void createLogger({ sink: ctx.stores.metadata, process: "app" }).event(
+    "admin.view",
+    `viewed ${ADMIN_OBSERVABILITY_ROUTE}`,
+    { correlationId: viewCorrelationId, route: ADMIN_OBSERVABILITY_ROUTE },
+  );
 
   const report = await buildObservabilityReport(ctx.stores);
   const { queue, window: readWindow } = report;
@@ -444,6 +470,12 @@ export async function handleAdminObservability(
   <p class="lede">Errors and job state, read straight from durable storage. Read-only: there are no
   controls on this page on purpose — the page that reports an incident must not be able to cause
   one. <a href="/admin">Back to the console</a>.</p>
+
+  <p class="muted" id="view-correlation">View correlation id
+  <code id="view-correlation-id">${
+    esc(viewCorrelationId)
+  }</code> — the same id this request's own log line
+  carries, so it can be quoted to find it. It is written whether or not the sections below can be read.</p>
 
   ${renderAdminNav("observability")}
 

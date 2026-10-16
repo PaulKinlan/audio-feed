@@ -818,6 +818,19 @@ const proof = runProof("audio-feed-exww", async (checker) => {
       const bodyB = String(await js(`document.body.textContent`));
       const sectionB = await claimSectionText();
 
+      // audio-feed-xapat: the view id is minted at the request, not read from the store, so it must render in
+      // THIS state too. A correlation id that only works when the diagnostic machinery is healthy is worse
+      // than none (ja7zp): the page exists to be read while that machinery is broken.
+      const viewIdB = String(
+        await js(`document.querySelector("#view-correlation-id")?.textContent ?? ""`),
+      )
+        .trim();
+      checker.check(
+        "the page still shows an id for its own view while the log store is unreadable",
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(viewIdB),
+        `id="${viewIdB}" in the worker-unhealthy state`,
+      );
+
       checker.check(
         "the page says the worker left no readable trace rather than swallowing it",
         bodyB.includes("the synthesis worker left no readable trace"),
@@ -1029,6 +1042,43 @@ const proof = runProof("audio-feed-exww", async (checker) => {
         paintedCorrelation.reason,
       );
 
+      // audio-feed-xapat: THE JOIN, which is the whole point - one value quoted from the page and found in
+      // the record for that view, so an operator does not have to copy the page out and paste it to the fleet.
+      const viewId = String(
+        await js(`document.querySelector("#view-correlation-id")?.textContent ?? ""`),
+      )
+        .trim();
+      const findViewRecord = async (id: string) => {
+        for (let i = 0; i < 100; i++) {
+          const found = (await stores.metadata.listLogs({ sinceSeq: 0, limit: 500 })).find((
+            record,
+          ) => record.type === "admin.view" && record.correlationId === id);
+          if (found) return found;
+          // The view record is written fire-and-forget on purpose - awaiting the store would put this page
+          // behind the machinery it reports on - so this is a bounded wait, and running out of it FAILS.
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return undefined;
+      };
+      const viewRecord = await findViewRecord(viewId);
+      checker.check(
+        "the id the page shows for its OWN view is well formed",
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(viewId),
+        `id="${viewId}"`,
+      );
+      checker.check(
+        "the page's own view id resolves to a record, so a quoted id can be looked up",
+        viewRecord !== undefined,
+        viewRecord === undefined
+          ? `no admin.view record carried the rendered id ${viewId}`
+          : `record seq=${viewRecord.seq} route=${viewRecord.route}`,
+      );
+      checker.check(
+        "the page's own view id is NOT the failure row's id: the two joins are distinguishable",
+        viewRecord?.route === "/admin/observability" && viewId !== "corr-ja7zp-wedged",
+        `view=${viewId} viewRoute=${viewRecord?.route} failureRowId=corr-ja7zp-wedged`,
+      );
+
       await writeEvidenceReadme({
         notes: [
           "The height-band floor control (tests/exww_band_floor_test.ts) used to import 01-live-lease-expiries-worker-healthy.png from THIS directory, so refreshing this evidence silently re-baselined an executable floor: when this change was first merged, the refreshed capture measured an occluded deviation of 0.089 against the 0.12 retention floor and reddened a change that touched no src/ file. The control now reads its own immutable copy at tests/fixtures/exww-band-floor-control.png, so a refresh here can no longer move what it measures.",
@@ -1038,6 +1088,10 @@ const proof = runProof("audio-feed-exww", async (checker) => {
         script: "scripts/exww-live-claims-browser-proof.ts",
         asserts: [
           "the worker recorded a REAL provider failure for ep-failing",
+          "the page still shows an id for its own view while the log store is unreadable",
+          "the id the page shows for its OWN view is well formed",
+          "the page's own view id resolves to a record, so a quoted id can be looked up",
+          "the page's own view id is NOT the failure row's id: the two joins are distinguishable",
           "with the queue WEDGED and the log store readable the page renders both sections",
           "the wedged verdict and a real provider failure are on ONE page",
           "the failed episode's attempt history is rendered, not just its last attempt",
