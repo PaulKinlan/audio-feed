@@ -1030,6 +1030,9 @@ const proof = runProof("audio-feed-exww", async (checker) => {
       );
 
       await writeEvidenceReadme({
+        notes: [
+          "The height-band floor control (tests/exww_band_floor_test.ts) used to import 01-live-lease-expiries-worker-healthy.png from THIS directory, so refreshing this evidence silently re-baselined an executable floor: when this change was first merged, the refreshed capture measured an occluded deviation of 0.089 against the 0.12 retention floor and reddened a change that touched no src/ file. The control now reads its own immutable copy at tests/fixtures/exww-band-floor-control.png, so a refresh here can no longer move what it measures.",
+        ],
         dir: OUT,
         title: "Live claim-lease expiries on /admin/observability (audio-feed-exww)",
         script: "scripts/exww-live-claims-browser-proof.ts",
