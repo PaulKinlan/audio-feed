@@ -18,6 +18,7 @@
  */
 import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
+import { bootstrap } from "../src/server.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
@@ -1608,4 +1609,110 @@ Deno.test("audio-feed-8amo: duplicate episode failures produce unique card ids a
   assertStringIncludes(body, 'id="ep-ep-dupe"');
   // Second failure card has a unique id and links to #ep-ep-dupe
   assertStringIncludes(body, 'href="#ep-ep-dupe"');
+});
+
+// ---------------------------------------------------------------------------
+// audio-feed-xapat: the page's OWN view has an id, so a view an operator is looking at joins to the log line
+// that produced it. Paul's complaint was having to copy data out of the UI and paste it to the fleet; a view
+// that cannot be joined keeps that manual step alive.
+// ---------------------------------------------------------------------------
+
+/** The rendered view id, matched with its full uuid shape so a truncated or absent one cannot pass. */
+const VIEW_ID_IN_HTML =
+  /id="view-correlation-id">([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})</;
+
+/**
+ * The view record is written fire-and-forget ON PURPOSE - awaiting the store would put this page behind the
+ * machinery it exists to report on, and the page must render while that machinery is wedged (ja7zp) - so
+ * reading it back is a bounded wait rather than an immediate read.
+ */
+async function waitForViewRecord(stores: Stores, id: string): Promise<LogRecord | undefined> {
+  for (let i = 0; i < 100; i++) {
+    const records = await stores.metadata.listLogs({ sinceSeq: 0, limit: 500 });
+    const found = records.find((record) =>
+      record.type === "admin.view" && record.correlationId === id
+    );
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return undefined;
+}
+
+Deno.test("audio-feed-xapat: the edge's id is the id the page renders and the id its request line carries", async () => {
+  const stores: Stores = memoryStores();
+  await stores.metadata.putUser(
+    makeUser({ id: "admin-1", email: "admin@example.com", isAdmin: true, status: "approved" }),
+  );
+  const cookie = `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`;
+  const priorBase = Deno.env.get("PUBLIC_BASE_URL");
+  Deno.env.set("PUBLIC_BASE_URL", BASE);
+  let server: Awaited<ReturnType<typeof bootstrap>> | null = null;
+  try {
+    server = await bootstrap({
+      port: 0,
+      stores,
+      isDeploy: true,
+      synthesizer: null,
+      inventory: false,
+    });
+    const response = await server.fetch(
+      new Request(`${BASE}/admin/observability`, { headers: { cookie } }),
+    );
+    assertEquals(response.status, 200);
+    const html = await response.text();
+    const rendered = html.match(VIEW_ID_IN_HTML)?.[1] ?? "";
+    assertEquals(rendered.length, 36, "the page must render its own view correlation id");
+    assertEquals(
+      rendered,
+      response.headers.get("x-correlation-id") ?? "",
+      "the page must render the id the edge minted for this request",
+    );
+    // The join an operator performs, in one test: the page's id resolves to the page's own record, and the
+    // same id is on the request's own log line.
+    const view = await waitForViewRecord(stores, rendered);
+    assert(view !== undefined, `the rendered id ${rendered} must resolve to a record`);
+    assertEquals(view.route, "/admin/observability");
+    assertEquals(view.severity, "info");
+    const line = (await stores.metadata.listLogs({ sinceSeq: 0, limit: 500 })).find((record) =>
+      record.type === "http.request" && record.correlationId === rendered
+    );
+    assert(line !== undefined, "the request's own http.request line must carry the same id");
+    assertStringIncludes(line.message, "/admin/observability");
+  } finally {
+    if (server) await server.shutdown();
+    if (priorBase === undefined) Deno.env.delete("PUBLIC_BASE_URL");
+    else Deno.env.set("PUBLIC_BASE_URL", priorBase);
+  }
+});
+
+Deno.test("audio-feed-xapat: without the edge's header the page mints its own id, and a caller cannot choose it", async () => {
+  const { stores, fetch, page } = await setup();
+  const cookie = `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`;
+  const minted = (await (await page(cookie)).text()).match(VIEW_ID_IN_HTML)?.[1] ?? "";
+  assertEquals(minted.length, 36, "the page must mint its own view id when the edge supplied none");
+  assert(
+    await waitForViewRecord(stores, minted) !== undefined,
+    "the minted id must resolve to a record",
+  );
+  const forged = "not-a-uuid-4f2a";
+  const body = await (await fetch(
+    new Request(`${BASE}/admin/observability`, { headers: { cookie, "x-correlation-id": forged } }),
+  )).text();
+  const rendered = body.match(VIEW_ID_IN_HTML)?.[1] ?? "";
+  assertEquals(rendered.length, 36, "the page must still render a well-formed id");
+  assertNotEquals(rendered, forged, "a caller cannot stamp its own id on the page");
+});
+
+Deno.test("audio-feed-xapat: the page's own view is not rendered as one of its own failures", async () => {
+  const { stores, page } = await setup();
+  const cookie = `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`;
+  const html = await (await page(cookie)).text();
+  const viewId = html.match(VIEW_ID_IN_HTML)?.[1] ?? "";
+  await waitForViewRecord(stores, viewId);
+  const report = await buildObservabilityReport(stores);
+  assertEquals(
+    report.failures.some((row) => row.correlationId === viewId),
+    false,
+    "the view record must be excluded from the failures this page renders",
+  );
 });
