@@ -78,10 +78,15 @@ Deno.test("customizable select: headless Chrome computes appearance: base-select
   const listenCss = await getListenCss();
 
   // Measure in real Chromium page context
+  // A PROFILE THIS RUN OWNS (audio-feed-e4udd): without --user-data-dir Chrome opens the machine's DEFAULT
+  // profile, which only one process can hold at a time - so this suite collided with any other Chrome in the
+  // run. scripts/proof-helper.ts isolates its own launches for the same reason; this module did not.
+  const profileDir = await Deno.makeTempDir({ prefix: "select-chrome-" });
   const evaluateCommand = new Deno.Command("google-chrome-stable", {
     args: [
       "--headless=new",
       "--disable-gpu",
+      `--user-data-dir=${profileDir}`,
       "--dump-dom",
       `data:text/html;charset=utf-8,${
         encodeURIComponent(`
@@ -102,7 +107,12 @@ Deno.test("customizable select: headless Chrome computes appearance: base-select
     ],
   });
 
-  const evalOutput = await evaluateCommand.output();
+  let evalOutput: Deno.CommandOutput;
+  try {
+    evalOutput = await evaluateCommand.output();
+  } finally {
+    await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+  }
   const dom = new TextDecoder().decode(evalOutput.stdout);
   assert(dom.includes('<div id="results">base-select,base-select</div>'));
 });

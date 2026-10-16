@@ -129,16 +129,26 @@ Deno.test("closedby: headless Chrome reflects closedBy property and attribute (a
 </body>
 </html>`;
 
+  // A PROFILE THIS RUN OWNS (audio-feed-e4udd): without --user-data-dir Chrome opens the machine's DEFAULT
+  // profile, which only one process can hold at a time - so this suite collided with any other Chrome in the
+  // run. scripts/proof-helper.ts isolates its own launches for the same reason; this module did not.
+  const profileDir = await Deno.makeTempDir({ prefix: "dialog-closedby-chrome-" });
   const command = new Deno.Command("google-chrome-stable", {
     args: [
       "--headless=new",
       "--disable-gpu",
+      `--user-data-dir=${profileDir}`,
       "--dump-dom",
       `data:text/html;charset=utf-8,${encodeURIComponent(testHtml)}`,
     ],
   });
 
-  const output = await command.output();
+  let output: Deno.CommandOutput;
+  try {
+    output = await command.output();
+  } finally {
+    await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+  }
   assertEquals(output.code, 0);
   const dom = new TextDecoder().decode(output.stdout);
   assert(dom.includes('<p id="output">true,any,any</p>'));
