@@ -131,6 +131,19 @@ All notable changes to this project will be documented in this file.
   future edit cannot quietly leave a tree unverified. `deno test --parallel`, the other half of the same
   bead, is measured at ~4x (187s to 48s) but needs 3-4 suites made parallel-safe first and is tracked as
   audio-feed-e4udd.
+- **The fence-scan timing test measures the work, not the machine (audio-feed-0evr)**: `tests/tts_test.ts`
+  bounded three `formatCodeForTts` scans with a single, unwarmed `performance.now()` reading each, so the
+  fence case was asserted against the wall clock - and the same work measured 648-1119ms of wall under 8 CPU
+  hogs (4.1-9.1s under starvation) and failed in isolation at ordinary load, while the whole file passed only
+  because earlier tests in it happen to warm the path first. The three scans now take the **floor of this
+  thread's CPU** (`process.threadCpuUsage()`, the smallest of 15 calls, and 15 is sized from measurement: the
+  floor arrives by call 3 at a quiet load but not until call 12 under 8 hogs, where any shallower minimum
+  reports 120-300ms - still passing here, but for the wrong reason). Process-wide `process.cpuUsage()` was
+  tried first and refuted by measurement: it accumulates the runtime's sibling threads and read 519-968ms on
+  the same calls, failing this very bound. Wall time measures how the box was shared. The 500ms bound is
+  unchanged - nothing was loosened - and every run prints the three floors with the margin each left.
+  Measuring it properly also exposed that the fence path is super-linear (4x markers = 13-17x CPU), so the
+  test's "scales linearly" name is not what its bound checks: filed as audio-feed-1mowv.
 - **The invocation budget's clock belongs to whoever drives it, so the deadline is a decision rather
   than a property of the machine (audio-feed-ugak)**: two suites in `tests/synthesis_resume_test.ts`
   asserted that an 80ms *real* deadline landed after segment 1 committed and before turn 2 finished —

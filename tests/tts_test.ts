@@ -5,6 +5,9 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@^1.0.10";
+// audio-feed-0evr: for thread-CPU measurement. `node:process` is the house import in this repo (v8, net,
+// crypto, dns, http are already used) and it is the one form `deno check` can see: the Deno-native
+// `Deno.cpuUsage()` exists on Deno 2.9.7 but is not in the type surface `deno check ... tests` reads.
 import {
   base64ToUint8Array,
   buildDialogueRequest,
@@ -31,6 +34,7 @@ import {
   GeminiTtsError,
   parseWavHeader,
   pcmToWav,
+  type ScanWork,
   uint8ArrayToBase64,
   VOICE_PROFILES,
 } from "../src/tts/gemini.ts";
@@ -1056,39 +1060,193 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
   assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
 });
 
-Deno.test("formatCodeForTts - scales linearly without quadratic blowup on unclosed pre tags, fences, and no-gt openers (audio-feed-c0gj, audio-feed-cg8s)", async () => {
-  // 32,000 unclosed <pre> tags previously took >6 seconds due to quadratic regex backtracking
-  const unclosedPre = "<pre><code>".repeat(32_000);
-  const t0 = performance.now();
-  const processedPre = await formatCodeForTts(unclosedPre, "skip");
-  const elapsedPre = performance.now() - t0;
-  assert(
-    elapsedPre < 500,
-    `unclosed <pre> scan must be linear and fast: took ${elapsedPre.toFixed(1)}ms`,
-  );
-  assertEquals(processedPre, unclosedPre);
+/**
+ * WHAT THIS ASSERTS, and why the wall-clock promise is gone (audio-feed-0evr, audio-feed-cf91x).
+ *
+ * The property is the SCAN'S OWN WORK. `ScanWork.examined` counts the characters the scan's forward searches
+ * had to cover (src/tts/gemini.ts), and it is measured, not guessed - on this VM, for the fixed workload below:
+ *
+ *   fences, 16,000 markers ( 64,000 chars)    768,088,000 examined  = 12,001x the input length
+ *   fences, 64,000 markers (256,000 chars) 12,288,352,000 examined  = 48,001x the input length
+ *   <pre>  , 32,000 openers (352,000 chars)     1,408,000 examined  = 4.00x the input length
+ *   no-gt  ,100,000 openers (500,000 chars)     1,499,996 examined  = 3.00x the input length
+ *
+ * A COUNT cannot be made comfortable by whatever ran first, which is what went wrong with the wall clock: on
+ * identical code and the same filter, at a quiet load, this scan read 250ms when run alone, 230ms with a filter
+ * that matched a couple of earlier tests, and 50ms inside the whole file - a 5x swing no assertion about the
+ * scan's own cost should depend on. The count is identical in all three conditions because it is the same
+ * string work, so the order dependence is removed by construction instead of being given a warmer neighbour.
+ *
+ * The fence path is super-linear TODAY - 4x the markers cost 16.00x the work, the shape a quadratic predicts -
+ * so no linearity claim is made for it: the band accepts anything from linear to quadratic and catches a scan
+ * that stopped looking (a revert to the old whole-text regex examines nothing here) or one worse than
+ * quadratic. Whether the fence scan SHOULD be linear is its own bead (audio-feed-1mowv), not something to
+ * squeeze into this test. The <pre> and no-gt paths ARE linear today, with the measured 3-4x doubled for
+ * headroom, so those are asserted linear.
+ *
+ * WHAT THIS NO LONGER SEES, stated rather than glossed: a constant-factor slowdown that does no extra string
+ * work would pass. That is the price of an order-independent assertion - a duration cannot tell "this work is
+ * expensive" from "this box is busy" - and the honest instrument for constant factors is a benchmark, not a gate.
+ */
+const FENCE_SCAN_MARKERS = 16_000;
+const FENCE_SCAN_MARKERS_4X = FENCE_SCAN_MARKERS * 4;
+const PRE_OPENERS = 32_000;
+const NO_GT_OPENERS = 100_000;
+/** examined <= len*len: today 0.19x of it for both fence sizes, so the ceiling is a shape claim, not a fit. */
+const SCAN_WORK_QUADRATIC_CEILING = 1;
+/** examined <= 8x len; measured 4.00x (<pre>) and 3.00x (no-gt). */
+const SCAN_WORK_LINEAR_CEILING = 8;
+/** 4x the input must not cost more than 20x the work; measured 16.00x. */
+const SCAN_WORK_GROWTH_CEILING = 20;
+/** ...and must cost at least the input's own growth, or the scan did not look at the extra text at all. */
+const SCAN_WORK_GROWTH_FLOOR = 4;
+/**
+ * A HANG GUARD, NOT A PERFORMANCE PROMISE (audio-feed-cf91x). The promise is the work count above; this exists
+ * so that a scan which stops terminating fails the test rather than the gate. Stated as a guard is the point: as
+ * a promise it was a machine measurement that a neighbour could move.
+ *
+ * The number is set from measurement with real headroom, and the measurements are the reason it is loose: the
+ * 16k fence scan measures 62ms bare and 288ms inside this test, and the 64k scan 893ms bare but 4092ms inside
+ * this test (the same work, differently scheduled - exactly why a DOMINANT wall-clock assertion was the wrong
+ * thing to assert here in the first place). The earlier wall-clock form of this measurement read 250ms run
+ * alone, 230ms with a filter matching earlier tests and 50ms in the whole file, and 4.1-9.1s under CPU
+ * starvation. 15s is >=3x the worst observed figure, so it fires on non-termination and not on a busy box.
+ */
+const SCAN_HANG_GUARD_MS = 15_000;
 
-  // 16,000 unclosed backtick fences
-  const unclosedFences = "```\n".repeat(16_000);
-  const t1 = performance.now();
-  const processedFences = await formatCodeForTts(unclosedFences, "skip");
-  const elapsedFences = performance.now() - t1;
-  assert(
-    elapsedFences < 500,
-    `unclosed fences scan must be linear and fast: took ${elapsedFences.toFixed(1)}ms`,
-  );
-  assert(typeof processedFences === "string");
+/** One scan of `text`: its work, its wall time (the guard), and what it classified (the decision). */
+function scanOf(text: string): { examined: number; ms: number; blocks: number } {
+  const work: ScanWork = { examined: 0 };
+  const started = performance.now();
+  const blocks = extractCodeBlocks(text, work);
+  return {
+    examined: work.examined,
+    ms: performance.now() - started,
+    blocks: blocks.length,
+  };
+}
 
-  // 100,000 unclosed <pre without > (audio-feed-t06l regression avoidance)
-  const unclosedNoGt = "<pre ".repeat(100_000);
-  const t2 = performance.now();
-  const processedNoGt = await formatCodeForTts(unclosedNoGt, "skip");
-  const elapsedNoGt = performance.now() - t2;
+Deno.test("formatCodeForTts - the fence scan's WORK is counted, and grows no worse than quadratically (audio-feed-c0gj, audio-feed-cg8s, audio-feed-0evr, audio-feed-cf91x)", async () => {
+  const unclosedPre = "<pre><code>".repeat(PRE_OPENERS);
+  const unclosedFences = "```\n".repeat(FENCE_SCAN_MARKERS);
+  const unclosedFences4x = "```\n".repeat(FENCE_SCAN_MARKERS_4X);
+  const unclosedNoGt = "<pre ".repeat(NO_GT_OPENERS);
+
+  // The DECISION half: what each scan classifies. Unterminated <pre> and `<pre ` openers close no block; fence
+  // markers can pair at most once per two markers.
+  const preScan = scanOf(unclosedPre);
+  const fenceScan = scanOf(unclosedFences);
+  const fenceScan4x = scanOf(unclosedFences4x);
+  const noGtScan = scanOf(unclosedNoGt);
+  assertEquals(preScan.blocks, 0, "an unterminated <pre> sequence closes no block");
+  assertEquals(noGtScan.blocks, 0, "`<pre ` with no `>` closes no block");
   assert(
-    elapsedNoGt < 500,
-    `unclosed <pre without > scan must be linear and fast: took ${elapsedNoGt.toFixed(1)}ms`,
+    fenceScan.blocks > 0 && fenceScan.blocks <= FENCE_SCAN_MARKERS / 2,
+    `fence markers pair into blocks, at most one per two markers: got ${fenceScan.blocks} for ${FENCE_SCAN_MARKERS} markers`,
   );
-  assertEquals(processedNoGt, unclosedNoGt);
+  assertEquals(
+    fenceScan4x.blocks,
+    fenceScan.blocks * 4,
+    "four times the markers must classify four times the blocks, not fewer",
+  );
+
+  // The WORK half. A count is the assertion; the wall clock below is only a guard.
+  assert(
+    preScan.examined >= unclosedPre.length / 2,
+    `the <pre> scan must examine the text: examined ${preScan.examined} for ${unclosedPre.length} characters`,
+  );
+  assert(
+    preScan.examined <= SCAN_WORK_LINEAR_CEILING * unclosedPre.length,
+    `the <pre> scan must stay linear in the text: examined ${preScan.examined} for ${unclosedPre.length} characters ` +
+      `(${
+        (preScan.examined / unclosedPre.length).toFixed(2)
+      }x, ceiling ${SCAN_WORK_LINEAR_CEILING}x)`,
+  );
+  assert(
+    noGtScan.examined >= unclosedNoGt.length / 2,
+    `the no-gt scan must examine the text: examined ${noGtScan.examined} for ${unclosedNoGt.length} characters`,
+  );
+  assert(
+    noGtScan.examined <= SCAN_WORK_LINEAR_CEILING * unclosedNoGt.length,
+    `the no-gt scan must stay linear in the text: examined ${noGtScan.examined} for ${unclosedNoGt.length} characters ` +
+      `(${
+        (noGtScan.examined / unclosedNoGt.length).toFixed(2)
+      }x, ceiling ${SCAN_WORK_LINEAR_CEILING}x)`,
+  );
+  assert(
+    fenceScan.examined >= unclosedFences.length / 2,
+    `the fence scan must examine the text: examined ${fenceScan.examined} for ${unclosedFences.length} characters`,
+  );
+  assert(
+    fenceScan.examined <= SCAN_WORK_QUADRATIC_CEILING * unclosedFences.length ** 2,
+    `the fence scan must not examine more than quadratically: examined ${fenceScan.examined} for ` +
+      `${unclosedFences.length} characters`,
+  );
+  const growth = fenceScan4x.examined / fenceScan.examined;
+  assert(
+    growth >= SCAN_WORK_GROWTH_FLOOR,
+    `4x the fence markers must cost at least the input's own growth in work: measured ${
+      growth.toFixed(2)
+    }x`,
+  );
+  assert(
+    growth <= SCAN_WORK_GROWTH_CEILING,
+    `4x the fence markers must not cost more than ${SCAN_WORK_GROWTH_CEILING}x the work: measured ` +
+      `${
+        growth.toFixed(2)
+      }x (today 16.00x, which is the quadratic shape; audio-feed-1mowv tracks the complexity)`,
+  );
+
+  // The count is a property of the INPUT, so a repeat scan must agree exactly. A scanner that leaked position
+  // between calls - the reference implementation in this file needs `lastIndex = 0` for exactly that reason -
+  // would show up here.
+  assertEquals(
+    scanOf(unclosedFences).examined,
+    fenceScan.examined,
+    "the same input must cost the same work on a second scan",
+  );
+
+  // The guard. Deliberately loose; see SCAN_HANG_GUARD_MS.
+  for (
+    const [name, scan] of [
+      ["<pre>", preScan],
+      ["fences", fenceScan],
+      ["fences 4x", fenceScan4x],
+      ["no-gt", noGtScan],
+    ] as const
+  ) {
+    assert(
+      scan.ms < SCAN_HANG_GUARD_MS,
+      `the ${name} scan must terminate: it did not finish inside the ${SCAN_HANG_GUARD_MS}ms HANG GUARD ` +
+        `(measured ${
+          scan.ms.toFixed(0)
+        }ms). This is a guard, not a performance promise - the promise is the ` +
+        `examined-character count above.`,
+    );
+  }
+
+  // The public entry point still returns the unterminated shapes unchanged (the decision the old equalities
+  // made) and a string for the fence shape.
+  assertEquals(await formatCodeForTts(unclosedPre, "skip"), unclosedPre);
+  assertEquals(await formatCodeForTts(unclosedNoGt, "skip"), unclosedNoGt);
+  assert(typeof (await formatCodeForTts(unclosedFences, "skip")) === "string");
+
+  // Printed on every run so a reader of the gate log sees WHAT is asserted and on what measurement.
+  console.log(
+    `formatCodeForTts scan WORK (characters examined, counted - NOT a duration; hang guard ${SCAN_HANG_GUARD_MS}ms): ` +
+      `<pre> ${preScan.examined} (${(preScan.examined / unclosedPre.length).toFixed(2)}x input) ${
+        preScan.ms.toFixed(0)
+      }ms / ` +
+      `fences ${fenceScan.examined} (${
+        (fenceScan.examined / unclosedFences.length).toFixed(2)
+      }x input) ${fenceScan.ms.toFixed(0)}ms / ` +
+      `fences 4x ${fenceScan4x.examined} (${growth.toFixed(2)}x the 16k work) ${
+        fenceScan4x.ms.toFixed(0)
+      }ms / ` +
+      `no-gt ${noGtScan.examined} (${
+        (noGtScan.examined / unclosedNoGt.length).toFixed(2)
+      }x input) ${noGtScan.ms.toFixed(0)}ms`,
+  );
 });
 
 Deno.test("formatCodeForTts - differential equivalence with reference regex grammar across edge shapes (audio-feed-c0gj, audio-feed-cg8s)", async () => {
