@@ -5,6 +5,10 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@^1.0.10";
+// audio-feed-0evr: for thread-CPU measurement. `node:process` is the house import in this repo (v8, net,
+// crypto, dns, http are already used) and it is the one form `deno check` can see: the Deno-native
+// `Deno.cpuUsage()` exists on Deno 2.9.7 but is not in the type surface `deno check ... tests` reads.
+import { threadCpuUsage } from "node:process";
 import {
   base64ToUint8Array,
   buildDialogueRequest,
@@ -1056,39 +1060,116 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
   assertEquals(singleCaptured, `x && y < 10 > 2 "quoted" 'single'  end`);
 });
 
-Deno.test("formatCodeForTts - scales linearly without quadratic blowup on unclosed pre tags, fences, and no-gt openers (audio-feed-c0gj, audio-feed-cg8s)", async () => {
+/**
+ * The bound each scan below asserts, in CPU milliseconds of this thread. The same 500ms the wall-clock form
+ * asserted. NOTE what it is a bound ON: this fixed workload (16,000 fence markers, 32,000 <pre> openers,
+ * 100,000 no-gt openers), NOT a linearity claim. The fence path is measured to be super-linear - a 4x input
+ * (16k -> 64k markers) costs 13-17x the CPU, which is the shape a quadratic predicts - so 500ms is a bound on
+ * the sizes used here and would not hold at 64k. Whether the fence scan SHOULD be linear is a separate
+ * question, filed as its own bead rather than folded into this timing fix.
+ */
+const SCAN_CPU_BOUND_MS = 500;
+/**
+ * Calls per input, the smallest of which is the number reported. Sized from measurement, not taste: at a quiet
+ * load the floor is reached by call 3, but under 8 CPU hogs the 60ms call first appeared at call 12 and the
+ * minimum over 15 was 60ms in BOTH conditions. Fewer calls would report 120-300ms under load - still passing
+ * here, but for the wrong reason, which is the defect this bead exists to remove.
+ */
+const SCAN_CPU_CALLS = 15;
+
+/**
+ * The FLOOR of this scan's own CPU cost, in milliseconds: the smallest of `SCAN_CPU_CALLS` calls.
+ *
+ * WHICH CLOCK, and why the other two are wrong (audio-feed-0evr, all three measured on this VM):
+ *
+ * - **`process.threadCpuUsage()` - CPU time on THIS thread - is the one that is a property of the work.**
+ *   Measured floor for the 16k fence scan: 60ms quiet (load 2.96) and 60ms under 8 hogs (load 8.0).
+ * - **`process.cpuUsage()` is process-wide** and therefore accumulates the runtime's sibling threads inside a
+ *   wall window that contention lengthens: the same scan read 519-968ms of process CPU under 8 hogs and FAILED
+ *   this bound. It was tried first and refuted by measurement.
+ * - **Wall clock** measures how the scheduler shared the box: 267-300ms quiet, 648-1119ms under 8 hogs, and
+ *   4.1-9.1s under starvation - all for the same work. That is the flake this bead is about.
+ *
+ * The number is a FLOOR, deliberately: this scan allocates, so a single call varies between ~60ms and ~200ms
+ * even quiet, and the minimum is what a linearity bound should compare. Note `threadCpuUsage` reports in 10ms
+ * steps on this platform, so the figures are quantised - immaterial against a 500ms bound.
+ *
+ * WHAT IT MEASURES IN ISOLATION, recorded rather than tuned around (audio-feed-0evr): whole file this floor is
+ * 50ms (10x under the bound) and 60-90ms under 8 hogs, but run alone (`--filter`) it is 250ms - and it stays
+ * 250ms after 200 small fence scans and after 30 further full-size ones, so a warm-up made of the SAME work
+ * does not move it. The cause is measurable rather than mysterious: the 15 <pre> scans that precede this
+ * measurement in the file make it 250ms, and skipping them makes the same measurement in the same file read
+ * 60ms. So the isolated figure carries a context cost the bound does not, leaving 2x margin there against
+ * 6-10x in the condition the gate actually runs (whole file, under load). Whether the assertion should change
+ * shape for that reason is open on the bead; the 500ms bound is unchanged and nothing here loosens it.
+ */
+async function cpuMsOver(
+  fn: () => Promise<unknown> | unknown,
+  calls = SCAN_CPU_CALLS,
+): Promise<number> {
+  let best = Infinity;
+  for (let i = 0; i < calls; i++) {
+    const before = threadCpuUsage();
+    await fn();
+    const delta = threadCpuUsage(before); // microseconds of CPU on this thread since `before`
+    const elapsedMs = (delta.user + delta.system) / 1000;
+    if (elapsedMs < best) best = elapsedMs;
+  }
+  return best;
+}
+
+/** "12.3ms (41x under the bound)" - the margin is stated because the number alone hides it. */
+function scanCostWithMargin(ms: number): string {
+  const margin = ms > 0
+    ? `${Math.round(SCAN_CPU_BOUND_MS / ms)}x under the bound`
+    : "below resolution";
+  return `${ms.toFixed(1)}ms (${margin})`;
+}
+
+Deno.test("formatCodeForTts - scales linearly without quadratic blowup on unclosed pre tags, fences, and no-gt openers (audio-feed-c0gj, audio-feed-cg8s, audio-feed-0evr)", async () => {
   // 32,000 unclosed <pre> tags previously took >6 seconds due to quadratic regex backtracking
   const unclosedPre = "<pre><code>".repeat(32_000);
-  const t0 = performance.now();
-  const processedPre = await formatCodeForTts(unclosedPre, "skip");
-  const elapsedPre = performance.now() - t0;
+  let processedPre = "";
+  const cpuPre = await cpuMsOver(async () => {
+    processedPre = await formatCodeForTts(unclosedPre, "skip");
+  });
   assert(
-    elapsedPre < 500,
-    `unclosed <pre> scan must be linear and fast: took ${elapsedPre.toFixed(1)}ms`,
+    cpuPre < SCAN_CPU_BOUND_MS,
+    `unclosed <pre> scan must be linear and fast: took ${cpuPre.toFixed(1)}ms of CPU`,
   );
   assertEquals(processedPre, unclosedPre);
 
   // 16,000 unclosed backtick fences
   const unclosedFences = "```\n".repeat(16_000);
-  const t1 = performance.now();
-  const processedFences = await formatCodeForTts(unclosedFences, "skip");
-  const elapsedFences = performance.now() - t1;
+  let processedFences = "";
+  const cpuFences = await cpuMsOver(async () => {
+    processedFences = await formatCodeForTts(unclosedFences, "skip");
+  });
   assert(
-    elapsedFences < 500,
-    `unclosed fences scan must be linear and fast: took ${elapsedFences.toFixed(1)}ms`,
+    cpuFences < SCAN_CPU_BOUND_MS,
+    `unclosed fences scan must be linear and fast: took ${cpuFences.toFixed(1)}ms of CPU`,
   );
   assert(typeof processedFences === "string");
 
   // 100,000 unclosed <pre without > (audio-feed-t06l regression avoidance)
   const unclosedNoGt = "<pre ".repeat(100_000);
-  const t2 = performance.now();
-  const processedNoGt = await formatCodeForTts(unclosedNoGt, "skip");
-  const elapsedNoGt = performance.now() - t2;
+  let processedNoGt = "";
+  const cpuNoGt = await cpuMsOver(async () => {
+    processedNoGt = await formatCodeForTts(unclosedNoGt, "skip");
+  });
   assert(
-    elapsedNoGt < 500,
-    `unclosed <pre without > scan must be linear and fast: took ${elapsedNoGt.toFixed(1)}ms`,
+    cpuNoGt < SCAN_CPU_BOUND_MS,
+    `unclosed <pre without > scan must be linear and fast: took ${cpuNoGt.toFixed(1)}ms of CPU`,
   );
   assertEquals(processedNoGt, unclosedNoGt);
+
+  // Printed on every run, so a reader of the gate log can see WHAT the three numbers are, how they were
+  // taken and how much room is left - the comment above should not be the only place that says so.
+  console.log(
+    `formatCodeForTts scan cost (FLOOR of this thread's CPU, min of ${SCAN_CPU_CALLS} calls, bound ${SCAN_CPU_BOUND_MS}ms): ` +
+      `<pre> ${scanCostWithMargin(cpuPre)} / fences ${scanCostWithMargin(cpuFences)} / ` +
+      `no-gt ${scanCostWithMargin(cpuNoGt)}`,
+  );
 });
 
 Deno.test("formatCodeForTts - differential equivalence with reference regex grammar across edge shapes (audio-feed-c0gj, audio-feed-cg8s)", async () => {
