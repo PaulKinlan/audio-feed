@@ -946,12 +946,42 @@ const WORD_CHAR = /[A-Za-z0-9_]/;
  * `index` is the start of the run and `end` one past its last character: the regex this
  * replaces matched the run greedily (`+`), so four backticks were one four-wide fence.
  */
+/**
+ * Instrumentation for the scan's own complexity assertion (audio-feed-0evr, audio-feed-cf91x).
+ *
+ * `examined` counts the characters the scan's forward searches had to cover - the work, not the
+ * elapsed time. It is deliberately a COUNT: unlike a wall-clock number it cannot be made
+ * comfortable by whatever test ran before it, which is why the fence assertion no longer promises
+ * a duration. Pass an object in to collect it; behaviour is unchanged when you do not.
+ */
+export interface ScanWork {
+  examined: number;
+}
+
+/**
+ * How much of `text` a forward search starting at `from` covered to reach `found`.
+ * `found < 0` (no match) covers the rest of the text.
+ */
+function chargedDistance(
+  found: number,
+  from: number,
+  length: number,
+): number {
+  return Math.max(0, (found < 0 ? length : found) - from);
+}
+
 function nextFenceRun(
   text: string,
   from: number,
+  work?: ScanWork,
 ): { index: number; end: number } | null {
   const ticks = text.indexOf("```", from);
   const tildes = text.indexOf("~~~", from);
+  // Both searches start at `from`, so both covered this much of the text.
+  if (work) {
+    work.examined += chargedDistance(ticks, from, text.length) +
+      chargedDistance(tildes, from, text.length);
+  }
   const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
   if (index < 0) return null;
   const char = text[index];
@@ -972,28 +1002,40 @@ function nextFenceRun(
 function nextPreTag(
   text: string,
   from: number,
+  work?: ScanWork,
 ): { index: number; end: number } | null {
   let index = nextCi(PRE_OPEN, text, from);
+  if (work) work.examined += chargedDistance(index, from, text.length);
   while (index >= 0) {
     const after = text[index + 4];
     if (after !== undefined && !WORD_CHAR.test(after)) {
       const close = text.indexOf(">", index + 4);
+      if (work) {
+        work.examined += chargedDistance(close, index + 4, text.length);
+      }
       if (close < 0) return null;
       return { index, end: close + 1 };
     }
-    index = nextCi(PRE_OPEN, text, index + 1);
+    const next = nextCi(PRE_OPEN, text, index + 1);
+    if (work) work.examined += chargedDistance(next, index + 1, text.length);
+    index = next;
   }
   return null;
 }
 
 /** Where the optional info string (`(?:[^\n\r]*\r?\n)?`) ends, or null when it cannot match. */
-function fenceInfoEnd(text: string, openerEnd: number): number | null {
+function fenceInfoEnd(
+  text: string,
+  openerEnd: number,
+  work?: ScanWork,
+): number | null {
   let lineEnd = openerEnd;
   while (
     lineEnd < text.length && text[lineEnd] !== "\n" && text[lineEnd] !== "\r"
   ) {
     lineEnd++;
   }
+  if (work) work.examined += lineEnd - openerEnd;
   if (text[lineEnd] === "\n") return lineEnd + 1;
   if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") return lineEnd + 2;
   return null;
@@ -1025,17 +1067,18 @@ const CODE_CLOSE = /<\/code>/gi;
 function matchFence(
   text: string,
   run: { index: number; end: number },
+  work?: ScanWork,
 ): CodeBlockMatch | null {
   const length = run.end - run.index;
   const shortest = Math.max(3, length - 3);
   for (let openerLength = length; openerLength >= shortest; openerLength--) {
     const openerEnd = run.index + openerLength;
-    const infoEnd = fenceInfoEnd(text, openerEnd);
+    const infoEnd = fenceInfoEnd(text, openerEnd, work);
     // The info string is tried first, then dropped.
     for (
       const contentStart of infoEnd === null ? [openerEnd] : [infoEnd, openerEnd]
     ) {
-      const close = nextFenceRun(text, contentStart);
+      const close = nextFenceRun(text, contentStart, work);
       if (close) {
         return {
           index: run.index,
@@ -1102,8 +1145,15 @@ function matchPre(
  *
  * Linear O(N) single-pass extraction matching origin/main REGEX grammar without
  * quadratic backtracking or repetitive scans.
+ *
+ * Pass `work` to collect the characters this scan's forward searches had to cover (audio-feed-cf91x):
+ * a broken scan cannot produce a sensible count for the same input, and - unlike a duration - the
+ * count does not depend on what ran before it.
  */
-export function extractCodeBlocks(text: string): CodeBlockMatch[] {
+export function extractCodeBlocks(
+  text: string,
+  work?: ScanWork,
+): CodeBlockMatch[] {
   if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
     return [];
   }
@@ -1113,12 +1163,12 @@ export function extractCodeBlocks(text: string): CodeBlockMatch[] {
   let presExhausted = false;
   let from = 0;
   while (from < text.length) {
-    const fence = fencesExhausted ? null : nextFenceRun(text, from);
-    const pre = presExhausted ? null : nextPreTag(text, from);
+    const fence = fencesExhausted ? null : nextFenceRun(text, from, work);
+    const pre = presExhausted ? null : nextPreTag(text, from, work);
     if (!fence && !pre) break;
     // The earlier start wins; the two alternatives can never begin at the same index.
     if (fence && (!pre || fence.index < pre.index)) {
-      const block = matchFence(text, fence);
+      const block = matchFence(text, fence, work);
       if (block) {
         blocks.push(block);
         from = block.index + block.full.length;
