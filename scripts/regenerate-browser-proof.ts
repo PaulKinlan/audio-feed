@@ -436,9 +436,15 @@ try {
   // argv (Deno.args), so the invocation itself carries the path and a process-table scan matches the caller -
   // observed on 2026-10-17 as a false FAIL with "profile refs left: 1" that was the invoking shell. The exit is the
   // fact this script can prove about its own child, and it is exactly what the bounded race could have skipped.
-  const reapExited = await chrome.status.then(() => true).catch(() => true);
+  // audio-feed-lgcnq: `await chrome.status` alone blocks until the child exits (unbounded) and ALWAYS resolves, so
+  // as an assertion it could never fail and could hang the script. This races the exit against the same 2s window the
+  // reap above uses, and answers false when the window closes first - so a child that outlives the reap fails by name.
+  const reapExited = await Promise.race([
+    chrome.status.then(() => true).catch(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000)),
+  ]);
   check(
-    "teardown: the browser child has exited after the reap",
+    "teardown: the browser child has exited within 2s of the reap",
     reapExited,
     `profile=${profileDir}`,
   );
