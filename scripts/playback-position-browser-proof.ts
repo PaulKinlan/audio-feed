@@ -43,7 +43,7 @@ const ASSERTS = [
 ];
 
 await runProof("playback-position-browser-proof", async (checker) => {
-  const { profileDir: PROFILE } = await createTempChromeProfile("audiofeed-playback-");
+  const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
   const harness = await spawnHarness("scripts/listen-harness.ts");
   const BASE = harness.base;
   const TOKEN = "harness-token";
@@ -308,6 +308,10 @@ await runProof("playback-position-browser-proof", async (checker) => {
     // process may still carry --user-data-dir=<profile>.
     await killChromeAndWait(chrome);
     await killChromeAndWait(harness.process);
+    // audio-feed-3vtav: the SITE'S OWN cleanup must run. createTempChromeProfile's cleanup is the retry-safe remover -
+    // it keeps removing while a surviving process (a heartbeat or active registration) recreates the directory - so a
+    // one-shot removal here can be undone a moment later. cleanup() runs first; removeDirWhenQuiet then VERIFIES it.
+    await cleanup();
     const profileRemoved = await removeDirWhenQuiet(PROFILE);
     const profileUnused = await waitForChromeProfileUnused(PROFILE);
     checker.check(

@@ -458,3 +458,12 @@ Deno.test("audio-feed-qmcf: helper contract creates separator-terminated profile
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   }
 });
+
+Deno.test("audio-feed-3vtav: playback-position runs its own profile cleanup (absence is assertable)", async () => {
+  // audio-feed-3vtav: the ft1sj teardown work asserted that the directory was gone and that nothing referenced the
+  // profile, but it did so with removeDirWhenQuiet alone - the SITE'S OWN cleanup() never ran, so a surviving process
+  // with a heartbeat could recreate the directory after the one-shot removal. This call-site check makes the absence
+  // of cleanup() assertable: delete `await cleanup()` from that script and this test fails BY NAME.
+  const audit = await auditCallSite("scripts/playback-position-browser-proof.ts");
+  assertSiteConforms(audit);
+});
