@@ -27,8 +27,11 @@ import { approveUser } from "../src/auth/users.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import {
   createTempChromeProfile,
+  killChromeAndWait,
   newestChrome,
+  removeDirWhenQuiet,
   runProof,
+  waitForChromeProfileUnused,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
@@ -459,11 +462,19 @@ await runProof("request-access-browser-proof", async (checker) => {
     crashError = err;
     checker.check("proof execution completed without unhandled exception", false, String(err));
   } finally {
-    try {
-      chrome.kill();
-    } catch { /* ignore */ }
+    // audio-feed-d7ua1: reap the browser, then assert THIS run's profile is unused - both halves.
+    await killChromeAndWait(chrome);
     await server.shutdown().catch(() => {});
+    // cleanup() stays: it is the pinned convention for retry-safe profile removal (tests/chrome_profile_sweep_sites_test.ts).
+    // removeDirWhenQuiet below VERIFIES what cleanup() swallows, and is idempotent when the directory is already gone.
     await cleanup();
+    const profileRemoved = await removeDirWhenQuiet(PROFILE);
+    const profileUnused = await waitForChromeProfileUnused(PROFILE);
+    checker.check(
+      "teardown: nothing still references the Chrome profile (directory removed and no process carries it)",
+      profileRemoved && profileUnused,
+      `removeDirWhenQuiet=${profileRemoved} waitForChromeProfileUnused=${profileUnused} profile=${PROFILE}`,
+    );
     await writeEvidenceReadme({
       dir: OUT,
       title: "Request Access Front Door Verification Report: audio-feed-r97",

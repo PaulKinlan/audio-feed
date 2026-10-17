@@ -12,7 +12,13 @@
  *   deno run --allow-all --unstable-kv scripts/listen-browser-proof.ts
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 import { connectCdp } from "./proof-cdp.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 
@@ -137,6 +143,6 @@ await runProof("audio-feed-py5", async (checker) => {
       }
     });
   } finally {
-    harness.kill();
+    await killChromeAndWait(harness.process);
   }
 });

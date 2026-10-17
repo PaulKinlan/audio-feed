@@ -18,7 +18,13 @@
  *   deno run --allow-all --unstable-kv scripts/home-player-link-browser-proof.ts
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 
 const ASSERTS = [
   "header navigation links to /listen",
@@ -272,7 +278,7 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  harness.kill();
+  await killChromeAndWait(harness.process);
 }
 
 Deno.exit(exitCode);

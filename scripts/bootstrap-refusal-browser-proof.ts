@@ -10,7 +10,13 @@
  *   deno run --allow-all --unstable-kv scripts/bootstrap-refusal-browser-proof.ts
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-xw7/", import.meta.url).pathname;
 
@@ -225,6 +231,6 @@ await runProof("audio-feed-xw7", async (checker) => {
       }
     });
   } finally {
-    harness.kill();
+    await killChromeAndWait(harness.process);
   }
 });

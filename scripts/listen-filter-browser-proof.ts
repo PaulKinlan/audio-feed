@@ -23,7 +23,13 @@
  *   deno run --allow-all --unstable-kv scripts/listen-filter-browser-proof.ts
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 
 const ASSERTS = [
   "initial load shows 5 rows and '5 episodes'",
@@ -467,7 +473,7 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  harness.kill();
+  await killChromeAndWait(harness.process);
 }
 
 Deno.exit(exitCode);
