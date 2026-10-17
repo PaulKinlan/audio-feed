@@ -13,7 +13,13 @@
  *   deno run --allow-all --unstable-kv scripts/bootstrap-browser-proof.ts
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-8eh/", import.meta.url).pathname;
 
@@ -205,6 +211,8 @@ await runProof("audio-feed-8eh", async (checker) => {
       }
     });
   } finally {
-    harness.kill();
+    // audio-feed-ft1sj: kill AND await the harness, so the child is reaped before this script exits. A kill that
+    // is not awaited leaves a child writing after the script has moved on (audio-feed-wj8o2, same shape).
+    await killChromeAndWait(harness.process);
   }
 });

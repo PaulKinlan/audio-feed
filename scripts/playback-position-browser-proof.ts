@@ -19,9 +19,12 @@
 
 import {
   createTempChromeProfile,
+  killChromeAndWait,
   newestChrome,
+  removeDirWhenQuiet,
   runProof,
   spawnHarness,
+  waitForChromeProfileUnused,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
@@ -36,10 +39,11 @@ const ASSERTS = [
   "re-saved position 50s",
   "other user cannot resume user-1's playback position (per-user isolation)",
   "ended event clears stored position",
+  "teardown: nothing still references the Chrome profile (directory removed and no process carries it)",
 ];
 
 await runProof("playback-position-browser-proof", async (checker) => {
-  const { profileDir: PROFILE, cleanup } = await createTempChromeProfile("audiofeed-playback-");
+  const { profileDir: PROFILE } = await createTempChromeProfile("audiofeed-playback-");
   const harness = await spawnHarness("scripts/listen-harness.ts");
   const BASE = harness.base;
   const TOKEN = "harness-token";
@@ -299,11 +303,18 @@ await runProof("playback-position-browser-proof", async (checker) => {
     crashError = err;
     checker.check("proof execution completed without unhandled exception", false, String(err));
   } finally {
-    try {
-      chrome.kill();
-    } catch { /* ignore */ }
-    harness.kill();
-    await cleanup();
+    // audio-feed-ft1sj: reap both children, then PROVE nothing still references the profile. "The process was
+    // killed" is not "no child of it is still writing where the profile was": the directory must be gone AND no
+    // process may still carry --user-data-dir=<profile>.
+    await killChromeAndWait(chrome);
+    await killChromeAndWait(harness.process);
+    const profileRemoved = await removeDirWhenQuiet(PROFILE);
+    const profileUnused = await waitForChromeProfileUnused(PROFILE);
+    checker.check(
+      "teardown: nothing still references the Chrome profile (directory removed and no process carries it)",
+      profileRemoved && profileUnused,
+      `removeDirWhenQuiet=${profileRemoved} waitForChromeProfileUnused=${profileUnused} profile=${PROFILE}`,
+    );
     await writeEvidenceReadme({
       dir: OUT,
       title: "Browser Acceptance Proof: audio-feed-kzi",

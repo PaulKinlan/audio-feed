@@ -201,7 +201,41 @@ Deno.test({
       const logs = harness.getLogs();
       assertStringIncludes(logs.stdout, `READY port=${harness.port}`);
     } finally {
-      harness.kill();
+      // audio-feed-ft1sj: kill AND await, so the harness child is reaped before the test continues.
+      await killChromeAndWait(harness.process);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "proof-helper: killChromeAndWait reaps the child, and nothing still references the profile afterwards (audio-feed-ft1sj)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    const chrome = await launchChrome();
+    const { profileDir, process } = chrome;
+    // A profile under the prefix we just created: this asserts about THIS run's directory, never about other
+    // scratch directories on the machine (audio-feed-wj8o2 left ~708 pre-existing ones, and a teardown fix stops
+    // the leak going forward without emptying them).
+    assertStringIncludes(profileDir, "audiofeed-chrome-");
+    try {
+      // The mechanism under test. If this is not awaited (or not called), the browser is still alive below.
+      await killChromeAndWait(process);
+      // BOTH acceptance assertions, and the second is the one that reddens by NAME when the reap is missing: a
+      // live Chrome carries --user-data-dir=<profileDir> on its own command line.
+      assertEquals(
+        await waitForChromeProfileUnused(profileDir),
+        true,
+        `no process may still carry --user-data-dir=${profileDir} after a reaped kill`,
+      );
+      assertEquals(
+        await removeDirWhenQuiet(profileDir),
+        true,
+        `the profile directory ${profileDir} must be gone after a reaped kill`,
+      );
+    } finally {
+      await killChromeAndWait(process);
+      await removeDirWhenQuiet(profileDir);
     }
   },
 });
