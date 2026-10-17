@@ -5,9 +5,10 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@^1.0.10";
-// audio-feed-0evr: for thread-CPU measurement. `node:process` is the house import in this repo (v8, net,
-// crypto, dns, http are already used) and it is the one form `deno check` can see: the Deno-native
-// `Deno.cpuUsage()` exists on Deno 2.9.7 but is not in the type surface `deno check ... tests` reads.
+// audio-feed-0evr (round two): the fence scan is asserted by the WORK it does, not by a clock - see the
+// "WHAT THIS ASSERTS" block below (ScanWork.examined against the shape ceilings, with SCAN_HANG_GUARD_MS as
+// the only remaining wall clock). The round-one process.threadCpuUsage() min-of-15 measure, and the
+// node:process import it needed, were removed with it; do not reintroduce a CPU-time or wall-clock bound here.
 import {
   base64ToUint8Array,
   buildDialogueRequest,
