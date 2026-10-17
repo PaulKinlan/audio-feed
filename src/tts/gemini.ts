@@ -970,17 +970,39 @@ function chargedDistance(
   return Math.max(0, (found < 0 ? length : found) - from);
 }
 
+/**
+ * Which fence delimiters occur anywhere in the scanned text (audio-feed-1mowv).
+ *
+ * Computed once per scan and threaded down, because a delimiter absent from the whole text cannot appear at any
+ * `from`: searching for it is guaranteed to miss, and the miss walks to the END of the text. Doing that on every
+ * call made the fence scan quadratic - the loop calls this once per fence marker, so the scan performed O(n)
+ * work O(n) times. Measured before the fix: doubling the markers cost 4.00x the examined characters at every
+ * size (16k: 768,088,000; 64k: 12,288,352,000), i.e. 12,001x and 48,001x the input length.
+ */
+interface ScanLimits {
+  hasTicks: boolean;
+  hasTildes: boolean;
+  hasPre: boolean;
+}
+
 function nextFenceRun(
   text: string,
   from: number,
+  limits: ScanLimits,
   work?: ScanWork,
 ): { index: number; end: number } | null {
-  const ticks = text.indexOf("```", from);
-  const tildes = text.indexOf("~~~", from);
-  // Both searches start at `from`, so both covered this much of the text.
+  // Substituting -1 for a skipped search is EXACTLY equivalent: `indexOf` returns -1 for every `from` when the
+  // needle does not occur in the text at all. Only the cost changes.
+  const ticks = limits.hasTicks ? text.indexOf("```", from) : -1;
+  const tildes = limits.hasTildes ? text.indexOf("~~~", from) : -1;
+  // Charged only for the searches actually performed - the point of the limit is that the skipped ones are free.
   if (work) {
-    work.examined += chargedDistance(ticks, from, text.length) +
-      chargedDistance(tildes, from, text.length);
+    if (limits.hasTicks) {
+      work.examined += chargedDistance(ticks, from, text.length);
+    }
+    if (limits.hasTildes) {
+      work.examined += chargedDistance(tildes, from, text.length);
+    }
   }
   const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
   if (index < 0) return null;
@@ -1002,8 +1024,12 @@ function nextFenceRun(
 function nextPreTag(
   text: string,
   from: number,
+  limits: ScanLimits,
   work?: ScanWork,
 ): { index: number; end: number } | null {
+  // Same short-circuit as the fence runs (audio-feed-1mowv): no `<pre` anywhere means every search from every
+  // `from` is a guaranteed miss that walks to the end of the text, and this is called once per loop iteration.
+  if (!limits.hasPre) return null;
   let index = nextCi(PRE_OPEN, text, from);
   if (work) work.examined += chargedDistance(index, from, text.length);
   while (index >= 0) {
@@ -1067,6 +1093,7 @@ const CODE_CLOSE = /<\/code>/gi;
 function matchFence(
   text: string,
   run: { index: number; end: number },
+  limits: ScanLimits,
   work?: ScanWork,
 ): CodeBlockMatch | null {
   const length = run.end - run.index;
@@ -1078,7 +1105,7 @@ function matchFence(
     for (
       const contentStart of infoEnd === null ? [openerEnd] : [infoEnd, openerEnd]
     ) {
-      const close = nextFenceRun(text, contentStart, work);
+      const close = nextFenceRun(text, contentStart, limits, work);
       if (close) {
         return {
           index: run.index,
@@ -1154,7 +1181,13 @@ export function extractCodeBlocks(
   text: string,
   work?: ScanWork,
 ): CodeBlockMatch[] {
-  if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
+  // Computed once, so a delimiter that is absent from the text costs no searches at all (audio-feed-1mowv).
+  const limits: ScanLimits = {
+    hasTicks: text.includes("```"),
+    hasTildes: text.includes("~~~"),
+    hasPre: /<pre\b/i.test(text),
+  };
+  if (!limits.hasTicks && !limits.hasTildes && !limits.hasPre) {
     return [];
   }
 
@@ -1163,12 +1196,17 @@ export function extractCodeBlocks(
   let presExhausted = false;
   let from = 0;
   while (from < text.length) {
-    const fence = fencesExhausted ? null : nextFenceRun(text, from, work);
-    const pre = presExhausted ? null : nextPreTag(text, from, work);
+    const fence = fencesExhausted ? null : nextFenceRun(text, from, limits, work);
+    const pre = presExhausted ? null : nextPreTag(text, from, limits, work);
+    // A null is MONOTONE: `from` only ever increases, so "no opener at or after here" stays true for the rest of
+    // the scan. Recording that is half the complexity fix (audio-feed-1mowv): without it every remaining
+    // iteration repeated a search that was guaranteed to miss, which is what made the scan quadratic.
+    if (!fence) fencesExhausted = true;
+    if (!pre) presExhausted = true;
     if (!fence && !pre) break;
     // The earlier start wins; the two alternatives can never begin at the same index.
     if (fence && (!pre || fence.index < pre.index)) {
-      const block = matchFence(text, fence, work);
+      const block = matchFence(text, fence, limits, work);
       if (block) {
         blocks.push(block);
         from = block.index + block.full.length;
