@@ -9,6 +9,7 @@
  */
 
 import {
+  assert,
   assertEquals,
   assertMatch,
   assertNotEquals,
@@ -101,38 +102,39 @@ Deno.test({
 });
 
 /**
- * audio-feed-9ot4: run `body` with TMPDIR redirected to a scratch directory, returning what it returns.
+ * audio-feed-9ot4 / audio-feed-oyf3g: run `body` against a scratch root that the code under test is HANDED.
  *
- * WHY EVERY ROW THAT ALLOCATES A PROFILE USES THIS: `createTempChromeProfile` reclaims abandoned
- * profiles under `TMPDIR ?? /tmp` BEFORE it allocates, so a row that calls it with the machine's real
- * TMPDIR makes a unit test mutate shared machine state. That was always true of the row's own prefix;
- * since the sweep became age-and-signature based rather than prefix-scoped (audio-feed-h62q) it is
- * true of EVERY abandoned profile on the VM. MEASURED: a single run of the allocating rows reclaimed
- * 82 directories from the real /tmp, none of which belonged to any test here.
+ * WHY EVERY ROW THAT ALLOCATES A PROFILE USES THIS: `createTempChromeProfile` reclaims abandoned profiles under
+ * the root it is given BEFORE it allocates, so a row that calls it with the machine's real temp dir makes a unit
+ * test mutate shared machine state. That was always true of the row's own prefix; since the sweep became
+ * age-and-signature based rather than prefix-scoped (audio-feed-h62q) it is true of EVERY abandoned profile on the
+ * VM. MEASURED: a single run of the allocating rows reclaimed 82 directories from the real /tmp, none of which
+ * belonged to any test here. The root argument keeps that protection without the coupling the old redirect had:
+ * under `deno test --parallel` Deno runs test modules CONCURRENTLY IN ONE PROCESS, so a process-global TMPDIR
+ * captured other modules' temp dirs into this sandbox and deleted them with it.
  *
- * The redirect is asserted rather than assumed - a helper that silently failed to take would leave the
- * rows exactly as they were while reading as fixed. Removal of the scratch tree is best-effort because
- * the row that locks a subdirectory to exercise the failure path cannot always unlock it again; a
- * leftover SCRATCH directory is ignored by the sweep (it holds no `Default/`), which is why redirecting
- * is safe where the previous behaviour was not.
+ * The sandbox is VERIFIED, not assumed: each row asserts that the profile it was handed lives under the scratch
+ * root, which is the same guarantee the old "assert the redirect took" line was making about the old mechanism.
+ * Removal of the scratch tree is best-effort because the row that locks a subdirectory to exercise the failure
+ * path cannot always unlock it again; a leftover SCRATCH directory holds no `Default/`, so the profile sweep
+ * ignores it, and the sweep is now scoped to this root anyway.
  */
-async function withScratchTmp<T>(body: (scratch: string) => Promise<T>): Promise<T> {
-  const original = Deno.env.get("TMPDIR");
+async function withScratchRoot<T>(body: (scratch: string) => Promise<T>): Promise<T> {
   const scratch = await Deno.makeTempDir({ prefix: "9ot4-scratch-" });
-  Deno.env.set("TMPDIR", scratch);
-  assertEquals(Deno.env.get("TMPDIR"), scratch, "the redirect is the point: assert it took");
   try {
     return await body(scratch);
   } finally {
-    if (original === undefined) Deno.env.delete("TMPDIR");
-    else Deno.env.set("TMPDIR", original);
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   }
 }
 
 Deno.test("proof-helper: createTempChromeProfile creates and cleanly removes temp dir", async () => {
-  await withScratchTmp(async () => {
-    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-profile-");
+  await withScratchRoot(async (scratch) => {
+    const { profileDir, cleanup } = await createTempChromeProfile(
+      "audiofeed-test-profile-",
+      scratch,
+    );
+    assert(profileDir.startsWith(scratch), "the profile must live under the row's scratch root");
     const stat = await Deno.stat(profileDir);
     assertEquals(stat.isDirectory, true);
 
@@ -217,8 +219,12 @@ Deno.test({
 });
 
 Deno.test("proof-helper: createTempChromeProfile cleanup is idempotent and safe to call twice", async () => {
-  await withScratchTmp(async () => {
-    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-idempotent-");
+  await withScratchRoot(async (scratch) => {
+    const { profileDir, cleanup } = await createTempChromeProfile(
+      "audiofeed-test-idempotent-",
+      scratch,
+    );
+    assert(profileDir.startsWith(scratch), "the profile must live under the row's scratch root");
     await cleanup();
     await cleanup(); // second call must not throw
     await assertRejects(
@@ -229,8 +235,9 @@ Deno.test("proof-helper: createTempChromeProfile cleanup is idempotent and safe 
 });
 
 Deno.test("proof-helper: createTempChromeProfile throws descriptive error if profile directory cannot be removed", async () => {
-  await withScratchTmp(async () => {
-    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-fail-");
+  await withScratchRoot(async (scratch) => {
+    const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-test-fail-", scratch);
+    assert(profileDir.startsWith(scratch), "the profile must live under the row's scratch root");
     const sub = `${profileDir}/locked-sub`;
     await Deno.mkdir(sub);
     await Deno.writeTextFile(`${sub}/file.txt`, "lock");
@@ -2563,12 +2570,17 @@ Deno.test("proof-helper: audio-feed-2bfv: cleaned Chrome profile remains absent 
         // the moment createTempChromeProfile returned would delete the profile out from under the
         // callback below. Measured: that version of this fix failed the row with ENOENT writing
         // `Preferences`, which is a real contract failing rather than a test artefact.
-        await withScratchTmp(() =>
+        await withScratchRoot((scratch) =>
           runProof(
             "test-2bfv-chrome-profile-cleanup",
             async (checker) => {
               const { profileDir, cleanup } = await createTempChromeProfile(
                 "audiofeed-chrome-test-fail-",
+                scratch,
+              );
+              assert(
+                profileDir.startsWith(scratch),
+                "the profile must live under the row's scratch root",
               );
               profileDirRef = profileDir;
 

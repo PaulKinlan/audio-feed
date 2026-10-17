@@ -17,8 +17,11 @@
  * - Every allocated prefix must be separator-terminated (`-`) conforming to the sweep boundary
  * - Cleanup must use the helper's retry-capable `cleanup()` rather than swallowing removal errors
  *
- * Scratch TMPDIR isolation:
- * As mandated, never touches the live `/tmp/audiofeed-*` pile; all directory operations use scratch.
+ * Scratch isolation:
+ * As mandated, never touches the live `/tmp/audiofeed-*` pile. Every directory operation is aimed at a scratch
+ * root handed to the helper AS AN ARGUMENT (audio-feed-oyf3g) rather than by redirecting the process-global
+ * TMPDIR - under `deno test --parallel` that redirect captured other modules' temp dirs into this sandbox and
+ * deleted them with it.
  */
 import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import { createTempChromeProfile } from "../scripts/proof-helper.ts";
@@ -344,7 +347,9 @@ Deno.test("audio-feed-qmcf: mutant M2 reverts observability-agent withTempDir to
   const fileUrl = new URL("../tests/observability_agent_poll_test.ts", import.meta.url);
   const source = await Deno.readTextFile(fileUrl);
   const anchor =
-    'const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-");';
+    // audio-feed-oyf3g: the anchor tracks the CONVERTED source (the root is now passed in), while the mutation
+    // target stays a raw makeTempDir - so M2 still proves the audit reddens a direct allocation for this prefix.
+    'const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-", root);';
   const mutant = applyMutant(
     source,
     anchor,
@@ -407,10 +412,13 @@ Deno.test("audio-feed-qmcf: mutant M4 reverts verify_s3uk to un-prefixed makeTem
 // ---------------------------------------------------------------------------------------------
 
 Deno.test("audio-feed-qmcf: helper contract creates separator-terminated profile in scratch and cleans up", async () => {
-  const originalTmp = Deno.env.get("TMPDIR");
   const scratch = await Deno.makeTempDir({ prefix: "qmcf-scratch-" });
-  Deno.env.set("TMPDIR", scratch);
 
+  // THE ROOT IS HANDED IN, NOT PUT IN THE ENVIRONMENT (audio-feed-oyf3g): redirecting the process-global
+  // TMPDIR under `deno test --parallel` captured other modules' temp dirs into this scratch directory and
+  // deleted them with it. Passing the root to createTempChromeProfile keeps the reclaim sweep inside this
+  // sandbox (so a real /tmp is never swept) and puts the profile here - the name contract asserted below is
+  // unaffected, because it reads the BASENAME, not the location.
   try {
     const prefixes = [
       "audiofeed-proof-3xq-4c-",
@@ -421,7 +429,7 @@ Deno.test("audio-feed-qmcf: helper contract creates separator-terminated profile
 
     for (const prefix of prefixes) {
       assert(prefix.endsWith("-"), `prefix '${prefix}' must end with '-' for separator boundary`);
-      const { profileDir, cleanup } = await createTempChromeProfile(prefix);
+      const { profileDir, cleanup } = await createTempChromeProfile(prefix, scratch);
 
       const basename = profileDir.split("/").pop()!;
       assert(
@@ -447,8 +455,6 @@ Deno.test("audio-feed-qmcf: helper contract creates separator-terminated profile
       assert(gone, `profile dir must be removed after cleanup()`);
     }
   } finally {
-    if (originalTmp === undefined) Deno.env.delete("TMPDIR");
-    else Deno.env.set("TMPDIR", originalTmp);
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   }
 });
