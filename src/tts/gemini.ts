@@ -980,26 +980,58 @@ function chargedDistance(
  * size (16k: 768,088,000; 64k: 12,288,352,000), i.e. 12,001x and 48,001x the input length.
  */
 interface ScanLimits {
-  /**
-   * Exhaustion POINT, not a flag: `from` is not monotone across callers (matchFence re-searches from an opener's
-   * end, which can be earlier than a previous search), so "absent at or after X" may only skip a search whose `from`
-   * is at/after X. audio-feed-ewedg: the point keeps the quadratic fix (the marker loop's `from` increases, so every
-   * later marker skips) without dropping a fence a smaller `from` could still find.
-   */
-  ticksEnd: number;
-  tildesEnd: number;
+  ticks: DelimiterProof;
+  tildes: DelimiterProof;
   hasPre: boolean;
+}
+
+/**
+ * A delimiter's exhaustion proof (audio-feed-375x1).
+ *
+ * `provenFrom === null` means NOTHING has been proven yet, so no search may be skipped. A number means "absent at or
+ * after this index". Keeping "no proof yet" as `null` instead of as a position makes the two states unrepresentable as
+ * one number: the previous shape wrote `from` on EVERY `-1`, including the `-1` of a SKIPPED search, which silently
+ * RAISED a proof point (weakening it) and turned every later block - matchFence re-searches from a small `infoEnd` -
+ * back into a scan to EOF.
+ */
+interface DelimiterProof {
+  provenFrom: number | null;
+}
+
+/**
+ * `text.indexOf(needle, from)`, but skipping the search when a previous miss proved the needle absent at or after a
+ * point <= `from`. This is the ONLY place a proof may be recorded: a skipped search returns without touching the
+ * state, so a skip can never be mistaken for a new fan-out of knowledge, and a real miss may only move the proof
+ * EARLIER (a miss at a smaller `from` is the stronger fact).
+ */
+function searchDelimiter(
+  text: string,
+  needle: string,
+  from: number,
+  proof: DelimiterProof,
+): { index: number; searched: boolean } {
+  if (proof.provenFrom !== null && from >= proof.provenFrom) {
+    return { index: -1, searched: false };
+  }
+  const index = text.indexOf(needle, from);
+  if (index < 0) {
+    proof.provenFrom = proof.provenFrom === null ? from : Math.min(proof.provenFrom, from);
+  }
+  return { index, searched: true };
 }
 
 /**
  * INVARIANT (audio-feed-ewedg) - the fast path may only skip a search whose result is provably -1.
  *
  * `nextFenceRun` searches for each fence delimiter from `from`. It may substitute -1 (skip the search) only when an
- * EARLIER search proved that delimiter absent at or after a point <= `from` (ticksEnd / tildesEnd). `from` is not
- * monotone across callers - matchFence re-searches from an opener's end, which can be EARLIER than a search that
- * already missed - so the proof is recorded as a POINT, not a flag, and a search from a smaller `from` still runs. A
- * delimiter absent from the whole text starts at point 0, so every search for it is skipped; that case is proven by
- * `text.includes`, never assumed.
+ * EARLIER SEARCH - never a skipped one - proved that delimiter absent at or after a point <= `from`. `from` is not
+ * monotone across callers (matchFence re-searches from an opener's end, which can be EARLIER than a search that
+ * already missed), so the proof is a POINT rather than a flag, and TWO RULES keep it honest:
+ *   - a proof may only move EARLIER (a miss at a smaller `from` is the stronger fact), and
+ *   - a SKIPPED search records NOTHING.
+ * audio-feed-375x1: the old shape wrote `from` on every -1, including the -1 of a skip, which RAISED the proof point
+ * and sent every block back to scanning to EOF. "No proof yet" is now `null`, so that write cannot happen.
+ * A delimiter absent from the whole text starts at point 0 (a real proof), never assumed.
  *
  * Equivalently: skipping changes only the COST of the scan, never which fence the scan classifies. The enforcement is
  * the differential test in tests/tts_test.ts - the reference regex grammar over the hand-picked shapes plus ~90
@@ -1020,17 +1052,17 @@ function nextFenceRun(
   // hasTildes stayed true and every marker re-ran `indexOf("~~~", from)`, missed, and walked to the end of the text:
   // quadratic, measured at ratio 2.00 x n^2 and 8.19B characters for 64k markers. Raising the exhaustion POINT makes
   // every later marker skip, while a smaller `from` (matchFence re-searches from an opener's end) still searches.
-  const ranTicks = from < limits.ticksEnd;
-  const ticks = ranTicks ? text.indexOf("```", from) : -1;
-  if (ticks < 0) limits.ticksEnd = from;
-  const ranTildes = from < limits.tildesEnd;
-  const tildes = ranTildes ? text.indexOf("~~~", from) : -1;
-  if (tildes < 0) limits.tildesEnd = from;
+  const ticks = searchDelimiter(text, "```", from, limits.ticks);
+  const tildes = searchDelimiter(text, "~~~", from, limits.tildes);
   if (work) {
-    if (ranTicks) work.examined += chargedDistance(ticks, from, text.length);
-    if (ranTildes) work.examined += chargedDistance(tildes, from, text.length);
+    if (ticks.searched) work.examined += chargedDistance(ticks.index, from, text.length);
+    if (tildes.searched) work.examined += chargedDistance(tildes.index, from, text.length);
   }
-  const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
+  const index = ticks.index < 0
+    ? tildes.index
+    : tildes.index < 0
+    ? ticks.index
+    : Math.min(ticks.index, tildes.index);
   if (index < 0) return null;
   const char = text[index];
   let end = index;
@@ -1211,11 +1243,12 @@ export function extractCodeBlocks(
   // (audio-feed-1mowv). Otherwise the point is raised when a search from some `from` misses (audio-feed-ewedg):
   // "absent at or after X" may only skip searches whose `from` is at or after X.
   const limits: ScanLimits = {
-    ticksEnd: text.includes("```") ? Number.POSITIVE_INFINITY : 0,
-    tildesEnd: text.includes("~~~") ? Number.POSITIVE_INFINITY : 0,
+    // A delimiter absent from the whole text is PROVEN exhausted at 0, which is a proof, so it is `0` and not `null`.
+    ticks: { provenFrom: text.includes("```") ? null : 0 },
+    tildes: { provenFrom: text.includes("~~~") ? null : 0 },
     hasPre: /<pre\b/i.test(text),
   };
-  if (limits.ticksEnd === 0 && limits.tildesEnd === 0 && !limits.hasPre) {
+  if (limits.ticks.provenFrom === 0 && limits.tildes.provenFrom === 0 && !limits.hasPre) {
     return [];
   }
 

@@ -1339,6 +1339,24 @@ Deno.test("formatCodeForTts - differential equivalence with reference regex gram
     "~~~~~~~<code>const x = 1;c++",
     "\`\`\`inline only\`\`\`",
   );
+  // audio-feed-375x1: the family is "ANY code block with an INFO STRING", so it is generated rather than pinned to one
+  // string - closed and unterminated, nested, repeated, and preceded by the other delimiter already exhausted (the
+  // shape whose `infoEnd` write-back used to raise the exhaustion point for every later block).
+  for (const len of [3, 4, 5]) {
+    const f = "`".repeat(len);
+    const t = "~".repeat(len);
+    generated.push(
+      `${f}js\nconst x = 1;\n${f}\n`,
+      `${t}js\nconst x = 1;\n${t}\n`,
+      `${f}js\n`,
+      `${f}js\nconst x = 1;\n`,
+      `${f}js\nconst a = 1;\n${f}\n${f}js\nconst b = 2;\n${f}\n`,
+      `${f}js\n${t}py\ninner\n${t}\n${f}\n`,
+      `${t}\n${f}js\nconst x = 1;\n${f}\n`,
+      `${f}c++\nint x = 1;\n${f}\n`,
+      `${f}js\n${f}\n`,
+    );
+  }
   const allShapes = [...shapes, ...generated];
 
   for (const shape of allShapes) {
