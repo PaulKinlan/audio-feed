@@ -970,19 +970,99 @@ function chargedDistance(
   return Math.max(0, (found < 0 ? length : found) - from);
 }
 
+/**
+ * Which fence delimiters occur anywhere in the scanned text (audio-feed-1mowv).
+ *
+ * Computed once per scan and threaded down, because a delimiter absent from the whole text cannot appear at any
+ * `from`: searching for it is guaranteed to miss, and the miss walks to the END of the text. Doing that on every
+ * call made the fence scan quadratic - the loop calls this once per fence marker, so the scan performed O(n)
+ * work O(n) times. Measured before the fix: doubling the markers cost 4.00x the examined characters at every
+ * size (16k: 768,088,000; 64k: 12,288,352,000), i.e. 12,001x and 48,001x the input length.
+ */
+interface ScanLimits {
+  ticks: DelimiterProof;
+  tildes: DelimiterProof;
+  hasPre: boolean;
+}
+
+/**
+ * A delimiter's exhaustion proof (audio-feed-375x1).
+ *
+ * `provenFrom === null` means NOTHING has been proven yet, so no search may be skipped. A number means "absent at or
+ * after this index". Keeping "no proof yet" as `null` instead of as a position makes the two states unrepresentable as
+ * one number: the previous shape wrote `from` on EVERY `-1`, including the `-1` of a SKIPPED search, which silently
+ * RAISED a proof point (weakening it) and turned every later block - matchFence re-searches from a small `infoEnd` -
+ * back into a scan to EOF.
+ */
+interface DelimiterProof {
+  provenFrom: number | null;
+}
+
+/**
+ * `text.indexOf(needle, from)`, but skipping the search when a previous miss proved the needle absent at or after a
+ * point <= `from`. This is the ONLY place a proof may be recorded: a skipped search returns without touching the
+ * state, so a skip can never be mistaken for a new fan-out of knowledge, and a real miss may only move the proof
+ * EARLIER (a miss at a smaller `from` is the stronger fact).
+ */
+function searchDelimiter(
+  text: string,
+  needle: string,
+  from: number,
+  proof: DelimiterProof,
+): { index: number; searched: boolean } {
+  if (proof.provenFrom !== null && from >= proof.provenFrom) {
+    return { index: -1, searched: false };
+  }
+  const index = text.indexOf(needle, from);
+  if (index < 0) {
+    proof.provenFrom = proof.provenFrom === null ? from : Math.min(proof.provenFrom, from);
+  }
+  return { index, searched: true };
+}
+
+/**
+ * INVARIANT (audio-feed-ewedg) - the fast path may only skip a search whose result is provably -1.
+ *
+ * `nextFenceRun` searches for each fence delimiter from `from`. It may substitute -1 (skip the search) only when an
+ * EARLIER SEARCH - never a skipped one - proved that delimiter absent at or after a point <= `from`. `from` is not
+ * monotone across callers (matchFence re-searches from an opener's end, which can be EARLIER than a search that
+ * already missed), so the proof is a POINT rather than a flag, and TWO RULES keep it honest:
+ *   - a proof may only move EARLIER (a miss at a smaller `from` is the stronger fact), and
+ *   - a SKIPPED search records NOTHING.
+ * audio-feed-375x1: the old shape wrote `from` on every -1, including the -1 of a skip, which RAISED the proof point
+ * and sent every block back to scanning to EOF. "No proof yet" is now `null`, so that write cannot happen.
+ * A delimiter absent from the whole text starts at point 0 (a real proof), never assumed.
+ *
+ * Equivalently: skipping changes only the COST of the scan, never which fence the scan classifies. The enforcement is
+ * the differential test in tests/tts_test.ts - the reference regex grammar over the hand-picked shapes plus ~90
+ * generated ones (nested, unterminated, absent delimiter, tilde lengths 3..7, mixed ~ and `) - so a divergence fails
+ * there rather than shipping as a speed-up.
+ */
 function nextFenceRun(
   text: string,
   from: number,
+  limits: ScanLimits,
   work?: ScanWork,
 ): { index: number; end: number } | null {
-  const ticks = text.indexOf("```", from);
-  const tildes = text.indexOf("~~~", from);
-  // Both searches start at `from`, so both covered this much of the text.
+  // Substituting -1 for a skipped search is EXACTLY equivalent: `indexOf` returns -1 for every `from` when the
+  // needle does not occur at or after that `from`. Only the cost changes.
+  //
+  // audio-feed-ewedg: the limit must be MONOTONE-MUTABLE, not a static fact about the whole text. When both
+  // delimiters occur somewhere but one exhausts early (e.g. a single `~~~` then thousands of ``` fences), a static
+  // hasTildes stayed true and every marker re-ran `indexOf("~~~", from)`, missed, and walked to the end of the text:
+  // quadratic, measured at ratio 2.00 x n^2 and 8.19B characters for 64k markers. Raising the exhaustion POINT makes
+  // every later marker skip, while a smaller `from` (matchFence re-searches from an opener's end) still searches.
+  const ticks = searchDelimiter(text, "```", from, limits.ticks);
+  const tildes = searchDelimiter(text, "~~~", from, limits.tildes);
   if (work) {
-    work.examined += chargedDistance(ticks, from, text.length) +
-      chargedDistance(tildes, from, text.length);
+    if (ticks.searched) work.examined += chargedDistance(ticks.index, from, text.length);
+    if (tildes.searched) work.examined += chargedDistance(tildes.index, from, text.length);
   }
-  const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
+  const index = ticks.index < 0
+    ? tildes.index
+    : tildes.index < 0
+    ? ticks.index
+    : Math.min(ticks.index, tildes.index);
   if (index < 0) return null;
   const char = text[index];
   let end = index;
@@ -1002,8 +1082,12 @@ function nextFenceRun(
 function nextPreTag(
   text: string,
   from: number,
+  limits: ScanLimits,
   work?: ScanWork,
 ): { index: number; end: number } | null {
+  // Same short-circuit as the fence runs (audio-feed-1mowv): no `<pre` anywhere means every search from every
+  // `from` is a guaranteed miss that walks to the end of the text, and this is called once per loop iteration.
+  if (!limits.hasPre) return null;
   let index = nextCi(PRE_OPEN, text, from);
   if (work) work.examined += chargedDistance(index, from, text.length);
   while (index >= 0) {
@@ -1067,6 +1151,7 @@ const CODE_CLOSE = /<\/code>/gi;
 function matchFence(
   text: string,
   run: { index: number; end: number },
+  limits: ScanLimits,
   work?: ScanWork,
 ): CodeBlockMatch | null {
   const length = run.end - run.index;
@@ -1078,7 +1163,7 @@ function matchFence(
     for (
       const contentStart of infoEnd === null ? [openerEnd] : [infoEnd, openerEnd]
     ) {
-      const close = nextFenceRun(text, contentStart, work);
+      const close = nextFenceRun(text, contentStart, limits, work);
       if (close) {
         return {
           index: run.index,
@@ -1154,7 +1239,16 @@ export function extractCodeBlocks(
   text: string,
   work?: ScanWork,
 ): CodeBlockMatch[] {
-  if (!text.includes("```") && !text.includes("~~~") && !/<pre\b/i.test(text)) {
+  // A delimiter absent from the WHOLE text starts exhausted at point 0, so every search for it is skipped
+  // (audio-feed-1mowv). Otherwise the point is raised when a search from some `from` misses (audio-feed-ewedg):
+  // "absent at or after X" may only skip searches whose `from` is at or after X.
+  const limits: ScanLimits = {
+    // A delimiter absent from the whole text is PROVEN exhausted at 0, which is a proof, so it is `0` and not `null`.
+    ticks: { provenFrom: text.includes("```") ? null : 0 },
+    tildes: { provenFrom: text.includes("~~~") ? null : 0 },
+    hasPre: /<pre\b/i.test(text),
+  };
+  if (limits.ticks.provenFrom === 0 && limits.tildes.provenFrom === 0 && !limits.hasPre) {
     return [];
   }
 
@@ -1163,12 +1257,17 @@ export function extractCodeBlocks(
   let presExhausted = false;
   let from = 0;
   while (from < text.length) {
-    const fence = fencesExhausted ? null : nextFenceRun(text, from, work);
-    const pre = presExhausted ? null : nextPreTag(text, from, work);
+    const fence = fencesExhausted ? null : nextFenceRun(text, from, limits, work);
+    const pre = presExhausted ? null : nextPreTag(text, from, limits, work);
+    // A null is MONOTONE: `from` only ever increases, so "no opener at or after here" stays true for the rest of
+    // the scan. Recording that is half the complexity fix (audio-feed-1mowv): without it every remaining
+    // iteration repeated a search that was guaranteed to miss, which is what made the scan quadratic.
+    if (!fence) fencesExhausted = true;
+    if (!pre) presExhausted = true;
     if (!fence && !pre) break;
     // The earlier start wins; the two alternatives can never begin at the same index.
     if (fence && (!pre || fence.index < pre.index)) {
-      const block = matchFence(text, fence, work);
+      const block = matchFence(text, fence, limits, work);
       if (block) {
         blocks.push(block);
         from = block.index + block.full.length;

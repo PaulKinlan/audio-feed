@@ -1078,12 +1078,15 @@ Deno.test("decodeHtmlEntities - decodes specific entities before ampersand to av
  * scan's own cost should depend on. The count is identical in all three conditions because it is the same
  * string work, so the order dependence is removed by construction instead of being given a warmer neighbour.
  *
- * The fence path is super-linear TODAY - 4x the markers cost 16.00x the work, the shape a quadratic predicts -
- * so no linearity claim is made for it: the band accepts anything from linear to quadratic and catches a scan
- * that stopped looking (a revert to the old whole-text regex examines nothing here) or one worse than
- * quadratic. Whether the fence scan SHOULD be linear is its own bead (audio-feed-1mowv), not something to
- * squeeze into this test. The <pre> and no-gt paths ARE linear today, with the measured 3-4x doubled for
- * headroom, so those are asserted linear.
+ * THE FENCE PATH IS LINEAR NOW (audio-feed-1mowv), and this test pins that instead of tolerating quadratic. Before
+ * the fix a 4x input cost 4.00x the work PER DOUBLING - 16.00x in total, 12,288,352,000 examined characters at 64k
+ * markers - because `nextFenceRun` searched for BOTH delimiters on every call and, when one of them did not occur
+ * in the text at all, that search walked to the end of the text: O(n) work, O(n) times. The same defect existed on
+ * the <pre> side, where a NULL lookup never set the exhausted flag. The fix is the same on both: a delimiter that
+ * is absent from the text is not searched at all, and a null lookup sets exhaustion because `from` only increases.
+ * Measured after the fix, the same 64k input examines 32,000 characters - 2.00x per doubling, linear - so every
+ * fence assertion below is the linear band and a quadratic regression fails here rather than passing inside a
+ * quadratic-sized tolerance.
  *
  * WHAT THIS NO LONGER SEES, stated rather than glossed: a constant-factor slowdown that does no extra string
  * work would pass. That is the price of an order-independent assertion - a duration cannot tell "this work is
@@ -1093,14 +1096,15 @@ const FENCE_SCAN_MARKERS = 16_000;
 const FENCE_SCAN_MARKERS_4X = FENCE_SCAN_MARKERS * 4;
 const PRE_OPENERS = 32_000;
 const NO_GT_OPENERS = 100_000;
-/** examined <= len*len: today 0.19x of it for both fence sizes, so the ceiling is a shape claim, not a fit. */
-const SCAN_WORK_QUADRATIC_CEILING = 1;
-/** examined <= 8x len; measured 4.00x (<pre>) and 3.00x (no-gt). */
+/** examined <= 8x len; measured 4.00x (<pre>), 3.00x (no-gt) and 0.13x (fences, after audio-feed-1mowv). */
 const SCAN_WORK_LINEAR_CEILING = 8;
-/** 4x the input must not cost more than 20x the work; measured 16.00x. */
-const SCAN_WORK_GROWTH_CEILING = 20;
-/** ...and must cost at least the input's own growth, or the scan did not look at the extra text at all. */
-const SCAN_WORK_GROWTH_FLOOR = 4;
+/**
+ * 4x the input must not cost more than 6x the work: measured 4.00x since audio-feed-1mowv made the scan linear, and
+ * 16.00x before it. This window is what fails if the quadratic comes back.
+ */
+const SCAN_WORK_GROWTH_CEILING = 6;
+/** ...and must cost at least 3x, or the scan did not look at the extra text at all (measured 4.00x). */
+const SCAN_WORK_GROWTH_FLOOR = 3;
 /**
  * A HANG GUARD, NOT A PERFORMANCE PROMISE (audio-feed-cf91x). The promise is the work count above; this exists
  * so that a scan which stops terminating fails the test rather than the gate. Stated as a guard is the point: as
@@ -1127,7 +1131,7 @@ function scanOf(text: string): { examined: number; ms: number; blocks: number } 
   };
 }
 
-Deno.test("formatCodeForTts - the fence scan's WORK is counted, and grows no worse than quadratically (audio-feed-c0gj, audio-feed-cg8s, audio-feed-0evr, audio-feed-cf91x)", async () => {
+Deno.test("formatCodeForTts - the fence scan's WORK is counted and is LINEAR in the input (audio-feed-c0gj, audio-feed-cg8s, audio-feed-0evr, audio-feed-cf91x, audio-feed-1mowv)", async () => {
   const unclosedPre = "<pre><code>".repeat(PRE_OPENERS);
   const unclosedFences = "```\n".repeat(FENCE_SCAN_MARKERS);
   const unclosedFences4x = "```\n".repeat(FENCE_SCAN_MARKERS_4X);
@@ -1152,20 +1156,15 @@ Deno.test("formatCodeForTts - the fence scan's WORK is counted, and grows no wor
   );
 
   // The WORK half. A count is the assertion; the wall clock below is only a guard.
-  assert(
-    preScan.examined >= unclosedPre.length / 2,
-    `the <pre> scan must examine the text: examined ${preScan.examined} for ${unclosedPre.length} characters`,
-  );
+  // NO FLOOR for <pre> and no-gt, deliberately: since audio-feed-1mowv both stop as soon as they know no closer
+  // exists (`examined` is 0 for these inputs), and a floor here would assert work the scan should be avoiding. The
+  // decision assertions above say it classified them correctly; the ceilings below say it cannot be super-linear.
   assert(
     preScan.examined <= SCAN_WORK_LINEAR_CEILING * unclosedPre.length,
     `the <pre> scan must stay linear in the text: examined ${preScan.examined} for ${unclosedPre.length} characters ` +
       `(${
         (preScan.examined / unclosedPre.length).toFixed(2)
       }x, ceiling ${SCAN_WORK_LINEAR_CEILING}x)`,
-  );
-  assert(
-    noGtScan.examined >= unclosedNoGt.length / 2,
-    `the no-gt scan must examine the text: examined ${noGtScan.examined} for ${unclosedNoGt.length} characters`,
   );
   assert(
     noGtScan.examined <= SCAN_WORK_LINEAR_CEILING * unclosedNoGt.length,
@@ -1175,13 +1174,16 @@ Deno.test("formatCodeForTts - the fence scan's WORK is counted, and grows no wor
       }x, ceiling ${SCAN_WORK_LINEAR_CEILING}x)`,
   );
   assert(
-    fenceScan.examined >= unclosedFences.length / 2,
+    fenceScan.examined >= unclosedFences.length / 64,
     `the fence scan must examine the text: examined ${fenceScan.examined} for ${unclosedFences.length} characters`,
   );
   assert(
-    fenceScan.examined <= SCAN_WORK_QUADRATIC_CEILING * unclosedFences.length ** 2,
-    `the fence scan must not examine more than quadratically: examined ${fenceScan.examined} for ` +
-      `${unclosedFences.length} characters`,
+    fenceScan.examined <= SCAN_WORK_LINEAR_CEILING * unclosedFences.length,
+    `the fence scan must stay linear in the text: examined ${fenceScan.examined} for ` +
+      `${unclosedFences.length} characters ` +
+      `(${
+        (fenceScan.examined / unclosedFences.length).toFixed(2)
+      }x, ceiling ${SCAN_WORK_LINEAR_CEILING}x)`,
   );
   const growth = fenceScan4x.examined / fenceScan.examined;
   assert(
@@ -1195,7 +1197,7 @@ Deno.test("formatCodeForTts - the fence scan's WORK is counted, and grows no wor
     `4x the fence markers must not cost more than ${SCAN_WORK_GROWTH_CEILING}x the work: measured ` +
       `${
         growth.toFixed(2)
-      }x (today 16.00x, which is the quadratic shape; audio-feed-1mowv tracks the complexity)`,
+      }x (a linear scan reads ~4.00x for a 4x input; the quadratic this bead removed read ~16x)`,
   );
 
   // The count is a property of the INPUT, so a repeat scan must agree exactly. A scanner that leaked position
@@ -1306,7 +1308,58 @@ Deno.test("formatCodeForTts - differential equivalence with reference regex gram
     "<pre><code no-gt here</pre>",
   ];
 
-  for (const shape of shapes) {
+  // audio-feed-ewedg hardening: the shapes named in the review - nested fences, an unterminated fence, an absent
+  // delimiter, tilde fences of 3..7 characters, and mixed ~ / ` fences - GENERATED rather than hand-picked, and
+  // compared against the SAME reference grammar. This stays a real differential (both implementations over generated
+  // inputs); nothing here carves out an exception for a shape the fast path gets wrong.
+  const generated: string[] = [];
+  for (const len of [3, 4, 5, 6, 7]) {
+    const ticks = "`".repeat(len);
+    const tildes = "~".repeat(len);
+    for (
+      const [open, close] of [[ticks, ticks], [tildes, tildes], [ticks, tildes], [tildes, ticks]]
+    ) {
+      generated.push(
+        `${open}\ninner\n${close}`,
+        `${open}js\nconst a = 1;\n${close}`,
+        `${open}\n`, // unterminated
+        `${open}`, // nothing but an opener
+        `before\n${open}\ncode\n${close}\nafter`,
+        `${open}\n${open}\n${close}\n${close}`, // nested
+      );
+    }
+  }
+  generated.push(
+    "~~~\n```\n~~~\n```",
+    "```\n~~~\n```",
+    "~~~~\n````\n~~~~",
+    "plain text with no delimiters at all",
+    "only ``` here",
+    "only ~~~ here",
+    "~~~~~~~<code>const x = 1;c++",
+    "\`\`\`inline only\`\`\`",
+  );
+  // audio-feed-375x1: the family is "ANY code block with an INFO STRING", so it is generated rather than pinned to one
+  // string - closed and unterminated, nested, repeated, and preceded by the other delimiter already exhausted (the
+  // shape whose `infoEnd` write-back used to raise the exhaustion point for every later block).
+  for (const len of [3, 4, 5]) {
+    const f = "`".repeat(len);
+    const t = "~".repeat(len);
+    generated.push(
+      `${f}js\nconst x = 1;\n${f}\n`,
+      `${t}js\nconst x = 1;\n${t}\n`,
+      `${f}js\n`,
+      `${f}js\nconst x = 1;\n`,
+      `${f}js\nconst a = 1;\n${f}\n${f}js\nconst b = 2;\n${f}\n`,
+      `${f}js\n${t}py\ninner\n${t}\n${f}\n`,
+      `${t}\n${f}js\nconst x = 1;\n${f}\n`,
+      `${f}c++\nint x = 1;\n${f}\n`,
+      `${f}js\n${f}\n`,
+    );
+  }
+  const allShapes = [...shapes, ...generated];
+
+  for (const shape of allShapes) {
     const expected = referenceFormatCode(shape);
     const actual = await formatCodeForTts(shape, "skip");
     assertEquals(
@@ -1524,4 +1577,33 @@ Deno.test("Gemini TTS requests guarantee parts.text contains ONLY verbatim trans
     assertEquals(part.text.includes("Never read raw code"), false);
     assert(Boolean(part.speech_metadata?.speaker));
   }
+});
+
+Deno.test("formatCodeForTts: one exhausted fence type must not re-scan the text (audio-feed-ewedg)", () => {
+  // Reviewer's repro from audio-feed-ewedg: a single `~~~` fence followed by thousands of ``` fences. A STATIC
+  // "both delimiters occur somewhere" limit kept looking for `~~~` on every marker, missed, and walked to the end of
+  // the text - measured 2.00 x n^2, 128,024,006 characters at n=8000. The scan limit is now an exhaustion POINT, so
+  // later markers skip while a smaller `from` (matchFence re-searches from an opener's end) still searches; the same
+  // input reads 36,006 and the differential-equivalence test proves the output is unchanged.
+  const scanOf = (markers: number): number => {
+    const work = { examined: 0 };
+    extractCodeBlocks("~~~\n" + "```\n".repeat(markers), work);
+    return work.examined;
+  };
+  const small = scanOf(2_000);
+  const large = scanOf(8_000);
+  // Linear: the text grows 4x with the markers, so examined work grows about 4x. The quadratic version read 16x.
+  const growth = large / small;
+  assert(
+    growth < 6,
+    `4x the markers must cost about 4x the work, not 16x: ${small} -> ${large} is ${
+      growth.toFixed(2)
+    }x`,
+  );
+  // Absolute band: the scan may not examine more than a few characters per input character (measured 2.25x).
+  const length = "~~~\n".length + "```\n".length * 8_000;
+  assert(
+    large <= 8 * length,
+    `examined ${large} for ${length} characters (${(large / length).toFixed(2)}x, ceiling 8x)`,
+  );
 });
