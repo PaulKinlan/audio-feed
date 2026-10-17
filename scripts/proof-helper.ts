@@ -4260,6 +4260,30 @@ async function ancestorPids(): Promise<Set<number>> {
   return ancestors;
 }
 
+/**
+ * Whether a process's rendered argument list references `profileDir` as its OWN `--user-data-dir` value.
+ *
+ * audio-feed-pclwg: `args.includes("--user-data-dir=" + profileDir)` is a PREFIX match, so the profile `/tmp/x` was
+ * reported as used whenever a DIFFERENT profile `/tmp/x-other` was on some command line. The value has to end at an
+ * argument boundary: `ps -eo args` joins argv with single spaces, so end-of-string, a space, or a quote terminates it.
+ * A trailing separator is accepted because a browser launched with `/tmp/x/` is using `/tmp/x`.
+ */
+function referencesProfile(args: string, profileDir: string): boolean {
+  for (const flag of [`--user-data-dir=${profileDir}`, `--user-data-dir=${profileDir}/`]) {
+    let from = 0;
+    for (;;) {
+      const at = args.indexOf(flag, from);
+      if (at < 0) break;
+      const next = args[at + flag.length];
+      if (next === undefined || next === " " || next === "\t" || next === '"' || next === "'") {
+        return true;
+      }
+      from = at + flag.length;
+    }
+  }
+  return false;
+}
+
 export async function waitForChromeProfileUnused(
   profileDir: string,
   opts: { timeoutMs?: number; pollMs?: number } = {},
@@ -4276,7 +4300,6 @@ export async function waitForChromeProfileUnused(
   //   3. THERE IS NO PATTERN RULE. Nothing like "ignore processes whose args mention audiofeed" - that breadth would
   //      also ignore a real leftover harness, which is the leak this detector exists to find.
   const ignored = await ancestorPids();
-  const flag = `--user-data-dir=${profileDir}`;
   for (;;) {
     const listing = await new Deno.Command("ps", { args: ["-eo", "pid,args"] }).output();
     if (!listing.success) {
@@ -4292,7 +4315,7 @@ export async function waitForChromeProfileUnused(
           ? { pid: 0, args: "" }
           : { pid: Number(trimmed.slice(0, split)), args: trimmed.slice(split + 1) };
       })
-      .filter((entry) => !ignored.has(entry.pid) && entry.args.includes(flag));
+      .filter((entry) => !ignored.has(entry.pid) && referencesProfile(entry.args, profileDir));
     if (referencing.length === 0) return true;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, pollMs));

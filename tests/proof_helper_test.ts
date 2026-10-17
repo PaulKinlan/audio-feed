@@ -8069,3 +8069,36 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "proof-helper: a profile that is a PREFIX of another must not be reported as used (audio-feed-pclwg)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    // The ubjt1 reviewer's repro: a child uses `--user-data-dir=<base>-other`. The base profile is NOT in use, so it
+    // must read unused, while the -other profile must read used. Before the fix, `includes()` matched the prefix and
+    // reported the base as used.
+    const base = `/tmp/audiofeed-pclwg-${crypto.randomUUID()}`;
+    const other = `${base}-other`;
+    const child = new Deno.Command("sh", {
+      args: ["-c", "sleep 2", `--user-data-dir=${other}`],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    try {
+      let settled = false;
+      for (let attempt = 1; attempt <= 20 && !settled; attempt++) {
+        settled = (await waitForChromeProfileUnused(other, { timeoutMs: 50 })) === false;
+        if (!settled) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assertEquals(settled, true, `the profile in use (${other}) must be reported as used`);
+      assertEquals(
+        await waitForChromeProfileUnused(base, { timeoutMs: 200 }),
+        true,
+        `the PREFIX profile ${base} is not in use and must not be reported as a collision`,
+      );
+    } finally {
+      await killChromeAndWait(child);
+    }
+  },
+});
