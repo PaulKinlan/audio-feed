@@ -11,7 +11,7 @@
  * - All user pages (Home, Account, Player) inherit view transitions via unified tokens
  */
 
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { DESIGN_TOKENS } from "../src/routes/tokens.ts";
 import { SHELL_CSS } from "../src/routes/shell.ts";
 import { createApp } from "../src/app.ts";
@@ -19,7 +19,13 @@ import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
-import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
+import {
+  createTempChromeProfile,
+  killChromeAndWait,
+  newestChrome,
+  removeDirWhenQuiet,
+  waitForChromeProfileUnused,
+} from "../scripts/proof-helper.ts";
 
 const BASE = "https://audio.example.com";
 
@@ -266,11 +272,16 @@ Deno.test({
 
       ws.close();
     } finally {
-      try {
-        chrome.kill();
-      } catch { /* ignore */ }
+      await killChromeAndWait(chrome);
       await cleanup();
-      await Deno.remove(scratchTmp, { recursive: true }).catch(() => {});
+      assert(
+        await removeDirWhenQuiet(scratchTmp),
+        "the scratch root must be gone after teardown: a dying browser's children must not recreate it (audio-feed-wj8o2)",
+      );
+      assert(
+        await waitForChromeProfileUnused(profileDir),
+        "no process may still reference the row's profile once teardown has finished (audio-feed-wj8o2)",
+      );
       await server.shutdown();
     }
   },
