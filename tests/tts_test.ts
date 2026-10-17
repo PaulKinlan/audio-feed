@@ -1527,3 +1527,32 @@ Deno.test("Gemini TTS requests guarantee parts.text contains ONLY verbatim trans
     assert(Boolean(part.speech_metadata?.speaker));
   }
 });
+
+Deno.test("formatCodeForTts: one exhausted fence type must not re-scan the text (audio-feed-ewedg)", () => {
+  // Reviewer's repro from audio-feed-ewedg: a single `~~~` fence followed by thousands of ``` fences. A STATIC
+  // "both delimiters occur somewhere" limit kept looking for `~~~` on every marker, missed, and walked to the end of
+  // the text - measured 2.00 x n^2, 128,024,006 characters at n=8000. The scan limit is now an exhaustion POINT, so
+  // later markers skip while a smaller `from` (matchFence re-searches from an opener's end) still searches; the same
+  // input reads 36,006 and the differential-equivalence test proves the output is unchanged.
+  const scanOf = (markers: number): number => {
+    const work = { examined: 0 };
+    extractCodeBlocks("~~~\n" + "```\n".repeat(markers), work);
+    return work.examined;
+  };
+  const small = scanOf(2_000);
+  const large = scanOf(8_000);
+  // Linear: the text grows 4x with the markers, so examined work grows about 4x. The quadratic version read 16x.
+  const growth = large / small;
+  assert(
+    growth < 6,
+    `4x the markers must cost about 4x the work, not 16x: ${small} -> ${large} is ${
+      growth.toFixed(2)
+    }x`,
+  );
+  // Absolute band: the scan may not examine more than a few characters per input character (measured 2.25x).
+  const length = "~~~\n".length + "```\n".length * 8_000;
+  assert(
+    large <= 8 * length,
+    `examined ${large} for ${length} characters (${(large / length).toFixed(2)}x, ceiling 8x)`,
+  );
+});

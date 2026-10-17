@@ -980,8 +980,14 @@ function chargedDistance(
  * size (16k: 768,088,000; 64k: 12,288,352,000), i.e. 12,001x and 48,001x the input length.
  */
 interface ScanLimits {
-  hasTicks: boolean;
-  hasTildes: boolean;
+  /**
+   * Exhaustion POINT, not a flag: `from` is not monotone across callers (matchFence re-searches from an opener's
+   * end, which can be earlier than a previous search), so "absent at or after X" may only skip a search whose `from`
+   * is at/after X. audio-feed-ewedg: the point keeps the quadratic fix (the marker loop's `from` increases, so every
+   * later marker skips) without dropping a fence a smaller `from` could still find.
+   */
+  ticksEnd: number;
+  tildesEnd: number;
   hasPre: boolean;
 }
 
@@ -992,17 +998,22 @@ function nextFenceRun(
   work?: ScanWork,
 ): { index: number; end: number } | null {
   // Substituting -1 for a skipped search is EXACTLY equivalent: `indexOf` returns -1 for every `from` when the
-  // needle does not occur in the text at all. Only the cost changes.
-  const ticks = limits.hasTicks ? text.indexOf("```", from) : -1;
-  const tildes = limits.hasTildes ? text.indexOf("~~~", from) : -1;
-  // Charged only for the searches actually performed - the point of the limit is that the skipped ones are free.
+  // needle does not occur at or after that `from`. Only the cost changes.
+  //
+  // audio-feed-ewedg: the limit must be MONOTONE-MUTABLE, not a static fact about the whole text. When both
+  // delimiters occur somewhere but one exhausts early (e.g. a single `~~~` then thousands of ``` fences), a static
+  // hasTildes stayed true and every marker re-ran `indexOf("~~~", from)`, missed, and walked to the end of the text:
+  // quadratic, measured at ratio 2.00 x n^2 and 8.19B characters for 64k markers. Raising the exhaustion POINT makes
+  // every later marker skip, while a smaller `from` (matchFence re-searches from an opener's end) still searches.
+  const ranTicks = from < limits.ticksEnd;
+  const ticks = ranTicks ? text.indexOf("```", from) : -1;
+  if (ticks < 0) limits.ticksEnd = from;
+  const ranTildes = from < limits.tildesEnd;
+  const tildes = ranTildes ? text.indexOf("~~~", from) : -1;
+  if (tildes < 0) limits.tildesEnd = from;
   if (work) {
-    if (limits.hasTicks) {
-      work.examined += chargedDistance(ticks, from, text.length);
-    }
-    if (limits.hasTildes) {
-      work.examined += chargedDistance(tildes, from, text.length);
-    }
+    if (ranTicks) work.examined += chargedDistance(ticks, from, text.length);
+    if (ranTildes) work.examined += chargedDistance(tildes, from, text.length);
   }
   const index = ticks < 0 ? tildes : tildes < 0 ? ticks : Math.min(ticks, tildes);
   if (index < 0) return null;
@@ -1181,13 +1192,15 @@ export function extractCodeBlocks(
   text: string,
   work?: ScanWork,
 ): CodeBlockMatch[] {
-  // Computed once, so a delimiter that is absent from the text costs no searches at all (audio-feed-1mowv).
+  // A delimiter absent from the WHOLE text starts exhausted at point 0, so every search for it is skipped
+  // (audio-feed-1mowv). Otherwise the point is raised when a search from some `from` misses (audio-feed-ewedg):
+  // "absent at or after X" may only skip searches whose `from` is at or after X.
   const limits: ScanLimits = {
-    hasTicks: text.includes("```"),
-    hasTildes: text.includes("~~~"),
+    ticksEnd: text.includes("```") ? Number.POSITIVE_INFINITY : 0,
+    tildesEnd: text.includes("~~~") ? Number.POSITIVE_INFINITY : 0,
     hasPre: /<pre\b/i.test(text),
   };
-  if (!limits.hasTicks && !limits.hasTildes && !limits.hasPre) {
+  if (limits.ticksEnd === 0 && limits.tildesEnd === 0 && !limits.hasPre) {
     return [];
   }
 
