@@ -1308,7 +1308,40 @@ Deno.test("formatCodeForTts - differential equivalence with reference regex gram
     "<pre><code no-gt here</pre>",
   ];
 
-  for (const shape of shapes) {
+  // audio-feed-ewedg hardening: the shapes named in the review - nested fences, an unterminated fence, an absent
+  // delimiter, tilde fences of 3..7 characters, and mixed ~ / ` fences - GENERATED rather than hand-picked, and
+  // compared against the SAME reference grammar. This stays a real differential (both implementations over generated
+  // inputs); nothing here carves out an exception for a shape the fast path gets wrong.
+  const generated: string[] = [];
+  for (const len of [3, 4, 5, 6, 7]) {
+    const ticks = "`".repeat(len);
+    const tildes = "~".repeat(len);
+    for (
+      const [open, close] of [[ticks, ticks], [tildes, tildes], [ticks, tildes], [tildes, ticks]]
+    ) {
+      generated.push(
+        `${open}\ninner\n${close}`,
+        `${open}js\nconst a = 1;\n${close}`,
+        `${open}\n`, // unterminated
+        `${open}`, // nothing but an opener
+        `before\n${open}\ncode\n${close}\nafter`,
+        `${open}\n${open}\n${close}\n${close}`, // nested
+      );
+    }
+  }
+  generated.push(
+    "~~~\n```\n~~~\n```",
+    "```\n~~~\n```",
+    "~~~~\n````\n~~~~",
+    "plain text with no delimiters at all",
+    "only ``` here",
+    "only ~~~ here",
+    "~~~~~~~<code>const x = 1;c++",
+    "\`\`\`inline only\`\`\`",
+  );
+  const allShapes = [...shapes, ...generated];
+
+  for (const shape of allShapes) {
     const expected = referenceFormatCode(shape);
     const actual = await formatCodeForTts(shape, "skip");
     assertEquals(

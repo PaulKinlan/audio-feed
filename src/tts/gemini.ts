@@ -991,6 +991,21 @@ interface ScanLimits {
   hasPre: boolean;
 }
 
+/**
+ * INVARIANT (audio-feed-ewedg) - the fast path may only skip a search whose result is provably -1.
+ *
+ * `nextFenceRun` searches for each fence delimiter from `from`. It may substitute -1 (skip the search) only when an
+ * EARLIER search proved that delimiter absent at or after a point <= `from` (ticksEnd / tildesEnd). `from` is not
+ * monotone across callers - matchFence re-searches from an opener's end, which can be EARLIER than a search that
+ * already missed - so the proof is recorded as a POINT, not a flag, and a search from a smaller `from` still runs. A
+ * delimiter absent from the whole text starts at point 0, so every search for it is skipped; that case is proven by
+ * `text.includes`, never assumed.
+ *
+ * Equivalently: skipping changes only the COST of the scan, never which fence the scan classifies. The enforcement is
+ * the differential test in tests/tts_test.ts - the reference regex grammar over the hand-picked shapes plus ~90
+ * generated ones (nested, unterminated, absent delimiter, tilde lengths 3..7, mixed ~ and `) - so a divergence fails
+ * there rather than shipping as a speed-up.
+ */
 function nextFenceRun(
   text: string,
   from: number,
