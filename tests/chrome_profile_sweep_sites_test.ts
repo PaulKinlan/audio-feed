@@ -347,7 +347,9 @@ Deno.test("audio-feed-qmcf: mutant M2 reverts observability-agent withTempDir to
   const fileUrl = new URL("../tests/observability_agent_poll_test.ts", import.meta.url);
   const source = await Deno.readTextFile(fileUrl);
   const anchor =
-    'const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-");';
+    // audio-feed-oyf3g: the anchor tracks the CONVERTED source (the root is now passed in), while the mutation
+    // target stays a raw makeTempDir - so M2 still proves the audit reddens a direct allocation for this prefix.
+    'const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-agent-test-", root);';
   const mutant = applyMutant(
     source,
     anchor,
