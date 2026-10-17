@@ -14,7 +14,11 @@
 
 import { openStores } from "../src/config.ts";
 import { bootstrap } from "../src/server.ts";
-import { createTempChromeProfile } from "./proof-helper.ts";
+import {
+  createTempChromeProfile,
+  removeDirWhenQuiet,
+  waitForChromeProfileUnused,
+} from "./proof-helper.ts";
 
 const DEADLINE_MS = 90_000;
 const startedAt = Date.now();
@@ -352,6 +356,20 @@ try {
   try {
     await cleanup();
   } catch { /* ignored */ }
+  // audio-feed-ee7pk: cleanup() swallows its own failures, so nothing proved the reap. Scoped to THIS run's profile
+  // (audiofeed-s3uk- prefix); never a /tmp sweep - pre-existing scratch dirs are not this row's business.
+  {
+    const profileRemoved = await removeDirWhenQuiet(profile);
+    const profileUnused = await waitForChromeProfileUnused(profile);
+    const profileLine =
+      `teardown: nothing still references the Chrome profile - removeDirWhenQuiet=${profileRemoved} waitForChromeProfileUnused=${profileUnused} profile=${profile}`;
+    if (profileRemoved && profileUnused) {
+      console.log(`PASS  ${profileLine}`);
+    } else {
+      failures++;
+      console.error(`FAIL  ${profileLine}`);
+    }
+  }
   await app.server.shutdown();
 }
 

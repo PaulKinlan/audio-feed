@@ -429,6 +429,25 @@ try {
     chrome.status.catch(() => {}),
     new Promise((r) => setTimeout(r, 2000)),
   ]);
+  // audio-feed-ee7pk: the race above can TIME OUT, and when it does the child is still alive while the script moves
+  // on - the reap is not wrong, it is unbounded, so what was missing is a property that names the failure.
+  //
+  // It asserts the CHILD'S EXIT rather than a `ps` scan for the profile path: this script receives profileDir as
+  // argv (Deno.args), so the invocation itself carries the path and a process-table scan matches the caller -
+  // observed on 2026-10-17 as a false FAIL with "profile refs left: 1" that was the invoking shell. The exit is the
+  // fact this script can prove about its own child, and it is exactly what the bounded race could have skipped.
+  // audio-feed-lgcnq: `await chrome.status` alone blocks until the child exits (unbounded) and ALWAYS resolves, so
+  // as an assertion it could never fail and could hang the script. This races the exit against the same 2s window the
+  // reap above uses, and answers false when the window closes first - so a child that outlives the reap fails by name.
+  const reapExited = await Promise.race([
+    chrome.status.then(() => true).catch(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000)),
+  ]);
+  check(
+    "teardown: the browser child has exited within 2s of the reap",
+    reapExited,
+    `profile=${profileDir}`,
+  );
   try {
     await Promise.race([
       h.shutdown().catch(() => {}),
