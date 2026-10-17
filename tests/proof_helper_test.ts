@@ -28,6 +28,7 @@ import {
   getActiveProof,
   isFullyVisible,
   isVisible,
+  killChromeAndWait,
   launchChrome,
   newestChrome,
   originalCopyFile,
@@ -35,12 +36,14 @@ import {
   originalOpen,
   originalWriteFile,
   proofPathLocks,
+  removeDirWhenQuiet,
   resolveChromeBinary,
   runProof,
   setOriginalCopyFileForTesting,
   setOriginalCopyFileSyncForTesting,
   spawnHarness,
   startInProcessServer,
+  waitForChromeProfileUnused,
   withChrome,
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
@@ -7963,4 +7966,72 @@ Deno.test("proof-helper: audio-feed-2bfv: shell redirect honors clearEnv and tra
     Deno.env.delete("OUT_CLEARENV_TEST");
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test({
+  name:
+    "proof-helper: a live Chrome is still a leftover - the detector is scoped, not weaker (audio-feed-ubjt1)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    const chrome = await launchChrome();
+    const { profileDir, process } = chrome;
+    try {
+      // FALSE-NEGATIVE side: a real child carrying --user-data-dir=<profile> must be REPORTED as a leftover.
+      assertEquals(
+        await waitForChromeProfileUnused(profileDir, { timeoutMs: 600 }),
+        false,
+        `a live Chrome carrying --user-data-dir=${profileDir} must still be reported as a leftover`,
+      );
+      await killChromeAndWait(process);
+      assertEquals(await waitForChromeProfileUnused(profileDir), true);
+    } finally {
+      await killChromeAndWait(process);
+      await removeDirWhenQuiet(profileDir);
+    }
+  },
+});
+
+Deno.test({
+  name: "proof-helper: our own command line does not make a profile look used (audio-feed-ubjt1)",
+  fn: async () => {
+    // FALSE-POSITIVE side: this process's own argv carries this file's path, as a RELATIVE path, exactly as the test
+    // runner was invoked (`deno test ... tests/proof_helper_test.ts`). The detector used to match the bare path, so it
+    // counted ITSELF and a correct run looked leaky. Verified against the old implementation: it fails this assertion.
+    const ownArgvPath = "tests/proof_helper_test.ts";
+    assertEquals(
+      await waitForChromeProfileUnused(ownArgvPath, { timeoutMs: 300 }),
+      true,
+      `a path that appears only on our own command line (${ownArgvPath}) must not be reported as a leftover`,
+    );
+  },
+});
+
+Deno.test({
+  name: "proof-helper: a child of this run that is NOT the browser still counts (audio-feed-ubjt1)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  fn: async () => {
+    // The interesting middle: a process descended from THIS run, carrying the flag, but not the browser under test.
+    // Excluding ancestors only must not silence it - an exclusion that walked the whole tree would.
+    const otherProfile = `/tmp/audiofeed-ubjt1-middle-${crypto.randomUUID()}`;
+    const child = new Deno.Command("sh", {
+      args: ["-c", "sleep 30", `--user-data-dir=${otherProfile}`],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    try {
+      let reported = true;
+      for (let attempt = 1; attempt <= 20 && reported; attempt++) {
+        reported = await waitForChromeProfileUnused(otherProfile, { timeoutMs: 50 });
+        if (reported) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assertEquals(
+        reported,
+        false,
+        `a child of this run carrying --user-data-dir=${otherProfile} must count as a leftover (ancestors are excluded, descendants are not)`,
+      );
+    } finally {
+      // Reap on our own failure path: a test that leaks what it spawns is the defect it is testing for.
+      await killChromeAndWait(child);
+    }
+  },
 });

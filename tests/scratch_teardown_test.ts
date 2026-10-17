@@ -13,7 +13,11 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { removeDirWhenQuiet, waitForChromeProfileUnused } from "../scripts/proof-helper.ts";
+import {
+  killChromeAndWait,
+  removeDirWhenQuiet,
+  waitForChromeProfileUnused,
+} from "../scripts/proof-helper.ts";
 
 function exists(path: string): boolean {
   try {
@@ -70,13 +74,12 @@ Deno.test("audio-feed-wj8o2: removeDirWhenQuiet outlasts a child that keeps recr
 
 Deno.test("audio-feed-wj8o2: waitForChromeProfileUnused sees a process whose command line carries the profile", async () => {
   const profile = await Deno.makeTempDir({ prefix: "wj8o2-profile-" });
-  // The path is inside the child's own code argument, so it appears on its command line the way a Chrome child's
-  // --user-data-dir does.
-  const child = new Deno.Command(Deno.execPath(), {
-    args: [
-      "eval",
-      `const profile = ${JSON.stringify(profile)}; await new Promise((r) => setTimeout(r, 600));`,
-    ],
+  // The child carries the profile the way a REAL browser child does - as an explicit --user-data-dir=<profile>
+  // argument - rather than merely mentioning the path somewhere in its code. audio-feed-ubjt1 replaced the bare-path
+  // match precisely because it also counted the CALLER's own command line; the flag is the signal that survives, and
+  // this row keeps its teeth: the process is still live, so it must still be reported as using the profile.
+  const child = new Deno.Command("sh", {
+    args: ["-c", "sleep 2", `--user-data-dir=${profile}`],
     stdout: "null",
     stderr: "null",
   }).spawn();
@@ -87,7 +90,9 @@ Deno.test("audio-feed-wj8o2: waitForChromeProfileUnused sees a process whose com
       false,
       "a live process carrying the profile path must be reported as still using it",
     );
-    await child.status.catch(() => {});
+    // Reap rather than outlive: awaiting a sleeping child's exit cost the fast gate 30s on the first attempt at this
+    // fix, and a test may not add half a minute to the gate for its own convenience.
+    await killChromeAndWait(child);
     assertEquals(
       await waitForChromeProfileUnused(profile, { timeoutMs: 2000, pollMs: 25 }),
       true,

@@ -4230,6 +4230,36 @@ export async function removeDirWhenQuiet(
  *
  * Fails CLOSED: if `ps` cannot run it throws, so a broken probe cannot become a green assertion.
  */
+/**
+ * Pids from this process up to init, via `ps -eo pid,ppid`.
+ *
+ * audio-feed-ubjt1: used to ignore OUR OWN command line. Upwards ONLY - a child of this run is not an ancestor, so a
+ * leftover harness or browser that this run spawned still counts as a leftover.
+ */
+async function ancestorPids(): Promise<Set<number>> {
+  const listing = await new Deno.Command("ps", { args: ["-eo", "pid,ppid"] }).output();
+  if (!listing.success) {
+    throw new Error(
+      `ps -eo pid,ppid exited ${listing.code}: cannot determine this process's ancestors`,
+    );
+  }
+  const parents = new Map<number, number>();
+  for (const line of new TextDecoder().decode(listing.stdout).split("\n").slice(1)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const pid = Number(parts[0]);
+    const ppid = Number(parts[1]);
+    if (Number.isFinite(pid) && Number.isFinite(ppid)) parents.set(pid, ppid);
+  }
+  const ancestors = new Set<number>();
+  let pid = Deno.pid;
+  while (pid > 0 && !ancestors.has(pid)) {
+    ancestors.add(pid);
+    pid = parents.get(pid) ?? 0;
+  }
+  return ancestors;
+}
+
 export async function waitForChromeProfileUnused(
   profileDir: string,
   opts: { timeoutMs?: number; pollMs?: number } = {},
@@ -4237,6 +4267,16 @@ export async function waitForChromeProfileUnused(
   const timeoutMs = opts.timeoutMs ?? 2000;
   const pollMs = opts.pollMs ?? 50;
   const deadline = Date.now() + timeoutMs;
+  // audio-feed-ubjt1: SCOPED, NOT QUIETER. Two narrow rules, and deliberately no third:
+  //   1. SIGNAL - a browser child carries `--user-data-dir=<profile>` as an argument. Matching the FLAG rather than
+  //      the bare path is what stops a caller counting itself: regenerate-browser-proof.ts takes profileDir through
+  //      Deno.args, so the invocation has the path on its command line.
+  //   2. ANCESTRY - this process and its PARENTS are ignored. Upwards only: a child of this run is not an ancestor
+  //      and still counts, so a leftover harness/browser that this run spawned cannot be excluded by this rule.
+  //   3. THERE IS NO PATTERN RULE. Nothing like "ignore processes whose args mention audiofeed" - that breadth would
+  //      also ignore a real leftover harness, which is the leak this detector exists to find.
+  const ignored = await ancestorPids();
+  const flag = `--user-data-dir=${profileDir}`;
   for (;;) {
     const listing = await new Deno.Command("ps", { args: ["-eo", "pid,args"] }).output();
     if (!listing.success) {
@@ -4244,7 +4284,16 @@ export async function waitForChromeProfileUnused(
         `ps -eo pid,args exited ${listing.code}: cannot prove that no process still references '${profileDir}'`,
       );
     }
-    if (!new TextDecoder().decode(listing.stdout).includes(profileDir)) return true;
+    const referencing = new TextDecoder().decode(listing.stdout).split("\n").slice(1)
+      .map((line) => {
+        const trimmed = line.trim();
+        const split = trimmed.indexOf(" ");
+        return split < 0
+          ? { pid: 0, args: "" }
+          : { pid: Number(trimmed.slice(0, split)), args: trimmed.slice(split + 1) };
+      })
+      .filter((entry) => !ignored.has(entry.pid) && entry.args.includes(flag));
+    if (referencing.length === 0) return true;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
