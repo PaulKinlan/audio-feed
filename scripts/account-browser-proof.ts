@@ -525,5 +525,18 @@ run, on a memory store that ends with the harness.`,
   } finally {
     harness.kill();
     await harness.process.status.catch(() => {});
+    // audio-feed-ee7pk: the reap above is correct - what was missing is a property that FAILS if it silently stops
+    // working. Once the harness has been reaped its port must refuse connections; if the kill/await regresses, the
+    // harness still serves and this check names it.
+    let serving = true;
+    for (let attempt = 1; attempt <= 5 && serving; attempt++) {
+      serving = await fetch(`${harness.base}/health`).then(() => true).catch(() => false);
+      if (serving) await new Promise((r) => setTimeout(r, 100));
+    }
+    checker.check(
+      "teardown: the reaped harness no longer serves on its port",
+      !serving,
+      `serving=${serving} harness=${harness.base}`,
+    );
   }
 });
