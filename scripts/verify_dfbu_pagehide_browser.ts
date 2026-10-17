@@ -6,7 +6,13 @@
  * and reload.
  */
 
-import { runProof, spawnHarness, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import {
+  killChromeAndWait,
+  runProof,
+  spawnHarness,
+  withChrome,
+  writeEvidenceReadme,
+} from "./proof-helper.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const harness = await spawnHarness("scripts/listen-harness.ts");
@@ -251,7 +257,7 @@ try {
   console.error(error);
   exitCode = 1;
 } finally {
-  harness.kill();
+  await killChromeAndWait(harness.process);
 }
 
 Deno.exit(exitCode);
