@@ -563,11 +563,9 @@ Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time a
     return origGet(userId, id);
   };
 
-  const started = Date.now();
   const run = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     batchSize: 2,
   });
-  const elapsed = Date.now() - started;
 
   assertEquals(run.ready.length, 2, "approved jobs behind 50 deferred jobs must run");
   assertEquals((await stores.metadata.getEpisode("user-1", "allowed-0"))?.status, "ready");
@@ -587,7 +585,20 @@ Deno.test("a large deferred backlog (50 jobs) pages with cursor in linear time a
     53,
     `point reads must equal 52 examined items + 1 verification read (expected 53, got ${pointReads})`,
   );
-  assert(elapsed < 500, `must complete quickly in linear time, took ${elapsed}ms`);
+  // audio-feed-q1vp1: no wall-clock bound here, by measurement rather than by taste. This test used
+  // to end with `assert(elapsed < 500)` from one unwarmed Date.now() pair around the call - the same
+  // shape as audio-feed-0evr, where the same kind of scan measured 819-3130ms of WALL for 58-183ms of
+  // CPU at this VM's ordinary load of ~8 (and 22.8-26.2s under 8 hogs with the test niced). A clock
+  // read there asserts how the scheduler shared the box, not what the code did, and its sensitivity
+  // is backwards: a real regression in this paging shape costs microseconds against a 500ms bound,
+  // while load alone can cross it.
+  //
+  // The decision that bound stood in for is pinned above by COUNTS, which no neighbour can warm:
+  // exactly ceil(52/25)=3 pages (listCalls) and exactly one read per examined item plus the
+  // verification read (pointReads); the linear scaling is pinned by counts across N and 2N in
+  // "deferred backlog paging scales linearly across N and 2N jobs". Do not re-add a duration bound.
+  // If the COST of this work ever needs an assertion, measure CPU (a process.cpuUsage delta with the
+  // warm-up excluded), not the clock.
 });
 
 Deno.test("deferred backlog paging scales linearly across N and 2N jobs (audio-feed-7li)", async () => {
