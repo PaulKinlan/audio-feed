@@ -16,7 +16,13 @@ import { memoryStores } from "../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerData } from "./listen_client.ts";
 import { renderListenPage } from "../src/routes/listen.ts";
-import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
+import {
+  createTempChromeProfile,
+  killChromeAndWait,
+  newestChrome,
+  removeDirWhenQuiet,
+  waitForChromeProfileUnused,
+} from "../scripts/proof-helper.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -539,11 +545,16 @@ Deno.test({
 
       ws.close();
     } finally {
-      try {
-        chrome.kill();
-      } catch { /* ignore */ }
+      await killChromeAndWait(chrome);
       await cleanup();
-      await Deno.remove(scratchTmp, { recursive: true }).catch(() => {});
+      assert(
+        await removeDirWhenQuiet(scratchTmp),
+        "the scratch root must be gone after teardown: a dying browser's children must not recreate it (audio-feed-wj8o2)",
+      );
+      assert(
+        await waitForChromeProfileUnused(profileDir),
+        "no process may still reference the row's profile once teardown has finished (audio-feed-wj8o2)",
+      );
       await Deno.remove(tempHtmlFile).catch(() => {});
     }
   },

@@ -4178,3 +4178,74 @@ export function startInProcessServer(
 
   return { port, base, shutdown };
 }
+
+/**
+ * Kill a Chrome process this test launched, and WAIT for it to exit (audio-feed-wj8o2).
+ *
+ * The kill alone is not a teardown. Chrome's CHILDREN outlive the parent by long enough to keep writing into the
+ * profile - which is how the browser rows leaked one scratch directory per run: cleanup() succeeded, the row
+ * removed the parent, and the children recreated the profile inside it. This is the kill-then-await-status pattern
+ * launchChrome's close() has always used, so a test that launches Chrome itself behaves the same way.
+ */
+export async function killChromeAndWait(chrome: Deno.ChildProcess): Promise<void> {
+  try {
+    chrome.kill();
+  } catch {
+    // Already gone: a row may have watched it exit itself.
+  }
+  await chrome.status.catch(() => {});
+}
+
+/**
+ * Remove a directory that a dying process may still be recreating, and report whether it is finally gone
+ * (audio-feed-wj8o2).
+ *
+ * It re-checks rather than sleeping a fixed time: it returns as soon as a check finds the directory absent, and
+ * gives up after `attempts` x `settleMs` (~1s by default). The RETURN VALUE is the point - callers assert it
+ * instead of swallowing the failure, because the failure this exists for (a child recreating the profile after
+ * cleanup() had removed it) was invisible while every removal ended in `.catch(() => {})`.
+ */
+export async function removeDirWhenQuiet(
+  dir: string,
+  opts: { attempts?: number; settleMs?: number } = {},
+): Promise<boolean> {
+  const attempts = opts.attempts ?? 20;
+  const settleMs = opts.settleMs ?? 50;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    if (attempt === attempts) break;
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+    if (!exists(dir)) return true;
+  }
+  return !exists(dir);
+}
+
+/**
+ * Whether no process still references a Chrome profile directory (audio-feed-wj8o2).
+ *
+ * "The directory is deleted" is not "nothing is still writing where it was": a Chrome child can outlive the parent
+ * with the profile path on its own command line. This asks the process table via `ps` rather than reading
+ * /proc/<pid>, because reading /proc is documented as denied in at least one sandboxed context in this repo
+ * (tests/fast_check_test.ts:1129), while `ps` is available wherever the suite runs with --allow-run.
+ *
+ * Fails CLOSED: if `ps` cannot run it throws, so a broken probe cannot become a green assertion.
+ */
+export async function waitForChromeProfileUnused(
+  profileDir: string,
+  opts: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 2000;
+  const pollMs = opts.pollMs ?? 50;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const listing = await new Deno.Command("ps", { args: ["-eo", "pid,args"] }).output();
+    if (!listing.success) {
+      throw new Error(
+        `ps -eo pid,args exited ${listing.code}: cannot prove that no process still references '${profileDir}'`,
+      );
+    }
+    if (!new TextDecoder().decode(listing.stdout).includes(profileDir)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
