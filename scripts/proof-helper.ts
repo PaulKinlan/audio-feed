@@ -477,12 +477,25 @@ export function pinQz3xCaptureDeterminism(
 
 export async function createTempChromeProfile(
   prefix = "audiofeed-chrome-",
+  // WHICH ROOT THE PROFILE IS ALLOCATED IN - AND SWEPT FROM - IS A PARAMETER (audio-feed-oyf3g), not process
+  // state. A caller that wants a sandbox passes it here instead of mutating the process-global TMPDIR, which
+  // under `deno test --parallel` captures every other concurrent module's temp dirs into that sandbox and then
+  // deletes them with it. Omitting it keeps the previous behaviour EXACTLY: the sweep resolves TMPDIR itself,
+  // and `Deno.makeTempDir({ prefix })` uses the platform temp dir.
+  rootDir?: string,
 ): Promise<{ profileDir: string; cleanup: () => Promise<void>; sweptStale: number }> {
   // Reclaim abandoned profiles before allocating another one, so a leak cannot accumulate across runs
   // (audio-feed-u8nv). NOT scoped to `prefix` (audio-feed-h62q): a directory whose creator never runs
   // again cannot be named by anyone, which is how the unreachable population got permanent.
-  const sweptStale = (await sweepStaleProfiles()).length;
-  const profileDir = await Deno.makeTempDir({ prefix });
+  const sweptStale = (await (rootDir === undefined ? sweepStaleProfiles() : sweepStaleProfiles(
+    Date.now(),
+    STALE_PROFILE_AGE_MS,
+    PROFILE_ACTIVITY_AGE_MS,
+    rootDir,
+  ))).length;
+  const profileDir = rootDir === undefined
+    ? await Deno.makeTempDir({ prefix })
+    : await Deno.makeTempDir({ prefix, dir: rootDir });
   const normProfileDir = normalizeFilePath(profileDir);
   activeChromeProfiles.add(normProfileDir);
   let cleaned = false;
