@@ -89,34 +89,26 @@ Deno.test("txcz: the no-support path keeps the sticky geometry, and the stuck ru
 });
 
 /**
- * audio-feed-w5f1: point TMPDIR at a scratch directory and hand back the restore.
+ * audio-feed-oyf3g: a scratch root this suite owns, handed to the helper AS AN ARGUMENT.
  *
- * WHY THIS SUITE NEEDS IT: createTempChromeProfile() reclaims abandoned profiles under
- * `TMPDIR ?? /tmp` BEFORE it allocates, so running this proof against the machine's real TMPDIR makes a
- * test mutate shared state. That was always true of this suite's own prefix; with the sweep now
- * age-and-signature based instead of prefix-scoped (audio-feed-h62q) it is true of EVERY abandoned
- * profile on the VM.
+ * WHY THIS SUITE NEEDS A SANDBOX AT ALL: createTempChromeProfile() reclaims abandoned profiles under the root
+ * it is given BEFORE it allocates, so running this proof against the machine's real temp directory makes a test
+ * mutate shared state - and with the sweep age-and-signature based instead of prefix-scoped (audio-feed-h62q)
+ * that means EVERY abandoned profile on the VM. The root argument keeps the sweep inside this sandbox.
  *
- * THE REDIRECT MUST SPAN THE PROFILE'S WHOLE LIFE, NOT JUST THE ALLOCATION: TMPDIR is both the sweep's
- * root and the profile's root, so restoring it - and deleting the scratch tree - while the browser is
- * still running would delete the profile out from under it. Measured on this repo's sibling suite,
- * which failed with ENOENT writing into a profile that had just been swept away; so `restore` is called
- * in the same `finally` that kills Chrome.
+ * WHY IT IS AN ARGUMENT RATHER THAN AN ENVIRONMENT VARIABLE: it used to redirect the process-global TMPDIR.
+ * Under `deno test --parallel` Deno runs test modules CONCURRENTLY IN ONE PROCESS, so that redirect captured
+ * other modules' unprefixed temp dirs into this sandbox and deleted them with it, and the victims failed in
+ * their own cleanup with NotFound.
  *
- * The redirect is ASSERTED where it is set: a helper that silently failed to take would leave the suite
- * exactly as it was while reading as fixed.
+ * THE SANDBOX MUST OUTLIVE THE PROFILE: `restore` deletes the scratch tree, so it runs in the same `finally`
+ * that closes the profile/browser - restoring earlier would delete the profile out from under its user.
  */
-async function redirectTmpToScratch(): Promise<() => Promise<void>> {
-  const original = Deno.env.get("TMPDIR");
-  const scratch = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
-  Deno.env.set("TMPDIR", scratch);
-  if (Deno.env.get("TMPDIR") !== scratch) {
-    throw new Error(`TMPDIR redirect did not take: ${Deno.env.get("TMPDIR")}`);
-  }
-  return async () => {
-    if (original === undefined) Deno.env.delete("TMPDIR");
-    else Deno.env.set("TMPDIR", original);
-    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+async function scratchRootForProfiles(): Promise<{ root: string; restore: () => Promise<void> }> {
+  const root = await Deno.makeTempDir({ prefix: "w5f1-scratch-" });
+  return {
+    root,
+    restore: () => Deno.remove(root, { recursive: true }).catch(() => {}),
   };
 }
 
@@ -127,8 +119,8 @@ async function withChrome<T>(
 ): Promise<T> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   // audio-feed-w5f1: BEFORE the allocation, and restored in the finally below - see the helper above.
-  const restoreTmp = await redirectTmpToScratch();
-  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-txcz-");
+  const { root, restore } = await scratchRootForProfiles();
+  const { profileDir, cleanup } = await createTempChromeProfile("audiofeed-txcz-", root);
   const chrome = new Deno.Command(newestChrome(), {
     args: [
       "--headless=new",
@@ -185,7 +177,7 @@ async function withChrome<T>(
       // already gone
     }
     cleanup();
-    await restoreTmp();
+    await restore();
   }
 }
 
