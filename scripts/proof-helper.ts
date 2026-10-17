@@ -606,6 +606,13 @@ export interface ChromeLaunchOptions {
   prefix?: string;
   args?: string[];
   portTimeoutMs?: number;
+  /**
+   * The root the profile is allocated in and swept from (audio-feed-oyf3g). A caller that wants a sandbox passes
+   * it here instead of mutating the process-global TMPDIR, which under `deno test --parallel` captured other
+   * concurrent modules' temp dirs into that sandbox and deleted them with it. Omitted, behaviour is unchanged:
+   * createTempChromeProfile resolves TMPDIR itself and allocates in the platform temp dir.
+   */
+  profileRoot?: string;
 }
 
 export interface ChromeHandle {
@@ -647,7 +654,7 @@ export async function launchChrome(
   };
 
   try {
-    profile = await createTempChromeProfile(prefix);
+    profile = await createTempChromeProfile(prefix, opts.profileRoot);
     const { profileDir } = profile;
 
     const defaultArgs = [
