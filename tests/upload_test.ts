@@ -1,7 +1,8 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { type AppConfig, memoryStores, type Stores } from "../src/config.ts";
+import { extractDocxArticle, MAX_DOCX_INFLATED_BYTES } from "../src/ingest/upload.ts";
 import { makeUser } from "./fixtures.ts";
 import type { User } from "../src/types.ts";
 
@@ -224,38 +225,44 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-function makeStoredZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
-  const fileEntries: Array<{ nameBytes: Uint8Array; offset: number; size: number }> = [];
+function makeZip(
+  entries: Array<{ name: string; stored: Uint8Array; size: number; method: number }>,
+): Uint8Array {
+  const fileEntries: Array<
+    { nameBytes: Uint8Array; offset: number; stored: number; size: number; method: number }
+  > = [];
   let offset = 0;
   const parts: Uint8Array[] = [];
 
-  for (const file of files) {
+  for (const file of entries) {
     const nameBytes = new TextEncoder().encode(file.name);
     const localHeader = new Uint8Array(30 + nameBytes.length);
     const view = new DataView(localHeader.buffer);
     view.setUint32(0, 0x04034b50, true);
     view.setUint16(4, 20, true);
     view.setUint16(6, 0, true);
-    view.setUint16(8, 0, true);
+    view.setUint16(8, file.method, true);
     view.setUint16(10, 0, true);
     view.setUint16(12, 0, true);
     view.setUint32(14, 0, true);
-    view.setUint32(18, file.data.length, true);
-    view.setUint32(22, file.data.length, true);
+    view.setUint32(18, file.stored.length, true);
+    view.setUint32(22, file.size, true);
     view.setUint16(26, nameBytes.length, true);
     view.setUint16(28, 0, true);
     localHeader.set(nameBytes, 30);
 
     parts.push(localHeader);
-    parts.push(file.data);
+    parts.push(file.stored);
 
     fileEntries.push({
       nameBytes,
       offset,
-      size: file.data.length,
+      stored: file.stored.length,
+      size: file.size,
+      method: file.method,
     });
 
-    offset += localHeader.length + file.data.length;
+    offset += localHeader.length + file.stored.length;
   }
 
   const cdStart = offset;
@@ -266,11 +273,11 @@ function makeStoredZip(files: Array<{ name: string; data: Uint8Array }>): Uint8A
     view.setUint16(4, 20, true);
     view.setUint16(6, 20, true);
     view.setUint16(8, 0, true);
-    view.setUint16(10, 0, true);
+    view.setUint16(10, entry.method, true);
     view.setUint16(12, 0, true);
     view.setUint16(14, 0, true);
     view.setUint32(16, 0, true);
-    view.setUint32(20, entry.size, true);
+    view.setUint32(20, entry.stored, true);
     view.setUint32(24, entry.size, true);
     view.setUint16(28, entry.nameBytes.length, true);
     view.setUint16(30, 0, true);
@@ -307,6 +314,28 @@ function makeStoredZip(files: Array<{ name: string; data: Uint8Array }>): Uint8A
     pos += p.length;
   }
   return zip;
+}
+
+function makeStoredZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+  return makeZip(
+    files.map((f) => ({ name: f.name, stored: f.data, size: f.data.length, method: 0 })),
+  );
+}
+
+/** A deflate-compressed zip: the .docx bomb shape (audio-feed-yl3bq). */
+async function makeDeflatedZip(
+  files: Array<{ name: string; data: Uint8Array }>,
+): Promise<Uint8Array> {
+  const entries = [];
+  for (const f of files) {
+    const buf = await new Response(
+      new Blob([f.data as unknown as BlobPart]).stream().pipeThrough(
+        new CompressionStream("deflate-raw"),
+      ),
+    ).arrayBuffer();
+    entries.push({ name: f.name, stored: new Uint8Array(buf), size: f.data.length, method: 8 });
+  }
+  return makeZip(entries);
 }
 
 // Built zip containing [Content_Types].xml and word/document.xml with 2 paragraphs,
@@ -510,6 +539,108 @@ Deno.test("POST /api/upload rejects docx whose text exceeds 72,000 bytes with 41
   assertStringIncludes(data.error, "72,000");
   assertStringIncludes(data.error, String(textBytes));
   assertEquals(data.file, "encyclopedia.docx");
+});
+
+Deno.test("extractDocxArticle rejects a deflated zip bomb DURING decompression, before allocation (audio-feed-yl3bq)", async () => {
+  // The reviewer's repro shape: ~16 KB compressed inflating to 16,000,000 text
+  // bytes. The bound must trip WHILE streaming, so the 16 MB ArrayBuffer, XML
+  // string and DOM are never materialized.
+  const bombXml = new TextEncoder().encode(
+    `<w:document><w:body><w:p><w:r><w:t>${
+      "A".repeat(16_000_000)
+    }</w:t></w:r></w:p></w:body></w:document>`,
+  );
+  const zipBytes = await makeDeflatedZip([
+    { name: "[Content_Types].xml", data: new TextEncoder().encode("<Types/>") },
+    { name: "word/document.xml", data: bombXml },
+  ]);
+  assert(
+    zipBytes.byteLength < 200_000,
+    `the bomb must be tiny compressed, was ${zipBytes.byteLength}`,
+  );
+  const err = await assertRejects(
+    () => extractDocxArticle(zipBytes, "upload://u/1", "bomb"),
+    Error,
+    "decompresses to more than 4 MiB",
+  );
+  assertEquals((err as { status?: number }).status, 413);
+  assertEquals((err as { limit?: number }).limit, MAX_DOCX_INFLATED_BYTES);
+});
+
+Deno.test("POST /api/upload rejects a deflated .docx zip bomb with 413 naming the inflated limit (audio-feed-yl3bq)", async () => {
+  const { app, user } = await setupTestApp();
+  const bombXml = new TextEncoder().encode(
+    `<w:document><w:body><w:p><w:r><w:t>${
+      "A".repeat(16_000_000)
+    }</w:t></w:r></w:p></w:body></w:document>`,
+  );
+  const zipBytes = await makeDeflatedZip([
+    { name: "[Content_Types].xml", data: new TextEncoder().encode("<Types/>") },
+    { name: "word/document.xml", data: bombXml },
+  ]);
+
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new File([zipBytes as unknown as BlobPart], "bomb.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  );
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 413);
+  const data = await res.json();
+  assert(data.correlationId);
+  assertStringIncludes(data.error, "4,194,304");
+  assertStringIncludes(data.error, "decompress");
+  assertEquals(data.file, "bomb.docx");
+});
+
+Deno.test("POST /api/upload rejects a stored .docx whose document XML exceeds the inflated bound (audio-feed-yl3bq)", async () => {
+  const { app, user } = await setupTestApp();
+  // Stored (method 0) is already bounded by the 10 MiB upload cap, but the same
+  // 4 MiB document-XML bound applies so both compression methods refuse at the
+  // same place. 5 MiB of mostly-markup XML has under 72,000 bytes of text, so
+  // this rejection must be the INFLATED-XML cap, not the narration cap.
+  const bigXml = new TextEncoder().encode(
+    `<w:document><w:body><w:p><w:r><w:t>real text</w:t></w:r>${
+      "<w:r></w:r>".repeat(460_000)
+    }</w:p></w:body></w:document>`,
+  );
+  assert(bigXml.byteLength > MAX_DOCX_INFLATED_BYTES);
+  const zipBytes = makeStoredZip([
+    { name: "[Content_Types].xml", data: new TextEncoder().encode("<Types/>") },
+    { name: "word/document.xml", data: bigXml },
+  ]);
+
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new File([zipBytes as unknown as BlobPart], "bloated.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  );
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 413);
+  const data = await res.json();
+  assert(data.correlationId);
+  assertStringIncludes(data.error, "4,194,304");
+  assertEquals(data.file, "bloated.docx");
 });
 
 Deno.test("POST /api/upload rejects bodies > 10 MiB with 413 naming limit and byte count", async () => {

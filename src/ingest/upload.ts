@@ -15,6 +15,16 @@ import { MAX_TTS_INPUT_BYTES, MAX_TTS_SEGMENTS } from "../tts/gemini.ts";
 
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_NARRATION_BYTES = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS; // 72,000 bytes
+/**
+ * Bound on the INFLATED size of a .docx's word/document.xml (audio-feed-yl3bq).
+ * MAX_UPLOAD_BYTES bounds the COMPRESSED bytes; deflate inflates them, and a
+ * 16 KB bomb was measured expanding to 16,000,000 text bytes before the
+ * 72,000-byte narration check ever ran. No document that can pass the
+ * narration ceiling needs anywhere near this much XML (it is ~58x the ceiling
+ * in pure markup), so nothing legitimate is refused. Decompression is bounded
+ * WHILE streaming: the allocation below can never exceed this.
+ */
+export const MAX_DOCX_INFLATED_BYTES = 4 * 1024 * 1024; // 4 MiB
 
 export interface UploadDependencies {
   authorize: (request: Request) => Promise<User | Response>;
@@ -171,6 +181,51 @@ export function ensurePlainTextOnly(text: string): string {
     .replace(/<[^>]+>/g, "");
 }
 
+/**
+ * Inflate a deflate-raw stream with a hard bound on the OUTPUT bytes
+ * (audio-feed-yl3bq). The reader is cancelled the moment the inflated total
+ * crosses maxBytes, so a zip bomb is rejected by a 413 naming the limit rather
+ * than materializing an unbounded ArrayBuffer, XML string and DOM. A genuinely
+ * corrupt stream keeps the pre-existing 415 mapping.
+ */
+async function inflateRawBounded(data: Uint8Array, maxBytes: number): Promise<Uint8Array> {
+  const reader = new Blob([data as unknown as BlobPart]).stream()
+    .pipeThrough(new DecompressionStream("deflate-raw"))
+    .getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new IngestError(
+          413,
+          `This .docx decompresses to more than 4 MiB of document XML ` +
+            `(limit: ${
+              maxBytes.toLocaleString("en-US")
+            } bytes); split the document or upload a smaller part.`,
+          { limit: maxBytes },
+        );
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    if (err instanceof IngestError) throw err;
+    throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 export async function extractDocxArticle(
   bytes: Uint8Array,
   syntheticUrl: string,
@@ -264,18 +319,22 @@ export async function extractDocxArticle(
   const compressedData = bytes.subarray(dataOffset, dataOffset + compressedSize);
   let xmlBytes: Uint8Array;
   if (compressionMethod === 0) {
+    // Stored, not compressed: the bytes are already bounded by the 10 MiB upload
+    // cap, but the same inflated-XML bound applies so a stored 10 MiB of markup
+    // is refused at the same place a deflated bomb is.
+    if (compressedSize > MAX_DOCX_INFLATED_BYTES) {
+      throw new IngestError(
+        413,
+        `This .docx holds more than 4 MiB of document XML ` +
+          `(limit: ${
+            MAX_DOCX_INFLATED_BYTES.toLocaleString("en-US")
+          } bytes); split the document or upload a smaller part.`,
+        { limit: MAX_DOCX_INFLATED_BYTES, actual: compressedSize },
+      );
+    }
     xmlBytes = compressedData;
   } else if (compressionMethod === 8) {
-    try {
-      const decompressed = await new Response(
-        new Blob([compressedData as unknown as BlobPart]).stream().pipeThrough(
-          new DecompressionStream("deflate-raw"),
-        ),
-      ).arrayBuffer();
-      xmlBytes = new Uint8Array(decompressed);
-    } catch {
-      throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
-    }
+    xmlBytes = await inflateRawBounded(compressedData, MAX_DOCX_INFLATED_BYTES);
   } else {
     throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
   }
