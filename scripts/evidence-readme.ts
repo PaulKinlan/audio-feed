@@ -25,7 +25,9 @@
  *
  * NOTHING IS MIGRATED BY THIS MODULE. A README with no markers is rejected loudly rather than having
  * markers injected into it, so the generator's behaviour is unchanged until a README is deliberately
- * migrated - the migration is a separate, per-file decision.
+ * migrated - the migration is a separate, per-file decision. The FIRST generator wired to honour a
+ * migrated README is writeEvidenceReadme in scripts/proof-helper.ts (audio-feed-i98g1: it now merges
+ * into marker-delimited files instead of overwriting them, and still overwrites un-migrated ones).
  *
  * THE MATCHING RULE, AND ITS KNOWN LIMIT, STATED PLAINLY: a marker is a line that is EXACTLY the marker
  * text (surrounding whitespace ignored). That makes an inline mention in prose safe - a README can talk
@@ -70,6 +72,19 @@ function requireSingleMarker(lines: string[], marker: string): number {
     );
   }
   return first;
+}
+
+/**
+ * True when `text` carries either marker as a whole line, i.e. the README has been MIGRATED to the
+ * two-writer shape. Deliberately does NOT validate the marker pair: a file with a begin marker but
+ * no end marker is migrated-but-malformed, and callers must treat it as a generated-region file and
+ * let splitGeneratedRegion throw LOUDLY rather than fall back to a whole-file overwrite - the silent
+ * fallback would strip human prose exactly when the file needs protection most (audio-feed-i98g1).
+ */
+export function hasGeneratedRegion(text: string): boolean {
+  return text.split("\n").some((line) =>
+    line.trim() === GENERATED_BEGIN || line.trim() === GENERATED_END
+  );
 }
 
 /** Split a README into the human prefix, the generated body and the human suffix. */

@@ -25,6 +25,7 @@ import {
   createChecker,
   createTempChromeProfile,
   type ElementMeasurement,
+  formatEvidenceReadme,
   getActiveProof,
   isFullyVisible,
   isVisible,
@@ -48,6 +49,7 @@ import {
   writeEvidenceReadme,
 } from "../scripts/proof-helper.ts";
 import { HARNESS_PORT_DEFAULT, resolveHarnessPort } from "../scripts/harness-port.ts";
+import { GENERATED_BEGIN, GENERATED_END } from "../scripts/evidence-readme.ts";
 
 Deno.test("proof-helper: newestChrome resolves Chrome binary path or throws descriptive error", () => {
   try {
@@ -8102,3 +8104,122 @@ Deno.test({
     }
   },
 });
+
+Deno.test(
+  "proof-helper: writeEvidenceReadme MERGES into a marker-delimited README - prose survives, region is replaced, a second run is a no-op (audio-feed-i98g1)",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-readme-merge-" });
+    try {
+      const readmePath = `${dir}/README.md`;
+      await Deno.writeTextFile(
+        readmePath,
+        [
+          GENERATED_BEGIN,
+          "# Stale generated title",
+          "",
+          "- Asserts: stale generated assert",
+          GENERATED_END,
+          "",
+          "- Debt: admitted (audio-feed-test)",
+          "",
+          "## Feature",
+          "",
+          "Human prose that must survive every regeneration.",
+          "",
+        ].join("\n"),
+      );
+      const options = {
+        dir,
+        title: "Browser Proof: merge (audio-feed-test)",
+        script: "scripts/test-browser-proof.ts",
+        asserts: ["fresh assert one", "fresh assert two"],
+        allowOutsideProof: true,
+      };
+      await writeEvidenceReadme(options);
+      const afterFirst = await Deno.readTextFile(readmePath);
+      // Everything OUTSIDE the region survives byte-for-byte - the audio-feed-i98g1 hazard: one run
+      // used to delete 26 lines of hand-written prose from docs/evidence/audio-feed-kzi/README.md.
+      assertStringIncludes(afterFirst, "- Debt: admitted (audio-feed-test)");
+      assertStringIncludes(afterFirst, "## Feature");
+      assertStringIncludes(afterFirst, "Human prose that must survive every regeneration.");
+      // Everything INSIDE the region is the generator's to state: stale generated content is gone.
+      assert(!afterFirst.includes("Stale generated title"));
+      assert(!afterFirst.includes("- Asserts: stale generated assert"));
+      assertStringIncludes(afterFirst, "- Asserts: fresh assert one; fresh assert two");
+      // IDEMPOTENCE: the second run must not dirty the file.
+      await writeEvidenceReadme(options);
+      assertEquals(
+        await Deno.readTextFile(readmePath),
+        afterFirst,
+        "a second run must leave the README byte-identical",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "proof-helper: writeEvidenceReadme still OVERWRITES a README that was not migrated to markers (audio-feed-i98g1)",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-readme-overwrite-" });
+    try {
+      const readmePath = `${dir}/README.md`;
+      await Deno.writeTextFile(readmePath, "# Old prose without markers\n");
+      const options = {
+        dir,
+        title: "Browser Proof: overwrite (audio-feed-test)",
+        script: "scripts/test-browser-proof.ts",
+        asserts: ["an assert"],
+        allowOutsideProof: true,
+      };
+      await writeEvidenceReadme(options);
+      const content = await Deno.readTextFile(readmePath);
+      // Migration is a deliberate per-file decision, so an un-migrated README keeps the historical
+      // whole-file overwrite: the generated content IS the file, prose and markers alike gone.
+      assertEquals(content, await formatEvidenceReadme(options));
+      assert(!content.includes("Old prose without markers"));
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "proof-helper: writeEvidenceReadme REFUSES a migrated-but-malformed README instead of silently stripping it (audio-feed-i98g1)",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "evidence-readme-malformed-" });
+    try {
+      const readmePath = `${dir}/README.md`;
+      const malformed = [
+        GENERATED_BEGIN,
+        "# A begin marker with no end marker",
+        "",
+        "- Debt: admitted (audio-feed-test)",
+        "",
+      ].join("\n");
+      await Deno.writeTextFile(readmePath, malformed);
+      // The worst response to a malformed region is the pre-i98g1 behaviour: fall back to a
+      // whole-file overwrite and delete the prose the markers failed to protect. Refuse instead.
+      await assertRejects(
+        () =>
+          writeEvidenceReadme({
+            dir,
+            title: "Browser Proof: malformed (audio-feed-test)",
+            script: "scripts/test-browser-proof.ts",
+            asserts: ["an assert"],
+            allowOutsideProof: true,
+          }),
+        Error,
+        "marker line is missing",
+      );
+      assertEquals(
+        await Deno.readTextFile(readmePath),
+        malformed,
+        "a rejected write must leave the file untouched",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+);
