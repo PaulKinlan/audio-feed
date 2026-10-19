@@ -112,11 +112,17 @@ Deno.test("the logged-out homepage does not render token password inputs (audio-
   assert(!html.includes('type="password"'), "homepage has no password inputs");
 });
 
-Deno.test("the token travels as a header, never as a query parameter", async () => {
+Deno.test("the front door's client carries no capability handling at all (audio-feed-ewpxz)", async () => {
   const html = await (await app()(get("/"))).text();
 
-  // audio-feed-3xq part 4b: the header usage lives in the client module now, not the page.
-  assertStringIncludes(assetBody("home.js") ?? "", '"x-feed-token"');
+  // audio-feed-ewpxz: the send flow lives on /account, so the front door's client has no token
+  // handling left. This used to assert home.js sent x-feed-token as a header - an assert that had
+  // been passing vacuously against the dead ingest wiring ever since 0bf07a7e moved the form off
+  // this page. The capability must not reappear here.
+  assert(
+    !assetBody("home.js")?.includes("x-feed-token"),
+    "the front door's client must not carry the capability",
+  );
   // A token in a query string is logged by every hop it passes through.
   assert(!/[?&](token|feedToken|feed_token)=/.test(html), "no token may appear in a URL");
 });
@@ -188,29 +194,11 @@ Deno.test("validation styling waits for interaction rather than firing on load",
   assert(!/input:invalid\s*{/.test(css), "do not style :invalid — it fires on page load");
 });
 
-Deno.test("a successful submit resets the form rather than emptying one field", () => {
-  // Found by driving the real page in a browser: after a 202 the script cleared
-  // `url.value`, which leaves a `required` field empty on an input the user has
-  // already interacted with — so `:user-invalid` matched and a red "Enter a
-  // full URL" error rendered directly beneath the green success message.
-  //
-  // `form.reset()` is what clears the browser's interaction state. Asserting on
-  // it here because the failure is invisible to any test that only reads the
-  // markup: the bug was in what the script does AFTER a successful response.
-  // audio-feed-3xq part 4b: this behaviour is client code in src/assets/home.js now; the
-  // property under test is unchanged, the bytes moved (tests/home_asset_test.ts pins that
-  // the page links exactly these bytes).
-  const client = assetBody("home.js") ?? "";
-  assertStringIncludes(client, "form.reset()");
-  // The token and mode must survive the reset, or sending a second article
-  // means retyping a credential.
-  assertStringIncludes(client, "keptToken");
-  assertStringIncludes(client, "keptMode");
-  assert(
-    !/url\.value\s*=\s*""/.test(client),
-    "clearing a single field re-triggers :user-invalid; reset the form instead",
-  );
-});
+// audio-feed-ewpxz: the "a successful submit resets the form rather than emptying one field" row is
+// gone with the form it protected. It pinned the ingest form's post-success UX (form.reset() plus
+// keptToken/keptMode) - wiring that lived behind the #ingest lookup guard and was unreachable since
+// 0bf07a7e moved the send flow to /account. The account page's submit UX is that route's own
+// concern; no carrier of this property remains on the front door.
 
 // ---------------------------------------------------------------------------
 // Behaviour without JavaScript
@@ -328,7 +316,7 @@ Deno.test("GET / redirects signed-in users to /account with 303 (audio-feed-irgu
   assertStringIncludes(res.headers.get("vary") ?? "", "Cookie");
 });
 
-Deno.test("homepage script includes open in web player action on submission success (audio-feed-ytg)", () => {
+Deno.test("the front door keeps its player links in markup; the client builds none (audio-feed-ewpxz)", () => {
   const html = renderHomePage({
     nonce: "test-nonce",
     publicBaseUrl: "https://audio.example.com",
@@ -336,13 +324,17 @@ Deno.test("homepage script includes open in web player action on submission succ
     defaultVoice: "Charon",
   });
 
-  // audio-feed-3xq part 4b: the success-message builder is client code now; the page keeps
-  // the player LINKS in markup (they must work without JavaScript).
-  const client = assetBody("home.js") ?? "";
-  assertStringIncludes(client, "Open in Web Player →");
+  // The player LINKS live in markup so they work without JavaScript. audio-feed-ewpxz removed the
+  // client-side builders ("Open in Web Player →" inside the dead #ingest and #subscribe-source
+  // guards), and the acceptance for that bead is that no "Open in Web Player" remains anywhere in
+  // src/ - so this row pins the client side of that, not just the grep of the day.
   assertStringIncludes(html, 'href="/listen"');
-  assertStringIncludes(client, '"/listen/" +');
-  assertStringIncludes(client, "encodeURIComponent(token.value.trim())");
+  const client = assetBody("home.js") ?? "";
+  assert(
+    !client.includes("Open in Web Player"),
+    "the client builds no player links; the markup owns them",
+  );
+  assert(!client.includes('"/listen/" +'), "the client builds no per-token listen URLs");
 });
 
 Deno.test("the homepage renders the request access form with accessible labels, hints, and secure action (audio-feed-r97)", () => {

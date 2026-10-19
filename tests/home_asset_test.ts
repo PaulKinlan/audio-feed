@@ -52,16 +52,20 @@ Deno.test("home page links its client module and carries the data island", () =>
   assert(match, "the page must carry a #home-data document");
   const data = JSON.parse(match![1]!);
   assertEquals(data.base, "https://example.com");
-  // Markers exclusive to the client code. (The bare header NAME appears in the page's
-  // noscript curl example on purpose, so the marker must be client-shaped.)
-  for (const marker of ["encodeURIComponent(token.value.trim())", "Open in Web Player"]) {
+  // Markers exclusive to the client code. (audio-feed-ewpxz: the old markers - the token header and
+  // the player-link string - died with the dead form wiring; these are strings only the live
+  // request-access client contains.)
+  for (const marker of ["Could not reach the server.", "Submitting…"]) {
     assertEquals(html.includes(marker), false, `${marker} must come from home.js`);
   }
 });
 
 Deno.test("the home assets are served with the hashes the page actually references", async () => {
   for (
-    const [name, marker] of [["home.css", ".card .voices"], ["home.js", "x-feed-token"]] as const
+    const [name, marker] of [
+      ["home.css", ".card .voices"],
+      ["home.js", "/api/request-access"],
+    ] as const
   ) {
     const url = assetUrl(name);
     const segments = url.slice("/assets/".length);
