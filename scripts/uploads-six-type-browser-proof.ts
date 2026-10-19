@@ -83,7 +83,9 @@ interface EpisodeRow {
 
 await runProof("uploads-six-type-browser-proof", async (checker) => {
   const SCRATCH = await Deno.makeTempDir({ prefix: "audiofeed-d82rv-uploads-" });
+  console.log('[d82rv] spawning harness…');
   const harness = await spawnHarness("scripts/account-harness.ts");
+  console.log('[d82rv] harness up at', harness.base);
   const BASE = harness.base;
 
   /** Rows recorded per type; also the machine-readable evidence the bead asks for. */
@@ -142,12 +144,14 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
     await Deno.writeFile(overLimitPath, overLimit);
 
     // ---- a subscriber to upload as ------------------------------------------------
+    console.log('[d82rv] reading harness users…');
     const usersRes = await fetch(`${BASE}/api/admin/users`, {
       headers: { "x-admin-token": ADMIN_TOKEN },
     });
     const usersBody = await usersRes.json() as { users?: Array<{ id: string; email?: string }> };
     const user = usersBody.users?.[0];
     if (!user) throw new Error("harness exposed no users to sign in as");
+    console.log('[d82rv] user:', user.id, 'requesting setup link…');
     const linkRes = await fetch(`${BASE}/api/admin/users/${user.id}/setup-link`, {
       method: "POST",
       headers: { "x-admin-token": ADMIN_TOKEN },
@@ -156,6 +160,8 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
     const setupUrl = linkBody.url ?? linkBody.link;
     if (!setupUrl) throw new Error("harness returned no setup link");
 
+    console.log('[d82rv] setup link:', String(setupUrl).slice(0, 60));
+    console.log('[d82rv] launching chrome…');
     await withChrome(async (chrome) => {
       chromeProcess = chrome.process;
       profileDir = chrome.profileDir;
@@ -178,8 +184,12 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       async function cdp(method: string, params: Record<string, unknown> = {}): Promise<any> {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));
-        const msg = await new Promise<{ result?: unknown; error?: unknown }>((r) =>
-          pending.set(id, r)
+        // EVERY CDP call is bounded and named. A call issued while the page navigates (the sign-in
+        // redirect destroys the execution context) can be dropped by the browser, and an unbounded
+        // wait for its reply hangs the whole proof until the outer bound kills it - which reports
+        // nothing. Bounding per call turns that into "ProofTimeout: Runtime.evaluate".
+        const msg = await withDeadline(method, 20_000, () =>
+          new Promise<{ result?: unknown; error?: unknown }>((r) => pending.set(id, r))
         );
         if (msg.error) throw new Error(`${method}: ${JSON.stringify(msg.error)}`);
         return msg.result;
@@ -248,12 +258,15 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       await cdp("Network.enable");
 
       // ---- sign in, land on /account -----------------------------------------------
-      await go(setupUrl.startsWith("http") ? setupUrl.replace(BASE, "") : setupUrl);
+      console.log('[d82rv] chrome up, signing in…');
+      await go(String(setupUrl).startsWith("http") ? String(setupUrl).replace(BASE, "") : String(setupUrl));
       await go("/account");
       await until(`document.getElementById("uploadFile") !== null`, "upload form on /account");
       cookieCache = null;
 
+      console.log('[d82rv] signed in, listing episodes…');
       const known = new Set((await episodes()).map((e) => e.id));
+      console.log('[d82rv] starting type loop');
 
       // ---- the five accepted types --------------------------------------------------
       for (const type of Object.keys(files)) {
