@@ -38,7 +38,7 @@ import { createVoiceSampleHandler } from "./routes/voice-samples.ts";
 import { handleCspReports } from "./routes/reports.ts";
 import { discoverFeeds } from "./ingest/url.ts";
 import type { ComposeDeps } from "./compose/shared.ts";
-import { createIngestHandler } from "./compose/ingest.ts";
+import { createIngestHandler, createUploadHandler } from "./compose/ingest.ts";
 import { createListEpisodesHandler } from "./compose/episodes.ts";
 import { createRequestAccessHandler } from "./compose/access.ts";
 import {
@@ -86,7 +86,7 @@ export {
   createMasterFeedHandler,
   createSourceFeedHandler,
 } from "./compose/feeds.ts";
-export { createIngestHandler } from "./compose/ingest.ts";
+export { createIngestHandler, createUploadHandler } from "./compose/ingest.ts";
 export { createListEpisodesHandler } from "./compose/episodes.ts";
 export { createRequestAccessHandler, type RequestAccessDeps } from "./compose/access.ts";
 export {
@@ -119,6 +119,7 @@ export function createHandlers(ctx: AppContext, deps: ComposeDeps = {}): AppHand
     masterFeed: createMasterFeedHandler(ctx),
     sourceFeed: createSourceFeedHandler(ctx),
     ingest: createIngestHandler(ctx, deps),
+    upload: createUploadHandler(ctx, deps),
     approveUser: createApproveUserHandler(ctx, deps),
     listSources: createListSourcesHandler(ctx),
     createSource: createCreateSourceHandler(ctx, deps),

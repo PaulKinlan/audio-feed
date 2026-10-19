@@ -24,9 +24,17 @@ export type IngestPayload =
   | { mode: "deepdive"; article: ExtractedArticle };
 
 export class IngestError extends Error {
-  constructor(public status: number, message: string) {
+  public limit?: number;
+  public actual?: number;
+  constructor(
+    public status: number,
+    message: string,
+    options?: { limit?: number; actual?: number },
+  ) {
     super(message);
     this.name = "IngestError";
+    if (options?.limit !== undefined) this.limit = options.limit;
+    if (options?.actual !== undefined) this.actual = options.actual;
   }
 }
 
@@ -151,11 +159,12 @@ function decompressBody(
   throw new IngestError(422, `${kind} uses an unsupported content-encoding: ${encoding}.`);
 }
 
-async function readBounded(
+export async function readBounded(
   body: ReadableStream<Uint8Array> | null,
   limit: number,
   status: number,
   signal: AbortSignal,
+  message?: string,
 ): Promise<Uint8Array> {
   if (!body) return new Uint8Array();
   const reader = body.getReader();
@@ -173,7 +182,11 @@ async function readBounded(
       if (done) break;
       length += value.byteLength;
       if (length > limit) {
-        throw new IngestError(status, "Request or article exceeds the size limit.");
+        throw new IngestError(
+          status,
+          message ?? "Request or article exceeds the size limit.",
+          { limit, actual: length },
+        );
       }
       chunks.push(value);
     }
@@ -700,7 +713,7 @@ export function plainText(node: Node): string {
 }
 
 export function extractArticle(html: string, sourceUrl: string): ExtractedArticle {
-  const url = articleUrl(sourceUrl).href;
+  const url = sourceUrl.startsWith("upload://") ? sourceUrl : articleUrl(sourceUrl).href;
   if (new TextEncoder().encode(html).byteLength > MAX_HTML_BYTES) {
     throw new IngestError(413, "Article exceeds the 2 MiB size limit.");
   }
@@ -855,7 +868,7 @@ export async function extractPdfArticle(
   sourceUrl: string,
   options: { timeoutMs?: number } = {},
 ): Promise<ExtractedArticle> {
-  const url = articleUrl(sourceUrl).href;
+  const url = sourceUrl.startsWith("upload://") ? sourceUrl : articleUrl(sourceUrl).href;
   if (bytes.byteLength > MAX_PDF_BYTES) {
     throw new IngestError(413, "PDF exceeds the 10 MiB size limit.");
   }

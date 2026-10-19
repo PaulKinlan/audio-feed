@@ -74,6 +74,8 @@ export interface AppHandlers {
   sourceFeed?: Handler<AppContext>;
   /** audio-feed-by7 — Send-to-Audio URL ingest. */
   ingest?: Handler<AppContext>;
+  /** File upload ingest (txt, md, html, pdf). */
+  upload?: Handler<AppContext>;
   /** audio-feed-s2pi / obs-1 — the authenticated errors feed and its summary. */
   observabilityErrors?: Handler<AppContext>;
   observabilitySummary?: Handler<AppContext>;
@@ -262,6 +264,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
 
   // -- api ------------------------------------------------------------------
   router.post("/api/ingest", handlers.ingest ?? (() => notImplemented("URL ingest")));
+  router.post("/api/upload", handlers.upload ?? (() => notImplemented("File upload")));
   // audio-feed-i7vi / obs-4: browser-reported metrics. Public by necessity (a browser sends it), so
   // it is bounded and rate-limited, and its payload becomes a TYPED record rather than a request
   // field — see src/observability/cwv.ts.
