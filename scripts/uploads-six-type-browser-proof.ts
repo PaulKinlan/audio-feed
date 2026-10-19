@@ -257,10 +257,29 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       await cdp("Runtime.enable");
       await cdp("Network.enable");
 
+      // audio-feed-d82rv: the sign-in step is a PASSKEY BOOTSTRAP (/login#setup= registers a WebAuthn credential).
+      // A CDP-driven Chrome with no authenticator waits on the user forever, which is a browser-side wait no deadline
+      // on a CDP call can shorten - that is exactly what stalled the first two runs. These three calls are copied
+      // verbatim from scripts/account-browser-proof.ts:187-197, which signs in successfully on this VM.
+      await cdp("WebAuthn.enable");
+      await cdp("WebAuthn.addVirtualAuthenticator", {
+        options: {
+          protocol: "ctap2",
+          transport: "internal",
+          hasResidentKey: true,
+          hasUserVerification: true,
+          isUserVerified: true,
+        },
+      });
+
       // ---- sign in, land on /account -----------------------------------------------
-      console.log('[d82rv] chrome up, signing in…');
-      await go(String(setupUrl).startsWith("http") ? String(setupUrl).replace(BASE, "") : String(setupUrl));
-      await go("/account");
+      console.log('[d82rv] chrome up, signing in (passkey bootstrap)…');
+      const setupSecret = String(setupUrl).split("#setup=")[1] ?? "";
+      if (!setupSecret) throw new Error("setup link carried no #setup= secret");
+      await go("/login#setup=" + setupSecret);
+      await until(`document.getElementById("createPasskey")?.disabled === false`, "setup options");
+      await js(`document.getElementById("createPasskey").click()`);
+      await until(`location.pathname === "/account"`, "signed in on /account");
       await until(`document.getElementById("uploadFile") !== null`, "upload form on /account");
       cookieCache = null;
 
