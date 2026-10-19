@@ -146,8 +146,16 @@ export function sanitizeFilenameTitle(filename: string): string {
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  // Strip control characters (ASCII < 32 and DEL / C1)
-  const sanitized = cleaned.replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim();
+  // Strip control characters (ASCII < 32, DEL and the C1 range) by CODE POINT rather than by a regex range of
+  // literal control characters, which deno lint rejects (no-control-regex) - and the gate runs lint, so a regex
+  // here fails the whole gate rather than just this function.
+  const sanitized = [...cleaned]
+    .filter((ch) => {
+      const code = ch.codePointAt(0) ?? 0;
+      return code > 0x1f && (code < 0x7f || code > 0x9f);
+    })
+    .join("")
+    .trim();
   return sanitized;
 }
 
