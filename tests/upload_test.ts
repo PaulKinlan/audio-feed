@@ -215,11 +215,165 @@ Deno.test("POST /api/upload with .html containing <script> strips scripts, alert
   assertEquals(article.content.includes("<"), false);
 });
 
-Deno.test("POST /api/upload with docx rejects as 'not yet supported' (415)", async () => {
-  const { app, user } = await setupTestApp();
-  const docxBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]);
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function makeStoredZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+  const fileEntries: Array<{ nameBytes: Uint8Array; offset: number; size: number }> = [];
+  let offset = 0;
+  const parts: Uint8Array[] = [];
+
+  for (const file of files) {
+    const nameBytes = new TextEncoder().encode(file.name);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const view = new DataView(localHeader.buffer);
+    view.setUint32(0, 0x04034b50, true);
+    view.setUint16(4, 20, true);
+    view.setUint16(6, 0, true);
+    view.setUint16(8, 0, true);
+    view.setUint16(10, 0, true);
+    view.setUint16(12, 0, true);
+    view.setUint32(14, 0, true);
+    view.setUint32(18, file.data.length, true);
+    view.setUint32(22, file.data.length, true);
+    view.setUint16(26, nameBytes.length, true);
+    view.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    parts.push(localHeader);
+    parts.push(file.data);
+
+    fileEntries.push({
+      nameBytes,
+      offset,
+      size: file.data.length,
+    });
+
+    offset += localHeader.length + file.data.length;
+  }
+
+  const cdStart = offset;
+  for (const entry of fileEntries) {
+    const cdHeader = new Uint8Array(46 + entry.nameBytes.length);
+    const view = new DataView(cdHeader.buffer);
+    view.setUint32(0, 0x02014b50, true);
+    view.setUint16(4, 20, true);
+    view.setUint16(6, 20, true);
+    view.setUint16(8, 0, true);
+    view.setUint16(10, 0, true);
+    view.setUint16(12, 0, true);
+    view.setUint16(14, 0, true);
+    view.setUint32(16, 0, true);
+    view.setUint32(20, entry.size, true);
+    view.setUint32(24, entry.size, true);
+    view.setUint16(28, entry.nameBytes.length, true);
+    view.setUint16(30, 0, true);
+    view.setUint16(32, 0, true);
+    view.setUint16(34, 0, true);
+    view.setUint16(36, 0, true);
+    view.setUint32(38, 0, true);
+    view.setUint32(42, entry.offset, true);
+    cdHeader.set(entry.nameBytes, 46);
+
+    parts.push(cdHeader);
+    offset += cdHeader.length;
+  }
+
+  const cdSize = offset - cdStart;
+  const eocd = new Uint8Array(22);
+  const view = new DataView(eocd.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(4, 0, true);
+  view.setUint16(6, 0, true);
+  view.setUint16(8, fileEntries.length, true);
+  view.setUint16(10, fileEntries.length, true);
+  view.setUint32(12, cdSize, true);
+  view.setUint32(16, cdStart, true);
+  view.setUint16(20, 0, true);
+
+  parts.push(eocd);
+
+  const totalLen = parts.reduce((acc, p) => acc + p.length, 0);
+  const zip = new Uint8Array(totalLen);
+  let pos = 0;
+  for (const p of parts) {
+    zip.set(p, pos);
+    pos += p.length;
+  }
+  return zip;
+}
+
+// Built zip containing [Content_Types].xml and word/document.xml with 2 paragraphs,
+// paragraph 1 split across two w:r runs.
+const REAL_DOCX_BASE64 =
+  "UEsDBBQAAAAIAAAAAAAAAAAAoAAAAMgAAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbCWOTQ6CMBBG95yimT0UXRhjKCz8OQEeYFIGJLbTho6m3N4g6/flfa/psnfqS0uaAxs4VDUoYhuGmScDz/5RnkElQR7QBSYDKyXo2qLp10hJZe84GXiJxIvWyb7IY6pCJM7ejWHxKKkKy6Qj2jdOpI91fdI2sBBLKZsD2kKp5kYjfpyoexbivSV7B+q6T7c3Axijmy3KHFhvVLdFo/8h7Q9QSwMEFAAAAAgAAAAAAAAAAADlAAAAlwEAABEAAAB3b3JkL2RvY3VtZW50LnhtbH2QQWrEMAxF93MK4X3jtItSQpLZ9QTTA7i2JjHYkrGcJrl9cWYKhaHdiCfQl75+f95igC/M4pkG9dy0CpAsO0/ToD4u709vCqQYciYw4aB2FHUeT/3aObZLRCqwxUDSrYOaS0md1mJnjEYaTkhbDFfO0RRpOE965exSZosinqYY9EvbvupoPKnxBNCv3Se7veLRpBsdnMd+7cp4mRGuPkuBZLKZskkzCFJBsgi9riO15kelZSqeFnTgCcqMIGiZHOSFmgdhxfv1v33cF/wyUoMSsBxTwIJhhyO1f9ZXuL1c6SfS8RtQSwECFAAUAAAACAAAAAAAAAAAAKAAAADIAAAAEwAAAAAAAAAAAAAAAAAAAAAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLAQIUABQAAAAIAAAAAAAAAAAA5QAAAJcBAAARAAAAAAAAAAAAAAAAANEAAAB3b3JkL2RvY3VtZW50LnhtbFBLBQYAAAAAAgACAIAAAADlAQAAAAA=";
+
+// Zip containing [Content_Types].xml but no word/document.xml
+const NO_DOC_XML_ZIP_BASE64 =
+  "UEsDBBQAAAAAAAAAAAAAAAAACAAAAAgAAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDxUeXBlcy8+UEsBAhQAFAAAAAAAAAAAAAAAAAAIAAAACAAAABMAAAAAAAAAAAAAAAAAAAAAAFtDb250ZW50X1R5cGVzXS54bWxQSwUGAAAAAAEAAQBBAAAAOQAAAAAA";
+
+Deno.test("POST /api/upload accepts valid .docx with multiple runs and paragraphs, queues episode", async () => {
+  const { app, stores, user } = await setupTestApp();
+  const docxBytes = base64ToBytes(REAL_DOCX_BASE64);
   const formData = new FormData();
-  formData.append("file", new File([docxBytes], "manuscript.docx"));
+  formData.append(
+    "file",
+    new File([docxBytes as unknown as BlobPart], "sample-report.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  );
+  formData.append("mode", "direct");
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 202);
+  const body = await res.json();
+  assertEquals(body.status, "queued");
+  assertEquals(body.mode, "direct");
+  assertStringIncludes(body.article.url, `upload://${user.id}/`);
+  assertStringIncludes(
+    body.article.body,
+    "The first paragraph sentence continued in the second run.",
+  );
+  assertStringIncludes(
+    body.article.body,
+    "The second paragraph stands completely alone.",
+  );
+
+  const article = await stores.metadata.getArticle(user.id, body.articleId);
+  assert(article);
+  assertStringIncludes(
+    article.content,
+    "The first paragraph sentence continued in the second run.",
+  );
+  assertStringIncludes(
+    article.content,
+    "The second paragraph stands completely alone.",
+  );
+
+  const episode = await stores.metadata.getEpisode(user.id, body.episodeId);
+  assert(episode);
+  assertEquals(episode.status, "pending");
+  assertEquals(episode.articleId, body.articleId);
+});
+
+Deno.test("POST /api/upload rejects zip without word/document.xml with specific 415 message", async () => {
+  const { app, user } = await setupTestApp();
+  const zipBytes = base64ToBytes(NO_DOC_XML_ZIP_BASE64);
+  const formData = new FormData();
+  formData.append("file", new File([zipBytes as unknown as BlobPart], "no-document.docx"));
 
   const res = await app.fetch(
     new Request(`${BASE}/api/upload`, {
@@ -231,9 +385,131 @@ Deno.test("POST /api/upload with docx rejects as 'not yet supported' (415)", asy
 
   assertEquals(res.status, 415);
   const data = await res.json();
-  assertStringIncludes(data.error.toLowerCase(), "not yet supported");
+  assertEquals(data.error, "This file is not a valid .docx (no word/document.xml).");
   assert(data.correlationId);
-  assertEquals(data.file, "manuscript.docx");
+  assertEquals(data.file, "no-document.docx");
+});
+
+Deno.test("POST /api/upload rejects legacy .doc (Word 97-2003) with specific 415 message", async () => {
+  const { app, user } = await setupTestApp();
+  // OLE compound document magic: D0 CF 11 E0 A1 B1 1A E1
+  // A real legacy sample from Apache Tika was verified against this handler (tested with /tmp/real.doc).
+  const oleBytes = new Uint8Array([
+    0xd0,
+    0xcf,
+    0x11,
+    0xe0,
+    0xa1,
+    0xb1,
+    0x1a,
+    0xe1,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+  ]);
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new File([oleBytes as unknown as BlobPart], "legacy.doc", { type: "application/msword" }),
+  );
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 415);
+  const data = await res.json();
+  assertEquals(
+    data.error,
+    "Legacy .doc files (Word 97-2003) are not supported. Save the document as .docx and upload that.",
+  );
+  assert(data.correlationId);
+  assertEquals(data.file, "legacy.doc");
+});
+
+Deno.test("POST /api/upload rejects oversize docx > 10 MiB with 413 naming limit and byte count", async () => {
+  const { app, user } = await setupTestApp();
+  const oversizeBytes = new Uint8Array(10 * 1024 * 1024 + 256);
+  // Zip magic header PK\x03\x04
+  oversizeBytes[0] = 0x50;
+  oversizeBytes[1] = 0x4b;
+  oversizeBytes[2] = 0x03;
+  oversizeBytes[3] = 0x04;
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new File([oversizeBytes as unknown as BlobPart], "huge-document.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  );
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 413);
+  const data = await res.json();
+  assert(data.correlationId);
+  assertEquals(data.limit, 10 * 1024 * 1024);
+  assert(data.actual >= 10 * 1024 * 1024);
+  assertStringIncludes(data.error, "10 MiB");
+  assertStringIncludes(data.error, "10,485,760");
+  assertEquals(data.file, "huge-document.docx");
+});
+
+Deno.test("POST /api/upload rejects docx whose text exceeds 72,000 bytes with 413 naming narration cap", async () => {
+  const { app, user } = await setupTestApp();
+  const longText = "Word paragraph with many descriptive terms repeating continuously. ".repeat(
+    1200,
+  );
+  const textBytes = new TextEncoder().encode(longText.trim()).byteLength;
+  assert(textBytes > 72_000);
+
+  const docXml = new TextEncoder().encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>${longText}</w:t></w:r></w:p>
+  </w:body>
+</w:document>`);
+
+  const zipBytes = makeStoredZip([
+    { name: "[Content_Types].xml", data: new TextEncoder().encode("<Types/>") },
+    { name: "word/document.xml", data: docXml },
+  ]);
+
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new File([zipBytes as unknown as BlobPart], "encyclopedia.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }),
+  );
+
+  const res = await app.fetch(
+    new Request(`${BASE}/api/upload`, {
+      method: "POST",
+      headers: { "x-feed-token": user.feedToken },
+      body: formData,
+    }),
+  );
+
+  assertEquals(res.status, 413);
+  const data = await res.json();
+  assert(data.correlationId);
+  assertEquals(data.limit, 72000);
+  assertEquals(data.actual, textBytes);
+  assertStringIncludes(data.error, "72,000");
+  assertStringIncludes(data.error, String(textBytes));
+  assertEquals(data.file, "encyclopedia.docx");
 });
 
 Deno.test("POST /api/upload rejects bodies > 10 MiB with 413 naming limit and byte count", async () => {

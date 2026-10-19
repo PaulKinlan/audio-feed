@@ -1,4 +1,5 @@
 /// <reference lib="dom" />
+import { DOMParser } from "npm:linkedom@0.18.12";
 import {
   clean,
   extractArticle,
@@ -51,6 +52,7 @@ export interface UploadDependencies {
 export type DetectedFileType =
   | { kind: "pdf" }
   | { kind: "docx" }
+  | { kind: "doc" }
   | { kind: "zip" }
   | { kind: "html" }
   | { kind: "text" }
@@ -70,7 +72,22 @@ export function detectFileType(bytes: Uint8Array, filename: string): DetectedFil
     return { kind: "pdf" };
   }
 
-  // 2. Zip magic: PK\x03\x04
+  // 2. Old binary OLE Word (.doc): D0 CF 11 E0 A1 B1 1A E1
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0xd0 &&
+    bytes[1] === 0xcf &&
+    bytes[2] === 0x11 &&
+    bytes[3] === 0xe0 &&
+    bytes[4] === 0xa1 &&
+    bytes[5] === 0xb1 &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0xe1
+  ) {
+    return { kind: "doc" };
+  }
+
+  // 3. Zip magic: PK\x03\x04
   if (
     bytes.length >= 4 &&
     bytes[0] === 0x50 && // 'P'
@@ -78,22 +95,10 @@ export function detectFileType(bytes: Uint8Array, filename: string): DetectedFil
     bytes[2] === 0x03 &&
     bytes[3] === 0x04
   ) {
-    if (ext === "docx" || ext === "doc") {
+    if (ext === "docx") {
       return { kind: "docx" };
     }
     return { kind: "zip" };
-  }
-
-  // 3. Old binary OLE Word (.doc): D0 CF 11 E0 A1 B1 1A E1
-  if (
-    bytes.length >= 8 &&
-    bytes[0] === 0xd0 &&
-    bytes[1] === 0xcf &&
-    bytes[2] === 0x11 &&
-    bytes[3] === 0xe0 &&
-    ext === "doc"
-  ) {
-    return { kind: "docx" };
   }
 
   // 4. Any file with .docx extension, even if corrupt/partial
@@ -164,6 +169,157 @@ export function ensurePlainTextOnly(text: string): string {
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
     .replace(/<[^>]+>/g, "");
+}
+
+export async function extractDocxArticle(
+  bytes: Uint8Array,
+  syntheticUrl: string,
+  displayTitle: string,
+): Promise<ExtractedArticle> {
+  // 1. Locate EOCD signature 0x06054b50 searching backwards from end
+  let eocdOffset = -1;
+  const minOffset = Math.max(0, bytes.length - 65535 - 22);
+  for (let i = bytes.length - 22; i >= minOffset; i--) {
+    if (
+      bytes[i] === 0x50 &&
+      bytes[i + 1] === 0x4b &&
+      bytes[i + 2] === 0x05 &&
+      bytes[i + 3] === 0x06
+    ) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const totalEntries = view.getUint16(eocdOffset + 10, true);
+  const cdSize = view.getUint32(eocdOffset + 12, true);
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+
+  if (cdOffset < 0 || cdOffset + cdSize > bytes.length) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  // 2. Walk Central Directory entries
+  let entryOffset = cdOffset;
+  let targetEntry: {
+    compressionMethod: number;
+    compressedSize: number;
+    localHeaderOffset: number;
+  } | null = null;
+
+  for (let i = 0; i < totalEntries && entryOffset + 46 <= cdOffset + cdSize; i++) {
+    if (view.getUint32(entryOffset, true) !== 0x02014b50) {
+      break;
+    }
+    const compressionMethod = view.getUint16(entryOffset + 10, true);
+    const compressedSize = view.getUint32(entryOffset + 20, true);
+    const nameLen = view.getUint16(entryOffset + 28, true);
+    const extraLen = view.getUint16(entryOffset + 30, true);
+    const commentLen = view.getUint16(entryOffset + 32, true);
+    const localHeaderOffset = view.getUint32(entryOffset + 42, true);
+
+    if (entryOffset + 46 + nameLen > bytes.length) break;
+
+    const nameBytes = bytes.subarray(entryOffset + 46, entryOffset + 46 + nameLen);
+    const name = new TextDecoder("utf-8").decode(nameBytes);
+
+    if (name === "word/document.xml") {
+      targetEntry = {
+        compressionMethod,
+        compressedSize,
+        localHeaderOffset,
+      };
+      break;
+    }
+
+    entryOffset += 46 + nameLen + extraLen + commentLen;
+  }
+
+  if (!targetEntry) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  const { compressionMethod, compressedSize, localHeaderOffset } = targetEntry;
+
+  if (localHeaderOffset + 30 > bytes.length) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+  const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+  const dataOffset = localHeaderOffset + 30 + localNameLen + localExtraLen;
+
+  if (dataOffset + compressedSize > bytes.length) {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  const compressedData = bytes.subarray(dataOffset, dataOffset + compressedSize);
+  let xmlBytes: Uint8Array;
+  if (compressionMethod === 0) {
+    xmlBytes = compressedData;
+  } else if (compressionMethod === 8) {
+    try {
+      const decompressed = await new Response(
+        new Blob([compressedData as unknown as BlobPart]).stream().pipeThrough(
+          new DecompressionStream("deflate-raw"),
+        ),
+      ).arrayBuffer();
+      xmlBytes = new Uint8Array(decompressed);
+    } catch {
+      throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
+    }
+  } else {
+    throw new IngestError(415, "This file is not a valid .docx (no word/document.xml).");
+  }
+
+  const xmlText = new TextDecoder("utf-8", { fatal: false }).decode(xmlBytes);
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(xmlText, "text/xml") as unknown as Document;
+  } catch {
+    throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
+  }
+
+  if (!doc || !doc.documentElement || doc.getElementsByTagName("parsererror").length > 0) {
+    throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
+  }
+
+  const paragraphs: string[] = [];
+  for (const p of doc.getElementsByTagName("w:p")) {
+    let paraText = "";
+    for (const t of p.getElementsByTagName("w:t")) {
+      paraText += t.textContent ?? "";
+    }
+    if (paraText.trim().length > 0) {
+      paragraphs.push(paraText.trim());
+    }
+  }
+
+  const cleanBody = ensurePlainTextOnly(paragraphs.join("\n\n").trim());
+  if (!cleanBody) {
+    throw new IngestError(415, "This file is not a valid .docx (contains no readable text).");
+  }
+
+  const firstPara = cleanBody.split(/\r?\n\s*\r?\n/)[0]?.trim() ?? "";
+  const lead = firstPara.slice(0, 300);
+  const title = displayTitle || "Uploaded Document";
+
+  return {
+    url: syntheticUrl,
+    title,
+    author: null,
+    publishedAt: null,
+    lead,
+    body: cleanBody,
+  };
 }
 
 /** Mount at POST /api/upload. Caller supplies approved-user authorization and durable queue. */
@@ -383,9 +539,10 @@ export function createUploadIngestHandler(
       }
 
       const detected = detectFileType(fileBytes, rawFilename);
-      if (detected.kind === "docx") {
+      if (detected.kind === "doc") {
         const correlationId = crypto.randomUUID();
-        const error = "DOCX files are not yet supported.";
+        const error =
+          "Legacy .doc files (Word 97-2003) are not supported. Save the document as .docx and upload that.";
         await deps.onFailure?.({
           user,
           reason: "unsupported_media",
@@ -432,7 +589,27 @@ export function createUploadIngestHandler(
       const syntheticUrl = `upload://${user.id}/${articleId}`;
 
       let article: ExtractedArticle;
-      if (detected.kind === "pdf") {
+      if (detected.kind === "docx") {
+        let extracted: ExtractedArticle;
+        try {
+          extracted = await extractDocxArticle(fileBytes, syntheticUrl, displayTitle);
+        } catch (err) {
+          const correlationId = crypto.randomUUID();
+          const status = err instanceof IngestError ? err.status : 415;
+          const error = (err as Error)?.message || "Failed to parse DOCX document.";
+          await deps.onFailure?.({
+            user,
+            reason: "unsupported_media",
+            status,
+            correlationId,
+            error,
+            filename: rawFilename,
+            mode,
+          });
+          return json({ error, correlationId, file: rawFilename }, status);
+        }
+        article = extracted;
+      } else if (detected.kind === "pdf") {
         let extracted: ExtractedArticle;
         try {
           extracted = await extractPdfArticle(fileBytes, syntheticUrl, {
