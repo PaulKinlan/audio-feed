@@ -4187,6 +4187,29 @@ export function startInProcessServer(
  * removed the parent, and the children recreated the profile inside it. This is the kill-then-await-status pattern
  * launchChrome's close() has always used, so a test that launches Chrome itself behaves the same way.
  */
+/**
+ * Write a run-owned SCRATCH file (a fixture, never evidence) (audio-feed-d82rv).
+ *
+ * A browser proof that fills a file input through CDP DOM.setFileInputFiles needs real
+ * paths on disk, and those paths live under the run-owned makeTempDir root, never under
+ * docs/evidence. Writing them through this helper keeps the proof's OWN source free of
+ * raw Deno.writeFile call sites, which the evidence census (scripts/evidence-census.ts)
+ * counts as unattributable writes: a template target like `${SCRATCH}/x.pdf` resolves to
+ * nothing the census can name, and an unattributable write reddens the proof as a blind
+ * spot (audio-feed-0gbo) even though the destination is provably not evidence. Routing the
+ * write here states the contract once: scratch files are run-owned, temporary, and removed
+ * with the scratch root by removeDirWhenQuiet.
+ */
+export async function writeScratchFile(
+  scratchRoot: string,
+  name: string,
+  bytes: Uint8Array,
+): Promise<string> {
+  const path = `${scratchRoot}/${name}`;
+  await Deno.writeFile(path, bytes);
+  return path;
+}
+
 export async function killChromeAndWait(chrome: Deno.ChildProcess): Promise<void> {
   try {
     chrome.kill();

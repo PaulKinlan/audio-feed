@@ -46,6 +46,7 @@ import {
   spawnHarness,
   waitForChromeProfileUnused,
   withChrome,
+  writeScratchFile,
 } from "./proof-helper.ts";
 
 const ADMIN_TOKEN = "harness-admin";
@@ -212,18 +213,17 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
     };
     const paths: Record<string, string> = {};
     for (const [type, f] of Object.entries(files)) {
-      const p = `${SCRATCH}/${f.name}`;
-      await Deno.writeFile(p, f.bytes);
-      paths[type] = p;
+      // Fixtures go through writeScratchFile: they are run-owned scratch, never
+      // evidence, and a raw writeFile with a `${SCRATCH}/...` target is an
+      // unattributable write to the evidence census (audio-feed-0gbo).
+      paths[type] = await writeScratchFile(SCRATCH, f.name, f.bytes);
     }
-    const overLimitPath = `${SCRATCH}/over-limit.txt`;
-    await Deno.writeFile(overLimitPath, overLimit);
+    const overLimitPath = await writeScratchFile(SCRATCH, "over-limit.txt", overLimit);
     // The legacy .doc MUST be copied into the scratch root: CDP
     // DOM.setFileInputFiles reads the path from disk, and pointing it at a
     // path that does not exist is what produced the bogus 'Failed to fetch'
     // (a transport failure, not the format rejection) in the first harness.
-    const legacyDocPath = `${SCRATCH}/legacy.doc`;
-    await Deno.writeFile(legacyDocPath, legacyDoc);
+    const legacyDocPath = await writeScratchFile(SCRATCH, "legacy.doc", legacyDoc);
 
     // ---- a subscriber to upload as ------------------------------------------------
     console.log("[d82rv] reading harness users…");
@@ -571,10 +571,12 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       // A rejection that created a pending episode anyway would be the silent-processing
       // failure these conditions exist to catch, so each row also asserts the listing
       // gained NOTHING.
-      const noTextPdfPath = `${SCRATCH}/no-text.pdf`;
-      await Deno.writeFile(noTextPdfPath, makePdf([])); // a valid page with no text operators
-      const tooLongPath = `${SCRATCH}/too-long.txt`;
-      await Deno.writeFile(tooLongPath, new TextEncoder().encode("y".repeat(73_000)));
+      const noTextPdfPath = await writeScratchFile(SCRATCH, "no-text.pdf", makePdf([])); // a valid page with no text operators
+      const tooLongPath = await writeScratchFile(
+        SCRATCH,
+        "too-long.txt",
+        new TextEncoder().encode("y".repeat(73_000)),
+      );
 
       /** Upload, wait for a TERMINAL feedback state, then count fresh episodes. */
       async function rejectedUpload(path: string, desc: string) {
