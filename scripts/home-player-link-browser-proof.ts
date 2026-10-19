@@ -9,7 +9,8 @@
  *      - Verifies /listen landing page renders without a stored token.
  *      - Verifies returning subscriber banner appears on / when token is stored.
  *      - Verifies /listen auto-redirects to /listen/:token when token is stored.
- *      - Verifies sending an article on / displays "Open in Web Player →" linking to /listen/:token.
+ *      - Verifies submitting an article on /account reports a queued success state (the player link this used to
+ *        check lives only in the dead legacy home module; see the retirement note in the submission section).
  *      - Takes desktop screenshot.
  *   3. Mobile (390x844):
  *      - Verifies responsive layout and zero horizontal overflow.
@@ -34,7 +35,7 @@ const ASSERTS = [
   "no home-page form field is pre-filled with a feed token (privacy invariant)",
   "the session's own feed token is never pre-filled into a home form (privacy invariant)",
   "/listen with stored token restores directly to /listen/:token",
-  "submission success state offers 'Open in Web Player →'",
+  "submitting an article reports a queued success state (/account)",
   "mobile layout has zero horizontal overflow at 390px",
 ];
 
@@ -251,32 +252,59 @@ try {
             ? "no field carries this session's token"
             : `field '${leaked}' carries the session token`,
         );
-        // Send an article on / and verify "Open in Web Player →"
-        await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "homepage loaded again");
-
-        // audio-feed-vo25h: this used to fill a `#token` field with userToken before submitting. That field is gone -
-        // the home page's ingest form takes the subscriber's token from the session now (same change as the privacy
-        // check above: the explainer home, 0bf07a7e) - so setting it threw `null.value` and killed the proof after the
-        // /listen checks. The session already carries the token, which is what the assertion below proves.
-        await js(`
-        document.getElementById("url").value = "https://example.com/front-door-article";
-        document.getElementById("ingest").requestSubmit();
-      `);
-
+        // audio-feed-jnjh5: DOCUMENTED RE-WORD - same property, new expression.
+        //
+        // OLD (before 0bf07a7e): the ingest form lived on the home page, so this section filled #url and #token,
+        // submitted through #ingest, waited for #result to show class "ok" or read "Queued", and then asserted the
+        // success state offered a link reading "Open in Web Player →".
+        //
+        // WHAT CHANGED: 0bf07a7e ("explainer home redirect, admin observability sub-pages, account pagination, and
+        // 180s TTS budget") moved the send flow to /account, where the form is #sendForm/#sendUrl and the success
+        // state is TEXT in #sendFeedback - class "ok", reading "Queued: <title>. It appears in your feed once
+        // narrated." - with failures rendered into the same element as class "error".
+        //
+        // The old affordance string survives only in src/assets/home.js, the legacy module whose elements are no
+        // longer on the page: it builds "Open in Web Player →" for a flow that no longer exists there. Asserting on
+        // that string would be an assert against nothing, so the property is kept and the expression is the one the
+        // product actually renders. (That dead module is filed as its own bead, not deleted here.)
+        //
+        // Property: submitting an article reports a queued success state. It can fail - the same element carries
+        // class "error" on a failed ingest - and it was mutation-checked before landing.
+        await cdp("Page.navigate", { url: `${BASE}/account` });
         await until(
-          `document.getElementById("result")?.classList.contains("ok") || document.getElementById("result")?.textContent.includes("Queued")`,
-          "submission success",
+          `document.getElementById("sendForm") !== null`,
+          "account send form rendered",
+        );
+        await js(`
+        document.getElementById("sendUrl").value = "https://example.com/front-door-article";
+        document.getElementById("sendForm").requestSubmit();
+      `);
+        await until(
+          `document.getElementById("sendFeedback")?.textContent?.startsWith("Queued: ") === true`,
+          "queued success state on /account",
+        );
+        const sendFeedback = await js(`(() => {
+          const el = document.getElementById("sendFeedback");
+          return el ? { tone: el.dataset.tone || "", text: el.textContent || "" } : null;
+        })()`);
+        checker.check(
+          "submitting an article reports a queued success state (/account)",
+          sendFeedback !== null && sendFeedback.tone === "ok" &&
+            sendFeedback.text.startsWith("Queued: "),
+          sendFeedback === null
+            ? "no #sendFeedback element"
+            : `tone: '${sendFeedback.tone}' text: '${sendFeedback.text.slice(0, 60)}'`,
         );
 
-        const playerLinkUrl = await js(
-          `document.querySelector("#result .player-link")?.getAttribute("href")`,
-        );
-        checker.check(
-          "submission success state offers 'Open in Web Player →'",
-          typeof playerLinkUrl === "string" && playerLinkUrl.includes(`/listen/${userToken}`),
-          `player link: '${playerLinkUrl}'`,
-        );
+        // audio-feed-jnjh5: RETIRED, with its object named - the second half of the same re-word above.
+        // This used to read a "Open in Web Player →" link out of #result and assert its href contained
+        // /listen/<token>. Both halves of that are gone with the legacy home: #result no longer exists anywhere in src/,
+        // and the affordance string survives only in src/assets/home.js, a module whose elements are not on the page.
+        // /account does not offer a player link AT SUBMISSION either - narration is asynchronous, and its success text
+        // says so ("It appears in your feed once narrated."), so there is no equivalent href to re-point at.
+        // Recording the retirement here rather than deleting the section (the section's record is what tells the next
+        // reader that a submission success state was ever asserted), and re-asserting nothing in its place: an assert
+        // invented to fill the slot is how the last one came to test a string that no page renders.
 
         const shotDesktop = await cdp("Page.captureScreenshot", { format: "png" });
         await Deno.writeFile(
