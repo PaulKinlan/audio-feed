@@ -1,5 +1,4 @@
 /// <reference lib="dom" />
-import { DOMParser } from "npm:linkedom@0.18.12";
 import {
   clean,
   extractArticle,
@@ -226,6 +225,91 @@ async function inflateRawBounded(data: Uint8Array, maxBytes: number): Promise<Ui
   return out;
 }
 
+/**
+ * Decode XML entities the way DOM textContent would: the five named entities
+ * and numeric character references, in a SINGLE left-to-right pass so
+ * `&amp;lt;` decodes to the text `&lt;`, never to `<`.
+ */
+function decodeXmlEntities(text: string): string {
+  return text.replace(/&(#x?[0-9a-fA-F]+|amp|lt|gt|quot|apos);/g, (m, body) => {
+    switch (body) {
+      case "amp":
+        return "&";
+      case "lt":
+        return "<";
+      case "gt":
+        return ">";
+      case "quot":
+        return '"';
+      case "apos":
+        return "'";
+    }
+    const cp = body[1] === "x" || body[1] === "X"
+      ? parseInt(body.slice(2), 16)
+      : parseInt(body.slice(1), 10);
+    return Number.isFinite(cp) && cp >= 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
+  });
+}
+
+const TAG_NAME_END = new Set([">", " ", "\t", "\n", "\r", "/"]);
+
+/**
+ * Extract paragraph text from word/document.xml by SCANNING, never by building
+ * a DOM (audio-feed-heeem). Measured on the reviewer's repro: 3.3 MB of
+ * markup-dense XML holding two characters of text - under the 4 MiB inflated
+ * cap - became a ~260 MB DOM. The extraction needs only w:t text inside w:p
+ * elements (getElementsByTagName already assumed the literal w: prefix), so a
+ * bounded scan over the already size-capped string replaces the parser: memory
+ * stays proportional to the capped input plus the extracted text, and the DOM
+ * amplification class is GONE rather than capped. Malformed XML no longer
+ * fails well-formedness; it yields whatever text is visible, which
+ * ensurePlainTextOnly renders inert - the corruption rejections that remain
+ * (bad zip, bad deflate, no document.xml) are the ones with operator meaning.
+ */
+function extractDocxParagraphs(xml: string): string[] {
+  const paragraphs: string[] = [];
+  let cursor = 0;
+  while (cursor < xml.length) {
+    const pOpen = xml.indexOf("<w:p", cursor);
+    if (pOpen === -1) break;
+    // `<w:p` must BE the w:p element, not w:pPr / w:pgSz / w:pStyle: the next
+    // character ends the tag name.
+    if (!TAG_NAME_END.has(xml[pOpen + 4] ?? "")) {
+      cursor = pOpen + 4;
+      continue;
+    }
+    const pEnd = xml.indexOf("</w:p>", pOpen);
+    const pClose = pEnd === -1 ? xml.length : pEnd;
+    let para = "";
+    let tCursor = pOpen;
+    while (tCursor < pClose) {
+      const tOpen = xml.indexOf("<w:t", tCursor);
+      if (tOpen === -1 || tOpen >= pClose) break;
+      // `<w:t` must be w:t, not w:tbl / w:tc / w:tr (a table cell's paragraphs
+      // are found by the OUTER loop, exactly as getElementsByTagName found
+      // them).
+      if (!TAG_NAME_END.has(xml[tOpen + 4] ?? "")) {
+        tCursor = tOpen + 4;
+        continue;
+      }
+      const tagEnd = xml.indexOf(">", tOpen);
+      if (tagEnd === -1 || tagEnd >= pClose) break;
+      if (xml[tagEnd - 1] === "/") {
+        tCursor = tagEnd + 1; // <w:t/> carries no text
+        continue;
+      }
+      const tEnd = xml.indexOf("</w:t>", tagEnd);
+      if (tEnd === -1 || tEnd > pClose) break;
+      para += decodeXmlEntities(xml.slice(tagEnd + 1, tEnd));
+      tCursor = tEnd + 6;
+    }
+    if (para.trim().length > 0) paragraphs.push(para.trim());
+    if (pEnd === -1) break;
+    cursor = pEnd + 6;
+  }
+  return paragraphs;
+}
+
 export async function extractDocxArticle(
   bytes: Uint8Array,
   syntheticUrl: string,
@@ -340,27 +424,7 @@ export async function extractDocxArticle(
   }
 
   const xmlText = new TextDecoder("utf-8", { fatal: false }).decode(xmlBytes);
-  let doc: Document;
-  try {
-    doc = new DOMParser().parseFromString(xmlText, "text/xml") as unknown as Document;
-  } catch {
-    throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
-  }
-
-  if (!doc || !doc.documentElement || doc.getElementsByTagName("parsererror").length > 0) {
-    throw new IngestError(415, "This file is not a valid .docx (unparseable XML).");
-  }
-
-  const paragraphs: string[] = [];
-  for (const p of doc.getElementsByTagName("w:p")) {
-    let paraText = "";
-    for (const t of p.getElementsByTagName("w:t")) {
-      paraText += t.textContent ?? "";
-    }
-    if (paraText.trim().length > 0) {
-      paragraphs.push(paraText.trim());
-    }
-  }
+  const paragraphs = extractDocxParagraphs(xmlText);
 
   const cleanBody = ensurePlainTextOnly(paragraphs.join("\n\n").trim());
   if (!cleanBody) {

@@ -643,6 +643,60 @@ Deno.test("POST /api/upload rejects a stored .docx whose document XML exceeds th
   assertEquals(data.file, "bloated.docx");
 });
 
+Deno.test("extractDocxArticle accepts the reviewer's markup-dense ratio bomb WITHOUT a DOM (audio-feed-heeem)", async () => {
+  // The exact heeem repro shape: 3.3 MB of inflated XML holding two characters
+  // of text, from a 6.6 KB zip. Under the old DOMParser path this reached
+  // ~260 MB peak RSS; the answer is not a tighter cap (the text IS legitimately
+  // tiny) but a bounded parsing strategy. The document is ACCEPTED - the
+  // assertion is that extraction is correct and the DOM amplifier is gone
+  // (pinned structurally by the source test below).
+  const xml = `<w:document><w:body><w:p><w:r><w:t>ok</w:t></w:r>${
+    "<w:r></w:r>".repeat(300_000)
+  }</w:p></w:body></w:document>`;
+  const zipBytes = await makeDeflatedZip([
+    { name: "[Content_Types].xml", data: new TextEncoder().encode("<Types/>") },
+    { name: "word/document.xml", data: new TextEncoder().encode(xml) },
+  ]);
+  assert(zipBytes.byteLength < 50_000, `ratio bomb must be tiny, was ${zipBytes.byteLength}`);
+  const article = await extractDocxArticle(zipBytes, "upload://u/1", "ratio");
+  assertEquals(article.body, "ok");
+});
+
+Deno.test("docx extraction builds no DOM (audio-feed-heeem): the amplifier is gone, not just capped", async () => {
+  // The structural pin: if DOMParser returns to this module, the 78x markup-to-
+  // RSS amplification returns with it, under ANY inflated-byte cap.
+  const source = await Deno.readTextFile(new URL("../src/ingest/upload.ts", import.meta.url));
+  assert(!source.includes("DOMParser"), "docx extraction must not materialize a DOM");
+});
+
+Deno.test("extractDocxArticle decodes XML entities exactly once, like DOM textContent (audio-feed-heeem)", async () => {
+  const xml = `<w:document><w:body>` +
+    `<w:p><w:r><w:t>Fish &amp; Chips &lt;3 &#65;&#x42; &amp;lt; stays literal</w:t></w:r></w:p>` +
+    `</w:body></w:document>`;
+  const zipBytes = await makeDeflatedZip([
+    { name: "word/document.xml", data: new TextEncoder().encode(xml) },
+  ]);
+  const article = await extractDocxArticle(zipBytes, "upload://u/1", "entities");
+  assertEquals(article.body, "Fish & Chips <3 AB &lt; stays literal");
+});
+
+Deno.test("extractDocxArticle handles w:t attributes, self-closing tags, and table cells (audio-feed-heeem)", async () => {
+  const xml = `<w:document><w:body>` +
+    `<w:p><w:r><w:t xml:space="preserve">spaced  text</w:t></w:r><w:r><w:t/></w:r></w:p>` +
+    `<w:p/>` +
+    `<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+    `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>heading text</w:t></w:r></w:p>` +
+    `</w:body></w:document>`;
+  const zipBytes = await makeDeflatedZip([
+    { name: "word/document.xml", data: new TextEncoder().encode(xml) },
+  ]);
+  const article = await extractDocxArticle(zipBytes, "upload://u/1", "shapes");
+  // xml:space="preserve" whitespace survives the paragraph trim only at the ends;
+  // table-cell paragraphs are extracted (getElementsByTagName found them too);
+  // w:pPr/w:pStyle must not be mistaken for w:p, nor w:tbl for w:t.
+  assertEquals(article.body, "spaced  text\n\ncell text\n\nheading text");
+});
+
 Deno.test("POST /api/upload rejects bodies > 10 MiB with 413 naming limit and byte count", async () => {
   const { app, user } = await setupTestApp();
   const oversizeBytes = new Uint8Array(10 * 1024 * 1024 + 128);
