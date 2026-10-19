@@ -24,6 +24,16 @@ const homeDataElement = document.getElementById("home-data");
 const HOME_DATA = homeDataElement ? JSON.parse(homeDataElement.textContent || "{}") : { base: "" };
 const BASE = HOME_DATA.base;
 
+// audio-feed-1dv4x: LEGACY INGEST WIRING - do not assert against this file.
+// The ids below (#ingest, #submit, #result, #url, #token) exist NOWHERE in src/ any more: 0bf07a7e replaced the home
+// page's ingest form with the explainer home, and the send flow now lives on /account (src/routes/account.ts -
+// #sendForm, #sendUrl, #sendFeedback, success marked with data-tone="ok"). Every lookup here returns null, so the
+// blocks guarded by them are dead at runtime - even though this MODULE is very much alive: it is imported by
+// src/routes/assets.ts:30, listed in the asset manifest (:82), and loaded as the / page's scriptModule
+// (src/routes/home.ts:253). That is why audio-feed-1dv4x did NOT delete the file; it marks it.
+// For anyone writing a proof: grepping an affordance string in src/ is not evidence that a page renders it. That
+// mistake cost audio-feed-vo25h + e3bp5 + jnjh5 - a proof asserted on #ingest/#result/"Open in Web Player →", all of
+// which live only here.
 const form = /** @type {HTMLFormElement | null} */ (document.getElementById("ingest"));
 const button = /** @type {HTMLButtonElement | null} */ (document.getElementById("submit"));
 const result = document.getElementById("result");
@@ -93,6 +103,11 @@ if (form && button && result && url && token) {
       a.href = playerUrl;
       a.className = "player-link";
       a.style.fontWeight = "600";
+      // audio-feed-1dv4x: DEAD - "Open in Web Player →" is NOT RENDERED ANYWHERE. This line is inside the
+      // `if (form && button && result && url && token)` guard, and every one of those elements VANISHED from src/
+      // when 0bf07a7e moved the send flow to /account (#sendForm/#sendUrl/#sendFeedback, success via
+      // data-tone="ok"). The live player link is on the account page. A grep landing here has found code that
+      // cannot run - do not assert against it.
       a.textContent = "Open in Web Player →";
       linkWrap.appendChild(a);
       result.append(linkWrap);
@@ -239,6 +254,11 @@ if (feedForm && feedButton && feedResult && feedUrl) {
       a.href = playerUrl;
       a.className = "player-link";
       a.style.fontWeight = "600";
+      // audio-feed-1dv4x: DEAD - "Open in Web Player →" is NOT RENDERED ANYWHERE. This line is inside the
+      // `if (form && button && result && url && token)` guard, and every one of those elements VANISHED from src/
+      // when 0bf07a7e moved the send flow to /account (#sendForm/#sendUrl/#sendFeedback, success via
+      // data-tone="ok"). The live player link is on the account page. A grep landing here has found code that
+      // cannot run - do not assert against it.
       a.textContent = "Open in Web Player →";
       linkWrap.appendChild(a);
       feedResult.append(linkWrap);
