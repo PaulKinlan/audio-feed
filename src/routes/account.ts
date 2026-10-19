@@ -292,6 +292,22 @@ ${
       </fieldset>
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
+    <div class="u-mt-3">
+      <h3 class="legend u-legend" id="upload-h">Upload a document</h3>
+      <p class="sub">Upload a text, markdown, HTML, or PDF file to narrate (up to 10 MiB).</p>
+      <form id="uploadForm" enctype="multipart/form-data" aria-labelledby="upload-h">
+        <div class="send-row">
+          <div class="field"><label for="uploadFile">Document file</label>
+            <input id="uploadFile" name="file" type="file" required accept=".txt,.text,.md,.markdown,.html,.htm,.pdf,text/plain,text/markdown,text/html,application/pdf"></div>
+          <button class="btn" type="submit"${approved ? "" : " disabled"}>Upload to Audio</button>
+        </div>
+        <fieldset class="choices" aria-label="How should the uploaded document sound?">
+          <label><input type="radio" name="uploadMode" value="direct" checked> Read aloud</label>
+          <label><input type="radio" name="uploadMode" value="deepdive"> Deep dive, two voices</label>
+        </fieldset>
+        <p class="feedback" id="uploadFeedback" role="status" aria-live="polite"></p>
+      </form>
+    </div>
     <div class="bookmarklet-box">
       <div class="u-flex-between-wrap">
         <div>
@@ -605,6 +621,39 @@ ${CONFIRM_DIALOG_CLIENT}
       const res = await send("POST", "/api/ingest", { url: $("sendUrl").value.trim(), mode });
       say(feedback, "ok", "Queued: " + res.article.title + ". It appears in your feed once narrated.");
       $("sendUrl").value = "";
+    } catch (error) {
+      say(feedback, "error", String(error.message || error));
+    }
+  });
+
+  const uploadForm = $("uploadForm");
+  if (uploadForm) uploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const feedback = $("uploadFeedback");
+    const fileInput = $("uploadFile");
+    const file = fileInput && fileInput.files && fileInput.files[0];
+    if (!file) {
+      say(feedback, "error", "Select a file to upload.");
+      return;
+    }
+    const mode = (document.querySelector("input[name=uploadMode]:checked") || {}).value || "direct";
+    say(feedback, "ok", "Uploading " + file.name + "…");
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("mode", mode);
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
+      if (!res.ok) {
+        throw new Error((data && data.error) || ("Upload failed (" + res.status + ")"));
+      }
+      const title = (data.article && data.article.title) ? data.article.title : (data.episodeId || file.name);
+      say(feedback, "ok", "Queued: " + title + ". It appears in your feed once narrated.");
+      uploadForm.reset();
     } catch (error) {
       say(feedback, "error", String(error.message || error));
     }
