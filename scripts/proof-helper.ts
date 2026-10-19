@@ -18,6 +18,11 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
+import {
+  hasGeneratedRegion,
+  mergeGeneratedRegion,
+  readEvidenceReadmeIfExists,
+} from "./evidence-readme.ts";
 
 export interface SupervisedHarness {
   port: number;
@@ -4100,6 +4105,23 @@ export async function writeEvidenceReadme(
   await Deno.mkdir(options.dir, { recursive: true });
   const cleanDir = options.dir.replace(/\/+$/, "");
   const readmePath = `${cleanDir}/README.md`;
+  // audio-feed-i98g1: a README that a human curates AND a proof regenerates is a two-writer file, and
+  // the overwrite here used to be the second writer that always won - one run of
+  // playback-position-browser-proof deleted 26 lines of hand-written prose from
+  // docs/evidence/audio-feed-kzi/README.md. The house mechanism is the marker-delimited generated
+  // region (scripts/evidence-readme.ts, audio-feed-pluv): when the committed README carries the
+  // markers, write ONLY the generated region and preserve everything a human wrote outside it.
+  // A README without the markers keeps the historical overwrite - migration is a deliberate per-file
+  // decision, never injected here. A file that HAS markers but malformed ones (missing, duplicated,
+  // reversed) falls through to mergeGeneratedRegion and THROWS loudly: refuse to guess, and above all
+  // refuse to strip prose because the region could not be parsed.
+  const existing = await readEvidenceReadmeIfExists(readmePath);
+  if (existing !== null && hasGeneratedRegion(existing)) {
+    // mergeGeneratedRegion runs BEFORE the write: a malformed region throws and leaves the file
+    // exactly as it was, rather than half-written or overwritten.
+    await Deno.writeTextFile(readmePath, mergeGeneratedRegion(existing, content));
+    return readmePath;
+  }
   await Deno.writeTextFile(readmePath, content);
   return readmePath;
 }

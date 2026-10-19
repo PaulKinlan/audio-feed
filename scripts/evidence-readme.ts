@@ -25,7 +25,9 @@
  *
  * NOTHING IS MIGRATED BY THIS MODULE. A README with no markers is rejected loudly rather than having
  * markers injected into it, so the generator's behaviour is unchanged until a README is deliberately
- * migrated - the migration is a separate, per-file decision.
+ * migrated - the migration is a separate, per-file decision. The FIRST generator wired to honour a
+ * migrated README is writeEvidenceReadme in scripts/proof-helper.ts (audio-feed-i98g1: it now merges
+ * into marker-delimited files instead of overwriting them, and still overwrites un-migrated ones).
  *
  * THE MATCHING RULE, AND ITS KNOWN LIMIT, STATED PLAINLY: a marker is a line that is EXACTLY the marker
  * text (surrounding whitespace ignored). That makes an inline mention in prose safe - a README can talk
@@ -70,6 +72,36 @@ function requireSingleMarker(lines: string[], marker: string): number {
     );
   }
   return first;
+}
+
+/**
+ * True when `text` carries either marker as a whole line, i.e. the README has been MIGRATED to the
+ * two-writer shape. Deliberately does NOT validate the marker pair: a file with a begin marker but
+ * no end marker is migrated-but-malformed, and callers must treat it as a generated-region file and
+ * let splitGeneratedRegion throw LOUDLY rather than fall back to a whole-file overwrite - the silent
+ * fallback would strip human prose exactly when the file needs protection most (audio-feed-i98g1).
+ */
+export function hasGeneratedRegion(text: string): boolean {
+  return text.split("\n").some((line) =>
+    line.trim() === GENERATED_BEGIN || line.trim() === GENERATED_END
+  );
+}
+
+/**
+ * Read an evidence README for a region merge, or null when it does not exist yet.
+ *
+ * WHY THE READ LIVES HERE AND NOT AT THE proof-helper CALL SITE (audio-feed-i98g1): the fast gate's
+ * read-relation derivation follows a suite's imports ONE hop out, and it resolves a template read like
+ * `Deno.readTextFile(`${dir}/README.md`)` to its static tail - so a read written in proof-helper.ts
+ * lent EVERY proof-helper importer (14 suites) a "README.md" relation, and a change to the repo-root
+ * README.md selected all of them (measured: the fixture in tests/fast_gate_subset_test.ts went from 3
+ * to 17 suites). Passed a full path as a plain parameter, this call site resolves to nothing, and the
+ * TRUE relations - docs/evidence files a suite really reads - keep driving the selection unchanged.
+ */
+export async function readEvidenceReadmeIfExists(
+  readmePath: string,
+): Promise<string | null> {
+  return await Deno.readTextFile(readmePath).catch(() => null);
 }
 
 /** Split a README into the human prefix, the generated body and the human suffix. */

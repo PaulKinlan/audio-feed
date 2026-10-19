@@ -13,11 +13,14 @@ import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/a
 import {
   GENERATED_BEGIN,
   GENERATED_END,
+  hasGeneratedRegion,
   isRegenerationStable,
   mergeGeneratedRegion,
   splitGeneratedRegion,
   wrapGeneratedRegion,
 } from "../scripts/evidence-readme.ts";
+import { formatEvidenceReadme } from "../scripts/proof-helper.ts";
+import { PLAYBACK_POSITION_EVIDENCE } from "../scripts/playback-position-evidence.ts";
 
 const GENERATED_BODY = "PASS  a generated row\nPASS  another generated row";
 
@@ -159,3 +162,44 @@ Deno.test("audio-feed-fied: a marker-delimited README with NO final newline roun
   assertEquals(mergeGeneratedRegion(tailWithNewline, "body"), tailWithNewline);
   assertEquals(isRegenerationStable(tailWithNewline, "body"), true);
 });
+
+Deno.test(
+  "audio-feed-i98g1: the committed kzi README is regeneration-stable against the proof's ACTUAL options",
+  async () => {
+    // THE ACCEPTANCE, GATE-RUNNABLE. The proof itself is a browser script, so the fast gate cannot
+    // run it twice and diff; instead the options it generates its README from are shared
+    // (scripts/playback-position-evidence.ts) and pinned here against the committed file. If the
+    // script's asserts change and the committed file is not regenerated in the same commit, this
+    // row goes red BEFORE a run can silently dirty the two-writer file.
+    const committed = await Deno.readTextFile(
+      new URL("../docs/evidence/audio-feed-kzi/README.md", import.meta.url),
+    );
+    const generated = formatEvidenceReadme({
+      ...PLAYBACK_POSITION_EVIDENCE,
+      dir: new URL("../docs/evidence/audio-feed-kzi/", import.meta.url).pathname,
+    });
+    assertEquals(hasGeneratedRegion(committed), true, "the kzi README must be migrated to markers");
+    assertEquals(
+      isRegenerationStable(committed, generated),
+      true,
+      "the committed README must survive a regeneration unchanged - run scripts/playback-position-browser-proof.ts and commit its README if the asserts moved",
+    );
+    // and the human prose the markers exist to protect is actually there. The `- Debt: admitted
+    // (audio-feed-tgnu)` line is deliberately GONE (audio-feed-t5gt): the directory now carries a valid
+    // declaration, and an admitted directory with a valid declaration must remove its debt admission -
+    // the debt list is shrink-only and its length is the debt number.
+    for (
+      const prose of [
+        "## Feature",
+        "## Real-Browser CDP Verification",
+        "## Artifacts",
+      ]
+    ) {
+      assertStringIncludes(committed, prose);
+    }
+    assert(
+      !committed.includes("- Debt: admitted"),
+      "a declaring directory must not also carry a debt admission (audio-feed-t5gt)",
+    );
+  },
+);
