@@ -32,6 +32,7 @@ const ASSERTS = [
   "/listen landing page explains how to listen",
   "returning subscriber banner is visible on /",
   "no home-page form field is pre-filled with a feed token (privacy invariant)",
+  "the session's own feed token is never pre-filled into a home form (privacy invariant)",
   "/listen with stored token restores directly to /listen/:token",
   "submission success state offers 'Open in Web Player →'",
   "mobile layout has zero horizontal overflow at 390px",
@@ -193,9 +194,14 @@ try {
         // input and textarea on the page for the repository's feed-token shape, so it survives a rename or a second
         // field and still cannot pass while a token is sitting in a form. Links are deliberately excluded: a resume
         // link to /listen/<token> is a legitimate affordance, which is why the original check was about form fields.
+        // audio-feed-e3bp5: the first version of this check matched /feedtoken[a-z0-9]{4,}/i, which is the HARNESS
+        // FIXTURE spelling (scripts/account-harness.ts) and not the product's token format at all: newFeedToken() is
+        // randomToken(32) over [a-z0-9] (src/ids.ts:25-40), so a real token has no "feedtoken" prefix and the row
+        // reported PASS with a credential sitting in a field. It now matches the ACTUAL format - a whole value of 32
+        // base36 characters - so it tests token identity rather than a fixture spelling.
         const prefilledToken = await js(`(() => {
           const fields = Array.from(document.querySelectorAll("input, textarea"));
-          const offending = fields.find((el) => /feedtoken[a-z0-9]{4,}/i.test(String(el.value ?? "")));
+          const offending = fields.find((el) => /^[a-z0-9]{32}$/.test(String(el.value ?? "").trim()));
           return offending ? String(offending.getAttribute("id") || offending.tagName) : "";
         })()`);
         checker.check(
@@ -221,6 +227,30 @@ try {
         );
 
         const userToken = redirectedPath.replace("/listen/", "");
+
+        // audio-feed-e3bp5 (second half): a format match cannot know WHICH token is the subscriber's, so assert the
+        // identity too - the exact token this session was issued must never be pre-filled into a home-page form.
+        // This is the property the reviewer asked for: "actual session token cannot be prefilled into a home form
+        // unnoticed". It runs here because userToken only exists after the /listen/:token redirect above.
+        await cdp("Page.navigate", { url: `${BASE}/` });
+        await until(
+          `document.readyState === "complete"`,
+          "homepage loaded for the token-identity check",
+        );
+        const leaked = await js(`(() => {
+          const token = ${JSON.stringify(userToken)};
+          if (!token) return "no-session-token";
+          const fields = Array.from(document.querySelectorAll("input, textarea"));
+          const offending = fields.find((el) => String(el.value ?? "").includes(token));
+          return offending ? String(offending.getAttribute("id") || offending.tagName) : "";
+        })()`);
+        checker.check(
+          "the session's own feed token is never pre-filled into a home form (privacy invariant)",
+          leaked === "",
+          leaked === ""
+            ? "no field carries this session's token"
+            : `field '${leaked}' carries the session token`,
+        );
         // Send an article on / and verify "Open in Web Player →"
         await cdp("Page.navigate", { url: `${BASE}/` });
         await until(`document.readyState === "complete"`, "homepage loaded again");
