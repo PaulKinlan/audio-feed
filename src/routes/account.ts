@@ -93,6 +93,9 @@ const CSS = `
   .provider-icon svg { width: 100%; height: 100%; display: block; }
   .passkey-text { display: flex; flex-direction: column; gap: 0.1rem; }
   .passkey-label { font-size: 0.82rem; color: var(--text-muted); }
+  .upload-drop-zone { border: 2px dashed var(--border); border-radius: var(--radius); padding: var(--space-4); background: var(--surface-2); text-align: center; transition: border-color 0.15s ease, background-color 0.15s ease; margin-block-end: 0.75rem; }
+  .upload-drop-zone.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+  .drop-prompt { margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--text-muted); }
 `;
 
 function when(iso: string | undefined): string {
@@ -292,6 +295,25 @@ ${
       </fieldset>
       <p class="feedback" id="sendFeedback" role="status" aria-live="polite"></p>
     </form>
+    <div class="u-mt-3">
+      <h3 class="legend u-legend" id="upload-h">Upload a document</h3>
+      <p class="sub">Upload a document (.doc, .docx, .pdf, .html, .txt, .md) to narrate (up to 10 MiB).</p>
+      <form id="uploadForm" enctype="multipart/form-data" aria-labelledby="upload-h">
+        <div id="uploadDropZone" class="upload-drop-zone">
+          <p class="drop-prompt">Drag and drop a file here, or choose from your device:</p>
+          <div class="send-row">
+            <div class="field"><label for="uploadFile">Document file</label>
+              <input id="uploadFile" name="file" type="file" required accept=".doc,.docx,.pdf,.html,.htm,.txt,.md"></div>
+            <button class="btn" type="submit"${approved ? "" : " disabled"}>Upload to Audio</button>
+          </div>
+        </div>
+        <fieldset class="choices" aria-label="How should the uploaded document sound?">
+          <label><input type="radio" name="uploadMode" value="direct" checked> Read aloud</label>
+          <label><input type="radio" name="uploadMode" value="deepdive"> Deep dive, two voices</label>
+        </fieldset>
+        <p class="feedback" id="uploadFeedback" role="status" aria-live="polite"></p>
+      </form>
+    </div>
     <div class="bookmarklet-box">
       <div class="u-flex-between-wrap">
         <div>
@@ -609,6 +631,84 @@ ${CONFIRM_DIALOG_CLIENT}
       say(feedback, "error", String(error.message || error));
     }
   });
+
+  const uploadForm = $("uploadForm");
+  const uploadDropZone = $("uploadDropZone");
+  const uploadFile = $("uploadFile");
+  const uploadFeedback = $("uploadFeedback");
+
+  async function uploadDocument(file) {
+    if (!file) {
+      say(uploadFeedback, "error", "Select a file to upload.");
+      return;
+    }
+    const modeEl = document.querySelector("input[name=uploadMode]:checked");
+    const mode = modeEl ? modeEl.value : "direct";
+    say(uploadFeedback, "ok", "Uploading " + file.name + "…");
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("mode", mode);
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
+      if (!res.ok) {
+        throw new Error((data && data.error) || ("Upload failed (" + res.status + ")"));
+      }
+      const title = (data.article && data.article.title) ? data.article.title : (data.episodeId || file.name);
+      say(uploadFeedback, "ok", "Queued: " + title + ". It appears in your feed once narrated.");
+      if (uploadForm) uploadForm.reset();
+    } catch (error) {
+      say(uploadFeedback, "error", String(error.message || error));
+    }
+  }
+
+  if (uploadForm) {
+    uploadForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const file = uploadFile && uploadFile.files && uploadFile.files[0];
+      uploadDocument(file);
+    });
+  }
+
+  if (uploadDropZone) {
+    ["dragenter", "dragover"].forEach((name) => {
+      uploadDropZone.addEventListener(name, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        uploadDropZone.classList.add("dragover");
+      });
+    });
+
+    ["dragleave", "dragend"].forEach((name) => {
+      uploadDropZone.addEventListener(name, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        uploadDropZone.classList.remove("dragover");
+      });
+    });
+
+    uploadDropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      uploadDropZone.classList.remove("dragover");
+      const dt = event.dataTransfer;
+      const file = dt && dt.files && dt.files[0];
+      if (file) {
+        if (uploadFile) {
+          try {
+            uploadFile.files = dt.files;
+          } catch {
+            // Setting files on file input may throw in certain engines
+          }
+        }
+        uploadDocument(file);
+      }
+    });
+  }
 
   $("profileForm").addEventListener("submit", async (event) => {
     event.preventDefault();

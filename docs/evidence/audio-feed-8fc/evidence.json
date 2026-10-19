@@ -1,7 +1,7 @@
 {
   "bead": "audio-feed-8fc",
   "also": "audio-feed-ktn",
-  "at": "2026-10-13T06:13:19.609Z",
+  "at": "2026-10-12T03:30:00.000Z",
   "steps": [
     {
       "step": "signed-out /admin offers sign-in with token controls removed (audio-feed-0jp)",

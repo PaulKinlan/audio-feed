@@ -6,8 +6,9 @@
  * places; they page rather than materialise the catalogue. Moved out of compose.ts
  * by audio-feed-bd0 with no behaviour change.
  */
-import { createUrlIngestHandler } from "../ingest/url.ts";
-import { INBOX_SOURCE_ID } from "../types.ts";
+import { createUrlIngestHandler, type ExtractedArticle } from "../ingest/url.ts";
+import { createUploadIngestHandler } from "../ingest/upload.ts";
+import { type AudioMode, INBOX_SOURCE_ID, type User } from "../types.ts";
 import { sameOrigin, sessionUser } from "../auth/sessions.ts";
 import type { EpisodeQuery, MetadataStore } from "../storage/mod.ts";
 import type { Episode } from "../types.ts";
@@ -60,6 +61,146 @@ export async function countEpisodeScan(
   for await (const batch of episodeScan(metadata, query)) total += batch.length;
   return total;
 }
+/** Authorize an ingest or upload request using either presented feed-token or signed-in session user. */
+export async function authorizeIngest(
+  ctx: AppContext,
+  request: Request,
+): Promise<User | Response> {
+  if (!presentedToken(request)) {
+    // audio-feed-8fc: a signed-in browser may send without pasting its token,
+    // but a cookie is ambient, so it only counts from this origin. This is a
+    // state change (POST), so the strict `sameOrigin` wall applies rather than
+    // the same-site-read wall a GET route uses.
+    const signedIn = await sessionUser(ctx.stores.metadata, request);
+    if (!signedIn) return forbidden("A feed token is required (x-feed-token).");
+    if (!sameOrigin(request, resolveOrigin(ctx.config, request).baseUrl)) {
+      return forbidden("Cross-origin request refused.");
+    }
+    return signedIn.status === "approved" ? signedIn : forbidden("An approved user is required.");
+  }
+  // The explicit-token path is the gate every user-scoped API route owns
+  // (`approvedUserFor`); sharing it stops the spend check drifting between
+  // routes with its own copy of the try/catch.
+  const resolved = await approvedUserFor(ctx, request);
+  return "denied" in resolved ? resolved.denied : resolved.user;
+}
+
+export interface EnqueueInboxItemInput {
+  article: ExtractedArticle;
+  mode: AudioMode;
+  user: User;
+  articleId?: string;
+  episodeId?: string;
+  route?: string;
+}
+
+/** Construct and persist an Article+Episode pair for the inbox source, seeding the source if needed. */
+export async function enqueueInboxArticle(
+  ctx: AppContext,
+  input: EnqueueInboxItemInput,
+): Promise<{ articleId: string; episodeId: string }> {
+  const { article, mode, user, route = "/api/ingest" } = input;
+  // 202 means QUEUED, not synthesized: no worker exists yet, so this records
+  // a pending job rather than pretending an episode is ready.
+  const articleId = input.articleId ?? newArticleId();
+  const episodeId = input.episodeId ?? newEpisodeId();
+  const now = new Date().toISOString();
+  const record: Article = {
+    id: articleId,
+    userId: user.id,
+    sourceId: INBOX_SOURCE_ID,
+    url: article.url,
+    title: article.title,
+    author: article.author ?? undefined,
+    publishedAt: article.publishedAt ?? undefined,
+    content: article.body,
+    excerpt: article.lead,
+    ingestedAt: now,
+  };
+  const episode: Episode = {
+    id: episodeId,
+    userId: user.id,
+    sourceId: INBOX_SOURCE_ID,
+    sourceTitle: "Inbox",
+    articleId,
+    mode,
+    status: "pending",
+    title: article.title,
+    description: article.lead,
+    createdAt: now,
+  };
+  // audio-feed-d8q: one commit for the pair. Written as two calls, a failed
+  // putEpisode left the article stored with no audio behind it — and because
+  // queueItems dedupes on the article alone, a URL that came through the inbox once
+  // like that was skipped by every later poll of a feed carrying it (measured on
+  // main before this: queued=0 skipped=1 episodes=0, permanently). A retry still
+  // re-queues here, since this write is deliberately blind; what it can no longer do
+  // is half-succeed.
+  await ctx.stores.metadata.putArticleWithEpisode(record, episode);
+  // audio-feed-0s2j, audio-feed-16jq: once the pair write commits, the episode IS
+  // persisted in KV as pending. Nothing in the post-commit auxiliary path (source seeding,
+  // degradation logging, stderr warnings) must ever throw or escape enqueue to fail the 202
+  // response or emit a false pre-episode dead-letter log.
+  try {
+    if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
+      await ctx.stores.metadata.putSource({
+        id: INBOX_SOURCE_ID,
+        userId: user.id,
+        title: "Send to Audio",
+        modes: ["direct", "deepdive"],
+        // Unspecified on purpose (audio-feed-4xt): the inbox is not a source that
+        // ever chose a voice, so hard-coding "Charon" here would shadow both the
+        // user's own preference and the operator's DEFAULT_VOICE.
+        voices: {},
+        createdAt: now,
+      });
+    }
+  } catch (err) {
+    // audio-feed-0xdm: screen operational stderr logs to eliminate unscreened error/stack/article text
+    const screened = screenErrorForLogging(err);
+    console.warn(
+      `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued: ${screened.message}`,
+    );
+    // audio-feed-l5w1, audio-feed-16jq: record a distinct durable warn event for post-commit
+    // auxiliary failure; wrap in nested try/catch so a failure to record degradation cannot
+    // fail the enqueue or escalate to an enqueue_failed 503 dead-letter.
+    try {
+      await ctx.stores.metadata.appendLog({
+        time: new Date().toISOString(),
+        severity: "warn",
+        type: "ingest.source_seed_failed",
+        message: "Failed to seed inbox source after episode was queued",
+        process: "app",
+        route,
+        userId: user.id,
+        correlationId: crypto.randomUUID(),
+        reason: "source_seed_failed",
+        context: {
+          status: 202,
+          episodeId,
+          articleId,
+          sourceId: INBOX_SOURCE_ID,
+          error: screened.message,
+        },
+      });
+    } catch (logErr) {
+      // audio-feed-m0sk: accepted containment trade. Once `putArticleWithEpisode` has
+      // committed, the episode is durably queued and returning 5xx would report failure for a
+      // write that already succeeded (causing a retrying client to duplicate the episode).
+      // Because `appendLog` writes to the same metadata store that just failed, no separate
+      // in-process durable fallback channel exists; if `appendLog` also fails during a store
+      // outage, only this screened operational stderr warning remains, and a reader of the
+      // durable observability feed cannot distinguish this post-commit auxiliary degradation
+      // from clean 202 success during that outage.
+      const screenedLogErr = screenErrorForLogging(logErr);
+      console.warn(
+        `[audio-feed] failed to record source_seed_failed log for episode ${episodeId}: ${screenedLogErr.message}`,
+      );
+    }
+  }
+  return { articleId, episodeId };
+}
+
 /** `POST /api/ingest` — queue an arbitrary article for synthesis. */
 export function createIngestHandler(
   ctx: AppContext,
@@ -68,128 +209,9 @@ export function createIngestHandler(
   const handler = createUrlIngestHandler({
     fetchArticle: deps.fetchArticle,
     // Identity is the feed token, the same capability the feed routes use.
-    authorize: async (request) => {
-      if (!presentedToken(request)) {
-        // audio-feed-8fc: a signed-in browser may send without pasting its token,
-        // but a cookie is ambient, so it only counts from this origin. This is a
-        // state change (POST), so the strict `sameOrigin` wall applies rather than
-        // the same-site-read wall a GET route uses.
-        const signedIn = await sessionUser(ctx.stores.metadata, request);
-        if (!signedIn) return forbidden("A feed token is required (x-feed-token).");
-        if (!sameOrigin(request, resolveOrigin(ctx.config, request).baseUrl)) {
-          return forbidden("Cross-origin request refused.");
-        }
-        return signedIn.status === "approved"
-          ? signedIn
-          : forbidden("An approved user is required.");
-      }
-      // The explicit-token path is the gate every user-scoped API route owns
-      // (`approvedUserFor`); sharing it stops the spend check drifting between
-      // routes with its own copy of the try/catch.
-      const resolved = await approvedUserFor(ctx, request);
-      return "denied" in resolved ? resolved.denied : resolved.user;
-    },
-    enqueue: async ({ article, mode, user }) => {
-      // 202 means QUEUED, not synthesized: no worker exists yet, so this records
-      // a pending job rather than pretending an episode is ready.
-      const articleId = newArticleId();
-      const episodeId = newEpisodeId();
-      const now = new Date().toISOString();
-      const record: Article = {
-        id: articleId,
-        userId: user.id,
-        sourceId: INBOX_SOURCE_ID,
-        url: article.url,
-        title: article.title,
-        author: article.author ?? undefined,
-        publishedAt: article.publishedAt ?? undefined,
-        content: article.body,
-        excerpt: article.lead,
-        ingestedAt: now,
-      };
-      const episode: Episode = {
-        id: episodeId,
-        userId: user.id,
-        sourceId: INBOX_SOURCE_ID,
-        sourceTitle: "Inbox",
-        articleId,
-        mode,
-        status: "pending",
-        title: article.title,
-        description: article.lead,
-        createdAt: now,
-      };
-      // audio-feed-d8q: one commit for the pair. Written as two calls, a failed
-      // putEpisode left the article stored with no audio behind it — and because
-      // queueItems dedupes on the article alone, a URL that came through the inbox once
-      // like that was skipped by every later poll of a feed carrying it (measured on
-      // main before this: queued=0 skipped=1 episodes=0, permanently). A retry still
-      // re-queues here, since this write is deliberately blind; what it can no longer do
-      // is half-succeed.
-      await ctx.stores.metadata.putArticleWithEpisode(record, episode);
-      // audio-feed-0s2j, audio-feed-16jq: once the pair write commits, the episode IS
-      // persisted in KV as pending. Nothing in the post-commit auxiliary path (source seeding,
-      // degradation logging, stderr warnings) must ever throw or escape enqueue to fail the 202
-      // response or emit a false pre-episode dead-letter log.
-      try {
-        if (!(await ctx.stores.metadata.getSource(user.id, INBOX_SOURCE_ID))) {
-          await ctx.stores.metadata.putSource({
-            id: INBOX_SOURCE_ID,
-            userId: user.id,
-            title: "Send to Audio",
-            modes: ["direct", "deepdive"],
-            // Unspecified on purpose (audio-feed-4xt): the inbox is not a source that
-            // ever chose a voice, so hard-coding "Charon" here would shadow both the
-            // user's own preference and the operator's DEFAULT_VOICE.
-            voices: {},
-            createdAt: now,
-          });
-        }
-      } catch (err) {
-        // audio-feed-0xdm: screen operational stderr logs to eliminate unscreened error/stack/article text
-        const screened = screenErrorForLogging(err);
-        console.warn(
-          `[audio-feed] failed to seed inbox source for user ${user.id}; episode ${episodeId} was queued: ${screened.message}`,
-        );
-        // audio-feed-l5w1, audio-feed-16jq: record a distinct durable warn event for post-commit
-        // auxiliary failure; wrap in nested try/catch so a failure to record degradation cannot
-        // fail the enqueue or escalate to an enqueue_failed 503 dead-letter.
-        try {
-          await ctx.stores.metadata.appendLog({
-            time: new Date().toISOString(),
-            severity: "warn",
-            type: "ingest.source_seed_failed",
-            message: "Failed to seed inbox source after episode was queued",
-            process: "app",
-            route: "/api/ingest",
-            userId: user.id,
-            correlationId: crypto.randomUUID(),
-            reason: "source_seed_failed",
-            context: {
-              status: 202,
-              episodeId,
-              articleId,
-              sourceId: INBOX_SOURCE_ID,
-              error: screened.message,
-            },
-          });
-        } catch (logErr) {
-          // audio-feed-m0sk: accepted containment trade. Once `putArticleWithEpisode` has
-          // committed, the episode is durably queued and returning 5xx would report failure for a
-          // write that already succeeded (causing a retrying client to duplicate the episode).
-          // Because `appendLog` writes to the same metadata store that just failed, no separate
-          // in-process durable fallback channel exists; if `appendLog` also fails during a store
-          // outage, only this screened operational stderr warning remains, and a reader of the
-          // durable observability feed cannot distinguish this post-commit auxiliary degradation
-          // from clean 202 success during that outage.
-          const screenedLogErr = screenErrorForLogging(logErr);
-          console.warn(
-            `[audio-feed] failed to record source_seed_failed log for episode ${episodeId}: ${screenedLogErr.message}`,
-          );
-        }
-      }
-      return { articleId, episodeId };
-    },
+    authorize: (request) => authorizeIngest(ctx, request),
+    enqueue: ({ article, mode, user }) =>
+      enqueueInboxArticle(ctx, { article, mode, user, route: "/api/ingest" }),
     onFailure: async ({ user, reason, status, mode, error, article }) => {
       // audio-feed-r7sb, audio-feed-tm97, audio-feed-fapx, audio-feed-8v53: surface pre-episode ingest failures
       // in structured logs for dead-letter visibility, preserving article URL/title and screened error cause.
@@ -218,5 +240,87 @@ export function createIngestHandler(
     },
   });
   // The ingest seam is a Router handler; the lane factory is a Request handler.
+  return ({ req }) => handler(req);
+}
+
+/** `POST /api/upload` — upload a document (txt, md, html, pdf) for synthesis. */
+export function createUploadHandler(
+  ctx: AppContext,
+  _deps: ComposeDeps = {},
+): AppHandlers["upload"] {
+  const handler = createUploadIngestHandler({
+    authorize: (request) => authorizeIngest(ctx, request),
+    enqueue: ({ article, mode, user, articleId, episodeId }) =>
+      enqueueInboxArticle(ctx, {
+        article,
+        mode,
+        user,
+        articleId,
+        episodeId,
+        route: "/api/upload",
+      }),
+    onSuccess: async ({ user, episodeId, articleId, article, mode, filename, bytes }) => {
+      try {
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: "info",
+          type: "upload.accepted",
+          message: `Uploaded file accepted and queued as episode ${episodeId}: "${article.title}"`,
+          process: "app",
+          route: "/api/upload",
+          userId: user.id,
+          correlationId: episodeId,
+          episodeId,
+          context: {
+            status: 202,
+            mode,
+            episodeId,
+            articleId,
+            title: article.title,
+            filename,
+            byteLength: bytes,
+          },
+        });
+      } catch (logErr) {
+        const screened = screenErrorForLogging(logErr);
+        console.warn(
+          `[audio-feed] failed to record upload.accepted log for episode ${episodeId}: ${screened.message}`,
+        );
+      }
+    },
+    onFailure: async (
+      { user, reason, status, correlationId, error, filename, limit, actual, mode },
+    ) => {
+      const screenedError = error !== undefined ? screenErrorMessage(error) : undefined;
+      try {
+        await ctx.stores.metadata.appendLog({
+          time: new Date().toISOString(),
+          severity: "warn",
+          type: "upload.failed",
+          message: screenedError && screenedError !== SUPPRESSED_MESSAGE
+            ? `File upload failed before episode creation: ${screenedError}`
+            : "File upload failed before episode creation",
+          process: "app",
+          route: "/api/upload",
+          userId: user?.id,
+          correlationId,
+          reason,
+          context: {
+            status,
+            ...(mode ? { mode } : {}),
+            ...(screenedError ? { error: screenedError } : {}),
+            ...(filename ? { filename } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+            ...(actual !== undefined ? { actual } : {}),
+          },
+        });
+      } catch (logErr) {
+        const screened = screenErrorForLogging(logErr);
+        console.warn(
+          `[audio-feed] failed to record upload.failed log: ${screened.message}`,
+        );
+      }
+    },
+  });
   return ({ req }) => handler(req);
 }
