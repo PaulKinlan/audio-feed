@@ -5,6 +5,14 @@
 - Asserts: playback position 45s saved to localStorage; row displays 'Resume from 0:45' badge; play button action is 'resume'; distinct 'Play from start' button is present; clicking resume seeks audio to 45s; clicking 'Play from start' clears stored position; re-saved position 50s; other user cannot resume user-1's playback position (per-user isolation); ended event clears stored position; teardown: nothing still references the Chrome profile (directory removed and no process carries it)
 <!-- #evidence-readme-generated-end -->
 
+## Evidence image format
+
+`01-resume-playback-position.png` is written through `quantiseEvidencePng` (scripts/proof-helper.ts), which quantises
+and bounds the palette. The committed image was re-captured in audio-feed-6dw2z: 44,450 bytes (md5 `73ffeedf…`) against
+the previous un-quantised 125,514-byte file (md5 `c05bbf35…`). The page and its geometry are unchanged (1280x900 both),
+so a diff on this file is the compression pipeline (audio-feed-39k1 / the quantise work in 2c9d915d), not a regression,
+and re-running the proof reproduces it byte-for-byte.
+
 ## Feature
 Playback position persistence and resume in the web player:
 - Automatically tracks and saves playback position per episode locally.
