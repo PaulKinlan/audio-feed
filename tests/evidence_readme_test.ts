@@ -184,10 +184,12 @@ Deno.test(
       true,
       "the committed README must survive a regeneration unchanged - run scripts/playback-position-browser-proof.ts and commit its README if the asserts moved",
     );
-    // and the human prose the markers exist to protect is actually there
+    // and the human prose the markers exist to protect is actually there. The `- Debt: admitted
+    // (audio-feed-tgnu)` line is deliberately GONE (audio-feed-t5gt): the directory now carries a valid
+    // declaration, and an admitted directory with a valid declaration must remove its debt admission -
+    // the debt list is shrink-only and its length is the debt number.
     for (
       const prose of [
-        "- Debt: admitted (audio-feed-tgnu)",
         "## Feature",
         "## Real-Browser CDP Verification",
         "## Artifacts",
@@ -195,5 +197,9 @@ Deno.test(
     ) {
       assertStringIncludes(committed, prose);
     }
+    assert(
+      !committed.includes("- Debt: admitted"),
+      "a declaring directory must not also carry a debt admission (audio-feed-t5gt)",
+    );
   },
 );

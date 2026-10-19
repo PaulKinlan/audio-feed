@@ -5,8 +5,6 @@
 - Asserts: playback position 45s saved to localStorage; row displays 'Resume from 0:45' badge; play button action is 'resume'; distinct 'Play from start' button is present; clicking resume seeks audio to 45s; clicking 'Play from start' clears stored position; re-saved position 50s; other user cannot resume user-1's playback position (per-user isolation); ended event clears stored position; teardown: nothing still references the Chrome profile (directory removed and no process carries it)
 <!-- #evidence-readme-generated-end -->
 
-- Debt: admitted (audio-feed-tgnu)
-
 ## Feature
 Playback position persistence and resume in the web player:
 - Automatically tracks and saves playback position per episode locally.

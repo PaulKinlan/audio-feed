@@ -87,6 +87,23 @@ export function hasGeneratedRegion(text: string): boolean {
   );
 }
 
+/**
+ * Read an evidence README for a region merge, or null when it does not exist yet.
+ *
+ * WHY THE READ LIVES HERE AND NOT AT THE proof-helper CALL SITE (audio-feed-i98g1): the fast gate's
+ * read-relation derivation follows a suite's imports ONE hop out, and it resolves a template read like
+ * `Deno.readTextFile(`${dir}/README.md`)` to its static tail - so a read written in proof-helper.ts
+ * lent EVERY proof-helper importer (14 suites) a "README.md" relation, and a change to the repo-root
+ * README.md selected all of them (measured: the fixture in tests/fast_gate_subset_test.ts went from 3
+ * to 17 suites). Passed a full path as a plain parameter, this call site resolves to nothing, and the
+ * TRUE relations - docs/evidence files a suite really reads - keep driving the selection unchanged.
+ */
+export async function readEvidenceReadmeIfExists(
+  readmePath: string,
+): Promise<string | null> {
+  return await Deno.readTextFile(readmePath).catch(() => null);
+}
+
 /** Split a README into the human prefix, the generated body and the human suffix. */
 export function splitGeneratedRegion(text: string): GeneratedRegionSplit {
   const lines = text.split("\n");

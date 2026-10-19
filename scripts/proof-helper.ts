@@ -18,7 +18,11 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
-import { hasGeneratedRegion, mergeGeneratedRegion } from "./evidence-readme.ts";
+import {
+  hasGeneratedRegion,
+  mergeGeneratedRegion,
+  readEvidenceReadmeIfExists,
+} from "./evidence-readme.ts";
 
 export interface SupervisedHarness {
   port: number;
@@ -4111,7 +4115,7 @@ export async function writeEvidenceReadme(
   // decision, never injected here. A file that HAS markers but malformed ones (missing, duplicated,
   // reversed) falls through to mergeGeneratedRegion and THROWS loudly: refuse to guess, and above all
   // refuse to strip prose because the region could not be parsed.
-  const existing = await Deno.readTextFile(readmePath).catch(() => null);
+  const existing = await readEvidenceReadmeIfExists(readmePath);
   if (existing !== null && hasGeneratedRegion(existing)) {
     // mergeGeneratedRegion runs BEFORE the write: a malformed region throws and leaves the file
     // exactly as it was, rather than half-written or overwritten.
