@@ -15,7 +15,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerData } from "./listen_client.ts";
-import { renderListenPage } from "../src/routes/listen.ts";
+import { LISTEN_RETRY_CEILING, renderListenPage } from "../src/routes/listen.ts";
 import {
   createTempChromeProfile,
   killChromeAndWait,
@@ -172,9 +172,16 @@ Deno.test("the status endpoint is token-gated and unknown tokens get nothing (au
   );
 });
 
+// The retry POST is same-origin walled (audio-feed-8jzgl): the player's fetch POST always
+// carries Origin, so every legitimate call in this file sends it.
+const ORIGIN = { origin: BASE };
+
 Deno.test("POST retry re-queues the caller's failed episode and it reappears as in-progress (audio-feed-7s2)", async () => {
   const { stores, fetch, req } = await seeded();
-  const res = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, { method: "POST" }));
+  const res = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+    method: "POST",
+    headers: ORIGIN,
+  }));
   assertEquals(res.status, 202, `retry must be accepted; got ${res.status}`);
   assertEquals((await stores.metadata.getEpisode("user-1", "ep-failed"))?.status, "pending");
 
@@ -186,22 +193,142 @@ Deno.test("POST retry re-queues the caller's failed episode and it reappears as 
 Deno.test("retry cannot touch another subscriber, a playable episode, or an unknown token (audio-feed-7s2)", async () => {
   const { stores, fetch, req } = await seeded();
   assertEquals(
-    (await fetch(req(`/listen/${TOKEN}/episodes/ep-other-failed/retry`, { method: "POST" })))
-      .status,
+    (await fetch(req(`/listen/${TOKEN}/episodes/ep-other-failed/retry`, {
+      method: "POST",
+      headers: ORIGIN,
+    }))).status,
     404,
     "an episode the caller does not own must not be retryable, and must not confirm it exists",
   );
   assertEquals((await stores.metadata.getEpisode("user-2", "ep-other-failed"))?.status, "failed");
 
   assertEquals(
-    (await fetch(req(`/listen/${TOKEN}/episodes/ep-ready/retry`, { method: "POST" }))).status,
+    (await fetch(req(`/listen/${TOKEN}/episodes/ep-ready/retry`, {
+      method: "POST",
+      headers: ORIGIN,
+    }))).status,
     409,
     "a playable episode is a requeue, not a retry — different transition, different method",
   );
   assertEquals(
-    (await fetch(req(`/listen/no-such-token/episodes/ep-failed/retry`, { method: "POST" }))).status,
+    (await fetch(req(`/listen/no-such-token/episodes/ep-failed/retry`, {
+      method: "POST",
+      headers: ORIGIN,
+    }))).status,
     404,
   );
+});
+
+Deno.test("retry refuses cross-origin and origin-less POSTs, and touches nothing (audio-feed-8jzgl)", async () => {
+  const { stores, fetch, req } = await seeded();
+  // A cross-site page that has learned a pasted feed URL — the whole credential — must not
+  // be able to fire retries from the subscriber's browser.
+  const evil = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+    method: "POST",
+    headers: { origin: "https://evil.example" },
+  }));
+  assertEquals(evil.status, 403);
+  // A non-browser client (curl on a leaked URL) sends no Origin at all: refused too. The
+  // wall is not what stops a scripted hammer — the rate windows and the ceiling are — but
+  // it keeps the browser context honest.
+  const bare = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, { method: "POST" }));
+  assertEquals(bare.status, 403);
+
+  // Neither attempt consumed the retry: the episode is still failed and still retryable
+  // by the page itself.
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-failed"))?.status, "failed");
+  const ok = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+    method: "POST",
+    headers: ORIGIN,
+  }));
+  assertEquals(ok.status, 202);
+});
+
+Deno.test("retry is rate-limited per feed token and client address (audio-feed-8jzgl)", async () => {
+  const { fetch, req } = await seeded();
+  // The first attempt requeues; the rest meet 409 (the episode is no longer failed) but
+  // still count: the window bounds how often the endpoint is hit at all, not how often it
+  // succeeds. LISTEN_RETRY_ADDR_RATE allows 10 per (token, address) window.
+  let last: Response | undefined;
+  for (let i = 0; i < 11; i++) {
+    last = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+      method: "POST",
+      headers: ORIGIN,
+    }));
+  }
+  assertEquals(last?.status, 429, "the 11th hit on a 10-per-window bound must be refused");
+  assert(Number(last?.headers.get("retry-after")) > 0, "a rate refusal says when to come back");
+
+  // Per token AND address, not global: another subscriber's token from the same address
+  // has its own window and its own failed episode.
+  const other = await fetch(req("/listen/token-other/episodes/ep-other-failed/retry", {
+    method: "POST",
+    headers: ORIGIN,
+  }));
+  assertEquals(other.status, 202, "one subscriber's exhausted window must not throttle another");
+});
+
+Deno.test("retry is rate-limited per feed token even from fresh addresses (audio-feed-8jzgl)", async () => {
+  const { fetch, req } = await seeded();
+  // A rotated-address hammer on ONE leaked token: every (token, address) window above is
+  // fresh by construction, but the per-token window is shared, so the 31st hit is refused
+  // wherever it came from. This is the bound that survives address rotation.
+  let last: Response | undefined;
+  for (let i = 0; i < 31; i++) {
+    last = await fetch(
+      req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+        method: "POST",
+        headers: ORIGIN,
+      }),
+      { remoteAddr: { hostname: `203.0.113.${i}` } },
+    );
+  }
+  assertEquals(last?.status, 429);
+  assert(Number(last?.headers.get("retry-after")) > 0, "a rate refusal says when to come back");
+});
+
+Deno.test("retry has a lifetime ceiling per episode that no retry resets (audio-feed-8jzgl)", async () => {
+  const { stores, fetch, req } = await seeded();
+  for (let i = 0; i < LISTEN_RETRY_CEILING; i++) {
+    const res = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+      method: "POST",
+      headers: ORIGIN,
+    }));
+    assertEquals(res.status, 202, `subscriber retry ${i + 1} must queue; got ${res.status}`);
+    // The worker fails again: the subscriber may legitimately try once more.
+    await stores.metadata.putEpisode(makeEpisode({
+      id: "ep-failed",
+      userId: "user-1",
+      sourceId: "src-a",
+      articleId: "art-1",
+      title: "The one that failed",
+      status: "failed",
+      error: "TTS upstream returned 503",
+      audioKey: undefined,
+    }));
+  }
+
+  const refused = await fetch(req(`/listen/${TOKEN}/episodes/ep-failed/retry`, {
+    method: "POST",
+    headers: ORIGIN,
+  }));
+  assertEquals(refused.status, 429);
+  const body = await refused.json();
+  assertEquals(body.error, "Retry limit reached for this episode.");
+  assertEquals(body.reason, "retry_ceiling", "the UI keys on the machine-readable reason");
+  assertEquals(
+    refused.headers.get("retry-after"),
+    null,
+    "a lifetime ceiling has no reset time, so it must not pretend to",
+  );
+
+  // Without operator reset: the episode was rewritten to failed again above (which resets
+  // the episode row's own state) and the ceiling still holds — the counter lives outside
+  // the episode record, in its own durable store row.
+  assertEquals((await stores.metadata.getEpisode("user-1", "ep-failed"))?.status, "failed");
+
+  // The rate windows sit above legitimate use, so the refusals here are the ceiling's:
+  // 6 hits against a 10-per-window bound.
 });
 
 Deno.test("failed episodes are always included in activity panel regardless of window paging (audio-feed-6y9)", async () => {
@@ -380,6 +507,14 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
     failedIds.includes("ep-weekly-fail"),
     "recurring title with different article URL must remain visible (J2)",
   );
+});
+
+Deno.test("the player button distinguishes a spent retry ceiling from a rate refusal (audio-feed-8jzgl)", async () => {
+  const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
+  // The route answers both 429s with different bodies; the UI keys on the machine-readable
+  // `reason`, never on parsing prose, and a rate refusal leaves the button usable.
+  assertStringIncludes(js, 'reason === "retry_ceiling"');
+  assertStringIncludes(js, "Retry limit reached");
 });
 
 Deno.test("listen.js and listen.css define Dismiss All button for multi-failure activity (audio-feed-j8o)", async () => {

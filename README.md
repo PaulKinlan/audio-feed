@@ -341,3 +341,33 @@ curl -X POST https://audio-feed.paulkinlan-ea.deno.net/api/ingest \
   -H "x-feed-token: <your-feed-token>" \
   -d '{"url":"https://example.com/article","mode":"dialogue"}'
 ```
+
+### Real-voice upload acceptance (cost-marked, dry by default)
+
+The offline test suite proves ingest → worker → READY with an injected stub synthesizer; it cannot
+catch a real Gemini TTS failure by construction. One command closes that gap with a single small
+real document (one segment, seconds of audio), and it **spends money only when you say so**:
+
+```bash
+# DRY (default): prints the plan, the token estimate and the worst-case spend. No network.
+deno run --allow-net --allow-env --allow-read --allow-write scripts/real-voice-upload-acceptance.ts
+
+# LIVE: boots the app in-process with the production synthesizer, uploads one small real
+# document through POST /api/upload, waits for the episode, prints episode id, state,
+# audio bytes, duration and observed cost, and writes the WAV to a temp path to listen to.
+GEMINI_API_BASE_URL=https://gemini.int.exe.xyz/v1beta \
+  deno run --allow-net --allow-env --allow-read --allow-write scripts/real-voice-upload-acceptance.ts --live
+
+# Same, and afterwards it deletes the created episode, article, audio blob and temp WAV.
+# (Stores are in-memory regardless: nothing but the temp WAV can outlive the process.)
+... --live --cleanup
+```
+
+It prints the price schedule it used (gemini-3.8-flash-tts: $0.50/$9.00 per 1M input/output audio
+tokens promotional through 2026-12-31, then $1.00/$18.00 — Google Cloud TTS pricing), an exact
+input-token count from the provider's free `countTokens` before spending, the worst case from the
+provider caps (~$3.64 per invocation promotional; output cannot be known before generation), and
+afterwards the observed cost derived from measured duration at Google's documented 25 audio
+tokens/second. Expected cost for the built-in document: a fraction of a cent. A run passes only if
+the episode reaches READY with decodable audio — listen to the WAV; the acceptance is the voice, not
+the status code.
