@@ -31,6 +31,27 @@ export interface RateLimitConfig {
   windowMs: number;
 }
 
+/**
+ * The key `extractClientIp` returns when neither the runtime's socket address
+ * nor a trusted forwarded address is available (audio-feed-0t8el).
+ *
+ * Such clients are INDISTINGUISHABLE, so they share one bucket by
+ * construction. What they must not do is share a PER-CLIENT-SIZED bucket:
+ * ten failed admin guesses from one unaddressed client then locked out every
+ * other unaddressed client of the deployment. The limiter keeps the
+ * unaddressed window in a dedicated row with a deployment-sized quota — a
+ * bound on the whole unaddressed population, not on one client.
+ */
+export const UNADDRESSED_CLIENT_KEY = "direct";
+
+/**
+ * How much larger the unaddressed bucket's quota is than the per-client one
+ * (audio-feed-0t8el). Large enough that one unaddressed abuser cannot lock
+ * out the rest; still a hard bound, so the deployment without socket
+ * addresses is rate limited, not unlimited.
+ */
+const UNADDRESSED_QUOTA_MULTIPLIER = 25;
+
 export interface RateLimitResult {
   allowed: boolean;
   remaining: number;
@@ -47,6 +68,7 @@ export interface RateLimitResult {
  */
 export class SlidingWindowRateLimiter {
   readonly #config: RateLimitConfig;
+  readonly #unaddressedConfig: RateLimitConfig;
   readonly #store: RateLimitStore;
   readonly #namespace: string;
 
@@ -57,15 +79,37 @@ export class SlidingWindowRateLimiter {
    * guesses — and each limiter would filter the other's timestamps by its own
    * window. The caller must state what its window means; defaults here would
    * invite exactly that collision (audio-feed-2zvc).
+   *
+   * `unaddressed` overrides the quota for the UNADDRESSED_CLIENT_KEY bucket
+   * (audio-feed-0t8el); the default is the per-client quota scaled by a fixed
+   * multiplier, because unaddressed clients are indistinguishable and share
+   * one row.
    */
-  constructor(config: RateLimitConfig, store: RateLimitStore, namespace: string) {
+  constructor(
+    config: RateLimitConfig,
+    store: RateLimitStore,
+    namespace: string,
+    unaddressed?: RateLimitConfig,
+  ) {
     this.#config = config;
     this.#store = store;
     this.#namespace = namespace;
+    this.#unaddressedConfig = unaddressed ?? {
+      maxRequests: config.maxRequests * UNADDRESSED_QUOTA_MULTIPLIER,
+      windowMs: config.windowMs,
+    };
   }
 
   #row(key: string): string {
-    return `${this.#namespace}:${key}`;
+    // The unaddressed bucket gets a dedicated row name, so its window can
+    // never merge with an addressed client's (audio-feed-0t8el).
+    return key === UNADDRESSED_CLIENT_KEY
+      ? `${this.#namespace}:unaddressed`
+      : `${this.#namespace}:${key}`;
+  }
+
+  #configFor(key: string): RateLimitConfig {
+    return key === UNADDRESSED_CLIENT_KEY ? this.#unaddressedConfig : this.#config;
   }
 
   /**
@@ -75,7 +119,8 @@ export class SlidingWindowRateLimiter {
    * isolates cannot both admit the attempt that crosses the bound.
    */
   async check(key: string, now = Date.now()): Promise<RateLimitResult> {
-    const windowStart = now - this.#config.windowMs;
+    const config = this.#configFor(key);
+    const windowStart = now - config.windowMs;
     // Set by the mutation that is actually committed. The callback can run more
     // than once when a concurrent writer wins a commit, and the last run is the
     // one the store applied.
@@ -85,7 +130,7 @@ export class SlidingWindowRateLimiter {
       this.#row(key),
       (current) => {
         const active = (current ?? []).filter((t) => t > windowStart);
-        if (active.length >= this.#config.maxRequests) {
+        if (active.length >= config.maxRequests) {
           // Refused attempts do NOT extend the window: the oldest active hit
           // still decides when the client may try again.
           admitted = false;
@@ -97,29 +142,39 @@ export class SlidingWindowRateLimiter {
       },
       // The row is housekeeping once every timestamp has fallen out of the
       // window; twice the window keeps it readable for the whole of one.
-      this.#config.windowMs * 2,
+      config.windowMs * 2,
     );
 
     // `committed` is load-bearing (audio-feed-2zvc review): a mutation that lost
     // every CAS race was never recorded, and reporting it as allowed would let
     // uncounted attempts through — the exact bound this exists to hold. A
     // window we could not write fails CLOSED.
-    return this.#result(write.value, write.committed && admitted, now);
+    const allowed = write.committed && admitted;
+    if (!allowed && key === UNADDRESSED_CLIENT_KEY) {
+      // Operator-visible (audio-feed-0t8el): an exhausted unaddressed bucket
+      // means the deployment is serving clients it cannot tell apart, at a
+      // rate past the deployment-wide bound.
+      console.warn(
+        `[audio-feed] rate limit: unaddressed bucket exhausted for namespace "${this.#namespace}"`,
+      );
+    }
+    return this.#result(key, write.value, allowed, now);
   }
 
   /** Check whether a key is currently rate-limited without recording a new hit. */
   async peek(key: string, now = Date.now()): Promise<RateLimitResult> {
+    const config = this.#configFor(key);
     // `null` from the mutation means "leave the row as it is"; the store still
     // returns the current value.
     const write = await this.#store.atomicUpdate<number[]>(this.#row(key), () => null);
-    const active = (write.value ?? []).filter((t) => t > now - this.#config.windowMs);
+    const active = (write.value ?? []).filter((t) => t > now - config.windowMs);
     // A read has no hit to admit, so unlike `check` the refusal rule is simply
     // whether the recorded window is already full.
-    const allowed = active.length < this.#config.maxRequests;
+    const allowed = active.length < config.maxRequests;
     return {
       allowed,
-      remaining: allowed ? this.#config.maxRequests - active.length : 0,
-      resetMs: allowed ? this.#config.windowMs : this.#untilOldestExpires(active, now),
+      remaining: allowed ? config.maxRequests - active.length : 0,
+      resetMs: allowed ? config.windowMs : this.#untilOldestExpires(active, now),
     };
   }
 
@@ -129,8 +184,9 @@ export class SlidingWindowRateLimiter {
   }
 
   /** Shape a `check` result: `admitted` is the mutation's own decision. */
-  #result(stored: number[] | null, admitted: boolean, now: number): RateLimitResult {
-    const active = (stored ?? []).filter((t) => t > now - this.#config.windowMs);
+  #result(key: string, stored: number[] | null, admitted: boolean, now: number): RateLimitResult {
+    const config = this.#configFor(key);
+    const active = (stored ?? []).filter((t) => t > now - config.windowMs);
 
     if (!admitted) {
       return {
@@ -142,8 +198,8 @@ export class SlidingWindowRateLimiter {
 
     return {
       allowed: true,
-      remaining: Math.max(0, this.#config.maxRequests - active.length),
-      resetMs: this.#config.windowMs,
+      remaining: Math.max(0, config.maxRequests - active.length),
+      resetMs: config.windowMs,
     };
   }
 
@@ -155,7 +211,7 @@ export class SlidingWindowRateLimiter {
     await this.#store.atomicUpdate<number[]>(
       this.#row(key),
       () => [],
-      this.#config.windowMs * 2,
+      this.#configFor(key).windowMs * 2,
     );
   }
 }
@@ -211,7 +267,10 @@ export function extractClientIp(
     }
   }
   if (remoteAddr) return remoteAddr;
-  return "direct";
+  // No socket address and nothing trustworthy in the headers: every such
+  // client shares the unaddressed bucket — see UNADDRESSED_CLIENT_KEY
+  // (audio-feed-0t8el).
+  return UNADDRESSED_CLIENT_KEY;
 }
 
 /**
@@ -274,6 +333,11 @@ export interface FailedAuthLimiterOptions {
   maxFailures?: number;
   /** Sliding window duration in milliseconds. Default: 5 minutes */
   windowMs?: number;
+  /**
+   * Quota for the unaddressed bucket (audio-feed-0t8el). Default: maxFailures
+   * scaled by the limiter's fixed multiplier.
+   */
+  unaddressedMaxFailures?: number;
 }
 
 /** Namespaces the admin-token window so it cannot swap rows with another limiter. */
@@ -283,13 +347,17 @@ export class FailedAuthLimiter {
   readonly #limiter: SlidingWindowRateLimiter;
 
   constructor(store: RateLimitStore, options: FailedAuthLimiterOptions = {}) {
+    const windowMs = options.windowMs ?? 5 * 60 * 1000;
     this.#limiter = new SlidingWindowRateLimiter(
       {
         maxRequests: options.maxFailures ?? 10,
-        windowMs: options.windowMs ?? 5 * 60 * 1000,
+        windowMs,
       },
       store,
       ADMIN_AUTH_NAMESPACE,
+      options.unaddressedMaxFailures !== undefined
+        ? { maxRequests: options.unaddressedMaxFailures, windowMs }
+        : undefined,
     );
   }
 

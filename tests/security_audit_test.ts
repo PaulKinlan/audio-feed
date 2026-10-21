@@ -11,7 +11,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { isHttpsRequest, Router, sanitizeRequestUrl } from "../src/router.ts";
-import { isAllowedAudioKey } from "../src/routes/audio.ts";
+import { AUDIO_RATE_LIMIT, isAllowedAudioKey, MAX_FANOUT_CANDIDATES } from "../src/routes/audio.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bytes, makeUser } from "./fixtures.ts";
@@ -777,6 +777,65 @@ Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat
   assertEquals(isAllowedAudioKey("episode-1.mp3"), false);
 });
 
+Deno.test("audio route: candidate fan-out is capped per request (audio-feed-k21s0)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-approved", status: "approved" }));
+
+  let getEpisodeCalls = 0;
+  const origGetEpisode = stores.metadata.getEpisode.bind(stores.metadata);
+  stores.metadata.getEpisode = (...args: Parameters<typeof origGetEpisode>) => {
+    getEpisodeCalls++;
+    return origGetEpisode(...args);
+  };
+
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  // 160 hyphen-separated parts, just under the 512-character isSafeBlobKey cap.
+  const id = Array.from({ length: 160 }, () => "aa").join("-");
+  const res = await fetch(new Request(`${BASE}/audio/user-approved/direct/${id}.wav`));
+  assertEquals(res.status, 404);
+  await res.body?.cancel();
+  assertEquals(
+    getEpisodeCalls <= MAX_FANOUT_CANDIDATES,
+    true,
+    `one request must cause at most ${MAX_FANOUT_CANDIDATES} candidate lookups, got ${getEpisodeCalls}`,
+  );
+});
+
+Deno.test("audio route: unauthenticated requests are rate limited per client address (audio-feed-k21s0)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-approved", status: "approved" }));
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  const addr = { remoteAddr: { hostname: "203.0.113.50" } };
+  const key = "audio/user-approved/direct/ep-1.wav";
+
+  // The bound holds: requests up to the limit are answered (404 here — the
+  // object does not exist — the point is they are not 429).
+  for (let i = 0; i < AUDIO_RATE_LIMIT.maxRequests; i++) {
+    const res = await fetch(new Request(`${BASE}/${key}`), addr);
+    assertEquals(res.status, 404, `request ${i + 1} must be within the limit`);
+    await res.body?.cancel();
+  }
+
+  // The next request from the same client is refused with the same shape as
+  // the other rate-limited routes: 429, problem body, retry-after.
+  const refused = await fetch(new Request(`${BASE}/${key}`), addr);
+  assertEquals(refused.status, 429, "a request past the bound must be refused");
+  const retryAfter = refused.headers.get("retry-after");
+  assertEquals(retryAfter !== null && Number(retryAfter) >= 1, true, "429 must carry retry-after");
+  const body = await refused.json();
+  assertEquals(body.error, "too_many_requests");
+
+  // A different client address has its own bucket.
+  const other = await fetch(
+    new Request(`${BASE}/${key}`),
+    { remoteAddr: { hostname: "203.0.113.51" } },
+  );
+  assertEquals(other.status, 404, "a different client address must not share the exhausted bucket");
+  await other.body?.cancel();
+});
+
 Deno.test("audio route: intermediate synthesis segments under audio-segments/ return 404", async () => {
   const stores = memoryStores();
   const SEGMENT_KEY = "audio-segments/user-1/ep-1/fnv64-rev1.wav";
@@ -801,7 +860,7 @@ Deno.test("audio route: intermediate synthesis segments under audio-segments/ re
   await headRes.body?.cancel();
 });
 
-Deno.test("audio route: canonical audio is served for approved users, 403 Forbidden for suspended/pending/rejected users", async () => {
+Deno.test("audio route: canonical audio is served for approved users; suspended/pending/rejected users get the identical 404 as a nonexistent object (audio-feed-7kdhb)", async () => {
   const stores = memoryStores();
 
   const approvedUser = makeUser({ id: "user-approved", status: "approved" });
@@ -831,27 +890,44 @@ Deno.test("audio route: canonical audio is served for approved users, 403 Forbid
   assertEquals(appRes.status, 200, "Approved user audio must be served");
   await appRes.body?.cancel();
 
-  // Suspended user: GET returns 403
-  const suspRes = await fetch(new Request(`${BASE}/${suspendedKey}`));
-  assertEquals(suspRes.status, 403, "Suspended user audio must return 403");
-  const suspBody = await suspRes.json();
-  assertEquals(suspBody.error, "forbidden");
-  assertEquals(suspBody.detail, "Not available");
+  // Reference: the status, headers and body of a nonexistent object for the suspended user.
+  const refRes = await fetch(new Request(`${BASE}/audio/user-suspended/direct/nonexistent.wav`));
+  assertEquals(refRes.status, 404, "Nonexistent object must return 404");
+  const refHeaders = [...refRes.headers.entries()].sort();
+  const refBody = await refRes.text();
 
-  // Suspended user: HEAD returns 403
+  // Suspended user: GET returns the identical 404 as a nonexistent object
+  const suspRes = await fetch(new Request(`${BASE}/${suspendedKey}`));
+  assertEquals(
+    suspRes.status,
+    404,
+    "Suspended user audio must be indistinguishable from a nonexistent object",
+  );
+  assertEquals(
+    [...suspRes.headers.entries()].sort(),
+    refHeaders,
+    "Suspended user audio headers must be identical to the nonexistent-object 404 headers",
+  );
+  assertEquals(
+    await suspRes.text(),
+    refBody,
+    "Suspended user audio body must be identical to the nonexistent-object 404 body",
+  );
+
+  // Suspended user: HEAD returns 404
   const suspHead = await fetch(new Request(`${BASE}/${suspendedKey}`, { method: "HEAD" }));
-  assertEquals(suspHead.status, 403, "Suspended user HEAD must return 403");
+  assertEquals(suspHead.status, 404, "Suspended user HEAD must return 404");
   await suspHead.body?.cancel();
 
-  // Pending user: GET returns 403
+  // Pending user: GET returns 404
   const pendRes = await fetch(new Request(`${BASE}/${pendingKey}`));
-  assertEquals(pendRes.status, 403, "Pending user audio must return 403");
-  await pendRes.body?.cancel();
+  assertEquals(pendRes.status, 404, "Pending user audio must return 404");
+  assertEquals(await pendRes.text(), refBody);
 
-  // Rejected user: GET returns 403
+  // Rejected user: GET returns 404
   const rejRes = await fetch(new Request(`${BASE}/${rejectedKey}`));
-  assertEquals(rejRes.status, 403, "Rejected user audio must return 403");
-  await rejRes.body?.cancel();
+  assertEquals(rejRes.status, 404, "Rejected user audio must return 404");
+  assertEquals(await rejRes.text(), refBody);
 });
 
 Deno.test("audio route: direct-URL redirect branch checks user approval before issuing 302 redirect", async () => {
@@ -878,9 +954,13 @@ Deno.test("audio route: direct-URL redirect branch checks user approval before i
   assertEquals(appRes.status, 302, "Approved user should redirect to direct URL");
   assertEquals(appRes.headers.get("location"), `https://cdn.example.com/${approvedKey}`);
 
-  // Non-CORS request for suspended user returns 403 Forbidden without redirecting
+  // Non-CORS request for suspended user returns the same 404 as a nonexistent object, without redirecting
   const suspRes = await fetch(new Request(`${BASE}/${suspendedKey}`));
-  assertEquals(suspRes.status, 403, "Suspended user must not receive 302 redirect");
+  assertEquals(
+    suspRes.status,
+    404,
+    "Suspended user must get a 404 indistinguishable from a nonexistent object, not a 302 redirect",
+  );
   assertEquals(suspRes.headers.get("location"), null);
   await suspRes.body?.cancel();
 });
@@ -959,7 +1039,7 @@ Deno.test("audio route: voice-samples and legacy flat keys return 404, while app
   await vsResDirect.body?.cancel();
 });
 
-Deno.test("audio route: out-of-range Range checks user approval before returning 416 (no existence/size leak)", async () => {
+Deno.test("audio route: out-of-range Range checks user approval before returning 416 — unapproved users get the same 404 as a nonexistent object (no existence/size leak)", async () => {
   const stores = memoryStores();
 
   const approvedUser = makeUser({ id: "user-approved", status: "approved" });
@@ -975,16 +1055,25 @@ Deno.test("audio route: out-of-range Range checks user approval before returning
 
   const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
 
-  // Out-of-range Range on suspended user must return 403 Forbidden (not 416), leaking neither existence nor size
+  // Out-of-range Range on suspended user must return the identical 404 as a nonexistent object (not 403, not 416), leaking neither existence nor size
   const suspRes = await fetch(
     new Request(`${BASE}/${suspendedKey}`, {
       headers: { range: "bytes=5000-6000" },
     }),
   );
-  assertEquals(suspRes.status, 403, "Out-of-range Range for suspended user must return 403");
+  assertEquals(
+    suspRes.status,
+    404,
+    "Out-of-range Range for suspended user must return 404 (audio-feed-7kdhb)",
+  );
   assertEquals(suspRes.headers.get("content-range"), null, "Must not leak content-range header");
   const suspBody = await suspRes.json();
-  assertEquals(suspBody.detail, "Not available", "Must return generic forbidden message");
+  assertEquals(suspBody.error, "not_found", "Must return the generic not-found shape");
+  assertEquals(
+    suspBody.detail,
+    "Unknown audio object",
+    "Must return the same body as a nonexistent object",
+  );
 
   // Out-of-range Range on approved user returns 416 with content-range
   const appRes = await fetch(
