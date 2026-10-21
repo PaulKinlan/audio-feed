@@ -59,6 +59,13 @@ import type { AccountHandlers } from "./routes/account_api.ts";
 export interface AppContext {
   config: AppConfig;
   stores: Stores;
+  /**
+   * Environment the /health deploy fingerprint reads (default Deno.env) —
+   * audio-feed-lnnjd. Tests pass a fake rather than mutating process-global
+   * DENO_DEPLOYMENT_ID / GIT_COMMIT_SHA, which every concurrently running
+   * module would see.
+   */
+  env?: { get(key: string): string | undefined };
 }
 
 /**
@@ -233,7 +240,7 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   );
 
   router.get("/health", ({ ctx }) => {
-    const deploy = deployFingerprint();
+    const deploy = deployFingerprint(ctx.env ? (name) => ctx.env?.get(name) : undefined);
     return json({
       status: "ok",
       storage: ctx.stores.describe,
