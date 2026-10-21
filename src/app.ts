@@ -132,7 +132,14 @@ export interface AppHandlers {
 /** The admin observability route pattern, named once so the route table and its two consumers agree. */
 export const ADMIN_OBSERVABILITY_ROUTE = "/admin/observability";
 
-export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
+export function createRouter(
+  handlers: AppHandlers = {},
+  // Registration-time env reads (the AUDIO_FEED_TEST_THROW trap door,
+  // audio-feed-sw1r) go through this reader: Deno.env by default, injectable
+  // so a test passes a fake instead of mutating process-global env
+  // (audio-feed-lnnjd).
+  env: { get(key: string): string | undefined } = Deno.env,
+): Router<AppContext> {
   const router = new Router<AppContext>();
 
   // audio-feed-f2a: every other route is machine-facing, so a person arriving
@@ -157,8 +164,11 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   // audio-feed-sw1r: a DEV/TEST-ONLY surface that THROWS, so the canary invariant test has a request path
   // that reaches the server's unhandled-error record. The screen it exercises is the point; the route exists
   // only when an operator sets AUDIO_FEED_TEST_THROW=1 (never in a deploy) and it reads the ambient env here
-  // rather than through config because it must be impossible to enable by a config file alone.
-  if (Deno.env.get("AUDIO_FEED_TEST_THROW") === "1") {
+  // rather than through config because it must be impossible to enable by a config file alone. The read goes
+  // through createRouter's env reader (audio-feed-lnnjd): Deno.env by default, a fake in tests — the reader
+  // is in-memory only, not config-file-backed, so the trap door stays exactly as reachable as the ambient
+  // env was.
+  if (env.get("AUDIO_FEED_TEST_THROW") === "1") {
     router.get("/__test/throw", ({ url }) => {
       // audio-feed-sw1r / audio-feed-z1gs: The error message and name carry ATTACKER-CHOSEN text on purpose:
       // this is the surface the invariant test fuzzes, and it is the exact shape the screen exists for -
@@ -481,7 +491,7 @@ export function createApp(
   router: Router<AppContext>;
   fetch: (req: Request, info?: { remoteAddr?: { hostname?: string } }) => Promise<Response>;
 } {
-  const router = createRouter(handlers);
+  const router = createRouter(handlers, ctx.env);
   const handle = router.fetchHandler(ctx, onUnhandledError);
   return {
     router,

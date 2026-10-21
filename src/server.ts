@@ -93,6 +93,12 @@ export interface BootstrapOptions {
   synthesizer?: Synthesizer | null;
   /** Injected config overrides (audio-feed-bns). */
   config?: Partial<AppConfig>;
+  /**
+   * Environment read for loadConfig and the app's env trap doors
+   * (audio-feed-lnnjd). Default Deno.env; tests pass a fake rather than
+   * mutating process-global env.
+   */
+  env?: { get(key: string): string | undefined };
   /** Run legacy audio key inventory at boot (audio-feed-e6xb). Defaults to true. */
   inventory?: boolean;
 }
@@ -135,10 +141,10 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<Bootstr
   // Read the decision per call, not once at module load: that is what lets the
   // gates below be exercised at all (audio-feed-1kw).
   const deploy = options.isDeploy ?? isDeploy;
-  const config = { ...loadConfig(), ...options.config };
+  const config = { ...loadConfig(options.env), ...options.config };
   if (options.port !== undefined) config.port = options.port;
   const stores = options.stores ?? await openStores();
-  const ctx: AppContext = { config, stores };
+  const ctx: AppContext = { config, stores, env: options.env };
 
   const synthesizer = options.synthesizer !== undefined
     ? options.synthesizer
