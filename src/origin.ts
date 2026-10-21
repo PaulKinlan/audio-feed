@@ -388,6 +388,79 @@ export function resolveOrigin(config: OriginConfig, request: Request): ResolvedO
 }
 
 /**
+ * The origin a deployment's browsers should send CSP / NEL reports to (audio-feed-s2esl).
+ *
+ * CONFIGURATION ONLY, AND THAT IS THE POINT. The value used to be built from
+ * `req.headers.get("host")` whenever `PUBLIC_BASE_URL` was unset, which made the safety of the
+ * resulting header depend on an ORDERING: the 421 host gate had to run first, and it had to be
+ * reading the same input. It was not — the gate inspects `new URL(req.url)`, and `deno serve`
+ * derives that from the SOCKET — so "allowed request URL, attacker-chosen `Host` header" passed the
+ * gate and put the attacker's domain into `report-uri`, `Reporting-Endpoints` and `Report-To`.
+ *
+ * Ordering the two checks correctly would still leave an attacker-supplied value one refactor away
+ * from a response header. Deriving from configuration removes the input entirely:
+ *
+ *  1. `PUBLIC_BASE_URL`, the operator's canonical origin, wins outright.
+ *  2. Otherwise the first `ALLOWED_HOSTS` entry — the same pinned-host policy `resolveOrigin`
+ *     applies — keeping any port or scheme the entry states, and taking the request's SCHEME (never
+ *     its host) when the entry is a bare host. Reports are cross-origin POSTs from the page, so a
+ *     wrong scheme silently drops them; the scheme is the one part of the request that cannot name
+ *     somebody else's domain.
+ *  3. Otherwise exact loopback, which is the local-dev case: nothing configured and `deno serve` on
+ *     `http://localhost:8000` keeps reporting to the port it is actually serving.
+ *  4. Otherwise `https://localhost` — obviously wrong rather than plausibly wrong, the same
+ *     last-resort shape `resolveOrigin` uses, and never a request-derived host.
+ *
+ * A deployment serving several allowed hosts should set `PUBLIC_BASE_URL` if per-host reporting
+ * matters: pinning to one configured host is the trade for not letting a request choose.
+ */
+export function cspReportOrigin(
+  config: OriginConfig,
+  request?: { url?: string; https?: boolean },
+): string {
+  const fallbackProto: "http" | "https" = request?.https ? "https" : "http";
+
+  if (config.publicBaseUrl) {
+    try {
+      const configured = new URL(config.publicBaseUrl);
+      if (configured.protocol === "http:" || configured.protocol === "https:") {
+        return normalise(configured.origin);
+      }
+    } catch { /* not a URL: fall through to the allow-list */ }
+  }
+
+  for (const entry of config.allowedHosts ?? []) {
+    const origin = configuredHostOrigin(entry, fallbackProto);
+    if (origin) return origin;
+  }
+
+  if (request?.url) {
+    try {
+      const url = new URL(request.url);
+      if (isLoopbackHost(bareHost(url.hostname))) return normalise(url.origin);
+    } catch { /* unparseable request URL: use the safe default */ }
+  }
+
+  return "https://localhost";
+}
+
+/** One configured host entry as an origin, or `null` when it names no host at all. */
+function configuredHostOrigin(entry: string, fallbackProto: "http" | "https"): string | null {
+  const trimmed = entry.trim();
+  if (!trimmed) return null;
+  try {
+    // Entries are tolerated as hosts, host:port or full origins — the same tolerance
+    // `normaliseHost` shows the gate, so a value that gates correctly also reports correctly.
+    const url = new URL(trimmed.includes("://") ? trimmed : `${fallbackProto}://${trimmed}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (!url.hostname) return null;
+    return normalise(url.origin);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `cache-control` for a document built from a resolved origin.
  *
  * A derived origin depends on the request host, so the response must never be

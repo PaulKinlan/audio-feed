@@ -7,6 +7,7 @@
 
 import { UNMATCHED_ROUTE } from "./request_route.ts";
 import { HttpError, methodNotAllowed, notFound, problem } from "./http.ts";
+import { cspReportOrigin, type OriginConfig } from "./origin.ts";
 import { screenErrorForLogging } from "./observability/error_screen.ts";
 
 export type Params = Record<string, string | undefined>;
@@ -115,7 +116,7 @@ export function isHttpsRequest(
 export function applySecurityHeaders(
   res: Response,
   req?: Request,
-  opts?: { trustProxyHeaders?: boolean; publicBaseUrl?: string },
+  opts?: OriginConfig,
 ): Response {
   let headers: Headers;
   let recreated = false;
@@ -139,22 +140,15 @@ export function applySecurityHeaders(
   }
 
   if (isHtml) {
-    let reportUrl = "https://localhost/api/reports/csp";
-    if (opts?.publicBaseUrl) {
-      try {
-        const u = new URL(opts.publicBaseUrl);
-        reportUrl = `${u.protocol}//${u.host}/api/reports/csp`;
-      } catch { /* fallback */ }
-    } else if (req) {
-      try {
-        const u = new URL(req.url);
-        const host = req.headers.get("host") || u.host;
-        const proto = isHttpsRequest(req, opts)
-          ? "https"
-          : (u.protocol === "http:" ? "http" : "https");
-        reportUrl = `${proto}://${host}/api/reports/csp`;
-      } catch { /* fallback */ }
-    }
+    // audio-feed-s2esl: the report target comes from CONFIGURATION, never from the request's `Host`
+    // header. The host gate inspects `new URL(req.url)`, so "allowed URL, attacker-chosen Host"
+    // used to pass it and have that host written into three response headers. See
+    // `cspReportOrigin` for the precedence and for why the request may contribute a SCHEME only.
+    const reportOrigin = cspReportOrigin(opts ?? {}, {
+      url: req?.url,
+      https: req ? isHttpsRequest(req, opts) : undefined,
+    });
+    const reportUrl = `${reportOrigin}/api/reports/csp`;
 
     if (!headers.has("content-security-policy")) {
       // Fallback only: every HTML route attaches the nonce-bearing policy itself via
@@ -236,6 +230,21 @@ export function applySecurityHeaders(
   return res;
 }
 
+/**
+ * The configuration `applySecurityHeaders` needs, read off an optional ctx config.
+ *
+ * One place, because every header decision that must not become request-derived (audio-feed-s2esl)
+ * depends on this being the SAME set of inputs for every call site.
+ */
+function securityOptions(ctx: unknown): OriginConfig {
+  const config = (ctx as { config?: OriginConfig } | undefined)?.config;
+  return {
+    trustProxyHeaders: Boolean(config?.trustProxyHeaders),
+    publicBaseUrl: config?.publicBaseUrl,
+    allowedHosts: config?.allowedHosts,
+  };
+}
+
 export class Router<Ctx> {
   readonly #routes: Route<Ctx>[] = [];
 
@@ -299,11 +308,7 @@ export class Router<Ctx> {
 
     const pathMatches: Route<Ctx>[] = [];
     const remoteAddr = info?.remoteAddr?.hostname;
-    const trustProxyHeaders = Boolean(
-      (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
-    );
-    const publicBaseUrl = (ctx as { config?: { publicBaseUrl?: string } })?.config?.publicBaseUrl;
-    const secOpts = { trustProxyHeaders, publicBaseUrl };
+    const secOpts = securityOptions(ctx);
 
     for (const route of this.#routes) {
       const match = route.pattern.exec({ pathname: url.pathname });
@@ -356,11 +361,7 @@ export class Router<Ctx> {
     req: Request,
     info?: { remoteAddr?: { hostname?: string } },
   ) => Promise<Response> {
-    const trustProxyHeaders = Boolean(
-      (ctx as { config?: { trustProxyHeaders?: boolean } })?.config?.trustProxyHeaders,
-    );
-    const publicBaseUrl = (ctx as { config?: { publicBaseUrl?: string } })?.config?.publicBaseUrl;
-    const secOpts = { trustProxyHeaders, publicBaseUrl };
+    const secOpts = securityOptions(ctx);
 
     return async (req, info) => {
       try {

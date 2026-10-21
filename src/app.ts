@@ -524,7 +524,10 @@ export function createApp(
         return applySecurityHeaders(
           response,
           req,
-          { trustProxyHeaders: Boolean(ctx.config.trustProxyHeaders) },
+          {
+            trustProxyHeaders: Boolean(ctx.config.trustProxyHeaders),
+            allowedHosts: ctx.config.allowedHosts,
+          },
         );
       }
       return await handle(req, info);
