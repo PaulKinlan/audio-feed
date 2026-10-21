@@ -45,7 +45,14 @@ function testApp(
     : undefined;
   const handlers = createHandlers(ctx, { adminAuthLimiter });
   const app = createApp(ctx, handlers);
-  return { app, ctx, stores, fetch: app.fetch };
+  // Default every request to a socket address: these tests pin the PER-CLIENT
+  // bound, and since audio-feed-0t8el an unaddressed client deliberately gets
+  // a deployment-sized quota instead of the per-client one.
+  const fetch = (
+    req: Request,
+    info: { remoteAddr?: { hostname?: string } } = { remoteAddr: { hostname: "10.9.9.9" } },
+  ) => app.fetch(req, info);
+  return { app, ctx, stores, fetch };
 }
 
 Deno.test("admin throttle: POST /api/auth/bootstrap throttles after 10 failed attempts", async () => {

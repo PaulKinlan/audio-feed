@@ -468,6 +468,9 @@ Deno.test("POST /api/request-access: HTML 429 response includes Retry-After head
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           "accept": "text/html",
+          // A client address: the per-client bound this test pins is the
+          // addressed one (audio-feed-0t8el).
+          "x-forwarded-for": "192.168.1.100",
         },
         body: new URLSearchParams({ email: "user@example.com" }).toString(),
       }),

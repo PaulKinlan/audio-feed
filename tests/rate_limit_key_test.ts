@@ -22,7 +22,12 @@ import { assertEquals } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
-import { extractClientIp } from "../src/auth/rate_limit.ts";
+import {
+  extractClientIp,
+  FailedAuthLimiter,
+  SlidingWindowRateLimiter,
+  UNADDRESSED_CLIENT_KEY,
+} from "../src/auth/rate_limit.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const request = (xff?: string, cf?: string) =>
@@ -187,6 +192,10 @@ Deno.test("a rotating malformed value in either header cannot change the bucket 
           headers: { "content-type": "application/json", "cf-connecting-ip": forge(i) },
           body: JSON.stringify({ email: `family-${index}-${i}@example.com`, reason: "probe" }),
         }),
+        // A socket address: the per-client bound these assertions count on is
+        // the addressed one; the unaddressed bucket has a deployment-sized
+        // quota by design (audio-feed-0t8el).
+        { remoteAddr: { hostname: "10.8.8.8" } },
       );
       statuses.push(response.status);
     }
@@ -280,5 +289,85 @@ Deno.test("two real clients are still limited separately (audio-feed-u2ve)", asy
     await post(fetch, `10.0.0.1, 198.51.100.4`, 99),
     200,
     "a different client must not inherit another client's lockout — a fix that collapsed everyone into one bucket would pass the test above and fail this one",
+  );
+});
+
+// -- 3. the unaddressed bucket (audio-feed-0t8el) ----------------------------
+
+Deno.test("the unaddressed bucket is a dedicated row with its own quota, not a shared per-client-sized one (audio-feed-0t8el)", async () => {
+  const stores = memoryStores();
+  const limiter = new SlidingWindowRateLimiter(
+    { maxRequests: 2, windowMs: 60_000 },
+    stores.metadata,
+    "test",
+    { maxRequests: 4, windowMs: 60_000 },
+  );
+
+  // An addressed client is bound at the per-client quota.
+  assertEquals((await limiter.check("10.1.2.3")).allowed, true);
+  assertEquals((await limiter.check("10.1.2.3")).allowed, true);
+  assertEquals((await limiter.check("10.1.2.3")).allowed, false, "addressed client locks at 2");
+
+  // The unaddressed bucket is untouched by the addressed client's exhaustion,
+  // and is bound at its own (larger) quota — bounded, not permissive.
+  for (let i = 0; i < 4; i++) {
+    assertEquals(
+      (await limiter.check(UNADDRESSED_CLIENT_KEY)).allowed,
+      true,
+      `unaddressed attempt ${i + 1} within its quota`,
+    );
+  }
+  assertEquals(
+    (await limiter.check(UNADDRESSED_CLIENT_KEY)).allowed,
+    false,
+    "the unaddressed bucket still has a hard bound",
+  );
+
+  // And exhausting the unaddressed bucket does not touch addressed clients.
+  assertEquals((await limiter.check("10.4.5.6")).allowed, true);
+});
+
+Deno.test("unaddressed clients no longer lock each other out at the per-client bound (audio-feed-0t8el)", async () => {
+  const stores = memoryStores();
+  // 2 failures per window for an addressed client; the derived unaddressed
+  // quota is 2 x 25 = 50.
+  const limiter = new FailedAuthLimiter(stores.metadata, { maxFailures: 2, windowMs: 60_000 });
+
+  // Two DISTINCT unaddressed clients map to the same key by construction —
+  // they cannot be told apart.
+  const keyA = extractClientIp(request(), false, undefined);
+  const keyB = extractClientIp(request(), false, undefined);
+  assertEquals(keyA, UNADDRESSED_CLIENT_KEY);
+  assertEquals(keyA, keyB);
+
+  // Client A burns what used to be the shared per-client-sized window.
+  await limiter.recordFailure(keyA);
+  await limiter.recordFailure(keyA);
+
+  // Before the fix, B — who never made a request — was locked out here.
+  const lockedB = await limiter.isLockedOut(keyB);
+  assertEquals(
+    lockedB.allowed,
+    true,
+    "an unaddressed client must not inherit the per-client lockout",
+  );
+
+  // The unaddressed bucket is still bounded: the deployment-wide quota holds.
+  let last;
+  for (let i = 0; i < 48; i++) last = await limiter.recordFailure(keyA);
+  assertEquals(last!.allowed, true, "attempt 50 is within the derived unaddressed quota");
+  assertEquals(
+    (await limiter.recordFailure(keyA)).allowed,
+    false,
+    "attempt 51 exceeds the derived unaddressed quota",
+  );
+
+  // An addressed client's own tight bound is unaffected by the unaddressed window.
+  assertEquals((await limiter.recordFailure("10.7.7.7")).allowed, true);
+  assertEquals((await limiter.recordFailure("10.7.7.7")).allowed, true);
+  assertEquals(
+    (await limiter.recordFailure("10.7.7.7")).allowed,
+    false,
+    "addressed clients keep the per-client bound",
   );
 });

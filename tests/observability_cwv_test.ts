@@ -142,9 +142,12 @@ Deno.test("the beacon rejects what it cannot use, without echoing it", async () 
 Deno.test("the beacon is rate limited per client", async () => {
   const { fetch } = app();
   let refused = 0;
+  // A socket address, so the per-client bound applies: an unaddressed client
+  // deliberately gets a deployment-sized quota instead (audio-feed-0t8el).
+  const client = { remoteAddr: { hostname: "203.0.113.60" } };
   // One over the limit, so the boundary is exercised rather than assumed.
   for (let i = 0; i <= CWV_RATE_LIMIT.maxRequests; i++) {
-    const res = await fetch(beacon({ metric: "lcp", value: 1000, page: "home" }));
+    const res = await fetch(beacon({ metric: "lcp", value: 1000, page: "home" }), client);
     if (res.status === 429) {
       refused++;
       assert(res.headers.get("retry-after"), "a refused client is told when to come back");

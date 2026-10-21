@@ -394,7 +394,8 @@ Deno.test("audio-feed-19db: chunked oversized upload rejects with 413 without bu
 Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited and capped per window", async () => {
   const { app, stores } = await setupApp();
 
-  // Send repeated batches of reports from the same client IP
+  // Send repeated batches of reports from the same client IP (a socket
+  // address, so the per-client bound applies — audio-feed-0t8el)
   const statuses: number[] = [];
   for (let i = 0; i < 6; i++) {
     const res = await app.fetch(
@@ -411,6 +412,7 @@ Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited a
           })),
         ),
       }),
+      { remoteAddr: { hostname: "203.0.113.195" } },
     );
     statuses.push(res.status);
   }
