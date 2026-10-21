@@ -1644,8 +1644,6 @@ Deno.test("audio-feed-xapat: the edge's id is the id the page renders and the id
     makeUser({ id: "admin-1", email: "admin@example.com", isAdmin: true, status: "approved" }),
   );
   const cookie = `${SESSION_COOKIE}=${await sessionFor(stores, "admin-1")}`;
-  const priorBase = Deno.env.get("PUBLIC_BASE_URL");
-  Deno.env.set("PUBLIC_BASE_URL", BASE);
   let server: Awaited<ReturnType<typeof bootstrap>> | null = null;
   try {
     server = await bootstrap({
@@ -1654,6 +1652,10 @@ Deno.test("audio-feed-xapat: the edge's id is the id the page renders and the id
       isDeploy: true,
       synthesizer: null,
       inventory: false,
+      // A config override, not a process-global PUBLIC_BASE_URL mutation
+      // (audio-feed-lnnjd): the value reaches the app the same way, and no
+      // concurrently running module can observe it.
+      config: { publicBaseUrl: BASE },
     });
     const response = await server.fetch(
       new Request(`${BASE}/admin/observability`, { headers: { cookie } }),
@@ -1680,8 +1682,6 @@ Deno.test("audio-feed-xapat: the edge's id is the id the page renders and the id
     assertStringIncludes(line.message, "/admin/observability");
   } finally {
     if (server) await server.shutdown();
-    if (priorBase === undefined) Deno.env.delete("PUBLIC_BASE_URL");
-    else Deno.env.set("PUBLIC_BASE_URL", priorBase);
   }
 });
 
