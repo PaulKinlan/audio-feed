@@ -213,7 +213,9 @@ export function createRouter(handlers: AppHandlers = {}): Router<AppContext> {
   router.get("/assets/:name", handleAsset);
   router.get("/listen/:token", handleListen);
   // audio-feed-7s2: the activity panel's poll, and the subscriber's retry. Same capability as
-  // the page itself — the token in the path is the credential.
+  // the page itself — the token in the path is the credential. The retry is a PAID mutation
+  // behind that weaker credential, so it is same-origin walled, rate-limited per
+  // (token, address) and per token, and ceilinged per episode for life (audio-feed-8jzgl).
   router.get("/listen/:token/status", handleListenStatus);
   router.post("/listen/:token/episodes/:episodeId/retry", handleListenRetry);
   // PWA surface, served as routes because this app has no static file pipeline.

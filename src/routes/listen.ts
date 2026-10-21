@@ -109,6 +109,8 @@ import type { AppContext } from "../app.ts";
 import type { RouteContext } from "../router.ts";
 import { resolveOrigin } from "../origin.ts";
 import { getUserByFeedToken } from "../auth/users.ts";
+import { sameOrigin } from "../auth/sessions.ts";
+import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { speculationRules } from "./shell.ts";
@@ -786,8 +788,82 @@ export async function handleListenStatus(
 }
 
 /**
+ * Retry abuse bounds for the capability-token endpoint (audio-feed-8jzgl).
+ *
+ * The retry POST's only credential is the feed token in the URL path, so a token that
+ * leaks into browser history, a proxy log, or a pasted link is a retry button anyone can
+ * hold down — and every accepted retry re-queues a PAID Gemini synthesis. Three walls,
+ * each backing a different shape of abuse:
+ *
+ * 1. The same-origin wall (in the handler): a cross-site page in a browser cannot fire
+ *    the subscriber's retries from the subscriber's own session, which matters exactly
+ *    when a feed URL was pasted somewhere public — that pasted URL is the whole credential.
+ * 2. Two sliding-window rate limits, shared through the metadata store like every other
+ *    limiter here (audio-feed-2zvc), so the bound holds across Deno Deploy isolates: one
+ *    per (feed token, client address), one per feed token alone. The pair answers both a
+ *    single client hammering the endpoint and a rotated-address hammer on one leaked
+ *    token. Both sit far above any subscriber's real behaviour (a "Try again" click per
+ *    failed episode).
+ * 3. A lifetime ceiling per episode (`LISTEN_RETRY_CEILING`), recorded durably in a store
+ *    row nothing resets — not the retry itself, not the episode's later states, not time.
+ *    A repeatedly failing episode is an owner problem: the account page's regenerate is
+ *    session- and CSRF-gated and deliberately NOT ceilinged. The capability token, the
+ *    weaker credential, gets a bounded number of swings at paid synthesis.
+ */
+export const LISTEN_RETRY_ADDR_RATE = { maxRequests: 10, windowMs: 10 * 60_000 } as const;
+export const LISTEN_RETRY_TOKEN_RATE = { maxRequests: 30, windowMs: 10 * 60_000 } as const;
+export const LISTEN_RETRY_CEILING = 5;
+
+/** The ceiling row's namespace, so it cannot collide with any limiter window row. */
+const RETRY_CEILING_NAMESPACE = "listen_retry_ceiling";
+
+interface RetryCeilingOutcome {
+  /** The attempt may proceed: the counter moved and stayed within the ceiling. */
+  admitted: boolean;
+  /** True when the ceiling was already exhausted — a deterministic refusal. */
+  exhausted: boolean;
+  /** True only when the store confirmed the read-modify-write. */
+  committed: boolean;
+}
+
+/**
+ * Check-and-increment an episode's lifetime retry counter as ONE atomic row update.
+ *
+ * Admission is decided inside the mutation, the way `SlidingWindowRateLimiter` does it.
+ * The subtlety is `committed`: a `null` mutate means "leave the row untouched" in both
+ * stores, and both report that as `committed: false` — the same value a lost CAS race
+ * produces — so a ceiling refusal writes the row back unchanged instead, keeping a
+ * deterministic refusal and a lost write distinguishable. A write that cannot commit
+ * after the store's own retries comes back uncommitted and the caller fails CLOSED:
+ * an uncounted swing at paid synthesis is exactly what this ceiling exists to prevent.
+ */
+async function recordEpisodeRetry(
+  store: AppContext["stores"]["metadata"],
+  userId: string,
+  episodeId: string,
+): Promise<RetryCeilingOutcome> {
+  let admitted = false;
+  let exhausted = false;
+  const write = await store.atomicUpdate<number>(
+    `${RETRY_CEILING_NAMESPACE}:${userId}:${episodeId}`,
+    (current) => {
+      const count = current ?? 0;
+      if (count >= LISTEN_RETRY_CEILING) {
+        exhausted = true;
+        // An unchanged write-back, so `committed` stays a verdict about the write.
+        return count;
+      }
+      admitted = true;
+      return count + 1;
+    },
+    // No TTL on purpose: the ceiling is lifetime. One bounded row per retried episode.
+  );
+  return { admitted: admitted && write.committed, exhausted, committed: write.committed };
+}
+
+/**
  * `POST /listen/:token/episodes/:episodeId/retry` — the subscriber's "try again"
- * (audio-feed-7s2).
+ * (audio-feed-7s2), bounded by the walls documented above (audio-feed-8jzgl).
  *
  * Scoped by the token that authenticated the page, and the episode is looked up under that
  * user id, so another subscriber's episode is simply not found: the response is the same 404
@@ -795,8 +871,14 @@ export async function handleListenStatus(
  * existence oracle over other users' episodes.
  */
 export async function handleListenRetry(
-  { ctx, params }: RouteContext<AppContext>,
+  { ctx, req, params, remoteAddr }: RouteContext<AppContext>,
 ): Promise<Response> {
+  // The origin wall first: it costs only headers, and it refuses a cross-site POST before
+  // the route spends a single store read on it. The player's fetch POST always carries
+  // Origin; `sameOrigin` also settles the `Origin: null` form case on Sec-Fetch-Site.
+  if (!sameOrigin(req, resolveOrigin(ctx.config, req).baseUrl)) {
+    return forbidden("Cross-origin request refused.");
+  }
   const token = await resolveTokenValue(ctx, (params.token ?? "").trim());
   if (!token) return notFound("Unknown feed");
   const user = await getUserByFeedToken(ctx.stores.metadata, token);
@@ -804,6 +886,28 @@ export async function handleListenRetry(
   if (!isSynthesisAuthorized(user)) {
     return forbidden(`Retry unavailable (status: ${user.status})`);
   }
+
+  // Rate limits BEFORE the episode reads: a hammer should not get free KV reads any more
+  // than free synthesis. Only a token that resolved to a real feed reaches here, so the
+  // windows cannot be seeded with garbage tokens (unknown ones 404'd above).
+  const clientIp = extractClientIp(req, Boolean(ctx.config.trustProxyHeaders), remoteAddr);
+  const addrLimit = await new SlidingWindowRateLimiter(
+    LISTEN_RETRY_ADDR_RATE,
+    ctx.stores.metadata,
+    "listen_retry_addr",
+  ).check(`${token}:${clientIp}`);
+  const tokenLimit = addrLimit.allowed
+    ? await new SlidingWindowRateLimiter(
+      LISTEN_RETRY_TOKEN_RATE,
+      ctx.stores.metadata,
+      "listen_retry_token",
+    ).check(token)
+    : undefined;
+  const refused = tokenLimit && !tokenLimit.allowed ? tokenLimit : addrLimit;
+  if (!refused.allowed) {
+    return tooManyRequests("Too many retries; try again later.", refused.resetMs);
+  }
+
   const episodeId = (params.episodeId ?? "").trim();
   if (!episodeId) return notFound("Unknown episode");
 
@@ -818,6 +922,38 @@ export async function handleListenRetry(
       headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
     });
   }
+
+  // The lifetime ceiling, checked and incremented BEFORE the queue call: a ceiling applied
+  // after the paid work started would be a receipt, not a bound. A unit is consumed even
+  // if a concurrent retry wins the requeue and this one answers 404 — wasted swings count,
+  // which is the conservative direction for paid spend.
+  const ceiling = await recordEpisodeRetry(ctx.stores.metadata, user.id, episodeId);
+  if (!ceiling.committed) {
+    // Fail closed: we could not prove the retry was counted, so it is not queued.
+    return new Response(JSON.stringify({ error: "Could not record the retry; try again." }), {
+      status: 503,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "retry-after": "5",
+      },
+    });
+  }
+  if (!ceiling.admitted) {
+    // `reason` is machine-readable on purpose: the player button has to distinguish a
+    // permanent ceiling from a temporary rate refusal without parsing prose.
+    return new Response(
+      JSON.stringify({ error: "Retry limit reached for this episode.", reason: "retry_ceiling" }),
+      {
+        status: 429,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      },
+    );
+  }
+
   const queued = await ctx.stores.metadata.retryEpisode(user.id, episodeId);
   if (!queued) return notFound("Unknown episode");
   return new Response(JSON.stringify({ queued: true, episodeId: queued.id }), {
@@ -830,6 +966,16 @@ const notFound = (message: string) =>
   Response.json({ error: message }, { status: 404, headers: { "cache-control": "no-store" } });
 const forbidden = (message: string) =>
   Response.json({ error: message }, { status: 403, headers: { "cache-control": "no-store" } });
+/** A rate-window refusal: `retry-after` says when the window opens again. */
+const tooManyRequests = (message: string, resetMs: number) =>
+  new Response(JSON.stringify({ error: message }), {
+    status: 429,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "retry-after": String(Math.max(1, Math.ceil(resetMs / 1000))),
+    },
+  });
 
 /** `/listen` without a token: restore from localStorage, or paste a feed URL. */
 export function renderListenLanding(publicBaseUrl: string, nonce: string): string {

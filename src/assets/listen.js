@@ -1051,7 +1051,20 @@ async function retryEpisode(id, button) {
     );
     if (!res.ok) {
       button.disabled = false;
-      button.textContent = res.status === 404 ? "Gone" : "Could not retry";
+      if (res.status === 404) {
+        button.textContent = "Gone";
+        return;
+      }
+      if (res.status === 429) {
+        // `reason: "retry_ceiling"` is permanent (the episode's lifetime retries are spent);
+        // any other 429 is the rate window, so the button stays usable for a later try.
+        const body = await res.json().catch(() => ({}));
+        button.textContent = body?.reason === "retry_ceiling"
+          ? "Retry limit reached"
+          : "Slow down — try again soon";
+        return;
+      }
+      button.textContent = "Could not retry";
       return;
     }
     button.textContent = "Queued";
