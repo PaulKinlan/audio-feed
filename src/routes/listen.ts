@@ -817,6 +817,15 @@ export const LISTEN_RETRY_CEILING = 5;
 /** The ceiling row's namespace, so it cannot collide with any limiter window row. */
 const RETRY_CEILING_NAMESPACE = "listen_retry_ceiling";
 
+/** The two rate-window namespaces — exported so tests can address the SAME rows the handler uses. */
+export const LISTEN_RETRY_ADDR_WINDOW = "listen_retry_addr";
+export const LISTEN_RETRY_TOKEN_WINDOW = "listen_retry_token";
+
+/** The durable per-episode ceiling row, exported for tests that seed or clear it. */
+export function retryCeilingRow(userId: string, episodeId: string): string {
+  return `${RETRY_CEILING_NAMESPACE}:${userId}:${episodeId}`;
+}
+
 interface RetryCeilingOutcome {
   /** The attempt may proceed: the counter moved and stayed within the ceiling. */
   admitted: boolean;
@@ -824,6 +833,26 @@ interface RetryCeilingOutcome {
   exhausted: boolean;
   /** True only when the store confirmed the read-modify-write. */
   committed: boolean;
+}
+
+/**
+ * One run of the ceiling mutation, PURE so the multi-run contract is testable
+ * (audio-feed-dqjf2): the KV store's CAS loop re-runs the callback against what each
+ * winning writer left behind, and the LAST run is the one the store applies. A decision
+ * captured inside a lost attempt must therefore never survive into the classification —
+ * before this was pure, a stale `admitted` from a lost increment waved a ceiling-exhausted
+ * caller into `retryEpisode`, which then answered 404 instead of the honest 429.
+ */
+export function applyRetryCeiling(
+  current: number | null,
+  ceiling = LISTEN_RETRY_CEILING,
+): { next: number; admitted: boolean; exhausted: boolean } {
+  const count = current ?? 0;
+  if (count >= ceiling) {
+    // An unchanged write-back, so `committed` stays a verdict about the write.
+    return { next: count, admitted: false, exhausted: true };
+  }
+  return { next: count + 1, admitted: true, exhausted: false };
 }
 
 /**
@@ -842,23 +871,23 @@ async function recordEpisodeRetry(
   userId: string,
   episodeId: string,
 ): Promise<RetryCeilingOutcome> {
-  let admitted = false;
-  let exhausted = false;
+  // Recomputed by EVERY callback run (see applyRetryCeiling): the last run is the one the
+  // store applied, so its outcome — never a lost attempt's — classifies the request.
+  let last: { next: number; admitted: boolean; exhausted: boolean } | null = null;
   const write = await store.atomicUpdate<number>(
     `${RETRY_CEILING_NAMESPACE}:${userId}:${episodeId}`,
     (current) => {
-      const count = current ?? 0;
-      if (count >= LISTEN_RETRY_CEILING) {
-        exhausted = true;
-        // An unchanged write-back, so `committed` stays a verdict about the write.
-        return count;
-      }
-      admitted = true;
-      return count + 1;
+      last = applyRetryCeiling(current);
+      return last.next;
     },
     // No TTL on purpose: the ceiling is lifetime. One bounded row per retried episode.
   );
-  return { admitted: admitted && write.committed, exhausted, committed: write.committed };
+  const outcome = last!; // the store always runs the callback at least once
+  return {
+    admitted: outcome.admitted && write.committed,
+    exhausted: outcome.exhausted,
+    committed: write.committed,
+  };
 }
 
 /**
@@ -894,13 +923,13 @@ export async function handleListenRetry(
   const addrLimit = await new SlidingWindowRateLimiter(
     LISTEN_RETRY_ADDR_RATE,
     ctx.stores.metadata,
-    "listen_retry_addr",
+    LISTEN_RETRY_ADDR_WINDOW,
   ).check(`${token}:${clientIp}`);
   const tokenLimit = addrLimit.allowed
     ? await new SlidingWindowRateLimiter(
       LISTEN_RETRY_TOKEN_RATE,
       ctx.stores.metadata,
-      "listen_retry_token",
+      LISTEN_RETRY_TOKEN_WINDOW,
     ).check(token)
     : undefined;
   const refused = tokenLimit && !tokenLimit.allowed ? tokenLimit : addrLimit;

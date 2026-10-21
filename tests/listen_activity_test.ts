@@ -10,12 +10,20 @@
  * endpoint the page can poll, and a token-gated retry that can only touch the caller's episodes.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import {
+  LISTEN_RETRY_ADDR_RATE,
+  LISTEN_RETRY_ADDR_WINDOW,
+  LISTEN_RETRY_TOKEN_RATE,
+  LISTEN_RETRY_TOKEN_WINDOW,
+  retryCeilingRow,
+} from "../src/routes/listen.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { playerData } from "./listen_client.ts";
-import { LISTEN_RETRY_CEILING, renderListenPage } from "../src/routes/listen.ts";
+import { applyRetryCeiling, LISTEN_RETRY_CEILING, renderListenPage } from "../src/routes/listen.ts";
 import {
   createTempChromeProfile,
   killChromeAndWait,
@@ -29,7 +37,11 @@ const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 const TOKEN = "token-activity";
 
-async function seeded() {
+async function seeded(configOverride: Partial<typeof config> = {}) {
+  // Overrides let a test serve the app on a DIFFERENT origin than the file-level default:
+  // `publicBaseUrl: undefined` makes resolveOrigin derive the origin from the request, which
+  // is what a browser test on 127.0.0.1 needs for the same-origin wall to accept it.
+  const testConfig = { ...config, ...configOverride };
   const stores: Stores = memoryStores();
   await stores.metadata.putUser(
     makeUser({ id: "user-1", status: "approved", feedToken: TOKEN, displayName: "Paul" }),
@@ -83,7 +95,7 @@ async function seeded() {
     error: "SECRET-OTHER-USER-DETAIL",
   }));
 
-  const ctx = { config, stores };
+  const ctx = { config: testConfig, stores };
   const { fetch } = createApp(ctx, createHandlers(ctx));
   const req = (path: string, init?: RequestInit) => new Request(`${BASE}${path}`, init);
   return { stores, fetch, req };
@@ -509,12 +521,228 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
   );
 });
 
-Deno.test("the player button distinguishes a spent retry ceiling from a rate refusal (audio-feed-8jzgl)", async () => {
-  const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
-  // The route answers both 429s with different bodies; the UI keys on the machine-readable
-  // `reason`, never on parsing prose, and a rate refusal leaves the button usable.
-  assertStringIncludes(js, 'reason === "retry_ceiling"');
-  assertStringIncludes(js, "Retry limit reached");
+Deno.test("the ceiling verdict describes the run the store applied, never a lost attempt (audio-feed-dqjf2)", () => {
+  // A KV CAS re-run: the caller's increment saw count 4 and lost the commit to a writer
+  // who moved the row to the ceiling. The callback runs AGAIN against 5 — and the SECOND
+  // run's verdict is the only one that may classify the request. Before the mutation was
+  // per-run pure, a stale `admitted` from the lost attempt waved the caller into
+  // retryEpisode, which answered 404 instead of the honest 429 retry_ceiling.
+  const lost = applyRetryCeiling(4);
+  assertEquals(lost, { next: 5, admitted: true, exhausted: false });
+  const committed = applyRetryCeiling(5);
+  assertEquals(committed, { next: LISTEN_RETRY_CEILING, admitted: false, exhausted: true });
+  assert(
+    committed.exhausted && !committed.admitted,
+    "the re-run against the exhausted counter must refuse, not admit",
+  );
+  // The no-row-yet and refused write-backs keep the counter an integer: the refusal
+  // writes the count back unchanged so `committed` stays a verdict about the write.
+  assertEquals(applyRetryCeiling(null), { next: 1, admitted: true, exhausted: false });
+  assertEquals(applyRetryCeiling(LISTEN_RETRY_CEILING).next, LISTEN_RETRY_CEILING);
+});
+
+Deno.test({
+  name:
+    "the retry button's labels are driven by real 429 bodies: rate refusal vs spent ceiling vs queued (audio-feed-8jzgl, audio-feed-rvy5n)",
+  // The ceiling-vs-rate distinction was first pinned by asserting listen.js SOURCE text,
+  // which listen_client.ts explicitly warns against: source assertions prove nothing about
+  // behaviour. This drives the real page in headless Chrome against the real app — three
+  // clicks, three different server answers, three rendered labels — and checks the episode
+  // state each time, so the UI contract is proven, not paraphrased.
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const { stores, fetch: appFetch } = await seeded({
+      // The browser will be served on 127.0.0.1:<ephemeral>, so the origin the wall compares
+      // against must be DERIVED from the request, not the file-level https://audio.example.com.
+      publicBaseUrl: undefined,
+      port: 0,
+    });
+
+    // The SAME limiter rows the handler addresses, driven through the public API so the
+    // rate window is genuinely full rather than faked.
+    const addrLimiter = new SlidingWindowRateLimiter(
+      LISTEN_RETRY_ADDR_RATE,
+      stores.metadata,
+      LISTEN_RETRY_ADDR_WINDOW,
+    );
+    const tokenLimiter = new SlidingWindowRateLimiter(
+      LISTEN_RETRY_TOKEN_RATE,
+      stores.metadata,
+      LISTEN_RETRY_TOKEN_WINDOW,
+    );
+    const clientIp = "127.0.0.1"; // what Deno.serve reports for a local Chrome
+    for (let i = 0; i < LISTEN_RETRY_ADDR_RATE.maxRequests; i++) {
+      await addrLimiter.check(`${TOKEN}:${clientIp}`);
+    }
+
+    const server = Deno.serve({ port: 0, hostname: "127.0.0.1" }, appFetch);
+    const port = (server.addr as Deno.NetAddr).port;
+
+    const scratchTmp = await Deno.makeTempDir({ prefix: "rvy5n-scratch-" });
+    const { profileDir, cleanup } = await createTempChromeProfile(
+      "audiofeed-retry-labels-",
+      scratchTmp,
+    );
+    const chrome = new Deno.Command(newestChrome(), {
+      args: [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profileDir}`,
+        "about:blank",
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let devtoolsPort = "";
+    for (let i = 0; i < 50 && !devtoolsPort; i++) {
+      await sleep(100);
+      devtoolsPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => ""))
+        .split("\n")[0]!;
+    }
+
+    /**
+     * Click the retry button and resolve to its label once it CHANGES from `prev`: the
+     * label persists between clicks, so a poll keyed on "not Try again" would resolve
+     * instantly with the previous answer before the new fetch returns.
+     */
+    // deno-lint-ignore no-explicit-any
+    const clickAndWaitForLabel = (
+      cdp: (m: string, p?: Record<string, unknown>) => Promise<any>,
+      prev: string,
+    ): Promise<string> =>
+      cdp("Runtime.evaluate", {
+        // An async IIFE, measured against this Chrome build: the `(() => new Promise(...))()`
+        // form came back from Runtime.evaluate as the uncalled function object, so the
+        // awaitPromise path needs the `(async () => ...)()` shape.
+        expression: `(async () => {
+          const started = Date.now();
+          document.querySelector('.act-retry')?.click();
+          for (;;) {
+            const label = document.querySelector('.act-retry')?.textContent ?? null;
+            if (label !== null && label !== "Try again" && label !== ${JSON.stringify(prev)}) {
+              return JSON.stringify(label);
+            }
+            if (Date.now() - started > 10000) return JSON.stringify("TIMEOUT:" + label);
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+        // deno-lint-ignore no-explicit-any
+      }).then((r: any) => {
+        if (r.result?.exceptionDetails) {
+          throw new Error(
+            `page error: ${JSON.stringify(r.result.exceptionDetails).slice(0, 400)}`,
+          );
+        }
+        return JSON.parse(r.result.result.value);
+      });
+
+    try {
+      const targets = await (await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`)).json();
+      // deno-lint-ignore no-explicit-any
+      const page = targets.find((t: any) => t.type === "page");
+      const ws = new WebSocket(page.webSocketDebuggerUrl);
+      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+      let nextId = 0;
+      // deno-lint-ignore no-explicit-any
+      const pending = new Map<number, (v: any) => void>();
+      ws.addEventListener("message", (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.id && pending.has(msg.id)) {
+          pending.get(msg.id)!(msg);
+          pending.delete(msg.id);
+        }
+      });
+      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+        const id = ++nextId;
+        ws.send(JSON.stringify({ id, method, params }));
+        return new Promise((resolve) => pending.set(id, resolve));
+      };
+
+      await cdp("Page.enable");
+      await cdp("Page.navigate", { url: `http://127.0.0.1:${port}/listen/${TOKEN}` });
+      await sleep(800);
+
+      const initial = await cdp("Runtime.evaluate", {
+        expression: `document.querySelector('.act-retry')?.textContent`,
+        returnByValue: true,
+        // deno-lint-ignore no-explicit-any
+      }).then((r: any) => r.result.result.value as string);
+
+      // 1. Rate-refused: the (token, address) window above is genuinely full, so the real
+      // endpoint answers 429 with retry-after and the label says the refusal is temporary.
+      const afterRate = await clickAndWaitForLabel(cdp, initial ?? "Try again");
+      assertEquals(
+        afterRate,
+        "Slow down — try again soon",
+        "a rate refusal must read as temporary",
+      );
+      assertEquals(
+        (await stores.metadata.getEpisode("user-1", "ep-failed"))?.status,
+        "failed",
+        "a rate-refused retry must not queue anything",
+      );
+
+      // 2. Ceiling-spent: open the rate windows, spend the episode's ceiling, click again.
+      await addrLimiter.reset(`${TOKEN}:${clientIp}`);
+      await tokenLimiter.reset(TOKEN);
+      await stores.metadata.atomicUpdate<number>(
+        retryCeilingRow("user-1", "ep-failed"),
+        () => LISTEN_RETRY_CEILING,
+      );
+      assertEquals(
+        await clickAndWaitForLabel(cdp, "Slow down — try again soon"),
+        "Retry limit reached",
+        "a spent ceiling must read as permanent",
+      );
+      assertEquals(
+        (await stores.metadata.getEpisode("user-1", "ep-failed"))?.status,
+        "failed",
+        "a ceiling-refused retry must not queue anything",
+      );
+
+      // 3. Un-spent: clear the ceiling row and the SAME button queues for real. Here the
+      // CONTRACT is the episode's state, not the label: a 202 is followed by
+      // refreshActivity(), which re-renders the activity section and replaces the button
+      // before any poll could read "Queued" — the accepted retry's visible result is the
+      // episode leaving the failed list.
+      await stores.metadata.atomicUpdate<number>(retryCeilingRow("user-1", "ep-failed"), () => 0);
+      await cdp("Runtime.evaluate", {
+        expression: `document.querySelector('.act-retry')?.click()`,
+      });
+      let status: string | undefined;
+      for (let i = 0; i < 50; i++) {
+        await sleep(100);
+        status = (await stores.metadata.getEpisode("user-1", "ep-failed"))?.status;
+        if (status === "pending") break;
+      }
+      assertEquals(
+        status,
+        "pending",
+        "the accepted retry must have requeued the episode",
+      );
+
+      ws.close();
+    } finally {
+      await server.shutdown();
+      await killChromeAndWait(chrome);
+      await cleanup();
+      assert(
+        await removeDirWhenQuiet(scratchTmp),
+        "the scratch root must be gone after teardown (audio-feed-wj8o2)",
+      );
+      assert(
+        await waitForChromeProfileUnused(profileDir),
+        "no process may still reference the row's profile once teardown has finished (audio-feed-wj8o2)",
+      );
+    }
+  },
 });
 
 Deno.test("listen.js and listen.css define Dismiss All button for multi-failure activity (audio-feed-j8o)", async () => {
