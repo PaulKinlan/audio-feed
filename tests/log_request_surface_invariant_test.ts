@@ -175,29 +175,18 @@ async function app(): Promise<{
   close: () => Promise<void>;
 }> {
   const stores = await openStores({ kvPath: ":memory:" });
-  // Set for the DURATION OF BOOTSTRAP (the route table and the config are both built there) and restored
-  // immediately, so no other file in this worker can observe them (audio-feed-sw1r).
-  const restore = (name: string, prior: string | undefined) => {
-    if (prior === undefined) Deno.env.delete(name);
-    else Deno.env.set(name, prior);
-  };
-  const priorThrow = Deno.env.get("AUDIO_FEED_TEST_THROW");
-  const priorBase = Deno.env.get("PUBLIC_BASE_URL");
-  Deno.env.set("AUDIO_FEED_TEST_THROW", "1");
-  Deno.env.set("PUBLIC_BASE_URL", BASE);
-  let server: Awaited<ReturnType<typeof bootstrap>>;
-  try {
-    server = await bootstrap({
-      port: 0,
-      stores,
-      isDeploy: true,
-      synthesizer: null,
-      inventory: false,
-    });
-  } finally {
-    restore("AUDIO_FEED_TEST_THROW", priorThrow);
-    restore("PUBLIC_BASE_URL", priorBase);
-  }
+  // No process-global env mutation (audio-feed-lnnjd): the trap door and the
+  // base URL reach the app through bootstrap's env/config seams instead of an
+  // env set/restore window a concurrently running module could observe.
+  const server = await bootstrap({
+    port: 0,
+    stores,
+    isDeploy: true,
+    synthesizer: null,
+    inventory: false,
+    config: { publicBaseUrl: BASE },
+    env: { get: (name: string) => name === "AUDIO_FEED_TEST_THROW" ? "1" : undefined },
+  });
   return {
     fetch: async (r, info) => await server.fetch(r, info),
     stores,

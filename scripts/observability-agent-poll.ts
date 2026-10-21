@@ -108,7 +108,13 @@ export interface PollConfig {
 }
 
 /** Resolves configuration WITHOUT making any decision about doing work. */
-export function resolveConfig(args: string[]): PollConfig {
+export function resolveConfig(
+  args: string[],
+  // Injectable so a test passes a fake rather than mutating process-global
+  // Deno.env, which every concurrently running module would see
+  // (audio-feed-lnnjd). The default keeps production unchanged.
+  env: { get(key: string): string | undefined } = Deno.env,
+): PollConfig {
   const flag = (name: string): string | null => {
     const i = args.indexOf(name);
     if (i < 0) return null;
@@ -116,7 +122,7 @@ export function resolveConfig(args: string[]): PollConfig {
     return value === undefined ? null : value;
   };
   const maxPromptRaw = flag("--max-prompt-bytes") ??
-    Deno.env.get("AUDIOFEED_AGENT_MAX_PROMPT_BYTES");
+    env.get("AUDIOFEED_AGENT_MAX_PROMPT_BYTES");
   const maxPromptOverride = maxPromptRaw === null ? Number.NaN : Number(maxPromptRaw);
   // A non-positive or unparseable override falls back to the default: a cap of nothing would drop every
   // event, which is worse than ignoring a typo in what is meant to be a test knob.
@@ -124,18 +130,18 @@ export function resolveConfig(args: string[]): PollConfig {
     ? maxPromptOverride
     : MAX_PROMPT_BYTES;
 
-  const key = Deno.env.get("AUDIOFEED_OBSERVABILITY_KEY") ?? null;
-  const enabledFlag = (Deno.env.get("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED") ?? "").toLowerCase();
+  const key = env.get("AUDIOFEED_OBSERVABILITY_KEY") ?? null;
+  const enabledFlag = (env.get("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED") ?? "").toLowerCase();
   return {
     // Off unless EXPLICITLY enabled, and a key is necessary anyway. The two conditions are separate on
     // purpose: a deployment that has a key for other reasons must still opt in to spending money.
     enabled: ["1", "true", "yes"].includes(enabledFlag) && key !== null && key.length > 0,
     key,
-    baseUrl: (flag("--base-url") ?? Deno.env.get("AUDIOFEED_OBSERVABILITY_BASE_URL") ??
+    baseUrl: (flag("--base-url") ?? env.get("AUDIOFEED_OBSERVABILITY_BASE_URL") ??
       DEFAULT_BASE_URL).replace(/\/+$/, ""),
-    model: flag("--model") ?? Deno.env.get("AUDIOFEED_AGENT_MODEL") ?? DEFAULT_MODEL,
-    geminiKey: Deno.env.get("GEMINI_API_KEY") ?? null,
-    stateDir: flag("--state-dir") ?? Deno.env.get("AUDIOFEED_AGENT_STATE_DIR") ?? DEFAULT_STATE_DIR,
+    model: flag("--model") ?? env.get("AUDIOFEED_AGENT_MODEL") ?? DEFAULT_MODEL,
+    geminiKey: env.get("GEMINI_API_KEY") ?? null,
+    stateDir: flag("--state-dir") ?? env.get("AUDIOFEED_AGENT_STATE_DIR") ?? DEFAULT_STATE_DIR,
     bdBin: flag("--bd-bin") ?? "bd",
     dryRun: args.includes("--dry-run"),
     json: args.includes("--json"),

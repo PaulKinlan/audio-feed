@@ -185,34 +185,22 @@ Deno.test("the home page states the deployment's real default voice, not Charon 
 });
 
 Deno.test("loadConfig rejects an invalid DEFAULT_VOICE at boot (audio-feed-4xt)", () => {
-  const had = Deno.env.get("DEFAULT_VOICE");
-  Deno.env.set("DEFAULT_VOICE", "Charonn"); // the typo this guard exists for
+  // A fake reader, not a process-global env mutation (audio-feed-lnnjd).
+  const env = { get: (key: string) => key === "DEFAULT_VOICE" ? "Charonn" : undefined };
+  let thrown: unknown;
   try {
-    let thrown: unknown;
-    try {
-      loadConfig();
-    } catch (error) {
-      thrown = error;
-    }
-    assert(thrown instanceof Error, "an invalid DEFAULT_VOICE must throw, not fall back");
-    assertStringIncludes((thrown as Error).message, "Charonn");
-    assertStringIncludes((thrown as Error).message, "Aoede", "the error must name the valid set");
-  } finally {
-    // Restore, or every later test in this process inherits the bad value.
-    if (had === undefined) Deno.env.delete("DEFAULT_VOICE");
-    else Deno.env.set("DEFAULT_VOICE", had);
+    loadConfig(env);
+  } catch (error) {
+    thrown = error;
   }
+  assert(thrown instanceof Error, "an invalid DEFAULT_VOICE must throw, not fall back");
+  assertStringIncludes((thrown as Error).message, "Charonn");
+  assertStringIncludes((thrown as Error).message, "Aoede", "the error must name the valid set");
 });
 
 Deno.test("loadConfig accepts a valid DEFAULT_VOICE (audio-feed-4xt)", () => {
-  const had = Deno.env.get("DEFAULT_VOICE");
-  Deno.env.set("DEFAULT_VOICE", "Kore");
-  try {
-    assertEquals(loadConfig().defaultVoice, "Kore");
-  } finally {
-    if (had === undefined) Deno.env.delete("DEFAULT_VOICE");
-    else Deno.env.set("DEFAULT_VOICE", had);
-  }
+  const env = { get: (key: string) => key === "DEFAULT_VOICE" ? "Kore" : undefined };
+  assertEquals(loadConfig(env).defaultVoice, "Kore");
 });
 
 // ---------------------------------------------------------------------------

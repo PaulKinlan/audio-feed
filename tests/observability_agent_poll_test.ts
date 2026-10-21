@@ -196,27 +196,26 @@ Deno.test("a disabled poll makes NO network call and NO model call (audio-feed-y
 });
 
 Deno.test("enablement requires BOTH the flag and a key (audio-feed-yl6b)", () => {
-  const savedFlag = Deno.env.get("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED");
-  const savedKey = Deno.env.get("AUDIOFEED_OBSERVABILITY_KEY");
-  try {
-    Deno.env.set("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED", "1");
-    Deno.env.set("AUDIOFEED_OBSERVABILITY_KEY", "");
-    assertEquals(resolveConfig([]).enabled, false, "a flag without a key must not enable spending");
-    Deno.env.set("AUDIOFEED_OBSERVABILITY_KEY", "k");
-    assertEquals(resolveConfig([]).enabled, true);
-    Deno.env.set("AUDIOFEED_OBSERVABILITY_AGENT_ENABLED", "0");
-    assertEquals(resolveConfig([]).enabled, false, "a key alone must not enable spending");
-  } finally {
-    for (
-      const [k, v] of [["AUDIOFEED_OBSERVABILITY_AGENT_ENABLED", savedFlag], [
-        "AUDIOFEED_OBSERVABILITY_KEY",
-        savedKey,
-      ]] as const
-    ) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  // A fake reader, not process-global env mutation (audio-feed-lnnjd).
+  const env = (flag?: string, key?: string) => ({
+    get: (name: string) =>
+      name === "AUDIOFEED_OBSERVABILITY_AGENT_ENABLED"
+        ? flag
+        : name === "AUDIOFEED_OBSERVABILITY_KEY"
+        ? key
+        : undefined,
+  });
+  assertEquals(
+    resolveConfig([], env("1", "")).enabled,
+    false,
+    "a flag without a key must not enable spending",
+  );
+  assertEquals(resolveConfig([], env("1", "k")).enabled, true);
+  assertEquals(
+    resolveConfig([], env("0", "k")).enabled,
+    false,
+    "a key alone must not enable spending",
+  );
 });
 
 Deno.test("a concurrent run is refused, does no work, and writes NOTHING (audio-feed-yl6b)", async () => {

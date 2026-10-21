@@ -119,16 +119,26 @@ const TRANSIENT_STATUSES = new Set([429, 503]);
 export const DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
 /**
+ * The minimum of an environment a reader needs (audio-feed-lnnjd). Tests pass
+ * a fake rather than mutating process-global `Deno.env`, which every
+ * concurrently running module would see for the whole set/restore window.
+ * The default stays `Deno.env`, so production callers are unchanged.
+ */
+export interface EnvReader {
+  get(key: string): string | undefined;
+}
+
+/**
  * Resolve the Gemini API base URL, preferring an explicit override or the
  * GEMINI_API_BASE_URL environment variable, falling back to DEFAULT_GEMINI_API_BASE_URL.
  * Normalizes host-only URLs by appending /v1beta so /models/... appends correctly.
  */
-export function getGeminiApiBaseUrl(override?: string): string {
+export function getGeminiApiBaseUrl(override?: string, env?: EnvReader): string {
   const raw = override?.trim() || (() => {
     try {
-      if (typeof Deno !== "undefined" && typeof Deno.env?.get === "function") {
-        return Deno.env.get("GEMINI_API_BASE_URL")?.trim();
-      }
+      const reader = env ??
+        (typeof Deno !== "undefined" && typeof Deno.env?.get === "function" ? Deno.env : undefined);
+      return reader?.get("GEMINI_API_BASE_URL")?.trim();
     } catch {
       // Permission denied or environment access restricted
     }
@@ -406,6 +416,8 @@ export interface GeminiTtsClientConfig {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  /** Environment the base-URL fallback reads (default Deno.env) — audio-feed-lnnjd. */
+  env?: EnvReader;
   fetchFn?: typeof fetch;
   /** Per-attempt deadline in ms (default 120000). */
   timeoutMs?: number;
@@ -1874,7 +1886,9 @@ export class GeminiTtsClient {
 
     this.apiKey = config.apiKey || envKey || "";
     this.model = config.model || DEFAULT_TTS_MODEL;
-    this.baseUrl = config.baseUrl ? getGeminiApiBaseUrl(config.baseUrl) : getGeminiApiBaseUrl();
+    this.baseUrl = config.baseUrl
+      ? getGeminiApiBaseUrl(config.baseUrl)
+      : getGeminiApiBaseUrl(undefined, config.env);
     this.fetchFn = config.fetchFn || fetch;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;

@@ -27,6 +27,13 @@ export interface QuantiseEvidencePngOptions {
     cmd: string,
     args: string[],
   ) => Promise<{ success: boolean; code: number; stdout?: Uint8Array; stderr?: Uint8Array }>;
+  /**
+   * The convert binary to spawn (default "convert", resolved via PATH).
+   * audio-feed-lnnjd: the seam for the failure-path tests is the BINARY PATH,
+   * not process-global PATH mutation and not `runner` — a named binary still
+   * exercises the real Deno.Command spawn, while `runner` would mock it away.
+   */
+  convertBin?: string;
 }
 
 /**
@@ -73,7 +80,7 @@ export async function quantiseEvidencePng(
     if (opts?.runner) {
       out = await opts.runner("convert", args);
     } else {
-      const cmd = new Deno.Command("convert", { args });
+      const cmd = new Deno.Command(opts?.convertBin ?? "convert", { args });
       out = await cmd.output();
     }
   } catch (err) {

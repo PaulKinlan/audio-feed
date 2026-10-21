@@ -19,10 +19,15 @@ const config: AppConfig = {
   publicBaseUrl: "https://audio.example.com",
 };
 
-function appFetch() {
-  const { fetch } = createApp({ config, stores: memoryStores() }, {});
+function appFetch(env?: { get(key: string): string | undefined }) {
+  const { fetch } = createApp({ config, stores: memoryStores(), env }, {});
   return fetch;
 }
+
+/** A fake env reader (audio-feed-lnnjd): no process-global mutation. */
+const fakeEnv = (values: Record<string, string>) => ({
+  get: (key: string) => values[key],
+});
 
 const get = (path: string, init?: RequestInit) =>
   new Request(`https://audio.example.com${path}`, init);
@@ -104,84 +109,54 @@ Deno.test("1552: /health carries deploy + deploySource alongside the existing fi
 });
 
 Deno.test("1552: a deployment id set in the environment reaches the route", async () => {
-  const previous = Deno.env.get("DENO_DEPLOYMENT_ID");
-  try {
-    Deno.env.set("DENO_DEPLOYMENT_ID", "dep-1552-test");
-    const body = await (await appFetch()(get("/health"))).json();
-    assertEquals(body.deploy, "dep-1552-test");
-    assertEquals(body.deploySource, "DENO_DEPLOYMENT_ID");
-  } finally {
-    if (previous === undefined) Deno.env.delete("DENO_DEPLOYMENT_ID");
-    else Deno.env.set("DENO_DEPLOYMENT_ID", previous);
-  }
+  const body = await (await appFetch(fakeEnv({ DENO_DEPLOYMENT_ID: "dep-1552-test" }))(
+    get("/health"),
+  )).json();
+  assertEquals(body.deploy, "dep-1552-test");
+  assertEquals(body.deploySource, "DENO_DEPLOYMENT_ID");
 });
 
 Deno.test("ciia/nqhg: /health exposes commit when set in env and degrades cleanly to null when unset", async () => {
-  const envVars = [
-    "DENO_DEPLOYMENT_ID",
-    ...DEPLOY_COMMIT_ENV_VARS,
-  ] as const;
-  const previous = new Map<string, string | undefined>();
-  for (const name of envVars) {
-    previous.set(name, Deno.env.get(name));
+  // Fake readers per case instead of process-global set/delete (audio-feed-lnnjd).
+
+  // 1. When unset, commit degrades cleanly to null (audio-feed-nqhg: all alias vars isolated)
+  const body1 = await (await appFetch(fakeEnv({}))(get("/health"))).json();
+  assertEquals(body1.commit, null);
+  assertEquals(body1.deploy, "dev");
+
+  // 2. When GIT_COMMIT_SHA is set alone, commit is exposed and deploySource is GIT_COMMIT_SHA
+  const body2 = await (await appFetch(fakeEnv({ GIT_COMMIT_SHA: "commit-sha-ciia-1" }))(
+    get("/health"),
+  )).json();
+  assertEquals(body2.commit, "commit-sha-ciia-1");
+  assertEquals(body2.deploy, "commit-sha-ciia-1");
+  assertEquals(body2.deploySource, "GIT_COMMIT_SHA");
+
+  // 3. When both DENO_DEPLOYMENT_ID and GIT_COMMIT_SHA are set, both are visible
+  const body3 = await (await appFetch(
+    fakeEnv({ DENO_DEPLOYMENT_ID: "deploy-id-ciia-2", GIT_COMMIT_SHA: "commit-sha-ciia-1" }),
+  )(get("/health"))).json();
+  assertEquals(body3.commit, "commit-sha-ciia-1");
+  assertEquals(body3.deploy, "deploy-id-ciia-2");
+  assertEquals(body3.deploySource, "DENO_DEPLOYMENT_ID");
+
+  // 4. audio-feed-likz: table-driven verification that every supported commit variable
+  // reports its exact variable name as deploySource and carries commit/deploy to the /health route.
+  for (const varName of DEPLOY_COMMIT_ENV_VARS) {
+    const testVal = `sha-test-${varName.toLowerCase().replace(/_/g, "-")}`;
+    const body = await (await appFetch(fakeEnv({ [varName]: testVal }))(get("/health"))).json();
+    assertEquals(body.commit, testVal, `commit matches for ${varName}`);
+    assertEquals(body.deploy, testVal, `deploy matches for ${varName}`);
+    assertEquals(body.deploySource, varName, `deploySource accurately names ${varName}`);
   }
 
-  const clearAll = () => {
-    for (const name of envVars) {
-      Deno.env.delete(name);
-    }
-  };
-
-  try {
-    // 1. When unset, commit degrades cleanly to null (audio-feed-nqhg: all alias vars isolated)
-    clearAll();
-    const body1 = await (await appFetch()(get("/health"))).json();
-    assertEquals(body1.commit, null);
-    assertEquals(body1.deploy, "dev");
-
-    // 2. When GIT_COMMIT_SHA is set alone, commit is exposed and deploySource is GIT_COMMIT_SHA
-    clearAll();
-    Deno.env.set("GIT_COMMIT_SHA", "commit-sha-ciia-1");
-    const body2 = await (await appFetch()(get("/health"))).json();
-    assertEquals(body2.commit, "commit-sha-ciia-1");
-    assertEquals(body2.deploy, "commit-sha-ciia-1");
-    assertEquals(body2.deploySource, "GIT_COMMIT_SHA");
-
-    // 3. When both DENO_DEPLOYMENT_ID and GIT_COMMIT_SHA are set, both are visible
-    clearAll();
-    Deno.env.set("DENO_DEPLOYMENT_ID", "deploy-id-ciia-2");
-    Deno.env.set("GIT_COMMIT_SHA", "commit-sha-ciia-1");
-    const body3 = await (await appFetch()(get("/health"))).json();
-    assertEquals(body3.commit, "commit-sha-ciia-1");
-    assertEquals(body3.deploy, "deploy-id-ciia-2");
-    assertEquals(body3.deploySource, "DENO_DEPLOYMENT_ID");
-
-    // 4. audio-feed-likz: table-driven verification that every supported commit variable
-    // reports its exact variable name as deploySource and carries commit/deploy to the /health route.
-    for (const varName of DEPLOY_COMMIT_ENV_VARS) {
-      clearAll();
-      const testVal = `sha-test-${varName.toLowerCase().replace(/_/g, "-")}`;
-      Deno.env.set(varName, testVal);
-      const body = await (await appFetch()(get("/health"))).json();
-      assertEquals(body.commit, testVal, `commit matches for ${varName}`);
-      assertEquals(body.deploy, testVal, `deploy matches for ${varName}`);
-      assertEquals(body.deploySource, varName, `deploySource accurately names ${varName}`);
-    }
-
-    // 5. When DENO_DEPLOYMENT_ID is set alone without commit, deploySource is DENO_DEPLOYMENT_ID and commit is null
-    clearAll();
-    Deno.env.set("DENO_DEPLOYMENT_ID", "deploy-id-only-test");
-    const body5 = await (await appFetch()(get("/health"))).json();
-    assertEquals(body5.commit, null);
-    assertEquals(body5.deploy, "deploy-id-only-test");
-    assertEquals(body5.deploySource, "DENO_DEPLOYMENT_ID");
-  } finally {
-    for (const name of envVars) {
-      const val = previous.get(name);
-      if (val === undefined) Deno.env.delete(name);
-      else Deno.env.set(name, val);
-    }
-  }
+  // 5. When DENO_DEPLOYMENT_ID is set alone without commit, deploySource is DENO_DEPLOYMENT_ID and commit is null
+  const body5 = await (await appFetch(fakeEnv({ DENO_DEPLOYMENT_ID: "deploy-id-only-test" }))(
+    get("/health"),
+  )).json();
+  assertEquals(body5.commit, null);
+  assertEquals(body5.deploy, "deploy-id-only-test");
+  assertEquals(body5.deploySource, "DENO_DEPLOYMENT_ID");
 });
 
 Deno.test("likz/lq6c/fciz: AGENTS.md documents exactly the set of DEPLOY_COMMIT_ENV_VARS with no duplicate enumerations", async () => {

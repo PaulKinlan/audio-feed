@@ -68,6 +68,8 @@ Deno.test("a bead id in a COMMENT is not a writer (the s3uk/i7vi false positive)
 Deno.test("a bead id in a STRING that is not a write target is not a writer", () => {
   const source = `
     const key = \`audio-feed-positions:\${TOKEN}\`;
+    // audio-feed-lnnjd audit: this Deno.env.set is FIXTURE TEXT parsed by
+    // censusSource, never executed — it mutates nothing.
     Deno.env.set("REPORT_DIR", "audio-feed-abcd");
     const raw = localStorage.getItem("audio-feed-abcd");
   `;
