@@ -298,7 +298,9 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
     {
       file: "src/routes/reports.ts",
       exercises: ["tests/csp_reporting_test.ts"],
-      mentionsOnly: ["tests/admin_subpages_test.ts"], // seeded report log; no POST to handler
+      // admin_subpages seeds a report log; the CSP report-URL suite (audio-feed-s2esl) asserts the
+      // `report-uri` that POINTS at this route in other routes' headers and never POSTs to it.
+      mentionsOnly: ["tests/admin_subpages_test.ts", "tests/router_csp_report_url_test.ts"],
       mentions: (source: string) => source.includes("/api/reports/csp"),
     },
   ];
