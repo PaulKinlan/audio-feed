@@ -104,12 +104,12 @@ exit 7
     );
     await Deno.chmod(stub, 0o755);
 
-    const origPath = Deno.env.get("PATH") || "";
-    try {
-      Deno.env.set("PATH", `${binDir}:${origPath}`);
-
+    {
+      // The seam is the binary path (audio-feed-lnnjd): a named stub binary
+      // still exercises the real Deno.Command spawn; mutating process-global
+      // PATH would be visible to every concurrently running module.
       const err = await assertRejects(
-        () => quantiseEvidencePng(filePath, { allowOutsideProof: true }),
+        () => quantiseEvidencePng(filePath, { allowOutsideProof: true, convertBin: stub }),
         Error,
       );
 
@@ -124,10 +124,8 @@ exit 7
       // Original file must remain untouched
       const origExists = await Deno.stat(filePath).then(() => true).catch(() => false);
       assertEquals(origExists, true, "original file must remain on disk");
-    } finally {
-      Deno.env.set("PATH", origPath);
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
   },
 });
 
@@ -145,12 +143,16 @@ Deno.test({
     // Pre-create .tmp to ensure spawn failure cleans it up
     await Deno.writeTextFile(tmpPath, "abandoned-tmp");
 
-    const origPath = Deno.env.get("PATH") || "";
-    try {
-      Deno.env.set("PATH", emptyBinDir);
-
+    // The seam is the binary path (audio-feed-lnnjd): a nonexistent binary
+    // hits the same real-spawn ENOENT as a PATH search miss, without mutating
+    // process-global PATH for every concurrently running module.
+    {
       const err = await assertRejects(
-        () => quantiseEvidencePng(filePath, { allowOutsideProof: true }),
+        () =>
+          quantiseEvidencePng(filePath, {
+            allowOutsideProof: true,
+            convertBin: `${emptyBinDir}/convert`,
+          }),
         Error,
       );
 
@@ -161,10 +163,8 @@ Deno.test({
       // Must clean up .tmp file
       const tmpExists = await Deno.stat(tmpPath).then(() => true).catch(() => false);
       assertEquals(tmpExists, false, ".tmp file must be removed on spawn failure");
-    } finally {
-      Deno.env.set("PATH", origPath);
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
   },
 });
 
