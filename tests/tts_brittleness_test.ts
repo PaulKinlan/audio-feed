@@ -167,26 +167,30 @@ Deno.test("a deadline retry does not consume the status-retry budget (audio-feed
 });
 
 Deno.test("TTS_TIMEOUT_MS is validated at boot and defaults to 120s (audio-feed-9yu8)", () => {
-  const had = Deno.env.get("TTS_TIMEOUT_MS");
-  try {
-    Deno.env.delete("TTS_TIMEOUT_MS");
-    assertEquals(loadConfig().ttsTimeoutMs, DEFAULT_TIMEOUT_MS, "unset means the new default");
+  // Fake readers, not process-global env mutation (audio-feed-lnnjd).
+  const ttsEnv = (value?: string) => ({
+    get: (key: string) => key === "TTS_TIMEOUT_MS" ? value : undefined,
+  });
 
-    Deno.env.set("TTS_TIMEOUT_MS", "45000");
-    assertEquals(loadConfig().ttsTimeoutMs, 45_000, "an operator can raise or lower it");
+  assertEquals(
+    loadConfig(ttsEnv()).ttsTimeoutMs,
+    DEFAULT_TIMEOUT_MS,
+    "unset means the new default",
+  );
 
-    for (const bad of ["0", "-1", "1.5", "soon", "120000ms"]) {
-      Deno.env.set("TTS_TIMEOUT_MS", bad);
-      assertThrows(
-        () => loadConfig(),
-        Error,
-        "Invalid TTS_TIMEOUT_MS",
-        `"${bad}" must fail closed rather than silently use the default`,
-      );
-    }
-  } finally {
-    if (had === undefined) Deno.env.delete("TTS_TIMEOUT_MS");
-    else Deno.env.set("TTS_TIMEOUT_MS", had);
+  assertEquals(
+    loadConfig(ttsEnv("45000")).ttsTimeoutMs,
+    45_000,
+    "an operator can raise or lower it",
+  );
+
+  for (const bad of ["0", "-1", "1.5", "soon", "120000ms"]) {
+    assertThrows(
+      () => loadConfig(ttsEnv(bad)),
+      Error,
+      "Invalid TTS_TIMEOUT_MS",
+      `"${bad}" must fail closed rather than silently use the default`,
+    );
   }
 });
 
