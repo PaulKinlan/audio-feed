@@ -571,13 +571,31 @@ export async function createTempChromeProfile(
   };
 }
 
-export function newestChrome(chromeCacheRoot?: string): string {
+/**
+ * Where chrome configuration is read from.
+ *
+ * Injected so a test can assert the resolution rules WITHOUT mutating the process env (audio-feed-w5i0m).
+ * `Deno.env.set("AUDIOFEED_CHROME_BIN"/"HOME")` under `deno test --parallel` is process-global: every
+ * concurrently running module sees the value for the whole set/restore window, and a module that launches a
+ * child inherits the mutated HOME/PATH. The default stays `Deno.env`, so production callers are unchanged.
+ */
+export interface EnvReader {
+  get(key: string): string | undefined;
+}
+
+export function newestChrome(chromeCacheRoot?: string, env: EnvReader = Deno.env): string {
   if (!chromeCacheRoot) {
-    const envBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
+    const envBin = env.get("AUDIOFEED_CHROME_BIN");
     if (envBin && envBin.trim().length > 0) {
       return envBin.trim();
     }
   }
+  // HOME stays a LITERAL `Deno.env.get("HOME")` on purpose. The fast gate's read-relation scanner classifies an
+  // out-of-repo base by that exact expression (`isOutOfRepoRhs` in scripts/test-selection.ts); routing it
+  // through the injected reader instead made `${home}/.cache/puppeteer/chrome` read as an unresolved IN-REPO
+  // hint, which disabled the gate's inert class and answered 500 server_misconfigured-shaped noise on three
+  // gate suites (audio-feed-w5i0m). A caller that needs a different root passes `chromeCacheRoot`, which is
+  // this module's existing seam and the one the discovery test uses.
   const home = Deno.env.get("HOME") ?? "";
   const root = chromeCacheRoot ?? `${home}/.cache/puppeteer/chrome`;
   let dirs: string[] = [];
@@ -595,15 +613,19 @@ export function newestChrome(chromeCacheRoot?: string): string {
   return `${root}/${dirs.at(-1)}/chrome-linux64/chrome`;
 }
 
-export function resolveChromeBinary(override?: string): string {
+export function resolveChromeBinary(
+  override?: string,
+  env: EnvReader = Deno.env,
+  chromeCacheRoot?: string,
+): string {
   if (override && override.trim().length > 0) {
     return override.trim();
   }
-  const envBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
+  const envBin = env.get("AUDIOFEED_CHROME_BIN");
   if (envBin && envBin.trim().length > 0) {
     return envBin.trim();
   }
-  return newestChrome();
+  return newestChrome(chromeCacheRoot, env);
 }
 
 export interface ChromeLaunchOptions {
@@ -618,6 +640,18 @@ export interface ChromeLaunchOptions {
    * createTempChromeProfile resolves TMPDIR itself and allocates in the platform temp dir.
    */
   profileRoot?: string;
+  /**
+   * Where the chrome binary is resolved from (audio-feed-w5i0m). Passed instead of mutating the
+   * process-global `AUDIOFEED_CHROME_BIN`/`HOME`, which under `deno test --parallel` is visible to every
+   * concurrently running module. Omitted, resolution is unchanged and reads `Deno.env`.
+   */
+  env?: EnvReader;
+  /**
+   * The Chrome cache root to discover under (audio-feed-w5i0m). Passed rather than mutating `HOME`, so a
+   * test can assert "no Chrome binaries found under <root>" without redirecting path resolution for every
+   * concurrently running module.
+   */
+  chromeCacheRoot?: string;
 }
 
 export interface ChromeHandle {
@@ -630,7 +664,7 @@ export interface ChromeHandle {
 export async function launchChrome(
   opts: ChromeLaunchOptions = {},
 ): Promise<ChromeHandle> {
-  const binary = resolveChromeBinary(opts.binary);
+  const binary = resolveChromeBinary(opts.binary, opts.env, opts.chromeCacheRoot);
   const prefix = opts.prefix ?? "audiofeed-chrome-";
 
   let profile: { profileDir: string; cleanup: () => Promise<void> } | null = null;
