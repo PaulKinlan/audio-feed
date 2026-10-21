@@ -150,13 +150,22 @@ export class SlidingWindowRateLimiter {
     // uncounted attempts through — the exact bound this exists to hold. A
     // window we could not write fails CLOSED.
     const allowed = write.committed && admitted;
-    if (!allowed && key === UNADDRESSED_CLIENT_KEY) {
-      // Operator-visible (audio-feed-0t8el): an exhausted unaddressed bucket
-      // means the deployment is serving clients it cannot tell apart, at a
-      // rate past the deployment-wide bound.
-      console.warn(
-        `[audio-feed] rate limit: unaddressed bucket exhausted for namespace "${this.#namespace}"`,
-      );
+    if (key === UNADDRESSED_CLIENT_KEY) {
+      if (write.committed && !admitted) {
+        // Operator-visible (audio-feed-0t8el): an exhausted unaddressed bucket
+        // means the deployment is serving clients it cannot tell apart, at a
+        // rate past the deployment-wide bound. Fires only when the refusal
+        // came from the quota: a LOST CAS race on an empty row also fails
+        // closed, and calling that "exhausted" is a false alarm an operator
+        // cannot act on (audio-feed-lxlm4).
+        console.warn(
+          `[audio-feed] rate limit: unaddressed bucket exhausted for namespace "${this.#namespace}"`,
+        );
+      } else if (!write.committed) {
+        console.warn(
+          `[audio-feed] rate limit: unaddressed check for namespace "${this.#namespace}" failed CLOSED on a lost CAS race (store contention, not exhaustion)`,
+        );
+      }
     }
     return this.#result(key, write.value, allowed, now);
   }
