@@ -411,39 +411,34 @@ Deno.test("the admin dashboard reports each subscriber's ceiling and its source 
 });
 
 Deno.test("DEFAULT_DAILY_EPISODE_BUDGET is a validated operator knob (audio-feed-khk3)", () => {
-  const original = Deno.env.get("DEFAULT_DAILY_EPISODE_BUDGET");
-  try {
-    Deno.env.delete("DEFAULT_DAILY_EPISODE_BUDGET");
-    assertEquals(loadConfig().defaultDailyEpisodeBudget, DEFAULT_DAILY_EPISODE_BUDGET);
+  // Fake readers, not process-global Deno.env mutation (audio-feed-lnnjd):
+  // a set/delete window is visible to every concurrently running module.
+  const budgetEnv = (value?: string) => ({
+    get: (key: string) => key === "DEFAULT_DAILY_EPISODE_BUDGET" ? value : undefined,
+  });
 
-    Deno.env.set("DEFAULT_DAILY_EPISODE_BUDGET", "3");
-    assertEquals(loadConfig().defaultDailyEpisodeBudget, 3);
+  assertEquals(loadConfig(budgetEnv()).defaultDailyEpisodeBudget, DEFAULT_DAILY_EPISODE_BUDGET);
 
-    Deno.env.set("DEFAULT_DAILY_EPISODE_BUDGET", "0");
-    assertEquals(
-      loadConfig().defaultDailyEpisodeBudget,
-      0,
-      "0 is legal: an unconfigured subscriber gets nothing",
-    );
+  assertEquals(loadConfig(budgetEnv("3")).defaultDailyEpisodeBudget, 3);
 
-    // Fail closed at boot: a typo must not silently restore the unbounded default.
-    for (const bad of ["abc", "-1", "2.5"]) {
-      Deno.env.set("DEFAULT_DAILY_EPISODE_BUDGET", bad);
-      let threw = false;
-      try {
-        loadConfig();
-      } catch {
-        threw = true;
-      }
-      assert(threw, `DEFAULT_DAILY_EPISODE_BUDGET="${bad}" must be refused at boot`);
+  assertEquals(
+    loadConfig(budgetEnv("0")).defaultDailyEpisodeBudget,
+    0,
+    "0 is legal: an unconfigured subscriber gets nothing",
+  );
+
+  // Fail closed at boot: a typo must not silently restore the unbounded default.
+  for (const bad of ["abc", "-1", "2.5"]) {
+    let threw = false;
+    try {
+      loadConfig(budgetEnv(bad));
+    } catch {
+      threw = true;
     }
-
-    // An empty value is "unset", not 0: a half-filled env file must land on the constant rather
-    // than silently switching every unconfigured subscriber off.
-    Deno.env.set("DEFAULT_DAILY_EPISODE_BUDGET", "");
-    assertEquals(loadConfig().defaultDailyEpisodeBudget, DEFAULT_DAILY_EPISODE_BUDGET);
-  } finally {
-    if (original === undefined) Deno.env.delete("DEFAULT_DAILY_EPISODE_BUDGET");
-    else Deno.env.set("DEFAULT_DAILY_EPISODE_BUDGET", original);
+    assert(threw, `DEFAULT_DAILY_EPISODE_BUDGET="${bad}" must be refused at boot`);
   }
+
+  // An empty value is "unset", not 0: a half-filled env file must land on the constant rather
+  // than silently switching every unconfigured subscriber off.
+  assertEquals(loadConfig(budgetEnv("")).defaultDailyEpisodeBudget, DEFAULT_DAILY_EPISODE_BUDGET);
 });

@@ -12,7 +12,12 @@ import type { BlobStore, MetadataStore } from "./storage/mod.ts";
 import { MemoryBlobStore, MemoryMetadataStore } from "./storage/memory.ts";
 import { KvMetadataStore } from "./storage/kv.ts";
 import { S3BlobStore } from "./storage/s3.ts";
-import { DEFAULT_TIMEOUT_MS, GEMINI_TTS_VOICES, type GeminiTtsVoice } from "./tts/gemini.ts";
+import {
+  DEFAULT_TIMEOUT_MS,
+  type EnvReader,
+  GEMINI_TTS_VOICES,
+  type GeminiTtsVoice,
+} from "./tts/gemini.ts";
 
 /**
  * The daily per-user episode ceiling that applies when a subscriber has no
@@ -209,19 +214,22 @@ export interface AppConfig {
   webAuthnRelatedOrigins?: string[];
 }
 
-function env(name: string): string | undefined {
-  const value = Deno.env.get(name);
+// The reader is a parameter (audio-feed-lnnjd): tests pass a fake rather than mutating
+// process-global Deno.env, which every concurrently running module would see. The default
+// stays Deno.env, so production callers are unchanged.
+function envFrom(reader: EnvReader, name: string): string | undefined {
+  const value = reader.get(name);
   return value && value.trim() !== "" ? value.trim() : undefined;
 }
 
-export function loadConfig(): AppConfig {
-  const port = Number(env("PORT") ?? 8000);
+export function loadConfig(reader: EnvReader = Deno.env): AppConfig {
+  const port = Number(envFrom(reader, "PORT") ?? 8000);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`Invalid PORT: ${env("PORT")}`);
+    throw new Error(`Invalid PORT: ${envFrom(reader, "PORT")}`);
   }
-  const trust = env("TRUST_PROXY_HEADERS")?.toLowerCase();
+  const trust = envFrom(reader, "TRUST_PROXY_HEADERS")?.toLowerCase();
 
-  const defaultVoice = env("DEFAULT_VOICE")?.trim();
+  const defaultVoice = envFrom(reader, "DEFAULT_VOICE")?.trim();
   if (defaultVoice) {
     // Fail closed at boot. Every voice actually used is validated downstream too,
     // but catching it here means an operator learns at deploy time, not after the
@@ -238,7 +246,7 @@ export function loadConfig(): AppConfig {
   // audio-feed-9yu8: the per-attempt TTS deadline is an operator knob, so a latency spike can be
   // absorbed without a redeploy. Fail closed at boot for the same reason PORT does: a typo that
   // silently fell back to the default would look healthy while every long segment kept dying.
-  const ttsTimeoutRaw = env("TTS_TIMEOUT_MS");
+  const ttsTimeoutRaw = envFrom(reader, "TTS_TIMEOUT_MS");
   let ttsTimeoutMs: number | undefined;
   if (ttsTimeoutRaw !== undefined) {
     ttsTimeoutMs = Number(ttsTimeoutRaw);
@@ -253,7 +261,7 @@ export function loadConfig(): AppConfig {
   // closed at boot for the same reason TTS_TIMEOUT_MS does: a typo that silently fell back to the
   // default would restore the unbounded behaviour this knob exists to remove, and would look
   // healthy while doing it.
-  const defaultBudgetRaw = env("DEFAULT_DAILY_EPISODE_BUDGET");
+  const defaultBudgetRaw = envFrom(reader, "DEFAULT_DAILY_EPISODE_BUDGET");
   let defaultDailyEpisodeBudget: number | undefined;
   if (defaultBudgetRaw !== undefined) {
     // `env` already treats an empty value as absent, so `DEFAULT_DAILY_EPISODE_BUDGET=` means
@@ -270,7 +278,7 @@ export function loadConfig(): AppConfig {
   // audio-feed-m182: same fail-closed reasoning as the per-subscriber ceiling above. A typo that
   // fell back to the constant would silently replace the operator's number with 500 and look
   // healthy, and a non-integer or negative ceiling is not a ceiling.
-  const globalBudgetRaw = env("GLOBAL_DAILY_EPISODE_BUDGET");
+  const globalBudgetRaw = envFrom(reader, "GLOBAL_DAILY_EPISODE_BUDGET");
   let globalDailyEpisodeBudget: number | undefined;
   if (globalBudgetRaw !== undefined) {
     globalDailyEpisodeBudget = Number(globalBudgetRaw);
@@ -282,7 +290,7 @@ export function loadConfig(): AppConfig {
     }
   }
 
-  const logRetentionRaw = env("LOG_RETENTION_DAYS");
+  const logRetentionRaw = envFrom(reader, "LOG_RETENTION_DAYS");
   let logRetentionDays = DEFAULT_LOG_RETENTION_DAYS;
   if (logRetentionRaw !== undefined && logRetentionRaw !== "") {
     logRetentionDays = Number(logRetentionRaw);
@@ -295,7 +303,7 @@ export function loadConfig(): AppConfig {
   }
 
   // audio-feed-vqu4: per-invocation work bounds to fit inside Deno Deploy cron isolate lifetime
-  const maxSegmentsRaw = env("MAX_SEGMENTS_PER_INVOCATION");
+  const maxSegmentsRaw = envFrom(reader, "MAX_SEGMENTS_PER_INVOCATION");
   let maxSegmentsPerInvocation: number | undefined;
   if (maxSegmentsRaw !== undefined) {
     maxSegmentsPerInvocation = Number(maxSegmentsRaw);
@@ -306,7 +314,7 @@ export function loadConfig(): AppConfig {
     }
   }
 
-  const maxDurationRaw = env("MAX_INVOCATION_DURATION_MS");
+  const maxDurationRaw = envFrom(reader, "MAX_INVOCATION_DURATION_MS");
   let maxInvocationDurationMs: number | undefined;
   if (maxDurationRaw !== undefined) {
     maxInvocationDurationMs = Number(maxDurationRaw);
@@ -322,15 +330,15 @@ export function loadConfig(): AppConfig {
     port,
     // No localhost fallback. An unset value means "resolve it from the request",
     // which is the only thing that knows the real origin.
-    publicBaseUrl: env("PUBLIC_BASE_URL")?.replace(/\/+$/, ""),
-    allowedHosts: env("ALLOWED_HOSTS")
+    publicBaseUrl: envFrom(reader, "PUBLIC_BASE_URL")?.replace(/\/+$/, ""),
+    allowedHosts: envFrom(reader, "ALLOWED_HOSTS")
       ?.split(",")
       .map((s) => s.trim())
       .filter(Boolean),
     trustProxyHeaders: trust === "1" || trust === "true" || trust === "yes",
-    notifyOutboxEnabled: env("NOTIFY_OUTBOX_ENABLED") === "true" ||
-      env("NOTIFY_OUTBOX_ENABLED") === "1",
-    geminiApiKey: env("GEMINI_API_KEY"),
+    notifyOutboxEnabled: envFrom(reader, "NOTIFY_OUTBOX_ENABLED") === "true" ||
+      envFrom(reader, "NOTIFY_OUTBOX_ENABLED") === "1",
+    geminiApiKey: envFrom(reader, "GEMINI_API_KEY"),
     ttsTimeoutMs: ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS,
     defaultDailyEpisodeBudget: defaultDailyEpisodeBudget ?? DEFAULT_DAILY_EPISODE_BUDGET,
     // Resolved to a number here so the worker and the admin console read the same value; the worker
@@ -339,19 +347,19 @@ export function loadConfig(): AppConfig {
     maxSegmentsPerInvocation,
     maxInvocationDurationMs: maxInvocationDurationMs ?? DEFAULT_MAX_INVOCATION_DURATION_MS,
     maxUploadRetries: (() => {
-      const raw = env("MAX_UPLOAD_RETRIES");
+      const raw = envFrom(reader, "MAX_UPLOAD_RETRIES");
       const parsed = raw !== undefined ? parseInt(raw, 10) : undefined;
       return parsed !== undefined && Number.isFinite(parsed) && parsed >= 0
         ? parsed
         : DEFAULT_MAX_UPLOAD_RETRIES;
     })(),
-    adminToken: env("ADMIN_TOKEN"),
+    adminToken: envFrom(reader, "ADMIN_TOKEN"),
     // Read here and never anywhere else, so there is one place a reviewer has to look to confirm the
     // key is not logged: nothing writes it to a record, and a request record carries no headers.
-    observabilityKey: env("AUDIOFEED_OBSERVABILITY_KEY"),
+    observabilityKey: envFrom(reader, "AUDIOFEED_OBSERVABILITY_KEY"),
     defaultVoice: defaultVoice as GeminiTtsVoice | undefined,
-    webAuthnRpId: env("WEBAUTHN_RP_ID"),
-    webAuthnRelatedOrigins: env("WEBAUTHN_RELATED_ORIGINS")
+    webAuthnRpId: envFrom(reader, "WEBAUTHN_RP_ID"),
+    webAuthnRelatedOrigins: envFrom(reader, "WEBAUTHN_RELATED_ORIGINS")
       ?.split(",")
       .map((s) => s.trim().replace(/\/+$/, ""))
       .filter(Boolean),
@@ -371,11 +379,15 @@ export interface Stores {
  * All-or-nothing: either every S3 variable is present, or none are. A partial
  * set is a configuration error, never a silent downgrade to memory.
  */
-export function selectBlobStore(): { store: BlobStore; describe: string } {
-  const bucket = env("STORAGE_BUCKET");
-  const endpoint = env("STORAGE_ENDPOINT");
-  const accessKeyId = env("STORAGE_ACCESS_KEY_ID") ?? env("STORAGE_ACCESS_KEY");
-  const secretAccessKey = env("STORAGE_SECRET_ACCESS_KEY") ?? env("STORAGE_SECRET_KEY");
+export function selectBlobStore(
+  reader: EnvReader = Deno.env,
+): { store: BlobStore; describe: string } {
+  const bucket = envFrom(reader, "STORAGE_BUCKET");
+  const endpoint = envFrom(reader, "STORAGE_ENDPOINT");
+  const accessKeyId = envFrom(reader, "STORAGE_ACCESS_KEY_ID") ??
+    envFrom(reader, "STORAGE_ACCESS_KEY");
+  const secretAccessKey = envFrom(reader, "STORAGE_SECRET_ACCESS_KEY") ??
+    envFrom(reader, "STORAGE_SECRET_KEY");
 
   const provided = [bucket, endpoint, accessKeyId, secretAccessKey].filter(Boolean).length;
 
@@ -395,8 +407,8 @@ export function selectBlobStore(): { store: BlobStore; describe: string } {
       endpoint: endpoint!,
       accessKeyId: accessKeyId!,
       secretAccessKey: secretAccessKey!,
-      region: env("STORAGE_REGION"),
-      publicBaseUrl: env("STORAGE_PUBLIC_BASE_URL"),
+      region: envFrom(reader, "STORAGE_REGION"),
+      publicBaseUrl: envFrom(reader, "STORAGE_PUBLIC_BASE_URL"),
     }),
     describe: `blobs=s3(${bucket})`,
   };
