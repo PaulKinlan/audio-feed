@@ -125,6 +125,16 @@ Deno.test("temporal: listen.js when() Temporal path and Date fallback agree acro
   // Pin TZ to the zone the frozen clock targets (Deno re-reads TZ on
   // Deno.env.set, so this takes effect in-process) so the test is deterministic
   // regardless of ambient TZ, and restore it so sibling tests are unaffected.
+  //
+  // audio-feed-lnnjd audit: TZ is process-global and there is NO sub-process
+  // seam — the code under test is the shipped browser bundle evaluated with
+  // `new Function`, whose local-time getters cannot take an injected zone.
+  // So this site is a recorded measurement instead of a seam: the collision
+  // set is EMPTY, measured 2026-10-21 — temporal_test.ts is the only test
+  // module reading local-time-derived values (getFullYear/getMonth/getDate/
+  // getHours/toLocale*/getTimezoneOffset: grep over tests/ finds no other),
+  // and no test calls Intl.DateTimeFormat without an explicit timeZone.
+  // `new Date(...)` construction from ISO strings/epochs is zone-independent.
   const savedTz = Deno.env.get("TZ");
   Deno.env.set("TZ", tz);
   try {
