@@ -371,3 +371,51 @@ Deno.test("unaddressed clients no longer lock each other out at the per-client b
     "addressed clients keep the per-client bound",
   );
 });
+
+Deno.test("the unaddressed exhaustion warning names exhaustion, not a lost CAS race (audio-feed-lxlm4)", async () => {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    // A store that loses every CAS: the refusal is fail-closed on contention,
+    // not exhaustion — the row is EMPTY and the quota was never approached.
+    const loseRace = {
+      atomicUpdate: () => Promise.resolve({ value: null, committed: false } as never),
+    };
+    const contended = new SlidingWindowRateLimiter(
+      { maxRequests: 10, windowMs: 60_000 },
+      loseRace,
+      "admin_auth",
+    );
+    assertEquals((await contended.check(UNADDRESSED_CLIENT_KEY)).allowed, false);
+    assertEquals(
+      warnings.filter((w) => w.includes("unaddressed bucket exhausted")).length,
+      0,
+      "a lost CAS race must not report the bucket as exhausted",
+    );
+    assertEquals(
+      warnings.filter((w) => w.includes("failed CLOSED on a lost CAS race")).length,
+      1,
+      "a lost CAS race names itself as contention",
+    );
+
+    // Genuine exhaustion of the unaddressed bucket still warns as exhaustion.
+    warnings.length = 0;
+    const stores = memoryStores();
+    const real = new SlidingWindowRateLimiter(
+      { maxRequests: 1, windowMs: 60_000 },
+      stores.metadata,
+      "admin_auth",
+      { maxRequests: 1, windowMs: 60_000 },
+    );
+    assertEquals((await real.check(UNADDRESSED_CLIENT_KEY)).allowed, true);
+    assertEquals((await real.check(UNADDRESSED_CLIENT_KEY)).allowed, false);
+    assertEquals(
+      warnings.filter((w) => w.includes("unaddressed bucket exhausted")).length,
+      1,
+      "a real exhaustion still reports as exhaustion",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
