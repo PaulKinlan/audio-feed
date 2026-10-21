@@ -608,10 +608,16 @@ Deno.test({
      * Click the retry button and resolve to its label once it CHANGES from `prev`: the
      * label persists between clicks, so a poll keyed on "not Try again" would resolve
      * instantly with the previous answer before the new fetch returns.
+     *
+     * Typed against the slice of the CDP reply this test reads, not `any`: the repo lint
+     * rejects explicit any on the whole-tree run even where a file-scoped check passed
+     * (audio-feed-rvy5n's own gate taught that lesson).
      */
-    // deno-lint-ignore no-explicit-any
+    interface CdpReply {
+      result?: { result?: { value?: unknown }; exceptionDetails?: unknown };
+    }
     const clickAndWaitForLabel = (
-      cdp: (m: string, p?: Record<string, unknown>) => Promise<any>,
+      cdp: (m: string, p?: Record<string, unknown>) => Promise<CdpReply>,
       prev: string,
     ): Promise<string> =>
       cdp("Runtime.evaluate", {
@@ -632,14 +638,13 @@ Deno.test({
         })()`,
         awaitPromise: true,
         returnByValue: true,
-        // deno-lint-ignore no-explicit-any
-      }).then((r: any) => {
+      }).then((r) => {
         if (r.result?.exceptionDetails) {
           throw new Error(
             `page error: ${JSON.stringify(r.result.exceptionDetails).slice(0, 400)}`,
           );
         }
-        return JSON.parse(r.result.result.value);
+        return JSON.parse(String(r.result?.result?.value));
       });
 
     try {
@@ -650,8 +655,7 @@ Deno.test({
       await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 
       let nextId = 0;
-      // deno-lint-ignore no-explicit-any
-      const pending = new Map<number, (v: any) => void>();
+      const pending = new Map<number, (v: CdpReply) => void>();
       ws.addEventListener("message", (e) => {
         const msg = JSON.parse(e.data);
         if (msg.id && pending.has(msg.id)) {
@@ -659,7 +663,7 @@ Deno.test({
           pending.delete(msg.id);
         }
       });
-      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+      const cdp = (method: string, params: Record<string, unknown> = {}): Promise<CdpReply> => {
         const id = ++nextId;
         ws.send(JSON.stringify({ id, method, params }));
         return new Promise((resolve) => pending.set(id, resolve));
@@ -672,8 +676,7 @@ Deno.test({
       const initial = await cdp("Runtime.evaluate", {
         expression: `document.querySelector('.act-retry')?.textContent`,
         returnByValue: true,
-        // deno-lint-ignore no-explicit-any
-      }).then((r: any) => r.result.result.value as string);
+      }).then((r) => String(r.result?.result?.value));
 
       // 1. Rate-refused: the (token, address) window above is genuinely full, so the real
       // endpoint answers 429 with retry-after and the label says the refusal is temporary.

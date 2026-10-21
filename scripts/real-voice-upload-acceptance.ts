@@ -212,11 +212,26 @@ function geminiBaseUrl(): string {
 }
 
 /** The provider's free token count for the prompt, through the same base URL the client uses. */
+/**
+ * The headers the free countTokens pre-check sends (audio-feed-rc30m).
+ *
+ * `x-goog-api-key` when a direct key is configured — the same credential GeminiTtsClient's
+ * transport uses — so a non-proxy configuration stops 403ing on the very call that is
+ * supposed to prove the spend before it happens. Without a key (fleet proxy) the header is
+ * absent and the proxy injects authentication server-side, exactly as for synthesis.
+ */
+export function countPromptHeaders(apiKey: string | undefined): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const key = apiKey?.trim();
+  if (key) headers["x-goog-api-key"] = key;
+  return headers;
+}
+
 async function countPromptTokens(prompt: string): Promise<number> {
   const base = geminiBaseUrl();
   const response = await fetch(`${base}/models/${DEFAULT_TTS_MODEL}:countTokens`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: countPromptHeaders(Deno.env.get("GEMINI_API_KEY")),
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -321,19 +336,6 @@ export async function main(args: string[]): Promise<number> {
 
   const prompt = acceptancePrompt();
   printPlan(prompt, rates, null);
-  console.log("\n--live: counting prompt tokens exactly (free call) before anything is spent...");
-  const exactInputTokens = await countPromptTokens(prompt);
-  console.log(`input tokens     : ${exactInputTokens} (EXACT)`);
-  const expected = estimateCost(
-    exactInputTokens,
-    Math.round((exactInputTokens / 15) * AUDIO_TOKENS_PER_SECOND),
-    rates,
-  );
-  console.log(
-    `EXPECTED SPEND   : ~${
-      usd(expected.totalUsd)
-    } (output estimate), worst case below is the bound:\n`,
-  );
 
   let tempWav: string | null = null;
   let episodeArticleId: string | null = null;
@@ -343,6 +345,24 @@ export async function main(args: string[]): Promise<number> {
     audioKey: null as string | null,
   };
   try {
+    console.log("\n--live: counting prompt tokens exactly (free call) before anything is spent...");
+    // INSIDE the try (audio-feed-rc30m): every statement from here on runs with the worker
+    // already live, so a countTokens failure must unwind through the same finally that
+    // aborts it — previously this call sat before the try and a 403 left a polling worker
+    // looping forever after main had returned.
+    const exactInputTokens = await countPromptTokens(prompt);
+    console.log(`input tokens     : ${exactInputTokens} (EXACT)`);
+    const expected = estimateCost(
+      exactInputTokens,
+      Math.round((exactInputTokens / 15) * AUDIO_TOKENS_PER_SECOND),
+      rates,
+    );
+    console.log(
+      `EXPECTED SPEND   : ~${
+        usd(expected.totalUsd)
+      } (output estimate), worst case below is the bound:\n`,
+    );
+
     // Upload through the app's OWN route — the ingest half of the path under test.
     const form = new FormData();
     form.append(

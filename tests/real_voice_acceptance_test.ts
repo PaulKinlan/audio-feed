@@ -13,6 +13,7 @@ import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/as
 import {
   acceptancePrompt,
   AUDIO_TOKENS_PER_SECOND,
+  countPromptHeaders,
   DOCUMENT,
   estimateCost,
   HEURISTIC_BYTES_PER_TOKEN,
@@ -143,6 +144,23 @@ Deno.test("DRY BY DEFAULT: a bare run exits 0, plans, and prints both cost marks
   assert(
     !logs.some((l) => l.includes("ACCEPTANCE PASSED")),
     "dry mode must not claim the real acceptance passed",
+  );
+});
+
+Deno.test("the countTokens pre-check carries the direct key when one is configured (audio-feed-rc30m)", () => {
+  // A direct GEMINI_API_KEY (no fleet proxy) must reach the free countTokens endpoint the
+  // same way GeminiTtsClient's transport sends it — x-goog-api-key — or the pre-check 403s
+  // and the acceptance dies before proving anything.
+  assertEquals(countPromptHeaders("test-key"), {
+    "Content-Type": "application/json",
+    "x-goog-api-key": "test-key",
+  });
+  // Proxy mode: no key configured, header absent, proxy injects auth server-side.
+  assertEquals(countPromptHeaders(undefined), { "Content-Type": "application/json" });
+  assertEquals(
+    countPromptHeaders("   "),
+    { "Content-Type": "application/json" },
+    "whitespace is not a key",
   );
 });
 
