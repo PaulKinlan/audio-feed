@@ -13,7 +13,7 @@
  * Owned by: audio-feed-0h8.
  */
 
-import { forbidden, notFound, problem } from "../http.ts";
+import { notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
 import { redactAudioKey, type RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
@@ -146,19 +146,38 @@ export function isAllowedAudioKey(rawKey: string): boolean {
   return false;
 }
 
-/** Check user approval on the key that actually resolved; fails closed if user missing or not approved. */
+/**
+ * Check user approval on the key that actually resolved; fails closed if user missing or not approved.
+ *
+ * The refusal is a 404 with the SAME body as a nonexistent object
+ * (audio-feed-7kdhb): a 403 here would tell an unauthenticated caller that
+ * the blob EXISTS but its owner is missing or unapproved — an existence
+ * oracle independent of authorization. The real reason is logged internally
+ * and never disclosed to the caller.
+ */
 async function checkUserApproval(
   ctx: RouteContext<AppContext>["ctx"],
   resolvedKey: string,
   canonicalUserId?: string | null,
 ): Promise<Response | null> {
   const userId = canonicalUserId ?? userIdFromBlobKey(resolvedKey);
-  if (!userId) return forbidden("Not available");
+  if (!userId) {
+    console.warn(
+      `[audio-feed] audio 404 (unauthorized): no owning user on key "${
+        redactAudioKey(resolvedKey)
+      }"`,
+    );
+    return notFound("Unknown audio object");
+  }
   const user = await ctx.stores.metadata.getUser(userId);
   if (!user || user.status !== "approved") {
     const status = user?.status ?? "unknown";
-    console.warn(`[audio-feed] audio 403: user "${userId}" is ${status}`);
-    return forbidden("Not available");
+    console.warn(
+      `[audio-feed] audio 404 (unauthorized): user "${userId}" is ${status} for key "${
+        redactAudioKey(resolvedKey)
+      }"`,
+    );
+    return notFound("Unknown audio object");
   }
   return null;
 }

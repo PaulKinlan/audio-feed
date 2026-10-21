@@ -14,7 +14,7 @@
  *    - When BOTH canonical and legacy blobs exist, canonical is preferred.
  *    - When NEITHER exists, returns 404.
  *    - Direct flat-key requests (GET /audio/<flat-key>) still return 404 (whsl approval bypass closed).
- *    - Suspended / unapproved user requests fail closed with 403 on fallback.
+ *    - Suspended / unapproved user requests fail closed with the identical 404 as a nonexistent object on fallback (audio-feed-7kdhb).
  *    - Attacker cannot access victim's legacy blob via attacker's canonical URL.
  *    - Whole-object downloads are attributed to the canonical user.
  */
@@ -296,7 +296,7 @@ Deno.test("rscz: direct flat-key request returns 404 (no approval bypass)", asyn
   assertEquals(resHead.status, 404);
 });
 
-Deno.test("rscz: fails closed with 403 when user is not approved", async () => {
+Deno.test("rscz: fails closed with the same 404 as a nonexistent object when user is not approved (audio-feed-7kdhb)", async () => {
   const stores = memoryStores();
   // Suspended user
   await stores.metadata.putUser(makeUser({ id: "suspended-user", status: "suspended" }));
@@ -314,8 +314,18 @@ Deno.test("rscz: fails closed with 403 when user is not approved", async () => {
 
   const { fetch } = setupTestApp(stores);
 
+  // Reference: a genuinely nonexistent object for the same user.
+  const refRes = await fetch(new Request(`${BASE}/audio/suspended-user/direct/nonexistent.wav`));
+  assertEquals(refRes.status, 404);
+  const refBody = await refRes.text();
+
   const res = await fetch(new Request(`${BASE}/audio/suspended-user/direct/ep-suspended.wav`));
-  assertEquals(res.status, 403, "must enforce user approval gate on fallback");
+  assertEquals(
+    res.status,
+    404,
+    "must enforce the user approval gate on fallback without disclosing existence",
+  );
+  assertEquals(await res.text(), refBody, "must be indistinguishable from a nonexistent object");
 });
 
 Deno.test("rscz: attacker cannot reach victim's legacy blob via attacker canonical URL", async () => {
