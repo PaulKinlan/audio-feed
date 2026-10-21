@@ -509,6 +509,14 @@ Deno.test("reprocessed or superseded failed episodes are filtered from activity 
   );
 });
 
+Deno.test("the player button distinguishes a spent retry ceiling from a rate refusal (audio-feed-8jzgl)", async () => {
+  const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
+  // The route answers both 429s with different bodies; the UI keys on the machine-readable
+  // `reason`, never on parsing prose, and a rate refusal leaves the button usable.
+  assertStringIncludes(js, 'reason === "retry_ceiling"');
+  assertStringIncludes(js, "Retry limit reached");
+});
+
 Deno.test("listen.js and listen.css define Dismiss All button for multi-failure activity (audio-feed-j8o)", async () => {
   const js = await Deno.readTextFile(new URL("../src/assets/listen.js", import.meta.url));
   const css = await Deno.readTextFile(new URL("../src/assets/listen.css", import.meta.url));
