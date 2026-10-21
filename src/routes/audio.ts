@@ -19,6 +19,33 @@ import { redactAudioKey, type RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
 import { isAudioMode, parseAudioBlobKey } from "../types.ts";
 import { getLegacyKeyUniqueOwner, isCanonicalAudioKey } from "../storage/legacy_audio.ts";
+import { extractClientIp, SlidingWindowRateLimiter } from "../auth/rate_limit.ts";
+
+/**
+ * Rate limit for the unauthenticated audio route (audio-feed-k21s0).
+ *
+ * The key is a capability, so the route is public by design — but every
+ * request costs store reads (the legacy candidate fan-out, then blob
+ * operations), and before this limit an unauthenticated caller could spend
+ * them at an unbounded rate. 300 per 5 minutes per client is generous for a
+ * podcast client (a HEAD probe, a download, and scrubbing Range requests for
+ * a few episodes) and bounds what one client address can spend. The window
+ * lives in the shared store, so the bound holds across isolates.
+ */
+export const AUDIO_RATE_LIMIT = { maxRequests: 300, windowMs: 5 * 60 * 1000 } as const;
+
+/**
+ * Upper bound on the legacy-fallback candidate lookups ONE request may cause
+ * (audio-feed-k21s0).
+ *
+ * Legitimate names are `<episodeId>[-<revision>]`: episode ids are UUIDs (5
+ * hyphen-separated parts) and a revision adds one or two more, so the deepest
+ * real lookup is well under 16. The parts are attacker-controlled, though —
+ * the 512-character key cap still admits ~160 hyphenated parts, and each one
+ * was a metadata read. Longest-first order means a cap keeps every real
+ * candidate and drops only attacker depth.
+ */
+export const MAX_FANOUT_CANDIDATES = 16;
 
 /**
  * Whether this request is one the browser will apply CORS rules to.
@@ -183,8 +210,29 @@ async function checkUserApproval(
 }
 
 export async function handleAudio(
-  { req, params, ctx }: RouteContext<AppContext>,
+  { req, params, ctx, remoteAddr }: RouteContext<AppContext>,
 ): Promise<Response> {
+  // Rate-limit before ANY store work (audio-feed-k21s0): the route is
+  // unauthenticated by design, so the rate of requests is the only bound on
+  // what a caller can spend. Checked first so that garbage keys count too —
+  // a limit that only applied to well-formed keys would leave probing free.
+  const limiter = new SlidingWindowRateLimiter(
+    AUDIO_RATE_LIMIT,
+    ctx.stores.metadata,
+    "audio",
+  );
+  const clientKey = extractClientIp(req, Boolean(ctx.config.trustProxyHeaders), remoteAddr);
+  const limit = await limiter.check(clientKey);
+  if (!limit.allowed) {
+    const refused = problem({
+      status: 429,
+      title: "too_many_requests",
+      detail: "Too many audio requests from this client; retry later.",
+    });
+    refused.headers.set("retry-after", String(Math.max(1, Math.ceil(limit.resetMs / 1000))));
+    return refused;
+  }
+
   const rawKey = params.key;
   if (!rawKey || !isAllowedAudioKey(rawKey)) {
     // audio-feed-0eae, audio-feed-f9wf: the key is a capability — and attacker-controlled
@@ -211,7 +259,9 @@ export async function handleAudio(
   if (canonicalUserId) {
     const parsed = parseAudioBlobKey(canonicalKey);
     if (parsed) {
-      for (const candidateId of parsed.candidateIds) {
+      // Capped (audio-feed-k21s0): the parts of the requested name are
+      // attacker-controlled, and each candidate is a metadata read.
+      for (const candidateId of parsed.candidateIds.slice(0, MAX_FANOUT_CANDIDATES)) {
         try {
           const ep = await ctx.stores.metadata.getEpisode(parsed.userId, candidateId);
           if (ep) {

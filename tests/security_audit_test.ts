@@ -11,7 +11,7 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import { isHttpsRequest, Router, sanitizeRequestUrl } from "../src/router.ts";
-import { isAllowedAudioKey } from "../src/routes/audio.ts";
+import { AUDIO_RATE_LIMIT, isAllowedAudioKey, MAX_FANOUT_CANDIDATES } from "../src/routes/audio.ts";
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bytes, makeUser } from "./fixtures.ts";
@@ -775,6 +775,65 @@ Deno.test("audio route: isAllowedAudioKey restricts to canonical audio/ and flat
   assertEquals(isAllowedAudioKey("audio/ready.wav"), false);
   assertEquals(isAllowedAudioKey("legacy.wav"), false);
   assertEquals(isAllowedAudioKey("episode-1.mp3"), false);
+});
+
+Deno.test("audio route: candidate fan-out is capped per request (audio-feed-k21s0)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-approved", status: "approved" }));
+
+  let getEpisodeCalls = 0;
+  const origGetEpisode = stores.metadata.getEpisode.bind(stores.metadata);
+  stores.metadata.getEpisode = (...args: Parameters<typeof origGetEpisode>) => {
+    getEpisodeCalls++;
+    return origGetEpisode(...args);
+  };
+
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  // 160 hyphen-separated parts, just under the 512-character isSafeBlobKey cap.
+  const id = Array.from({ length: 160 }, () => "aa").join("-");
+  const res = await fetch(new Request(`${BASE}/audio/user-approved/direct/${id}.wav`));
+  assertEquals(res.status, 404);
+  await res.body?.cancel();
+  assertEquals(
+    getEpisodeCalls <= MAX_FANOUT_CANDIDATES,
+    true,
+    `one request must cause at most ${MAX_FANOUT_CANDIDATES} candidate lookups, got ${getEpisodeCalls}`,
+  );
+});
+
+Deno.test("audio route: unauthenticated requests are rate limited per client address (audio-feed-k21s0)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-approved", status: "approved" }));
+  const { fetch } = setupTestApp(stores, createHandlers({ config, stores }));
+
+  const addr = { remoteAddr: { hostname: "203.0.113.50" } };
+  const key = "audio/user-approved/direct/ep-1.wav";
+
+  // The bound holds: requests up to the limit are answered (404 here — the
+  // object does not exist — the point is they are not 429).
+  for (let i = 0; i < AUDIO_RATE_LIMIT.maxRequests; i++) {
+    const res = await fetch(new Request(`${BASE}/${key}`), addr);
+    assertEquals(res.status, 404, `request ${i + 1} must be within the limit`);
+    await res.body?.cancel();
+  }
+
+  // The next request from the same client is refused with the same shape as
+  // the other rate-limited routes: 429, problem body, retry-after.
+  const refused = await fetch(new Request(`${BASE}/${key}`), addr);
+  assertEquals(refused.status, 429, "a request past the bound must be refused");
+  const retryAfter = refused.headers.get("retry-after");
+  assertEquals(retryAfter !== null && Number(retryAfter) >= 1, true, "429 must carry retry-after");
+  const body = await refused.json();
+  assertEquals(body.error, "too_many_requests");
+
+  // A different client address has its own bucket.
+  const other = await fetch(
+    new Request(`${BASE}/${key}`),
+    { remoteAddr: { hostname: "203.0.113.51" } },
+  );
+  assertEquals(other.status, 404, "a different client address must not share the exhausted bucket");
+  await other.body?.cancel();
 });
 
 Deno.test("audio route: intermediate synthesis segments under audio-segments/ return 404", async () => {
