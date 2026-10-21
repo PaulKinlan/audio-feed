@@ -982,19 +982,23 @@ Deno.test("proof-helper: launchChrome with stub exiting immediately rejects and 
 });
 
 Deno.test("proof-helper: resolveChromeBinary supports explicit override and env var", () => {
+  // The env is INJECTED rather than set process-globally (audio-feed-w5i0m): under
+  // `deno test --parallel` a Deno.env.set here is visible to every concurrently running module for the
+  // whole set/restore window. The assertion is unchanged - override beats the env var, the env var
+  // beats discovery - and the default reader (`Deno.env`) is exercised by every launching test below.
   assertEquals(resolveChromeBinary("/custom/chrome"), "/custom/chrome");
-  const originalEnv = Deno.env.get("AUDIOFEED_CHROME_BIN");
-  try {
-    Deno.env.set("AUDIOFEED_CHROME_BIN", "/env/chrome");
-    assertEquals(resolveChromeBinary(), "/env/chrome");
-    assertEquals(resolveChromeBinary("/override/chrome"), "/override/chrome");
-  } finally {
-    if (originalEnv !== undefined) {
-      Deno.env.set("AUDIOFEED_CHROME_BIN", originalEnv);
-    } else {
-      Deno.env.delete("AUDIOFEED_CHROME_BIN");
-    }
-  }
+  const env = {
+    get: (key: string) => key === "AUDIOFEED_CHROME_BIN" ? "/env/chrome" : undefined,
+  };
+  assertEquals(resolveChromeBinary(undefined, env), "/env/chrome");
+  assertEquals(resolveChromeBinary("/override/chrome", env), "/override/chrome");
+  // An empty reader does not silently fall back to the process env: it reaches discovery, which fails on an
+  // empty cache root rather than returning something plausible.
+  assertThrows(
+    () =>
+      resolveChromeBinary(undefined, { get: () => undefined }, "/tmp/absent-audiofeed-chrome-root"),
+    Error,
+  );
 });
 
 Deno.test("proof-helper: withChrome with stub writing port succeeds, close is idempotent, profile removed", async () => {
@@ -1044,30 +1048,25 @@ Deno.test("proof-helper: launchChrome with hanging stub rejects on bounded timeo
 });
 
 Deno.test("proof-helper: AUDIOFEED_CHROME_BIN env override redirects launch and cleans up on failure", async () => {
-  const originalEnv = Deno.env.get("AUDIOFEED_CHROME_BIN");
-  try {
-    Deno.env.set("AUDIOFEED_CHROME_BIN", "/bin/true");
-    await assertRejects(
-      async () => {
-        await withChrome(
-          async () => {},
-          { prefix: "audiofeed-stub-env-" },
-        );
-      },
-      Error,
-      "exited prematurely with code 0 before writing DevToolsActivePort",
-    );
+  // Injected env, not Deno.env.set (audio-feed-w5i0m): the launch reads the same field the process env
+  // would have given it, and no other concurrently running module can see the value.
+  await assertRejects(
+    async () => {
+      await withChrome(
+        async () => {},
+        {
+          prefix: "audiofeed-stub-env-",
+          env: { get: (key: string) => key === "AUDIOFEED_CHROME_BIN" ? "/bin/true" : undefined },
+        },
+      );
+    },
+    Error,
+    "exited prematurely with code 0 before writing DevToolsActivePort",
+  );
 
-    const leftovers = [...Deno.readDirSync("/tmp")]
-      .filter((e) => e.name.startsWith("audiofeed-stub-env-"));
-    assertEquals(leftovers.length, 0);
-  } finally {
-    if (originalEnv !== undefined) {
-      Deno.env.set("AUDIOFEED_CHROME_BIN", originalEnv);
-    } else {
-      Deno.env.delete("AUDIOFEED_CHROME_BIN");
-    }
-  }
+  const leftovers = [...Deno.readDirSync("/tmp")]
+    .filter((e) => e.name.startsWith("audiofeed-stub-env-"));
+  assertEquals(leftovers.length, 0);
 });
 
 Deno.test("proof-helper: contract interlock: failing check or body throw in withChrome surfaces failure after guaranteed profile cleanup", async () => {
@@ -1163,17 +1162,19 @@ Deno.test("proof-helper: error precedence: body throw propagates with teardown f
 });
 
 Deno.test("proof-helper: launchChrome rejects without creating profile when Chrome binary discovery fails", async () => {
-  const origBin = Deno.env.get("AUDIOFEED_CHROME_BIN");
-  const origHome = Deno.env.get("HOME");
   const testPrefix = "audiofeed-disc-fail-inproc-";
   const fakeHome = "/tmp/nonexistent-audiofeed-inproc-home";
   try {
-    Deno.env.delete("AUDIOFEED_CHROME_BIN");
-    Deno.env.set("HOME", fakeHome);
-
+    // The cache root and the env are PASSED, not mutated (audio-feed-w5i0m): a global HOME change redirects
+    // path resolution for anything spawning a child in a concurrently running module, and a global
+    // AUDIOFEED_CHROME_BIN delete makes another module's launch fail for reasons it cannot see.
     const err = await assertRejects(
       async () => {
-        await launchChrome({ prefix: testPrefix });
+        await launchChrome({
+          prefix: testPrefix,
+          chromeCacheRoot: `${fakeHome}/.cache/puppeteer/chrome`,
+          env: { get: () => undefined },
+        });
       },
       Error,
       `No Chrome binaries found under ${fakeHome}/.cache/puppeteer/chrome`,
@@ -1190,16 +1191,6 @@ Deno.test("proof-helper: launchChrome rejects without creating profile when Chro
       }`,
     );
   } finally {
-    if (origBin !== undefined) {
-      Deno.env.set("AUDIOFEED_CHROME_BIN", origBin);
-    } else {
-      Deno.env.delete("AUDIOFEED_CHROME_BIN");
-    }
-    if (origHome !== undefined) {
-      Deno.env.set("HOME", origHome);
-    } else {
-      Deno.env.delete("HOME");
-    }
     for (const entry of Deno.readDirSync("/tmp")) {
       if (entry.name.startsWith(testPrefix)) {
         await Deno.remove(`/tmp/${entry.name}`, { recursive: true }).catch(() => {});
