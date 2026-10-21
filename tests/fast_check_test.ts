@@ -1158,6 +1158,9 @@ Deno.test("audio-feed-ylg6: committed paths survive ambient environment variable
         const baseline = await changedFiles();
         assert(baseline !== null && baseline.length > 0, "baseline must contain committed files vs HEAD~1");
         
+        // audio-feed-lnnjd audit: these Deno.env.set calls are SOURCE TEXT for the
+        // deno-eval child process, not mutations of this test process — nothing
+        // concurrently running in this worker can observe them.
         Deno.env.set("IN_FAST_GATE_INTEGRATION_TEST", "1");
         Deno.env.set("FAST_GATE_FMT_FIXTURE", "/tmp/nonexistent-fixture.ts");
         const withEnv = await changedFiles();

@@ -7379,6 +7379,11 @@ Deno.test("proof-helper: audio-feed-2bfv: subprocess write through shell environ
         assertEquals(new TextDecoder().decode(await Deno.readFile(file1)), "dirty1");
 
         // 2. Redirect to "${OUT2}" via process env
+        // audio-feed-lnnjd audit: the mutated name is invented for this test and
+        // its ONLY reader is the child this test spawns (grep: EVIDENCE_TEST_OUT2
+        // appears nowhere else in src/, scripts/, tests/), so no concurrently
+        // running module can observe the set/delete window. The env read by the
+        // child is the behavior under test, so no seam applies.
         Deno.env.set("EVIDENCE_TEST_OUT2", file2);
         try {
           const cmd2 = new Deno.Command("sh", {
@@ -7944,6 +7949,10 @@ Deno.test("proof-helper: audio-feed-2bfv: shell redirect honors clearEnv and tra
   await Deno.mkdir(subDir);
   const targetFile = `${subDir}/result_clearenv.txt`;
 
+  // audio-feed-lnnjd audit: same shape as EVIDENCE_TEST_OUT2 above — an
+  // invented, uniquely-named variable whose only consumer is the child this
+  // test spawns with clearEnv; the parent-side set/delete window is
+  // unobservable to any other module.
   Deno.env.set("OUT_CLEARENV_TEST", "parent_out.txt");
   try {
     await assertRejects(
