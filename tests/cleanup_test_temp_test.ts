@@ -280,6 +280,7 @@ Deno.test("exit contract: 1 only for real errors, 3 for unproven liveness, 0 whe
     skippedOtherOwner: 0,
     removed: 2,
     bytesReclaimed: 100,
+    removalFailures: 0,
     rootReadable: true,
   };
   assertEquals(exitCodeFor(base), 0);
@@ -291,8 +292,97 @@ Deno.test("exit contract: 1 only for real errors, 3 for unproven liveness, 0 whe
   assertEquals(
     exitCodeFor({ ...base, rootReadable: false }),
     1,
-    "an unreadable temp root is the only real-error exit",
+    "an unreadable temp root is a real-error exit",
   );
+  assertEquals(
+    exitCodeFor({ ...base, removalFailures: 1 }),
+    1,
+    "a FAILED removal is a real error: silent non-deletion must not look like success (audio-feed-nz9dr)",
+  );
+});
+
+/**
+ * THE SECOND INVERSION (audio-feed-nz9dr): lsof exits 1 BOTH for "no open files" AND for
+ * "errors occurred" — an un-inspectable subtree (permission warning) also exits 1, and the
+ * first fix trusted that exit as "clear". Real-path row: the fake lsof emits the permission
+ * wording on stderr and exits 1 — the verdict must be UNKNOWN, so nothing is deleted.
+ */
+Deno.test("REAL lsof path: exit 1 WITH a permission warning is UNKNOWN — never clear, never deleted (audio-feed-nz9dr)", async () => {
+  await withFakeLsofOnPath(async () => {
+    const root = await makeScratch();
+    try {
+      const live = `${root}/audiofeed-chrome-uninspectable`;
+      await Deno.mkdir(live);
+      await Deno.utime(live, OLD.mtime, OLD.mtime);
+
+      const counts = await cleanupTestTemp({
+        tempRoot: root,
+        maxAgeMs: 60 * 60_000,
+        yes: true,
+        processCmdlines: () => [],
+        pathLiveness: (p) => lsofPathLiveness(p, 5_000),
+        lsofTimeoutMs: 5_000,
+      });
+
+      assertEquals(
+        counts.skippedUnknown,
+        1,
+        "a warning-bearing exit 1 must be UNKNOWN: lsof could not have inspected the whole tree",
+      );
+      assertEquals(counts.removed, 0);
+      assertEquals(exitCodeFor(counts), 3);
+      assert(await exists(live), "the candidate lsof could not inspect must survive");
+    } finally {
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  }, '#!/bin/sh\necho "lsof: WARNING: cannot opendir($1/inner): Permission denied" >&2\nexit 1\n');
+});
+
+/**
+ * THE LYING SUMMARY (audio-feed-nz9dr): a removal that fails left the run at exit 0, so the
+ * operator's automation read a still-present directory as a completed sweep. Real-path row:
+ * the candidate dir is made undeletable (read-only, non-empty) and the run must exit 1 with
+ * the path named in the output.
+ */
+Deno.test("a FAILED removal is a real error: exit 1 and the path named in the output (audio-feed-nz9dr)", async () => {
+  const root = await makeScratch();
+  const lines: string[] = [];
+  try {
+    const stuck = `${root}/w5f1-scratch-dead0001`;
+    await Deno.mkdir(stuck);
+    await Deno.writeFile(`${stuck}/held`, new Uint8Array(16));
+    await Deno.utime(stuck, OLD.mtime, OLD.mtime);
+    await Deno.chmod(stuck, 0o555); // non-empty + read-only: Deno.remove(recursive) hits EACCES
+
+    const counts = await cleanupTestTemp({
+      tempRoot: root,
+      maxAgeMs: 60 * 60_000,
+      yes: true,
+      processCmdlines: () => [],
+      pathLiveness: () => Promise.resolve("clear"),
+      log: (line) => lines.push(line),
+    });
+
+    assertEquals(
+      counts.removalFailures,
+      1,
+      "a failed deletion must be counted, not silently absorbed",
+    );
+    assertEquals(counts.removed, 0);
+    assertEquals(
+      exitCodeFor(counts),
+      1,
+      "silent non-deletion must not look like success",
+    );
+    assert(
+      lines.some((l) => l.includes("removal FAILED") && l.includes(stuck)),
+      "the output must NAME the path that could not be removed",
+    );
+  } finally {
+    const stuck = `${root}/w5f1-scratch-dead0001`;
+    await Deno.chmod(stuck, 0o755).catch(() => {});
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
 });
 
 Deno.test("parseCliOptions: a non-positive --max-age-minutes is rejected with a clear message (audio-feed-qdm95)", () => {

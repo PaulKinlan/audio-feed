@@ -33,6 +33,8 @@
  * skipped-unknown — NOT an error to "fix by re-running harder": it means the host was too busy
  * to prove liveness, nothing was deleted for those candidates, and the sweep should be re-run
  * when the host is quiet. 1 = a real error (temp root unreadable, unusable --max-age-minutes).
+ * A removal that FAILS is a real error (exit 1, path named in the output): silent
+ * non-deletion must never look like success (audio-feed-nz9dr).
  * Chosen so exit 0 can never mean "some deletions happened without proof", while automation
  * still gets a distinct, documented code to alert on instead of a silent partial sweep.
  * - NO ROOT: only entries owned by the current user are removed; anything else is counted as
@@ -59,6 +61,8 @@ export interface CleanupCounts {
   skippedOtherOwner: number;
   removed: number;
   bytesReclaimed: number;
+  /** Deletion attempts that FAILED: a real error — silent non-deletion is not a proven fate. */
+  removalFailures: number;
   /** False only when the temp root itself could not be read — the one real-error shape. */
   rootReadable: boolean;
 }
@@ -122,8 +126,8 @@ export async function lsofPathLiveness(
   try {
     child = new Deno.Command("lsof", {
       args: ["-a", "+D", path, "-Fn"],
-      stdout: "null",
-      stderr: "null",
+      stdout: "piped",
+      stderr: "piped",
     }).spawn();
   } catch {
     // Missing binary or spawn refused: liveness cannot be established. Fail closed.
@@ -134,20 +138,24 @@ export async function lsofPathLiveness(
       child.kill("SIGKILL");
     } catch { /* already gone */ }
   }, timeoutMs);
-  let status: { code: number; success: boolean; signal: string | null };
+  let output: { code: number; signal: string | null; stdout: Uint8Array; stderr: Uint8Array };
   try {
-    status = await child.status;
+    output = await child.output();
   } catch {
     clearTimeout(timer);
     return "unknown";
   }
   clearTimeout(timer);
-  if (!status.success) {
-    // Distinguishes the two clean answers: lsof exits 0 = open files found, 1 = none found.
-    // ANYTHING else — killed by our own bound (signalled), or an odd code — is UNKNOWN.
-    return status.code === 1 && !status.signal ? "clear" : "unknown";
+  if (output.signal) return "unknown"; // killed by our own bound: no verdict exists
+  if (output.code === 0) return "open"; // files found — never reaches a deletion decision
+  // THE ONLY TRUSTED "none found" SHAPE (audio-feed-nz9dr): exit 1 with NOTHING on either
+  // stream. lsof exits 1 BOTH for "no open files" AND for "errors occurred" — a subtree it
+  // could not inspect (permission warning) also exits 1, and the earlier version read that
+  // as clear and deleted. Only a silent, clean exit proves the tree was fully walked.
+  if (output.code === 1 && output.stdout.length === 0 && output.stderr.length === 0) {
+    return "clear";
   }
-  return "open";
+  return "unknown";
 }
 
 export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupCounts> {
@@ -169,6 +177,7 @@ export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupC
     skippedOtherOwner: 0,
     removed: 0,
     bytesReclaimed: 0,
+    removalFailures: 0,
     rootReadable: true,
   };
 
@@ -255,8 +264,13 @@ export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupC
       counts.bytesReclaimed += bytes;
       log(`removed ${path} (${bytes} bytes)`);
     } catch (error) {
-      // Already gone or raced with a creator: count as seen, not removed. Never fatal.
-      log(`could not remove ${path}: ${error}`);
+      // REAL ERROR (audio-feed-nz9dr): a removal that fails must never read as success —
+      // the exit contract's "every candidate's fate is proven" would be a lie. Named in the
+      // log, counted, and exit 1 via exitCodeFor. (A benign race with a creator would ALSO
+      // land here; the sweep is scoped to hour-old entries, so re-running later is correct
+      // and cheap — loud beats silent either way.)
+      counts.removalFailures++;
+      log(`removal FAILED ${path}: ${error}`);
     }
   }
 
@@ -264,8 +278,8 @@ export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupC
     `cleanup-test-temp (${tempRoot}): candidates ${counts.candidatesSeen}, ` +
       `skipped-live ${counts.skippedLive}, skipped-unknown ${counts.skippedUnknown}, ` +
       `skipped-age ${counts.skippedAge}, skipped-other-owner ${counts.skippedOtherOwner}, ` +
-      `removed ${counts.removed}, reclaimed ${counts.bytesReclaimed} bytes` +
-      `${yes ? "" : " (DRY RUN)"}`,
+      `removed ${counts.removed}, removal-failures ${counts.removalFailures}, ` +
+      `reclaimed ${counts.bytesReclaimed} bytes${yes ? "" : " (DRY RUN)"}`,
   );
   return counts;
 }
@@ -327,9 +341,11 @@ export function parseCliOptions(
 }
 
 /** THE EXIT CONTRACT (see the header): 1 = real error, 3 = completed with unproven liveness,
- * 0 = every candidate's fate proven. */
+ * 0 = every candidate's fate proven. A failed removal is a REAL error: the tool's job is
+ * removal, so a silent non-deletion must not look like success (audio-feed-nz9dr). */
 export function exitCodeFor(counts: CleanupCounts): number {
   if (!counts.rootReadable) return 1;
+  if (counts.removalFailures > 0) return 1;
   return counts.skippedUnknown > 0 ? 3 : 0;
 }
 
