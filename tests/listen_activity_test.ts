@@ -630,10 +630,13 @@ Deno.test({
     await addrLimiter.reset(`${TOKEN}:${UNADDRESSED_CLIENT_KEY}`);
     await tokenLimiter.reset(TOKEN);
 
-    // Spend the ceiling via the same CAS the old browser flow used, then take the ceiling
-    // refusal's exact body. The rate POST above consumed a ceiling unit (wasted swings count,
-    // by design); the refused one below consumes nothing — the verdict writes the row back
-    // unchanged (audio-feed-dqjf2).
+    // Set the ceiling DIRECTLY to its limit via the same CAS primitive the handler's
+    // recordEpisodeRetry uses, then take the ceiling refusal's exact body. Note the rate POST
+    // above never reached the ceiling at all: handleListenRetry checks the rate window FIRST
+    // and answers 429 there (src/routes/listen.ts:936), so no ceiling unit was spent on the way
+    // to that refusal — the atomicUpdate below is the only ceiling state this POST sees. The
+    // refused POST below consumes nothing either — the verdict writes the row back unchanged
+    // (audio-feed-dqjf2).
     await stores.metadata.atomicUpdate<number>(
       retryCeilingRow("user-1", "ep-failed"),
       () => LISTEN_RETRY_CEILING,
