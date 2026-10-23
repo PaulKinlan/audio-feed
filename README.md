@@ -366,7 +366,8 @@ GEMINI_API_BASE_URL=https://gemini.int.exe.xyz/v1beta \
 It prints the price schedule it used (gemini-3.8-flash-tts: $0.50/$9.00 per 1M input/output audio
 tokens promotional through 2026-12-31, then $1.00/$18.00 — Google Cloud TTS pricing), an exact
 input-token count from the provider's free `countTokens` before spending, the worst case from the
-provider caps (~$3.64 per invocation promotional; output cannot be known before generation), and
+provider caps (~$9.70 per invocation promotional at the 64-segment ceiling, audio-feed-cco6g;
+output cannot be known before generation), and
 afterwards the observed cost derived from measured duration at Google's documented 25 audio
 tokens/second. Expected cost for the built-in document: a fraction of a cent. A run passes only if
 the episode reaches READY with decodable audio — listen to the WAV; the acceptance is the voice, not

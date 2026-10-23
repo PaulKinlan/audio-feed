@@ -85,12 +85,27 @@ export const DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts";
 export const MAX_TTS_INPUT_BYTES = 3_000;
 /** Explicit audio output ceiling for the current TTS model, rather than an implicit default. */
 export const MAX_TTS_OUTPUT_TOKENS = 16_384;
-/** Bound paid calls per episode (audio-feed-9yu8, audio-feed-9lrl). Further adaptive splits count too; long
- * articles fail before sending any requests. The claim lease — not this cap — is the wall-clock
- * outer bound: the worker stops paid work 60s before expiry and passes a lease AbortSignal, and
- * resumable segments (audio-feed-wr1u) mean a claim that expires mid-episode re-pays only the
- * segment that was in flight. */
-export const MAX_TTS_SEGMENTS = 24;
+/**
+ * Bound paid calls per episode (audio-feed-9yu8, audio-feed-9lrl). Further adaptive splits count too; long
+ * articles fail before sending any requests. Raised 24 -> 64 (audio-feed-cco6g): resumable segment claims
+ * (audio-feed-wr1u) landed, so a document needing between 25 and 64 segments synthesises across invocation
+ * slices instead of failing at ingest.
+ *
+ * THE WALL-CLOCK CHECK THIS RAISE HAD TO SURVIVE (audio-feed-cco6g): 64 segments x the 45s worst-case turn
+ * estimate is ~48 minutes, far beyond the 15-minute claim lease (DEFAULT_CLAIM_LEASE_MS) — and that is
+ * safe BY DESIGN, not by tuning. Three mechanisms carry an episode longer than any single lease: (1) the
+ * invocation budget (maxInvocationDurationMs, 90s default) yields the claim with durable progress well
+ * inside the lease, and a progress-yield resets the attempts counter (audio-feed-vqu4), so a long episode
+ * crosses many cron ticks without ever being superseded; (2) the worker stops paid work 60s before lease
+ * expiry and passes a lease AbortSignal, and resumable segments mean a claim that DOES expire mid-episode
+ * (crash, hang, eviction) re-pays only the segment that was in flight; (3) the per-attempt TTS deadline
+ * (TTS_TIMEOUT_MS, 120s) bounds one request, independent of how many the episode needs. What a raise here
+ * must never do is make the cap the wall-clock bound: superseded-after-lease work is reported (the
+ * `superseded` result field), and a rising count means the lease — not this constant — needs
+ * attention. With 64 segments the narration input ceiling is 3 KB x 64 = 192,000 bytes
+ * (MAX_NARRATION_BYTES, src/ingest/upload.ts).
+ */
+export const MAX_TTS_SEGMENTS = 64;
 /**
  * Per-attempt deadline: a hung request must not hold a synthesis worker forever. 120s answers the
  * 2026-10-09 incident (audio-feed-bp6r): 9vns measured segments at 45-55s wall-clock, and the

@@ -62,15 +62,20 @@ Deno.test("estimate arithmetic is per-1M tokens, inputs and outputs summed (audi
   assert(small.totalUsd < 0.01, "a small document must cost well under a cent");
 });
 
-Deno.test("the worst case is the provider's own caps, ~$3.64 promotional (audio-feed-9hfz9)", () => {
-  // The bound is built from the model caps the app enforces elsewhere.
+Deno.test("the worst case is the provider's own caps, ~$9.70 promotional (audio-feed-9hfz9, audio-feed-cco6g)", () => {
+  // The bound is built from the model caps the app enforces elsewhere. The 24 -> 64
+  // segment raise (audio-feed-cco6g) scales this bound 2.67x: $3.64 -> ~$9.70 promotional.
   assertEquals(WORST_CASE.inputTokens, MAX_TTS_SEGMENTS * 8192);
   assertEquals(WORST_CASE.outputTokens, MAX_TTS_SEGMENTS * 16384);
   const worst = estimateCost(WORST_CASE.inputTokens, WORST_CASE.outputTokens, PROMO);
-  assertEqualsApprox(worst.totalUsd, 196_608 / 1e6 * 0.5 + 393_216 / 1e6 * 9.0, "worst-case sum");
+  assertEqualsApprox(
+    worst.totalUsd,
+    MAX_TTS_SEGMENTS * 8192 / 1e6 * 0.5 + MAX_TTS_SEGMENTS * 16384 / 1e6 * 9.0,
+    "worst-case sum",
+  );
   assert(
-    worst.totalUsd > 3 && worst.totalUsd < 4,
-    `worst case sits near $3.64, got ${worst.totalUsd}`,
+    worst.totalUsd > 9 && worst.totalUsd < 10,
+    `worst case sits near $9.70, got ${worst.totalUsd}`,
   );
 });
 
