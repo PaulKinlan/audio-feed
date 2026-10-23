@@ -253,6 +253,26 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Reclaiming leaked test temp entries (audio-feed-qdm95)
+
+Test scratch roots (`<bead>-scratch-<hex>` dirs) and Chromium crashpad leftovers accumulate in
+the temp root when a row dies before its own teardown — 14,519 entries / 4.3 GB were measured
+on one VM before this existed. The reclaimer targets EXACTLY those pattern classes (plus stale
+`audiofeed-chrome-*` profile dirs) and nothing else — never a general /tmp sweep:
+
+```bash
+# DRY RUN by default: lists what it would remove, changes nothing.
+deno run --allow-read --allow-write --allow-run --allow-sys scripts/cleanup-test-temp.ts
+# Execute. Exits 0 when every candidate's fate is proven, 3 when some candidates' liveness
+could NOT be proven (busy host; nothing was deleted for them — re-run when quiet), 1 for
+# real errors. It also fails closed per candidate: an inconclusive liveness probe (lsof
+timed out/missing) SKIPS the candidate and counts it as skipped-unknown, never deletes.
+deno run --allow-read --allow-write --allow-run --allow-sys scripts/cleanup-test-temp.ts --yes
+```
+
+Safe without root (only the current user's entries are touched), idempotent, and every skip is
+logged. Run it before long test sessions on a lane VM that has seen gate crashes.
+
 ## Verifying a landing against production
 
 `GET /health` returns **`deploy`** (the identifier), **`deploySource`** (the variable that
