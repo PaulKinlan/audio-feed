@@ -10,7 +10,7 @@
  * endpoint the page can poll, and a token-gated retry that can only touch the caller's episodes.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import { SlidingWindowRateLimiter, UNADDRESSED_CLIENT_KEY } from "../src/auth/rate_limit.ts";
 import {
   LISTEN_RETRY_ADDR_RATE,
   LISTEN_RETRY_ADDR_WINDOW,
@@ -547,8 +547,13 @@ Deno.test({
   // The ceiling-vs-rate distinction was first pinned by asserting listen.js SOURCE text,
   // which listen_client.ts explicitly warns against: source assertions prove nothing about
   // behaviour. This drives the real page in headless Chrome against the real app — three
-  // clicks, three different server answers, three rendered labels — and checks the episode
-  // state each time, so the UI contract is proven, not paraphrased.
+  // clicks, three rendered labels, and the episode state checked each time — so the UI
+  // contract is proven, not paraphrased. The two refusal ANSWERS are pinned at app level
+  // first and then injected into the page as one-shot fetch stubs (audio-feed-flr6y): the
+  // original row raced a live round trip against its own 10s poll and failed on slow hosts
+  // while the mapping was intact. Nothing is weakened: the server's exact 429 bodies are
+  // still asserted (in-process, above), the labels are still read from the real DOM of the
+  // real page, and the accepted retry still goes over the real wire.
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
     const { stores, fetch: appFetch } = await seeded({
@@ -578,6 +583,70 @@ Deno.test({
     const server = Deno.serve({ port: 0, hostname: "127.0.0.1" }, appFetch);
     const port = (server.addr as Deno.NetAddr).port;
 
+    // PIN THE SERVER BODIES IN-PROCESS, BEFORE THE BROWSER RUNS (audio-feed-flr6y). This row
+    // used to make the BROWSER produce each 429 by racing a real round trip against the test's
+    // own 10s label poll — on a degraded host the poll expired first and the row failed while
+    // the product property it protects was intact (measured 2026-10-23: the union gate lost
+    // 22m to this row in the 6x Chrome-degradation signature, and the same file passed 18/18
+    // in 7s on a healthy browser). The two layers the row must prove are now pinned separately,
+    // and neither races wall-clock: HERE the endpoint answers a genuinely-full rate window and
+    // a genuinely-spent ceiling through the app's own handler and the exact bodies are asserted
+    // (this remains the only coverage of the server's 429 shapes); IN THE PAGE those same
+    // measured bodies are injected as one-shot fetch stubs so the real button drives the real
+    // mapping code with no round trip to lose. The stub is removed before the accepted-retry
+    // click, which still exercises the real wire end to end.
+    //
+    // The in-process POSTs have NO socket address, so extractClientIp puts them in the
+    // "direct" bucket — a DIFFERENT row from the browser's 127.0.0.1 window filled above.
+    // Fill that bucket too, or the first in-process POST would be ADMITTED (and consume a
+    // ceiling unit on the way to a 202). The in-process POSTs target the SERVED loopback
+    // origin: the host wall admits loopback even with no PUBLIC_BASE_URL (this is how the
+    // browser is served too), while the file-level https://audio.example.com host would be
+    // refused 500 server_misconfigured with the allow-list unset.
+    const postRetryInProcess = () =>
+      appFetch(
+        new Request(`http://127.0.0.1:${port}/listen/${TOKEN}/episodes/ep-failed/retry`, {
+          method: "POST",
+          headers: { origin: `http://127.0.0.1:${port}` },
+        }),
+      );
+    for (let i = 0; i < LISTEN_RETRY_ADDR_RATE.maxRequests; i++) {
+      await addrLimiter.check(`${TOKEN}:${UNADDRESSED_CLIENT_KEY}`);
+    }
+    const rateRes = await postRetryInProcess();
+    assertEquals(rateRes.status, 429, "a full addr window must refuse the retry with 429");
+    const rateBody = await rateRes.json();
+    assertEquals(
+      rateBody,
+      { error: "Too many retries; try again later." },
+      "the rate refusal's exact body: reason ABSENT, so the client must read it as temporary",
+    );
+
+    // Reopen the windows BEFORE the ceiling POST: the handler checks the rate window first,
+    // so a still-full window would answer the rate body and this step would never reach the
+    // ceiling verdict. The browser's bucket is reopened here too — nothing else touches it
+    // until the accepted retry at the end (the two refusal clicks are stubbed).
+    await addrLimiter.reset(`${TOKEN}:${clientIp}`);
+    await addrLimiter.reset(`${TOKEN}:${UNADDRESSED_CLIENT_KEY}`);
+    await tokenLimiter.reset(TOKEN);
+
+    // Spend the ceiling via the same CAS the old browser flow used, then take the ceiling
+    // refusal's exact body. The rate POST above consumed a ceiling unit (wasted swings count,
+    // by design); the refused one below consumes nothing — the verdict writes the row back
+    // unchanged (audio-feed-dqjf2).
+    await stores.metadata.atomicUpdate<number>(
+      retryCeilingRow("user-1", "ep-failed"),
+      () => LISTEN_RETRY_CEILING,
+    );
+    const ceilingRes = await postRetryInProcess();
+    assertEquals(ceilingRes.status, 429, "a spent ceiling must refuse the retry with 429");
+    const ceilingBody = await ceilingRes.json();
+    assertEquals(
+      ceilingBody,
+      { error: "Retry limit reached for this episode.", reason: "retry_ceiling" },
+      "the ceiling refusal's exact body: reason names the ceiling",
+    );
+
     const scratchTmp = await Deno.makeTempDir({ prefix: "rvy5n-scratch-" });
     const { profileDir, cleanup } = await createTempChromeProfile(
       "audiofeed-retry-labels-",
@@ -605,48 +674,29 @@ Deno.test({
     }
 
     /**
-     * Click the retry button and resolve to its label once it CHANGES from `prev`: the
-     * label persists between clicks, so a poll keyed on "not Try again" would resolve
-     * instantly with the previous answer before the new fetch returns.
-     *
-     * Typed against the slice of the CDP reply this test reads, not `any`: the repo lint
+     * Typed against the slice of the CDP reply these helpers read, not `any`: the repo lint
      * rejects explicit any on the whole-tree run even where a file-scoped check passed
      * (audio-feed-rvy5n's own gate taught that lesson).
      */
     interface CdpReply {
       result?: { result?: { value?: unknown }; exceptionDetails?: unknown };
     }
-    const clickAndWaitForLabel = (
+    const evalValue = async (
       cdp: (m: string, p?: Record<string, unknown>) => Promise<CdpReply>,
-      prev: string,
-    ): Promise<string> =>
-      cdp("Runtime.evaluate", {
-        // An async IIFE, measured against this Chrome build: the `(() => new Promise(...))()`
-        // form came back from Runtime.evaluate as the uncalled function object, so the
-        // awaitPromise path needs the `(async () => ...)()` shape.
-        expression: `(async () => {
-          const started = Date.now();
-          document.querySelector('.act-retry')?.click();
-          for (;;) {
-            const label = document.querySelector('.act-retry')?.textContent ?? null;
-            if (label !== null && label !== "Try again" && label !== ${JSON.stringify(prev)}) {
-              return JSON.stringify(label);
-            }
-            if (Date.now() - started > 10000) return JSON.stringify("TIMEOUT:" + label);
-            await new Promise((r) => setTimeout(r, 100));
-          }
-        })()`,
-        awaitPromise: true,
-        returnByValue: true,
-      }).then((r) => {
-        if (r.result?.exceptionDetails) {
-          throw new Error(
-            `page error: ${JSON.stringify(r.result.exceptionDetails).slice(0, 400)}`,
-          );
-        }
-        return JSON.parse(String(r.result?.result?.value));
-      });
+      expression: string,
+    ): Promise<unknown> => {
+      const r = await cdp("Runtime.evaluate", { expression, returnByValue: true });
+      if (r.result?.exceptionDetails) {
+        throw new Error(`page error: ${JSON.stringify(r.result.exceptionDetails).slice(0, 400)}`);
+      }
+      return r.result?.result?.value;
+    };
 
+    // EVERY wait below polls a FUNCTIONAL signal with a generous bound instead of sleeping a
+    // fixed number of milliseconds (audio-feed-flr6y): the old row's sleep(800) plus a 10s
+    // "label changed from prev" poll raced page-load and host latency, and lost on a slow
+    // host (the union gate's 22m failure). A slow host may only add iterations to these
+    // polls — never change their outcome.
     try {
       const targets = await (await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`)).json();
       // deno-lint-ignore no-explicit-any
@@ -671,44 +721,122 @@ Deno.test({
 
       await cdp("Page.enable");
       await cdp("Page.navigate", { url: `http://127.0.0.1:${port}/listen/${TOKEN}` });
-      await sleep(800);
+      // The button is the row's entry point; poll for it instead of sleeping a fixed 800ms,
+      // which a slow host can outlive (audio-feed-flr6y).
+      let buttonReady = false;
+      for (let i = 0; i < 100 && !buttonReady; i++) {
+        await sleep(100);
+        buttonReady = Boolean(
+          await evalValue(cdp, `document.querySelector('.act-retry') !== null`),
+        );
+      }
+      assert(buttonReady, ".act-retry never appeared within 10s of navigation");
 
-      const initial = await cdp("Runtime.evaluate", {
-        expression: `document.querySelector('.act-retry')?.textContent`,
+      // Inject the two refusal answers into the page as ONE-SHOT fetch stubs (audio-feed-flr6y):
+      // each armed click consumes exactly one body — the SAME bodies the server was just caught
+      // answering — so the mapping runs in the real page with no network round trip to race.
+      // The stub passes everything else through and counts its hits, so if the page ever stops
+      // calling fetch for retries the hit assertion below reddens by name instead of the row
+      // passing silently on an unused stub.
+      await cdp("Runtime.evaluate", {
+        expression: `(() => {
+          window.__origFetch = window.fetch;
+          window.__retryStubHits = 0;
+          window.__injectedRetryBody = null;
+          window.fetch = (url, opts) => {
+            if (window.__injectedRetryBody !== null && String(url).includes("/retry")) {
+              const body = window.__injectedRetryBody;
+              window.__injectedRetryBody = null;
+              window.__retryStubHits++;
+              return Promise.resolve(new Response(body, {
+                status: 429,
+                headers: { "content-type": "application/json" },
+              }));
+            }
+            return window.__origFetch(url, opts);
+          };
+          return "installed";
+        })()`,
         returnByValue: true,
-      }).then((r) => String(r.result?.result?.value));
+      });
+      const injectRetryBody = (body: unknown) =>
+        cdp("Runtime.evaluate", {
+          expression: `window.__injectedRetryBody = ${JSON.stringify(JSON.stringify(body))};`,
+          returnByValue: true,
+        });
 
-      // 1. Rate-refused: the (token, address) window above is genuinely full, so the real
-      // endpoint answers 429 with retry-after and the label says the refusal is temporary.
-      const afterRate = await clickAndWaitForLabel(cdp, initial ?? "Try again");
-      assertEquals(
-        afterRate,
-        "Slow down — try again soon",
-        "a rate refusal must read as temporary",
-      );
+      // Click until the stub's hit counter PROVES this click's fetch ran (the one-shot body
+      // was consumed), then wait for the EXPECTED label — the injected body determines the
+      // label, so "changed from prev" polling is unnecessary and was the race. Re-clicking
+      // is safe: a handlerless button (page JS still loading on a slow host) ignores clicks,
+      // and the one-shot body makes a consumed click idempotent.
+      const clickUntilStubConsumes = async (expectedHits: number): Promise<void> => {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          await evalValue(cdp, `document.querySelector('.act-retry')?.click()`);
+          for (let i = 0; i < 10; i++) {
+            await sleep(100);
+            if (Number(await evalValue(cdp, `window.__retryStubHits`)) >= expectedHits) return;
+          }
+          if (Date.now() > deadline) {
+            throw new Error(`retry stub never consumed click ${expectedHits} within 10s`);
+          }
+        }
+      };
+      const waitForRetryLabel = async (expected: string): Promise<void> => {
+        for (let i = 0; i < 100; i++) {
+          const label = await evalValue(
+            cdp,
+            `document.querySelector('.act-retry')?.textContent ?? null`,
+          );
+          if (label === expected) return;
+          await sleep(100);
+        }
+        throw new Error(
+          `retry label never became ${JSON.stringify(expected)}; last was ${
+            JSON.stringify(
+              await evalValue(cdp, `document.querySelector('.act-retry')?.textContent ?? null`),
+            )
+          }`,
+        );
+      };
+
+      // 1. Rate-refused: the server's measured refusal body must read as temporary.
+      await injectRetryBody(rateBody);
+      await clickUntilStubConsumes(1);
+      await waitForRetryLabel("Slow down — try again soon");
       assertEquals(
         (await stores.metadata.getEpisode("user-1", "ep-failed"))?.status,
         "failed",
         "a rate-refused retry must not queue anything",
       );
 
-      // 2. Ceiling-spent: open the rate windows, spend the episode's ceiling, click again.
-      await addrLimiter.reset(`${TOKEN}:${clientIp}`);
-      await tokenLimiter.reset(TOKEN);
-      await stores.metadata.atomicUpdate<number>(
-        retryCeilingRow("user-1", "ep-failed"),
-        () => LISTEN_RETRY_CEILING,
-      );
-      assertEquals(
-        await clickAndWaitForLabel(cdp, "Slow down — try again soon"),
-        "Retry limit reached",
-        "a spent ceiling must read as permanent",
-      );
+      // 2. Ceiling-spent: the server's measured ceiling body must read as permanent.
+      await injectRetryBody(ceilingBody);
+      await clickUntilStubConsumes(2);
+      await waitForRetryLabel("Retry limit reached");
       assertEquals(
         (await stores.metadata.getEpisode("user-1", "ep-failed"))?.status,
         "failed",
         "a ceiling-refused retry must not queue anything",
       );
+
+      // Both refusals were consumed from the stub, one per click: a count below 2 means a
+      // click bypassed the injection (a renamed endpoint or a changed handler), and the row
+      // must fail loudly rather than pass on an answer nobody injected.
+      const stubHits = Number(
+        (await cdp("Runtime.evaluate", {
+          expression: "window.__retryStubHits",
+          returnByValue: true,
+        })).result?.result?.value,
+      );
+      assertEquals(stubHits, 2, "both refusal clicks must have been driven by the injected bodies");
+
+      // Remove the stub: the accepted retry below goes over the REAL wire.
+      await cdp("Runtime.evaluate", {
+        expression: "window.fetch = window.__origFetch;",
+        returnByValue: true,
+      });
 
       // 3. Un-spent: clear the ceiling row and the SAME button queues for real. Here the
       // CONTRACT is the episode's state, not the label: a 202 is followed by
