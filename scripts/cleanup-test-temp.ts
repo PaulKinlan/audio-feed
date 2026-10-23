@@ -45,6 +45,8 @@
  *   deno run --allow-read --allow-write --allow-run --allow-sys scripts/cleanup-test-temp.ts           # dry run (uses $TMPDIR or /tmp; add --allow-env to honour $TMPDIR)
  *   deno run --allow-read --allow-write --allow-run --allow-sys scripts/cleanup-test-temp.ts --yes     # reclaim
  *   ... --temp-root /tmp --max-age-minutes 60
+ *       (--max-age-minutes accepts whole minutes, minimum 1, digits only: scientific,
+ *        denormal, signed, and empty values are rejected as errors — audio-feed-son8q)
  */
 
 /** The three in-scope name patterns, anchored to the temp root (never recursive). */
@@ -309,8 +311,10 @@ export interface CliOptions {
   yes: boolean;
 }
 
-/** Parses and VALIDATES the CLI: a non-positive --max-age-minutes would disable the age bound
- * entirely (a typo silencing a real guard), so it is a real error, not a default. */
+/** Parses and VALIDATES the CLI. --max-age-minutes is parsed STRICTLY (audio-feed-son8q):
+ * digits only, minimum 1 — '5e-324' is finite and positive yet its millisecond product
+ * underflows to zero, disabling the age bound entirely; scientific, signed, empty, and
+ * sub-1 values are named errors, never silent defaults. */
 export function parseCliOptions(
   args: string[],
   readEnv: (name: string) => string | undefined = (n) => Deno.env.get(n),
@@ -327,15 +331,31 @@ export function parseCliOptions(
   const maxAgeIndex = args.indexOf("--max-age-minutes");
   let maxAgeMinutes = 60;
   if (maxAgeIndex !== -1) {
-    const raw = Number(args[maxAgeIndex + 1]);
-    if (!Number.isFinite(raw) || raw <= 0) {
+    // STRICT PARSING (audio-feed-son8q): every number this CLI accepts is treated as
+    // attacker-supplied. The grammar is digits-only — no sign, no decimal point, no
+    // scientific notation — because '5e-324' passed a naive "finite and > 0" check and its
+    // product with 60_000 underflowed to ~0ms, flipping the age comparison to "everything
+    // is old" and DELETING FRESH DIRECTORIES. Parse failure is an ERROR, never a default.
+    // THE FLOOR IS 1 MINUTE, documented: this tool reclaims hour-old test debris; any bound
+    // under a minute only exists to delete things nobody asked to delete.
+    const raw = args[maxAgeIndex + 1];
+    if (raw === undefined || raw === "" || !/^\d+$/.test(raw)) {
       return {
-        error: `--max-age-minutes must be a positive number of minutes (got ${
-          args[maxAgeIndex + 1] ?? "nothing"
-        }); a zero or negative bound would disable the age guard entirely.`,
+        error:
+          `--max-age-minutes must be a plain positive whole number of minutes (digits only; no sign, decimal point, or scientific notation) — got ${
+            raw === undefined ? "no value" : JSON.stringify(raw)
+          }. Scientific, denormal, signed, or empty values are rejected outright.`,
       };
     }
-    maxAgeMinutes = raw;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 1) {
+      return {
+        error: `--max-age-minutes must be at least 1 (got ${
+          JSON.stringify(raw)
+        }): the documented floor is 1 minute — anything smaller only exists to delete things nobody asked to delete.`,
+      };
+    }
+    maxAgeMinutes = value;
   }
   return { options: { tempRoot, maxAgeMinutes, yes: isYesFlag(args) } };
 }

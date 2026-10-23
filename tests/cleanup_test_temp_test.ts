@@ -385,19 +385,61 @@ Deno.test("a FAILED removal is a real error: exit 1 and the path named in the ou
   }
 });
 
-Deno.test("parseCliOptions: a non-positive --max-age-minutes is rejected with a clear message (audio-feed-qdm95)", () => {
-  for (const bad of ["0", "-5", "later"]) {
+Deno.test("parseCliOptions: the age bound is parsed STRICTLY — every number is attacker-supplied (audio-feed-son8q)", () => {
+  // '5e-324' is finite and > 0, yet its millisecond product underflows to ~0ms: the age
+  // comparison then reads "everything is old" and FRESH directories get deleted. The rule
+  // is digits-only with a documented floor of 1 minute; each rejection is a NAMED error.
+  const rejected = [
+    ["5e-324", "scientific"],
+    ["+1", "digits only"],
+    ["1e9", "scientific"],
+    ["NaN", "digits only"],
+    ["", "digits only"],
+    ["1.5", "digits only"],
+    ["-5", "digits only"],
+    ["0", "at least 1"],
+    ["later", "digits only"],
+  ] as const;
+  for (const [bad, expectIn] of rejected) {
     const parsed = parseCliOptions(["--yes", "--max-age-minutes", bad]);
     assert(
-      "error" in parsed && parsed.error.includes("--max-age-minutes"),
-      `a ${JSON.stringify(bad)} age bound must be a named error, not a disabled guard`,
+      "error" in parsed,
+      `${JSON.stringify(bad)} must be a named rejection, not a parsed value`,
+    );
+    assert(
+      parsed.error.includes("--max-age-minutes") && parsed.error.includes(expectIn),
+      `the rejection of ${JSON.stringify(bad)} must name the flag and the rule (want ${
+        JSON.stringify(expectIn)
+      }), got: ${"error" in parsed ? parsed.error : "options"}`,
     );
   }
-  const good = parseCliOptions(["--yes", "--max-age-minutes", "30"]);
-  assert("options" in good);
-  assertEquals(good.options.maxAgeMinutes, 30);
-  assertEquals(good.options.yes, true);
+  // Documented accepted values: the floor itself, and a plain number.
+  for (const [good, expected] of [["1", 1], ["60", 60]] as const) {
+    const parsed = parseCliOptions(["--yes", "--max-age-minutes", good]);
+    assert("options" in parsed, `${JSON.stringify(good)} must be accepted`);
+    assertEquals(parsed.options.maxAgeMinutes, expected);
+  }
+  // A missing VALUE is an error, not a silent default.
+  assert("error" in parseCliOptions(["--max-age-minutes"]));
+  // Default when the flag is absent entirely.
   const defaulted = parseCliOptions([]);
   assert("options" in defaulted);
   assertEquals(defaulted.options.maxAgeMinutes, 60);
+});
+
+Deno.test("a rejected --max-age-minutes deletes NOTHING — the CLI errors out before any walk (audio-feed-son8q)", async () => {
+  const root = await makeScratch();
+  try {
+    const fresh = `${root}/rvy5n-scratch-fresh01`; // mtime = now: would die under a ~0ms bound
+    await Deno.mkdir(fresh);
+    const parsed = parseCliOptions(["--yes", "--temp-root", root, "--max-age-minutes", "5e-324"]);
+    assert("error" in parsed, "5e-324 must be a named rejection");
+    // The CLI exits 1 on a parse error BEFORE any directory walk, so the fresh entry is
+    // untouched; this row pins the outcome that matters to the operator's data.
+    assertEquals(await exists(fresh), true, "a rejected invocation must delete nothing");
+    const undisturbed = await Deno.stat(fresh);
+    assert(undisturbed.isDirectory);
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
 });
