@@ -215,7 +215,9 @@ Deno.test("oversized article is refused before any paid call; empty narration is
     }) as typeof fetch,
   });
   const huge = await assertRejects(() =>
-    client.synthesizeNarration({ title: "Huge", body: "word ".repeat(30000) })
+    // 200,000 bytes: over the 192,000-byte narration ceiling (64 segments), so it must
+    // still be refused before any paid call (audio-feed-cco6g raised the cap 72,000 -> 192,000).
+    client.synthesizeNarration({ title: "Huge", body: "word ".repeat(40000) })
   );
   assert(huge instanceof Error);
   assertStringIncludes(huge.message, `limit ${MAX_TTS_SEGMENTS}`);
@@ -227,6 +229,93 @@ Deno.test("oversized article is refused before any paid call; empty narration is
   assertStringIncludes(empty.message, "no spoken text");
   assertEquals(calls, 0);
 });
+
+/**
+ * Build a body whose narration prompt splits into EXACTLY n segments under the
+ * client's own splitter (audio-feed-cco6g). Paragraph count is found by binary
+ * search over a monotone paragraph->segment relation, then pinned with an exact
+ * assertion — a per-word growth loop would call the superlinear splitter thousands
+ * of times and dominate the suite.
+ */
+const SEGMENT_PARA =
+  "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore. "
+    .repeat(25); // ~2,475 bytes: a paragraph is a seam the splitter packs whole.
+
+function promptSegmentCount(body: string): number {
+  return splitTtsText(
+    formatNarrationPrompt({ title: "Boundary", body, includeIntro: false }),
+    MAX_TTS_INPUT_BYTES,
+  ).length;
+}
+
+function bodyOfParagraphCount(k: number): string {
+  return Array.from({ length: k }, () => SEGMENT_PARA).join("\n\n");
+}
+
+function smallestParagraphCountAtLeast(n: number): number {
+  let lo = 1;
+  let hi = n * 3;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (promptSegmentCount(bodyOfParagraphCount(mid)) >= n) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+function bodyWithExactSegmentCount(n: number): string {
+  const body = bodyOfParagraphCount(smallestParagraphCountAtLeast(n));
+  assertEquals(promptSegmentCount(body), n);
+  return body;
+}
+
+Deno.test(
+  `a narration needing exactly ${MAX_TTS_SEGMENTS} segments passes the cap and synthesises (audio-feed-cco6g)`,
+  async () => {
+    const body = bodyWithExactSegmentCount(MAX_TTS_SEGMENTS);
+    let calls = 0;
+    const client = new GeminiTtsClient({
+      apiKey: "fixture-key",
+      fetchFn: (() => {
+        calls++;
+        return Promise.resolve(success());
+      }) as typeof fetch,
+    });
+    const result = await client.synthesizeNarration({
+      title: "Boundary",
+      body,
+      includeIntro: false,
+    });
+    // Every admitted segment was really synthesised: admission is not a quiet no-op.
+    assertEquals(calls, MAX_TTS_SEGMENTS);
+    assertEquals(result.format, "pcm");
+    assert(result.rawBytes.byteLength > 0);
+  },
+);
+
+Deno.test(
+  `a narration needing ${
+    MAX_TTS_SEGMENTS + 1
+  } segments is refused before any paid call (audio-feed-cco6g)`,
+  async () => {
+    const body = bodyWithExactSegmentCount(MAX_TTS_SEGMENTS + 1);
+    let calls = 0;
+    const client = new GeminiTtsClient({
+      apiKey: "fixture-key",
+      fetchFn: (() => {
+        calls++;
+        return Promise.resolve(success());
+      }) as typeof fetch,
+    });
+    const err = await assertRejects(() =>
+      client.synthesizeNarration({ title: "Boundary", body, includeIntro: false })
+    );
+    assert(err instanceof Error);
+    assertStringIncludes(err.message, `needs ${MAX_TTS_SEGMENTS + 1} TTS segments`);
+    assertStringIncludes(err.message, `limit ${MAX_TTS_SEGMENTS}`);
+    assertEquals(calls, 0);
+  },
+);
 
 Deno.test("a failed later turn is terminal, not a retry of earlier paid turns", async () => {
   let calls = 0;

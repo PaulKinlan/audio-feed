@@ -114,16 +114,19 @@ export const ESTIMATED_UPLOAD_DURATION_MS = 5_000;
 /**
  * Assumed upload throughput in bytes per ms (audio-feed-aqms): 10_000 = 10 MB/s.
  *
- * THE ARITHMETIC THIS CONSTANT HAS TO SURVIVE (measured from the repo, 2026-10-13):
+ * THE ARITHMETIC THIS CONSTANT HAS TO SURVIVE (measured from the repo, 2026-10-13; rescalled
+ * for the 64-segment ceiling, audio-feed-cco6g):
  * Gemini TTS emits 24 kHz 16-bit mono PCM = 48_000 B/s of audio. Input is capped
- * at MAX_TTS_INPUT_BYTES (3 KB) x MAX_TTS_SEGMENTS (24) = 72 KB of text ~= 80
- * minutes of narration at typical speaking rates, so the WAV ceiling is
- * 80 min x 48 KB/s ~= 230 MB; a typical 2_000-4_000 word article narrates to
+ * at MAX_TTS_INPUT_BYTES (3 KB) x MAX_TTS_SEGMENTS (64) = 192 KB of text ~= 3.5
+ * hours of narration at typical speaking rates, so the WAV ceiling is
+ * 3.5 h x 3600 s x 48 KB/s ~= 620 MB; a typical 2_000-4_000 word article narrates to
  * 13-27 min = 37-77 MB. To fit the default upload window (45 s budget - 5 s
  * margin = 40 s) those payloads need 1-2 MB/s sustained to R2 from a Deploy
- * isolate; the 230 MB absolute cap needs ~6 MB/s. R2-class object stores
+ * isolate; the 620 MB absolute cap needs ~16 MB/s. R2-class object stores
  * sustain an order of magnitude more than that, so 10 MB/s is the planning
- * floor, not the ceiling.
+ * floor for typical articles, not the ceiling — and the absolute-cap case is
+ * estimated long, deferred, and retried under the budget rather than refused:
+ * the estimate is advisory; the deadline is the bound.
  *
  * NOT MEASURED ON PRODUCTION from this VM (no deploy token): if reality is
  * slower than assumed, the preflight defers more often than it should - and

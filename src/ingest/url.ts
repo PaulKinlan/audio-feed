@@ -859,6 +859,41 @@ function sanitizeMetadataText(text: string, maxLength: number): string {
 }
 
 /**
+ * A line that is EXACTLY a section heading for citations — nothing else on the line but
+ * optional surrounding whitespace (audio-feed-cco6g). The anchors are the false-positive
+ * guard: a sentence that merely CONTAINS the word "references" ("these references anchor
+ * the claim") is prose and must not truncate anything; only a bare heading does.
+ */
+export const REFERENCES_HEADING_PATTERN = /^(references|bibliography|works cited)\s*$/i;
+
+/**
+ * Strip a trailing bibliography/references/appendix-style citations block from parsed PDF
+ * text BEFORE it is counted or narrated (audio-feed-cco6g). Academic PDFs end in hundreds
+ * of citation lines; left in, they are counted against the narration byte budget and read
+ * aloud as noise after the paper's real conclusion.
+ *
+ * Truncation happens at the LAST bare heading match, not the first: an early bare heading
+ * (a table-of-contents row that survived as its own line, a slide titled "References") must
+ * not cut real content when the actual citations section sits at the end. A match on the
+ * FIRST line never truncates — a document that opens with the word is not a document made
+ * entirely of citations, and truncating it to nothing would fail extraction with a confusing
+ * "no readable text" error.
+ *
+ * Returns the text unchanged when no qualifying heading exists.
+ */
+export function truncateAtReferencesSection(rawText: string): string {
+  if (!rawText) return rawText;
+  const rawLines = rawText.split(/\r?\n/);
+  for (let i = rawLines.length - 1; i > 0; i--) {
+    const line = clean(rawLines[i]);
+    if (line && REFERENCES_HEADING_PATTERN.test(line)) {
+      return rawLines.slice(0, i).join("\n");
+    }
+  }
+  return rawText;
+}
+
+/**
  * Extract structured text and metadata from PDF bytes (audio-feed-w9n, audio-feed-a3y).
  * Uses pdf-parse to extract text, document metadata (Title, Author, CreationDate),
  * and generates clean body paragraphs suitable for TTS narration and dialogue synthesis.
@@ -881,7 +916,10 @@ export async function extractPdfArticle(
 
   const data = await parsePdfBounded(bytes, options.timeoutMs);
 
-  const rawText = data.text ?? "";
+  // Cut a trailing citations block first (audio-feed-cco6g): everything downstream — the
+  // 80-char readability check, the character cap, title/body/lead extraction — must see the
+  // paper without its bibliography, so citation bytes are neither counted nor narrated.
+  const rawText = truncateAtReferencesSection(data.text ?? "");
 
   // Check lines for a candidate heading
   const lines = rawText

@@ -21,6 +21,7 @@ import {
   IngestError,
   MAX_ARTICLE_CONTENT_CHARS,
   MAX_PDF_BYTES,
+  truncateAtReferencesSection,
 } from "../src/ingest/url.ts";
 
 /** Helper to generate valid synthetic PDF bytes for testing. */
@@ -207,6 +208,92 @@ Deno.test("extractPdfArticle: rejects content exceeding character limit (> 2,000
   assertEquals(err.status, 413);
   assertStringIncludes(err.message, "character limit");
   assertStringIncludes(err.message, String(MAX_ARTICLE_CONTENT_CHARS));
+});
+
+const CONCLUSION_LINE =
+  "We conclude that bounded runtimes and declarative specs materially reduce narration waste.";
+const CITATION_1 = "[1] Smith, J. Deep Edges (2024). Journal of Bounded Things, 12(3), 45-67.";
+const CITATION_2 =
+  "[2] Lovelace, A. Notes on Runtime Overhead (2025). Annals of Declarative Work, 1(1), 1-22.";
+const CITATION_3 = "Doe, J. and Roe, R. Measuring Citations at Scale (2023). doi:10.1000/xyz123.";
+
+Deno.test("truncateAtReferencesSection: cuts the last bare heading and everything after it (audio-feed-cco6g)", () => {
+  const text = [LONG_PARA_1, CONCLUSION_LINE, "References", CITATION_1, CITATION_2, CITATION_3]
+    .join(
+      "\n",
+    );
+  const truncated = truncateAtReferencesSection(text);
+  assertStringIncludes(truncated, CONCLUSION_LINE);
+  assert(!truncated.includes(CITATION_1), "citations must be truncated");
+  assert(!truncated.includes("References"), "the heading itself must go too");
+});
+
+Deno.test("truncateAtReferencesSection: case-insensitive and variant headings (audio-feed-cco6g)", () => {
+  for (const heading of ["REFERENCES", "bibliography", "Works Cited", "  references  "]) {
+    const text = [LONG_PARA_1, heading, CITATION_1].join("\n");
+    const truncated = truncateAtReferencesSection(text);
+    assertStringIncludes(truncated, LONG_PARA_1);
+    assert(!truncated.includes(CITATION_1), `heading ${JSON.stringify(heading)} must truncate`);
+  }
+});
+
+Deno.test("truncateAtReferencesSection: a line that merely says the word references is prose, not a heading (audio-feed-cco6g)", () => {
+  const proseLine = "As the references above anchor, these claims are empirical.";
+  const text = [LONG_PARA_1, proseLine, CONCLUSION_LINE, CITATION_1].join("\n");
+  const truncated = truncateAtReferencesSection(text);
+  // No bare heading anywhere: nothing is truncated.
+  assertEquals(truncated, text);
+});
+
+Deno.test("truncateAtReferencesSection: truncates at the LAST heading, keeping content after an early one (audio-feed-cco6g)", () => {
+  const afterEarlyHeading = "Appendix material aside, the body continues here with real findings.";
+  const text = [
+    LONG_PARA_1,
+    "References", // early bare heading (e.g. an in-text section pointer)
+    afterEarlyHeading,
+    "Bibliography", // the real citations section at the end
+    CITATION_1,
+    CITATION_2,
+  ].join("\n");
+  const truncated = truncateAtReferencesSection(text);
+  assertStringIncludes(truncated, afterEarlyHeading, "content between the headings must survive");
+  assert(!truncated.includes(CITATION_1), "the final citations block must go");
+});
+
+Deno.test("truncateAtReferencesSection: a heading on the FIRST line never truncates (audio-feed-cco6g)", () => {
+  const text = ["References", LONG_PARA_1, CONCLUSION_LINE].join("\n");
+  assertEquals(truncateAtReferencesSection(text), text);
+  assertEquals(truncateAtReferencesSection(""), "");
+});
+
+Deno.test("extractPdfArticle: a PDF ending in a References block narrates without its citations (audio-feed-cco6g)", async () => {
+  const lines = [LONG_PARA_1, LONG_PARA_2, CONCLUSION_LINE, "References"];
+  // A realistically long citations block: 60 reference lines.
+  for (let i = 1; i <= 60; i++) {
+    lines.push(`[${i}] Author${i}, A. Title ${i} (202${i % 10}). Venue ${i}, 1-9.`);
+  }
+  const bytes = makeSyntheticPdf({ title: "Cited Paper", lines });
+
+  const article = await extractPdfArticle(bytes, "https://example.com/papers/cited.pdf");
+  assertStringIncludes(article.body, CONCLUSION_LINE);
+  assert(!article.body.includes("[60] Author60"), "citations must not reach the narration body");
+  assert(!article.body.includes("References"), "the heading must not reach the narration body");
+  const bodyBytes = new TextEncoder().encode(article.body).byteLength;
+  assert(bodyBytes < 192_000, `body must sit under the 192,000-byte ceiling, got ${bodyBytes}`);
+});
+
+Deno.test("extractPdfArticle: a mid-document prose mention of references does not truncate (audio-feed-cco6g)", async () => {
+  const lines = [
+    LONG_PARA_1,
+    "The references discussed in the introduction are expanded here.",
+    LONG_PARA_2,
+    CONCLUSION_LINE,
+  ];
+  const bytes = makeSyntheticPdf({ title: "Prose Paper", lines });
+
+  const article = await extractPdfArticle(bytes, "https://example.com/papers/prose.pdf");
+  assertStringIncludes(article.body, CONCLUSION_LINE, "the ending must survive a prose mention");
+  assertStringIncludes(article.body, LONG_PARA_2);
 });
 
 Deno.test("fetchArticle: fetches and extracts application/pdf documents (audio-feed-w9n)", async () => {

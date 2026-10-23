@@ -13,13 +13,13 @@ import { newArticleId, newEpisodeId } from "../ids.ts";
 import { MAX_TTS_INPUT_BYTES, MAX_TTS_SEGMENTS } from "../tts/gemini.ts";
 
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
-export const MAX_NARRATION_BYTES = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS; // 72,000 bytes
+export const MAX_NARRATION_BYTES = MAX_TTS_INPUT_BYTES * MAX_TTS_SEGMENTS; // 192,000 bytes (audio-feed-cco6g)
 /**
  * Bound on the INFLATED size of a .docx's word/document.xml (audio-feed-yl3bq).
  * MAX_UPLOAD_BYTES bounds the COMPRESSED bytes; deflate inflates them, and a
  * 16 KB bomb was measured expanding to 16,000,000 text bytes before the
- * 72,000-byte narration check ever ran. No document that can pass the
- * narration ceiling needs anywhere near this much XML (it is ~58x the ceiling
+ * 192,000-byte narration check ever ran. No document that can pass the
+ * narration ceiling needs anywhere near this much XML (it is ~15x the ceiling
  * in pure markup), so nothing legitimate is refused. Decompression is bounded
  * WHILE streaming: the allocation below can never exceed this.
  */
@@ -842,12 +842,15 @@ export function createUploadIngestHandler(
         };
       }
 
-      // Check narration limit (72,000 bytes)
+      // Check narration limit (192,000 bytes — MAX_NARRATION_BYTES, audio-feed-cco6g)
       const textBytes = new TextEncoder().encode(article.body).byteLength;
       if (textBytes > MAX_NARRATION_BYTES) {
         const correlationId = crypto.randomUUID();
-        const error =
-          `Extracted text from '${rawFilename}' exceeds the narration limit of 72,000 bytes (actual: ${textBytes} bytes).`;
+        // Derived from the constant, not hardcoded: the ceiling moved 72,000 -> 192,000 once
+        // already (audio-feed-cco6g) and the message must follow the next move too.
+        const error = `Extracted text from '${rawFilename}' exceeds the narration limit of ${
+          MAX_NARRATION_BYTES.toLocaleString("en-US")
+        } bytes (actual: ${textBytes.toLocaleString("en-US")} bytes).`;
         await deps.onFailure?.({
           user,
           reason: "payload_too_large",

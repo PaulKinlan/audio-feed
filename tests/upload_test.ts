@@ -495,13 +495,13 @@ Deno.test("POST /api/upload rejects oversize docx > 10 MiB with 413 naming limit
   assertEquals(data.file, "huge-document.docx");
 });
 
-Deno.test("POST /api/upload rejects docx whose text exceeds 72,000 bytes with 413 naming narration cap", async () => {
+Deno.test("POST /api/upload rejects docx whose text exceeds 192,000 bytes with 413 naming narration cap", async () => {
   const { app, user } = await setupTestApp();
   const longText = "Word paragraph with many descriptive terms repeating continuously. ".repeat(
-    1200,
+    3200,
   );
   const textBytes = new TextEncoder().encode(longText.trim()).byteLength;
-  assert(textBytes > 72_000);
+  assert(textBytes > 192_000);
 
   const docXml = new TextEncoder().encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -534,10 +534,10 @@ Deno.test("POST /api/upload rejects docx whose text exceeds 72,000 bytes with 41
   assertEquals(res.status, 413);
   const data = await res.json();
   assert(data.correlationId);
-  assertEquals(data.limit, 72000);
+  assertEquals(data.limit, 192000);
   assertEquals(data.actual, textBytes);
-  assertStringIncludes(data.error, "72,000");
-  assertStringIncludes(data.error, String(textBytes));
+  assertStringIncludes(data.error, "192,000");
+  assertStringIncludes(data.error, textBytes.toLocaleString("en-US"));
   assertEquals(data.file, "encyclopedia.docx");
 });
 
@@ -607,7 +607,7 @@ Deno.test("POST /api/upload rejects a stored .docx whose document XML exceeds th
   const { app, user } = await setupTestApp();
   // Stored (method 0) is already bounded by the 10 MiB upload cap, but the same
   // 4 MiB document-XML bound applies so both compression methods refuse at the
-  // same place. 5 MiB of mostly-markup XML has under 72,000 bytes of text, so
+  // same place. 5 MiB of mostly-markup XML has under 192,000 bytes of text, so
   // this rejection must be the INFLATED-XML cap, not the narration cap.
   const bigXml = new TextEncoder().encode(
     `<w:document><w:body><w:p><w:r><w:t>real text</w:t></w:r>${
@@ -721,12 +721,12 @@ Deno.test("POST /api/upload rejects bodies > 10 MiB with 413 naming limit and by
   assertStringIncludes(data.error, "10,485,760");
 });
 
-Deno.test("POST /api/upload rejects extracted text > 72,000 bytes with 413 naming the limit", async () => {
+Deno.test("POST /api/upload rejects extracted text > 192,000 bytes with 413 naming the limit", async () => {
   const { app, user } = await setupTestApp();
-  // Generate 75,000 bytes of text (well under 10 MiB upload cap, but exceeds 72,000 narration limit)
-  const longText = "Prose paragraph with words. ".repeat(2800); // ~78,400 bytes
+  // Generate 200,000 bytes of text (well under 10 MiB upload cap, but exceeds the 192,000 narration limit)
+  const longText = "Prose paragraph with words. ".repeat(7200); // ~201,600 bytes
   const textBytes = new TextEncoder().encode(longText.trim()).byteLength;
-  assert(textBytes > 72_000);
+  assert(textBytes > 192_000);
 
   const formData = new FormData();
   formData.append("file", new File([longText], "encyclopedia.txt", { type: "text/plain" }));
@@ -742,9 +742,9 @@ Deno.test("POST /api/upload rejects extracted text > 72,000 bytes with 413 namin
   assertEquals(res.status, 413);
   const data = await res.json();
   assert(data.correlationId);
-  assertEquals(data.limit, 72000);
+  assertEquals(data.limit, 192000);
   assertEquals(data.actual, textBytes);
-  assertStringIncludes(data.error, "72,000");
+  assertStringIncludes(data.error, "192,000");
   assertEquals(data.file, "encyclopedia.txt");
 });
 
