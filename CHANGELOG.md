@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **Longer papers narrate: PDF citation blocks are stripped before narration, and the segment ceiling
+  is 64 segments / 192,000 bytes (audio-feed-cco6g)**: two changes that move together. First,
+  `extractPdfArticle` (src/ingest/url.ts) now cuts a trailing citations section before the text is
+  counted or narrated: a line that is EXACTLY "references", "bibliography" or "works cited"
+  (case-insensitive, whitespace-trimmed) ends the narration body at the LAST such heading, so a
+  paper's real conclusion survives an early bare heading and hundreds of citation lines are neither
+  counted against the byte budget nor read aloud. A sentence that merely CONTAINS the word
+  "references" is prose and truncates nothing, and a heading on the document's first line never
+  truncates (a document is not citations just because it opens with the word). Second,
+  `MAX_TTS_SEGMENTS` rises 24 -> 64, lifting the narration ceiling `MAX_NARRATION_BYTES`
+  72,000 -> 192,000 bytes — a document needing between 25 and 64 segments now synthesises to READY
+  instead of failing at ingest. The wall-clock story was checked, not assumed: 64 segments x the 45s
+  worst-case turn (~48 min) far exceeds the 15-minute claim lease, and that is safe BY DESIGN — the
+  90s invocation budget yields with durable progress (resetting attempts, audio-feed-vqu4),
+  resumable segments (audio-feed-wr1u) mean a lease expiry re-pays only the in-flight segment, and
+  the 120s per-attempt TTS deadline bounds one request regardless of episode length. The error
+  string now derives its number from the constant, so the next ceiling move cannot leave the message
+  behind; the upload 413 path, tests, README worst-case cost (~$3.64 -> ~$9.70 promotional) and the
+  synthesis upload-throughput planning arithmetic were rescalled to match.
+
 - **The admin page's own view has an id you can quote (audio-feed-xapat)**: the page rendered correlation ids
   for FAILURE ROWS, but the page's own view had none - `src/app.ts`, `src/router.ts` and `src/http.ts` carried
   no request id at all - so an operator looking at the page could not go from what was in front of them to the
