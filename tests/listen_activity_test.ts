@@ -1009,25 +1009,33 @@ Deno.test({
         deviceScaleFactor: 3,
         mobile: true,
       });
-      await cdp("Page.navigate", { url: `file://${tempHtmlFile}` });
-      // audio-feed-5egu4: readiness is POLLED, never slept. The fixed 600ms sleep that sat
-      // here was the ONLY readiness gate for the layout assertion below - on a loaded host
-      // the evaluate ran on a partially parsed document (red on a correct page) or on
-      // about:blank (false pass, since about:blank is 390px wide with zero overflow). The
-      // poll exits on document readiness PLUS non-zero laid-out width, so the assertions
-      // measure the real page. Bounded by a documented ceiling (100 x 50ms = 5s, the same
-      // guard family as the DevToolsActivePort poll above): a loaded host consumes poll
-      // cycles and the guard names itself on trip - it cannot turn slowness into a layout
-      // verdict.
-      let metrics: {
+      // The readiness guard's contract (rev-audiofeed5egu4 finding): a document is ready
+      // ONLY if it IS the navigated target (identity by href), complete, and laid out.
+      // Anything else - the pre-navigation about:blank, a torn-down context - is NOT READY
+      // and the loop WAITS. The old predicate (readyState+width only) accepted
+      // about:blank under this row's 390px emulation, so an uncommitted navigation let
+      // the loop exit on the wrong document and the assertions falsely accused the
+      // product of a layout blowout.
+      const targetUrl = `file://${tempHtmlFile}`;
+      interface ReadDocument {
+        href: string;
+        readyState: string;
         scrollWidth: number;
         clientWidth: number;
         hasOverflow: boolean;
-      } | undefined;
-      for (let i = 0; i < 100 && !metrics; i++) {
+      }
+      const urlIsTarget = (href: string): boolean => {
+        try {
+          return href === targetUrl || decodeURIComponent(href) === targetUrl;
+        } catch {
+          return href === targetUrl;
+        }
+      };
+      const readDocument = async (): Promise<ReadDocument | undefined> => {
         // deno-lint-ignore no-explicit-any
         const probe: any = await cdp("Runtime.evaluate", {
           expression: `(() => JSON.stringify({
+            href: location.href,
             readyState: document.readyState,
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
@@ -1038,20 +1046,55 @@ Deno.test({
         // exception (probe.result.result.value undefined) - under load this is COMMON and
         // it means "not ready yet", never a layout verdict (audio-feed-5egu4).
         const raw = probe?.result?.result?.value;
-        if (typeof raw === "string") {
-          const candidate = JSON.parse(raw);
-          if (candidate.readyState === "complete" && candidate.scrollWidth > 0) {
-            metrics = candidate;
-          }
+        if (typeof raw !== "string") return undefined;
+        try {
+          return JSON.parse(raw) as ReadDocument;
+        } catch {
+          return undefined;
         }
-        if (!metrics) {
+      };
+      const isTargetReady = (d: ReadDocument | undefined): boolean =>
+        d !== undefined && urlIsTarget(d.href) && d.readyState === "complete" &&
+        d.scrollWidth > 0;
+
+      // DETERMINISTIC REPRODUCTION of the race the reviewer found - no timing involved:
+      // BEFORE Page.navigate, the only document in this target IS about:blank by
+      // construction. The guard must classify it NOT READY; the old predicate accepted
+      // it (complete + 980px wide under the emulation), which let the loop exit on the
+      // wrong document and assert a layout lie about the real page.
+      const preNavigation = await readDocument();
+      assertEquals(
+        preNavigation?.href,
+        "about:blank",
+        "pre-navigation document must be about:blank",
+      );
+      assertEquals(
+        isTargetReady(preNavigation),
+        false,
+        "the readiness guard must reject the pre-navigation about:blank document " +
+          "- accepting it would assert a layout verdict about the wrong page",
+      );
+
+      await cdp("Page.navigate", { url: targetUrl });
+      // audio-feed-5egu4: readiness is POLLED, never slept. Bounded by a documented
+      // ceiling (100 x 50ms = 5s, the same guard family as the DevToolsActivePort poll
+      // above): a loaded host consumes poll cycles and the guard names itself on trip -
+      // it cannot turn slowness into a layout verdict.
+      let metrics: ReadDocument | undefined;
+      for (let i = 0; i < 100 && !metrics; i++) {
+        const candidate = await readDocument();
+        if (isTargetReady(candidate)) {
+          metrics = candidate;
+        } else {
           await sleep(50);
         }
       }
       assert(
         metrics,
-        "the page never reached readyState complete with non-zero layout within the 5s " +
-          `readiness guard - the assertions below would be measuring a partial document`,
+        "the navigated target never reached readyState complete with non-zero layout " +
+          `within the 5s readiness guard (last document seen: ${
+            (await readDocument())?.href ?? "unreadable"
+          }) - the assertions below would be measuring a partial or wrong document`,
       );
       assertEquals(
         metrics.scrollWidth,
