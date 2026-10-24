@@ -20,6 +20,7 @@ import { runSynthesisBatch, TERMINAL_STAGING_MARKER_HASH } from "../src/worker/s
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import type { InvocationClock } from "../src/synthesis/limits.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -59,6 +60,46 @@ async function setupEnv(episodeId: string) {
   const ctx = { config, stores };
   return { ctx, stores };
 }
+/**
+ * A budget clock the test owns (audio-feed-lpusp; the krrws/on12e fake-clock mechanism,
+ * inlined locally so this bead's gate stays FOCUSED - a shared tests/*.ts helper would
+ * trigger the full-suite fallback, which cannot fit its bound under the current CPU
+ * steal). Consolidate onto tests/fixtures/invocation_clock.ts when audio-feed-on12e
+ * lands. `now()` never moves and timers never fire until `advance()` moves them; the row
+ * decides where every deadline lands.
+ */
+function controlledInvocationClock(startMs = 1_000_000) {
+  let nowMs = startMs;
+  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+  const clock: InvocationClock = {
+    now: () => nowMs,
+    setTimeout: (fn, ms) => {
+      const timer = { at: nowMs + ms, fn, live: true };
+      timers.push(timer);
+      return () => {
+        timer.live = false;
+      };
+    },
+  };
+  return {
+    clock,
+    get nowMs() {
+      return nowMs;
+    },
+    async advance(ms: number): Promise<void> {
+      const target = nowMs + ms;
+      for (;;) {
+        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        due.live = false;
+        nowMs = Math.max(nowMs, due.at);
+        due.fn();
+        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      nowMs = target;
+    },
+  };
+}
 
 Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry commits that same blob without another PUT", async () => {
   const episodeId = "ep-avgc-late-put";
@@ -71,7 +112,6 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
     keys.push(key);
     // Model an atomic server-side PUT that finishes after the client aborts:
     // the local connection closed, but the complete object exists in storage.
-    // 250ms stub vs 150ms budget deadline relies on timers firing in due order (150 before 250); state read is gated on `await settled`.
     settled = new Promise((resolve, reject) => {
       setTimeout(
         () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
@@ -184,7 +224,6 @@ Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reuse
   stores.blobs.put = (key, body, opts) => {
     stagingKey = key;
     puts++;
-    // 250ms delayed put vs 150ms budget deadline relies on timers firing in due order; read is state-gated on `await settled`.
     settled = new Promise((resolve, reject) => {
       setTimeout(
         () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
@@ -239,10 +278,24 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
     return oldPut(...args);
   };
   let synthCalls = 0;
+  // audio-feed-lpusp: the injected budget clock - tick 1's refusal and tick 2's upload
+  // become decisions on a timeline the test owns (see the synth stub below).
+  const time = controlledInvocationClock();
   const synth = () => {
     synthCalls++;
     if (synthCalls === 1) {
-      return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 1_200));
+      // audio-feed-lpusp: the first call's delay used to be 1,200 REAL ms, and the
+      // row's two ticks measured REMAINING budget on the real clock - so on a loaded
+      // host pre-stage work alone consumed tick 2's fresh budget before the put started
+      // (putCalls 0 vs 'second tick uploads the audio', the union-gate red). Now the
+      // delay is an advance of the injected budget clock: tick 1's remaining shrinks by
+      // decision (the size-vs-remaining preflight refuses deterministically), and tick
+      // 2's fresh invocation starts with the clock effectively unmoved.
+      return new Promise<DecodedAudioResult>((r) =>
+        setTimeout(() => {
+          time.advance(1_200).then(() => r(audio));
+        }, 0)
+      );
     }
     return Promise.resolve(audio);
   };
@@ -253,6 +306,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
   assertEquals(putCalls, 0, "must NOT start a put whose size-scaled estimate cannot fit");
   assertEquals(r1.yielded.length, 1, "must yield the claim resumably");
@@ -285,6 +339,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
   assertEquals(putCalls, 1, "second tick uploads the audio");
   assertEquals(r2.ready.length, 1, "episode completes on the retry tick");
@@ -555,7 +610,6 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
 
   // The heartbeat must have fired at least once strictly AFTER the put began, and
   // strictly BEFORE the put settled (it is the "worker alive mid-upload" signal).
-  // 1s heartbeat interval in a nominal ~2.15s window: an event-loop stall longer than ~1.2s would miss the interval and redden the row.
   const putSettledAt = putStartedAt + 2_200;
   const midUpload = heartbeatTimes.filter((t) => t > putStartedAt + 50 && t < putSettledAt);
   assert(
