@@ -1033,10 +1033,16 @@ Deno.test({
           return href === targetUrl;
         }
       };
+      // audio-feed-hqtfo (measured on this VM): while a navigation to a server that never
+      // sends a first byte is in flight, Runtime.evaluate does NOT answer either - an
+      // unawaited probe would hang the whole wait. Every probe races its own deadline and a
+      // probe that does not answer in time is "not ready", never a hang.
+      const PROBE_DEADLINE_MS = 1_000;
       const readDocument = async (): Promise<ReadDocument | undefined> => {
         // deno-lint-ignore no-explicit-any
-        const probe: any = await cdp("Runtime.evaluate", {
-          expression: `(() => JSON.stringify({
+        const probe: any = await Promise.race([
+          cdp("Runtime.evaluate", {
+            expression: `(() => JSON.stringify({
             href: location.href,
             readyState: document.readyState,
             hasListenPage: Boolean(document.getElementById("main")) &&
@@ -1045,10 +1051,13 @@ Deno.test({
             clientWidth: document.documentElement.clientWidth,
             hasOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
           }))()`,
-        });
-        // An evaluate that lands in a context torn down by the navigation returns an
-        // exception (probe.result.result.value undefined) - under load this is COMMON and
-        // it means "not ready yet", never a layout verdict (audio-feed-5egu4).
+          }),
+          sleep(PROBE_DEADLINE_MS).then(() => undefined),
+        ]);
+        // Two ways raw is absent, both "not ready yet", never a layout verdict: an evaluate
+        // that lands in a context torn down by the navigation returns an exception
+        // (audio-feed-5egu4), and a probe that missed its deadline returns undefined above
+        // (audio-feed-hqtfo).
         const raw = probe?.result?.result?.value;
         if (typeof raw !== "string") return undefined;
         try {
@@ -1273,6 +1282,229 @@ Deno.test({
         "no process may still reference the row's profile once teardown has finished (audio-feed-wj8o2)",
       );
       await Deno.remove(tempHtmlFile).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "player page readiness: a navigation whose server never answers fails BY NAME, bounded, with no hung Page.navigate (audio-feed-hqtfo)",
+  // audio-feed-hqtfo (rev-audiofeed5egu4's coverage finding): the existing negative proofs keep a
+  // real browser on about:blank or load marker-less content at an already RESPONDING file://
+  // target - neither reproduces an HTTP server that accepts the navigation and never sends a
+  // response byte. This row serves exactly that: a handler that holds /player open until the
+  // client goes away. The property under test is that the whole navigation-and-readiness
+  // operation is BOUNDED and that no-response is a NAMED failure, not a hang.
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The handler MUST resolve when the client disconnects (req.signal aborts) or the row's
+    // own teardown would hang inside server.shutdown() - the hold is on the RESPONSE, not on
+    // the process.
+    let handlerEntered = 0;
+    const neverAnswer = (req: Request) => {
+      handlerEntered++;
+      return new Promise<Response>((resolve) => {
+        req.signal.addEventListener(
+          "abort",
+          () => resolve(new Response("client gone", { status: 500 })),
+          { once: true },
+        );
+      });
+    };
+    const server = Deno.serve({ port: 0, hostname: "127.0.0.1" }, neverAnswer);
+    const port = (server.addr as Deno.NetAddr).port;
+    const hungUrl = `http://127.0.0.1:${port}/player`;
+
+    const scratchTmp = await Deno.makeTempDir({ prefix: "hqtfo-scratch-" });
+    const { profileDir, cleanup } = await createTempChromeProfile(
+      "audiofeed-hqtfo-proof-",
+      scratchTmp,
+    );
+    const chrome = new Deno.Command(newestChrome(), {
+      args: [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profileDir}`,
+        "about:blank",
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let debugPort = "";
+    for (let i = 0; i < 50 && !debugPort; i++) {
+      await sleep(100);
+      debugPort = (await Deno.readTextFile(`${profileDir}/DevToolsActivePort`).catch(() => ""))
+        .split("\n")[0]!;
+    }
+
+    try {
+      const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
+      // deno-lint-ignore no-explicit-any
+      const page = targets.find((t: any) => t.type === "page");
+      const ws = new WebSocket(page.webSocketDebuggerUrl);
+      await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+
+      let nextId = 0;
+      // deno-lint-ignore no-explicit-any
+      const pending = new Map<number, (v: any) => void>();
+      ws.addEventListener("message", (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.id && pending.has(msg.id)) {
+          pending.get(msg.id)!(msg);
+          pending.delete(msg.id);
+        }
+      });
+      const cdp = (method: string, params: Record<string, unknown> = {}) => {
+        const id = ++nextId;
+        ws.send(JSON.stringify({ id, method, params }));
+        return new Promise((resolve) => pending.set(id, resolve));
+      };
+
+      await cdp("Page.enable");
+
+      // The SAME readiness contract as the mobile layout row (audio-feed-5egu4), pointed at a
+      // URL whose server never answers: a document is ready only if it IS the navigated target
+      // (identity by href AND the player's marker), complete, and laid out.
+      interface ReadDocument {
+        href: string;
+        readyState: string;
+        hasListenPage: boolean;
+        scrollWidth: number;
+        clientWidth: number;
+      }
+      const urlIsTarget = (href: string): boolean => {
+        try {
+          return href === hungUrl || decodeURIComponent(href) === hungUrl;
+        } catch {
+          return href === hungUrl;
+        }
+      };
+      // audio-feed-hqtfo (measured on this VM): while a navigation to a server that never
+      // sends a first byte is in flight, Runtime.evaluate does NOT answer either - so every
+      // probe races its own deadline and a probe that does not answer in time is "not ready",
+      // never a hang. With the 1s deadline the 8x(1s+100ms) loop concludes in ~9s worst case
+      // against a hung navigation and ~1s against an answering one.
+      const PROBE_DEADLINE_MS = 1_000;
+      const readDocument = async (): Promise<ReadDocument | undefined> => {
+        // deno-lint-ignore no-explicit-any
+        const probe: any = await Promise.race([
+          cdp("Runtime.evaluate", {
+            expression: `(() => JSON.stringify({
+            href: location.href,
+            readyState: document.readyState,
+            hasListenPage: Boolean(document.getElementById("main")) &&
+              Boolean(document.getElementById("episodes")),
+            scrollWidth: document.documentElement.scrollWidth,
+            clientWidth: document.documentElement.clientWidth
+          }))()`,
+          }),
+          sleep(PROBE_DEADLINE_MS).then(() => undefined),
+        ]);
+        const raw = probe?.result?.result?.value;
+        if (typeof raw !== "string") return undefined;
+        try {
+          return JSON.parse(raw) as ReadDocument;
+        } catch {
+          return undefined;
+        }
+      };
+      const isTargetReady = (d: ReadDocument | undefined): boolean =>
+        d !== undefined && urlIsTarget(d.href) && d.hasListenPage &&
+        d.readyState === "complete" && d.scrollWidth > 0;
+      const waitForTargetDocument = async (
+        attempts: number,
+        delayMs: number,
+      ): Promise<ReadDocument> => {
+        let lastSeen = "unreadable (no evaluate returned a document)";
+        for (let i = 0; i < attempts; i++) {
+          const candidate = await readDocument();
+          if (candidate !== undefined && isTargetReady(candidate)) return candidate;
+          if (candidate !== undefined) {
+            lastSeen = `${candidate.href} (readyState ${candidate.readyState})`;
+          }
+          await sleep(delayMs);
+        }
+        throw new Error(
+          `audio-feed-hqtfo readiness guard: ${hungUrl} did not become the ready target ` +
+            `document after ${attempts} probe(s), last document seen: ${lastSeen} - a server ` +
+            `that never answers is a bounded named failure, never a hang`,
+        );
+      };
+
+      // Navigate WITHOUT awaiting. Measured on this VM (the row's own probe, 2026-10-24):
+      // Page.navigate to a server that never sends a first byte does NOT resolve - the CDP
+      // promise hangs with the load for as long as the browser holds it. So "no hung
+      // Page.navigate" cannot mean "await it"; it means the row's bounded operation must
+      // conclude while the navigate is still pending, and the pending promise is discarded
+      // with the socket at teardown. (Do not pin "navigate never resolves" as an assertion:
+      // that is Chrome's behaviour, not this repo's contract.)
+      const navPromise = cdp("Page.navigate", { url: hungUrl });
+      void navPromise; // resolved or not, the row below decides - it must not block on this
+
+      // The navigation must have REACHED the never-answering server (state-gated on the
+      // handler firing, not slept): without this the row would pass vacuously on a connection
+      // error instead of on a held response.
+      for (let i = 0; i < 50 && handlerEntered === 0; i++) await sleep(100);
+      assertEquals(
+        handlerEntered,
+        1,
+        "the navigation must have REACHED the never-answering server - without this the row " +
+          "would pass vacuously on a connection error instead of on a held response",
+      );
+
+      // The readiness wait must FAIL BY NAME while the response is still held: the document on
+      // screen stays about:blank (identity can never match), so this throw is decided by the
+      // predicate, not by timing - the 8 probes only bound how long the negative proof takes.
+      // The outer 30s race is the rule-2 hang guard against a REGRESSION (a wait that never
+      // throws); the loop's worst case against the hung navigation is ~9s (8 x (1s probe
+      // deadline + 100ms)), so the guard is over 3x the worst case.
+      const rejection = await Promise.race([
+        waitForTargetDocument(8, 100).then(
+          () => "NO ERROR - the guard accepted a document that is not the target",
+          (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        ),
+        sleep(30_000).then(() =>
+          "audio-feed-hqtfo hang guard: the readiness wait did not conclude within 30s against " +
+          "a server that never answers (loop worst case ~9s with the 1s probe deadline)"
+        ),
+      ]);
+      assertStringIncludes(
+        rejection,
+        "audio-feed-hqtfo readiness guard",
+        `a never-answering navigation must redden BY NAME, got: ${rejection}`,
+      );
+      assertStringIncludes(
+        rejection,
+        hungUrl,
+        `the readiness failure must name the URL it was waiting for, got: ${rejection}`,
+      );
+      assertStringIncludes(
+        rejection,
+        "last document seen:",
+        `the readiness failure must name the document it actually saw (measured: all probes ` +
+          `time out during a hung navigation, so "unreadable" is the honest observation), ` +
+          `got: ${rejection}`,
+      );
+
+      ws.close();
+    } finally {
+      // Kill the browser FIRST: its disconnect aborts the held handler (req.signal), which is
+      // what lets server.shutdown() complete instead of hanging on the held connection.
+      await killChromeAndWait(chrome);
+      await server.shutdown();
+      await cleanup();
+      assert(
+        await removeDirWhenQuiet(scratchTmp),
+        "the scratch root must be gone after teardown: a dying browser's children must not recreate it (audio-feed-wj8o2)",
+      );
+      assert(
+        await waitForChromeProfileUnused(profileDir),
+        "no process may still reference the row's profile once teardown has finished (audio-feed-wj8o2)",
+      );
     }
   },
 });
