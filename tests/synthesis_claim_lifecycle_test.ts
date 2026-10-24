@@ -13,6 +13,7 @@ import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthe
 import { decodedFromWav, GeminiTtsClient, MAX_TTS_SEGMENTS, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import {
   isInvocationBudgetAbort,
@@ -1833,13 +1834,41 @@ Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation bud
 
 Deno.test("audio-feed-avgc: timed-out upload leaves a late completed blob for a retry", async () => {
   const { ctx, stores } = await setupEnv();
+  // audio-feed-on12e: DETERMINISTIC ordering by construction - the clock is the repo's
+  // shared fake, the PUT parks on a gate only the test releases, and a detached block
+  // fires the 80ms deadline the moment the transfer is IN FLIGHT. So: PUT starts (the
+  // frozen clock cannot consume the budget before it) -> abort wins mid-transfer -> the
+  // batch yields -> the test releases the gate -> the transfer completes late. Was a real
+  // 80ms deadline racing a real 135ms sleep; measured 4/10 red under 8 CPU hogs.
+  const time = controlledInvocationClock();
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let startedKey = "";
+  // Settlement is EXPOSED, not awaited by the batch: on the abort the wrapper yields the
+  // stage without waiting for the transfer, so the PUT completing after the yield is the
+  // exact scenario this row exists to pin (audio-feed-avgc). The test awaits the promise
+  // below before reading - deterministic, no timing wait.
+  let putSettlement: Promise<unknown> = Promise.resolve();
+  let resolveInFlight: () => void = () => {};
+  const inFlight = new Promise<void>((r) => {
+    resolveInFlight = r;
+  });
+  let releaseTransfer: () => void = () => {};
+  const transferGate = new Promise<void>((r) => {
+    releaseTransfer = r;
+  });
+  const deadlineFired = (async () => {
+    await inFlight;
+    await time.advance(60_000);
+  })();
+  deadlineFired.catch(() => {});
   stores.blobs.put = async (key, body, opts) => {
     startedKey = key;
-    await new Promise((r) => setTimeout(r, 135));
-    // Whole-object server-side completion despite the client aborting.
-    return oldPut(key, body, { contentType: opts?.contentType });
+    resolveInFlight();
+    await transferGate;
+    // Whole-object server-side completion despite the client aborting: the LATE
+    // completed PUT is the fact under test.
+    putSettlement = oldPut(key, body, { contentType: opts?.contentType }).catch(() => {});
+    return putSettlement as never;
   };
   const r = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-upload-race",
@@ -1847,6 +1876,7 @@ Deno.test("audio-feed-avgc: timed-out upload leaves a late completed blob for a 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(r.yielded.length, 1);
   // Never mark a retryable blob as an orphan: this batch's orphan sweep could
@@ -1854,8 +1884,10 @@ Deno.test("audio-feed-avgc: timed-out upload leaves a late completed blob for a 
   const orphanAtYield = await stores.metadata.listOrphanBlobs(10);
   assertEquals(orphanAtYield.includes(startedKey), false);
 
-  // Wait for the late complete PUT, which the next tick can verify by key.
-  await new Promise((r) => setTimeout(r, 160));
+  // Release the gated transfer: the late completion happens NOW, by the test's decision,
+  // and settlement is awaited as a state - no timing wait anywhere (audio-feed-on12e).
+  releaseTransfer();
+  await putSettlement;
   const retainedBlob = await stores.blobs.get(startedKey);
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assert(retainedBlob, "a completed PUT must survive the budget yield");
@@ -2035,12 +2067,32 @@ Deno.test("audio-feed-uecw: terminal completion commits episode ready and billin
 
 Deno.test("audio-feed-avgc: lost yield CAS does not orphan a potentially reusable upload", async () => {
   const { ctx, stores } = await setupEnv();
+  // audio-feed-on12e: same deterministic gate shape as the row above - abort wins
+  // mid-transfer by the test's decision, the transfer completes when the test releases
+  // it, and settlement is awaited as a state, not slept for.
+  const time = controlledInvocationClock();
   let stagingKey = "";
+  let putSettlement: Promise<unknown> = Promise.resolve();
+  let resolveInFlight: () => void = () => {};
+  const inFlight = new Promise<void>((r) => {
+    resolveInFlight = r;
+  });
+  let releaseTransfer: () => void = () => {};
+  const transferGate = new Promise<void>((r) => {
+    releaseTransfer = r;
+  });
+  const deadlineFired = (async () => {
+    await inFlight;
+    await time.advance(60_000);
+  })();
+  deadlineFired.catch(() => {});
   const oldPut = stores.blobs.put.bind(stores.blobs);
   stores.blobs.put = async (key, body, opts) => {
     stagingKey = key;
-    await new Promise((resolve) => setTimeout(resolve, 135));
-    return oldPut(key, body, { contentType: opts?.contentType });
+    resolveInFlight();
+    await transferGate;
+    putSettlement = oldPut(key, body, { contentType: opts?.contentType }).catch(() => {});
+    return putSettlement as never;
   };
 
   // Simulate CAS failure during cleanupOnAbort (audio-feed-22ui)
@@ -2054,6 +2106,7 @@ Deno.test("audio-feed-avgc: lost yield CAS does not orphan a potentially reusabl
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
 
   assertEquals(result.yielded.length, 1);
@@ -2062,7 +2115,10 @@ Deno.test("audio-feed-avgc: lost yield CAS does not orphan a potentially reusabl
   // delete its whole-object PUT while it is still settling.
   const orphanBlobs = await stores.metadata.listOrphanBlobs(10);
   assertEquals(orphanBlobs.includes(stagingKey), false);
-  await new Promise((resolve) => setTimeout(resolve, 160));
+  // Release the gated transfer and await its settlement as a state (audio-feed-on12e:
+  // the fixed 160ms sleep that used to sit here lost to host load).
+  releaseTransfer();
+  await putSettlement;
   assert(await stores.blobs.head(stagingKey), "late PUT remains available for takeover");
 });
 
