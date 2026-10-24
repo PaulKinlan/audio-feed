@@ -256,6 +256,12 @@ export interface MigrationOptions {
    * Heartbeat renewal interval in milliseconds (default: leaseMs / 3).
    */
   heartbeatIntervalMs?: number;
+  /**
+   * Callback fired when the background heartbeat observes lock loss
+   * (either renewal returned false or renewal threw). Allows callers/tests
+   * to observe the lockLost state transition directly without scraping log strings (audio-feed-gm1gb).
+   */
+  onLockLost?: (reason: "failed" | "threw", error?: unknown) => void;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -395,10 +401,12 @@ export async function migrateLegacyAudioKeys(
         const renewed = await renewMigrationLock(metadata, lockHolder, leaseMs);
         if (!renewed) {
           lockLost = true;
+          opts?.onLockLost?.("failed");
           log?.(`[migration] ERROR: lock renewal failed for holder ${lockHolder}; lock lost`);
         }
       } catch (err) {
         lockLost = true;
+        opts?.onLockLost?.("threw", err);
         log?.(`[migration] ERROR: lock renewal threw: ${err}`);
       }
     }, heartbeatIntervalMs);

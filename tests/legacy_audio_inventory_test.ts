@@ -872,6 +872,45 @@ Deno.test("migrateLegacyAudioKeys: heartbeat renewal holds lock indefinitely pas
   }
 });
 
+/**
+ * State gate for migration lock loss tests (audio-feed-raxn2, audio-feed-gm1gb).
+ * Resolves when the migration's background heartbeat observes lock loss via the
+ * explicit onLockLost callback in MigrationOptions.
+ *
+ * docs/speed.md rule 2: the 5s bound is a HANG GUARD, not the assertion - at a 10ms
+ * heartbeat it is a 500x margin, and it trips only when the renewal never fires (the
+ * regression this row pins); then the migration completes without aborting and the
+ * `threw` assertion reddens by name.
+ */
+function createLockLossGate() {
+  let notifyLockLossObserved!: (reason: "failed" | "threw", error?: unknown) => void;
+  let observedReason: "failed" | "threw" | undefined;
+  const lockLossObserved = new Promise<"failed" | "threw">((resolve) => {
+    notifyLockLossObserved = (reason) => {
+      if (!observedReason) observedReason = reason;
+      resolve(reason);
+    };
+  });
+  return {
+    get reason() {
+      return observedReason;
+    },
+    onLockLost: (reason: "failed" | "threw", error?: unknown) => {
+      notifyLockLossObserved(reason, error);
+    },
+    waitForLockLoss: async (hangGuardMs = 5_000) => {
+      let guard: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        lockLossObserved,
+        new Promise<void>((resolve) => {
+          guard = setTimeout(resolve, hangGuardMs);
+        }),
+      ]);
+      clearTimeout(guard);
+    },
+  };
+}
+
 Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediately (audio-feed-hrfn)", async () => {
   const stores = memoryStores();
   await stores.metadata.putUser(makeUser({ id: "user-abort", status: "approved" }));
@@ -879,6 +918,8 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
   await stores.metadata.putEpisode(
     makeEpisode({ id: "ep-abort-1", userId: "user-abort", audioKey: "track-1.mp3" }),
   );
+
+  const gate = createLockLossGate();
 
   const stealingBlobs = wrapBlobs(stores.blobs, {
     get: async (k, opts) => {
@@ -893,8 +934,8 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
           holder: "rogue-stealer",
         }),
       );
-      // Wait for heartbeat callback (10ms) to fire and observe lock loss
-      await new Promise((r) => setTimeout(r, 25));
+      // Wait for the heartbeat to observe the lock loss (state signal), not a fixed sleep.
+      await gate.waitForLockLoss();
       return stores.blobs.get(k, opts);
     },
   });
@@ -906,6 +947,7 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
       blobs: stealingBlobs,
       leaseMs: 30,
       heartbeatIntervalMs: 10,
+      onLockLost: gate.onLockLost,
     });
   } catch (err) {
     threw = true;
@@ -913,6 +955,7 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
   }
   // The run must fail closed when lock cannot be renewed
   assert(threw, "migration must abort when lock is lost mid-run");
+  assertEquals(gate.reason, "failed", "lock loss must be observed via renewal failure");
 
   // Verify episode audioKey was NOT updated (failed closed)
   const ep = await stores.metadata.getEpisode("user-abort", "ep-abort-1");
@@ -928,6 +971,8 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
         makeEpisode({ id: "ep-84q9", userId: "user-84q9", audioKey: "old-84q9.mp3" }),
       );
       await stores.blobs.put("audio/old-84q9.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
+
+      const gate = createLockLossGate();
 
       const blobs = new Proxy(stores.blobs, {
         get(target, prop, receiver) {
@@ -947,8 +992,8 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
                 holder: "other-holder",
               }),
             );
-            // Delay to allow heartbeat renewal to fail and set lockLost = true
-            await new Promise((r) => setTimeout(r, 50));
+            // Wait for the heartbeat to observe the lock loss (state signal), not a fixed sleep.
+            await gate.waitForLockLoss();
             return stores.blobs.putIfAbsent(key, body, opts);
           };
         },
@@ -961,6 +1006,7 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
           apply: true,
           leaseMs: 90,
           heartbeatIntervalMs: 10,
+          onLockLost: gate.onLockLost,
         });
       } catch (err) {
         threw = true;
@@ -968,6 +1014,7 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
       }
 
       assert(threw, "must throw and abort when lock lost during putIfAbsent");
+      assertEquals(gate.reason, "failed", "lock loss must be observed via renewal failure");
       const ep = await stores.metadata.getEpisode("user-84q9", "ep-84q9");
       assertEquals(
         ep?.audioKey,
@@ -978,6 +1025,61 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
       await stores.metadata.close?.();
     }
   }
+});
+
+Deno.test("migrateLegacyAudioKeys: heartbeat renewal error marks lock lost and aborts (audio-feed-gm1gb)", async () => {
+  const stores = memoryStores();
+  await stores.metadata.putUser(makeUser({ id: "user-threw", status: "approved" }));
+  await stores.blobs.put("track-threw.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
+  await stores.metadata.putEpisode(
+    makeEpisode({ id: "ep-threw-1", userId: "user-threw", audioKey: "track-threw.mp3" }),
+  );
+
+  const gate = createLockLossGate();
+  let failRenewals = false;
+
+  // Wrap metadata store so atomicUpdate throws during heartbeat renewal
+  const originalAtomicUpdate = stores.metadata.atomicUpdate.bind(stores.metadata);
+  stores.metadata.atomicUpdate = (<T>(
+    key: string,
+    updateFn: (current: T | null) => T | null,
+    leaseMs?: number,
+  ) => {
+    if (key === "migration_lock:legacy_audio_keys" && failRenewals) {
+      return Promise.reject(new Error("simulated heartbeat renewal store error"));
+    }
+    return originalAtomicUpdate(key, updateFn, leaseMs);
+  }) as typeof stores.metadata.atomicUpdate;
+
+  const interceptingBlobs = wrapBlobs(stores.blobs, {
+    get: async (k, opts) => {
+      // Trigger renewal error while migration is reading the blob
+      failRenewals = true;
+      await gate.waitForLockLoss();
+      return stores.blobs.get(k, opts);
+    },
+  });
+
+  let threw = false;
+  try {
+    await migrateLegacyAudioKeys(stores.metadata, {
+      apply: true,
+      blobs: interceptingBlobs,
+      leaseMs: 30,
+      heartbeatIntervalMs: 10,
+      onLockLost: gate.onLockLost,
+    });
+  } catch (err) {
+    threw = true;
+    assert(String(err).includes("Migration aborted") || String(err).includes("lock lost"));
+  }
+
+  assert(threw, "migration must abort when heartbeat renewal throws");
+  assertEquals(gate.reason, "threw", "lock loss must be observed via renewal threw");
+
+  // Verify episode was not updated
+  const ep = await stores.metadata.getEpisode("user-threw", "ep-threw-1");
+  assertEquals(ep?.audioKey, "track-threw.mp3", "must not mutate when heartbeat renewal threw");
 });
 
 Deno.test("getLegacyKeyUniqueOwner: invalidates and re-verifies ownership when colliding tenant episode is added after cache population (audio-feed-ni04)", async () => {
