@@ -1121,6 +1121,26 @@ Deno.test({
           "must not count as ready - an error page is 390px wide and would pass every " +
           "layout assertion while proving nothing about the page",
       );
+      // And the IDENTITY condition ISOLATED, so it cannot be deleted in silence
+      // (audio-feed-s4p5s, the reviewer's finding on this row): the marker is PRESENT, the
+      // document is complete and laid out at 390px - and it is still not the navigated
+      // target. Every other case here fails identity AND the marker together (the real
+      // about:blank carries no #main/#episodes), which is why removing urlIsTarget left the
+      // row green; this is the one input that pins the identity check on its own.
+      assertEquals(
+        isTargetReady({
+          href: "about:blank",
+          readyState: "complete",
+          hasListenPage: true,
+          scrollWidth: 390,
+          clientWidth: 390,
+          hasOverflow: false,
+        }),
+        false,
+        "a complete, 390px document that carries the player's marker but is NOT the " +
+          "navigated target must not count as ready - this case isolates the identity " +
+          "check from the marker check instead of relying on them to fail together",
+      );
 
       // AND THE SECOND HALF OF THE (a) PROOF, IN THE REAL BROWSER: before Page.navigate the
       // only document in this target IS about:blank by construction, so the guard must
