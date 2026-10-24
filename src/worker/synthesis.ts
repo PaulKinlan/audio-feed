@@ -142,6 +142,8 @@ export type Synthesizer = (job: {
     estimatedScriptDurationMs?: number;
     flushMarginMs?: number;
   };
+  /** Callback fired when grounded script stage fails and falls back to static dialogue (audio-feed-ap2mk) */
+  onScriptFallback?: (info: GroundedScriptFallback) => void;
 }) => Promise<DecodedAudioResult>;
 
 /** The prepare/commit pair the TTS client drives; see SynthesisOptions.resume. */
@@ -624,6 +626,18 @@ export function describeSynthesisFailure(
  * has its own 60s deadline in script.ts. The worker claim lease remains the outer bound. */
 export const DEFAULT_SCRIPT_STAGE_TIMEOUT_MS = 360_000;
 
+/**
+ * Structured discriminator for grounded script stage fallback reasons (audio-feed-ap2mk).
+ * Replaces coupling to console.warn English prose.
+ */
+export type GroundedScriptFallbackReason = "timeout" | "error";
+
+export interface GroundedScriptFallback {
+  reason: GroundedScriptFallbackReason;
+  error?: unknown;
+  articleTitle: string;
+}
+
 async function runScriptStage(
   generator: ScriptGenerator | null,
   input: GroundedScriptInput,
@@ -631,6 +645,7 @@ async function runScriptStage(
   flushMarginMs?: number,
   estimateMs = ESTIMATED_SCRIPT_STAGE_DURATION_MS,
   defaultTimeoutMs = DEFAULT_SCRIPT_STAGE_TIMEOUT_MS,
+  onFallback?: (info: GroundedScriptFallback) => void,
 ): Promise<Awaited<ReturnType<ScriptGenerator>> | undefined> {
   if (!generator) return undefined;
   // The unbounded fallback arms its own deadline, on the same clock the caller supplied so a test
@@ -651,6 +666,11 @@ async function runScriptStage(
     if (budget?.maxDurationMs) {
       throw outcome.error;
     }
+    onFallback?.({
+      reason: "timeout",
+      error: outcome.error,
+      articleTitle: input.article.title,
+    });
     console.warn(
       `[synthesis] grounded script stage failed for "${input.article.title}": ` +
         `grounded script stage exceeded ${defaultTimeoutMs}ms — falling back to the static dialogue builder`,
@@ -658,6 +678,11 @@ async function runScriptStage(
     return undefined;
   }
   if (outcome.kind === "error") {
+    onFallback?.({
+      reason: "error",
+      error: outcome.error,
+      articleTitle: input.article.title,
+    });
     console.warn(
       `[synthesis] grounded script stage failed for "${input.article.title}": ` +
         `${
@@ -706,6 +731,8 @@ export function createGeminiSynthesizer(
     estimatedScriptDurationMs?: number;
     estimatedTurnDurationMs?: number;
     flushMarginMs?: number;
+    /** Callback fired when grounded script stage fails and falls back to static dialogue (audio-feed-ap2mk) */
+    onScriptFallback?: (info: GroundedScriptFallback) => void;
   } = {},
 ): Synthesizer {
   const client = deps.client ?? new GeminiTtsClient(ttsClientConfig(ctx.config));
@@ -721,6 +748,7 @@ export function createGeminiSynthesizer(
     leaseMs,
     resume,
     invocationBudget,
+    onScriptFallback,
   }) => {
     // Stop paid work before the claim expires; reserve one minute for persisting its outcome.
     // A terminal TTS error prevents the worker retrying already-paid segments from turn one.
@@ -907,6 +935,7 @@ export function createGeminiSynthesizer(
           remainingMs !== undefined
             ? Math.min(deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS, remainingMs)
             : (deps.scriptTimeoutMs ?? DEFAULT_SCRIPT_STAGE_TIMEOUT_MS),
+          onScriptFallback ?? deps.onScriptFallback,
         );
         turns = script?.turns;
         if (turns && turns.length > 0) {
