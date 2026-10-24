@@ -390,15 +390,46 @@ Deno.test("synthesis: in-flight TTS is cancelled before claim expiry and termina
     stores: memoryStores(),
   } as unknown as AppContext;
   const synthesize = createGeminiSynthesizer(ctx, { client, scriptGenerator: null });
-  const error = await assertRejects(() =>
-    synthesize({
-      article: makeArticle({ title: "Lease", content: "Body." }),
-      source: makeSource({ voices: {} }),
-      episode: makeEpisode({ claimedAt: new Date().toISOString() }),
-      mode: "direct",
-      leaseMs: 60_060,
-    })
-  );
+  // docs/speed.md rule 2 (audio-feed-4zwtl): the claim lease is a WALL-CLOCK mechanism with no
+  // injected-clock seam (src/worker/synthesis.ts reads Date.now()/AbortSignal.timeout directly),
+  // so the row must buy a real window: the lease abort fires leaseMs - 60_000 (the persist
+  // reserve) after entry, and the pre-TTS stages must fit inside it. The old 60_060 left 60ms;
+  // under gate load that check fired before the fetch started and the row reddened with
+  // calls === 0 on correct code (fast-gate job 824fd182). 2s is ~33x that observed failure
+  // latency, and the pre-TTS work is in-memory mocks, so only a genuinely stalled event loop
+  // consumes it. The 10s race is a HANG GUARD, not an assertion: it trips only when the lease
+  // abort never reaches the in-flight fetch (the cancellation this row pins is broken), turning
+  // a suite hang into a named red.
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const hangGuard = new Promise<never>((_, reject) => {
+    guard = setTimeout(
+      () =>
+        reject(
+          new Error(
+            "in-flight TTS was not cancelled within 10s of a 2s claim-lease window - the lease " +
+              "abort is not reaching the fetch",
+          ),
+        ),
+      10_000,
+    );
+  });
+  let error: unknown;
+  try {
+    error = await Promise.race([
+      assertRejects(() =>
+        synthesize({
+          article: makeArticle({ title: "Lease", content: "Body." }),
+          source: makeSource({ voices: {} }),
+          episode: makeEpisode({ claimedAt: new Date().toISOString() }),
+          mode: "direct",
+          leaseMs: 62_000,
+        })
+      ),
+      hangGuard,
+    ]);
+  } finally {
+    clearTimeout(guard);
+  }
   assert(error instanceof Error);
   assertEquals((error as { status?: number }).status, 400);
   assertStringIncludes(error.message, "claim lease");
@@ -641,17 +672,42 @@ Deno.test("synthesis: a generator that hangs forever still produces an episode",
       // Deliberately ignores its signal: this is what the call-site race exists for.
       scriptGenerator: () => new Promise(() => {}),
     });
-    const started = Date.now();
-    await synthesize({
-      article: makeArticle({ title: "Hanging", content: "Body." }),
-      source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
-      episode: makeEpisode({}),
-      mode: "deepdive",
+    // docs/speed.md rule 2 (audio-feed-54up3): the 5s race below is a HANG GUARD, not an
+    // assertion - it replaces an `elapsed < 5_000` check that reddened when a loaded host
+    // delayed the 50ms deadline timer past the bound. The behavioural assertions are the
+    // observable events below: synthesize RETURNS (the fallback ran), the timeout warning is
+    // logged, and the TTS call still happens. The guard exists only to turn a broken fallback
+    // (synthesize awaits the hung generator forever) into a named red instead of a suite hang;
+    // at 100x the 50ms deadline it cannot trip on a merely slow host, because everything after
+    // the deadline is in-memory mocks.
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const hangGuard = new Promise<never>((_, reject) => {
+      guard = setTimeout(
+        () =>
+          reject(
+            new Error(
+              "synthesize did not return within 5s of the 50ms script deadline - the timeout " +
+                "race is not falling back to the static builder",
+            ),
+          ),
+        5_000,
+      );
     });
-    const elapsed = Date.now() - started;
+    try {
+      await Promise.race([
+        synthesize({
+          article: makeArticle({ title: "Hanging", content: "Body." }),
+          source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
+          episode: makeEpisode({}),
+          mode: "deepdive",
+        }),
+        hangGuard,
+      ]);
+    } finally {
+      clearTimeout(guard);
+    }
     assertEquals(calls.length, 1, "the TTS call must still happen");
     assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
-    assert(elapsed < 5_000, `synthesis waited ${elapsed}ms on a hung generator`);
     assert(
       warnings.some((line) =>
         line.includes("grounded script stage failed") && line.includes("exceeded 50ms")

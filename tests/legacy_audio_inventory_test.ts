@@ -880,6 +880,21 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
     makeEpisode({ id: "ep-abort-1", userId: "user-abort", audioKey: "track-1.mp3" }),
   );
 
+  // State gate (audio-feed-raxn2): resolves when the migration's heartbeat has OBSERVED the
+  // lock loss. The migration logs the renewal failure in the same block that sets its internal
+  // lockLost flag, and the log line is written AFTER the assignment, so once this fires the
+  // next assertLockHeld must throw. This replaces a bare 25ms sleep raced against the 10ms
+  // heartbeat timer, which reddened correct code when a loaded host delayed the timer.
+  let notifyLockLossObserved!: () => void;
+  const lockLossObserved = new Promise<void>((resolve) => {
+    notifyLockLossObserved = resolve;
+  });
+  const log = (msg: string) => {
+    if (msg.includes("lock renewal failed") || msg.includes("lock renewal threw")) {
+      notifyLockLossObserved();
+    }
+  };
+
   const stealingBlobs = wrapBlobs(stores.blobs, {
     get: async (k, opts) => {
       // Steal the lock while migration is reading the blob
@@ -893,8 +908,19 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
           holder: "rogue-stealer",
         }),
       );
-      // Wait for heartbeat callback (10ms) to fire and observe lock loss
-      await new Promise((r) => setTimeout(r, 25));
+      // Wait for the heartbeat to observe the lock loss (state signal), not a fixed sleep.
+      // docs/speed.md rule 2: the 5s bound is a HANG GUARD, not the assertion - at a 10ms
+      // heartbeat it is a 500x margin, and it trips only when the renewal never fires (the
+      // regression this row pins); then the migration completes without aborting and the
+      // `threw` assertion below reddens by name.
+      let guard: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        lockLossObserved,
+        new Promise<void>((resolve) => {
+          guard = setTimeout(resolve, 5_000);
+        }),
+      ]);
+      clearTimeout(guard);
       return stores.blobs.get(k, opts);
     },
   });
@@ -906,6 +932,7 @@ Deno.test("migrateLegacyAudioKeys: mid-run lock loss aborts migration immediatel
       blobs: stealingBlobs,
       leaseMs: 30,
       heartbeatIntervalMs: 10,
+      log,
     });
   } catch (err) {
     threw = true;
@@ -929,6 +956,20 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
       );
       await stores.blobs.put("audio/old-84q9.mp3", AUDIO_BYTES, { contentType: "audio/mpeg" });
 
+      // State gate (audio-feed-raxn2): resolves when the migration's heartbeat has OBSERVED
+      // the lock loss - the renewal-failure log line is written in the same block that sets the
+      // migration's internal lockLost flag, AFTER the assignment. Replaces a bare 50ms sleep
+      // raced against the 10ms heartbeat timer, which reddened correct code on a loaded host.
+      let notifyLockLossObserved!: () => void;
+      const lockLossObserved = new Promise<void>((resolve) => {
+        notifyLockLossObserved = resolve;
+      });
+      const log = (msg: string) => {
+        if (msg.includes("lock renewal failed") || msg.includes("lock renewal threw")) {
+          notifyLockLossObserved();
+        }
+      };
+
       const blobs = new Proxy(stores.blobs, {
         get(target, prop, receiver) {
           if (prop !== "putIfAbsent") {
@@ -947,8 +988,19 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
                 holder: "other-holder",
               }),
             );
-            // Delay to allow heartbeat renewal to fail and set lockLost = true
-            await new Promise((r) => setTimeout(r, 50));
+            // Wait for the heartbeat to observe the lock loss (state signal), not a fixed sleep.
+            // docs/speed.md rule 2: the 5s bound is a HANG GUARD, not the assertion - at a 10ms
+            // heartbeat it is a 500x margin, and it trips only when the renewal never fires (the
+            // regression this row pins); then the migration completes without aborting and the
+            // `threw` assertion below reddens by name.
+            let guard: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+              lockLossObserved,
+              new Promise<void>((resolve) => {
+                guard = setTimeout(resolve, 5_000);
+              }),
+            ]);
+            clearTimeout(guard);
             return stores.blobs.putIfAbsent(key, body, opts);
           };
         },
@@ -961,6 +1013,7 @@ Deno.test("migrateLegacyAudioKeys: lock loss during putIfAbsent aborts before me
           apply: true,
           leaseMs: 90,
           heartbeatIntervalMs: 10,
+          log,
         });
       } catch (err) {
         threw = true;

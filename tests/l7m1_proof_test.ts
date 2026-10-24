@@ -64,6 +64,56 @@ export const CONTROLS_REMOVAL_MUTANT = `await js(\`(() => {
   document.querySelectorAll("button, [role=button], input[type=range]").forEach((e) => e.remove());
 })()\`);`;
 
+/**
+ * Build the mutant copy of scripts/verify_main_l7m1_e2e.ts that both rows in this file run:
+ * OUT redirected to a temp evidence dir and the injected mutant placed before the
+ * captureIdentity marker.
+ *
+ * audio-feed-6gst1: the copy also raises the script's own until() default from 8s to 120s.
+ * That default is a wall race nested inside any outer guard - under 8-way CPU saturation a
+ * readyState wait legitimately exceeded 8s and the child self-killed before reaching the
+ * milestone the killed-mid-run row waits on. The mutant copy gets the generous budget; the
+ * outer milestone guard and the run's own assertions remain the real bounds.
+ *
+ * Every anchor is DRIFT-CHECKED against the original source: a replacement that silently
+ * no-ops because upstream edited the anchor would quietly restore the race or re-point OUT at
+ * the committed evidence, so drift fails by name instead.
+ */
+function buildMutantSource(
+  originalSource: string,
+  tempEvidenceDir: string,
+  injectedMutant: string,
+): string {
+  const outLine =
+    'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
+  const marker = "const captureIdentity = (await js(`(() => {";
+  const untilDefault = "timeoutMs = 8000";
+  for (
+    const [anchor, name] of [
+      [outLine, "OUT declaration"],
+      [marker, "mutant injection marker"],
+      [untilDefault, "until() default budget"],
+    ] as const
+  ) {
+    if (!originalSource.includes(anchor)) {
+      throw new Error(
+        `mutant fixture drifted: ${name} not found in scripts/verify_main_l7m1_e2e.ts; ` +
+          "re-pin the anchor - a silent no-op replacement restores the wall race or re-points OUT " +
+          "at committed evidence",
+      );
+    }
+  }
+  return originalSource
+    .replace(
+      outLine,
+      `const OUT = ${
+        JSON.stringify(tempEvidenceDir.endsWith("/") ? tempEvidenceDir : tempEvidenceDir + "/")
+      };`,
+    )
+    .replace(marker, `${injectedMutant}\n      ${marker}`)
+    .replace(untilDefault, "timeoutMs = 120_000");
+}
+
 export async function getFileBytesAndBlobHash(filePath: string): Promise<{
   bytes: Uint8Array;
   blobHash: string;
@@ -97,30 +147,9 @@ export async function runProofWithInjectedMutant(injectedMutant: string): Promis
     .pathname;
   const originalSource = await Deno.readTextFile(originalScriptPath);
 
-  const outLine =
-    'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
-  if (!originalSource.includes(outLine)) {
-    throw new Error(`OUT declaration '${outLine}' not found in scripts/verify_main_l7m1_e2e.ts`);
-  }
-
-  const marker = "const captureIdentity = (await js(`(() => {";
-  if (!originalSource.includes(marker)) {
-    throw new Error(`Marker '${marker}' not found in scripts/verify_main_l7m1_e2e.ts`);
-  }
-
   const tempEvidenceDir = await Deno.makeTempDir({ prefix: "l7m1-proof-test-evidence-" });
   // Ensure OUT points to the temporary evidence directory so that tests cannot overwrite committed evidence
-  const modifiedSource = originalSource
-    .replace(
-      outLine,
-      `const OUT = ${
-        JSON.stringify(tempEvidenceDir.endsWith("/") ? tempEvidenceDir : tempEvidenceDir + "/")
-      };`,
-    )
-    .replace(
-      marker,
-      `${injectedMutant}\n      ${marker}`,
-    );
+  const modifiedSource = buildMutantSource(originalSource, tempEvidenceDir, injectedMutant);
 
   const scriptsDir = new URL("../scripts/", import.meta.url).pathname;
   const tempScriptPath = await Deno.makeTempFile({
@@ -131,8 +160,11 @@ export async function runProofWithInjectedMutant(injectedMutant: string): Promis
 
   try {
     await Deno.writeTextFile(tempScriptPath, modifiedSource);
+    // --no-check (audio-feed-6gst1): type-checking the whole import graph in the child is the
+    // dominant host-variable cost of the run and is redundant with `deno task check` in both
+    // gates; skipping it shrinks the loaded-host runtime instead of bounding around it.
     const cmd = new Deno.Command(Deno.execPath(), {
-      args: ["run", "--allow-all", "--unstable-kv", tempScriptPath],
+      args: ["run", "--no-check", "--allow-all", "--unstable-kv", tempScriptPath],
       stdout: "piped",
       stderr: "piped",
     });
@@ -219,22 +251,13 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
   const originalScriptPath = new URL("../scripts/verify_main_l7m1_e2e.ts", import.meta.url)
     .pathname;
   const originalSource = await Deno.readTextFile(originalScriptPath);
-  const outLine =
-    'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
-  const marker = "const captureIdentity = (await js(`(() => {";
 
   const tempEvidenceDir = await Deno.makeTempDir({ prefix: "l7m1-killed-test-evidence-" });
-  const modifiedSource = originalSource
-    .replace(
-      outLine,
-      `const OUT = ${
-        JSON.stringify(tempEvidenceDir.endsWith("/") ? tempEvidenceDir : tempEvidenceDir + "/")
-      };`,
-    )
-    .replace(
-      marker,
-      `${CONTROLS_REMOVAL_MUTANT}\n      ${marker}`,
-    );
+  const modifiedSource = buildMutantSource(
+    originalSource,
+    tempEvidenceDir,
+    CONTROLS_REMOVAL_MUTANT,
+  );
 
   const scriptsDir = new URL("../scripts/", import.meta.url).pathname;
   const tempScriptPath = await Deno.makeTempFile({
@@ -247,9 +270,13 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
   try {
     await Deno.writeTextFile(tempScriptPath, modifiedSource);
 
-    // Launch under setsid in a distinct process group so the kill signal reaches all children
+    // Launch under setsid in a distinct process group so the kill signal reaches all children.
+    // --no-check (audio-feed-6gst1): the child's `deno run` type-check of the whole import graph
+    // is the dominant host-variable cost before the milestone (tens of seconds under CPU
+    // saturation) and is redundant - `deno task check` covers the tree in both gates. Skipping
+    // it shrinks the race window instead of widening the bound around it.
     const cmd = new Deno.Command("setsid", {
-      args: [Deno.execPath(), "run", "--allow-all", "--unstable-kv", tempScriptPath],
+      args: [Deno.execPath(), "run", "--no-check", "--allow-all", "--unstable-kv", tempScriptPath],
       stdout: "piped",
       stderr: "piped",
     });
@@ -275,7 +302,15 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     const BROWSER_MILESTONE = "admin observability page loads with h1 header";
     let stdoutAcc = "";
     let milestoneReached = false;
-    const milestoneTimeoutMs = 20_000;
+    // docs/speed.md rule 2 (audio-feed-6gst1): a real-time HANG GUARD, not an assertion - the
+    // assertion is the observable milestone itself (the child's stdout line). The guard trips
+    // only when the child NEVER reaches live browser execution, which is the defect this row
+    // pins. Measured on this VM 2026-10-24 with the child running --no-check: 9s at ambient
+    // load ~3, 40s and 46s under an added 8-way busy-loop saturation at ambient load ~5 - 180s
+    // is ~4x the worst hostile measurement. The 20s bound this replaces reddened correct runs
+    // on this host (3 of 7 unloaded runs failed, both saturated runs failed) because Chrome
+    // cold start plus the child's type-check legitimately exceed 20s under contention.
+    const milestoneTimeoutMs = 180_000;
     let timerId: ReturnType<typeof setTimeout> | undefined;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
