@@ -1009,21 +1009,241 @@ Deno.test({
         deviceScaleFactor: 3,
         mobile: true,
       });
-      await cdp("Page.navigate", { url: `file://${tempHtmlFile}` });
-      await sleep(600);
-
-      // deno-lint-ignore no-explicit-any
-      const evalRes: any = await cdp("Runtime.evaluate", {
-        expression: `(() => {
-          return JSON.stringify({
+      // The readiness guard's contract (rev-audiofeed5egu4 finding): a document is ready
+      // ONLY if it IS the navigated target - identity by href AND the marker the rendered
+      // page sets - complete, and laid out. Anything else - the pre-navigation about:blank,
+      // an error page or a blank-only response that happens to sit AT the target URL, a
+      // torn-down context - is NOT READY and the loop WAITS. The old predicate
+      // (readyState+width only) accepted about:blank under this row's 390px emulation, so an
+      // uncommitted navigation let the loop exit on the wrong document and the assertions
+      // falsely accused the product of a layout blowout.
+      const targetUrl = `file://${tempHtmlFile}`;
+      interface ReadDocument {
+        href: string;
+        readyState: string;
+        hasListenPage: boolean;
+        scrollWidth: number;
+        clientWidth: number;
+        hasOverflow: boolean;
+      }
+      const urlIsTarget = (href: string): boolean => {
+        try {
+          return href === targetUrl || decodeURIComponent(href) === targetUrl;
+        } catch {
+          return href === targetUrl;
+        }
+      };
+      const readDocument = async (): Promise<ReadDocument | undefined> => {
+        // deno-lint-ignore no-explicit-any
+        const probe: any = await cdp("Runtime.evaluate", {
+          expression: `(() => JSON.stringify({
+            href: location.href,
+            readyState: document.readyState,
+            hasListenPage: Boolean(document.getElementById("main")) &&
+              Boolean(document.getElementById("episodes")),
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
             hasOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
-          });
-        })()`,
-      });
+          }))()`,
+        });
+        // An evaluate that lands in a context torn down by the navigation returns an
+        // exception (probe.result.result.value undefined) - under load this is COMMON and
+        // it means "not ready yet", never a layout verdict (audio-feed-5egu4).
+        const raw = probe?.result?.result?.value;
+        if (typeof raw !== "string") return undefined;
+        try {
+          return JSON.parse(raw) as ReadDocument;
+        } catch {
+          return undefined;
+        }
+      };
+      const isTargetReady = (d: ReadDocument | undefined): boolean =>
+        d !== undefined && urlIsTarget(d.href) && d.hasListenPage &&
+        d.readyState === "complete" && d.scrollWidth > 0;
 
-      const metrics = JSON.parse(evalRes.result.result.value);
+      // The ONE way this row waits for a document. It THROWS a named failure instead of
+      // returning whatever is on screen, which is what makes a target that genuinely never
+      // loads (a 500, a blank-only server, a navigation that never commits) a red that says
+      // what happened rather than a hang or a layout verdict about the wrong page.
+      const waitForTargetDocument = async (
+        attempts: number,
+        delayMs: number,
+      ): Promise<ReadDocument> => {
+        let lastSeen = "unreadable (no evaluate returned a document)";
+        for (let i = 0; i < attempts; i++) {
+          const candidate = await readDocument();
+          if (candidate !== undefined && isTargetReady(candidate)) return candidate;
+          if (candidate !== undefined) {
+            lastSeen = `${candidate.href} (readyState ${candidate.readyState})`;
+          }
+          await sleep(delayMs);
+        }
+        throw new Error(
+          `audio-feed-5egu4 readiness guard: ${targetUrl} did not become the ready target ` +
+            `document after ${attempts} probe(s), last document seen: ${lastSeen} - refusing ` +
+            `to assert a layout verdict about a page that is not the navigated target`,
+        );
+      };
+
+      // THE REVIEWER'S OWN MEASURED DOCUMENT, pinned as a predicate case - no timing, no
+      // browser state: their probe reported url=about:blank, readyState=complete,
+      // scrollWidth=980, clientWidth=980 and the old predicate accepted it. It must never
+      // count as ready again.
+      assertEquals(
+        isTargetReady({
+          href: "about:blank",
+          readyState: "complete",
+          hasListenPage: false,
+          scrollWidth: 980,
+          clientWidth: 980,
+          hasOverflow: false,
+        }),
+        false,
+        "the readiness guard must reject the reviewer's measured document " +
+          "(about:blank, readyState complete, 980px wide) - accepting it is what turned an " +
+          "uncommitted navigation into a confident layout verdict about the wrong page",
+      );
+      // And the shape href-identity alone cannot catch: the RIGHT url, complete, laid out -
+      // but not our page (a failed load renders the browser's own error page AT that url; a
+      // blank-only response looks the same). Only the marker the rendered page sets tells
+      // them apart, which is why readiness requires it.
+      assertEquals(
+        isTargetReady({
+          href: targetUrl,
+          readyState: "complete",
+          hasListenPage: false,
+          scrollWidth: 390,
+          clientWidth: 390,
+          hasOverflow: false,
+        }),
+        false,
+        "a document at the target URL without the player's marker (#main + #episodes) " +
+          "must not count as ready - an error page is 390px wide and would pass every " +
+          "layout assertion while proving nothing about the page",
+      );
+      // And the IDENTITY condition ISOLATED, so it cannot be deleted in silence
+      // (audio-feed-s4p5s, the reviewer's finding on this row): the marker is PRESENT, the
+      // document is complete and laid out at 390px - and it is still not the navigated
+      // target. Every other case here fails identity AND the marker together (the real
+      // about:blank carries no #main/#episodes), which is why removing urlIsTarget left the
+      // row green; this is the one input that pins the identity check on its own.
+      assertEquals(
+        isTargetReady({
+          href: "about:blank",
+          readyState: "complete",
+          hasListenPage: true,
+          scrollWidth: 390,
+          clientWidth: 390,
+          hasOverflow: false,
+        }),
+        false,
+        "a complete, 390px document that carries the player's marker but is NOT the " +
+          "navigated target must not count as ready - this case isolates the identity " +
+          "check from the marker check instead of relying on them to fail together",
+      );
+
+      // AND THE SECOND HALF OF THE (a) PROOF, IN THE REAL BROWSER: before Page.navigate the
+      // only document in this target IS about:blank by construction, so the guard must
+      // classify it NOT READY; the old predicate accepted it (complete + 980px wide under
+      // the emulation), which let the loop exit on the wrong document and assert a layout
+      // lie about the real page.
+      const preNavigation = await readDocument();
+      assertEquals(
+        preNavigation?.href,
+        "about:blank",
+        "pre-navigation document must be about:blank",
+      );
+      assertEquals(
+        isTargetReady(preNavigation),
+        false,
+        "the readiness guard must reject the pre-navigation about:blank document " +
+          "- accepting it would assert a layout verdict about the wrong page",
+      );
+
+      // AND THE OTHER HALF OF THE CONTRACT: the guard REDDENS BY NAME when the target never
+      // becomes the document on screen. Proved against the real reader and the real
+      // predicate, with no timing deciding the outcome: about:blank can never satisfy target
+      // identity, so this wait MUST throw at any host speed - the 5x1ms attempts only bound
+      // how long the negative probe takes, they cannot make it pass or fail. A regression that
+      // accepts a non-target document makes the wait RETURN, and the assertion below then
+      // reddens by name instead of silently arming the false layout verdict this row exists
+      // to prevent. (Coord's suggested mutation - point the target at a 500 or a blank-only
+      // server - exercises this same throw with more moving parts; the property under test is
+      // the throw, and about:blank is the one wrong document the browser guarantees exists.)
+      const rejection = await waitForTargetDocument(5, 1).then(
+        () => "NO ERROR - the guard accepted a document that is not the target",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      assertStringIncludes(
+        rejection,
+        "audio-feed-5egu4 readiness guard",
+        `waiting for the target must redden BY NAME when the document never becomes it, got: ${rejection}`,
+      );
+      assertStringIncludes(
+        rejection,
+        targetUrl,
+        `the readiness failure must name the document it was waiting for, got: ${rejection}`,
+      );
+      assertStringIncludes(
+        rejection,
+        "about:blank",
+        `the readiness failure must name the document it actually saw, got: ${rejection}`,
+      );
+
+      // (b) THE SECOND FAILURE SHAPE, IN THE REAL BROWSER. Identity by href alone still accepts
+      // a page that FAILED TO LOAD: Chrome renders its own error page AT the target URL, and a
+      // blank-only response sits there too - both are 390px wide, so both would sail through
+      // the layout assertions while proving nothing about the player. That is why readiness also
+      // requires the marker the rendered page sets (#main + #episodes). Proved here by serving a
+      // marker-less page at the SAME URL and requiring the wait to throw by name.
+      await Deno.writeTextFile(
+        tempHtmlFile,
+        "<!doctype html><html><body><p>a page that failed to load looks like this</p></body></html>",
+      );
+      await cdp("Page.navigate", { url: targetUrl });
+      let wrongContent: ReadDocument | undefined;
+      for (let i = 0; i < 100 && wrongContent === undefined; i++) {
+        const candidate = await readDocument();
+        if (
+          candidate !== undefined && urlIsTarget(candidate.href) &&
+          candidate.readyState === "complete"
+        ) {
+          wrongContent = candidate;
+        } else {
+          await sleep(50);
+        }
+      }
+      assert(
+        wrongContent,
+        `the marker-less page never loaded at ${targetUrl}, so this proof would be testing ` +
+          `identity instead of the marker - the browser has to SHOW us a wrong page at the ` +
+          `right URL for the marker check to be worth anything`,
+      );
+      assertEquals(
+        wrongContent.hasListenPage,
+        false,
+        "the page served at the target URL in this proof must NOT carry the player's marker",
+      );
+      const wrongContentRejection = await waitForTargetDocument(5, 1).then(
+        () => "NO ERROR - the guard accepted a page at the target URL that is not the player",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      assertStringIncludes(
+        wrongContentRejection,
+        "audio-feed-5egu4 readiness guard",
+        `a target that loads the wrong page must redden BY NAME, got: ${wrongContentRejection}`,
+      );
+
+      // Back to the real page for the layout assertions this row exists for.
+      await Deno.writeTextFile(tempHtmlFile, html);
+      await cdp("Page.navigate", { url: targetUrl });
+
+      await cdp("Page.navigate", { url: targetUrl });
+      // audio-feed-5egu4: readiness is POLLED, never slept, and the poll exits only on the
+      // navigated target. Bounded by a documented ceiling (100 x 50ms = 5s, the same guard
+      // family as the DevToolsActivePort poll above): a loaded host consumes poll cycles and
+      // the guard names itself on trip - it cannot turn slowness into a layout verdict.
+      const metrics = await waitForTargetDocument(100, 50);
       assertEquals(
         metrics.scrollWidth,
         390,
