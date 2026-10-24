@@ -36,10 +36,13 @@ supersede an earlier status and log, so cite a record that still resolves. The r
 ## Tests must not assert on elapsed real time (audio-feed-n52j3)
 
 Two of the three union-gate reds on 2026-10-23 had nothing to do with the branches under test: the ROWS
-raced wall-clock time (`tests/listen_activity_test.ts:684`, fixed in d9571c40 by injecting the measured
-429 bodies; `tests/synthesis_worker_test.ts:2000`, fixed under audio-feed-krrws by injecting the budget's
-clock). Each cost a 20-27 minute full-gate run for every lane queued behind it. A row that can fail
-because the HOST was slow while the code was correct is a tax on every landing, so the rule is:
+raced wall-clock time. One was `tests/listen_activity_test.ts`, row "the retry button's labels are driven
+by real 429 bodies: rate refusal vs spent ceiling vs queued (audio-feed-8jzgl, audio-feed-rvy5n)", fixed
+in d9571c40 by injecting the measured 429 bodies. The other was `tests/synthesis_worker_test.ts`, row
+"audio-feed-091i: completed staging upload interrupted by budget records a durable cleanup marker that
+sweeps on subsequent failure or ready", fixed under audio-feed-krrws by injecting the budget's clock. Each
+cost a 20-27 minute full-gate run for every lane queued behind it. A row that can fail because the HOST was
+slow while the code was correct is a tax on every landing, so the rule is:
 
 1. **A test asserts on an INJECTED clock, never on elapsed real time.** No `Date.now`/`performance.now`
    pair compared against a bound; no real `sleep(N)` whose adequacy the assertion depends on; no real
@@ -63,6 +66,12 @@ because the HOST was slow while the code was correct is a tax on every landing, 
 
 A new test that asserts on elapsed real time without the rule-2 comment is a review finding; a row that
 reddens a gate on a loaded host gets the krrws treatment (inject the clock), not a wider bound.
+
+**Cite a row by its `Deno.test` NAME, never by a line number (audio-feed-361l7).** Both pointers above
+were first written as line numbers, and both were wrong within a day: `:684` landed on an unrelated CDP
+typing interface and `:2000` on the pre-fix position, so a reader following them could not see the row the
+rule is about. A row name is unique and line-independent; `grep -n` over the file costs one command and
+cannot silently point at different code. The same standard applies to any row cited from a doc or a bead.
 
 ## Widening verdict boundary
 
