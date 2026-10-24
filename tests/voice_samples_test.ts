@@ -367,9 +367,15 @@ Deno.test("a disconnected listener aborts the sample synthesis and the cache put
   // instead of the isolate sitting inside them until the platform kills the request.
   const seenSignals: Array<AbortSignal | undefined> = [];
   let firstCall = true;
+  const synthEntered = Promise.withResolvers<void>();
   const client = {
     synthesizeNarration: (input: NarrationInput, opts?: { signal?: AbortSignal }) => {
       seenSignals.push(opts?.signal);
+      // Dispatch acknowledgement (audio-feed-wtvmp): the test aborts only after the route
+      // has entered the synthesis call with the request's own derived signal. The abort
+      // listener below is wired synchronously in this same call, so by the time the test's
+      // await resumes, the signal it must fire is already in place.
+      synthEntered.resolve();
       if (firstCall) {
         firstCall = false;
         return new Promise((_resolve, reject) => {
@@ -407,8 +413,10 @@ Deno.test("a disconnected listener aborts the sample synthesis and the cache put
   });
 
   const pending = fetch(request).catch(() => null);
-  // Let the route reach the in-flight synthesis, then disconnect the listener.
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Dispatch acknowledgement, not a wall window (audio-feed-wtvmp): wait until the route
+  // has actually entered the in-flight synthesis, then disconnect the listener. A bare
+  // sleep raced the dispatch: under load the abort could precede synthesis and redden.
+  await synthEntered.promise;
   controller.abort();
   await pending;
 
