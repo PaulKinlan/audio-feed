@@ -390,15 +390,46 @@ Deno.test("synthesis: in-flight TTS is cancelled before claim expiry and termina
     stores: memoryStores(),
   } as unknown as AppContext;
   const synthesize = createGeminiSynthesizer(ctx, { client, scriptGenerator: null });
-  const error = await assertRejects(() =>
-    synthesize({
-      article: makeArticle({ title: "Lease", content: "Body." }),
-      source: makeSource({ voices: {} }),
-      episode: makeEpisode({ claimedAt: new Date().toISOString() }),
-      mode: "direct",
-      leaseMs: 60_060,
-    })
-  );
+  // docs/speed.md rule 2 (audio-feed-4zwtl): the claim lease is a WALL-CLOCK mechanism with no
+  // injected-clock seam (src/worker/synthesis.ts reads Date.now()/AbortSignal.timeout directly),
+  // so the row must buy a real window: the lease abort fires leaseMs - 60_000 (the persist
+  // reserve) after entry, and the pre-TTS stages must fit inside it. The old 60_060 left 60ms;
+  // under gate load that check fired before the fetch started and the row reddened with
+  // calls === 0 on correct code (fast-gate job 824fd182). 2s is ~33x that observed failure
+  // latency, and the pre-TTS work is in-memory mocks, so only a genuinely stalled event loop
+  // consumes it. The 10s race is a HANG GUARD, not an assertion: it trips only when the lease
+  // abort never reaches the in-flight fetch (the cancellation this row pins is broken), turning
+  // a suite hang into a named red.
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const hangGuard = new Promise<never>((_, reject) => {
+    guard = setTimeout(
+      () =>
+        reject(
+          new Error(
+            "in-flight TTS was not cancelled within 10s of a 2s claim-lease window - the lease " +
+              "abort is not reaching the fetch",
+          ),
+        ),
+      10_000,
+    );
+  });
+  let error: unknown;
+  try {
+    error = await Promise.race([
+      assertRejects(() =>
+        synthesize({
+          article: makeArticle({ title: "Lease", content: "Body." }),
+          source: makeSource({ voices: {} }),
+          episode: makeEpisode({ claimedAt: new Date().toISOString() }),
+          mode: "direct",
+          leaseMs: 62_000,
+        })
+      ),
+      hangGuard,
+    ]);
+  } finally {
+    clearTimeout(guard);
+  }
   assert(error instanceof Error);
   assertEquals((error as { status?: number }).status, 400);
   assertStringIncludes(error.message, "claim lease");
