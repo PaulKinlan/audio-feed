@@ -1894,13 +1894,43 @@ Deno.test("audio-feed-avgc: timed-out upload leaves a late completed blob for a 
   assertEquals(episode?.status, "pending");
 });
 
+// audio-feed-50hes: the budget clock is the SHARED fixture (tests/fixtures/invocation_clock.ts),
+// which landed after this fix was first written - the row uses the repo's one fake clock rather
+// than a divergent local copy (the fixture's own consolidation decision).
+
+/** Fires the injected budget's deadline the moment the resolver is called (audio-feed-b8u49 shape). */
+function abortWhileInFlight(time: ReturnType<typeof controlledInvocationClock>): () => void {
+  let resolveInFlight: () => void = () => {};
+  const inFlight = new Promise<void>((r) => {
+    resolveInFlight = r;
+  });
+  const fired = (async () => {
+    await inFlight;
+    await time.advance(60_000);
+  })();
+  fired.catch(() => {});
+  return resolveInFlight;
+}
+
 Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode does not delete committed blob", async () => {
   const { ctx, stores } = await setupEnv();
+  // audio-feed-50hes: the delayed return is GATED, and the timeout fires the moment the
+  // commit has landed - both facts the test decides. Was a real 140ms delay raced by a
+  // real 190ms sleep: under steal the real 80ms deadline fired AFTER the delayed return
+  // (or the read landed mid-flight) and the row red-den correct code.
+  const time = controlledInvocationClock();
+  const fireTimeoutOnCommit = abortWhileInFlight(time);
+  let releaseReturn: () => void = () => {};
+  const returnGate = new Promise<void>((r) => {
+    releaseReturn = r;
+  });
   const complete = stores.metadata.completeEpisode.bind(stores.metadata);
   stores.metadata.completeEpisode = async (...args) => {
     const result = await complete(...args);
-    // Simulate delay during completeEpisode return exceeding remaining budget
-    await new Promise((resolve) => setTimeout(resolve, 140));
+    // Simulate delay during completeEpisode return exceeding remaining budget: the
+    // timeout fires NOW (commit landed, return still gated).
+    fireTimeoutOnCommit();
+    await returnGate;
     return result;
   };
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
@@ -1909,9 +1939,9 @@ Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode d
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
-  // 190ms wait racing 140ms stub continuation (~50ms margin): committed state is terminal, so a slow host can only false-pass, never false-fail.
-  await new Promise((resolve) => setTimeout(resolve, 190));
+  releaseReturn();
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "ready", "committed episode must remain ready");
   assert(episode?.audioKey, "ready episode must have audioKey");
@@ -1922,11 +1952,24 @@ Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode d
 
 Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically before delayed commit can win (never ready with deleted audio)", async () => {
   const { ctx, stores } = await setupEnv();
+  // audio-feed-50hes: the PRE-commit delay is gated and the timeout fires while the
+  // commit is still parked - the abort-wins outcome is a decision, not a race between a
+  // real 140ms delay and a real 80ms deadline (under steal the deadline fired after the
+  // commit won and the row red-den).
+  const time = controlledInvocationClock();
+  const fireTimeoutPreCommit = abortWhileInFlight(time);
+  let releaseCommit: () => void = () => {};
+  const commitGate = new Promise<void>((r) => {
+    releaseCommit = r;
+  });
+  let lateCommit: Promise<unknown> = Promise.resolve();
   const complete = stores.metadata.completeEpisode.bind(stores.metadata);
   stores.metadata.completeEpisode = async (...args) => {
     // Simulate delay BEFORE completeEpisode commits
-    await new Promise((resolve) => setTimeout(resolve, 140));
-    return await complete(...args);
+    fireTimeoutPreCommit();
+    await commitGate;
+    lateCommit = complete(...args).catch(() => {});
+    return lateCommit as never;
   };
   const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-terminal-race-pre-commit",
@@ -1934,9 +1977,8 @@ Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically befo
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
-  // 190ms wait racing 140ms pre-commit continuation: under extreme event loop stall, the deleted-blob assertion would redden first.
-  await new Promise((resolve) => setTimeout(resolve, 190));
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   // The abort won the atomic transition: episode must be pending, not ready!
   assertEquals(
@@ -1949,6 +1991,16 @@ Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically befo
     const blob = await stores.blobs.get(episode.audioKey);
     assertEquals(blob, null, "aborted staging blob must be cleaned up");
   }
+  // Release the gated late commit and prove it CANNOT win the atomic transition
+  // (audio-feed-50hes: the late completion is a test decision, awaited as a state).
+  releaseCommit();
+  await lateCommit;
+  const epAfterLateCommit = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(
+    epAfterLateCommit?.status,
+    "pending",
+    "a commit released after the abort won must stay atomically rejected",
+  );
 });
 
 Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal completion", async () => {
