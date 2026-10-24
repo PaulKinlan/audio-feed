@@ -21,6 +21,47 @@ import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import type { InvocationClock } from "../src/synthesis/limits.ts";
+
+/**
+ * A budget clock the test owns (audio-feed-fnbm0; same shape as synthesis_worker_test.ts's and
+ * synthesis_resume_test.ts's controlledInvocationClock, kept local because this fix is one file
+ * by decision). `now()` never moves and timers never fire until `advance()` moves them, so a
+ * deadline armed on this clock lands exactly where the test advances to - the row asserts an
+ * ORDER of operations, not that work finished inside N real milliseconds.
+ */
+function controlledInvocationClock(startMs = 1_000_000) {
+  let nowMs = startMs;
+  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+  const clock: InvocationClock = {
+    now: () => nowMs,
+    setTimeout: (fn, ms) => {
+      const timer = { at: nowMs + ms, fn, live: true };
+      timers.push(timer);
+      return () => {
+        timer.live = false;
+      };
+    },
+  };
+  return {
+    clock,
+    get nowMs() {
+      return nowMs;
+    },
+    async advance(ms: number): Promise<void> {
+      const target = nowMs + ms;
+      for (;;) {
+        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        due.live = false;
+        nowMs = Math.max(nowMs, due.at);
+        due.fn();
+        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      nowMs = target;
+    },
+  };
+}
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -231,6 +272,12 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   // 1510), an invocation that already spent 1200ms on synthesis does not
   // (1200 < 1510) and must refuse to START the put and yield instead of dying
   // inside it.
+  // audio-feed-fnbm0: the budget clock is INJECTED and the first tick's synthesis cost is
+  // VIRTUAL (time.advance inside the synth), so the row asserts the ORDER of operations - 1200ms
+  // of virtual spend leaves 1200ms of the 2500ms budget, under the 1510ms the 15MB upload
+  // needs - instead of that work fitting inside real milliseconds. The merger measured this row
+  // red at load 8-10 on the 2-vCPU VM, at the same rate with and without the union under test.
+  const time = controlledInvocationClock();
   const audio = fakeAudio(15_000_000);
   let putCalls = 0;
   const oldPut = stores.blobs.put.bind(stores.blobs);
@@ -242,7 +289,9 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
   const synth = () => {
     synthCalls++;
     if (synthCalls === 1) {
-      return new Promise<DecodedAudioResult>((r) => setTimeout(() => r(audio), 1_200));
+      // 1200ms of VIRTUAL synthesis spend on the injected clock, not a real sleep: the batch's
+      // budget readings (clock.now()) see exactly 1200ms spent regardless of host load.
+      return time.advance(1_200).then(() => audio);
     }
     return Promise.resolve(audio);
   };
@@ -253,6 +302,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
   assertEquals(putCalls, 0, "must NOT start a put whose size-scaled estimate cannot fit");
   assertEquals(r1.yielded.length, 1, "must yield the claim resumably");
@@ -285,6 +335,7 @@ Deno.test("audio-feed-aqms: size-scaled upload preflight yields resumably; next 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
   assertEquals(putCalls, 1, "second tick uploads the audio");
   assertEquals(r2.ready.length, 1, "episode completes on the retry tick");
