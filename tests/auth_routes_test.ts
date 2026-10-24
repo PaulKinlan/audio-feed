@@ -615,6 +615,7 @@ Deno.test("setup link: admin-only, fragment-borne, stored hashed (audio-feed-8fc
   assertEquals(await stores.metadata.getSetupLink(token), null, "never stored in the clear");
   assertEquals((await stores.metadata.getSetupLink(await hashSecret(token)))?.userId, user.id);
   const days = (Date.parse(body.expiresAt) - Date.now()) / 86_400_000;
+  // 7-day token expiry asserting days > 6.9 and <= 7 (2.4h margin): seconds-scale scheduler delay cannot cross multi-hour headroom.
   assert(days > 6.9 && days <= 7, `expires in 7 days, got ${days}`);
 });
 

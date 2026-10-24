@@ -228,6 +228,7 @@ Deno.test("REAL lsof path: a fast clean verdict admits removal; a fast open verd
         yes: true,
         processCmdlines: () => [],
         // The fake lsof answers instantly: exit 1 = nothing open, then exit 0 = open.
+        // 5s timeout on instant exit: host scheduler jitter only lengthens wait time, never flips the clean exit 1 verdict.
         pathLiveness: (p) => lsofPathLiveness(p, 5_000),
         lsofTimeoutMs: 5_000,
         // Distinguish the two candidates per-call: the fake script reads LSOF_VERDICT.

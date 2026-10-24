@@ -224,6 +224,7 @@ Deno.test("startedAt is when the run STARTED, and duration covers the work (audi
     startedAt >= before - 1000 && startedAt <= after,
     `startedAt ${record.startedAt} must fall inside the run's own window`,
   );
+  // Lower bound against 30ms setTimeout: host scheduler delay only increases elapsed time, making durationMs >= 25 pass more easily rather than redden.
   assert(record.durationMs >= 25, `durationMs ${record.durationMs} must cover the work`);
 });
 

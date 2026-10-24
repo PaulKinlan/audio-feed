@@ -1768,7 +1768,7 @@ Deno.test("proof-helper: audio-feed-2bfv: pre-existing source file renamed durin
   await Deno.writeFile(sourceFile, sourceOriginal);
   await Deno.writeFile(destFile, destOriginal);
 
-  // Brief pause so file timestamps precede runProof startTime
+  // Brief pause so file timestamps precede runProof startTime; on a busy host scheduler delay only lengthens the pause, preserving prior mtime order.
   await new Promise((r) => setTimeout(r, 20));
 
   try {
@@ -1850,7 +1850,7 @@ Deno.test("proof-helper: audio-feed-2bfv: pre-existing .tmp file renamed during 
   await Deno.writeFile(sourceTmp, sourceOriginal);
   await Deno.writeFile(destFile, destOriginal);
 
-  // Brief pause so file timestamps precede runProof startTime
+  // Brief pause so file timestamps precede runProof startTime; host latency stretches the pause, which safely keeps fixture mtime earlier.
   await new Promise((r) => setTimeout(r, 20));
 
   try {
@@ -1934,7 +1934,7 @@ Deno.test("proof-helper: audio-feed-2bfv: pre-existing source with updated mtime
   await Deno.writeFile(sourceFile, sourceOriginal);
   await Deno.writeFile(destFile, destOriginal);
 
-  // Pause so birthtime clearly precedes runProof startTime
+  // Pause so birthtime clearly precedes runProof startTime; host scheduling delay only widens separation, keeping birthtime strictly prior.
   await new Promise((r) => setTimeout(r, 25));
 
   try {
@@ -8056,6 +8056,7 @@ Deno.test({
     }).spawn();
     try {
       let reported = true;
+      // 30s background child sleep vs a 20x50ms poll (~2s ceiling): child process outlives poll loop by >10x margin, preventing premature exit under load.
       for (let attempt = 1; attempt <= 20 && reported; attempt++) {
         reported = await waitForChromeProfileUnused(otherProfile, { timeoutMs: 50 });
         if (reported) await new Promise((resolve) => setTimeout(resolve, 50));

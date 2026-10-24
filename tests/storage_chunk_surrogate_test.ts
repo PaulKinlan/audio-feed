@@ -70,5 +70,6 @@ Deno.test("chunking completes promptly rather than spinning when a chunk cannot 
   const back = await roundTrip(content, "invariant");
   assertEquals(back, content);
   // A spin would not reach this line at all; a bounded throw would take far longer than a clean write.
+  // 10s ceiling on purely in-memory chunking provides ~2000x margin over microsecond baseline, absorbing severe host contention.
   assertEquals(Date.now() - started < 10_000, true, "round-trip must complete promptly, not crawl");
 });

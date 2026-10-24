@@ -177,6 +177,7 @@ Deno.test("amhn: the entry record is durable WHILE the PUT is in flight, not mer
   try {
     // Bounded, and it RESOLVES on timeout instead of rejecting so a regression fails an assertion rather
     // than hanging the suite.
+    // 2s hang guard ceiling around in-memory batch execution reaching put hook: fails assertion on stall rather than timing out the runner.
     await Promise.race([
       enteredSignal,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),

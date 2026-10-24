@@ -914,6 +914,7 @@ Deno.test("audio-feed-vvwb: a stage that would take longer than the budget is ab
       scriptGenerator: (_input, options) => {
         scriptCalls++;
         return new Promise((resolve, reject) => {
+          // 45ms REAL_INVOCATION_CLOCK deadline vs 200ms stage stub: safe while due timers fire in due order (4.4x margin residual).
           const timer = setTimeout(() => {
             simulatedMs += 200;
             resolve({
@@ -1061,6 +1062,7 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
     flushMarginMs: 5,
   });
 
+  // 100ms real invocation budget: requires paid TTS call to start within ~95ms before flush margin aborts; microsecond in-memory work provides margin.
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-tts",
     maxAttempts: 2,
@@ -1198,6 +1200,7 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
     estimatedTurnDurationMs: 1,
   });
 
+  // 100ms real invocation budget: requires script generation to begin within ~95ms before abort; in-memory stage entry supplies margin.
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-script",
     maxAttempts: 2,
@@ -1457,6 +1460,7 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   });
 
   // Tick 1: yields with attempts=1
+  // 100ms real invocation budget: paid call must start within ~95ms of tick entry; in-memory scheduling margin prevents premature abort.
   const r1 = await runSynthesisBatch(ctx, synth, {
     owner: "repro-1",
     maxAttempts: 2,
@@ -1718,6 +1722,7 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
       flushMarginMs: 5,
       worstCaseEstimateMs: 10,
       fn: async (_signal) => {
+        // 45ms invocation deadline raced against 200ms stage continuation: relies on timers firing in due order (4.4x margin).
         await new Promise((r) => setTimeout(r, 200));
         stageCompleted = true;
         return "too slow";
@@ -1807,6 +1812,7 @@ Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation bud
   // which is the bounded-yield fact. A wall-clock literal here flaked under load; the
   // elapsed bound below is a deliberately wide sanity check (2s against an 80ms budget),
   // not the assertion.
+  // Order fact across two timestamps (80ms abort vs 140ms completeEpisode delay, ~60ms separation): microtasks drain before next timer.
   assert(
     completeSettledAt === 0 || yieldReturnedAt < completeSettledAt,
     "the yield must be decided while the terminal write is still in flight (order, not ms)",
@@ -1872,6 +1878,7 @@ Deno.test("audio-feed-y0da: timeout during delayed return from completeEpisode d
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
+  // 190ms wait racing 140ms stub continuation (~50ms margin): committed state is terminal, so a slow host can only false-pass, never false-fail.
   await new Promise((resolve) => setTimeout(resolve, 190));
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   assertEquals(episode?.status, "ready", "committed episode must remain ready");
@@ -1896,6 +1903,7 @@ Deno.test("audio-feed-y0da (reverse): timeout abort yields claim atomically befo
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
+  // 190ms wait racing 140ms pre-commit continuation: under extreme event loop stall, the deleted-blob assertion would redden first.
   await new Promise((resolve) => setTimeout(resolve, 190));
   const episode = await stores.metadata.getEpisode("user-1", "episode-1");
   // The abort won the atomic transition: episode must be pending, not ready!

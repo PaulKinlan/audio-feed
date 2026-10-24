@@ -71,6 +71,7 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
     keys.push(key);
     // Model an atomic server-side PUT that finishes after the client aborts:
     // the local connection closed, but the complete object exists in storage.
+    // 250ms stub vs 150ms budget deadline relies on timers firing in due order (150 before 250); state read is gated on `await settled`.
     settled = new Promise((resolve, reject) => {
       setTimeout(
         () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
@@ -183,6 +184,7 @@ Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reuse
   stores.blobs.put = (key, body, opts) => {
     stagingKey = key;
     puts++;
+    // 250ms delayed put vs 150ms budget deadline relies on timers firing in due order; read is state-gated on `await settled`.
     settled = new Promise((resolve, reject) => {
       setTimeout(
         () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
@@ -553,6 +555,7 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
 
   // The heartbeat must have fired at least once strictly AFTER the put began, and
   // strictly BEFORE the put settled (it is the "worker alive mid-upload" signal).
+  // 1s heartbeat interval in a nominal ~2.15s window: an event-loop stall longer than ~1.2s would miss the interval and redden the row.
   const putSettledAt = putStartedAt + 2_200;
   const midUpload = heartbeatTimes.filter((t) => t > putStartedAt + 50 && t < putSettledAt);
   assert(

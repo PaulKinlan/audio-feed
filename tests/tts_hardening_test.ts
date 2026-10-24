@@ -72,6 +72,7 @@ Deno.test("retries honour Retry-After instead of the default backoff", async () 
   const started = Date.now();
   await client(fn, { retryBaseDelayMs: 60_000 }).sendRequest(request);
   // A 0-second Retry-After must beat the 60s base delay; jitter cannot mask it.
+  // 5s ceiling vs 0ms backoff: host load only slows in-memory dispatch (never shortens the 60s fallback), with ~inf headroom to absorb scheduler pauses.
   if (Date.now() - started > 5_000) throw new Error("Retry-After was ignored");
 });
 
@@ -135,6 +136,7 @@ Deno.test("a hung request is killed by the per-attempt timeout", async () => {
   }
   const elapsed = Date.now() - started;
   if (!/timed out after 150ms/.test(message)) throw new Error(`unexpected error: ${message}`);
+  // 5s ceiling catches a broken abort rather than measuring duration; the await is state-gated on abort, with 33x margin over the 150ms timeout.
   if (elapsed > 5_000) throw new Error(`timeout took ${elapsed}ms`);
 });
 

@@ -4367,6 +4367,7 @@ export async function waitForChromeProfileUnused(
   profileDir: string,
   opts: { timeoutMs?: number; pollMs?: number } = {},
 ): Promise<boolean> {
+  // 2s default timeout: caller teardowns (e.g. listen_activity_test) assert unused profile cleanup; a delayed process reap past 2s will redden the caller's teardown.
   const timeoutMs = opts.timeoutMs ?? 2000;
   const pollMs = opts.pollMs ?? 50;
   const deadline = Date.now() + timeoutMs;
