@@ -4653,6 +4653,7 @@ Deno.test("proof-helper: audio-feed-2bfv: unawaited spawned child process is awa
   const rootDir = await Deno.makeTempDir({ prefix: "evidence-2bfv-spawn-unawaited-" });
   const out = `${rootDir}/spawned_out.txt`;
 
+  let child!: Deno.ChildProcess;
   await assertRejects(
     async () => {
       await runProof(
@@ -4661,7 +4662,7 @@ Deno.test("proof-helper: audio-feed-2bfv: unawaited spawned child process is awa
           const cmd = new Deno.Command("sh", {
             args: ["-c", `sleep 0.05; echo hello > "${out}"`],
           });
-          cmd.spawn(); // unawaited spawn!
+          child = cmd.spawn(); // unawaited spawn! (the proof body never awaits it)
           c.check("fail step", false, "deliberate fail");
         },
         { logger: () => {} },
@@ -4671,9 +4672,12 @@ Deno.test("proof-helper: audio-feed-2bfv: unawaited spawned child process is awa
     "deliberate fail",
   );
 
-  // Even after a small delay, the output file must NOT exist because runProof awaited
-  // the spawned child before rollback and removed the output file
-  await new Promise((r) => setTimeout(r, 100));
+  // The output file must NOT exist because runProof awaited the spawned child before
+  // rollback and removed the output file. Gated on the child's OWN observable - its exit -
+  // instead of a wall-clock sleep (audio-feed-w3nel): the write lands before the exit, so
+  // once status resolves the check is ordered after both the write and runProof's rollback,
+  // with no window for a loaded host to move the write across the read.
+  await child.status;
   const exists = await Deno.lstat(out).then(() => true).catch(() => false);
   assertEquals(exists, false);
 
@@ -8083,25 +8087,42 @@ Deno.test({
     // reported the base as used.
     const base = `/tmp/audiofeed-pclwg-${crypto.randomUUID()}`;
     const other = `${base}-other`;
+    // The child's lifetime is gated on a file THIS test controls, not a wall-clock sleep
+    // (audio-feed-w3nel): a fixed `sleep 2` can expire mid-poll on a loaded host and flip the
+    // "used" assertion red on a correct detector. The child lives until the stop file exists,
+    // and its exit is awaited in the finally. `$0` still carries the flag under test.
+    const stopFile = `/tmp/audiofeed-pclwg-stop-${crypto.randomUUID()}`;
     const child = new Deno.Command("sh", {
-      args: ["-c", "sleep 2", `--user-data-dir=${other}`],
+      args: [
+        "-c",
+        'while [ ! -f "$1" ]; do sleep 0.05; done',
+        `--user-data-dir=${other}`,
+        stopFile,
+      ],
       stdout: "null",
       stderr: "null",
     }).spawn();
     try {
-      let settled = false;
-      for (let attempt = 1; attempt <= 20 && !settled; attempt++) {
-        settled = (await waitForChromeProfileUnused(other, { timeoutMs: 50 })) === false;
-        if (!settled) await new Promise((resolve) => setTimeout(resolve, 50));
+      // State-gate, not a window (audio-feed-w3nel): the child cannot exit before the stop file
+      // is written, so no poll speed can outrun its exit. A "still used" answer costs one short
+      // probe (waitForChromeProfileUnused holds a small timeout - a long one would pay the full
+      // budget on every scan), and the bounded retry only covers the child not being in `ps` yet.
+      let used = false;
+      for (let attempt = 1; attempt <= 20 && !used; attempt++) {
+        used = (await waitForChromeProfileUnused(other, { timeoutMs: 100 })) === false;
+        if (!used) await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      assertEquals(settled, true, `the profile in use (${other}) must be reported as used`);
+      assertEquals(used, true, `the profile in use (${other}) must be reported as used`);
       assertEquals(
-        await waitForChromeProfileUnused(base, { timeoutMs: 200 }),
+        await waitForChromeProfileUnused(base, { timeoutMs: 5_000 }),
         true,
         `the PREFIX profile ${base} is not in use and must not be reported as a collision`,
       );
     } finally {
+      // Release the child, then reap it: a test that leaks what it spawns is the defect it is testing for.
+      await Deno.writeTextFile(stopFile, "stop").catch(() => {});
       await killChromeAndWait(child);
+      await Deno.remove(stopFile).catch(() => {});
     }
   },
 });
