@@ -534,6 +534,13 @@ console.log("script attempt finished");
     stdout: "piped",
     stderr: "piped",
   }).spawn();
+  // docs/speed.md rule 2: the 20s SIGKILL is a HANG GUARD, not an assertion. The property
+  // under test is that the child exits BY ITSELF - both markers printed, exit code 0; a
+  // regression leaves the process held open and the SIGKILL turns that into the named
+  // non-zero exit below. There is deliberately NO elapsed-time ceiling (audio-feed-1xfvx):
+  // the old `elapsed > 15_000` check was redundant with this guard (a real hang already
+  // reds via exit code) and reddened the row when a loaded gate host merely pushed a
+  // correct `deno eval` cold start past 15s.
   const giveUp = setTimeout(() => job.kill("SIGKILL"), 20_000);
   const started = Date.now();
   const { code, stdout, stderr } = await job.output();
@@ -545,5 +552,4 @@ console.log("script attempt finished");
     throw new Error(`script attempt never ran: ${output}`);
   }
   if (code !== 0) throw new Error(`child exited ${code} after ${elapsed}ms: ${output}`);
-  if (elapsed > 15_000) throw new Error(`child took ${elapsed}ms to exit: ${output}`);
 });

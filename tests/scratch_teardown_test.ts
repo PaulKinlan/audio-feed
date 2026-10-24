@@ -150,18 +150,33 @@ Deno.test("audio-feed-wj8o2: waitForChromeProfileUnused sees a process whose com
   // argument - rather than merely mentioning the path somewhere in its code. audio-feed-ubjt1 replaced the bare-path
   // match precisely because it also counted the CALLER's own command line; the flag is the signal that survives, and
   // this row keeps its teeth: the process is still live, so it must still be reported as using the profile.
+  // The child stays alive until KILLED (30s, reaped by killChromeAndWait below - killing, not
+  // awaiting, so the longer lifetime costs no wall time). A 2s lifetime could expire on a loaded
+  // host before the probe ever observed the child, reddening the row on correct code
+  // (audio-feed-me0dr).
   const child = new Deno.Command("sh", {
-    args: ["-c", "sleep 2", `--user-data-dir=${profile}`],
+    args: ["-c", "sleep 30", `--user-data-dir=${profile}`],
     stdout: "null",
     stderr: "null",
   }).spawn();
   try {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assertEquals(
-      await waitForChromeProfileUnused(profile, { timeoutMs: 200, pollMs: 25 }),
-      false,
-      "a live process carrying the profile path must be reported as still using it",
-    );
+    // State gate, not a blind sleep (audio-feed-me0dr, docs/speed.md): poll the probe until it
+    // reports the profile IN USE - the observable event the row exists to prove - rather than
+    // sleeping a bare 150ms raced against spawn latency. The probe returns "unused" the instant a
+    // poll sees no referencing process, so a late-spawning child just means the next poll. The 15s
+    // deadline is a HANG GUARD, not an assertion (rule 2): it trips only when a child that lives
+    // 30s never becomes visible to `ps` at all, which is the fixture breaking, not a slow host.
+    const hangGuard = Date.now() + 15_000;
+    for (;;) {
+      const inUse = !await waitForChromeProfileUnused(profile, { timeoutMs: 150, pollMs: 25 });
+      if (inUse) break; // the live-child verdict this row asserts: a carrier is reported as using it
+      if (Date.now() >= hangGuard) {
+        throw new Error(
+          "spawned child never became visible to the profile probe within the 15s hang guard; " +
+            "the fixture (spawn or ps) is broken, not the probe verdict",
+        );
+      }
+    }
     // Reap rather than outlive: awaiting a sleeping child's exit cost the fast gate 30s on the first attempt at this
     // fix, and a test may not add half a minute to the gate for its own convenience.
     await killChromeAndWait(child);
@@ -171,7 +186,9 @@ Deno.test("audio-feed-wj8o2: waitForChromeProfileUnused sees a process whose com
       "once that process has exited, nothing references the profile",
     );
   } finally {
-    await child.status.catch(() => {});
+    // Kill before awaiting status, so a row that reds before the normal reap (e.g. the hang
+    // guard tripping) does not sit out the child's remaining 30s sleep in the finally.
+    await killChromeAndWait(child);
     await Deno.remove(profile, { recursive: true }).catch(() => {});
   }
 });
