@@ -31,54 +31,12 @@ import { audioBlobKey, INBOX_SOURCE_ID } from "../src/types.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { Synthesizer } from "../src/worker/synthesis.ts";
-import type { InvocationClock } from "../src/synthesis/limits.ts";
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
 
-/**
- * A budget clock the test owns (audio-feed-krrws; same shape as
- * synthesis_resume_test.ts's controlledInvocationClock, kept local because this fix is one
- * file by decision). `now()` never moves and timers never fire until `advance()` moves them,
- * so a deadline armed on this clock lands exactly where the test advances to — the row
- * asserts an ORDER of operations, not that work finished inside N real milliseconds.
- *
- * `advance()` fires every due timer, earliest first, letting each one's awaiters run before
- * the next, so an abort that is a CONSEQUENCE of a firing is observed before the stub reads
- * `signal.aborted`.
- */
-function controlledInvocationClock(startMs = 1_000_000) {
-  let nowMs = startMs;
-  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
-  const clock: InvocationClock = {
-    now: () => nowMs,
-    setTimeout: (fn, ms) => {
-      const timer = { at: nowMs + ms, fn, live: true };
-      timers.push(timer);
-      return () => {
-        timer.live = false;
-      };
-    },
-  };
-  return {
-    clock,
-    get nowMs() {
-      return nowMs;
-    },
-    async advance(ms: number): Promise<void> {
-      const target = nowMs + ms;
-      for (;;) {
-        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
-        if (!due) break;
-        due.live = false;
-        nowMs = Math.max(nowMs, due.at);
-        due.fn();
-        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      nowMs = target;
-    },
-  };
-}
+/** The repo's one fake budget clock (moved to a shared fixture by audio-feed-on12e). */
+import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 
 /** A tiny but genuinely decodable WAV-shaped payload (RIFF header + PCM). */
 function fakeAudio(bytes = 480): DecodedAudioResult {
