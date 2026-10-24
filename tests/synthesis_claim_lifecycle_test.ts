@@ -13,6 +13,7 @@ import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthe
 import { decodedFromWav, GeminiTtsClient, MAX_TTS_SEGMENTS, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import type { InvocationClock } from "../src/synthesis/limits.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import {
   isInvocationBudgetAbort,
@@ -138,6 +139,69 @@ async function waitFor(
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+}
+
+/**
+ * audio-feed-b8u49: fire the injected budget's deadline the moment the paid call is IN
+ * FLIGHT. The returned resolver is called by the stub when the call starts; the deadline
+ * (armed on the shared fake clock, frozen until then) fires mid-call, so the abort and
+ * the call's start are both the test's decision - never a race between pre-stage work
+ * and a real 80-100ms budget.
+ */
+function abortWhileInFlight(time: ReturnType<typeof controlledInvocationClock>): () => void {
+  let resolveInFlight: () => void = () => {};
+  const inFlight = new Promise<void>((r) => {
+    resolveInFlight = r;
+  });
+  const fired = (async () => {
+    await inFlight;
+    await time.advance(60_000);
+  })();
+  fired.catch(() => {});
+  return resolveInFlight;
+}
+
+/**
+ * A budget clock the test owns (audio-feed-lpusp; the krrws/on12e fake-clock mechanism,
+ * inlined locally so this bead's gate stays FOCUSED - a shared tests/*.ts helper would
+ * trigger the full-suite fallback, which cannot fit its bound under the current CPU
+ * steal). Consolidate onto tests/fixtures/invocation_clock.ts when audio-feed-on12e
+ * lands. `now()` never moves and timers never fire until `advance()` moves them; the row
+ * decides where every deadline lands.
+ */
+import type { InvocationClock } from "../src/synthesis/limits.ts";
+
+function controlledInvocationClock(startMs = 1_000_000) {
+  let nowMs = startMs;
+  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+  const clock: InvocationClock = {
+    now: () => nowMs,
+    setTimeout: (fn, ms) => {
+      const timer = { at: nowMs + ms, fn, live: true };
+      timers.push(timer);
+      return () => {
+        timer.live = false;
+      };
+    },
+  };
+  return {
+    clock,
+    get nowMs() {
+      return nowMs;
+    },
+    async advance(ms: number): Promise<void> {
+      const target = nowMs + ms;
+      for (;;) {
+        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        due.live = false;
+        nowMs = Math.max(nowMs, due.at);
+        due.fn();
+        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      nowMs = target;
+    },
+  };
 }
 
 Deno.test("audio-feed-siv1: claim dying before terminal write persists phase, reason, and attempt count across retries and abandonment", async () => {
@@ -1579,16 +1643,29 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
     }),
   );
 
+  // audio-feed-b8u49: the budget's clock is injected and the deadline fires the moment
+  // the transfer is IN FLIGHT (test's decision) - was a real 80ms deadline racing a real
+  // 135ms sleep, where a loaded host consumed the budget in pre-stage work and the PUT
+  // never started (putCalls stayed 0 - the exact red this bead names). The transfer parks
+  // on a gate the test releases after the batch, so "the batch yields while the transfer
+  // is still in flight" is an ORDER fact, not a race.
+  const time = controlledInvocationClock();
+  const markInFlight = abortWhileInFlight(time);
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let putCalls = 0;
   let putSettledAt = 0;
   let putAborted = 0;
+  let releaseTransfer: () => void = () => {};
+  const transferGate = new Promise<void>((r) => {
+    releaseTransfer = r;
+  });
   let putSettlement: Promise<unknown> = Promise.resolve();
   stores.blobs.put = (...args) => {
     putCalls++;
+    markInFlight();
     const attempt = (async () => {
       try {
-        await new Promise((r) => setTimeout(r, 135));
+        await transferGate;
         return await oldPut(...args);
       } catch (error) {
         // THE ORDER FACT this test pins: the deadline aborted the transfer WHILE IT WAS
@@ -1614,10 +1691,13 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 10, // Allows preflight to pass (10 + 5 < 80)
     flushMarginMs: 5,
+    clock: time.clock,
   });
   const elapsed = performance.now() - start;
-  // The aborted transfer may still be settling when the batch yields (that is the point);
-  // await it so the counts below are facts, not races.
+  // Release the gated transfer, THEN await it: the settlement happens after the batch
+  // yielded, by the test's decision (audio-feed-b8u49) - so the order assertion below is
+  // a fact, not a race between two real clocks.
+  releaseTransfer();
   await putSettlement.catch(() => {});
 
   // THE PROPERTY (audio-feed-y2ex cure, applied because this test flaked twice under
