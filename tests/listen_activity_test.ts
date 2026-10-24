@@ -1010,20 +1010,49 @@ Deno.test({
         mobile: true,
       });
       await cdp("Page.navigate", { url: `file://${tempHtmlFile}` });
-      await sleep(600);
-
-      // deno-lint-ignore no-explicit-any
-      const evalRes: any = await cdp("Runtime.evaluate", {
-        expression: `(() => {
-          return JSON.stringify({
+      // audio-feed-5egu4: readiness is POLLED, never slept. The fixed 600ms sleep that sat
+      // here was the ONLY readiness gate for the layout assertion below - on a loaded host
+      // the evaluate ran on a partially parsed document (red on a correct page) or on
+      // about:blank (false pass, since about:blank is 390px wide with zero overflow). The
+      // poll exits on document readiness PLUS non-zero laid-out width, so the assertions
+      // measure the real page. Bounded by a documented ceiling (100 x 50ms = 5s, the same
+      // guard family as the DevToolsActivePort poll above): a loaded host consumes poll
+      // cycles and the guard names itself on trip - it cannot turn slowness into a layout
+      // verdict.
+      let metrics: {
+        scrollWidth: number;
+        clientWidth: number;
+        hasOverflow: boolean;
+      } | undefined;
+      for (let i = 0; i < 100 && !metrics; i++) {
+        // deno-lint-ignore no-explicit-any
+        const probe: any = await cdp("Runtime.evaluate", {
+          expression: `(() => JSON.stringify({
+            readyState: document.readyState,
             scrollWidth: document.documentElement.scrollWidth,
             clientWidth: document.documentElement.clientWidth,
             hasOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
-          });
-        })()`,
-      });
-
-      const metrics = JSON.parse(evalRes.result.result.value);
+          }))()`,
+        });
+        // An evaluate that lands in a context torn down by the navigation returns an
+        // exception (probe.result.result.value undefined) - under load this is COMMON and
+        // it means "not ready yet", never a layout verdict (audio-feed-5egu4).
+        const raw = probe?.result?.result?.value;
+        if (typeof raw === "string") {
+          const candidate = JSON.parse(raw);
+          if (candidate.readyState === "complete" && candidate.scrollWidth > 0) {
+            metrics = candidate;
+          }
+        }
+        if (!metrics) {
+          await sleep(50);
+        }
+      }
+      assert(
+        metrics,
+        "the page never reached readyState complete with non-zero layout within the 5s " +
+          `readiness guard - the assertions below would be measuring a partial document`,
+      );
       assertEquals(
         metrics.scrollWidth,
         390,
