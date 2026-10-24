@@ -243,6 +243,7 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         probe: () => Promise<T>,
         ready: (value: T) => boolean,
       ): Promise<T> => {
+        // State-gated CDP poll with 5s deadline: loops until ready condition matches; host scheduling delay adds poll cycles rather than failing a fixed sleep.
         const deadline = Date.now() + 5000;
         let value = await probe();
         while (!ready(value) && Date.now() < deadline) {
@@ -268,6 +269,7 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         );
         assert(loaded, `${url}: page did not become scrollable`);
         const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
+        // State-gated CDP poll under 5s deadline: predicate checks initial sticky state; renderer delay adds poll iterations.
         const before = await until(
           probe,
           (state) => state.scrollY === 0 && state.rectTop === 0 && state.shadow === "none",

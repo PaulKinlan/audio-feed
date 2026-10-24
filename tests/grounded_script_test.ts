@@ -413,6 +413,7 @@ Deno.test("grounded continuation stage is clamped to remaining claim lease", asy
       if (init?.signal?.aborted) {
         return Promise.reject(new Error("claim cancelled before TTS spend"));
       }
+      // Guard against spending TTS if claim aborted; under load preflight throw and lease abort both result in 0 accepted calls.
       ttsAccepted++;
       return Promise.reject(new Error("unexpected TTS call"));
     }) as typeof fetch,
@@ -436,6 +437,7 @@ Deno.test("grounded continuation stage is clamped to remaining claim lease", asy
   );
   assert(error instanceof Error);
   assertEquals((error as { status?: number }).status, 400);
+  // 60_060ms lease clamp against hanging generator: on a slow host, preflight refusal and lease abort are observationally equal (status 400, ttsAccepted 0); load can only false-pass, never false-fail.
   assertEquals(ttsAccepted, 0);
 });
 

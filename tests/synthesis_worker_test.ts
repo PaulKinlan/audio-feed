@@ -368,6 +368,7 @@ Deno.test("the loop runs a tick, stops on abort, and never dies on a bad tick", 
     },
     { intervalMs: 10 },
   );
+  // Bare 60ms pause gating "a tick happened" at intervalMs 10 (~6x margin; a cold-start stall >60ms would redden); waitFor (used below) is the state-gated alternative.
   await new Promise((r) => setTimeout(r, 60));
   await worker.stop();
   assert(ticks >= 1, `expected at least one tick, got ${ticks}`);

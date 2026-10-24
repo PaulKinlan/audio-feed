@@ -102,6 +102,7 @@ Deno.test("audio-feed-wj8o2: removeDirWhenQuiet outlasts a child that keeps recr
     // The historical implementation, exactly: one removal, no retries. The writer has writes 2..12 still
     // queued, so at least one of them lands after this attempt and recreates the directory.
     await removeDirWhenQuiet(leakDir, { attempts: 1, settleMs: 25 });
+    // State-gated poll with 10s ceiling vs ~240ms of writer work: host load adds poll attempts without changing completion verdict.
     assert(
       await waitForSentinel(leakDir + ".done", 10_000),
       "the late writer never signalled completion; the race fixture is broken, not the teardown",

@@ -788,7 +788,7 @@ Deno.test("declared bound exceedance reports [declared] provenance (audio-feed-k
       "UNKNOWN (exceeded the 1s bound [declared]; raise --timeout to decide it)",
     );
 
-    // Explicit --timeout 10 overrides declared 1s bound and passes
+    // Explicit --timeout 10 overrides declared 1s bound and passes; 10s ceiling is >6x the 1.5s sleep work, absorbing scheduler latency.
     const resOverride = await runTier(tempDir, ["--timeout", "10"]);
     assertEquals(resOverride.code, 0, "explicit --timeout 10 overrides declared 1s bound");
     assertStringIncludes(resOverride.stdout, "ok   docs/evidence/audio-feed-tight");
