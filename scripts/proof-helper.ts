@@ -819,13 +819,29 @@ export async function withChrome<T>(
   return result!;
 }
 
+/**
+ * Production fail-fast window for a harness child to bind and answer its
+ * health check (audio-feed-57ape). Proof scripts rely on this for fast
+ * feedback; tests pin it BY NAME rather than racing it, because one wall
+ * window deciding both the happy path and fail-fast reads a healthy-but-slow
+ * host as a broken harness (measured twice at exactly 15s under saturation).
+ */
+export const SPAWN_HARNESS_HEALTH_TIMEOUT_MS = 15_000;
+
 export async function spawnHarness(
   scriptRelPath: string,
   extraArgs: string[] = [],
-  options: { healthPath?: string; timeoutMs?: number } = {},
+  options: { healthPath?: string; timeoutMs?: number | null } = {},
 ): Promise<SupervisedHarness> {
   const healthPath = options.healthPath ?? "/health";
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  // `timeoutMs: null` means NO wall deadline: wait on the child's own
+  // bind/first-response state signal, with child-exit still failing fast.
+  // Tests use it for the happy path so a saturated host's cold start cannot
+  // turn into a red row (audio-feed-57ape); production callers keep the
+  // default fail-fast window above.
+  const timeoutMs = options.timeoutMs === undefined
+    ? SPAWN_HARNESS_HEALTH_TIMEOUT_MS
+    : options.timeoutMs;
   const cwd = new URL("..", import.meta.url).pathname;
 
   const cmd = new Deno.Command(Deno.execPath(), {
@@ -869,7 +885,7 @@ export async function spawnHarness(
   const startTime = Date.now();
   let assignedPort: number | null = null;
 
-  while (Date.now() - startTime < timeoutMs) {
+  while (timeoutMs === null || Date.now() - startTime < timeoutMs) {
     if (exited) {
       throw new Error(
         `Harness '${scriptRelPath}' exited prematurely with code ${exitCode} before answering health check.\n` +
@@ -922,6 +938,14 @@ export async function spawnHarness(
   try {
     process.kill();
   } catch { /* ignore */ }
+  // Reap before throwing: a killed-but-unawaited child leaks its process
+  // resource into the caller's test sanitizer (audio-feed-ft1sj's rule:
+  // kill AND await). Bounded so a child that ignores the signal cannot
+  // hang the error path.
+  await Promise.race([
+    process.status.catch(() => {}),
+    new Promise((r) => setTimeout(r, 2000)),
+  ]);
   throw new Error(
     `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}.\n` +
       `Assigned port: ${assignedPort}\nStdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
