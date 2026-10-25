@@ -252,6 +252,39 @@ Deno.test({
   },
 });
 
+/**
+ * The two mutation children for the fail-fast rows below (audio-feed-57ape). They are written into the
+ * row's scratch root at test time rather than kept as tests/fixtures FILES: a non-*_test.ts file under
+ * tests/ is a "shared test helper" to the fast gate's selection, which widened this branch's gate to the
+ * FULL suite on every run (measured: three ~35-minute full-suite runs, two reddened by unrelated
+ * main-intermittent rows). Inline sources keep the selection narrow (same pattern as spawnLateWriter's
+ * deno eval child in scratch_teardown_test.ts); the behaviour pinned is identical.
+ */
+const NEVER_READY_CHILD = `// Never prints READY, never binds, never answers /health: pins
+// spawnHarness's fail-fast timeout path behind a SMALL bound (audio-feed-57ape).
+// A pending interval keeps the event loop alive; a top-level await of a
+// never-resolving promise makes Deno exit with an error instead (measured).
+setInterval(() => {}, 1000);
+`;
+
+const BINDS_NEVER_ANSWERS_CHILD =
+  `// Binds an ephemeral port and logs its READY line, but accepts every
+// request and NEVER answers: pins the second named timeout case in
+// spawnHarness ("the child bound port N but /health never answered OK")
+// behind a small bound (audio-feed-57ape).
+Deno.serve(
+  { port: 0, onListen: ({ port }) => console.log(\`READY port=\${port}\`) },
+  () => new Promise(() => {}),
+);
+`;
+
+/** Write a mutation child into the row's scratch root and return its path for spawnHarness. */
+async function writeHarnessChild(scratch: string, name: string, source: string): Promise<string> {
+  const path = `${scratch}/${name}`;
+  await Deno.writeTextFile(path, source);
+  return path;
+}
+
 Deno.test({
   name:
     "proof-helper: spawnHarness fails fast on a harness that never answers, behind a small bound (audio-feed-57ape)",
@@ -262,15 +295,21 @@ Deno.test({
     // given window whatever the host's load, because its never answering is
     // a property of the child, not of the clock. A small bound keeps the row
     // fast; the production window itself is pinned by name in the row below.
-    const fixture = new URL("./fixtures/never_ready_harness_child.ts", import.meta.url).pathname;
-    const err = await assertRejects(
-      () => spawnHarness(fixture, [], { timeoutMs: 800 }),
-      Error,
-      "timed out after 800ms waiting for /health",
-    );
-    // The failure NAMES the condition that never became true.
-    assertStringIncludes(err.message, "the child never logged its READY line");
-    assertStringIncludes(err.message, "Assigned port: null");
+    await withScratchRoot(async (scratch) => {
+      const child = await writeHarnessChild(
+        scratch,
+        "never_ready_harness_child.ts",
+        NEVER_READY_CHILD,
+      );
+      const err = await assertRejects(
+        () => spawnHarness(child, [], { timeoutMs: 800 }),
+        Error,
+        "timed out after 800ms waiting for /health",
+      );
+      // The failure NAMES the condition that never became true.
+      assertStringIncludes(err.message, "the child never logged its READY line");
+      assertStringIncludes(err.message, "Assigned port: null");
+    });
   },
 });
 
@@ -282,15 +321,20 @@ Deno.test({
     // The second mutation class: the child logs READY and binds, but accepts
     // the /health connection and never answers. The timeout report must name
     // THAT case, so a red row says what broke rather than merely "timed out".
-    const fixture = new URL("./fixtures/binds_never_answers_harness_child.ts", import.meta.url)
-      .pathname;
-    const err = await assertRejects(
-      () => spawnHarness(fixture, [], { timeoutMs: 800 }),
-      Error,
-      "timed out after 800ms waiting for /health",
-    );
-    assertStringIncludes(err.message, "never answered OK");
-    assertMatch(err.message, /the child bound port [1-9]\d*/);
+    await withScratchRoot(async (scratch) => {
+      const child = await writeHarnessChild(
+        scratch,
+        "binds_never_answers_harness_child.ts",
+        BINDS_NEVER_ANSWERS_CHILD,
+      );
+      const err = await assertRejects(
+        () => spawnHarness(child, [], { timeoutMs: 800 }),
+        Error,
+        "timed out after 800ms waiting for /health",
+      );
+      assertStringIncludes(err.message, "never answered OK");
+      assertMatch(err.message, /the child bound port [1-9]\d*/);
+    });
   },
 });
 
