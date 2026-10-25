@@ -20,48 +20,8 @@ import { runSynthesisBatch, TERMINAL_STAGING_MARKER_HASH } from "../src/worker/s
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import type { InvocationClock } from "../src/synthesis/limits.ts";
-
-/**
- * A budget clock the test owns (audio-feed-fnbm0; same shape as synthesis_worker_test.ts's and
- * synthesis_resume_test.ts's controlledInvocationClock, kept local because this fix is one file
- * by decision). `now()` never moves and timers never fire until `advance()` moves them, so a
- * deadline armed on this clock lands exactly where the test advances to - the row asserts an
- * ORDER of operations, not that work finished inside N real milliseconds.
- */
-function controlledInvocationClock(startMs = 1_000_000) {
-  let nowMs = startMs;
-  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
-  const clock: InvocationClock = {
-    now: () => nowMs,
-    setTimeout: (fn, ms) => {
-      const timer = { at: nowMs + ms, fn, live: true };
-      timers.push(timer);
-      return () => {
-        timer.live = false;
-      };
-    },
-  };
-  return {
-    clock,
-    get nowMs() {
-      return nowMs;
-    },
-    async advance(ms: number): Promise<void> {
-      const target = nowMs + ms;
-      for (;;) {
-        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
-        if (!due) break;
-        due.live = false;
-        nowMs = Math.max(nowMs, due.at);
-        due.fn();
-        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      nowMs = target;
-    },
-  };
-}
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -616,18 +576,33 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
     releaseUpload = resolve;
   });
   let uploadsInFlight = 0;
-  const putEntered = new Promise<void>((resolve) => {
-    stores.blobs.put = async (...args) => {
-      uploadsInFlight++;
-      resolve();
-      try {
-        await uploadGate;
-        return await oldPut(...args);
-      } finally {
-        uploadsInFlight--;
+  let putStarted = false;
+  stores.blobs.put = async (...args) => {
+    putStarted = true;
+    uploadsInFlight++;
+    try {
+      await uploadGate;
+      return await oldPut(...args);
+    } finally {
+      uploadsInFlight--;
+    }
+  };
+  // OBSERVABILITY GUARD, not the pass condition (audio-feed-uswe0): a bounded, NAMED wait so a
+  // batch that never reaches its terminal upload fails loudly instead of hanging the suite.
+  // The pass condition remains the beats-by-state assertions below.
+  const untilPutEntered = async (): Promise<void> => {
+    const budgetMs = 10_000;
+    const limit = Date.now() + budgetMs;
+    while (!putStarted) {
+      if (Date.now() > limit) {
+        throw new Error(
+          `terminal upload never started within ${budgetMs}ms: the put stub was not entered, ` +
+            `so there was no window in which a heartbeat could be observed (audio-feed-uswe0)`,
+        );
       }
-    };
-  });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
 
   // Record every phase-less touch (the heartbeat) that lands while the put is PROVABLY in
   // flight - by state, not by wall-clock windows.
@@ -656,13 +631,16 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
     clock: time.clock,
   });
 
-  await putEntered; // the terminal put is in flight; virtual time has not moved
+  await untilPutEntered(); // the terminal put is in flight; virtual time has not moved
   putStartMs = time.nowMs;
   await time.advance(1_000); // beat 1: fires the 1s heartbeat timer
   await time.advance(1_000); // beat 2: the beat's own re-arm
   assert(
     heartbeatTimes.length >= 1,
-    `expected >=1 heartbeat while the upload is in flight, got ${JSON.stringify(heartbeatTimes)}`,
+    `heartbeat never observed while the upload was in flight (beats: ${
+      JSON.stringify(heartbeatTimes)
+    }): startClaimHeartbeat's clocked beats did not touch the claim between the put starting ` +
+      `and the upload being released (audio-feed-uswe0)`,
   );
   assert(
     heartbeatTimes.every((t) => t > putStartMs),
