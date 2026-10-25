@@ -42,6 +42,7 @@ import {
   runProof,
   setOriginalCopyFileForTesting,
   setOriginalCopyFileSyncForTesting,
+  SPAWN_HARNESS_HEALTH_TIMEOUT_MS,
   spawnHarness,
   startInProcessServer,
   waitForChromeProfileUnused,
@@ -186,7 +187,16 @@ Deno.test({
   name: "proof-helper: spawnHarness binds ephemeral port 0 and answers health check",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
-    const harness = await spawnHarness("scripts/account-harness.ts");
+    // audio-feed-57ape: the pass condition is the child's own READINESS SIGNAL
+    // (binds an ephemeral port, answers /health), never the clock. The 120s is
+    // a bounded-but-generous OUTER GUARD, not the assertion: a healthy row
+    // passes on the state signal in seconds even on a saturated host (measured
+    // 18s under 12 busy loops on 8 cores - over the production 15s window,
+    // which is exactly the race this bead named). The guard fires only when
+    // readiness genuinely never arrives, and then the error NAMES which
+    // condition never became true. The production fail-fast window and the
+    // timeout mechanism are pinned by the rows below.
+    const harness = await spawnHarness("scripts/account-harness.ts", [], { timeoutMs: 120_000 });
     try {
       // spawnHarness ALWAYS passes "0", so this must be an EPHEMERAL bind.
       // `port > 0` alone was satisfied by the pinned default too, so a green row
@@ -241,6 +251,57 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "proof-helper: spawnHarness fails fast on a harness that never answers, behind a small bound (audio-feed-57ape)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The fail-fast MECHANISM pinned deterministically: a child that never
+    // prints READY and never binds must be killed and reported after the
+    // given window whatever the host's load, because its never answering is
+    // a property of the child, not of the clock. A small bound keeps the row
+    // fast; the production window itself is pinned by name in the row below.
+    const fixture = new URL("./fixtures/never_ready_harness_child.ts", import.meta.url).pathname;
+    const err = await assertRejects(
+      () => spawnHarness(fixture, [], { timeoutMs: 800 }),
+      Error,
+      "timed out after 800ms waiting for /health",
+    );
+    // The failure NAMES the condition that never became true.
+    assertStringIncludes(err.message, "the child never logged its READY line");
+    assertStringIncludes(err.message, "Assigned port: null");
+  },
+});
+
+Deno.test({
+  name:
+    "proof-helper: spawnHarness names the bound-but-never-answers case when /health hangs (audio-feed-57ape)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The second mutation class: the child logs READY and binds, but accepts
+    // the /health connection and never answers. The timeout report must name
+    // THAT case, so a red row says what broke rather than merely "timed out".
+    const fixture = new URL("./fixtures/binds_never_answers_harness_child.ts", import.meta.url)
+      .pathname;
+    const err = await assertRejects(
+      () => spawnHarness(fixture, [], { timeoutMs: 800 }),
+      Error,
+      "timed out after 800ms waiting for /health",
+    );
+    assertStringIncludes(err.message, "never answered OK");
+    assertMatch(err.message, /the child bound port [1-9]\d*/);
+  },
+});
+
+Deno.test(
+  "proof-helper: spawnHarness's production health deadline is the pinned 15s fail-fast window (audio-feed-57ape)",
+  () => {
+    // The production constant, asserted by name so a silent change to the
+    // fail-fast window is a red row rather than a drift nobody noticed.
+    assertEquals(SPAWN_HARNESS_HEALTH_TIMEOUT_MS, 15_000);
+  },
+);
 
 Deno.test({
   name: "proof-helper: spawnHarness fails fast if child process exits prematurely",

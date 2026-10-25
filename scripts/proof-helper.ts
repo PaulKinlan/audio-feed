@@ -819,13 +819,27 @@ export async function withChrome<T>(
   return result!;
 }
 
+/**
+ * Production fail-fast window for a harness child to bind and answer its
+ * health check (audio-feed-57ape). Proof scripts rely on this for fast
+ * feedback; tests pin it BY NAME rather than racing it, because one wall
+ * window deciding both the happy path and fail-fast reads a healthy-but-slow
+ * host as a broken harness (measured twice at exactly 15s under saturation).
+ */
+export const SPAWN_HARNESS_HEALTH_TIMEOUT_MS = 15_000;
+
 export async function spawnHarness(
   scriptRelPath: string,
   extraArgs: string[] = [],
   options: { healthPath?: string; timeoutMs?: number } = {},
 ): Promise<SupervisedHarness> {
   const healthPath = options.healthPath ?? "/health";
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  // The deadline is a BACKSTOP, never the pass condition: the wait below is on
+  // the child's own bind/first-response state signal, so a healthy-but-slow
+  // host passes whenever readiness actually arrives (audio-feed-57ape).
+  // Production callers keep the default fail-fast window above; a test row
+  // verifying readiness itself passes a generous outer guard instead.
+  const timeoutMs = options.timeoutMs ?? SPAWN_HARNESS_HEALTH_TIMEOUT_MS;
   const cwd = new URL("..", import.meta.url).pathname;
 
   const cmd = new Deno.Command(Deno.execPath(), {
@@ -888,9 +902,16 @@ export async function spawnHarness(
     if (assignedPort) {
       let res: Response | null = null;
       try {
-        res = await fetch(`http://localhost:${assignedPort}${healthPath}`);
+        // Bound each probe by the REMAINING outer budget: an accepted-but-
+        // never-answered socket must not defeat the deadline (the mutation
+        // fixture tests/fixtures/binds_never_answers_harness_child.ts proved
+        // an unbounded fetch hangs the wait past its own timeout).
+        const remaining = timeoutMs - (Date.now() - startTime);
+        res = await fetch(`http://localhost:${assignedPort}${healthPath}`, {
+          signal: AbortSignal.timeout(Math.max(remaining, 1)),
+        });
       } catch {
-        // Socket not open or not responding yet
+        // Socket not open, not responding yet, or probe outlived the budget
       }
 
       if (res && res.ok) {
@@ -922,8 +943,22 @@ export async function spawnHarness(
   try {
     process.kill();
   } catch { /* ignore */ }
+  // Reap before throwing: a killed-but-unawaited child leaks its process
+  // resource into the caller's test sanitizer (audio-feed-ft1sj's rule:
+  // kill AND await). Bounded so a child that ignores the signal cannot
+  // hang the error path.
+  await Promise.race([
+    process.status.catch(() => {}),
+    new Promise((r) => setTimeout(r, 2000)),
+  ]);
+  // Name the condition that never became true: a report must not render an
+  // inability to know as a fact, and "timed out" alone says nothing about
+  // whether the child never bound or bound but never answered.
+  const condition = assignedPort === null
+    ? "the child never logged its READY line (no 'READY port=N' or server URL in stdout)"
+    : `the child bound port ${assignedPort} but ${healthPath} never answered OK`;
   throw new Error(
-    `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}.\n` +
+    `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}: ${condition}.\n` +
       `Assigned port: ${assignedPort}\nStdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
   );
 }
