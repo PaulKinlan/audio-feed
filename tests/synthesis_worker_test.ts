@@ -363,21 +363,38 @@ Deno.test("a missing article fails the job with a readable reason", async () => 
 Deno.test("the loop runs a tick, stops on abort, and never dies on a bad tick", async () => {
   const { ctx, stores } = await queued();
   let ticks = 0;
+  let completions = 0;
   const worker = startSynthesisWorker(
     ctx,
     () => {
       ticks++;
       return Promise.resolve(fakeAudio());
     },
-    { intervalMs: 10 },
+    // onTick fires on EVERY batch completion, work or none, so unlike the
+    // synthesize counter it can still move after the episode is ready - which
+    // is what makes 'no ticks after stop()' OBSERVABLE (audio-feed-at5tm):
+    // a loop that ignores stop() keeps completing ticks and is caught below.
+    { intervalMs: 10, onTick: () => completions++ },
   );
-  // Bare 60ms pause gating "a tick happened" at intervalMs 10 (~6x margin; a cold-start stall >60ms would redden); waitFor (used below) is the state-gated alternative.
-  await new Promise((r) => setTimeout(r, 60));
+  // audio-feed-at5tm: the first-tick gate is the OBSERVABLE EVENT (the loop's own tick
+  // counter), never the clock. waitFor's 5s ceiling is the observability guard that names
+  // the hang - 'the loop never emitted its first tick' - it does not decide pass/fail:
+  // a correct loop ticks on any host, however slow (measured: the old bare 60ms pause
+  // reddened a correct loop when a cold-start stall outlasted it).
+  await waitFor(
+    () => ticks >= 1,
+    () => `the loop never emitted its first tick (ticks=${ticks})`,
+  );
   await worker.stop();
   assert(ticks >= 1, `expected at least one tick, got ${ticks}`);
-  const afterStop = ticks;
+  const afterStop = completions;
+  // OBSERVABILITY GUARD, not a pass gate: stop() awaits the in-flight tick
+  // (src/worker/synthesis.ts), so a correct loop can NEVER tick after stop() resolves,
+  // whatever the host's speed. This short settle window exists only so a REGRESSION that
+  // stops awaiting the in-flight tick is observed here; it decides nothing when the loop
+  // is correct, so its length cannot flake the row.
   await new Promise((r) => setTimeout(r, 40));
-  assertEquals(ticks, afterStop, "no ticks after stop()");
+  assertEquals(completions, afterStop, "no ticks after stop()");
   assertEquals((await stores.metadata.getEpisode("user-1", "episode-1"))?.status, "ready");
 
   // A throwing tick must not kill the loop. Fresh stores, because the episode
