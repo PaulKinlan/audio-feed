@@ -187,14 +187,16 @@ Deno.test({
   name: "proof-helper: spawnHarness binds ephemeral port 0 and answers health check",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   async fn() {
-    // audio-feed-57ape: NO wall deadline here. This row's contract is the
-    // child's own state signal (binds an ephemeral port, answers /health);
-    // the production 15s fail-fast window is pinned separately by the two
-    // rows below. One wall window deciding both read a healthy-but-slow host
-    // as a broken harness (measured twice at exactly 15s in the wtvmp
-    // saturation hunt). The backstop for a genuinely wedged child is
-    // spawnHarness's child-exit fail-fast plus the gate's external bound.
-    const harness = await spawnHarness("scripts/account-harness.ts", [], { timeoutMs: null });
+    // audio-feed-57ape: the pass condition is the child's own READINESS SIGNAL
+    // (binds an ephemeral port, answers /health), never the clock. The 120s is
+    // a bounded-but-generous OUTER GUARD, not the assertion: a healthy row
+    // passes on the state signal in seconds even on a saturated host (measured
+    // 18s under 12 busy loops on 8 cores - over the production 15s window,
+    // which is exactly the race this bead named). The guard fires only when
+    // readiness genuinely never arrives, and then the error NAMES which
+    // condition never became true. The production fail-fast window and the
+    // timeout mechanism are pinned by the rows below.
+    const harness = await spawnHarness("scripts/account-harness.ts", [], { timeoutMs: 120_000 });
     try {
       // spawnHarness ALWAYS passes "0", so this must be an EPHEMERAL bind.
       // `port > 0` alone was satisfied by the pinned default too, so a green row
@@ -266,8 +268,29 @@ Deno.test({
       Error,
       "timed out after 800ms waiting for /health",
     );
-    // The child never bound, so the report must say so rather than naming a port.
+    // The failure NAMES the condition that never became true.
+    assertStringIncludes(err.message, "the child never logged its READY line");
     assertStringIncludes(err.message, "Assigned port: null");
+  },
+});
+
+Deno.test({
+  name:
+    "proof-helper: spawnHarness names the bound-but-never-answers case when /health hangs (audio-feed-57ape)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The second mutation class: the child logs READY and binds, but accepts
+    // the /health connection and never answers. The timeout report must name
+    // THAT case, so a red row says what broke rather than merely "timed out".
+    const fixture = new URL("./fixtures/binds_never_answers_harness_child.ts", import.meta.url)
+      .pathname;
+    const err = await assertRejects(
+      () => spawnHarness(fixture, [], { timeoutMs: 800 }),
+      Error,
+      "timed out after 800ms waiting for /health",
+    );
+    assertStringIncludes(err.message, "never answered OK");
+    assertMatch(err.message, /the child bound port [1-9]\d*/);
   },
 });
 
