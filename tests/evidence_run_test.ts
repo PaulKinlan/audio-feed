@@ -770,11 +770,14 @@ Deno.test("declared bound exceedance reports [declared] provenance (audio-feed-k
 
     const unblockFile = join(tempDir, "unblock.signal");
 
-    // Script parks until unblocked by state signal file; large safety bound ensures timeout kill is the only exit path when blocked (audio-feed-nszl8)
+    // Script parks until unblocked by state signal file (Run 1: exceedance test).
+    // For Run 2 (override test), work must exceed the declared 1s bound (1500ms) under
+    // the 10s ceiling so deleting --timeout 10 reddens the row by name (audio-feed-nszl8).
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
       `try {
   await Deno.stat(${JSON.stringify(unblockFile)});
+  await new Promise((r) => setTimeout(r, 1500));
   console.log("PASS finished");
 } catch {
   await new Promise((r) => setTimeout(r, 120_000));
