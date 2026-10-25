@@ -4411,6 +4411,11 @@ Deno.test("proof-helper: audio-feed-2bfv: rollback waits for in-flight write and
   // Wait until Proof B has performed the write and holds the lock on file1
   await proofBWrote;
 
+  let signalARollbackStarted!: () => void;
+  const proofARollbackStarted = new Promise<void>((r) => {
+    signalARollbackStarted = r;
+  });
+
   // Proof A: started earlier or attempts rollback of file1
   // Proof A fails and attempts rollback while Proof B is paused with in-flight write
   const promiseA = assertRejects(
@@ -4422,17 +4427,23 @@ Deno.test("proof-helper: audio-feed-2bfv: rollback waits for in-flight write and
           await Deno.writeFile(file1, proofABytes);
           checker.check("fail A", false, "deliberate fail A");
         },
-        { logger: () => {} },
+        {
+          logger: () => {},
+          // State signal, not a wall window (audio-feed-wtvmp): "start" fires when A's
+          // rollback has begun; runProof then runs synchronously to the first entry's
+          // waitForInFlightWrite, where it parks until B's proof completes.
+          rollbackHook: (phase) => {
+            if (phase === "start") signalARollbackStarted();
+          },
+        },
       );
     },
     Error,
     "deliberate fail A",
   );
 
-  // Give Proof A time to enter rollback and block on file1 lock
-  await new Promise((r) => setTimeout(r, 50));
-
-  // Now unpause Proof B, allowing it to finish and commit file1
+  // Unpause B only once A's rollback has actually begun (state-gated, not timed)
+  await proofARollbackStarted;
   unpauseProofB();
 
   await Promise.all([promiseA, promiseB]);
@@ -4605,6 +4616,11 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof does not erase you
     signalProofAWrote = r;
   });
 
+  let signalARollbackStarted!: () => void;
+  const proofARollbackStarted = new Promise<void>((r) => {
+    signalARollbackStarted = r;
+  });
+
   // Proof A (older proof): writes file, waits for B to write, then fails
   const promiseA = (async () => {
     try {
@@ -4616,7 +4632,14 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof does not erase you
           await proofBWrote;
           cA.check("fail A", false, "deliberate fail A");
         },
-        { logger: () => {} },
+        {
+          logger: () => {},
+          // State signal, not a wall window (audio-feed-wtvmp): unpause B only after
+          // A's rollback has begun; A then parks in waitForInFlightWrite until B commits.
+          rollbackHook: (phase) => {
+            if (phase === "start") signalARollbackStarted();
+          },
+        },
       );
     } catch { /* expected */ }
   })();
@@ -4636,8 +4659,8 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof does not erase you
     );
   })();
 
-  // Wait a moment for older proof A to enter rollback while younger proof B is paused
-  await new Promise((r) => setTimeout(r, 50));
+  // Unpause B only once A's rollback has actually begun (state-gated, not timed)
+  await proofARollbackStarted;
   unpauseProofB();
 
   await Promise.all([promiseA, promiseB]);
@@ -5155,6 +5178,11 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof rollback waits for
     signalProofAWrote = r;
   });
 
+  let signalARollbackStartedSubproc!: () => void;
+  const proofARollbackStartedSubproc = new Promise<void>((r) => {
+    signalARollbackStartedSubproc = r;
+  });
+
   // Proof A (older proof): touches file, waits for B, then fails and enters rollback
   const promiseA = (async () => {
     try {
@@ -5166,7 +5194,14 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof rollback waits for
           await proofBWrote;
           cA.check("fail A", false, "deliberate fail A");
         },
-        { logger: () => {} },
+        {
+          logger: () => {},
+          // State signal, not a wall window (audio-feed-wtvmp): unpause B only after
+          // A's rollback has begun; A then parks in waitForInFlightWrite until B commits.
+          rollbackHook: (phase) => {
+            if (phase === "start") signalARollbackStartedSubproc();
+          },
+        },
       );
     } catch { /* expected */ }
   })();
@@ -5189,8 +5224,8 @@ Deno.test("proof-helper: audio-feed-2bfv: older failing proof rollback waits for
     );
   })();
 
-  // Give older proof A time to enter rollback and block on Proof B's in-flight write
-  await new Promise((r) => setTimeout(r, 50));
+  // Unpause B only once A's rollback has actually begun (state-gated, not timed)
+  await proofARollbackStartedSubproc;
   unpauseProofB();
 
   await Promise.all([promiseA, promiseB]);
@@ -5282,6 +5317,10 @@ Deno.test("proof-helper: audio-feed-2bfv: duplicate-name concurrent proofs isola
   const proof2Paused = new Promise<void>((r) => {
     unpauseProof2 = r;
   });
+  let signal0RollbackStarted!: () => void;
+  const proof0RollbackStarted = new Promise<void>((r) => {
+    signal0RollbackStarted = r;
+  });
 
   // Proof 0 (older proof): touches file, then fails and enters rollback
   const promise0 = (async () => {
@@ -5294,7 +5333,15 @@ Deno.test("proof-helper: audio-feed-2bfv: duplicate-name concurrent proofs isola
           await proof2Wrote;
           c0.check("fail 0", false, "deliberate fail 0");
         },
-        { logger: () => {} },
+        {
+          logger: () => {},
+          // State signal, not a wall window (audio-feed-wtvmp): unpause the workers only
+          // after proof 0's rollback has begun; it then parks in waitForInFlightWrite until
+          // Worker 2's proof completes.
+          rollbackHook: (phase) => {
+            if (phase === "start") signal0RollbackStarted();
+          },
+        },
       );
     } catch { /* expected */ }
   })();
@@ -5327,8 +5374,8 @@ Deno.test("proof-helper: audio-feed-2bfv: duplicate-name concurrent proofs isola
     );
   })();
 
-  // Give older proof 0 time to enter rollback and block on Worker 2's in-flight write
-  await new Promise((r) => setTimeout(r, 60));
+  // Unpause the workers only once proof 0's rollback has begun (state-gated, not timed)
+  await proof0RollbackStarted;
   unpauseProof2();
 
   await Promise.all([promise0, promiseWorkers]);
@@ -7301,6 +7348,7 @@ Deno.test("proof-helper: audio-feed-2bfv: parent directory rollback and multi-st
 
   const proofBWroteChild1 = Promise.withResolvers<void>();
   const proofARollbackHoldingParent = Promise.withResolvers<void>();
+  const proofBWritingChild2 = Promise.withResolvers<void>();
 
   // Proof B: writes child1, waits for Proof A to enter directory rollback, then writes child2 and passes
   const proofBPromise = runProof(
@@ -7313,8 +7361,14 @@ Deno.test("proof-helper: audio-feed-2bfv: parent directory rollback and multi-st
       // Wait until Proof A's rollback has acquired the lock on parentDir
       await proofARollbackHoldingParent.promise;
 
-      // Step 2: Write child2 under parent while Proof A's parentDir lock was acquired
-      await Deno.writeFile(child2, new Uint8Array([2, 2, 2]));
+      // Step 2: Write child2 under parent while Proof A's parentDir lock was acquired.
+      // The call is issued UNAWAITED and only then signalled, so "issued" is the state A
+      // waits on: the interception is in flight and B's write contends for the held lock
+      // (audio-feed-wtvmp). The final asserts hold under both interleavings; this gates the
+      // contended path the row exists to exercise without a fixed window.
+      const writingChild2 = Deno.writeFile(child2, new Uint8Array([2, 2, 2]));
+      proofBWritingChild2.resolve();
+      await writingChild2;
       c.check("proof B completed", true);
     },
     { logger: () => {} },
@@ -7340,8 +7394,9 @@ Deno.test("proof-helper: audio-feed-2bfv: parent directory rollback and multi-st
             if (phase === "lock-acquired" && path === parentDir) {
               // Signal Proof B that Proof A is actively holding the lock on parentDir!
               proofARollbackHoldingParent.resolve();
-              // Pause inside parentDir lock to guarantee Proof B attempts write while lock is held
-              await new Promise((r) => setTimeout(r, 40));
+              // Hold until B has ISSUED its child2 write (state, not a wall window -
+              // audio-feed-wtvmp); the restore below keeps the lock held while B contends.
+              await proofBWritingChild2.promise;
             }
           },
         },

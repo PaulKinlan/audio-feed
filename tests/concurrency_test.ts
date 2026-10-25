@@ -50,7 +50,10 @@ Deno.test("a throwing item rejects the caller and stops the pool starting later 
   // Release the survivors: without the abort flag they would now run indices 3 and
   // 4 (and then every remaining item), which `Promise.all` would never surface.
   inFlight.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  // One macrotask tick is an exact drain here (audio-feed-wtvmp): everything the pool can
+  // still do after the survivors resolve is microtask work (worker-loop pull and return),
+  // and no timer callback can run until the microtask queue is empty - load-independently.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assertEquals(
     [...started].sort((a, b) => a - b),
     [0, 1, 2],
