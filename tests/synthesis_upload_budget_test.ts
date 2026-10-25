@@ -600,17 +600,39 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
   const episodeId = "ep-aqms-heartbeat";
   const { ctx, stores } = await setupEnv(episodeId);
 
+  // audio-feed-uswe0: the heartbeat runs on the INJECTED clock (startClaimHeartbeat now takes
+  // the invocation clock) and the slow upload is a GATE the test holds, so "a beat lands while
+  // the put is in flight" is an order of operations the clock guarantees. The old row raced a
+  // REAL 1s interval against a REAL 2.2s window and its own comment confessed a >1.2s event-loop
+  // stall would redden it - this host's measured steal produces multi-second stalls. The 2.2s
+  // shape is kept as VIRTUAL time: two 1s heartbeat intervals pass inside one held transfer,
+  // inside a 10s budget the advances never reach.
+  const time = controlledInvocationClock();
   const audio = fakeAudio(1_000);
   const oldPut = stores.blobs.put.bind(stores.blobs);
-  let putStartedAt = 0;
-  stores.blobs.put = async (...args) => {
-    putStartedAt = Date.now();
-    await new Promise((r) => setTimeout(r, 2_200));
-    return oldPut(...args);
-  };
 
-  // Record every phase-less touch (the heartbeat) and every lifecycle log append.
+  let releaseUpload: () => void = () => {};
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  let uploadsInFlight = 0;
+  const putEntered = new Promise<void>((resolve) => {
+    stores.blobs.put = async (...args) => {
+      uploadsInFlight++;
+      resolve();
+      try {
+        await uploadGate;
+        return await oldPut(...args);
+      } finally {
+        uploadsInFlight--;
+      }
+    };
+  });
+
+  // Record every phase-less touch (the heartbeat) that lands while the put is PROVABLY in
+  // flight - by state, not by wall-clock windows.
   const heartbeatTimes: number[] = [];
+  let putStartMs = 0;
   const origTouch = stores.metadata.touchEpisodeClaim.bind(stores.metadata);
   stores.metadata.touchEpisodeClaim = (
     userId: string,
@@ -618,34 +640,42 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
     owner: string,
     update: { phase?: string; now?: string },
   ) => {
-    if (!update.phase && update.now === undefined) heartbeatTimes.push(Date.now());
+    if (!update.phase && update.now === undefined) {
+      if (uploadsInFlight > 0) heartbeatTimes.push(time.nowMs);
+    }
     return origTouch(userId, episodeId, owner, update);
   };
 
-  const r1 = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+  const running = runSynthesisBatch(ctx, () => Promise.resolve(audio), {
     owner: "aqms-heartbeat-1",
     leaseMs: 4_000, // heartbeat interval = clamp(lease/4, 1s, 30s) = 1s
     maxInvocationDurationMs: 10_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
+
+  await putEntered; // the terminal put is in flight; virtual time has not moved
+  putStartMs = time.nowMs;
+  await time.advance(1_000); // beat 1: fires the 1s heartbeat timer
+  await time.advance(1_000); // beat 2: the beat's own re-arm
+  assert(
+    heartbeatTimes.length >= 1,
+    `expected >=1 heartbeat while the upload is in flight, got ${JSON.stringify(heartbeatTimes)}`,
+  );
+  assert(
+    heartbeatTimes.every((t) => t > putStartMs),
+    `ORDER: every beat must be strictly after the put started (put at ${putStartMs}, beats ${
+      JSON.stringify(heartbeatTimes)
+    })`,
+  );
+  releaseUpload();
+  const r1 = await running;
 
   assertEquals(r1.ready.length, 1, "slow upload still completes within budget");
   const ep = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep?.status, "ready");
-
-  // The heartbeat must have fired at least once strictly AFTER the put began, and
-  // strictly BEFORE the put settled (it is the "worker alive mid-upload" signal).
-  // 1s heartbeat interval in a nominal ~2.15s window: an event-loop stall longer than ~1.2s would miss the interval and redden the row.
-  const putSettledAt = putStartedAt + 2_200;
-  const midUpload = heartbeatTimes.filter((t) => t > putStartedAt + 50 && t < putSettledAt);
-  assert(
-    midUpload.length >= 1,
-    `expected >=1 heartbeat during the upload, got ${
-      JSON.stringify(heartbeatTimes)
-    } (put ${putStartedAt}..${putSettledAt})`,
-  );
 
   // Phase-less touches must not produce claim-lifecycle log events (noise guard):
   // the only lifecycle events in this flow are the phase transitions themselves

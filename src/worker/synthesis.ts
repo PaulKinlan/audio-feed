@@ -528,29 +528,51 @@ export async function checkpointEpisodeClaim(
  * noise. It is best-effort: a failed touch (store hiccup, superseded claim) is
  * swallowed - the stage's own checkpoint/yield writes remain the durable truth.
  *
- * Returns a stop function; callers MUST call it when the stage ends. The timer is
- * unref'd so that even a missed stop cannot keep the isolate alive on its own.
+ * Returns a stop function; callers MUST call it when the stage ends. On the default clock the
+ * timer is unref'd so that even a missed stop cannot keep the isolate alive on its own.
+ *
+ * audio-feed-uswe0: with `clock` supplied, the beats are a self-re-arming one-shot on the SAME
+ * timeline as the budget the stage runs under, so "a heartbeat landed while the stage was awaited"
+ * is an order of operations the clock guarantees rather than a real-interval race against however
+ * busy the host was. Production passes no clock and keeps the real interval above.
  */
 export function startClaimHeartbeat(
   metadata: MetadataStore,
   userId: string,
   episodeId: string,
   owner: string,
-  opts: { leaseMs?: number; intervalMs?: number; now?: () => string } = {},
+  opts: { leaseMs?: number; intervalMs?: number; now?: () => string; clock?: InvocationClock } = {},
 ): () => void {
   const intervalMs = opts.intervalMs ??
     Math.min(30_000, Math.max(1_000, Math.floor((opts.leaseMs ?? DEFAULT_CLAIM_LEASE_MS) / 4)));
-  const timer = setInterval(() => {
+  const beat = () => {
     void metadata.touchEpisodeClaim(userId, episodeId, owner, { now: opts.now?.() }).catch(
       () => {},
     );
-  }, intervalMs);
-  try {
-    Deno.unrefTimer(timer);
-  } catch {
-    // Not a Deno timer handle in this runtime; the stop function still clears it.
+  };
+  if (!opts.clock) {
+    const timer = setInterval(beat, intervalMs);
+    try {
+      Deno.unrefTimer(timer);
+    } catch {
+      // Not a Deno timer handle in this runtime; the stop function still clears it.
+    }
+    return () => clearInterval(timer);
   }
-  return () => clearInterval(timer);
+  let live = true;
+  let cancelNext: () => void = () => {};
+  const arm = () => {
+    cancelNext = opts.clock!.setTimeout(() => {
+      if (!live) return;
+      beat();
+      arm();
+    }, intervalMs);
+  };
+  arm();
+  return () => {
+    live = false;
+    cancelNext();
+  };
 }
 
 /**
@@ -2604,7 +2626,9 @@ async function runSynthesisBatchCore(
       currentEpisode.userId,
       currentEpisode.id,
       opts.owner,
-      { leaseMs: opts.leaseMs },
+      // audio-feed-uswe0: the heartbeat runs on the SAME clock as the budget it sits inside,
+      // so a beat during the upload is on the invocation's timeline, not the host's.
+      { leaseMs: opts.leaseMs, clock },
     );
     let terminalOutcome: BudgetedOutcome<{ stored: BlobInfo; byteLength: number; wrote: boolean }>;
     try {
