@@ -48,9 +48,14 @@ function exists(path: string): boolean {
  *   the old implementation by assertion, deterministically: the attempt lands between write 1 and write 12.
  *
  *   PHASE B (the fix): the real helper, full budget, same handshake. It must report gone AND the directory
- *   must be absent at the moment it reports. Whether the writer still had a queued write at that instant is
- *   the helper's contract deciding "quiet", not this row's business - a cross-process cadence cannot promise
- *   more, and pretending otherwise is what made the row flaky.
+ *   must be absent once the race has SETTLED - the verdict is event-ordered (writer's .done sentinel, then
+ *   absence), never report-vs-assert raced: a queued write landing between the helper's return and this
+ *   row's check used to redden a truthful report (measured: the ONLY red in a 2359-row gate on a
+ *   steal-heavy host, audio-feed-1if0q). A red after the writer is provably done means the helper declared
+ *   quiet during a mid-stream gap and leaked a recreated directory - a true wj8o2 regression, named as such.
+ *   The per-gap margin is re-margined for steal (audio-feed-1if0q): settleMs 400 vs the 20ms cadence means
+ *   one inter-write stall must exceed 20x the cadence before the helper can see a false quiet - the host's
+ *   measured ~10x timer stretch cannot produce it.
  */
 function spawnLateWriter(dir: string, writes: number): Deno.ChildProcess {
   const script = `const dir = ${JSON.stringify(dir)};
@@ -85,8 +90,9 @@ async function waitForSentinel(path: string, ms: number): Promise<boolean> {
 
 /**
  * The two phases over one fixture shape, shared by both assertions below (audio-feed-8b4wx). 12 writes at
- * 20ms (~240ms nominal) against the full budget of 120 attempts (~3s+ at settleMs 25): ~10x headroom, and
- * both sides are iteration-counted, so the margin survives load instead of measuring it.
+ * 20ms (~240ms nominal) against the full budget of 30 attempts at settleMs 400 (~12s): ~50x total headroom,
+ * and a false "quiet" needs ONE inter-write stall above 400ms - 20x the cadence, past the ~10x stretch
+ * measured under this host's steal (audio-feed-1if0q; the old 120 x 25ms pairing left only 1.25x per gap).
  */
 const WRITES = 12;
 
@@ -128,14 +134,23 @@ Deno.test("audio-feed-wj8o2: removeDirWhenQuiet outlasts a child that keeps recr
       await waitForSentinel(root + ".started", 10_000),
       "the late writer never wrote anything; the race fixture is broken, not the teardown",
     );
-    const gone = await removeDirWhenQuiet(root, { attempts: 120, settleMs: 25 });
+    const gone = await removeDirWhenQuiet(root, { attempts: 30, settleMs: 400 });
     assert(gone, "removeDirWhenQuiet must report the directory gone");
+    // audio-feed-1if0q: the verdict is EVENT-ORDERED, never report-vs-assert raced. Wait for the
+    // writer's own .done sentinel and reap it BEFORE judging final absence: a write queued behind a
+    // stretched timer can land between the helper's return and this row's check, and that used to
+    // redden a truthful report (the only red in 57ape's 2359-row fast gate). A red AFTER the writer
+    // is provably done means the helper declared quiet mid-stream and leaked a recreated directory.
     assert(
-      !exists(root),
-      "the scratch must be absent at the moment the helper reports gone; reporting true over a present " +
-        "directory would be a lie about quiescence",
+      await waitForSentinel(root + ".done", 10_000),
+      "the late writer never signalled completion; the race fixture is broken, not the teardown",
     );
     await child.status.catch(() => {});
+    assert(
+      !exists(root),
+      "the writer is done and the helper reported gone, yet the scratch exists: the helper declared " +
+        "quiet during a mid-stream gap and leaked the recreated directory (audio-feed-wj8o2)",
+    );
   } finally {
     await child.status.catch(() => {});
     await Deno.remove(root, { recursive: true }).catch(() => {});
