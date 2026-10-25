@@ -21,7 +21,7 @@ import {
   SCRIPT_MAX_OUTPUT_TOKENS,
   textFromResponse,
 } from "../src/worker/script.ts";
-import { createGeminiSynthesizer } from "../src/worker/synthesis.ts";
+import { createGeminiSynthesizer, type GroundedScriptFallback } from "../src/worker/synthesis.ts";
 import { type DecodedAudioResult, GeminiTtsClient } from "../src/tts/gemini.ts";
 import type { AppContext } from "../src/app.ts";
 import { makeArticle, makeEpisode, makeSource } from "./fixtures.ts";
@@ -300,7 +300,11 @@ interface SynthesisCall {
   article?: { body: string };
 }
 
-function harness(options: { scriptGenerator: unknown; scriptTimeoutMs?: number }) {
+function harness(options: {
+  scriptGenerator: unknown;
+  scriptTimeoutMs?: number;
+  onScriptFallback?: (info: GroundedScriptFallback) => void;
+}) {
   const calls: SynthesisCall[] = [];
   const client = {
     synthesizeDialogue: (input: SynthesisCall) => {
@@ -325,6 +329,7 @@ function harness(options: { scriptGenerator: unknown; scriptTimeoutMs?: number }
     // deno-lint-ignore no-explicit-any
     scriptGenerator: options.scriptGenerator as any,
     scriptTimeoutMs: options.scriptTimeoutMs,
+    onScriptFallback: options.onScriptFallback,
   });
   return { calls, synthesize };
 }
@@ -497,32 +502,26 @@ Deno.test("synthesis: direct mode never pays for the research call", async () =>
 });
 
 Deno.test("synthesis: a refused research call still produces an episode, with the static dialogue", async () => {
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (message?: unknown) => {
-    warnings.push(String(message));
-  };
-  try {
-    const { calls, synthesize } = harness({
-      scriptGenerator: () => Promise.reject(new GroundedScriptError("search is down")),
-    });
-    await synthesize({
-      article: makeArticle({ title: "Fallback", content: "Body." }),
-      source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
-      episode: makeEpisode({}),
-      mode: "deepdive",
-    });
-    assertEquals(calls.length, 1, "the TTS call must still happen");
-    assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
-    assert(
-      warnings.some((line) =>
-        line.includes("grounded script stage failed") && line.includes("search is down")
-      ),
-      `expected the fallback reason to be logged, saw: ${JSON.stringify(warnings)}`,
-    );
-  } finally {
-    console.warn = originalWarn;
-  }
+  let fallback: GroundedScriptFallback | undefined;
+  const { calls, synthesize } = harness({
+    scriptGenerator: () => Promise.reject(new GroundedScriptError("search is down")),
+    onScriptFallback: (info) => {
+      fallback = info;
+    },
+  });
+  await synthesize({
+    article: makeArticle({ title: "Fallback", content: "Body." }),
+    source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
+    episode: makeEpisode({}),
+    mode: "deepdive",
+  });
+  assertEquals(calls.length, 1, "the TTS call must still happen");
+  assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
+  assertEquals(fallback?.reason, "error", "fallback reason must be structured 'error' signal");
+  assert(
+    fallback?.error instanceof GroundedScriptError && fallback.error.message === "search is down",
+    "fallback error must preserve the underlying GroundedScriptError",
+  );
 });
 
 Deno.test("synthesis: the stage can be switched off explicitly", async () => {
@@ -661,62 +660,52 @@ Deno.test("script deadline: the default clears three times the observed real-tra
 });
 
 Deno.test("synthesis: a generator that hangs forever still produces an episode", async () => {
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (message?: unknown) => {
-    warnings.push(String(message));
-  };
-  try {
-    const { calls, synthesize } = harness({
-      scriptTimeoutMs: 50,
-      // Deliberately ignores its signal: this is what the call-site race exists for.
-      scriptGenerator: () => new Promise(() => {}),
-    });
-    // docs/speed.md rule 2 (audio-feed-54up3): the 5s race below is a HANG GUARD, not an
-    // assertion - it replaces an `elapsed < 5_000` check that reddened when a loaded host
-    // delayed the 50ms deadline timer past the bound. The behavioural assertions are the
-    // observable events below: synthesize RETURNS (the fallback ran), the timeout warning is
-    // logged, and the TTS call still happens. The guard exists only to turn a broken fallback
-    // (synthesize awaits the hung generator forever) into a named red instead of a suite hang;
-    // at 100x the 50ms deadline it cannot trip on a merely slow host, because everything after
-    // the deadline is in-memory mocks.
-    let guard: ReturnType<typeof setTimeout> | undefined;
-    const hangGuard = new Promise<never>((_, reject) => {
-      guard = setTimeout(
-        () =>
-          reject(
-            new Error(
-              "synthesize did not return within 5s of the 50ms script deadline - the timeout " +
-                "race is not falling back to the static builder",
-            ),
+  let fallback: GroundedScriptFallback | undefined;
+  const { calls, synthesize } = harness({
+    scriptTimeoutMs: 50,
+    // Deliberately ignores its signal: this is what the call-site race exists for.
+    scriptGenerator: () => new Promise(() => {}),
+    onScriptFallback: (info) => {
+      fallback = info;
+    },
+  });
+  // docs/speed.md rule 2 (audio-feed-54up3): the 5s race below is a HANG GUARD, not an
+  // assertion - it replaces an `elapsed < 5_000` check that reddened when a loaded host
+  // delayed the 50ms deadline timer past the bound. The behavioural assertions are the
+  // observable events below: synthesize RETURNS (the fallback ran), the timeout warning is
+  // logged, and the TTS call still happens. The guard exists only to turn a broken fallback
+  // (synthesize awaits the hung generator forever) into a named red instead of a suite hang;
+  // at 100x the 50ms deadline it cannot trip on a merely slow host, because everything after
+  // the deadline is in-memory mocks.
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const hangGuard = new Promise<never>((_, reject) => {
+    guard = setTimeout(
+      () =>
+        reject(
+          new Error(
+            "synthesize did not return within 5s of the 50ms script deadline - the timeout " +
+              "race is not falling back to the static builder",
           ),
-        5_000,
-      );
-    });
-    try {
-      await Promise.race([
-        synthesize({
-          article: makeArticle({ title: "Hanging", content: "Body." }),
-          source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
-          episode: makeEpisode({}),
-          mode: "deepdive",
-        }),
-        hangGuard,
-      ]);
-    } finally {
-      clearTimeout(guard);
-    }
-    assertEquals(calls.length, 1, "the TTS call must still happen");
-    assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
-    assert(
-      warnings.some((line) =>
-        line.includes("grounded script stage failed") && line.includes("exceeded 50ms")
-      ),
-      `expected the timeout to be logged as the fallback reason, saw: ${JSON.stringify(warnings)}`,
+        ),
+      5_000,
     );
+  });
+  try {
+    await Promise.race([
+      synthesize({
+        article: makeArticle({ title: "Hanging", content: "Body." }),
+        source: makeSource({ voices: { deepdive: ["Kore", "Puck"] } }),
+        episode: makeEpisode({}),
+        mode: "deepdive",
+      }),
+      hangGuard,
+    ]);
   } finally {
-    console.warn = originalWarn;
+    clearTimeout(guard);
   }
+  assertEquals(calls.length, 1, "the TTS call must still happen");
+  assertEquals(calls[0]?.turns, undefined, "no researched turns means the static builder runs");
+  assertEquals(fallback?.reason, "timeout", "fallback reason must be structured 'timeout' signal");
 });
 
 // ─── a deadline that fires mid-body (audio-feed-0rmn) ────────────────────────
