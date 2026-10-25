@@ -654,14 +654,14 @@ Deno.test("explicit --timeout flag overrides declared README bound with [flag] p
     await Deno.mkdir(scriptsDir, { recursive: true });
     await Deno.mkdir(join(evidenceRoot, "audio-feed-long"), { recursive: true });
 
-    // Script takes ~1.5s to complete and prints PASS
+    // Script parks until killed by timeout; large safety bound ensures the timeout kill is the only exit path (audio-feed-8bwnx)
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
-      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+      `await new Promise((r) => setTimeout(r, 120_000));\nconsole.log("PASS finished");\n`,
     );
 
     // Declares Timeout: 5, while operator passes --timeout 1.
-    // Explicit --timeout 1 MUST OVERRIDE declared 5s, killing the 1.5s proof at 1s with [flag] provenance.
+    // Explicit --timeout 1 MUST OVERRIDE declared 5s, killing the parked proof at 1s with [flag] provenance.
     await Deno.writeTextFile(
       join(evidenceRoot, "audio-feed-long", "README.md"),
       "- Script: scripts/proof.ts\n- Timeout: 5\n- Asserts: finished\n",
@@ -736,10 +736,10 @@ Deno.test("missing declaration with explicit flag reports [flag] provenance (aud
     await Deno.mkdir(scriptsDir, { recursive: true });
     await Deno.mkdir(join(evidenceRoot, "audio-feed-undeclared"), { recursive: true });
 
-    // Script takes ~1.5s to complete
+    // Script parks until killed by timeout; large safety bound ensures the timeout kill is the only exit path (audio-feed-4ltgn)
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
-      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+      `await new Promise((r) => setTimeout(r, 120_000));\nconsole.log("PASS finished");\n`,
     );
 
     // No Timeout declared in README
@@ -768,30 +768,39 @@ Deno.test("declared bound exceedance reports [declared] provenance (audio-feed-k
     await Deno.mkdir(scriptsDir, { recursive: true });
     await Deno.mkdir(join(evidenceRoot, "audio-feed-tight"), { recursive: true });
 
-    // Script takes ~1.5s to complete
+    // Script parks until killed by timeout; large safety bound ensures the timeout kill is the only exit path (audio-feed-nszl8)
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
-      `await new Promise((r) => setTimeout(r, 1500));\nconsole.log("PASS finished");\n`,
+      `await new Promise((r) => setTimeout(r, 120_000));\nconsole.log("PASS finished");\n`,
     );
 
-    // README declares tight 1s bound
+    // README declares tight 2s bound
     await Deno.writeTextFile(
       join(evidenceRoot, "audio-feed-tight", "README.md"),
-      "- Script: scripts/proof.ts\n- Timeout: 1\n- Asserts: finished\n",
+      "- Script: scripts/proof.ts\n- Timeout: 2\n- Asserts: finished\n",
     );
 
-    // Run without --timeout flag; declared 1s bound must kill it -> [declared] provenance
+    // Run without --timeout flag; declared 2s bound must kill it -> [declared] provenance
     const res = await runTier(tempDir);
     assertEquals(res.code, 1, "exceeded declared bound must report UNKNOWN / exit 1");
     assertStringIncludes(
       res.stdout,
-      "UNKNOWN (exceeded the 1s bound [declared]; raise --timeout to decide it)",
+      "UNKNOWN (exceeded the 2s bound [declared]; raise --timeout to decide it)",
     );
 
-    // Explicit --timeout 10 overrides declared 1s bound and passes; 10s ceiling is >6x the 1.5s sleep work, absorbing scheduler latency.
-    const resOverride = await runTier(tempDir, ["--timeout", "10"]);
-    assertEquals(resOverride.code, 0, "explicit --timeout 10 overrides declared 1s bound");
-    assertStringIncludes(resOverride.stdout, "ok   docs/evidence/audio-feed-tight");
+    // Negative control per reviewer finding P1(a)/P1(b): explicit --timeout 1 overrides declared 2s bound
+    // with shorter timeout, killing the parked proof at 1s with [flag] provenance. Proves the requested
+    // value was applied (not default 300s, not declared 2s) while keeping the child blocked without timing delays.
+    const resOverride = await runTier(tempDir, ["--timeout", "1"]);
+    assertEquals(
+      resOverride.code,
+      1,
+      "explicit --timeout 1 must override declared bound and exit 1",
+    );
+    assertStringIncludes(
+      resOverride.stdout,
+      "UNKNOWN (exceeded the 1s bound [flag]; raise --timeout to decide it)",
+    );
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }
