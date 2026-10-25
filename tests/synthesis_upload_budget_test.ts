@@ -104,6 +104,11 @@ async function setupEnv(episodeId: string) {
 Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry commits that same blob without another PUT", async () => {
   const episodeId = "ep-avgc-late-put";
   const { ctx, stores } = await setupEnv(episodeId);
+  // audio-feed-rpf01: the budget clock is INJECTED so the row asserts an ORDER of
+  // operations - the put STARTS at virtual +0 and the 150ms deadline provably fires
+  // before the 250ms settle - instead of that a real 150ms window outlasted all the
+  // pre-put work on however busy the host was (measured: it did not, 8 runs in 9).
+  const time = controlledInvocationClock();
   const audio = fakeAudio(1_024);
   const oldPut = stores.blobs.put.bind(stores.blobs);
   const keys: string[] = [];
@@ -112,12 +117,16 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
     keys.push(key);
     // Model an atomic server-side PUT that finishes after the client aborts:
     // the local connection closed, but the complete object exists in storage.
-    // 250ms stub vs 150ms budget deadline relies on timers firing in due order (150 before 250); state read is gated on `await settled`.
+    // The 250ms settle is VIRTUAL on the injected clock, so "150 fires before 250"
+    // is the clock's due order, not the scheduler's; the advance is kicked one
+    // macrotask after the put's promise is handed back so the stage's race is
+    // watching when the abort lands. State read stays gated on `await settled`.
     settled = new Promise((resolve, reject) => {
-      setTimeout(
-        () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
-        250,
-      );
+      queueMicrotask(() => {
+        time.advance(250).then(() =>
+          oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject)
+        );
+      });
     });
     return settled as ReturnType<typeof oldPut>;
   };
@@ -128,9 +137,14 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(first.yielded.length, 1, "the budget must yield before the delayed PUT settles");
-  assertEquals(keys.length, 1, "the first tick started exactly one PUT");
+  assertEquals(
+    keys.length,
+    1,
+    "ORDER: the PUT started before the budget yielded (audio-feed-rpf01)",
+  );
   await settled;
   const existing = await stores.blobs.head(keys[0]!);
   assertEquals(existing?.size, audio.rawBytes.length, "completed upload must survive the yield");
@@ -142,6 +156,7 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(second.ready.length, 1, "the next fresh tick commits the retained blob");
   assertEquals(keys.length, 1, "retry must not PUT again, even under a new key");
@@ -179,12 +194,18 @@ Deno.test("audio-feed-avgc: completed PUT after budget yield survives and retry 
 Deno.test("audio-feed-avgc: absent object after an aborted PUT retries under the same key", async () => {
   const episodeId = "ep-avgc-aborted-put";
   const { ctx, stores } = await setupEnv(episodeId);
+  // audio-feed-rpf01: injected clock - the hanging put is aborted by a deadline the
+  // TEST fires one macrotask after the put starts, so "the PUT started before the
+  // budget aborted it" is an order the clock guarantees, not a race between all the
+  // pre-put work and a real 150ms window.
+  const time = controlledInvocationClock();
   const audio = fakeAudio(1_024);
   const oldPut = stores.blobs.put.bind(stores.blobs);
   const keys: string[] = [];
   stores.blobs.put = (key, body, opts) => {
     keys.push(key);
     if (keys.length > 1) return oldPut(key, body, opts);
+    queueMicrotask(() => void time.advance(150));
     return new Promise((_resolve, reject) => {
       opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
     });
@@ -195,6 +216,7 @@ Deno.test("audio-feed-avgc: absent object after an aborted PUT retries under the
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(first.yielded.length, 1);
   assertEquals(keys.length, 1);
@@ -205,6 +227,7 @@ Deno.test("audio-feed-avgc: absent object after an aborted PUT retries under the
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(second.ready.length, 1);
   assertEquals(
@@ -217,6 +240,10 @@ Deno.test("audio-feed-avgc: absent object after an aborted PUT retries under the
 Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reused or overwritten", async () => {
   const episodeId = "ep-avgc-mismatched-put";
   const { ctx, stores } = await setupEnv(episodeId);
+  // audio-feed-rpf01: injected clock, same shape as the late-put row above - the
+  // 250ms settle is virtual, so the deadline's firing precedes it by the clock's
+  // due order, whatever the host was doing.
+  const time = controlledInvocationClock();
   const audio = fakeAudio(1_024);
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let stagingKey = "";
@@ -225,12 +252,14 @@ Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reuse
   stores.blobs.put = (key, body, opts) => {
     stagingKey = key;
     puts++;
-    // 250ms delayed put vs 150ms budget deadline relies on timers firing in due order; read is state-gated on `await settled`.
+    // The settle is VIRTUAL on the injected clock (see the late-put row); the state
+    // read stays gated on `await settled`.
     settled = new Promise((resolve, reject) => {
-      setTimeout(
-        () => oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject),
-        250,
-      );
+      queueMicrotask(() => {
+        time.advance(250).then(() =>
+          oldPut(key, body, { contentType: opts?.contentType }).then(resolve, reject)
+        );
+      });
     });
     return settled as ReturnType<typeof oldPut>;
   };
@@ -240,6 +269,7 @@ Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reuse
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(first.yielded.length, 1);
   await settled;
@@ -252,6 +282,7 @@ Deno.test("audio-feed-avgc: equal-sized but different stored bytes are not reuse
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(second.ready.length, 0, "mismatched bytes must never become published audio");
   assertEquals(
