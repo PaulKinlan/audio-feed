@@ -1194,9 +1194,16 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
     }),
   );
 
+  // audio-feed-y3jfl: same injected-clock ORDER fix as q7zy(a) — this row also
+  // required script generation to BEGIN within ~95 REAL ms and reddened under
+  // 8-way saturation (measured: scriptCalls 0, 2 of 7 runs). Fire the deadline
+  // only once the generator is in flight; do not widen the 100ms.
+  const time = controlledInvocationClock();
+  const fireAbortInFlight = abortWhileInFlight(time);
   let scriptCalls = 0;
   const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
     scriptCalls++;
+    fireAbortInFlight();
     return new Promise<{
       turns: { speaker: "Alex" | "Sam"; text: string }[];
       sources: [];
@@ -1220,16 +1227,22 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
     estimatedTurnDurationMs: 1,
   });
 
-  // 100ms real invocation budget: requires script generation to begin within ~95ms before abort; in-memory stage entry supplies margin.
+  // 100ms invocation budget on the INJECTED clock: script generation provably
+  // begins (clock frozen until then), then the test fires the deadline mid-flight.
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-script",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 1,
+    clock: time.clock,
   });
 
-  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(
+    scriptCalls,
+    1,
+    "ORDER: the script generator was called before the budget aborted it (audio-feed-y3jfl)",
+  );
   assertEquals(result.failed.length, 0, "script budget abort must NOT fail episode");
   assertEquals(result.yielded.length, 1, "script budget abort must yield");
 
