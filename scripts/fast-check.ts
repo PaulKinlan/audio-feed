@@ -1247,10 +1247,21 @@ if (import.meta.main) {
   // fails closed with exit 2, here at entry, before any work. No task (gate, test:fast) passes either
   // flag, so a production run can never skip the check, and when it IS honoured the run says so in
   // plain text (below) rather than passing quietly.
+  //
+  // audio-feed-i8e0z: "fixture mode" means a usable fixture VALUE, not the flag's presence -
+  // `--fmt-fixture --skip-type-check` used to pass this guard (presence) while the value resolver
+  // below swallowed the flag as the fixture path, so fmt failed on a bogus path AND the skip was
+  // honoured. Resolve the value FIRST, here at entry, and let the guard judge that. A value that is
+  // itself a flag (`--...`) is not a value.
+  const fmtFixtureIdx = Deno.args.indexOf("--fmt-fixture");
+  const fmtFixture = fmtFixtureIdx !== -1 && fmtFixtureIdx + 1 < Deno.args.length &&
+      !Deno.args[fmtFixtureIdx + 1]!.startsWith("--")
+    ? Deno.args[fmtFixtureIdx + 1]
+    : null;
   const skipTypeCheck = Deno.args.includes("--skip-type-check");
-  if (skipTypeCheck && !Deno.args.includes("--fmt-fixture")) {
+  if (skipTypeCheck && !fmtFixture) {
     console.error(
-      "fast-gate: failed: --skip-type-check refused without --fmt-fixture — skipping the type-check is honoured only for the integration-test fixture mode (audio-feed-efgpr)",
+      "fast-gate: failed: --skip-type-check refused without --fmt-fixture <path> — skipping the type-check is honoured only for the integration-test fixture mode (audio-feed-efgpr, audio-feed-i8e0z)",
     );
     Deno.exit(2);
   }
@@ -1375,10 +1386,7 @@ ${auditUniverseDrift}`);
   // untracked, unformatted test file behind to fail the next gate in this worktree.
   // audio-feed-8rz5: explicit --fmt-fixture on argv is the ONLY way to pass an external fixture;
   // ambient environment variables are completely removed so they have zero effect.
-  const fmtFixtureIdx = Deno.args.indexOf("--fmt-fixture");
-  const fmtFixture = fmtFixtureIdx !== -1 && fmtFixtureIdx + 1 < Deno.args.length
-    ? Deno.args[fmtFixtureIdx + 1]
-    : null;
+  // (The value itself is resolved at entry, next to the --skip-type-check guard - audio-feed-i8e0z.)
   const fmtStep = formatCheckStep(fmtFixture);
   for (const step of [fmtStep, ["deno", "lint"], ["deno", "task", "check"]]) {
     // audio-feed-efgpr: the opt-out honoured above. The loop and its steps stay unconditional for
