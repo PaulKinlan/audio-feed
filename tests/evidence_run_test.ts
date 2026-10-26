@@ -791,15 +791,20 @@ Deno.test("declared bound exceedance reports [declared] provenance (audio-feed-k
     // Negative control per reviewer finding P1(a)/P1(b): explicit --timeout 1 overrides declared 2s bound
     // with shorter timeout, killing the parked proof at 1s with [flag] provenance. Proves the requested
     // value was applied (not default 300s, not declared 2s) while keeping the child blocked without timing delays.
+    //
+    // The bound/provenance line is asserted BEFORE the exit code on purpose (audio-feed-p4snp): an
+    // exit-code-first assertion fires before the bound is ever compared, so when the --timeout value is
+    // discarded while the flag is still accepted the red names only the exit code and hides which bound
+    // actually ran. Bound first makes that red name the effective bound and its provenance.
     const resOverride = await runTier(tempDir, ["--timeout", "1"]);
+    assertStringIncludes(
+      resOverride.stdout,
+      "UNKNOWN (exceeded the 1s bound [flag]; raise --timeout to decide it)",
+    );
     assertEquals(
       resOverride.code,
       1,
       "explicit --timeout 1 must override declared bound and exit 1",
-    );
-    assertStringIncludes(
-      resOverride.stdout,
-      "UNKNOWN (exceeded the 1s bound [flag]; raise --timeout to decide it)",
     );
   } finally {
     await Deno.remove(tempDir, { recursive: true });
