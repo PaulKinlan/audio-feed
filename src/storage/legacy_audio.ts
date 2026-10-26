@@ -885,8 +885,19 @@ async function cachedLegacyKeyOwnershipHolds(
  * is ambiguous (referenced by zero or multiple episodes globally) (audio-feed-65lf, audio-feed-ni04).
  *
  * Uses a bounded, in-memory cache per MetadataStore instance, invalidated immediately
- * on any metadata mutation and re-verified before authorizing a positive owner so newly
- * colliding tenant episodes never leak across tenants (audio-feed-ni04).
+ * on any metadata mutation made THROUGH THIS INSTANCE, and re-verified before authorizing
+ * a positive owner (audio-feed-y63gb: one targeted getEpisode) so moved/migrated/deleted
+ * keys disagree and fall back to a full rebuild.
+ *
+ * BOUNDED WINDOW, EXPLICIT (audio-feed-uhmzv): the invalidation hooks and the generation
+ * counter are PER INSTANCE (WeakMap/WeakSet keyed on the handle). A colliding episode added
+ * through a DIFFERENT MetadataStore handle over the same underlying store (another instance,
+ * e.g. another Deno Deploy isolate) is not visible to this handle's cache until INDEX_TTL_MS
+ * expires or the caller forces the store via options.bypassCache / clearLegacyKeyIndexCache.
+ * Within that window this handle can still authorize the cached owner for a key that has just
+ * become ambiguous elsewhere; callers that need the ambiguity IMMEDIATELY across handles must
+ * pass bypassCache. The same-handle property (audio-feed-ni04) is unaffected: additions
+ * through this handle invalidate immediately.
  */
 export async function getLegacyKeyUniqueOwner(
   metadata: MetadataStore,

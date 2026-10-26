@@ -38,6 +38,7 @@ import {
   releaseMigrationLock,
   renewMigrationLock,
 } from "../src/storage/legacy_audio.ts";
+import { KvMetadataStore } from "../src/storage/kv.ts";
 import { makeEpisode, makeSource, makeUser } from "./fixtures.ts";
 import { bootstrap } from "../src/server.ts";
 
@@ -1123,6 +1124,81 @@ Deno.test("getLegacyKeyUniqueOwner: invalidates and re-verifies ownership when c
 
   clearLegacyKeyIndexCache(stores.metadata);
 });
+
+Deno.test(
+  "getLegacyKeyUniqueOwner: a collision added through a DIFFERENT handle is not seen by this handle's cache until forced - the documented bounded window (audio-feed-uhmzv)",
+  async () => {
+    // CONTRACT PIN for the bounded window the getLegacyKeyUniqueOwner doc comment
+    // declares (audio-feed-uhmzv): invalidation hooks and the generation counter are per
+    // HANDLE, so a colliding tenant episode added through a second handle over the same
+    // underlying store is not visible to this handle's cached index until INDEX_TTL_MS
+    // expires or the caller forces the store. Within the window the cached owner IS still
+    // served - that is the accepted weakening of audio-feed-ni04's cross-handle wording,
+    // and this row makes it a stated contract instead of an accident. Same-handle
+    // additions invalidate immediately (the row above); forcing the store restores the
+    // ambiguity detection immediately (the last assertion here). If someone later restores
+    // cross-handle detection, this row FAILS BY NAME and must be rewritten with it.
+    const kv = await Deno.openKv(":memory:");
+    try {
+      const handleA = new KvMetadataStore(kv, { ownsConnection: false });
+      const handleB = new KvMetadataStore(kv, { ownsConnection: false });
+      await handleA.putUser(makeUser({ id: "alice", status: "approved" }));
+      await handleA.putEpisode(
+        makeEpisode({
+          id: "ep-alice",
+          userId: "alice",
+          mode: "direct",
+          status: "ready",
+          audioKey: "cross-handle.wav",
+        }),
+      );
+
+      // Warm handle A's cache (alice is the unique owner at this point).
+      assertEquals(
+        await getLegacyKeyUniqueOwner(handleA, "cross-handle.wav"),
+        "alice",
+      );
+
+      // A collision is added through handle B: handle A's hooks cannot see it.
+      await handleB.putUser(makeUser({ id: "bob", status: "approved" }));
+      await handleB.putEpisode(
+        makeEpisode({
+          id: "ep-bob",
+          userId: "bob",
+          mode: "direct",
+          status: "ready",
+          audioKey: "cross-handle.wav",
+        }),
+      );
+
+      // The documented window: handle A still serves the cached owner.
+      assertEquals(
+        await getLegacyKeyUniqueOwner(handleA, "cross-handle.wav"),
+        "alice",
+        "the bounded window is the contract: a cross-handle collision is not seen until TTL or a forced read",
+      );
+
+      // Forcing the store restores the ambiguity detection immediately.
+      assertEquals(
+        await getLegacyKeyUniqueOwner(handleA, "cross-handle.wav", { bypassCache: true }),
+        null,
+        "bypassCache must detect the cross-handle collision immediately",
+      );
+
+      // And the forced rebuild re-populates handle A's cache with the truth.
+      assertEquals(
+        await getLegacyKeyUniqueOwner(handleA, "cross-handle.wav"),
+        null,
+        "after the forced rebuild the cached handle serves the ambiguous key as null",
+      );
+
+      clearLegacyKeyIndexCache(handleA);
+      clearLegacyKeyIndexCache(handleB);
+    } finally {
+      await kv.close();
+    }
+  },
+);
 
 Deno.test(
   "getLegacyKeyUniqueOwner: a cached unique owner is re-verified with one targeted read, not a full rebuild (audio-feed-y63gb)",
