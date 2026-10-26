@@ -557,3 +557,64 @@ Deno.test("POST /api/request-access: spend gate authority & end-to-end access li
   );
   assertEquals(ingestApproved.status, 202);
 });
+
+Deno.test("POST /api/request-access: a declared oversized body is refused 413 before the read (audio-feed-oxw5g)", async () => {
+  const { fetch } = setup();
+
+  const big = JSON.stringify({
+    email: "alice@example.com",
+    displayName: "A".repeat(64 * 1024),
+  });
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: big,
+    }),
+  );
+
+  assertEquals(res.status, 413, "a body over the 4KiB cap must be refused");
+  const data = await res.json();
+  assertEquals(data.error, "Payload too large.");
+});
+
+Deno.test("POST /api/request-access: an undeclared chunked oversized body is bounded by construction (audio-feed-oxw5g)", async () => {
+  const { fetch } = setup();
+
+  // No content-length is declared (a stream body): the declared-length fast path
+  // cannot refuse, so the READ ITSELF must stop at cap+1 bytes and return 413.
+  const chunk = "A".repeat(2048);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 8; i++) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    },
+  });
+  const req = new Request(`${BASE}/api/request-access`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: stream,
+    // @ts-expect-error - duplex is not in the lib types for this cast
+    duplex: "half",
+  });
+  const res = await fetch(req);
+
+  assertEquals(res.status, 413, "a chunked body over the cap must be refused by the read bound");
+});
+
+Deno.test("POST /api/request-access: an oversized urlencoded form body is refused too (audio-feed-oxw5g)", async () => {
+  const { fetch } = setup();
+
+  const params = new URLSearchParams();
+  params.set("email", "alice@example.com");
+  params.set("displayName", "B".repeat(64 * 1024));
+  const res = await fetch(
+    new Request(`${BASE}/api/request-access`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    }),
+  );
+
+  assertEquals(res.status, 413, "the cap applies to the form path, not only JSON");
+});
