@@ -1415,14 +1415,25 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
     estimatedTurnDurationMs: 10,
   });
 
+  // audio-feed-qz1eb (docs/speed.md rule 1): the budget clock is INJECTED and each
+  // tick's deadline is fired VIRTUALLY once the script call is observably in flight
+  // (it hangs until aborted by construction), so "the script call started, then the
+  // budget aborted it" is an order the clock guarantees rather than a real 100ms
+  // window the host can steal.
+  const time = controlledInvocationClock();
+
   // Tick 1 with maxAttempts: 2 -> yields, advances attempts to 1
-  const r1 = await runSynthesisBatch(ctx, synth, {
+  const running1 = runSynthesisBatch(ctx, synth, {
     owner: "worker-fsr3-1",
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 10,
     maxAttempts: 2,
+    clock: time.clock,
   });
+  await waitFor(() => scriptCalls === 1, "the script call to be initiated", 5_000);
+  await time.advance(100); // fires the ~95ms derived deadline virtually
+  const r1 = await running1;
   assertEquals(r1.yielded.length, 1);
   assertEquals(r1.failed.length, 0);
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
@@ -1430,13 +1441,17 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
   assertEquals(ep1?.attempts, 1, "zero-progress yield must preserve attempt count");
 
   // Tick 2 with maxAttempts: 2 -> attempts exhausted without progress, must FAIL
-  const r2 = await runSynthesisBatch(ctx, synth, {
+  const running2 = runSynthesisBatch(ctx, synth, {
     owner: "worker-fsr3-2",
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 10,
     maxAttempts: 2,
+    clock: time.clock,
   });
+  await waitFor(() => scriptCalls === 2, "the second script call to be initiated", 5_000);
+  await time.advance(100);
+  const r2 = await running2;
   assertEquals(r2.yielded.length, 0, "must not yield indefinitely");
   assertEquals(r2.failed.length, 1, "must fail after maxAttempts zero-progress yields");
   const ep2 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
@@ -1492,15 +1507,26 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
     flushMarginMs: 5,
   });
 
+  // audio-feed-qz1eb (docs/speed.md rule 1): the budget clock is INJECTED and each
+  // tick's deadline is fired VIRTUALLY once the paid call is observably in flight, so
+  // "the paid call started, then the budget aborted it" is an order the clock
+  // guarantees - the old shape raced a real 100ms deadline against host scheduling
+  // and reddened as "TTS call was initiated" 0 while the code was correct (main
+  // measured 0/4 passes at load ~3.2).
+  const time = controlledInvocationClock();
+
   // Tick 1: yields with attempts=1
-  // 100ms real invocation budget: paid call must start within ~95ms of tick entry; in-memory scheduling margin prevents premature abort.
-  const r1 = await runSynthesisBatch(ctx, synth, {
+  const running1 = runSynthesisBatch(ctx, synth, {
     owner: "repro-1",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
+  await waitFor(() => paidCalls === 1, "the paid TTS call to be initiated", 5_000);
+  await time.advance(100); // fires the ~95ms derived deadline virtually
+  const r1 = await running1;
   assertEquals(r1.yielded.length, 1);
   assertEquals(r1.failed.length, 0);
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
@@ -1508,13 +1534,17 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   assertEquals(ep1?.attempts, 1, "attempts must advance to 1 on uncommitted yield");
 
   // Tick 2: reaches maxAttempts (2) with zero progress -> fails!
-  const r2 = await runSynthesisBatch(ctx, synth, {
+  const running2 = runSynthesisBatch(ctx, synth, {
     owner: "repro-2",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
+  await waitFor(() => paidCalls === 2, "the second paid TTS call to be initiated", 5_000);
+  await time.advance(100);
+  const r2 = await running2;
   assertEquals(r2.yielded.length, 0);
   assertEquals(r2.failed.length, 1);
   const ep2 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
@@ -1528,6 +1558,7 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(r3.yielded.length, 0);
   assertEquals(r3.failed.length, 0);
@@ -1618,23 +1649,35 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
 
   const oldPut = stores.blobs.put.bind(stores.blobs);
   let putCalls = 0;
-  let putSettledAt = 0;
+  let putSettled = false;
   let putAborted = 0;
   let putSettlement: Promise<unknown> = Promise.resolve();
+  // audio-feed-qz1eb (docs/speed.md rule 1): the budget clock is INJECTED and the
+  // transfer parks on a gate the test holds, so "the deadline aborted the transfer
+  // while it was in flight" is an order the clock guarantees. The old shape raced a
+  // real 80ms deadline against a real 135ms sleep; under steal the deadline fired
+  // after the put settled and the row reddened as "blobs.put was started" 0 while
+  // the code was correct (gate-observed twice).
+  const time = controlledInvocationClock();
+  let releasePut: () => void = () => {};
+  const putGate = new Promise<void>((resolve) => {
+    releasePut = resolve;
+  });
+  let putEnteredFlag = false;
   stores.blobs.put = (...args) => {
     putCalls++;
+    putEnteredFlag = true;
     const attempt = (async () => {
       try {
-        await new Promise((r) => setTimeout(r, 135));
+        await putGate;
         return await oldPut(...args);
       } catch (error) {
         // THE ORDER FACT this test pins: the deadline aborted the transfer WHILE IT WAS
-        // IN FLIGHT. The elapsed clock below is only a wide sanity bound (audio-feed-y2ex:
-        // order/property first, wall-clock literals last).
+        // IN FLIGHT (parked here, undecided).
         if ((args[2] as { signal?: AbortSignal } | undefined)?.signal?.aborted) putAborted++;
         throw error;
       } finally {
-        putSettledAt = performance.now();
+        putSettled = true;
       }
     })();
     putSettlement = attempt;
@@ -1644,35 +1687,28 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
   const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
   const synth = () => Promise.resolve(decodedFromWav(wav));
 
-  const start = performance.now();
-  const r1 = await runSynthesisBatch(ctx, synth, {
+  const running = runSynthesisBatch(ctx, synth, {
     owner: "upload-probe-inflight-1",
     maxInvocationDurationMs: 80,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 10, // Allows preflight to pass (10 + 5 < 80)
     flushMarginMs: 5,
+    clock: time.clock,
   });
-  const elapsed = performance.now() - start;
-  // The aborted transfer may still be settling when the batch yields (that is the point);
-  // await it so the counts below are facts, not races.
+  // Hold the transfer in flight, then fire the 80ms deadline VIRTUALLY: the abort
+  // wins while the transfer is parked and undecided.
+  await waitFor(() => putEnteredFlag, "the terminal put to be entered", 5_000);
+  await time.advance(80);
+  const r1 = await running;
+  // THE PROPERTY (audio-feed-y2ex cure, restated as state by qz1eb): the batch's yield
+  // decision PRECEDED the transfer's settlement - the transfer was still parked when
+  // the batch returned, and it ended BECAUSE of the deadline (no zombie left running).
+  assert(!putSettled, "the batch must yield while the transfer is still in flight (order)");
+  releasePut();
+  // The released transfer was aborted mid-flight: its settlement is the rejection.
   await putSettlement.catch(() => {});
-
-  // THE PROPERTY (audio-feed-y2ex cure, applied because this test flaked twice under
-  // load): the budget aborted the put BEFORE it settled — a statement about ORDER, not
-  // milliseconds. The batch's yield decision preceded the transfer's settlement, the
-  // transfer ended BECAUSE of the deadline, and it DID end (no zombie left running).
   assertEquals(putCalls, 1, "blobs.put was started");
   assertEquals(putAborted, 1, "the deadline must abort the in-flight transfer");
-  assert(
-    elapsed < putSettledAt - start,
-    "the batch must yield while the transfer is still in flight (order, not ms)",
-  );
-  // Sanity bound only — deliberately WIDE (2s against an 80ms budget) so scheduler noise
-  // on a loaded 2-vCPU box cannot flip this test; the order assertions above are the test.
-  assert(
-    elapsed < 2_000,
-    `elapsed (${elapsed}ms) sanity bound — the order assertions above are the test`,
-  );
   assertEquals(r1.ready.length, 0, "must not finish ready past budget");
   assertEquals(r1.yielded.length, 1, "must abort upload and yield claim");
 
@@ -1820,40 +1856,51 @@ Deno.test("withInvocationBudget: enforces preflight, deadline derivation, proven
 
 Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation budget and yields cleanly", async () => {
   const { ctx, stores } = await setupEnv();
-  const oldComplete = stores.metadata.completeEpisode.bind(stores.metadata);
-  let completeSettledAt = 0;
-  stores.metadata.completeEpisode = async (...args) => {
-    try {
-      await new Promise((r) => setTimeout(r, 140));
-      return await oldComplete(...args);
-    } finally {
-      completeSettledAt = performance.now();
-    }
+  // audio-feed-qz1eb (docs/speed.md rule 1): the budget clock is INJECTED and the
+  // terminal metadata write parks on a gate the test holds, so "the budget-yield was
+  // decided while the write was still in flight" is an ORDER the clock guarantees.
+  // The old shape raced a real 80ms deadline against a real 140ms sleep: under steal
+  // the deadline fired after the write settled and the row reddened as "must cleanly
+  // yield claim" 0 while the code was correct (gate-observed).
+  const time = controlledInvocationClock();
+  let releaseWrite: () => void = () => {};
+  const writeGate = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  let writeSettled = false;
+  let writeEnteredFlag = false;
+  stores.metadata.completeEpisode = async () => {
+    writeEnteredFlag = true;
+    await writeGate;
+    writeSettled = true;
+    // The claim was yielded by the budget cleanup while this write sat parked; the
+    // real store's CAS would refuse it, so the stub models the refusal rather than
+    // writing ready behind a yielded claim.
+    return false;
   };
-  const started = performance.now();
-  const result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+  const running = runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-upload-commit",
     maxInvocationDurationMs: 80,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
-  const yieldReturnedAt = performance.now();
-  const elapsed = yieldReturnedAt - started;
-  // THE ORDER PROPERTY (audio-feed-y2ex cure): the budget-yield decision PRECEDED the
-  // metadata write's settlement — the write was still in flight when its deadline fired,
-  // which is the bounded-yield fact. A wall-clock literal here flaked under load; the
-  // elapsed bound below is a deliberately wide sanity check (2s against an 80ms budget),
-  // not the assertion.
-  // Order fact across two timestamps (80ms abort vs 140ms completeEpisode delay, ~60ms separation): microtasks drain before next timer.
+
+  // Hold the write in flight, then fire the 80ms deadline VIRTUALLY: the yield is
+  // decided while the write is parked - the bounded-yield fact, as an order.
+  await waitFor(() => writeEnteredFlag, "the terminal metadata write to be entered", 5_000);
+  await time.advance(80);
+  const result = await running;
+
+  // THE ORDER PROPERTY (audio-feed-y2ex, restated as state by qz1eb): the budget-yield
+  // decision PRECEDED the metadata write's settlement - the write never settled before
+  // the batch returned.
   assert(
-    completeSettledAt === 0 || yieldReturnedAt < completeSettledAt,
-    "the yield must be decided while the terminal write is still in flight (order, not ms)",
+    !writeSettled,
+    "the yield must be decided while the terminal write is still in flight (order)",
   );
-  assert(
-    elapsed < 2_000,
-    `elapsed (${elapsed}ms) sanity bound — the order assertion above is the test`,
-  );
+  releaseWrite();
   assertEquals(
     result.ready.length,
     0,
