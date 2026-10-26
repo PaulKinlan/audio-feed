@@ -188,6 +188,10 @@ making the gate red by derivation is audio-feed-4kl3.
   the Modern Web Guidance forms reference inline — in `src/routes/shell.ts` (every text-focus
   control in the main shell), `src/assets/listen.css` (the same for the standalone player) and
   `src/assets/home.css` (the home page's url/password inputs). It is a per-root rule rather than a
-  Claim-B shared-token unification (there is no single stylesheet all three share), and **no proof
-  script asserts it** (`audio-feed-jb1k`: this bullet previously cited
-  `scripts/mobile-overflow-browser-proof.ts`, which exists in no commit).
+  Claim-B shared-token unification (there is no single stylesheet all three share). The floor IS
+  asserted on a rendered page: `scripts/listen-filter-browser-proof.ts` computes every text control
+  at 390x844 and asserts `>= 16px` — including against a page-level `0.9rem` rule that would
+  otherwise win — with the falsifiable mutation check that removes the floor's declarations and
+  reads the search box below 16px (`audio-feed-nmw3`: before that script, NOTHING asserted the
+  floor — no proof script and no verify_\* script touched font size). This bullet previously cited
+  `scripts/mobile-overflow-browser-proof.ts`, which exists in no commit (`audio-feed-jb1k`).
