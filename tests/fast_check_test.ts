@@ -1374,6 +1374,44 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "audio-feed-i8e0z: a --fmt-fixture flag with no usable VALUE is not fixture mode for --skip-type-check",
+  async () => {
+    // The guard used to read argv PRESENCE: `--fmt-fixture --skip-type-check` passed it while the
+    // value resolver swallowed the flag as the fixture path, so fmt failed on a bogus path AND the
+    // type-check was skipped. Both orderings must refuse with exit 2.
+    for (
+      const args of [
+        ["--fmt-fixture", "--skip-type-check"],
+        ["--skip-type-check", "--fmt-fixture"],
+      ]
+    ) {
+      const out = await new Deno.Command("deno", {
+        args: [
+          "run",
+          "--allow-read",
+          "--allow-run=git,deno",
+          "--allow-env",
+          "scripts/fast-check.ts",
+          ...args,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const stderr = new TextDecoder().decode(out.stderr);
+      assertEquals(
+        out.code,
+        2,
+        `${args.join(" ")} must exit 2 (no usable fixture value): ${stderr}`,
+      );
+      assert(
+        stderr.includes("--skip-type-check refused without --fmt-fixture <path>"),
+        `stderr must name the refusal: ${stderr}`,
+      );
+    }
+  },
+);
+
 Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programmatically", () => {
   // audio-feed-vdys: changedFiles accepts 0 arguments; untrackedOnly option is eliminated
   // entirely from the API so synthetic selection cannot be requested programmatically.
