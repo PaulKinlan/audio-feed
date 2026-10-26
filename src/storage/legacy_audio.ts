@@ -866,6 +866,21 @@ async function buildLegacyKeyIndex(
 }
 
 /**
+ * Targeted re-verification of a cached unique owner (audio-feed-y63gb): ONE
+ * getEpisode read instead of a full index rebuild. The owner must still exist
+ * and still point at the same normalized legacy key - a moved, migrated or
+ * deleted key disagrees and falls back to the full rebuild.
+ */
+async function cachedLegacyKeyOwnershipHolds(
+  metadata: MetadataStore,
+  entry: KeyOwnerEntry,
+  normKey: string,
+): Promise<boolean> {
+  const ep = await metadata.getEpisode(entry.userId, entry.episodeId);
+  return !!ep?.audioKey && normalizeLegacyAudioKey(ep.audioKey) === normKey;
+}
+
+/**
  * Returns the unique owner user ID of a legacy flat audio key, or null if the key
  * is ambiguous (referenced by zero or multiple episodes globally) (audio-feed-65lf, audio-feed-ni04).
  *
@@ -894,9 +909,21 @@ export async function getLegacyKeyUniqueOwner(
     cached = await buildLegacyKeyIndex(metadata, now);
   } else {
     const cachedEntry = cached.owners.get(normKey);
-    // Re-verify positive cached ownership or unindexed keys so even cross-handle KV writes
-    // cannot leak a newly colliding tenant blob during the TTL window (audio-feed-ni04).
-    if (!cachedEntry || cachedEntry.count === 1) {
+    // audio-feed-y63gb: re-verify a cached UNIQUE owner with one targeted
+    // getEpisode read instead of rebuilding the whole index - count===1 is
+    // the NORMAL case (the one line 905 returns an owner for), so the old
+    // unconditional rebuild made the 60s cache dead for exactly the
+    // population it serves: every playback of a legacy-keyed episode paid a
+    // full listUsers + paginated-episodes scan. The targeted read keeps the
+    // audio-feed-ni04 property that the authorized owner still exists and
+    // still points at this key; a disagreement (or no cached entry at all)
+    // falls back to the full rebuild. Ambiguous cached entries (count > 1)
+    // keep serving from cache and still yield null on the return path below.
+    const needsRebuild = cachedEntry
+      ? cachedEntry.count === 1 &&
+        !(await cachedLegacyKeyOwnershipHolds(metadata, cachedEntry, normKey))
+      : true;
+    if (needsRebuild) {
       cached = await buildLegacyKeyIndex(metadata, now);
     }
   }
