@@ -242,9 +242,10 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
       const until = async <T>(
         probe: () => Promise<T>,
         ready: (value: T) => boolean,
+        timeoutMs = 5000,
       ): Promise<T> => {
-        // State-gated CDP poll with 5s deadline: loops until ready condition matches; host scheduling delay adds poll cycles rather than failing a fixed sleep.
-        const deadline = Date.now() + 5000;
+        // State-gated CDP poll with a deadline: loops until ready condition matches; host scheduling delay adds poll cycles rather than failing a fixed sleep.
+        const deadline = Date.now() + timeoutMs;
         let value = await probe();
         while (!ready(value) && Date.now() < deadline) {
           await sleep(50);
@@ -258,6 +259,10 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         );
         // The external listen stylesheet can arrive after navigation; scrolling a short
         // document clamps to zero and a later layout does not replay scrollTo().
+        // audio-feed-1vxbj: this wait is page LOAD (navigation + stylesheet + layout), not a
+        // style-state poll - under a full-gate load a starved renderer blew the 5s default
+        // (measured: the gate run failed here at 21s into the row; the isolated pass takes
+        // 22s). It gets 20s; the state polls below keep 5s.
         const loaded = await until(
           () =>
             evaluate(
@@ -266,8 +271,9 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
               } && document.readyState === "complete" && document.documentElement.scrollHeight > innerHeight`,
             ),
           Boolean,
+          20_000,
         );
-        assert(loaded, `${url}: page did not become scrollable`);
+        assert(loaded, `${url}: page did not become scrollable within 20s`);
         const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
         // State-gated CDP poll under 5s deadline: predicate checks initial sticky state; renderer delay adds poll iterations.
         const before = await until(
