@@ -564,8 +564,10 @@ export function startClaimHeartbeat(
   const arm = () => {
     cancelNext = opts.clock!.setTimeout(() => {
       if (!live) return;
+      arm(); // re-arm BEFORE the beat (review finding audio-feed-72nv9): a
+      // synchronous throw out of the touch must not kill the chain, matching
+      // the real-interval branch where the interval keeps firing.
       beat();
-      arm();
     }, intervalMs);
   };
   arm();
@@ -2626,9 +2628,13 @@ async function runSynthesisBatchCore(
       currentEpisode.userId,
       currentEpisode.id,
       opts.owner,
-      // audio-feed-uswe0: the heartbeat runs on the SAME clock as the budget it sits inside,
-      // so a beat during the upload is on the invocation's timeline, not the host's.
-      { leaseMs: opts.leaseMs, clock },
+      // audio-feed-uswe0, per review finding audio-feed-72nv9: pass the
+      // CALLER-INJECTED clock only. `clock` (the resolved local) is always
+      // truthy - REAL_INVOCATION_CLOCK fallback - so production would always
+      // take the clocked branch and lose the unref'd real-interval invariant.
+      // Undefined in production -> the real setInterval path; a test that
+      // injects a clock (the aqms rows) still drives the beats on it.
+      { leaseMs: opts.leaseMs, clock: options.clock },
     );
     let terminalOutcome: BudgetedOutcome<{ stored: BlobInfo; byteLength: number; wrote: boolean }>;
     try {

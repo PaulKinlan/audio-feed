@@ -17,6 +17,8 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, TERMINAL_STAGING_MARKER_HASH } from "../src/worker/synthesis.ts";
+import { startClaimHeartbeat } from "../src/worker/synthesis.ts";
+import type { MetadataStore } from "../src/storage/mod.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
@@ -554,6 +556,45 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
   const ep = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep?.status, "failed");
   assert((ep?.error ?? "").includes("cannot fit the invocation budget"));
+});
+
+Deno.test("audio-feed-72nv9: startClaimHeartbeat without an injected clock keeps the real-interval production branch", async () => {
+  // Review finding audio-feed-72nv9: the terminal call site must pass the
+  // CALLER-INJECTED clock (undefined in production), not the resolved local -
+  // otherwise every production upload takes the clocked branch and loses the
+  // unref'd real-interval invariant (a missed stop then holds the isolate
+  // open; the reviewer measured hang-until-killed vs clean exit). This row
+  // pins the production branch by its OBSERVABLE: beats arrive on real time
+  // with NO clock driven, and stop() ends them.
+  const beats: number[] = [];
+  const metadata = {
+    touchEpisodeClaim: () => {
+      beats.push(Date.now());
+      return Promise.resolve(true);
+    },
+  } as unknown as MetadataStore;
+  const stop = startClaimHeartbeat(metadata, "user-1", "ep-72nv9", "worker-72nv9", {
+    intervalMs: 20,
+  });
+  try {
+    const limit = Date.now() + 2_000;
+    while (beats.length < 2 && Date.now() < limit) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert(
+      beats.length >= 2,
+      `expected real-interval beats with no injected clock, got ${beats.length} - the production branch did not fire`,
+    );
+  } finally {
+    stop();
+  }
+  const afterStop = beats.length;
+  await new Promise((r) => setTimeout(r, 100));
+  assertEquals(
+    beats.length,
+    afterStop,
+    "stop() must end the beats on the production branch",
+  );
 });
 
 Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow terminal upload without phase changes", async () => {
