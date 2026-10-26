@@ -1390,9 +1390,17 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
     }),
   );
 
+  // audio-feed-2rny6: same injected-clock ORDER fix as q7zy (y3jfl). The 100ms budget
+  // is on the shared controlled clock, frozen until the script call is in flight, then
+  // the test fires the deadline - so "the script call started before the budget
+  // aborted it" is an order, not ~95 real ms of pre-stage work. One fresh
+  // abortWhileInFlight per tick (the helper is one-shot). 100ms NOT widened.
+  const time = controlledInvocationClock();
+  let fireAbortInFlight = abortWhileInFlight(time);
   let scriptCalls = 0;
   const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
     scriptCalls++;
+    fireAbortInFlight();
     return new Promise<{
       turns: { speaker: "Alex" | "Sam"; text: string }[];
       sources: [];
@@ -1422,7 +1430,13 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
     flushMarginMs: 5,
     estimatedTurnDurationMs: 10,
     maxAttempts: 2,
+    clock: time.clock,
   });
+  assertEquals(
+    scriptCalls,
+    1,
+    "ORDER: the script call was initiated before the budget aborted it (audio-feed-2rny6)",
+  );
   assertEquals(r1.yielded.length, 1);
   assertEquals(r1.failed.length, 0);
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-fsr3-stall");
@@ -1430,12 +1444,14 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
   assertEquals(ep1?.attempts, 1, "zero-progress yield must preserve attempt count");
 
   // Tick 2 with maxAttempts: 2 -> attempts exhausted without progress, must FAIL
+  fireAbortInFlight = abortWhileInFlight(time);
   const r2 = await runSynthesisBatch(ctx, synth, {
     owner: "worker-fsr3-2",
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 10,
     maxAttempts: 2,
+    clock: time.clock,
   });
   assertEquals(r2.yielded.length, 0, "must not yield indefinitely");
   assertEquals(r2.failed.length, 1, "must fail after maxAttempts zero-progress yields");
@@ -1469,12 +1485,19 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
     }),
   );
 
+  // audio-feed-2rny6: same injected-clock ORDER fix as q7zy (y3jfl). The 100ms budget
+  // is on the shared controlled clock, frozen until the paid TTS call is in flight,
+  // then the test fires the deadline - one fresh abortWhileInFlight per tick (the
+  // helper is one-shot). 100ms NOT widened.
+  const time = controlledInvocationClock();
+  let fireAbortInFlight = abortWhileInFlight(time);
   let paidCalls = 0;
   const client = new GeminiTtsClient({
     apiKey: "dummy",
     timeoutRetries: 0,
     fetchFn: (_url, init) => {
       paidCalls++;
+      fireAbortInFlight();
       return new Promise((_resolve, reject) => {
         init?.signal?.addEventListener(
           "abort",
@@ -1493,14 +1516,19 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   });
 
   // Tick 1: yields with attempts=1
-  // 100ms real invocation budget: paid call must start within ~95ms of tick entry; in-memory scheduling margin prevents premature abort.
   const r1 = await runSynthesisBatch(ctx, synth, {
     owner: "repro-1",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
+  assertEquals(
+    paidCalls,
+    1,
+    "ORDER: the TTS call was initiated before the budget aborted it (audio-feed-2rny6)",
+  );
   assertEquals(r1.yielded.length, 1);
   assertEquals(r1.failed.length, 0);
   const ep1 = await stores.metadata.getEpisode("user-1", "ep-o88z-stall");
@@ -1508,12 +1536,14 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   assertEquals(ep1?.attempts, 1, "attempts must advance to 1 on uncommitted yield");
 
   // Tick 2: reaches maxAttempts (2) with zero progress -> fails!
+  fireAbortInFlight = abortWhileInFlight(time);
   const r2 = await runSynthesisBatch(ctx, synth, {
     owner: "repro-2",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(r2.yielded.length, 0);
   assertEquals(r2.failed.length, 1);
@@ -1522,12 +1552,14 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
   assertEquals(ep2?.attempts, 2, "attempts must be 2");
 
   // Tick 3: failed episode is not picked up, paidCalls remains bounded
+  fireAbortInFlight = abortWhileInFlight(time);
   const r3 = await runSynthesisBatch(ctx, synth, {
     owner: "repro-3",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   assertEquals(r3.yielded.length, 0);
   assertEquals(r3.failed.length, 0);
