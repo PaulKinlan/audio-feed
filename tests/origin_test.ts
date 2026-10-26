@@ -160,6 +160,58 @@ Deno.test("a malformed forwarded header falls back rather than emitting nonsense
 });
 
 // ---------------------------------------------------------------------------
+// audio-feed-xqliz: the forwarded PROTO token is a header value too
+// ---------------------------------------------------------------------------
+
+Deno.test("a non-{http,https} forwarded proto can never become the scheme", () => {
+  // Measured in this repo's Deno: new URL('null://example.com').origin === 'null' - a
+  // non-special scheme is syntactically valid with an OPAQUE origin, so the old try/catch
+  // let the string 'null' be advertised as the origin of every feed selfUrl and enclosure.
+  for (const proto of ["null", "javascript", "foo", "", "HTTPS "]) {
+    const resolved = resolveOrigin(
+      { trustProxyHeaders: true },
+      req("http://internal:8000/", {
+        "x-forwarded-host": "audio.example.com",
+        "x-forwarded-proto": proto,
+      }),
+    );
+    assertEquals(
+      resolved.baseUrl,
+      "https://audio.example.com",
+      `proto token ${JSON.stringify(proto)} must fall back to https, not be interpolated`,
+    );
+  }
+});
+
+Deno.test("a forwarded http proto is honoured only for a loopback host", () => {
+  // Local dev behind a proxy is the legitimate http case.
+  const loopback = resolveOrigin(
+    { trustProxyHeaders: true },
+    req("http://internal:8000/", {
+      "x-forwarded-host": "localhost:8000",
+      "x-forwarded-proto": "http",
+    }),
+  );
+  assertEquals(loopback.baseUrl, "http://localhost:8000");
+
+  // On a public host an advertised http origin puts the feed token (a bearer capability in
+  // the enclosure path) onto cleartext, so a forwarded client-supplied 'http' must not
+  // downgrade the origin (audio-feed-xqliz case b).
+  const downgraded = resolveOrigin(
+    { trustProxyHeaders: true },
+    req("http://internal:8000/", {
+      "x-forwarded-host": "audio.example.com",
+      "x-forwarded-proto": "http",
+    }),
+  );
+  assertEquals(
+    downgraded.baseUrl,
+    "https://audio.example.com",
+    "a public host must not advertise a cleartext origin from a header",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Cache safety
 // ---------------------------------------------------------------------------
 

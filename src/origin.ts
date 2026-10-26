@@ -320,13 +320,27 @@ export function requestOrigin(
     // Only reachable when an operator has stated a trusted proxy is in front.
     const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
     if (host) {
-      const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ||
-        "https";
+      // audio-feed-xqliz: the proto token is a header value too, and only {http, https} may
+      // be interpolated into the candidate. Any other token ('null', 'javascript', 'foo') is a
+      // syntactically VALID non-special scheme whose URL has an OPAQUE origin - measured in this
+      // repo's Deno: new URL('null://example.com').origin === 'null' - so the old try/catch let
+      // the string 'null' become the advertised origin of every feed selfUrl and enclosure URL.
+      const rawProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim()
+        .toLowerCase();
+      const proto = rawProto === "http" || rawProto === "https" ? rawProto : "https";
       const candidate = `${proto}://${host}`;
       try {
         // Round-trip through URL so a malformed header cannot produce a
         // syntactically broken origin in a feed document.
-        return normalise(new URL(candidate).origin);
+        const parsed = new URL(candidate);
+        // audio-feed-xqliz (b): a forwarded 'http' for a PUBLIC host downgrades every URL built
+        // from this origin to cleartext - and feed enclosure URLs carry a feed token (a bearer
+        // capability) in their path. Honour http only for a loopback host (local dev behind a
+        // proxy); anywhere else the advertised origin is https.
+        if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname.toLowerCase())) {
+          parsed.protocol = "https:";
+        }
+        return normalise(parsed.origin);
       } catch {
         // Fall through to the request URL rather than emitting nonsense.
       }
