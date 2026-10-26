@@ -1123,3 +1123,49 @@ Deno.test("getLegacyKeyUniqueOwner: invalidates and re-verifies ownership when c
 
   clearLegacyKeyIndexCache(stores.metadata);
 });
+
+Deno.test(
+  "getLegacyKeyUniqueOwner: a cached unique owner is re-verified with one targeted read, not a full rebuild (audio-feed-y63gb)",
+  async () => {
+    const stores = memoryStores();
+    await stores.metadata.putUser(makeUser({ id: "carol", status: "approved" }));
+    await stores.metadata.putEpisode(
+      makeEpisode({
+        id: "ep-carol",
+        userId: "carol",
+        mode: "direct",
+        status: "ready",
+        audioKey: "carol-set.wav",
+      }),
+    );
+
+    // Warm the cache: this first call legitimately builds the index.
+    assertEquals(await getLegacyKeyUniqueOwner(stores.metadata, "carol-set.wav"), "carol");
+
+    // Spy on listUsers - the full rebuild's first step - on the live instance.
+    const origListUsers = stores.metadata.listUsers.bind(stores.metadata);
+    let listUsersCalls = 0;
+    stores.metadata.listUsers = (...args: Parameters<typeof origListUsers>) => {
+      listUsersCalls++;
+      return origListUsers(...args);
+    };
+
+    // The cache is fresh and holds carol as a count===1 owner: the re-verify
+    // must be ONE targeted getEpisode read; a full rebuild (listUsers) must
+    // NOT run. This is the cost pin: before audio-feed-y63gb, every playback
+    // of a legacy-keyed episode paid a full metadata scan here.
+    assertEquals(await getLegacyKeyUniqueOwner(stores.metadata, "carol-set.wav"), "carol");
+    assertEquals(
+      listUsersCalls,
+      0,
+      "a cached unique owner must be served via the targeted read, not a full index rebuild",
+    );
+
+    // The audio/-prefixed form normalizes to the same key: same cached entry,
+    // same targeted path, still no rebuild.
+    assertEquals(await getLegacyKeyUniqueOwner(stores.metadata, "audio/carol-set.wav"), "carol");
+    assertEquals(listUsersCalls, 0);
+
+    clearLegacyKeyIndexCache(stores.metadata);
+  },
+);

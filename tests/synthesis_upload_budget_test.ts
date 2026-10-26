@@ -17,51 +17,13 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { runSynthesisBatch, TERMINAL_STAGING_MARKER_HASH } from "../src/worker/synthesis.ts";
+import { startClaimHeartbeat } from "../src/worker/synthesis.ts";
+import type { MetadataStore } from "../src/storage/mod.ts";
 import { decodedFromWav, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
-import type { InvocationClock } from "../src/synthesis/limits.ts";
-
-/**
- * A budget clock the test owns (audio-feed-fnbm0; same shape as synthesis_worker_test.ts's and
- * synthesis_resume_test.ts's controlledInvocationClock, kept local because this fix is one file
- * by decision). `now()` never moves and timers never fire until `advance()` moves them, so a
- * deadline armed on this clock lands exactly where the test advances to - the row asserts an
- * ORDER of operations, not that work finished inside N real milliseconds.
- */
-function controlledInvocationClock(startMs = 1_000_000) {
-  let nowMs = startMs;
-  const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
-  const clock: InvocationClock = {
-    now: () => nowMs,
-    setTimeout: (fn, ms) => {
-      const timer = { at: nowMs + ms, fn, live: true };
-      timers.push(timer);
-      return () => {
-        timer.live = false;
-      };
-    },
-  };
-  return {
-    clock,
-    get nowMs() {
-      return nowMs;
-    },
-    async advance(ms: number): Promise<void> {
-      const target = nowMs + ms;
-      for (;;) {
-        const due = timers.filter((t) => t.live && t.at <= target).sort((a, b) => a.at - b.at)[0];
-        if (!due) break;
-        due.live = false;
-        nowMs = Math.max(nowMs, due.at);
-        due.fn();
-        for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      nowMs = target;
-    },
-  };
-}
 
 const BASE = "https://audio.example.com";
 const config: AppConfig = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
@@ -596,21 +558,97 @@ Deno.test("audio-feed-aqms: payload that cannot fit even a fresh invocation budg
   assert((ep?.error ?? "").includes("cannot fit the invocation budget"));
 });
 
+Deno.test("audio-feed-72nv9: startClaimHeartbeat without an injected clock keeps the real-interval production branch", async () => {
+  // Review finding audio-feed-72nv9: the terminal call site must pass the
+  // CALLER-INJECTED clock (undefined in production), not the resolved local -
+  // otherwise every production upload takes the clocked branch and loses the
+  // unref'd real-interval invariant (a missed stop then holds the isolate
+  // open; the reviewer measured hang-until-killed vs clean exit). This row
+  // pins the production branch by its OBSERVABLE: beats arrive on real time
+  // with NO clock driven, and stop() ends them.
+  const beats: number[] = [];
+  const metadata = {
+    touchEpisodeClaim: () => {
+      beats.push(Date.now());
+      return Promise.resolve(true);
+    },
+  } as unknown as MetadataStore;
+  const stop = startClaimHeartbeat(metadata, "user-1", "ep-72nv9", "worker-72nv9", {
+    intervalMs: 20,
+  });
+  try {
+    const limit = Date.now() + 2_000;
+    while (beats.length < 2 && Date.now() < limit) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert(
+      beats.length >= 2,
+      `expected real-interval beats with no injected clock, got ${beats.length} - the production branch did not fire`,
+    );
+  } finally {
+    stop();
+  }
+  const afterStop = beats.length;
+  await new Promise((r) => setTimeout(r, 100));
+  assertEquals(
+    beats.length,
+    afterStop,
+    "stop() must end the beats on the production branch",
+  );
+});
+
 Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow terminal upload without phase changes", async () => {
   const episodeId = "ep-aqms-heartbeat";
   const { ctx, stores } = await setupEnv(episodeId);
 
+  // audio-feed-uswe0: the heartbeat runs on the INJECTED clock (startClaimHeartbeat now takes
+  // the invocation clock) and the slow upload is a GATE the test holds, so "a beat lands while
+  // the put is in flight" is an order of operations the clock guarantees. The old row raced a
+  // REAL 1s interval against a REAL 2.2s window and its own comment confessed a >1.2s event-loop
+  // stall would redden it - this host's measured steal produces multi-second stalls. The 2.2s
+  // shape is kept as VIRTUAL time: two 1s heartbeat intervals pass inside one held transfer,
+  // inside a 10s budget the advances never reach.
+  const time = controlledInvocationClock();
   const audio = fakeAudio(1_000);
   const oldPut = stores.blobs.put.bind(stores.blobs);
-  let putStartedAt = 0;
+
+  let releaseUpload: () => void = () => {};
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve;
+  });
+  let uploadsInFlight = 0;
+  let putStarted = false;
   stores.blobs.put = async (...args) => {
-    putStartedAt = Date.now();
-    await new Promise((r) => setTimeout(r, 2_200));
-    return oldPut(...args);
+    putStarted = true;
+    uploadsInFlight++;
+    try {
+      await uploadGate;
+      return await oldPut(...args);
+    } finally {
+      uploadsInFlight--;
+    }
+  };
+  // OBSERVABILITY GUARD, not the pass condition (audio-feed-uswe0): a bounded, NAMED wait so a
+  // batch that never reaches its terminal upload fails loudly instead of hanging the suite.
+  // The pass condition remains the beats-by-state assertions below.
+  const untilPutEntered = async (): Promise<void> => {
+    const budgetMs = 10_000;
+    const limit = Date.now() + budgetMs;
+    while (!putStarted) {
+      if (Date.now() > limit) {
+        throw new Error(
+          `terminal upload never started within ${budgetMs}ms: the put stub was not entered, ` +
+            `so there was no window in which a heartbeat could be observed (audio-feed-uswe0)`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   };
 
-  // Record every phase-less touch (the heartbeat) and every lifecycle log append.
+  // Record every phase-less touch (the heartbeat) that lands while the put is PROVABLY in
+  // flight - by state, not by wall-clock windows.
   const heartbeatTimes: number[] = [];
+  let putStartMs = 0;
   const origTouch = stores.metadata.touchEpisodeClaim.bind(stores.metadata);
   stores.metadata.touchEpisodeClaim = (
     userId: string,
@@ -618,34 +656,45 @@ Deno.test("audio-feed-aqms: timer heartbeat touches the claim during a slow term
     owner: string,
     update: { phase?: string; now?: string },
   ) => {
-    if (!update.phase && update.now === undefined) heartbeatTimes.push(Date.now());
+    if (!update.phase && update.now === undefined) {
+      if (uploadsInFlight > 0) heartbeatTimes.push(time.nowMs);
+    }
     return origTouch(userId, episodeId, owner, update);
   };
 
-  const r1 = await runSynthesisBatch(ctx, () => Promise.resolve(audio), {
+  const running = runSynthesisBatch(ctx, () => Promise.resolve(audio), {
     owner: "aqms-heartbeat-1",
     leaseMs: 4_000, // heartbeat interval = clamp(lease/4, 1s, 30s) = 1s
     maxInvocationDurationMs: 10_000,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
+
+  await untilPutEntered(); // the terminal put is in flight; virtual time has not moved
+  putStartMs = time.nowMs;
+  await time.advance(1_000); // beat 1: fires the 1s heartbeat timer
+  await time.advance(1_000); // beat 2: the beat's own re-arm
+  assert(
+    heartbeatTimes.length >= 1,
+    `heartbeat never observed while the upload was in flight (beats: ${
+      JSON.stringify(heartbeatTimes)
+    }): startClaimHeartbeat's clocked beats did not touch the claim between the put starting ` +
+      `and the upload being released (audio-feed-uswe0)`,
+  );
+  assert(
+    heartbeatTimes.every((t) => t > putStartMs),
+    `ORDER: every beat must be strictly after the put started (put at ${putStartMs}, beats ${
+      JSON.stringify(heartbeatTimes)
+    })`,
+  );
+  releaseUpload();
+  const r1 = await running;
 
   assertEquals(r1.ready.length, 1, "slow upload still completes within budget");
   const ep = await stores.metadata.getEpisode("user-1", episodeId);
   assertEquals(ep?.status, "ready");
-
-  // The heartbeat must have fired at least once strictly AFTER the put began, and
-  // strictly BEFORE the put settled (it is the "worker alive mid-upload" signal).
-  // 1s heartbeat interval in a nominal ~2.15s window: an event-loop stall longer than ~1.2s would miss the interval and redden the row.
-  const putSettledAt = putStartedAt + 2_200;
-  const midUpload = heartbeatTimes.filter((t) => t > putStartedAt + 50 && t < putSettledAt);
-  assert(
-    midUpload.length >= 1,
-    `expected >=1 heartbeat during the upload, got ${
-      JSON.stringify(heartbeatTimes)
-    } (put ${putStartedAt}..${putSettledAt})`,
-  );
 
   // Phase-less touches must not produce claim-lifecycle log events (noise guard):
   // the only lifecycle events in this flow are the phase transitions themselves

@@ -43,6 +43,7 @@ import {
   setOriginalCopyFileForTesting,
   setOriginalCopyFileSyncForTesting,
   SPAWN_HARNESS_HEALTH_TIMEOUT_MS,
+  SPAWN_HARNESS_STARTUP_TIMEOUT_MS,
   spawnHarness,
   startInProcessServer,
   waitForChromeProfileUnused,
@@ -293,8 +294,10 @@ Deno.test({
     // The fail-fast MECHANISM pinned deterministically: a child that never
     // prints READY and never binds must be killed and reported after the
     // given window whatever the host's load, because its never answering is
-    // a property of the child, not of the clock. A small bound keeps the row
-    // fast; the production window itself is pinned by name in the row below.
+    // a property of the child, not of the clock. audio-feed-62ozc: the bound
+    // NAMES its phase - this is the STARTUP window (spawn -> READY), not the
+    // /health window, so the report says which budget expired. The production
+    // windows themselves are pinned by name in the row below.
     await withScratchRoot(async (scratch) => {
       const child = await writeHarnessChild(
         scratch,
@@ -302,9 +305,9 @@ Deno.test({
         NEVER_READY_CHILD,
       );
       const err = await assertRejects(
-        () => spawnHarness(child, [], { timeoutMs: 800 }),
+        () => spawnHarness(child, [], { startupTimeoutMs: 800 }),
         Error,
-        "timed out after 800ms waiting for /health",
+        "timed out after 800ms waiting for the harness to log READY",
       );
       // The failure NAMES the condition that never became true.
       assertStringIncludes(err.message, "the child never logged its READY line");
@@ -335,15 +338,23 @@ Deno.test({
       assertStringIncludes(err.message, "never answered OK");
       assertMatch(err.message, /the child bound port [1-9]\d*/);
     });
+    // audio-feed-62ozc: the 800ms asserted above bounds the HEALTH phase and
+    // starts at the OBSERVED bind event, so cold-start compilation under
+    // saturation spends the STARTUP window, not this one - the row can no
+    // longer red with the wrong named case ("never logged its READY line")
+    // for a child whose defect is accepting and never answering.
   },
 });
 
 Deno.test(
   "proof-helper: spawnHarness's production health deadline is the pinned 15s fail-fast window (audio-feed-57ape)",
   () => {
-    // The production constant, asserted by name so a silent change to the
-    // fail-fast window is a red row rather than a drift nobody noticed.
+    // The production constants, asserted by name so a silent change to the
+    // fail-fast windows is a red row rather than a drift nobody noticed.
+    // audio-feed-62ozc: startup and health are separate windows - one wall
+    // window deciding both phases is the defect this file exists to prevent.
     assertEquals(SPAWN_HARNESS_HEALTH_TIMEOUT_MS, 15_000);
+    assertEquals(SPAWN_HARNESS_STARTUP_TIMEOUT_MS, 15_000);
   },
 );
 

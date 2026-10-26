@@ -828,18 +828,30 @@ export async function withChrome<T>(
  */
 export const SPAWN_HARNESS_HEALTH_TIMEOUT_MS = 15_000;
 
+/**
+ * Cold-start budget for a harness child to log READY and bind (audio-feed-62ozc),
+ * SEPARATE from the health window above: one wall window covering compilation too
+ * let a saturated host spend the health budget before the port existed, so the
+ * timeout report named the WRONG case ("never logged its READY line") for a child
+ * whose actual defect was accepting /health and never answering. The health budget
+ * now starts at the OBSERVED bind event; this backstop bounds only spawn->READY.
+ */
+export const SPAWN_HARNESS_STARTUP_TIMEOUT_MS = 15_000;
+
 export async function spawnHarness(
   scriptRelPath: string,
   extraArgs: string[] = [],
-  options: { healthPath?: string; timeoutMs?: number } = {},
+  options: { healthPath?: string; timeoutMs?: number; startupTimeoutMs?: number } = {},
 ): Promise<SupervisedHarness> {
   const healthPath = options.healthPath ?? "/health";
   // The deadline is a BACKSTOP, never the pass condition: the wait below is on
   // the child's own bind/first-response state signal, so a healthy-but-slow
   // host passes whenever readiness actually arrives (audio-feed-57ape).
-  // Production callers keep the default fail-fast window above; a test row
-  // verifying readiness itself passes a generous outer guard instead.
+  // audio-feed-62ozc: `timeoutMs` bounds the HEALTH phase and its budget starts
+  // at the OBSERVED bind event (the READY line), not at spawn - cold-start
+  // compilation is the STARTUP phase, bounded separately by `startupTimeoutMs`.
   const timeoutMs = options.timeoutMs ?? SPAWN_HARNESS_HEALTH_TIMEOUT_MS;
+  const startupMs = options.startupTimeoutMs ?? SPAWN_HARNESS_STARTUP_TIMEOUT_MS;
   const cwd = new URL("..", import.meta.url).pathname;
 
   const cmd = new Deno.Command(Deno.execPath(), {
@@ -882,8 +894,9 @@ export async function spawnHarness(
 
   const startTime = Date.now();
   let assignedPort: number | null = null;
+  let healthStartedAt = 0;
 
-  while (Date.now() - startTime < timeoutMs) {
+  for (;;) {
     if (exited) {
       throw new Error(
         `Harness '${scriptRelPath}' exited prematurely with code ${exitCode} before answering health check.\n` +
@@ -891,22 +904,27 @@ export async function spawnHarness(
       );
     }
 
-    if (!assignedPort) {
+    if (assignedPort === null) {
       const match = /READY port=(\d+)/.exec(stdoutBuf) ??
         /http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/.exec(stdoutBuf);
       if (match) {
         assignedPort = Number(match[1]);
+        // audio-feed-62ozc: the health budget starts HERE, at the observed bind,
+        // so whatever the host spent compiling is startup, not health.
+        healthStartedAt = Date.now();
       }
     }
 
-    if (assignedPort) {
+    if (assignedPort !== null) {
+      const healthElapsed = Date.now() - healthStartedAt;
+      if (healthElapsed >= timeoutMs) break; // health budget exhausted: named /health report below
       let res: Response | null = null;
       try {
-        // Bound each probe by the REMAINING outer budget: an accepted-but-
+        // Bound each probe by the REMAINING health budget: an accepted-but-
         // never-answered socket must not defeat the deadline (the mutation
         // fixture tests/fixtures/binds_never_answers_harness_child.ts proved
         // an unbounded fetch hangs the wait past its own timeout).
-        const remaining = timeoutMs - (Date.now() - startTime);
+        const remaining = timeoutMs - healthElapsed;
         res = await fetch(`http://localhost:${assignedPort}${healthPath}`, {
           signal: AbortSignal.timeout(Math.max(remaining, 1)),
         });
@@ -935,6 +953,8 @@ export async function spawnHarness(
           },
         };
       }
+    } else if (Date.now() - startTime >= startupMs) {
+      break; // startup budget exhausted with no bind: named never-READY report below
     }
 
     await new Promise((r) => setTimeout(r, 100));
@@ -951,14 +971,20 @@ export async function spawnHarness(
     process.status.catch(() => {}),
     new Promise((r) => setTimeout(r, 2000)),
   ]);
-  // Name the condition that never became true: a report must not render an
-  // inability to know as a fact, and "timed out" alone says nothing about
-  // whether the child never bound or bound but never answered.
+  // Name the condition that never became true, and the PHASE whose budget
+  // expired: a report must not render an inability to know as a fact, and
+  // "timed out" alone says nothing about whether the child never bound or
+  // bound but never answered (audio-feed-57ape); a startup stall is likewise
+  // not a /health answer, so each phase names its own window
+  // (audio-feed-62ozc).
   const condition = assignedPort === null
     ? "the child never logged its READY line (no 'READY port=N' or server URL in stdout)"
     : `the child bound port ${assignedPort} but ${healthPath} never answered OK`;
+  const phase = assignedPort === null
+    ? `timed out after ${startupMs}ms waiting for the harness to log READY`
+    : `timed out after ${timeoutMs}ms waiting for ${healthPath}`;
   throw new Error(
-    `Harness '${scriptRelPath}' timed out after ${timeoutMs}ms waiting for ${healthPath}: ${condition}.\n` +
+    `Harness '${scriptRelPath}' ${phase}: ${condition}.\n` +
       `Assigned port: ${assignedPort}\nStdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
   );
 }
