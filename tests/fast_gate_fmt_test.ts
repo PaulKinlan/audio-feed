@@ -119,9 +119,15 @@ async function sharedClone(): Promise<string> {
   sharedCloneDir = dir;
   // The clone outlives a single row by design, so per-row `finally` cannot own it; the module's
   // process exit does. A SIGKILL strands it exactly as the per-row version did - the bounded residue
-  // accepted under audio-feed-kp7l / audio-feed-gw4k (see tests/fast_check_test.ts).
+  // accepted under audio-feed-kp7l / audio-feed-gw4k (see tests/fast_check_test.ts). The removeSync is
+  // guarded (audio-feed-efgpr): an exit-time throw from an already-removed or unreadable dir must not
+  // turn a passing module into a failing one.
   addEventListener("unload", () => {
-    Deno.removeSync(dir, { recursive: true });
+    try {
+      Deno.removeSync(dir, { recursive: true });
+    } catch {
+      // Exit-time best effort only; the temp dir residue is bounded and accepted.
+    }
   });
   return dir;
 }
@@ -150,6 +156,13 @@ async function runGateInDisposableClone(
         "scripts/fast-check.ts",
         "--fmt-fixture",
         fixturePath,
+        // audio-feed-efgpr: the clone's tree is byte-identical to the outer HEAD this module is
+        // running inside, which the OUTER gate already type-checked; the in-clone `deno task check`
+        // is ~4 minutes of cold-cache duplicate work per row (deno's check cache is keyed by
+        // absolute path, and the clone's path is fresh). The flag is honoured only with
+        // --fmt-fixture, and the run says SKIPPED out loud - the rows below assert that line so a
+        // silently un-honoured flag is a failure, not a slowdown nobody notices.
+        "--skip-type-check",
       ],
       cwd: dir,
       env: {
@@ -168,6 +181,15 @@ async function runGateInDisposableClone(
     };
   } finally {
     await Deno.remove(scratch).catch(() => {});
+    // audio-feed-efgpr: the clone is SHARED with the next row, so a row must hand it over in the
+    // state it received it: no scratch residue (a bypassed remove, an interrupted run) and no
+    // tracked mutation the inner gate or a failed assertion path may have left. Without this the
+    // second row's change set - the thing the assertion judges - is a function of the first row's
+    // leftovers, the same machine-state defect the clone exists to close.
+    const git = (args: string[]) =>
+      new Deno.Command("git", { args, cwd: dir, stdout: "null", stderr: "null" }).output();
+    await git(["reset", "--hard", "-q", "HEAD"]).catch(() => {});
+    await git(["clean", "-fdq"]).catch(() => {});
   }
 }
 
@@ -186,6 +208,14 @@ Deno.test({
 
       // (a) gate must still fail
       assertEquals(out.code, 1, "gate must fail on unformatted file");
+
+      // (a2) the type-check opt-out must be HONOURED AND SAID (audio-feed-efgpr): a silently
+      // un-honoured flag would leave this row paying the ~4-minute cold in-clone check again,
+      // green and slow, which is the regression 2rr49/efgpr exist to close.
+      assert(
+        stdout.includes("fast-check: type-check SKIPPED"),
+        `the inner run must say the type-check was skipped; output was: ${selectionOf(stdout)}`,
+      );
 
       // (b) coverage result must be reported
       assert(
@@ -238,6 +268,12 @@ Deno.test({
     try {
       const stdout = run.stdout;
       assertEquals(run.code, 0, "gate must pass on formatted file");
+      assert(
+        stdout.includes("fast-check: type-check SKIPPED"),
+        `the inner run must say the type-check was skipped (audio-feed-efgpr); output was: ${
+          selectionOf(stdout)
+        }`,
+      );
       // The point of this control: the gate answers a formatting question WITHOUT the full suite, and it
       // must SAY SO POSITIVELY rather than merely not saying the opposite (audio-feed-9bco). Same
       // reasoning as the row above: an absence check is satisfied by a partial widening.

@@ -1336,6 +1336,44 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "audio-feed-efgpr: --skip-type-check without --fmt-fixture fails closed with exit code 2",
+  async () => {
+    // The flag exists for the gate-in-gate fixture mode only; on a bare invocation it is a
+    // synthetic gate, and synthetic gates refuse at entry with exit 2 (audio-feed-8rz5's contract),
+    // so fleet-check (rc=0 = PASS) can never cache a run that skipped the type-check.
+    const cmd = new Deno.Command("deno", {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-run=git,deno",
+        "--allow-env",
+        "scripts/fast-check.ts",
+        "--skip-type-check",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const out = await cmd.output();
+    const stdout = new TextDecoder().decode(out.stdout);
+    const stderr = new TextDecoder().decode(out.stderr);
+
+    assertEquals(
+      out.code,
+      2,
+      `--skip-type-check without --fmt-fixture must exit 2, got ${out.code}: ${stderr}`,
+    );
+    assert(
+      stderr.includes("--skip-type-check refused without --fmt-fixture"),
+      `stderr must name the refusal: ${stderr}`,
+    );
+    assert(
+      !stdout.includes("fast-check: ok in"),
+      `stdout must NOT contain a passing verdict: ${stdout}`,
+    );
+  },
+);
+
 Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programmatically", () => {
   // audio-feed-vdys: changedFiles accepts 0 arguments; untrackedOnly option is eliminated
   // entirely from the API so synthetic selection cannot be requested programmatically.

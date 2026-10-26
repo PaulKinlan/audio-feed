@@ -226,6 +226,9 @@ async function git(...args: string[]): Promise<string | null> {
  *       unhonourable invocation, so it is 1 and not 2.
  * - 2 = REFUSED / SYNTHETIC / UNKNOWN (selection issue: committed changes exist in git when --untracked-only was requested,
  *       or synthetic selection active; not a test failure; fix the invocation).
+ *       2 also covers --skip-type-check WITHOUT --fmt-fixture (audio-feed-efgpr): that flag exists for the
+ *       integration-test fixture mode only, so a bare-gate invocation carrying it is a synthetic gate and
+ *       fails closed like any other.
  *       Exiting 2 fails closed so fleet-check (which treats rc=0 as PASS) can NEVER record or cache a synthetic run as PASS.
  *       DO NOT turn 2 into 0.
  * - Note: The script's own tests (tests/fast_check_test.ts) are the ONLY place --untracked-only is passed;
@@ -1235,6 +1238,23 @@ if (import.meta.main) {
     Deno.exit(2);
   }
 
+  // audio-feed-efgpr: --skip-type-check is an EXPLICIT argv opt-out (never an environment variable,
+  // per audio-feed-8rz5) that exists for ONE caller: the gate-in-gate integration suite
+  // (tests/fast_gate_fmt_test.ts), whose disposable clone holds a tree byte-identical to the one the
+  // outer gate already type-checked, so the in-clone `deno task check` is ~4 minutes of cold-cache
+  // duplicate work per row. It is honoured ONLY together with --fmt-fixture, the flag that already
+  // marks an integration-test invocation; any other invocation carrying it is a synthetic gate and
+  // fails closed with exit 2, here at entry, before any work. No task (gate, test:fast) passes either
+  // flag, so a production run can never skip the check, and when it IS honoured the run says so in
+  // plain text (below) rather than passing quietly.
+  const skipTypeCheck = Deno.args.includes("--skip-type-check");
+  if (skipTypeCheck && !Deno.args.includes("--fmt-fixture")) {
+    console.error(
+      "fast-gate: failed: --skip-type-check refused without --fmt-fixture — skipping the type-check is honoured only for the integration-test fixture mode (audio-feed-efgpr)",
+    );
+    Deno.exit(2);
+  }
+
   // audio-feed-es8y property 2, checked BEFORE anything else so a selection gap is a NAMED failure at the
   // start of the run rather than a suite that quietly never runs again. The full gate runs this audit too
   // (first step of `deno task gate`), so drift cannot survive in either direction.
@@ -1361,6 +1381,16 @@ ${auditUniverseDrift}`);
     : null;
   const fmtStep = formatCheckStep(fmtFixture);
   for (const step of [fmtStep, ["deno", "lint"], ["deno", "task", "check"]]) {
+    // audio-feed-efgpr: the opt-out honoured above. The loop and its steps stay unconditional for
+    // every real invocation (audio-feed-pnw73's pin stands); the skip exists only inside
+    // fixture-mode runs, and even there it is SAID, not silent - a log reading "ok" while the
+    // type-check never ran is exactly the report-must-not-lie defect this fleet keeps fixing.
+    if (skipTypeCheck && step[1] === "task" && step[2] === "check") {
+      console.log(
+        "fast-check: type-check SKIPPED (--skip-type-check, honoured only with --fmt-fixture): this verdict says nothing about types",
+      );
+      continue;
+    }
     const res = await run(step);
     if (res.code !== 0) {
       console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
