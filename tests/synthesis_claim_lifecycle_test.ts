@@ -1040,12 +1040,25 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
     }),
   );
 
+  // audio-feed-y3jfl: the budget clock is INJECTED (the repo's one fake clock,
+  // tests/fixtures/invocation_clock.ts) and its deadline is fired the moment the paid TTS
+  // call is in flight, so the row asserts an ORDER - "the paid call STARTED before the
+  // budget aborted it" - instead of requiring ~95 REAL milliseconds of pre-TTS work
+  // (setupEnv, claim, checkpoint, script stage) to fit on however busy the host was.
+  // Measured by the merger: under load the real 100ms budget aborted FIRST and paidCalls
+  // read 0 on a correct product (blocked the at5tm union gate). The 100ms is NOT widened:
+  // on a clock the test owns, the deadline is a decision, not a host-speed assumption.
+  const time = controlledInvocationClock();
+  const fireAbortInFlight = abortWhileInFlight(time);
   let paidCalls = 0;
   const client = new GeminiTtsClient({
     apiKey: "dummy",
     timeoutRetries: 0,
     fetchFn: (_url, init) => {
       paidCalls++;
+      // Fire the budget deadline NOW, while the paid call is in flight: the abort lands
+      // by the injected clock's due order, not by the real scheduler's mercy.
+      fireAbortInFlight();
       return new Promise((_resolve, reject) => {
         init?.signal?.addEventListener(
           "abort",
@@ -1063,16 +1076,22 @@ Deno.test("audio-feed-q7zy: (a) budget-aborted TTS turn yields cleanly to pendin
     flushMarginMs: 5,
   });
 
-  // 100ms real invocation budget: requires paid TTS call to start within ~95ms before flush margin aborts; microsecond in-memory work provides margin.
+  // 100ms invocation budget on the INJECTED clock: the paid TTS call provably starts
+  // (the clock is frozen until then), then the test fires the deadline mid-flight.
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-tts",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     estimatedTurnDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
 
-  assertEquals(paidCalls, 1, "TTS call was initiated");
+  assertEquals(
+    paidCalls,
+    1,
+    "ORDER: the TTS call was initiated before the budget aborted it (audio-feed-y3jfl)",
+  );
   assertEquals(result.failed.length, 0, "must NOT fail episode on budget abort");
   assertEquals(result.yielded.length, 1, "must report episode as yielded");
 
@@ -1175,9 +1194,16 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
     }),
   );
 
+  // audio-feed-y3jfl: same injected-clock ORDER fix as q7zy(a) — this row also
+  // required script generation to BEGIN within ~95 REAL ms and reddened under
+  // 8-way saturation (measured: scriptCalls 0, 2 of 7 runs). Fire the deadline
+  // only once the generator is in flight; do not widen the 100ms.
+  const time = controlledInvocationClock();
+  const fireAbortInFlight = abortWhileInFlight(time);
   let scriptCalls = 0;
   const slowScriptGenerator = (_input: unknown, options?: { signal?: AbortSignal }) => {
     scriptCalls++;
+    fireAbortInFlight();
     return new Promise<{
       turns: { speaker: "Alex" | "Sam"; text: string }[];
       sources: [];
@@ -1201,16 +1227,22 @@ Deno.test("audio-feed-q7zy: (c) budget abort on script stage yields cleanly to p
     estimatedTurnDurationMs: 1,
   });
 
-  // 100ms real invocation budget: requires script generation to begin within ~95ms before abort; in-memory stage entry supplies margin.
+  // 100ms invocation budget on the INJECTED clock: script generation provably
+  // begins (clock frozen until then), then the test fires the deadline mid-flight.
   const result = await runSynthesisBatch(ctx, synth, {
     owner: "worker-budget-script",
     maxAttempts: 2,
     maxInvocationDurationMs: 100,
     flushMarginMs: 5,
     estimatedTurnDurationMs: 1,
+    clock: time.clock,
   });
 
-  assertEquals(scriptCalls, 1, "script generator was called");
+  assertEquals(
+    scriptCalls,
+    1,
+    "ORDER: the script generator was called before the budget aborted it (audio-feed-y3jfl)",
+  );
   assertEquals(result.failed.length, 0, "script budget abort must NOT fail episode");
   assertEquals(result.yielded.length, 1, "script budget abort must yield");
 
