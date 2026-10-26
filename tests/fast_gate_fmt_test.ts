@@ -30,12 +30,22 @@ import { assert, assertEquals } from "@std/assert";
  * gate still resolves its own change set, in a directory where that resolution is deterministic.
  *
  * The clone idiom (git clone --shared, git update-ref) follows tests/fast_check_test.ts.
+ *
+ * ONE CLONE PER RUN OF THIS FILE, SHARED BY BOTH ROWS (audio-feed-2rr49). Each row used to build its
+ * own disposable clone, and a fresh clone's inner gate run pays a COLD whole-repo `deno task check`:
+ * deno's type-check cache is keyed by absolute path, so a new temp dir is never warm. Measured on the
+ * fleet VM, 2026-10-26, identical tree: cold check 237s, warm check 3s (plus ~25s of clone + hooks +
+ * lint per row). Two rows therefore spent ~9-13 minutes of a full-gate window here - the rows the
+ * merger measured at 9m3s and 4m0s+ when the 3600s ceiling killed the gate at 1256/2358 rows. Sharing
+ * the clone pays the cold check ONCE; the second row's inner gate runs the same check over the same
+ * paths and it is warm. The sharing changes no verdict: the rows run sequentially, each writes a
+ * uniquely-named scratch file and removes it in `finally`, and the clone's pinned origin/main is the
+ * same for both. The clone directory itself is removed when this test module's process exits.
  */
 interface GateRun {
   code: number;
   stdout: string;
   stderr: string;
-  cleanup: () => Promise<void>;
 }
 
 /**
@@ -52,12 +62,17 @@ function selectionOf(stdout: string): string {
   return lines.length ? lines.join(" | ") : "(no selection line found in the gate's output)";
 }
 
-async function runGateInDisposableClone(
-  fixturePath: string,
-): Promise<GateRun> {
+/**
+ * The shared clone for this file's rows, created on first use (audio-feed-2rr49). Deno runs each test
+ * MODULE in its own subprocess, so this singleton is per-file: there is exactly one clone per gate
+ * run, and no other suite can observe it.
+ */
+let sharedCloneDir: string | null = null;
+
+async function sharedClone(): Promise<string> {
+  if (sharedCloneDir) return sharedCloneDir;
   const dir = await Deno.makeTempDir({ prefix: "fast-gate-fmt-clone-" });
-  const git = (args: string[]) =>
-    new Deno.Command("git", { args, cwd: dir, stdout: "null", stderr: "piped" }).output();
+  const cleanup = () => Deno.remove(dir, { recursive: true }).catch(() => {});
 
   const cloned = await new Deno.Command("git", {
     args: ["clone", "--shared", "-q", ".", dir],
@@ -65,7 +80,7 @@ async function runGateInDisposableClone(
     stderr: "piped",
   }).output();
   if (!cloned.success) {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await cleanup();
     throw new Error("git clone --shared must succeed");
   }
 
@@ -84,52 +99,76 @@ async function runGateInDisposableClone(
   }).output();
   if (!armed.success) {
     const detail = new TextDecoder().decode(armed.stdout) + new TextDecoder().decode(armed.stderr);
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await cleanup();
     throw new Error(`arming the clone's pre-push guard must succeed: ${detail}`);
   }
 
   // Pin origin/main to the clone's own HEAD: the committed diff is then EMPTY by construction, so no
   // other branch's commits can reach the selection this test is about to assert a property of.
-  const pinned = await git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+  const pinned = await new Deno.Command("git", {
+    args: ["update-ref", "refs/remotes/origin/main", "HEAD"],
+    cwd: dir,
+    stdout: "null",
+    stderr: "piped",
+  }).output();
   if (!pinned.success) {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    await cleanup();
     throw new Error("update-ref origin/main -> HEAD must succeed");
   }
 
+  sharedCloneDir = dir;
+  // The clone outlives a single row by design, so per-row `finally` cannot own it; the module's
+  // process exit does. A SIGKILL strands it exactly as the per-row version did - the bounded residue
+  // accepted under audio-feed-kp7l / audio-feed-gw4k (see tests/fast_check_test.ts).
+  addEventListener("unload", () => {
+    Deno.removeSync(dir, { recursive: true });
+  });
+  return dir;
+}
+
+async function runGateInDisposableClone(
+  fixturePath: string,
+): Promise<GateRun> {
+  const dir = await sharedClone();
+
   // The scratch is repo-relative INSIDE THE CLONE, and untracked, so it is the only file the plan can
-  // see. A formatted `.md` is documentation: zero suites by classification.
+  // see. A formatted `.md` is documentation: zero suites by classification. Unique per row, removed in
+  // `finally`, so the row that follows still sees exactly one change.
   const scratch = `${dir}/.fast-gate-dqrw-scratch-${crypto.randomUUID()}.md`;
   await Deno.writeTextFile(
     scratch,
     "# fast-gate control scratch\n\nIn the clone; removed in finally; formatted on purpose.\n",
   );
 
-  const out = await new Deno.Command("deno", {
-    args: [
-      "run",
-      "--allow-read",
-      "--allow-run=git,deno",
-      "--allow-env",
-      "scripts/fast-check.ts",
-      "--fmt-fixture",
-      fixturePath,
-    ],
-    cwd: dir,
-    env: {
-      ...Deno.env.toObject(),
-      IN_FAST_GATE_INTEGRATION_TEST: "1",
-    },
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
+  try {
+    const out = await new Deno.Command("deno", {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-run=git,deno",
+        "--allow-env",
+        "scripts/fast-check.ts",
+        "--fmt-fixture",
+        fixturePath,
+      ],
+      cwd: dir,
+      env: {
+        ...Deno.env.toObject(),
+        IN_FAST_GATE_INTEGRATION_TEST: "1",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
 
-  const dec = new TextDecoder();
-  return {
-    code: out.code,
-    stdout: dec.decode(out.stdout),
-    stderr: dec.decode(out.stderr),
-    cleanup: () => Deno.remove(dir, { recursive: true }).catch(() => {}),
-  };
+    const dec = new TextDecoder();
+    return {
+      code: out.code,
+      stdout: dec.decode(out.stdout),
+      stderr: dec.decode(out.stderr),
+    };
+  } finally {
+    await Deno.remove(scratch).catch(() => {});
+  }
 }
 
 Deno.test({
@@ -185,7 +224,6 @@ Deno.test({
       );
     } finally {
       await Deno.remove(file).catch(() => {});
-      await run.cleanup();
     }
   },
 });
@@ -223,7 +261,6 @@ Deno.test({
       );
     } finally {
       await Deno.remove(file).catch(() => {});
-      await run.cleanup();
     }
   },
 });
