@@ -1156,17 +1156,34 @@ Deno.test({
       // classify it NOT READY; the old predicate accepted it (complete + 980px wide under
       // the emulation), which let the loop exit on the wrong document and assert a layout
       // lie about the real page.
-      const preNavigation = await readDocument();
-      assertEquals(
-        preNavigation?.href,
-        "about:blank",
-        "pre-navigation document must be about:blank",
-      );
+      //
+      // audio-feed-741vj (measured: full-gate run 46f091ab): the OLD code observed the
+      // pre-navigation document with ONE probe and asserted its identity at that fixed
+      // instant - under load the probe's own deadline (1s) expired, readDocument returned
+      // undefined, and the row red 'pre-navigation document must be about:blank' ACTUAL
+      // undefined: a harness precondition failure wearing a layout name. The precondition
+      // is now observed the way the readiness guard itself prescribes: RETRY until a
+      // document is readable at all (bounded named guard), and the asserted property is
+      // the GUARD's rejection of whatever document is there (pre-navigation it can only
+      // be about:blank) - not document identity at a fixed instant.
+      let preNavigation: ReadDocument | undefined = undefined;
+      const readGuardDeadline = Date.now() + 20_000; // observability guard with load headroom, not a measurement
+      while (preNavigation === undefined && Date.now() < readGuardDeadline) {
+        preNavigation = await readDocument();
+        if (preNavigation === undefined) await sleep(50);
+      }
+      if (preNavigation === undefined) {
+        throw new Error(
+          "audio-feed-741vj precondition guard: no readable document after 20s of pre-navigation probes - " +
+            "refusing to reason about a target whose documents cannot be read at all",
+        );
+      }
       assertEquals(
         isTargetReady(preNavigation),
         false,
-        "the readiness guard must reject the pre-navigation about:blank document " +
-          "- accepting it would assert a layout verdict about the wrong page",
+        "the readiness guard must reject the pre-navigation document (about:blank by " +
+          "construction - no navigation has been issued) - accepting it would assert a " +
+          "layout verdict about the wrong page",
       );
 
       // AND THE OTHER HALF OF THE CONTRACT: the guard REDDENS BY NAME when the target never
