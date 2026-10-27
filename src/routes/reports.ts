@@ -23,6 +23,7 @@ import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import type { LogSeverity } from "../storage/mod.ts";
 import { cleanString, MAX_LOG_MESSAGE_LENGTH, redactContext } from "../storage/log_shape.ts";
+import { readBoundedBody } from "../http.ts";
 import {
   extractClientIp,
   type RateLimitConfig,
@@ -217,59 +218,6 @@ export function buildReportMessage(report: SanitizedReport): string {
       return cleanString(`Browser report: ${type}${urlPart}`, MAX_LOG_MESSAGE_LENGTH);
     }
   }
-}
-
-/**
- * Bounded stream reader for request bodies (audio-feed-19db).
- * Stops reading as soon as totalBytes exceeds maxBytes (without buffering the rest).
- */
-export async function readBoundedBody(
-  req: Request,
-  maxBytes: number = MAX_REPORT_PAYLOAD_BYTES,
-): Promise<{ ok: true; text: string } | { ok: false; status: 413 | 400 }> {
-  const contentLengthHeader = req.headers.get("content-length");
-  if (contentLengthHeader) {
-    const contentLength = parseInt(contentLengthHeader, 10);
-    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-      if (req.body) {
-        await req.body.cancel("payload_too_large").catch(() => {});
-      }
-      return { ok: false, status: 413 };
-    }
-  }
-
-  if (!req.body) {
-    return { ok: true, text: "" };
-  }
-
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        totalBytes += value.byteLength;
-        if (totalBytes > maxBytes) {
-          await reader.cancel("payload_too_large").catch(() => {});
-          return { ok: false, status: 413 };
-        }
-        chunks.push(value);
-      }
-    }
-  } catch {
-    return { ok: false, status: 400 };
-  }
-
-  const combined = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { ok: true, text: new TextDecoder().decode(combined) };
 }
 
 /**

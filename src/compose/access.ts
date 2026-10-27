@@ -22,11 +22,15 @@ import {
 } from "../auth/users.ts";
 import { esc } from "../routes/html.ts";
 import { htmlResponse, newCspNonce } from "../routes/csp.ts";
+import { readBoundedBody } from "../http.ts";
 import {
   extractClientIp,
   type RateLimitConfig,
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
+
+/** The request-body cap for this public endpoint (audio-feed-oxw5g): email + displayName are small; 4KiB matches the CWV beacon cap's scale. */
+export const MAX_ACCESS_BODY_BYTES = 4096;
 
 export interface RequestAccessDeps {
   /** Optional rate limiter override for testing. */
@@ -114,31 +118,61 @@ export function createRequestAccessHandler(
     let email = "";
     let displayName = "";
 
-    try {
-      if (contentType.includes("application/json")) {
-        const body = await req.json();
-        email = typeof body.email === "string" ? body.email.trim() : "";
-        displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
-      } else if (
-        contentType.includes("application/x-www-form-urlencoded") ||
-        contentType.includes("multipart/form-data")
-      ) {
-        const formData = await req.formData();
-        email = (formData.get("email") as string | null)?.trim() ?? "";
-        displayName = (formData.get("displayName") as string | null)?.trim() ?? "";
-      } else {
+    // The body is bounded BEFORE parsing (audio-feed-oxw5g): this is a PUBLIC
+    // endpoint and the old code called req.json()/req.formData() unbounded, so a
+    // giant body was fully buffered by the platform parser before the email check
+    // ever ran. email + displayName are small; 4KiB covers them with room and
+    // matches the CWV beacon cap's scale. The declared-length fast path refuses
+    // oversized bodies before the read; a chunked or lying declared length is
+    // bounded BY CONSTRUCTION by the shared reader.
+    if (
+      contentType.includes("application/json") ||
+      contentType.includes("application/x-www-form-urlencoded") ||
+      contentType.includes("multipart/form-data")
+    ) {
+      const capped = await readBoundedBody(req, MAX_ACCESS_BODY_BYTES);
+      if (!capped.ok) {
+        if (isHtml) return sendHtml("Payload Too Large", "The submitted form was too large.", 413);
         return Response.json(
-          {
-            error:
-              "Unsupported Content-Type. Use application/json or application/x-www-form-urlencoded.",
-          },
-          { status: 415, headers: { "cache-control": "no-store" } },
+          { error: "Payload too large." },
+          { status: capped.status, headers: { "cache-control": "no-store" } },
         );
       }
-    } catch {
+      try {
+        if (contentType.includes("application/json")) {
+          const body = JSON.parse(capped.text);
+          email = typeof body.email === "string" ? body.email.trim() : "";
+          displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+        } else if (contentType.includes("application/x-www-form-urlencoded")) {
+          const params = new URLSearchParams(capped.text);
+          email = (params.get("email") ?? "").trim();
+          displayName = (params.get("displayName") ?? "").trim();
+        } else {
+          // multipart/form-data: the endpoint only reads two text fields, so
+          // re-parsing the capped TEXT through a synthetic Request keeps the
+          // formData() semantics on a bounded body.
+          const synthetic = new Request("http://local/access", {
+            method: "POST",
+            headers: { "content-type": contentType },
+            body: capped.text,
+          });
+          const formData = await synthetic.formData();
+          email = (formData.get("email") as string | null)?.trim() ?? "";
+          displayName = (formData.get("displayName") as string | null)?.trim() ?? "";
+        }
+      } catch {
+        return Response.json(
+          { error: "Malformed request payload." },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        );
+      }
+    } else {
       return Response.json(
-        { error: "Malformed request payload." },
-        { status: 400, headers: { "cache-control": "no-store" } },
+        {
+          error:
+            "Unsupported Content-Type. Use application/json or application/x-www-form-urlencoded.",
+        },
+        { status: 415, headers: { "cache-control": "no-store" } },
       );
     }
 

@@ -134,3 +134,60 @@ export function normaliseRequestHost(req: Request, trustProxyHeaders?: boolean):
   }
   return bare;
 }
+
+/**
+ * Bounded stream reader for request bodies (audio-feed-19db; moved here from
+ * src/routes/reports.ts so every public body read shares one implementation,
+ * audio-feed-oxw5g). Stops reading as soon as totalBytes exceeds maxBytes
+ * (without buffering the rest). A declared content-length over the cap is
+ * refused before the body is touched at all; a chunked or lying declared
+ * length is bounded BY CONSTRUCTION on the read.
+ */
+export async function readBoundedBody(
+  req: Request,
+  maxBytes: number,
+): Promise<{ ok: true; text: string } | { ok: false; status: 413 | 400 }> {
+  const contentLengthHeader = req.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      if (req.body) {
+        await req.body.cancel("payload_too_large").catch(() => {});
+      }
+      return { ok: false, status: 413 };
+    }
+  }
+
+  if (!req.body) {
+    return { ok: true, text: "" };
+  }
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel("payload_too_large").catch(() => {});
+          return { ok: false, status: 413 };
+        }
+        chunks.push(value);
+      }
+    }
+  } catch {
+    return { ok: false, status: 400 };
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(combined) };
+}
