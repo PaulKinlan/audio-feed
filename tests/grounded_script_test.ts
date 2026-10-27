@@ -672,8 +672,9 @@ Deno.test("synthesis: a generator that hangs forever still produces an episode",
   // docs/speed.md rule 2 (audio-feed-54up3): the 5s race below is a HANG GUARD, not an
   // assertion - it replaces an `elapsed < 5_000` check that reddened when a loaded host
   // delayed the 50ms deadline timer past the bound. The behavioural assertions are the
-  // observable events below: synthesize RETURNS (the fallback ran), the timeout warning is
-  // logged, and the TTS call still happens. The guard exists only to turn a broken fallback
+  // observable events below: synthesize RETURNS (the fallback ran), the structured
+  // onScriptFallback signal carries reason 'timeout' (audio-feed-ap2mk replaced the log-text
+  // assertion with the structured signal), and the TTS call still happens. The guard exists only to turn a broken fallback
   // (synthesize awaits the hung generator forever) into a named red instead of a suite hang;
   // at 100x the 50ms deadline it cannot trip on a merely slow host, because everything after
   // the deadline is in-memory mocks.
