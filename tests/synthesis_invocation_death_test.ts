@@ -58,6 +58,20 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   }).spawn();
 }
 
+/**
+ * The marker bound for each kill round, DERIVED FROM AN OBSERVED EVENT (coord review of
+ * audio-feed-ga3jd): round 1 keeps the original 20s guard unchanged; each later round gets
+ * 3x the previous round's OBSERVED time-to-marker (min 20s) - a host that needed T ms to
+ * reach the put once gets 3T now, so the headroom tracks the machine the row is actually
+ * running on instead of a widened literal. The survive round has no marker bound at all
+ * (it waits on the child's whole output, behind the controlled clock).
+ */
+let lastObservedMarkerMs = 0;
+function markerDeadlineFor(round: number, startedAt: number): number {
+  if (round === 1 || lastObservedMarkerMs === 0) return startedAt + 20_000;
+  return startedAt + Math.max(20_000, lastObservedMarkerMs * 3);
+}
+
 /** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
   kvPath: string,
   round: number,
@@ -67,16 +81,14 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   let out = "";
   const buffer = child.stdout.getReader();
   try {
-    // audio-feed-ga3jd: the marker bound is an OBSERVABILITY GUARD with load headroom
-    // (same ruling shape as the hang rounds' widened 30s budget, audio-feed-y2ex): it is
-    // not a measurement of how long the stages take, it is the loud-fail line for a child
-    // that never reaches the put. A heavily loaded host (deno spawn ~seconds per child,
-    // KV opens, fleet neighbours) stacked past the old 20s on round 2 and the row flaked
-    // while the code under test was correct, so the guard gets real headroom - and each
+    // audio-feed-ga3jd: the marker bound is an OBSERVABILITY GUARD derived from the
+    // observed time-to-marker of the previous round (markerDeadlineFor), never a widened
+    // literal: it is the loud-fail line for a child that never reaches the put, and each
     // read is raced against the child's EXIT so an early-dying child fails with its
     // stderr immediately instead of after the guard. Every read result is consumed, so
     // no marker chunk is lost to the race.
-    const markerDeadline = Date.now() + 40_000;
+    const markerStart = Date.now();
+    const markerDeadline = markerDeadlineFor(round, markerStart);
     const exited = child.status.then(() => "exited" as const);
     let childExitedEarly = false;
     for (;;) {
@@ -89,7 +101,10 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
       const { value, done } = race;
       if (done) break;
       out += decoder.decode(value);
-      if (out.includes("MARKER:uploading")) break;
+      if (out.includes("MARKER:uploading")) {
+        lastObservedMarkerMs = Date.now() - markerStart;
+        break;
+      }
     }
     if (childExitedEarly) {
       const status = await child.status;
