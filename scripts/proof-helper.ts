@@ -829,19 +829,96 @@ export async function withChrome<T>(
 export const SPAWN_HARNESS_HEALTH_TIMEOUT_MS = 15_000;
 
 /**
- * Cold-start budget for a harness child to log READY and bind (audio-feed-62ozc),
- * SEPARATE from the health window above: one wall window covering compilation too
- * let a saturated host spend the health budget before the port existed, so the
- * timeout report named the WRONG case ("never logged its READY line") for a child
- * whose actual defect was accepting /health and never answering. The health budget
- * now starts at the OBSERVED bind event; this backstop bounds only spawn->READY.
+ * The harness STARTUP window is DERIVED, never fixed (audio-feed-3n0xs).
+ *
+ * Spawn -> READY is a Deno compile, so how long it takes is a property of the
+ * host's CURRENT load, not of the child. Measured on this VM while fixing this:
+ *
+ *   baseline 503ms   account-harness.ts logged READY at  12.0s  (23.9x boot)
+ *   baseline 899ms   account-harness.ts logged READY at  19.0s  (21.1x boot)
+ *                    (the second sample is the same harness under eight busy loops)
+ *
+ * A fixed 15s window (audio-feed-62ozc's `SPAWN_HARNESS_STARTUP_TIMEOUT_MS`) sits
+ * BELOW that second sample, so a loaded host reported a HEALTHY harness as "never
+ * logged its READY line" and reddened whichever proof row happened to spawn it - a
+ * row racing real time, the family of dv4p/5dxrk/hrfn/cls. Raising 15s is not a fix:
+ * it moves the red to a slower host. The window is instead derived from a boot
+ * baseline MEASURED ON THE SAME HOST at the same moment, so a load that stretches
+ * the baseline by 1.8x stretches the window by 1.8x. The measured harness-to-boot
+ * ratio (21-24x) sits inside 60x in BOTH samples, i.e. ~2.5x headroom at every load
+ * level observed here.
  */
-export const SPAWN_HARNESS_STARTUP_TIMEOUT_MS = 15_000;
+export const SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE = 60;
+
+/**
+ * The startup window for a host that booted the baseline in `measuredBootMs`.
+ *
+ * Proportional BY CONSTRUCTION - `startupBackstopMs(2 * b) === 2 * startupBackstopMs(b)` -
+ * so a host that is twice as slow gets twice the window. Pinned BY NAME by
+ * "proof-helper: the harness startup window is derived from the measured boot
+ * baseline, never a fixed 15s (audio-feed-3n0xs)" in tests/proof_helper_test.ts,
+ * which reds if a constant is ever returned from here again.
+ */
+export function startupBackstopMs(measuredBootMs: number): number {
+  return Math.round(measuredBootMs * SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE);
+}
+
+/**
+ * Source for the boot-baseline probe child: the SAME runtime with the SAME flags as
+ * a harness child and no imports, so what it measures is this host's Deno BOOT cost
+ * right now - the quantity the startup window is derived from.
+ */
+const BOOT_BASELINE_PROBE_SOURCE = `console.log("READY");\nDeno.exit(0);\n`;
+
+/**
+ * How long this host currently takes to boot a Deno child, in ms (audio-feed-3n0xs).
+ *
+ * Fed to the child over stdin (`deno run -`) rather than written to a scratch file,
+ * so the measurement touches no path on disk and leaves nothing behind for a sweep to
+ * reclaim, and so the fast gate's selection gains no file to read. Fails CLOSED: a
+ * probe that cannot run throws, so a broken measurement can never silently become a
+ * window.
+ */
+async function measureHarnessBootBaselineMs(cwd: string): Promise<number> {
+  const startedAt = Date.now();
+  const probe = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-all", "--unstable-kv", "-"],
+    cwd,
+    stdin: "piped",
+    stdout: "null",
+    stderr: "piped",
+  }).spawn();
+  const writer = probe.stdin.getWriter();
+  try {
+    await writer.write(new TextEncoder().encode(BOOT_BASELINE_PROBE_SOURCE));
+    await writer.close();
+  } catch { /* the probe child died before reading its source: reported below */ }
+  const output = await probe.output();
+  const measured = Date.now() - startedAt;
+  if (!output.success) {
+    throw new Error(
+      `the boot-baseline probe exited ${output.code}: ${
+        new TextDecoder().decode(output.stderr).trim()
+      }`,
+    );
+  }
+  if (!Number.isFinite(measured) || measured <= 0) {
+    throw new Error(`the boot-baseline probe measured ${measured}ms`);
+  }
+  return measured;
+}
 
 export async function spawnHarness(
   scriptRelPath: string,
   extraArgs: string[] = [],
-  options: { healthPath?: string; timeoutMs?: number; startupTimeoutMs?: number } = {},
+  options: {
+    healthPath?: string;
+    timeoutMs?: number;
+    /** Explicit STARTUP window; when set it REPLACES the derived window (deterministic fail-fast rows). */
+    startupTimeoutMs?: number;
+    /** A boot baseline measured elsewhere, injected so a row decides the window instead of the host. */
+    bootBaselineMs?: number;
+  } = {},
 ): Promise<SupervisedHarness> {
   const healthPath = options.healthPath ?? "/health";
   // The deadline is a BACKSTOP, never the pass condition: the wait below is on
@@ -849,9 +926,9 @@ export async function spawnHarness(
   // host passes whenever readiness actually arrives (audio-feed-57ape).
   // audio-feed-62ozc: `timeoutMs` bounds the HEALTH phase and its budget starts
   // at the OBSERVED bind event (the READY line), not at spawn - cold-start
-  // compilation is the STARTUP phase, bounded separately by `startupTimeoutMs`.
+  // compilation is the STARTUP phase, whose window is DERIVED from this host's
+  // measured boot baseline instead of fixed (audio-feed-3n0xs).
   const timeoutMs = options.timeoutMs ?? SPAWN_HARNESS_HEALTH_TIMEOUT_MS;
-  const startupMs = options.startupTimeoutMs ?? SPAWN_HARNESS_STARTUP_TIMEOUT_MS;
   const cwd = new URL("..", import.meta.url).pathname;
 
   const cmd = new Deno.Command(Deno.execPath(), {
@@ -867,11 +944,30 @@ export async function spawnHarness(
 
   const textDecoder = new TextDecoder();
 
+  // The readiness SIGNAL: resolved the moment the child's own READY line reaches
+  // its stdout, so the startup wait is an EVENT - never a fixed sleep, and never a
+  // fixed real-time window that a loaded host can spend on compilation.
+  let assignedPort: number | null = null;
+  let announceReady: (() => void) | null = null;
+  const readyLine = new Promise<void>((resolve) => {
+    announceReady = resolve;
+  });
+  const scanForReadyLine = () => {
+    if (assignedPort !== null) return;
+    const match = /READY port=(\d+)/.exec(stdoutBuf) ??
+      /http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/.exec(stdoutBuf);
+    if (match) {
+      assignedPort = Number(match[1]);
+      announceReady?.();
+    }
+  };
+
   // Pipe and accumulate stdout in background
   (async () => {
     try {
       for await (const chunk of process.stdout) {
         stdoutBuf += textDecoder.decode(chunk, { stream: true });
+        scanForReadyLine();
       }
     } catch { /* stream closed */ }
   })();
@@ -887,35 +983,102 @@ export async function spawnHarness(
 
   let exited = false;
   let exitCode: number | null = null;
+  let announceExit: (() => void) | null = null;
+  const exitSignal = new Promise<void>((resolve) => {
+    announceExit = resolve;
+  });
   process.status.then((st) => {
     exited = true;
     exitCode = st.code;
-  }).catch(() => {});
+    announceExit?.();
+  }).catch(() => {
+    exited = true;
+    announceExit?.();
+  });
 
-  const startTime = Date.now();
-  let assignedPort: number | null = null;
-  let healthStartedAt = 0;
+  /**
+   * Kill AND await: a killed-but-unawaited child leaks its process resource into the
+   * caller's test sanitizer (audio-feed-ft1sj). Bounded so a child that ignores the
+   * signal cannot hang the error path.
+   */
+  const killAndReap = async () => {
+    try {
+      process.kill();
+    } catch { /* ignore */ }
+    await Promise.race([
+      process.status.catch(() => {}),
+      new Promise((r) => setTimeout(r, 2000)),
+    ]);
+  };
 
-  for (;;) {
-    if (exited) {
+  // The baseline probe is started CONCURRENTLY with the child, so on the pass path it
+  // costs nothing: its measurement overlaps the compile it exists to size.
+  const baselineProbe = options.startupTimeoutMs !== undefined ||
+      options.bootBaselineMs !== undefined
+    ? null
+    : measureHarnessBootBaselineMs(cwd)
+      .then((ms) => ({ ok: true as const, ms }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+  let startupMs: number;
+  let startupDerived = false;
+  if (options.startupTimeoutMs !== undefined) {
+    startupMs = options.startupTimeoutMs;
+  } else if (options.bootBaselineMs !== undefined) {
+    startupMs = startupBackstopMs(options.bootBaselineMs);
+    startupDerived = true;
+  } else {
+    const probe = await baselineProbe!;
+    if (!probe.ok) {
+      await killAndReap();
       throw new Error(
-        `Harness '${scriptRelPath}' exited prematurely with code ${exitCode} before answering health check.\n` +
+        `Harness '${scriptRelPath}': the boot-baseline probe failed (${
+          probe.error instanceof Error ? probe.error.message : String(probe.error)
+        }), so the startup window has no host measurement to derive from.\n` +
           `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
       );
     }
+    startupMs = startupBackstopMs(probe.ms);
+    startupDerived = true;
+  }
 
-    if (assignedPort === null) {
-      const match = /READY port=(\d+)/.exec(stdoutBuf) ??
-        /http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/.exec(stdoutBuf);
-      if (match) {
-        assignedPort = Number(match[1]);
-        // audio-feed-62ozc: the health budget starts HERE, at the observed bind,
-        // so whatever the host spent compiling is startup, not health.
-        healthStartedAt = Date.now();
+  // STARTUP: spawn -> READY. Whichever event happens first decides; the derived
+  // window is only the backstop for a child that neither binds nor exits.
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  const startupDeadline = new Promise<"timeout">((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), startupMs);
+    Deno.unrefTimer(timer);
+    startupTimer = timer;
+  });
+  const startupOutcome = await Promise.race([
+    readyLine.then(() => "ready" as const),
+    exitSignal.then(() => "exited" as const),
+    startupDeadline,
+  ]);
+  if (startupTimer !== undefined) clearTimeout(startupTimer);
+
+  if (startupOutcome === "exited") {
+    // Reap before throwing: the child is gone, but its status must settle before the
+    // error leaves or the caller's sanitizer sees a live resource.
+    await process.status.catch(() => {});
+    throw new Error(
+      `Harness '${scriptRelPath}' exited prematurely with code ${exitCode} before answering health check.\n` +
+        `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
+    );
+  }
+
+  if (startupOutcome === "ready") {
+    // HEALTH: bind -> first OK response. audio-feed-62ozc: the budget starts HERE, at
+    // the observed bind, so whatever the host spent compiling is startup, not health.
+    const healthStartedAt = Date.now();
+    for (;;) {
+      if (exited) {
+        throw new Error(
+          `Harness '${scriptRelPath}' exited prematurely with code ${exitCode} before answering health check.\n` +
+            `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
+        );
       }
-    }
 
-    if (assignedPort !== null) {
       const healthElapsed = Date.now() - healthStartedAt;
       if (healthElapsed >= timeoutMs) break; // health budget exhausted: named /health report below
       let res: Response | null = null;
@@ -941,9 +1104,10 @@ export async function spawnHarness(
               `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
           );
         }
+        const port = assignedPort!;
         return {
-          port: assignedPort,
-          base: `http://localhost:${assignedPort}`,
+          port,
+          base: `http://localhost:${port}`,
           process,
           getLogs: () => ({ stdout: stdoutBuf, stderr: stderrBuf }),
           kill: () => {
@@ -953,35 +1117,30 @@ export async function spawnHarness(
           },
         };
       }
-    } else if (Date.now() - startTime >= startupMs) {
-      break; // startup budget exhausted with no bind: named never-READY report below
-    }
 
-    await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) =>
+        setTimeout(r, Math.max(Math.min(100, timeoutMs - healthElapsed), 1))
+      );
+    }
   }
 
-  try {
-    process.kill();
-  } catch { /* ignore */ }
-  // Reap before throwing: a killed-but-unawaited child leaks its process
-  // resource into the caller's test sanitizer (audio-feed-ft1sj's rule:
-  // kill AND await). Bounded so a child that ignores the signal cannot
-  // hang the error path.
-  await Promise.race([
-    process.status.catch(() => {}),
-    new Promise((r) => setTimeout(r, 2000)),
-  ]);
+  // One of the two budgets expired: the derived startup window (spawn -> READY) or
+  // the health window (observed bind -> first OK answer).
+  await killAndReap();
   // Name the condition that never became true, and the PHASE whose budget
   // expired: a report must not render an inability to know as a fact, and
   // "timed out" alone says nothing about whether the child never bound or
   // bound but never answered (audio-feed-57ape); a startup stall is likewise
   // not a /health answer, so each phase names its own window
-  // (audio-feed-62ozc).
+  // (audio-feed-62ozc). The startup window names the DERIVED value it used, so a
+  // report shows what this host was measured to need (audio-feed-3n0xs).
   const condition = assignedPort === null
     ? "the child never logged its READY line (no 'READY port=N' or server URL in stdout)"
     : `the child bound port ${assignedPort} but ${healthPath} never answered OK`;
   const phase = assignedPort === null
-    ? `timed out after ${startupMs}ms waiting for the harness to log READY`
+    ? `timed out after ${startupMs}ms waiting for the harness to log READY${
+      startupDerived ? " (a window derived from the measured boot baseline)" : ""
+    }`
     : `timed out after ${timeoutMs}ms waiting for ${healthPath}`;
   throw new Error(
     `Harness '${scriptRelPath}' ${phase}: ${condition}.\n` +

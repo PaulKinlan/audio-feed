@@ -43,9 +43,9 @@ import {
   setOriginalCopyFileForTesting,
   setOriginalCopyFileSyncForTesting,
   SPAWN_HARNESS_HEALTH_TIMEOUT_MS,
-  SPAWN_HARNESS_STARTUP_TIMEOUT_MS,
   spawnHarness,
   startInProcessServer,
+  startupBackstopMs,
   waitForChromeProfileUnused,
   withChrome,
   writeEvidenceReadme,
@@ -349,14 +349,78 @@ Deno.test({
 Deno.test(
   "proof-helper: spawnHarness's production health deadline is the pinned 15s fail-fast window (audio-feed-57ape)",
   () => {
-    // The production constants, asserted by name so a silent change to the
-    // fail-fast windows is a red row rather than a drift nobody noticed.
+    // The production constant, asserted by name so a silent change to the
+    // fail-fast window is a red row rather than a drift nobody noticed.
     // audio-feed-62ozc: startup and health are separate windows - one wall
     // window deciding both phases is the defect this file exists to prevent.
+    // audio-feed-3n0xs: the STARTUP window is no longer a constant at all - it is
+    // derived from the host's measured boot baseline (rows below) - so this value
+    // bounds only the /health phase, which starts at the OBSERVED bind.
     assertEquals(SPAWN_HARNESS_HEALTH_TIMEOUT_MS, 15_000);
-    assertEquals(SPAWN_HARNESS_STARTUP_TIMEOUT_MS, 15_000);
   },
 );
+
+Deno.test(
+  "proof-helper: the harness startup window is derived from the measured boot baseline, never a fixed 15s (audio-feed-3n0xs)",
+  () => {
+    // THE RACE (audio-feed-3n0xs, real-timer family of dv4p/5dxrk/hrfn/cls): spawn ->
+    // READY is a Deno COMPILE, so how long it takes is a property of the host's load,
+    // not of the child. Measured on this VM while fixing this, the same harness logged
+    // READY at 12.0s off a 503ms boot baseline, and at 19.0s off an 899ms baseline
+    // under eight busy loops - so a FIXED 15s window failed a HEALTHY child and
+    // reddened whichever proof row happened to spawn it. These assertions are the ones
+    // that redden by NAME if a constant is returned from startupBackstopMs again:
+    // every one of them is false for 15_000.
+    assertEquals(startupBackstopMs(500), 30_000);
+    assertEquals(startupBackstopMs(900), 54_000);
+    assertEquals(startupBackstopMs(100), 6_000);
+    // Proportional in both directions - a fixed window cannot be: 1.8x the measured
+    // boot is 1.8x the window, which is exactly the load change that produced the
+    // 12.0s -> 19.0s measurement above.
+    assertEquals(startupBackstopMs(900), Math.round(1.8 * startupBackstopMs(500)));
+    assertEquals(startupBackstopMs(1_800), Math.round(2 * startupBackstopMs(900)));
+    // The failure in one assertion: a host measured 1.8x slower than the first sample
+    // needs MORE than the 19.0s its healthy harness actually took, and now gets it,
+    // where the fixed window gave it 15s.
+    assert(
+      startupBackstopMs(900) > 19_000,
+      `a 899ms measured boot baseline must derive more than the 19.0s READY measured on that host, got ${
+        startupBackstopMs(900)
+      }ms`,
+    );
+  },
+);
+
+Deno.test({
+  name:
+    "proof-helper: spawnHarness bounds READY by the boot-baseline-derived window, not a fixed 15s (audio-feed-3n0xs)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    // The WIRING: the row injects the measured baseline (docs/speed.md rule 1 - the
+    // test decides the window, not the host) so 8ms of measured boot derives a 480ms
+    // window. The row therefore reddens in under a second, BY NAME, if spawnHarness
+    // ever waits on a fixed window again: the report then names 15000 instead of 480.
+    await withScratchRoot(async (scratch) => {
+      const child = await writeHarnessChild(
+        scratch,
+        "never_ready_harness_child.ts",
+        NEVER_READY_CHILD,
+      );
+      const derived = startupBackstopMs(8);
+      assertEquals(derived, 480, "8ms of measured boot must derive a 480ms startup window");
+      const err = await assertRejects(
+        () => spawnHarness(child, [], { bootBaselineMs: 8 }),
+        Error,
+        `timed out after ${derived}ms waiting for the harness to log READY`,
+      );
+      // The report says the window was DERIVED, so no reader reads 480ms as a
+      // production constant, and it still names the condition that never became true.
+      assertStringIncludes(err.message, "derived from the measured boot baseline");
+      assertStringIncludes(err.message, "the child never logged its READY line");
+      assertStringIncludes(err.message, "Assigned port: null");
+    });
+  },
+});
 
 Deno.test({
   name: "proof-helper: spawnHarness fails fast if child process exits prematurely",

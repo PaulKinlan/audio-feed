@@ -58,6 +58,20 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   }).spawn();
 }
 
+/**
+ * The marker bound for each kill round, DERIVED FROM AN OBSERVED EVENT (coord review of
+ * audio-feed-ga3jd): round 1 keeps the original 20s guard unchanged; each later round gets
+ * 3x the previous round's OBSERVED time-to-marker (min 20s) - a host that needed T ms to
+ * reach the put once gets 3T now, so the headroom tracks the machine the row is actually
+ * running on instead of a widened literal. The survive round has no marker bound at all
+ * (it waits on the child's whole output, behind the controlled clock).
+ */
+let lastObservedMarkerMs = 0;
+function markerDeadlineFor(round: number, startedAt: number): number {
+  if (round === 1 || lastObservedMarkerMs === 0) return startedAt + 20_000;
+  return startedAt + Math.max(20_000, lastObservedMarkerMs * 3);
+}
+
 /** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
   kvPath: string,
   round: number,
@@ -67,12 +81,37 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   let out = "";
   const buffer = child.stdout.getReader();
   try {
-    const markerDeadline = Date.now() + 20_000;
-    while (Date.now() < markerDeadline) {
-      const { value, done } = await buffer.read();
+    // audio-feed-ga3jd: the marker bound is an OBSERVABILITY GUARD derived from the
+    // observed time-to-marker of the previous round (markerDeadlineFor), never a widened
+    // literal: it is the loud-fail line for a child that never reaches the put, and each
+    // read is raced against the child's EXIT so an early-dying child fails with its
+    // stderr immediately instead of after the guard. Every read result is consumed, so
+    // no marker chunk is lost to the race.
+    const markerStart = Date.now();
+    const markerDeadline = markerDeadlineFor(round, markerStart);
+    const exited = child.status.then(() => "exited" as const);
+    let childExitedEarly = false;
+    for (;;) {
+      if (Date.now() >= markerDeadline) break;
+      const race = await Promise.race([buffer.read(), exited]);
+      if (race === "exited") {
+        childExitedEarly = true;
+        break;
+      }
+      const { value, done } = race;
       if (done) break;
       out += decoder.decode(value);
-      if (out.includes("MARKER:uploading")) break;
+      if (out.includes("MARKER:uploading")) {
+        lastObservedMarkerMs = Date.now() - markerStart;
+        break;
+      }
+    }
+    if (childExitedEarly) {
+      const status = await child.status;
+      const err = await child.stderr.text();
+      throw new Error(
+        `child round ${round} exited before uploading_audio (signal ${status.signal}, code ${status.code}; stderr: ${err}; stdout: ${out})`,
+      );
     }
   } finally {
     await buffer.cancel().catch(() => {});
@@ -91,9 +130,17 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
   const kvPath = await Deno.makeTempFile({ prefix: "audio-feed-aqms-survive-", suffix: ".kv" });
   try {
     const child = spawnChild(kvPath, "survive", 1);
-    const out = new TextDecoder().decode((await child.output()).stdout);
+    const output = await child.output();
+    const out = new TextDecoder().decode(output.stdout);
+    const err = new TextDecoder().decode(output.stderr);
     const status = await child.status;
-    assertEquals(status.success, true, `survive child failed: ${out}`);
+    assertEquals(
+      status.success,
+      true,
+      // audio-feed-ga3jd: the child's SURVIVE-FATAL stderr line names the order break
+      // (e.g. the deadline fired before the put started), so the red carries the mechanism.
+      `survive child failed: ${out}${err}`,
+    );
 
     const line = out.split("\n").find((l) => l.startsWith("SURVIVE:"));
     assert(line, `survive child printed no SURVIVE line: ${out}`);
@@ -103,22 +150,28 @@ Deno.test("audio-feed-aqms control: the same put outlasts the invocation budget 
       putStarted: number;
       putSettled: number;
       putAborted: number;
-      awaitedMs: number;
+      putStartedBeforeDeadline: boolean;
       episode?: { status: string; phase?: string; attempts?: number };
     };
 
     // The invocation awaited the put past its own budget-derived deadline: the
     // wrapper cannot yield before maxInvocationDurationMs (4000) minus flushMargin
     // (500) = 3500ms after batch start, and the put had already started by then.
+    // audio-feed-ga3jd: the deadline now fires on the child's controlled clock
+    // ONLY AFTER the put is observably started (an ORDER fact), so these counter
+    // assertions carry the whole property on any host speed; the old
+    // `awaitedMs >= 3_000` wall-clock assert measured the very race that starved
+    // the put under load and is gone with the injected clock that replaced it.
     assertEquals(r.putStarted, 1, "the put must have been started");
+    assertEquals(
+      r.putStartedBeforeDeadline,
+      true,
+      "the put must start BEFORE the deadline fires - the abort lands mid-put by construction, not on an already-dead signal",
+    );
     assertEquals(r.putSettled, 0, "the put must never complete: it outlasts the budget");
     assertEquals(r.putAborted, 1, "the budget deadline must ABORT the put by construction");
     assertEquals(r.yielded.length, 1, "surviving invocation converts it to a clean yield");
     assertEquals(r.failed.length, 0);
-    assert(
-      r.awaitedMs >= 3_000,
-      `batch must have awaited the put to its deadline before yielding (awaited ${r.awaitedMs}ms)`,
-    );
     assertEquals(r.episode?.status, "pending", "claim released non-terminally");
     assertEquals(r.episode?.phase, "upload_retry", "phase records the upload retry");
   } finally {
