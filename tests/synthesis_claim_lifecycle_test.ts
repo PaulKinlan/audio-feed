@@ -1591,23 +1591,28 @@ Deno.test("audio-feed-dv4p: (a) terminal upload preflight yields before slow upl
   const wav = pcmToWav(new Uint8Array(64), { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
   const synth = () => Promise.resolve(decodedFromWav(wav));
 
-  const start = performance.now();
+  // audio-feed-5dxrk (docs/speed.md rule 1, extending the qz1eb family fix): the
+  // upload estimate is PINNED at 200ms - larger than the whole 80ms budget for any
+  // elapsed >= 0 - so the preflight refusal is ARITHMETIC and cannot flip with how
+  // much real time the earlier stages consumed. The old row relied on the scaled
+  // byte-derived default estimate racing the real elapsed budget remaining, and a
+  // 159-suite gate run flipped it (yielded 0 while the code was correct).
+  // The budget clock is INJECTED so no stage consumes real time at all.
+  const time = controlledInvocationClock();
   const r1 = await runSynthesisBatch(ctx, synth, {
     owner: "upload-probe-1",
     maxInvocationDurationMs: 80,
     estimatedTurnDurationMs: 1,
+    estimatedUploadDurationMs: 200,
     flushMarginMs: 5,
+    clock: time.clock,
   });
-  const elapsed = performance.now() - start;
 
   // THE PROPERTY is the line below: preflight REFUSED before any put was attempted
-  // (putCalls === 0 — an order fact, not a clock). The elapsed literal was a second,
-  // load-sensitive way of saying the same thing (audio-feed-y2ex); it stays only as a
-  // deliberately wide sanity bound so scheduler noise cannot flip this test.
-  assert(
-    elapsed < 2_000,
-    `elapsed (${elapsed}ms) sanity bound — putCalls === 0 is the assertion`,
-  );
+  // (putCalls === 0 — an order fact, not a clock). With the estimate pinned above the
+  // budget the refusal holds for any clock reading, so no wall-clock figure is needed
+  // here at all (the old deliberately-wide 2s sanity bound rode a real-time read and
+  // is gone with the race it guarded).
   assertEquals(r1.ready.length, 0, "must not finish ready past budget");
   assertEquals(r1.yielded.length, 1, "must preflight yield before upload");
   assertEquals(putCalls, 0, "blobs.put must not have been called due to preflight yield");
