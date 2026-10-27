@@ -24,6 +24,7 @@
 import { KvMetadataStore } from "../../src/storage/kv.ts";
 import type { BlobInfo, BlobObject, BlobStore } from "../../src/storage/mod.ts";
 import { runSynthesisBatch } from "../../src/worker/synthesis.ts";
+import { controlledInvocationClock } from "./invocation_clock.ts";
 import { decodedFromWav, pcmToWav } from "../../src/tts/gemini.ts";
 import type { AppConfig, Stores } from "../../src/config.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "../fixtures.ts";
@@ -33,6 +34,11 @@ class HangingPutBlobStore implements BlobStore {
   started = 0;
   settled = 0;
   aborted = 0;
+  /** True when a put() was entered AFTER its signal was already aborted (audio-feed-ga3jd
+   * order probe: with the controlled clock the deadline must land MID-put, so this must
+   * stay false for the survive control - a true here would mean the deadline fired first
+   * and the counters alone could not tell the two orders apart). */
+  startedAfterAbort = 0;
   /** Monotonic ms of each put start and settlement, for the budget assertions. */
   putStartedAt: number[] = [];
   putSettledAt: number[] = [];
@@ -41,6 +47,7 @@ class HangingPutBlobStore implements BlobStore {
     signal?: AbortSignal;
   }): Promise<BlobInfo> {
     this.started++;
+    if (opts?.signal?.aborted) this.startedAfterAbort++;
     this.putStartedAt.push(performance.now());
     return new Promise<BlobInfo>((_, reject) => {
       // Never settles on its own: an upload that outlasts everything. Since
@@ -78,6 +85,15 @@ class HangingPutBlobStore implements BlobStore {
 }
 
 const [kvPath, mode, roundArg] = Deno.args;
+
+// Survive control only (audio-feed-ga3jd): the batch's deadline runs on the
+// repo's ONE controlled clock (tests/fixtures/invocation_clock.ts, per
+// docs/speed.md rule 1) so the deadline fires when THIS row decides - after the
+// put is observably started - instead of 3500ms of real time during which a
+// loaded host's earlier stages eat the whole budget and the tick yields before
+// the put stage. Hang/drain rounds keep the real clock: their 30s bound is
+// parent-side kill headroom, not a raced deadline.
+const surviveTime = controlledInvocationClock();
 if (!kvPath || (mode !== "hang" && mode !== "drain" && mode !== "survive") || !roundArg) {
   console.error("usage: invocation_death_child.ts <kvPath> <hang|survive|drain> <round>");
   Deno.exit(2);
@@ -145,6 +161,9 @@ const batchPromise = runSynthesisBatch(ctx, synth, {
   flushMarginMs: 500,
   estimatedTurnDurationMs: 1,
   estimatedUploadDurationMs: 5,
+  // audio-feed-ga3jd: survive mode's deadline is driven by the controlled clock
+  // (declared above); hang/drain stay on the default real clock.
+  ...(mode === "survive" ? { clock: surviveTime.clock } : {}),
 });
 
 const hangingBlobs = stores.blobs as HangingPutBlobStore;
@@ -179,9 +198,22 @@ if (mode === "survive") {
   // second assertion of the repro: it separates "the put outlasted the budget
   // mid-await" (what happens here) from "the test harness merely interrupted
   // something" (what the hang rounds do on purpose).
-  const startedAt = performance.now();
+  //
+  // The deadline is on the controlled clock (audio-feed-ga3jd): wait until the put
+  // is OBSERVABLY started (an order fact, not a race), then advance past the
+  // 4000-500=3500ms deadline so the abort lands mid-put on any host speed.
+  const putStartDeadline = Date.now() + 20_000;
+  while (hangingBlobs.started === 0) {
+    if (Date.now() > putStartDeadline) {
+      console.error(
+        `SURVIVE-FATAL: the put never started within 20s (stages starved) - aborting so the parent asserts red`,
+      );
+      Deno.exit(1);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await surviveTime.advance(4_000);
   const result = await batchPromise;
-  const yieldedAt = performance.now();
   const episode = await metadata.getEpisode("user-1", "episode-1");
   console.log(
     "SURVIVE:" + JSON.stringify({
@@ -190,8 +222,8 @@ if (mode === "survive") {
       putStarted: hangingBlobs.started,
       putSettled: hangingBlobs.settled,
       putAborted: hangingBlobs.aborted,
+      putStartedBeforeDeadline: hangingBlobs.startedAfterAbort === 0,
       putStartedAt: hangingBlobs.putStartedAt[0] ?? null,
-      awaitedMs: Math.round(yieldedAt - startedAt),
       episode: episode && {
         status: episode.status,
         phase: episode.phase,
