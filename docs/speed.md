@@ -13,12 +13,19 @@
   relations (`scripts/fast-check.ts:942-1053,1066-1191`; `scripts/test-selection.ts:164-213`). A
   changed path with no selected reader and no proof that it is inert widens to the full test suite;
   an inert doc with no derived reader selects zero suites and reports **NO SUITES SELECTED**, not a
-  test pass (`scripts/fast-check.ts:811-849,1149-1177`).
+  test pass. The decision is the `isProvablyInert` return in `scripts/fast-check.ts`, behind the
+  `inertContradictions` and incomplete-relation guards, and the marker is emitted by that file's
+  `testFiles.length === 0` branch; both are pinned by row NAME (audio-feed-361l7) —
+  `tests/fast_gate_subset_test.ts` "the empty state is announced for the coverage line and said out
+  loud" and `tests/fast_gate_fmt_test.ts` "audio-feed-8qnu control: formatted file passes gate
+  without extra work".
 - `.ts` data-read admission is **partial today**: resolver-proven paths (`resolvedPaths`) are
   admitted, while literal `authoredPaths` and dynamic reads are not admitted and the explicit
   declaration escape hatch is **not built** (`scripts/test-selection.ts:1500-1549`). Unresolved read
   hints disable the _inert-document_ shortcut when the planner otherwise has no tests and an inert
-  path, not all affected-only selection (`scripts/fast-check.ts:818-841`).
+  path, not all affected-only selection (the incomplete-relation guard in `scripts/fast-check.ts`,
+  pinned by row NAME: `tests/fast_gate_subset_test.ts` "audio-feed-q0ky: while the relation is
+  INCOMPLETE no file is inert, and the widening is NAMED").
 
 ## Timing evidence, not a latency budget
 
