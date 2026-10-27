@@ -885,15 +885,23 @@ async function cachedLegacyKeyOwnershipHolds(
  * is ambiguous (referenced by zero or multiple episodes globally) (audio-feed-65lf, audio-feed-ni04).
  *
  * Uses a bounded, in-memory cache per MetadataStore instance, invalidated immediately
- * on any metadata mutation made THROUGH THIS INSTANCE, and re-verified before authorizing
- * a positive owner (audio-feed-y63gb: one targeted getEpisode) so moved/migrated/deleted
- * keys disagree and fall back to a full rebuild.
+ * on any of the EIGHT HOOKED MUTATION METHODS (see ensureMetadataInvalidationHooks:
+ * putUser, deleteUser, putEpisode, completeEpisode, updateEpisodeAudioKeyIfCurrent,
+ * claimEpisode, releaseEpisodeClaim, atomicUpdate) made THROUGH THIS INSTANCE, and
+ * re-verified before authorizing a positive owner (audio-feed-y63gb: one targeted
+ * getEpisode) so moved/migrated/deleted keys disagree and fall back to a full rebuild.
+ * Mutations through methods OUTSIDE that list do not invalidate the cache; the
+ * targeted re-verify, the TTL, and the forcing escapes below are what bound that gap
+ * (audio-feed-uk1xn: name the hooks, do not overclaim the invalidation scope).
  *
  * BOUNDED WINDOW, EXPLICIT (audio-feed-uhmzv): the invalidation hooks and the generation
  * counter are PER INSTANCE (WeakMap/WeakSet keyed on the handle). A colliding episode added
  * through a DIFFERENT MetadataStore handle over the same underlying store (another instance,
  * e.g. another Deno Deploy isolate) is not visible to this handle's cache until INDEX_TTL_MS
  * expires or the caller forces the store via options.bypassCache / clearLegacyKeyIndexCache.
+ * The TTL-expiry half of that sentence has NO ROW: testing a real 60s expiry needs a real
+ * sleep, which docs/speed.md rule 1 forbids - untested by design (audio-feed-uk1xn); the
+ * forcing escapes ARE tested.
  * Within that window this handle can still authorize the cached owner for a key that has just
  * become ambiguous elsewhere; callers that need the ambiguity IMMEDIATELY across handles must
  * pass bypassCache. The same-handle property (audio-feed-ni04) is unaffected: additions

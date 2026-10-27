@@ -1138,6 +1138,15 @@ Deno.test(
     // additions invalidate immediately (the row above); forcing the store restores the
     // ambiguity detection immediately (the last assertion here). If someone later restores
     // cross-handle detection, this row FAILS BY NAME and must be rewritten with it.
+    //
+    // BOUND (rule 2, audio-feed-uk1xn): this row uses no injected clock, so the cached
+    // index must still be younger than the 60s INDEX_TTL_MS when the window assertion
+    // runs. The row completes in milliseconds; even a host a thousand times slower
+    // stays two orders of magnitude inside the bound, so real elapsed time cannot reach
+    // the TTL and flip the window assertion's meaning. If a host ever could, the TTL
+    // expiry path (untested by design, see the doc comment) would invalidate the cache
+    // and this row would red - the bound that would be violated is the one this comment
+    // names.
     const kv = await Deno.openKv(":memory:");
     try {
       const handleA = new KvMetadataStore(kv, { ownsConnection: false });
