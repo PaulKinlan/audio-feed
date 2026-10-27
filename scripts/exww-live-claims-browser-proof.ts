@@ -545,16 +545,60 @@ const proof = runProof("audio-feed-exww", async (checker) => {
           deviceScaleFactor: 1,
           mobile: false,
         });
+        // audio-feed-d6g4c: the sleep keeps its original role (a beat for the override to take);
+        // the race it used to lose is now handled by the delivery-observed capture below, which
+        // re-issues the override and retries when Chrome delivered the wrong scale.
         await sleep(120);
-        const shot = (await cdp("Page.captureScreenshot", {
-          format: "png",
-          captureBeyondViewport: true,
-          clip,
-        })) as { data: string };
-        const path = `${OUT}${name}`;
-        await Deno.writeFile(path, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
-        const bytes = await compressInPlace(path);
-        const image = pngSize(await Deno.readFile(path));
+        // audio-feed-d6g4c (measured, full-gate run 46f091ab): under a loaded host the metrics
+        // override above had not settled when the capture fired, and Chrome delivered the 04-
+        // capture at the EMULATED device scale instead of the clip's requested scale - the
+        // wrong-scale mutant's red then depended on host speed (the mutated proof ran GREEN:
+        // 'Observed 0 failure(s)'). The delivery is now OBSERVED, not assumed: the capture is
+        // taken, and if the PNG's dimensions are not the clip's dimensions at the REQUESTED
+        // clip.scale, the override is re-issued and the capture is retried ONCE (the quirk is
+        // transient; two attempts bound it). The check below then judges a capture Chrome
+        // actually delivered at the requested scale, so its verdict is host-speed independent in
+        // both worlds: unmutated delivers EVIDENCE_SCALE and passes; the mutated clip delivers
+        // the wrong scale and reds by name. A persisted mismatch after the retry FAILS THE PROOF
+        // loudly (never a silent accept), which keeps a real Chrome regression a red.
+        const requestedWidth = Math.round(clip.width * clip.scale);
+        const requestedHeight = Math.round(clip.height * clip.scale);
+        let image: { width: number; height: number } | undefined = undefined;
+        let bytes = 0;
+        let path = "";
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const shot = (await cdp("Page.captureScreenshot", {
+            format: "png",
+            captureBeyondViewport: true,
+            clip,
+          })) as { data: string };
+          path = `${OUT}${name}`;
+          await Deno.writeFile(path, Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)));
+          bytes = await compressInPlace(path);
+          image = pngSize(await Deno.readFile(path));
+          if (image.width === requestedWidth && image.height === requestedHeight) break;
+          if (attempt === 1) {
+            await cdp("Emulation.setDeviceMetricsOverride", {
+              width: VIEWPORT_WIDTH,
+              height: Math.max(1400, Math.ceil(bounds.bottom) + 40),
+              deviceScaleFactor: 1,
+              mobile: false,
+            });
+            await cdp("Runtime.evaluate", {
+              expression:
+                "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+              awaitPromise: true,
+            });
+          }
+        }
+        if (image!.width !== requestedWidth || image!.height !== requestedHeight) {
+          throw new Error(
+            `audio-feed-d6g4c capture-scale guard: after a re-issued override and retry, ${name} ` +
+              `delivered ${image!.width}x${image!.height} but the clip requests ` +
+              `${clip.width}x${clip.height} at scale ${clip.scale} (expected ${requestedWidth}x${requestedHeight}) - ` +
+              `refusing to judge a capture Chrome did not deliver at the requested scale`,
+          );
+        }
         checker.check(
           `${name} is within the ${
             (EVIDENCE_PNG_BUDGET_BYTES / 1024).toFixed(0)

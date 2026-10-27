@@ -726,7 +726,24 @@ export async function launchChrome(
     }).catch(() => {});
 
     const portFile = `${profileDir}/DevToolsActivePort`;
-    const portTimeoutMs = opts.portTimeoutMs ?? 10_000;
+    // audio-feed-d6g4c (measured, full-gate run 46f091ab on a loaded host): the old 10s
+    // bound expired BEFORE Chrome wrote DevToolsActivePort - the proof died with a launch
+    // timeout instead of the mutant contract the calling row asserts, which is how the
+    // l7m1 row flaked ('Timed out after 10000ms waiting for DevToolsActivePort' at
+    // proof-helper.ts:761). The bound is an observability GUARD on an external binary's
+    // cold start, not a measurement and not a budget under test (the y2ex ruling shape:
+    // headroom against a loaded box, loud failure if genuinely broken), so it carries 4x
+    // headroom. The 50ms poll below is the observed-event wait; premature exit still
+    // fails immediately with the exit code.
+    // audio-feed-d6g4c (measured, full-gate run 46f091ab on a loaded host): the old 10s
+    // bound expired BEFORE Chrome wrote DevToolsActivePort - the proof died with a launch
+    // timeout instead of the mutant contract the calling row asserts, which is how the
+    // l7m1 row flaked ('Timed out after 10000ms waiting for DevToolsActivePort'). The
+    // bound is an observability GUARD on an external binary's cold start, not a
+    // measurement and not a budget under test (the y2ex ruling shape: headroom against a
+    // loaded box, loud failure if genuinely broken), so it carries 4x headroom. The 50ms
+    // poll below is the observed-event wait; premature exit still fails immediately.
+    const portTimeoutMs = opts.portTimeoutMs ?? 40_000;
     const startTime = Date.now();
     let port = 0;
 
