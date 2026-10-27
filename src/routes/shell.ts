@@ -251,6 +251,24 @@ export const SHELL_CSS = `
     pointer-events: auto;
   }
 
+  /* audio-feed-tyu77: #appTooltip is popover="manual", so it paints in the TOP LAYER,
+     above any modal <dialog> (z-index:1000 cannot cross that boundary). The popover UA
+     sheet sets inset: 0 and margin: auto; both are neutralised here so the anchor rules
+     below and the JS fallback keep sole control of placement. :not(:popover-open) is
+     display:none by UA rule, which is the platform's own hidden state. */
+  .tooltip {
+    inset: auto;
+    margin: 0;
+  }
+
+  /* The display:none -> :popover-open transition needs an explicit starting style
+     for the opacity fade to run. */
+  @starting-style {
+    .tooltip:popover-open {
+      opacity: 0;
+    }
+  }
+
   @supports (anchor-name: --tooltip-anchor) {
     [data-tooltip-active] {
       anchor-name: --tooltip-anchor;
@@ -574,9 +592,11 @@ export const CONFIRM_DIALOG_CLIENT = confirmClientFromSource(confirmSharedSource
  * - role="tooltip" for screen readers
  * - aria-hidden="true" when idle
  * - aria-describedby binding on active trigger
+ * - popover="manual" (audio-feed-tyu77): paints in the top layer, so the tooltip stays
+ *   visible over a modal <dialog> — no z-index can cross that boundary
  */
 export const TOOLTIP_HTML =
-  `<div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>`;
+  `<div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true" popover="manual"></div>`;
 
 /**
  * The tooltip client, shipped inline on every shell page. Its source is

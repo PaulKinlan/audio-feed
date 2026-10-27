@@ -1082,6 +1082,25 @@ dialog.confirm-dialog .confirm-actions {
   pointer-events: auto;
 }
 
+/* audio-feed-tyu77: #appTooltip is popover="manual", so it paints in the TOP LAYER,
+   above any modal <dialog> (z-index:1000 cannot cross that boundary, which is why the
+   share dialog's own Copy button tooltip was invisible). The popover UA sheet sets
+   inset: 0 and margin: auto; both are neutralised here so the anchor rules below and
+   the JS fallback keep sole control of placement. :not(:popover-open) is display:none
+   by UA rule, which is the platform's own hidden state. */
+.tooltip {
+  inset: auto;
+  margin: 0;
+}
+
+/* The display:none -> :popover-open transition needs an explicit starting style
+   for the opacity fade to run. */
+@starting-style {
+  .tooltip:popover-open {
+    opacity: 0;
+  }
+}
+
 @supports (anchor-name: --tooltip-anchor) {
   [data-tooltip-active] {
     anchor-name: --tooltip-anchor;
