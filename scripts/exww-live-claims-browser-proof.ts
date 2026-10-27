@@ -591,10 +591,12 @@ const proof = runProof("audio-feed-exww", async (checker) => {
             });
           }
         }
-        if (image!.width !== requestedWidth || image!.height !== requestedHeight) {
+        if (
+          image === undefined || image.width !== requestedWidth || image.height !== requestedHeight
+        ) {
           throw new Error(
             `audio-feed-d6g4c capture-scale guard: after a re-issued override and retry, ${name} ` +
-              `delivered ${image!.width}x${image!.height} but the clip requests ` +
+              `delivered ${image?.width}x${image?.height} but the clip requests ` +
               `${clip.width}x${clip.height} at scale ${clip.scale} (expected ${requestedWidth}x${requestedHeight}) - ` +
               `refusing to judge a capture Chrome did not deliver at the requested scale`,
           );
