@@ -40,6 +40,24 @@ supersede an earlier status and log, so cite a record that still resolves. The r
 | Fast | `fleet-check --status --fast d20fc5c5` (tree `25f34298`, log `~/.fleet/checks/25f342983e281a0587d0c2918c5f1bc62a43ea10.fast.log`) |       `run_s=35` s | `wait_s=7` s | 6 suites  |
 | Full | `fleet-check --status 793ea22a` (tree `25f34298`, log `~/.fleet/checks/25f342983e281a0587d0c2918c5f1bc62a43ea10.log`)             |      `run_s=185` s | `wait_s=0` s | full gate |
 
+### Full-gate duration distribution and the CHECK_TIMEOUT default (audio-feed-9jlp3, 2026-10-27)
+
+Per the MERGER's measurement table (the merger runs the gates; do not re-derive from logs), this
+window holds TEN full-gate runs — 4830 / 4551 / 3703 / 3602 (INTERRUPTED) / 3259 / 3207 / 2785 /
+2608 / 1622 / 1580 seconds — a wide spread (min 1580 s, max 4830 s) because load and queue shape
+vary per run. That spread is exactly why the TIMEOUT, not test duration, is the binding
+constraint: the bound must clear the observed max, not a typical run, and `run_s` in the cached
+fleet-check record is the value the bound is actually compared against. Gates killed at the bound
+are recorded as KILLED (not a verdict), which forces a cold re-run and taxes every lane behind it.
+
+**CHECK_TIMEOUT default = 5400 s**, derived from the merger table: the rule `ceil(observed_max ×
+1.1)` gives 5313 s from the observed max 4830 s, and the shipped default is the next round
+hundred, 5400 s. That clears the slowest observed full gate by the rule's headroom while staying
+low enough that a genuinely hung gate still dies within a bounded window (a hung gate holds its
+heavy slot and the union behind it). Re-derive from the merger's table whenever a full gate lands
+above the current default: the rule is `ceil(observed_max × 1.1)`, from measurements, never from
+preference.
+
 ## Tests must not assert on elapsed real time (audio-feed-n52j3)
 
 Two of the three union-gate reds on 2026-10-23 had nothing to do with the branches under test: the ROWS
