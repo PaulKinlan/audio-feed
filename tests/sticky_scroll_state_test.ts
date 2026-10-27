@@ -171,7 +171,14 @@ async function withChrome<T>(
     await cdp("Page.enable");
     await cdp("Runtime.enable");
     const evaluate = async (expr: string) => {
-      const r = await cdp("Runtime.evaluate", { expression: expr, returnByValue: true });
+      // awaitPromise: lets callers hand page-side async waits (the frame-coupled stuck-state
+      // wait below, audio-feed-mir4g) to the page instead of polling over CDP. Harmless for
+      // synchronous expressions - the value resolves the same way.
+      const r = await cdp("Runtime.evaluate", {
+        expression: expr,
+        returnByValue: true,
+        awaitPromise: true,
+      });
       if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails));
       return r.result?.result?.value;
     };
@@ -190,6 +197,56 @@ async function withChrome<T>(
     );
   }
 }
+
+/**
+ * audio-feed-mir4g: a FRAME-COUPLED wait for the stuck-state flip, replacing the wall-clock
+ * state poll that raced under a saturated gate. The previous shape polled the computed styles
+ * under a 5s wall-clock deadline and then ASSERTED on whatever the last probe saw. Under load
+ * the flip landed late in the window and the deadline cut the 180ms border-color/box-shadow
+ * transitions short: a probe in the transition's first instants can round back to the starting
+ * 8-bit colour (measured: 'the stuck edge strengthens (rgb(36,36,43) -> rgb(36,36,43))' with
+ * box-shadow already flipped - a partial, mid-transition read). Here every check runs after a
+ * rendered frame (double rAF), so a starved renderer adds FRAMES, never a wall-clock miss, and
+ * the values are only read once they are stable across two consecutive frames (the transitions
+ * have run out). The 600-frame cap is a HANG GUARD measured in frames, not milliseconds
+ * (docs/speed.md rule 1): ~50x the 11-frame transition, and it trips only when the flip or the
+ * settle never happens - which is the regression, named by the returned flags.
+ */
+const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolean) =>
+  `(async () => {
+    const el = document.querySelector(${JSON.stringify(surfaceSel)});
+    const keyOf = () => {
+      const cs = getComputedStyle(el);
+      return [cs.boxShadow, cs.backgroundColor, cs.borderBlockEndColor].join("|");
+    };
+    const base = ${JSON.stringify(baseKey)};
+    const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const state = () => ({
+      scrollY: Math.round(window.scrollY),
+      rectTop: Math.round(el.getBoundingClientRect().top),
+      key: keyOf(),
+    });
+    let frames = 0;
+    for (;;) {
+      const s = state();
+      const reached = ${wantStuck}
+        ? s.scrollY > 0 && s.rectTop === 0 && s.key !== base
+        : s.scrollY === 0 && s.key === base;
+      if (reached) break;
+      if (++frames > 600) return JSON.stringify({ reached: false, settled: false, ...s });
+      await frame();
+    }
+    let prev = keyOf();
+    frames = 0;
+    for (;;) {
+      await frame();
+      const cur = keyOf();
+      if (cur === prev) break;
+      if (++frames > 600) return JSON.stringify({ reached: true, settled: false, ...state() });
+      prev = cur;
+    }
+    return JSON.stringify({ reached: true, settled: true, ...state() });
+  })()`;
 
 const PROBE = (surfaceSel: string, wrapSel: string) =>
   `(() => {
@@ -275,20 +332,29 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         );
         assert(loaded, `${url}: page did not become scrollable within 20s`);
         const probe = () => evaluate(PROBE(surface, wrap)).then(JSON.parse);
-        // State-gated CDP poll under 5s deadline: predicate checks initial sticky state; renderer delay adds poll iterations.
+        // The unscrolled baseline still polls on a wall-clock deadline: no transition is in
+        // flight before the first scroll, so there is no mid-transition value to race.
         const before = await until(
           probe,
           (state) => state.scrollY === 0 && state.rectTop === 0 && state.shadow === "none",
         );
+        // From here on the waits are FRAME-COUPLED (audio-feed-mir4g): the flip and the
+        // restore are awaited inside the page, and the styles are read only once they are
+        // stable across two rendered frames - no assertion can land mid-transition.
+        const baseKey = [before.shadow, before.bg, before.border].join("|");
         await evaluate("window.scrollTo(0, 2000)");
-        const after = await until(
-          probe,
-          (state) =>
-            state.scrollY > 0 && state.rectTop === 0 && state.shadow !== "none" &&
-            state.bg !== before.bg && state.border !== before.border,
+        const flip = JSON.parse(await evaluate(STUCK_STATE_WAIT(surface, baseKey, true)));
+        assert(
+          flip.reached,
+          `${url}: the stuck flip never landed (scrollY=${flip.scrollY}, rectTop=${flip.rectTop})`,
         );
+        assert(flip.settled, `${url}: the stuck-style transitions never settled`);
+        const after = await probe();
         await evaluate("window.scrollTo(0, 0)");
-        const back = await until(probe, (state) => state.scrollY === 0 && state.shadow === "none");
+        const restored = JSON.parse(await evaluate(STUCK_STATE_WAIT(surface, baseKey, false)));
+        assert(restored.reached, `${url}: scrolling back never un-stuck the header`);
+        assert(restored.settled, `${url}: the un-stick transitions never settled`);
+        const back = await probe();
         return { before, after, back };
       };
       return {
