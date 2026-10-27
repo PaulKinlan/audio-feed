@@ -6,6 +6,9 @@
 // - Real markup wiring across account, admin, home, shell, and player templates
 // - WCAG 2.1 1.4.13 Accessibility invariants (dismissible via Escape, hoverable, persistent, aria-describedby)
 // - Headless Chrome verification of CSS Anchor Positioning geometry and flip-block parity with fallback
+// - audio-feed-tyu77: top-layer promotion via popover="manual" so the tooltip paints ABOVE a modal
+//   <dialog> (the share dialog's Copy button tooltip was invisible as a body-level fixed div —
+//   z-index cannot cross the top-layer boundary), verified in headless Chrome with showModal()
 
 import { assert, assertEquals } from "@std/assert";
 import { renderAdminPage } from "../src/routes/admin.ts";
@@ -63,6 +66,69 @@ Deno.test("anchor-positioning: shell stylesheet delivers anchor-positioning rule
   assert(shellHtml.includes("position-anchor: --tooltip-anchor"));
   assert(shellHtml.includes("top: anchor(bottom)"));
   assert(shellHtml.includes("position-try-fallbacks: flip-block"));
+});
+
+Deno.test("anchor-positioning: the tooltip is a manual popover in every markup, CSS, and JS home (audio-feed-tyu77)", async () => {
+  // The premise: a body-level position:fixed div paints BELOW a modal <dialog>'s top
+  // layer at ANY z-index, so the share dialog's own Copy button tooltip was invisible.
+  // popover="manual" is the platform's top-layer promotion; the contract below fails by
+  // name if any of the six homes (2 markup, 3 CSS, 1 shared JS pair) loses it.
+  assert(
+    TOOLTIP_HTML.includes('popover="manual"'),
+    'shell TOOLTIP_HTML must carry popover="manual"',
+  );
+
+  const listenTs = await Deno.readTextFile("src/routes/listen.ts");
+  assert(
+    /id="appTooltip"[^>]*popover="manual"/.test(listenTs),
+    'the player page\'s tooltip container must carry popover="manual"',
+  );
+
+  const listenJs = await Deno.readTextFile("src/assets/listen.js");
+  const tooltipClientJs = await Deno.readTextFile("src/assets/tooltip-client.js");
+  for (
+    const [name, src] of [
+      ["listen.js", listenJs],
+      ["tooltip-client.js", tooltipClientJs],
+    ] as const
+  ) {
+    assert(
+      src.includes('setAttribute("popover", "manual")'),
+      `${name} must ensure the popover attribute on the tooltip element`,
+    );
+    assert(
+      src.includes("showPopover"),
+      `${name} must promote the tooltip via showPopover()`,
+    );
+    assert(
+      src.includes("hidePopover"),
+      `${name} must demote the tooltip via hidePopover()`,
+    );
+    assert(
+      src.includes("TODO(baseline/popover)"),
+      `${name} must mark the pre-popover fallback with TODO(baseline/popover)`,
+    );
+  }
+
+  const listenCss = await Deno.readTextFile("src/assets/listen.css");
+  const adminCss = await Deno.readTextFile("src/assets/admin.css");
+  const shellTs = await Deno.readTextFile("src/routes/shell.ts");
+  for (
+    const [name, css] of [
+      ["listen.css", listenCss],
+      ["admin.css", adminCss],
+      ["shell.ts SHELL_CSS", shellTs],
+    ] as const
+  ) {
+    assert(
+      css.includes(":popover-open"),
+      `${name} must style the platform's open state`,
+    );
+    assert(
+      css.includes("@starting-style"),
+      `${name} must keep the opacity fade across the display:none boundary`,
+    );
+  }
 });
 
 Deno.test("anchor-positioning: Baseline markers are present at all @supports guard sites (audio-feed-pzwe)", async () => {
@@ -589,6 +655,133 @@ Deno.test({
       assert(
         res.edgeRenderedBottom <= res.edgeRectTop,
         "the flipped tooltip must render above its target",
+      );
+    } finally {
+      await Deno.remove(tempHtmlFile).catch(() => {});
+      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "anchor-positioning: tooltip promotes to the top layer above a modal dialog (audio-feed-tyu77)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const listenCss = await getListenCss();
+
+    // The bug being fixed: #shareCopyBtn sits INSIDE the modal <dialog id="shareDialog">
+    // (src/routes/listen.ts), so its tooltip - a body-level fixed div at z-index 1000 -
+    // was painted below the dialog's top layer and never visible. The fix is popover=
+    // "manual": showPopover() puts #appTooltip in the top layer AFTER the dialog, so it
+    // paints above it. This test opens a real modal dialog, triggers the button's
+    // tooltip, and proves (a) the platform open state, (b) anchor-positioned geometry
+    // against a target inside the dialog, and (c) that it is actually displayed
+    // (not the UA display:none of a closed popover). Paint order CANNOT be proven by
+    // elementFromPoint here: a modal dialog confines hit-testing to its own subtree by
+    // platform rule (measured on this VM's Chrome: elementsFromPoint over an open
+    // body-level popover above a modal returns [dialog, HTML] - the tooltip is
+    // deliberately unhittable while the modal is up), so hit-testing cannot observe
+    // the top layer. Paint above the dialog is guaranteed by top-layer insertion order
+    // (showPopover() after showModal()) and evidenced by the screenshot in
+    // docs/evidence/audio-feed-tyu77/, regenerated by
+    // scripts/tooltip-top-layer-browser-proof.ts on the REAL player page.
+    const testHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee; --text: #111; --border: #999; --radius-sm: 6px; --ease: ease; }
+    body { margin: 0; height: 900px; font: 14px system-ui; }
+    dialog { padding: 24px; }
+    dialog::backdrop { background: rgba(0,0,0,0.4); }
+    ${listenCss}
+  </style>
+</head>
+<body>
+  <dialog id="dlg">
+    <button id="dlgBtn" data-tooltip="Copy link to clipboard">Copy</button>
+  </dialog>
+  <div id="results"></div>
+  ${TOOLTIP_HTML}
+
+  <script>
+    ${TOOLTIP_CLIENT}
+
+    const dlg = document.getElementById("dlg");
+    const btn = document.getElementById("dlgBtn");
+    const tip = document.getElementById("appTooltip");
+    const out = document.getElementById("results");
+
+    dlg.showModal();
+    const dialogOpen = dlg.open;
+
+    btn.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+
+    const popoverOpen = tip.matches(":popover-open");
+    const btnRect = btn.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+    const anchoredX = Math.round(tipRect.left) === Math.round(btnRect.left);
+    const anchoredY = Math.round(tipRect.top) === Math.round(btnRect.bottom + 8);
+    const displayed = getComputedStyle(tip).display !== "none";
+
+    out.textContent = JSON.stringify({
+      dialogOpen,
+      popoverOpen,
+      anchoredX,
+      anchoredY,
+      tipTop: Math.round(tipRect.top),
+      expectedTop: Math.round(btnRect.bottom + 8),
+      displayed
+    });
+  </script>
+</body>
+</html>`;
+
+    const tempHtmlFile = await Deno.makeTempFile({ suffix: ".html" });
+    // A PROFILE PER LAUNCH (audio-feed-e4udd), as in the other headless tests in this file.
+    const profileDir = await Deno.makeTempDir({ prefix: "anchor-positioning-chrome-" });
+    await Deno.writeTextFile(tempHtmlFile, testHtml);
+
+    try {
+      const command = new Deno.Command("google-chrome-stable", {
+        args: [
+          "--headless=new",
+          "--disable-gpu",
+          `--user-data-dir=${profileDir}`,
+          "--allow-file-access-from-files",
+          "--dump-dom",
+          `file://${tempHtmlFile}`,
+        ],
+      });
+
+      const output = await command.output();
+      assertEquals(output.code, 0);
+      const dom = new TextDecoder().decode(output.stdout);
+      const match = dom.match(/<div id="results">(.*?)<\/div>/);
+      assert(match && match[1], "results container must be present");
+      const res = JSON.parse(match[1].replace(/&quot;/g, '"'));
+
+      assertEquals(res.dialogOpen, true, "the dialog must be open modally");
+      assertEquals(
+        res.popoverOpen,
+        true,
+        "the tooltip must be in the top layer (:popover-open) while the modal dialog is open",
+      );
+      assertEquals(
+        res.anchoredX,
+        true,
+        "the tooltip must remain anchor-positioned to the button inside the dialog (left)",
+      );
+      assertEquals(
+        res.anchoredY,
+        true,
+        `the tooltip must sit 8px below the dialog button (got top=${res.tipTop}, expected ${res.expectedTop})`,
+      );
+      assertEquals(
+        res.displayed,
+        true,
+        "the tooltip must be displayed (not the UA display:none of a closed popover) while the modal dialog is open",
       );
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});

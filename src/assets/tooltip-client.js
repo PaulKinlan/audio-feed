@@ -20,6 +20,14 @@
 if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
   const tooltipEl = document.getElementById("appTooltip");
   if (tooltipEl) {
+    // audio-feed-tyu77: popover="manual" promotes the tooltip to the TOP LAYER, so it
+    // stays visible over a modal <dialog> (the share dialog's Copy button on the player,
+    // whose tooltip was invisible as a body-level fixed div at any z-index). TOOLTIP_HTML
+    // ships the attribute; set it here too so a stale or hand-built container still works.
+    // TODO(baseline/popover): drop the showPopover/hidePopover feature checks (and this
+    // attribute shim) when popover reaches Baseline; the pre-popover fixed+z-index paint
+    // order below the top layer is the fallback until then.
+    tooltipEl.setAttribute("popover", "manual");
     const supportsAnchorPositioning = typeof CSS !== "undefined" &&
       typeof CSS.supports === "function" &&
       CSS.supports("anchor-name", "--a");
@@ -46,6 +54,12 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
       target.setAttribute("aria-describedby", "appTooltip");
       tooltipEl.textContent = text;
       tooltipEl.setAttribute("aria-hidden", "false");
+      if (
+        typeof tooltipEl.showPopover === "function" &&
+        !tooltipEl.matches(":popover-open")
+      ) {
+        tooltipEl.showPopover();
+      }
       tooltipEl.classList.add("visible");
 
       if (!supportsAnchorPositioning) {
@@ -77,6 +91,12 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
         }
         tooltipEl.classList.remove("visible");
         tooltipEl.setAttribute("aria-hidden", "true");
+        if (
+          typeof tooltipEl.hidePopover === "function" &&
+          tooltipEl.matches(":popover-open")
+        ) {
+          tooltipEl.hidePopover();
+        }
         if (!supportsAnchorPositioning) {
           tooltipEl.style.left = "";
           tooltipEl.style.top = "";

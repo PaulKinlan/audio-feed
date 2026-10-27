@@ -401,8 +401,9 @@ ${ICON_SPRITE}
     </form>
   </dialog>
 
-  <!-- audio-feed-pzwe: accessible tooltip container -->
-  <div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>
+  <!-- audio-feed-pzwe: accessible tooltip container;
+       audio-feed-tyu77: popover="manual" paints it in the top layer, above modal dialogs -->
+  <div id="appTooltip" class="tooltip" role="tooltip" aria-hidden="true" popover="manual"></div>
 
   <!-- audio-feed-3xq: the player's client is a content-addressed module, and everything it needs is
        one JSON document. Data in the page, code in a file. -->
