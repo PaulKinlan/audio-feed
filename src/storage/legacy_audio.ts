@@ -294,6 +294,16 @@ export async function acquireMigrationLock(
   nowMs?: number,
 ): Promise<boolean> {
   const now = nowMs ?? Date.now();
+  // The lease is LOGICAL - evaluated here against `now` and the record's lastHeartbeat -
+  // never the KV entry's real expireIn. The expireIn is only a dead-holder backstop
+  // (hygiene for a record whose holder isolate died without releasing), so it must be
+  // far outside the logical lease: at expireIn=leaseMs a loaded host's real time slips
+  // past it between heartbeats and Deno KV silently deletes the record, which reads as
+  // "lock expired" even though the logical lease is fresh - that exact race failed two
+  // independent full-gate runs (audio-feed-hrfn, bead 741vj: 'holder-1 must renew
+  // successfully' ACTUAL false / 'second holder must be refused' actual true) while
+  // passing in isolation, and its fixed-instant row became a coin flip.
+  const recordTtlMs = Math.max(leaseMs * 10, 1_000);
   const res = await metadata.atomicUpdate<MigrationLockRecord>(
     "migration_lock:legacy_audio_keys",
     (current) => {
@@ -306,7 +316,7 @@ export async function acquireMigrationLock(
       }
       return { active: true, lockedAt: now, lastHeartbeat: now, leaseMs, holder };
     },
-    leaseMs,
+    recordTtlMs,
   );
   return res.committed;
 }
@@ -323,6 +333,9 @@ export async function renewMigrationLock(
   nowMs?: number,
 ): Promise<boolean> {
   const now = nowMs ?? Date.now();
+  // Same backstop rule as acquireMigrationLock (audio-feed-hrfn, bead 741vj): the KV
+  // expireIn must sit far outside the logical lease so a loaded host's real time can
+  // never delete a freshly-renewed record ahead of the lease logic.
   const res = await metadata.atomicUpdate<MigrationLockRecord>(
     "migration_lock:legacy_audio_keys",
     (current) => {
@@ -335,7 +348,7 @@ export async function renewMigrationLock(
       }
       return null; // lock lost or held by someone else
     },
-    leaseMs,
+    Math.max(leaseMs * 10, 1_000),
   );
   return res.committed;
 }
