@@ -411,6 +411,28 @@ export interface RunOutcome {
   tail: string;
 }
 
+/** MEASURED (audio-feed-ybwj7, this VM, quiet host, 2026-10-28T10:57Z): the unmutated
+ * exww proof run took 130,700ms (rc 0, standalone) and the boot-baseline probe median was
+ * 603ms (samples 600/603/699) - a measured cost-per-boot ratio of 216.7. The calibration
+ * below is the measured ratio x 2 stated safety; the r6hft review rejected the
+ * back-fitted 1200 (it happened to equal 240s at an ASSUMED 200ms quiet boot and nothing
+ * pinned it). These consts are pinned BY NAME in tests/exww_mutants_test.ts, which reds
+ * if the calibration and the measurement drift apart. */
+export const EXWW_MEASURED_PROOF_MS = 130_700;
+export const EXWW_MEASURED_BOOT_MS = 603;
+export const EXWW_RUN_BOOT_CALIBRATION = 434; // round(216.7 x 2): measured ratio with 2x safety
+export const EXWW_RUN_GUARD_FLOOR_MS = 240_000; // the original r6hft quiet-guard floor
+
+/** The exww row's per-run bound for a host whose boot probe measured `bootMs`:
+ * max(floor, boot x measured-ratio x safety). Proportional by construction - a host twice
+ * as slow gets twice the window - and floored at the original quiet guard. */
+export function runBoundFromBootMs(bootMs: number): number {
+  return Math.max(
+    EXWW_RUN_GUARD_FLOOR_MS,
+    Math.round(bootMs * EXWW_RUN_BOOT_CALIBRATION),
+  );
+}
+
 export async function runProofIn(
   dir: string,
   timeoutMs = 240_000,

@@ -31,14 +31,18 @@
  * `deno task evidence:mutants` runs all seven when someone wants the matrix. The row is shared with that
  * harness rather than redefined here, so a row cannot drift between the tier and the gate.
  */
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   applyMutant,
   buildScratch,
+  EXWW_MEASURED_BOOT_MS,
+  EXWW_MEASURED_PROOF_MS,
+  EXWW_RUN_GUARD_FLOOR_MS,
   interpretRun,
   MUTANTS,
   PROOF,
   PROOF_REL,
+  runBoundFromBootMs,
   runProofIn,
 } from "../scripts/exww-mutants.ts";
 import { measureHarnessBootBaselineMs } from "../scripts/proof-helper.ts";
@@ -52,12 +56,49 @@ import { measureHarnessBootBaselineMs } from "../scripts/proof-helper.ts";
  * quiet host by calibration, proportionally longer on a contended one, never a fixed widened literal.
  * A bound-kill is still UNKNOWN (never a pass), so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
-const BASELINE_RUN_GUARD_MS = 240_000;
-const QUIET_BOOT_CALIBRATION = 1200;
 const runBoundMs = async (): Promise<number> => {
-  const bootMs = await measureHarnessBootBaselineMs(new URL("../", import.meta.url).pathname);
-  return Math.max(BASELINE_RUN_GUARD_MS, bootMs * QUIET_BOOT_CALIBRATION);
+  // audio-feed-ybwj7 (r6hft review): the probe FAILS OPEN - a probe spawn failure under
+  // load must not red the row as a hard error; it falls back to the quiet-guard floor
+  // (still bounded, a real hang still reds as UNKNOWN) and LOGS the measurement failure.
+  try {
+    const bootMs = await measureHarnessBootBaselineMs(
+      new URL("../", import.meta.url).pathname,
+    );
+    return runBoundFromBootMs(bootMs);
+  } catch (err) {
+    console.error(
+      `audio-feed-ybwj7: the boot-baseline probe failed (${
+        err instanceof Error ? err.message : err
+      })` +
+        ` - falling back to the ${EXWW_RUN_GUARD_FLOOR_MS / 1000}s quiet guard; still bounded`,
+    );
+    return EXWW_RUN_GUARD_FLOOR_MS;
+  }
 };
+
+Deno.test("audio-feed-ybwj7: the exww run bound is the MEASURED boot ratio x 2 safety, floored at the quiet guard - pinned so calibration and measurement cannot drift apart", () => {
+  // The measured quiet case, EXACT: 603ms boot x 434 calibration (the r6hft review's
+  // complaint was a back-fitted constant with nothing pinning it).
+  assertEquals(runBoundFromBootMs(EXWW_MEASURED_BOOT_MS), 261_702);
+  // Proportional by construction - a fixed literal cannot be: 2x the measured boot is
+  // 2x the window, the same load-change shape the 3n0xs pin asserts for startupBackstopMs.
+  assertEquals(
+    runBoundFromBootMs(EXWW_MEASURED_BOOT_MS * 2),
+    Math.round(2 * runBoundFromBootMs(EXWW_MEASURED_BOOT_MS)),
+  );
+  // The floor holds at the calm end: a faster-than-measured boot cannot drop the bound
+  // below the original r6hft quiet guard.
+  assertEquals(runBoundFromBootMs(0), EXWW_RUN_GUARD_FLOOR_MS);
+  assertEquals(runBoundFromBootMs(100), EXWW_RUN_GUARD_FLOOR_MS);
+  // The failure in one assertion: at the MEASURED quiet boot the window carries 2x the
+  // proof's actual measured cost (130.7s) - headroom at the calm end, which the
+  // back-fitted 240s-exact calibration had zero of.
+  assert(
+    runBoundFromBootMs(EXWW_MEASURED_BOOT_MS) >= 2 * EXWW_MEASURED_PROOF_MS,
+    `the calibrated window must carry 2x the measured proof cost ` +
+      `(got ${runBoundFromBootMs(EXWW_MEASURED_BOOT_MS)}, need >= ${2 * EXWW_MEASURED_PROOF_MS})`,
+  );
+});
 
 Deno.test({
   name:
