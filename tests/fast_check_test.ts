@@ -558,6 +558,34 @@ Deno.test("planTests: an OBSERVED core/hub file selects its closure, crossing hu
   );
 });
 
+Deno.test("planTests: a whole-tree scan relation covers every file under it (audio-feed-sru1b)", () => {
+  // The post-zyrug hole: once a core file had ANY graph observer the fail-closed rule went quiet, so a
+  // suite that scans all of src/ as TEXT (security_audit's CSP scan) silently dropped out of selection.
+  // A directory relation key - bare ("src") or trailing-slash ("src/") - observes every file under it,
+  // and coverage through it defeats the uncovered fallback the same as an exact entry does.
+  const relations = new Map([
+    ["src/", ["tests/tree_scan_test.ts"]],
+    ["scripts", ["tests/scripts_scan_test.ts"]],
+  ]);
+  assertEquals(
+    planTests(["src/config.ts"], new Map(), NO_NAMED, relations).testFiles,
+    ["tests/tree_scan_test.ts"],
+    "a bare/trailing-slash directory key must cover a core file with no graph observer and no exact entry",
+  );
+  const scriptPlan = planTests(["scripts/tool.ts"], GRAPH, NO_NAMED, relations);
+  assertEquals(
+    scriptPlan.testFiles,
+    ["tests/scripts_scan_test.ts", "tests/tool_test.ts"],
+    "a bare directory key covers a scripts/ change alongside the graph observers",
+  );
+  // The slash anchor: a bare "src" key must never claim a path outside the tree it scans.
+  assertEquals(
+    planTests(["src2/config.ts"], new Map(), NO_NAMED, relations).testFiles,
+    null,
+    "a directory key must not prefix-match a sibling tree (src vs src2)",
+  );
+});
+
 Deno.test("planTests: a tests/ helper selects its OBSERVERS, not the FULL suite (audio-feed-3e4s0)", () => {
   // The bead's repro: tests/fixtures/invocation_death_child.ts is observed by exactly ONE suite and paid
   // the full 159-suite gate under the old blanket "shared test helper" rule.

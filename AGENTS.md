@@ -37,7 +37,10 @@ core files select their observers now (audio-feed-zyrug): the reverse-graph walk
 changed file IS the hub (a suite that boots through `src/http.ts` exercises it on every request; the hub
 cut stays for route changes, where booting through the hub exercises the app but not the route), plus the
 suites the derived relation names as reading it, and a core file nothing reaches still runs the FULL
-suite by name - when a
+suite by name. A suite that declares a WHOLE-TREE scan (a literal `Deno.readDir("src")` earns a directory
+relation key, `"src"` or `"src/"`) observes every file under it and is selected for ANY change under it
+(audio-feed-sru1b; the parameterised `scan("src")` shape earns nothing - the resolver cannot see through
+a parameter - so a scanner's ENTRY read carries the literal) - when a
 changed src file has no covering test, when a changed script has importers but no reachable test,
 when a changed test helper (`tests/*.ts` that is not `*_test.ts`) is observed by NO suite - helpers
 select their observers now (audio-feed-3e4s0): the importers the reverse graph walks from the `tests/`

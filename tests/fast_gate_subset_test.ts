@@ -176,7 +176,14 @@ Deno.test("a changed shell runner selects the suite that executes it (es8y)", ()
   // audio-feed-t9w1's census test enumerates docs/evidence AND scripts/*.ts, so it observes this
   // runner too. Over-selection in the safe direction: a change to any script now also runs one 40ms
   // unit test. Measured, not assumed - it is the derivation doing this, not a listed relation.
-  assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"]);
+  // audio-feed-sru1b: the bare "scripts" directory key now prefix-matches too, so the deno-task-coverage
+  // scan (a whole-scripts/ reader) is selected for any script change - the correct relation for a scanner.
+  assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"], [
+    "tests/evidence_census_test.ts",
+    "tests/evidence_run_test.ts",
+    "tests/evidence_selection_test.ts",
+    "tests/deno-task-coverage_test.ts",
+  ]);
 });
 
 Deno.test("a changed data file rides ALONGSIDE a code change", () => {
@@ -190,6 +197,14 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/widgets_test.ts",
+  ], [
+    // The default tolerated census trio (docs/evidence/ readers), plus - audio-feed-sru1b - the src/
+    // whole-tree scanners, which observe every file under src/, widgets.ts included.
+    "tests/evidence_census_test.ts",
+    "tests/evidence_run_test.ts",
+    "tests/evidence_selection_test.ts",
+    "tests/security_audit_test.ts",
+    "tests/tokens_test.ts",
   ]);
 });
 
@@ -440,8 +455,8 @@ Deno.test("audio-feed-40ch / audio-feed-tz01: assets and fixtures INSIDE src/ an
   );
   assertEquals(
     derived.suites,
-    relations.get("src/assets/admin.css"),
-    "the suites named by the relation are the suites selected",
+    suitesObserving("src/assets/admin.css", relations),
+    "the suites named by the relation - the exact-key readers AND the whole-tree scanners (audio-feed-sru1b) - are the suites selected",
   );
   const homeCssSuites = relations.get("src/assets/home.css") ?? [];
   assert(
@@ -452,13 +467,17 @@ Deno.test("audio-feed-40ch / audio-feed-tz01: assets and fixtures INSIDE src/ an
   );
 
   // Anti-vacuity for the FALLBACK, which is the thing that makes this change safe to make: a non-TS file
-  // under src/ that NOTHING is derived to read must still widen to the full suite, and must never be inert.
-  const unread = classifyNonTsChanges(["src/assets/unread.css"], relations);
+  // that NOTHING is derived to read must still widen to the full suite, and must never be inert.
+  // audio-feed-sru1b moved the EXAMPLE, not the rule: while a whole-src/ scanner lives (tokens_test reads
+  // every src/assets/*.css; security_audit reads every src/**/*.ts), no path under src/ is unread, so the
+  // case is exercised by a path outside every scanned tree. If the scanners ever go away, their relation
+  // keys go with them and this example could move back.
+  const unread = classifyNonTsChanges(["docs/unread.css"], relations);
   assertEquals(unread.inert, [], "an unread asset is not documentation - it may not be inert");
   assertEquals(unread.suites, [], "nothing is derived to read it");
   assertEquals(
     unread.unclassified,
-    ["src/assets/unread.css"],
+    ["docs/unread.css"],
     "so it keeps the full-suite fallback",
   );
 
@@ -470,22 +489,55 @@ Deno.test("audio-feed-40ch / audio-feed-tz01: assets and fixtures INSIDE src/ an
   const derivedPlan = planTests(["src/assets/admin.css"], new Map(), new Map(), relations);
   assertEquals(
     derivedPlan.testFiles,
-    relations.get("src/assets/admin.css")!,
+    suitesObserving("src/assets/admin.css", relations),
     "a src/ asset a suite reads must SELECT that suite, not the full suite",
   );
+  // audio-feed-sru1b: the selection is the asset's readers PLUS the whole-src/ scanners, and nothing else.
+  for (const scanner of ["tests/security_audit_test.ts", "tests/tokens_test.ts"]) {
+    assert(
+      derivedPlan.testFiles?.includes(scanner),
+      `a src/ asset change must select the whole-tree scanner ${scanner}`,
+    );
+  }
   const homeCssPlan = planTests(["src/assets/home.css"], new Map(), new Map(), relations);
   assertEquals(
     homeCssPlan.testFiles,
-    relations.get("src/assets/home.css")!,
+    suitesObserving("src/assets/home.css", relations),
     "src/assets/home.css must select its readers rather than forcing the full gate (audio-feed-tz01)",
   );
-  const unreadPlan = planTests(["src/assets/unread.css"], new Map(), new Map(), relations);
+  const unreadPlan = planTests(["docs/unread.css"], new Map(), new Map(), relations);
   assertEquals(
     unreadPlan.testFiles,
     null,
     "an unread asset must still run the FULL suite - the fallback is what makes this change safe",
   );
-  assertStringIncludes(unreadPlan.reason, "src/assets/unread.css");
+  assertStringIncludes(unreadPlan.reason, "docs/unread.css");
+
+  // audio-feed-sru1b (coord's rule): a suite that declares a WHOLE-TREE scan of src/ is selected for ANY
+  // src/ change - that is the correct relation for a scanner, not a widened timeout - and this row reds if
+  // either scanner drops out of a src/ selection. Measured against the REAL tree because that is where the
+  // detector, the directory keys, and the planner meet: "src" is earned by tokens_test's literal readDir
+  // calls, "src/" by security_audit_test's literal entry read (its scan recursion crosses a parameter
+  // boundary the resolver provably cannot see through, which is why the entry read carries the literal).
+  assertEquals(
+    relations.get("src"),
+    ["tests/tokens_test.ts"],
+    "the bare src/ tree scan must earn a directory relation keyed 'src'",
+  );
+  assertEquals(
+    relations.get("src/"),
+    ["tests/security_audit_test.ts"],
+    "the CSP source scan must earn a directory relation keyed 'src/'",
+  );
+  const serverPlan = planTests(["src/server.ts"], NO_GRAPH, NO_NAMED, relations);
+  for (const scanner of ["tests/security_audit_test.ts", "tests/tokens_test.ts"]) {
+    assert(
+      serverPlan.testFiles?.includes(scanner),
+      `a src/ change must select the whole-tree scanner ${scanner} (audio-feed-sru1b), got: ${
+        JSON.stringify(serverPlan.testFiles)
+      }`,
+    );
+  }
 });
 
 Deno.test("audio-feed-q0ky: while the relation is INCOMPLETE no file is inert, and the widening is NAMED", () => {
@@ -596,9 +648,13 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // README.md moved out of the inert bucket for the reason recorded above: a suite reads the docs/evidence
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
+  // audio-feed-sru1b: src/server.ts sits under the whole-tree scanners' directory keys ("src", "src/"),
+  // so the scanners join the bucket; the .ts skip still applies to files NO channel observes.
   assertSelected(classified.suites, [
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
+    "tests/security_audit_test.ts",
+    "tests/tokens_test.ts",
   ]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
 });
@@ -852,6 +908,7 @@ import {
   proveDiscoveryMatchesDeno,
   resolverConfigInputs,
   ROOT,
+  suitesObserving,
   universeDrift,
 } from "../scripts/test-selection.ts";
 

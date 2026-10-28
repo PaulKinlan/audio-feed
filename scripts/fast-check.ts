@@ -73,6 +73,7 @@ import {
   isTestModule,
   type ReadRelationReport,
   resolverConfigInputs,
+  suitesObserving,
   universeDrift,
 } from "./test-selection.ts";
 import { evidenceReadmesAmong, findUnselectedExecutors } from "./evidence-selection.ts";
@@ -897,7 +898,7 @@ export function findCandidateTestsForFile(
   for (const t of options.named?.get(normTarget) ?? []) {
     if (testSources.has(t)) candidates.add(t);
   }
-  for (const t of options.readRelations?.get(normTarget) ?? []) {
+  for (const t of options.readRelations ? suitesObserving(normTarget, options.readRelations) : []) {
     if (testSources.has(t)) candidates.add(t);
   }
 
@@ -1180,7 +1181,7 @@ export function planTests(
   // proven (tests/fixtures/invocation_death_child.ts -> the suite that spawns it; a source-scanner suite
   // reading a src/*.ts as text -> that suite).
   for (const file of codeChanged) {
-    for (const suite of readRelations.get(file) ?? []) tests.add(suite);
+    for (const suite of suitesObserving(file, readRelations)) tests.add(suite);
   }
 
   // audio-feed-x4kc: Any change under tests/ can alter what a suite reads (or change test assertions/invariants
@@ -1210,7 +1211,7 @@ export function planTests(
   // executes it (audio-feed-3e4s0 for helpers, audio-feed-zyrug for src) -
   // the graph cannot see a spawn or a resolver-proven data read.
   const stillUncovered = uncovered.filter((f) =>
-    !named.get(f)?.length && !readRelations.get(f)?.length
+    !named.get(f)?.length && !suitesObserving(f, readRelations).length
   );
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
