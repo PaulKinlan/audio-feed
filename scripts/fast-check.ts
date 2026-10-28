@@ -25,6 +25,10 @@
  *     cannot see runs the FULL suite and names itself (audio-feed-es8y: "not
  *     a .ts file" used to mean "no test can care", which gave a fast PASS on a tree where the full gate
  *     failed);
+ *   - a changed tests/ helper selects the suites observed to depend on it - the importers the reverse
+ *     graph walks, plus the suites the derived relation names as reading or EXECUTING it (a spawned
+ *     fixture has no import edge) - and only a helper NEITHER channel connects to any suite runs the
+ *     FULL suite (audio-feed-3e4s0: the old blanket rule cost a one-file fixture the whole gate);
  *   - deno.json/deno.lock changed, or a src/ file no test reaches, also runs
  *     the FULL suite. Safe beats fast.
  *
@@ -336,7 +340,10 @@ function isHub(file: string): boolean {
  * does not exercise that route's behaviour; the changed file's direct tests
  * are the ones that do. scripts/ modules are walked like anything else — a
  * tested script (fast-check.ts itself) must select its test; only a script
- * NOTHING imports is exempt (audio-feed-bqd4).
+ * NOTHING imports is exempt (audio-feed-bqd4). tests/ helpers (fixtures.ts,
+ * tests/fixtures/*) are walked too (audio-feed-3e4s0): a helper selects the
+ * suites that import it, transitively through other helpers, and one NO test
+ * imports is uncovered rather than silently skipped.
  */
 export function reachableTests(reverse: Map<string, string[]>, changed: string[]): {
   tests: Set<string>;
@@ -350,7 +357,7 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
       tests.add(start);
       continue;
     }
-    if (!/^(src\/|scripts\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
+    if (!/^(src\/|scripts\/|tests\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
 
     let covered = false;
     const queue = [start];
@@ -1077,12 +1084,16 @@ export function planTests(
     return { testFiles: null, reason: `cross-cutting file(s) changed: ${coreChanged.join(", ")}` };
   }
 
-  // A changed tests/ helper (fixtures.ts, listen_client.ts, ...) fans out to
-  // dozens of suites; selecting its importers IS most of the suite anyway.
+  // audio-feed-3e4s0: a changed tests/ helper used to widen EVERY change to the FULL suite on the
+  // argument that a shared helper (fixtures.ts, listen_client.ts) fans out to dozens of suites anyway.
+  // Measured on this tree, that blanket rule cost a one-file fixture change the full 159-suite gate
+  // (killed at the bound): tests/fixtures/invocation_death_child.ts is observed by exactly ONE suite,
+  // and not even by import - the suite SPAWNS it as a child process. A helper is now observed through
+  // BOTH channels below: the import graph (reachableTests walks tests/ starts, transitively through
+  // other helpers) and the DERIVED relation (a read-as-data or an execute earns a relation without an
+  // import edge). Only a helper NEITHER channel connects to any suite widens, via the uncovered
+  // fallback at the bottom of this function - the fail-closed direction is unchanged.
   const helpers = codeChanged.filter((f) => f.startsWith("tests/") && !f.endsWith("_test.ts"));
-  if (helpers.length) {
-    return { testFiles: null, reason: `shared test helper(s) changed: ${helpers.join(", ")}` };
-  }
 
   if (!codeChanged.length) {
     if (data.suites.length) {
@@ -1153,6 +1164,12 @@ export function planTests(
   for (const list of named.values()) for (const f of list) tests.add(f);
   // A data change (a screenshot, a document the app serves) rides alongside the code change.
   for (const suite of data.suites) tests.add(suite);
+  // The second observation channel for a tests/ helper (audio-feed-3e4s0): a suite that READS the
+  // helper as data or EXECUTES it as a child process has no import edge for the graph to walk, but the
+  // derived relation names it (tests/fixtures/invocation_death_child.ts -> the suite that spawns it).
+  for (const helper of helpers) {
+    for (const suite of readRelations.get(helper) ?? []) tests.add(suite);
+  }
 
   // audio-feed-x4kc: Any change under tests/ can alter what a suite reads (or change test assertions/invariants
   // that relation-policing suites depend on) without touching scripts/test-selection.ts.
@@ -1176,8 +1193,12 @@ export function planTests(
     };
   }
   // A file with name-matched tests is covered even when the graph cannot
-  // see it (the route tests boot the app through the hub).
-  const stillUncovered = uncovered.filter((f) => !named.get(f)?.length);
+  // see it (the route tests boot the app through the hub). A tests/ helper is
+  // covered the same way when the derived relation names a suite that reads or
+  // executes it (audio-feed-3e4s0) - the graph cannot see a spawn.
+  const stillUncovered = uncovered.filter((f) =>
+    !named.get(f)?.length && !(f.startsWith("tests/") && readRelations.get(f)?.length)
+  );
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
   }

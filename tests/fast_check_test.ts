@@ -504,7 +504,10 @@ Deno.test("planTests: graph-uncovered with NO name match falls back to the full 
   assertEquals(plan.testFiles, null);
 });
 
-Deno.test("planTests: deno.json, a core file, a test helper, and a non-ts asset all fall back", () => {
+Deno.test("planTests: deno.json, a core file, an UNOBSERVED test helper, and a non-ts asset all fall back", () => {
+  // The tests/fixtures.ts row is a helper NO channel observes in this synthetic setup (no importer in
+  // GRAPH, no relation entry): the fail-closed fallback for that shape is unchanged (audio-feed-3e4s0).
+  // An OBSERVED helper selects its observers instead - pinned in the 3e4s0 test below.
   for (
     const changed of [
       ["deno.json"],
@@ -520,6 +523,31 @@ Deno.test("planTests: deno.json, a core file, a test helper, and a non-ts asset 
     const plan = planTests(changed, GRAPH, NO_NAMED);
     assertEquals(plan.testFiles, null, `${changed} must run the full suite: ${plan.reason}`);
   }
+});
+
+Deno.test("planTests: a tests/ helper selects its OBSERVERS, not the FULL suite (audio-feed-3e4s0)", () => {
+  // The bead's repro: tests/fixtures/invocation_death_child.ts is observed by exactly ONE suite and paid
+  // the full 159-suite gate under the old blanket "shared test helper" rule.
+  // Channel 1 - the import graph: an IMPORTED helper selects the suites that import it, transitively
+  // through other helpers.
+  const graph = new Map<string, string[]>([
+    ["tests/helpers/util.ts", ["tests/helpers/more.ts"]],
+    ["tests/helpers/more.ts", ["tests/one_test.ts"]],
+  ]);
+  const imported = planTests(["tests/helpers/util.ts"], graph, NO_NAMED);
+  assertEquals(imported.testFiles, ["tests/fast_gate_subset_test.ts", "tests/one_test.ts"]);
+
+  // Channel 2 - the derived relation: a helper a suite EXECUTES as a child process has no import edge
+  // for the graph to walk, so the relation is the only channel that can see it.
+  const relations = new Map([["tests/fixtures/child.ts", ["tests/spawner_test.ts"]]]);
+  const spawned = planTests(["tests/fixtures/child.ts"], new Map(), NO_NAMED, relations);
+  assertEquals(spawned.testFiles, ["tests/fast_gate_subset_test.ts", "tests/spawner_test.ts"]);
+
+  // Neither channel: fail CLOSED - a helper nothing is seen to import, read or execute still runs the
+  // full suite, named as uncovered rather than as a class.
+  const unobserved = planTests(["tests/helpers/orphan.ts"], new Map(), NO_NAMED);
+  assertEquals(unobserved.testFiles, null);
+  assert(unobserved.reason.includes("no test reaches"), unobserved.reason);
 });
 
 Deno.test("planTests: docs-only runs nothing; an EMPTY change set runs the full suite (es8y)", () => {
