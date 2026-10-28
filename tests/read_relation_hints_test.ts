@@ -12,7 +12,12 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { couldBeTheChangedFile, couldHideInertRead, planTests } from "../scripts/fast-check.ts";
-import { deriveReadRelationReport, ROOT, unclassifiedTail } from "../scripts/test-selection.ts";
+import {
+  deriveReadRelationReport,
+  ROOT,
+  suitesObserving,
+  unclassifiedTail,
+} from "../scripts/test-selection.ts";
 
 const NO_MAP = new Map<string, string[]>();
 
@@ -236,8 +241,15 @@ Deno.test("audio-feed-lm4d: on the REAL tree an inert change is inert, and a rea
     [],
     blockFor(["src/assets/listen.js"]),
   );
-  assertEquals(real.testFiles, report.relations.get("src/assets/listen.js"));
+  // audio-feed-sru1b: the selection is the exact-key readers PLUS the whole-tree scanners, whose directory
+  // relation keys ("src", "src/") observe every file under them - so equality is against the union the rule
+  // defines, and the exact-key readers are asserted present by name so the mirror error still cannot be
+  // "widen nothing".
+  assertEquals(real.testFiles, suitesObserving("src/assets/listen.js", report.relations));
   assert((real.testFiles?.length ?? 0) > 0);
+  for (const reader of report.relations.get("src/assets/listen.js") ?? []) {
+    assert(real.testFiles!.includes(reader), `${reader} must stay selected`);
+  }
 
   // A data file under a directory the relation names a reader for selects that reader (over-selection is the
   // safe direction and is what the directory prefixes are for).
