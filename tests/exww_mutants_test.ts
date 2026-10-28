@@ -31,7 +31,7 @@
  * `deno task evidence:mutants` runs all seven when someone wants the matrix. The row is shared with that
  * harness rather than redefined here, so a row cannot drift between the tier and the gate.
  */
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import {
   applyMutant,
   buildScratch,
