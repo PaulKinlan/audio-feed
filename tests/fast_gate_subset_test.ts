@@ -197,13 +197,11 @@ Deno.test("a changed data file rides ALONGSIDE a code change", () => {
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/widgets_test.ts",
-  ], [
-    // The default tolerated census trio (docs/evidence/ readers), plus - audio-feed-sru1b - the src/
-    // whole-tree scanners, which observe every file under src/, widgets.ts included.
     "tests/evidence_census_test.ts",
     "tests/evidence_run_test.ts",
     "tests/evidence_selection_test.ts",
     "tests/security_audit_test.ts",
+    "tests/error_screen_test.ts",
     "tests/tokens_test.ts",
   ]);
 });
@@ -526,11 +524,17 @@ Deno.test("audio-feed-40ch / audio-feed-tz01: assets and fixtures INSIDE src/ an
   );
   assertEquals(
     relations.get("src/"),
-    ["tests/security_audit_test.ts"],
-    "the CSP source scan must earn a directory relation keyed 'src/'",
+    ["tests/error_screen_test.ts", "tests/security_audit_test.ts"],
+    "every whole-src/ text scan must earn the directory relation keyed 'src/' - error_screen walks the tree for throw sites, security_audit for CSP headers; a computed walk root earns nothing and this row reds",
   );
   const serverPlan = planTests(["src/server.ts"], NO_GRAPH, NO_NAMED, relations);
-  for (const scanner of ["tests/security_audit_test.ts", "tests/tokens_test.ts"]) {
+  for (
+    const scanner of [
+      "tests/error_screen_test.ts",
+      "tests/security_audit_test.ts",
+      "tests/tokens_test.ts",
+    ]
+  ) {
     assert(
       serverPlan.testFiles?.includes(scanner),
       `a src/ change must select the whole-tree scanner ${scanner} (audio-feed-sru1b), got: ${
@@ -654,6 +658,7 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
     "tests/security_audit_test.ts",
+    "tests/error_screen_test.ts",
     "tests/tokens_test.ts",
   ]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
