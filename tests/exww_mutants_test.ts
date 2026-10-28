@@ -45,14 +45,13 @@ import {
   runProofIn,
 } from "../scripts/exww-mutants.ts";
 
-/** Where the mutated script goes, and how long a run may take. Derived per run from this host's
- * measured Deno boot baseline (audio-feed-r6hft): the fixed 240s literal was a real-timer bound that
- * a loaded host's BASELINE run outran (measured: exit 124 at 241.2s in gate ee6e2b5d, "a bound is
- * UNKNOWN" - the row red for reasons no diff caused), while passing isolated. The proof's cost scales
- * with the same host-speed factor the boot probe measures, so the window is the harness's own
- * startupBackstopMs shape scaled to this row: max(240s, measuredBoot x 1200) - exactly 240s on a
- * quiet host by calibration, proportionally longer on a contended one, never a fixed widened literal.
- * A bound-kill is still UNKNOWN (never a pass), so a genuinely hung proof stays loud. */
+/** Where the mutated script goes, and how long a run may take. KILL-DERIVED LADDER
+ * (audio-feed-ybwj7, superseding the r6hft boot-baseline calibration - a follow-up gate
+ * killed a baseline at 240.6s while the boot probe measured FAST, so boot was the wrong
+ * observable): attempt 1 runs under the original 240s quiet guard; each OBSERVED bound-kill
+ * doubles the next attempt. Base and ratio are LITERALS pending measurement
+ * (audio-feed-8u4x1); nothing here claims calibration. A bound-kill is still UNKNOWN
+ * (never a pass), so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
 const MAX_ATTEMPTS = 3;
 
