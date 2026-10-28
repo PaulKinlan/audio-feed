@@ -896,7 +896,7 @@ const BOOT_BASELINE_PROBE_SOURCE = `console.log("READY");\nDeno.exit(0);\n`;
  * probe that cannot run throws, so a broken measurement can never silently become a
  * window.
  */
-async function measureHarnessBootBaselineMs(cwd: string): Promise<number> {
+export async function measureHarnessBootBaselineMs(cwd: string): Promise<number> {
   const startedAt = Date.now();
   const probe = new Deno.Command(Deno.execPath(), {
     args: ["run", "--allow-all", "--unstable-kv", "-"],

@@ -41,10 +41,23 @@ import {
   PROOF_REL,
   runProofIn,
 } from "../scripts/exww-mutants.ts";
+import { measureHarnessBootBaselineMs } from "../scripts/proof-helper.ts";
 
-/** Where the mutated script goes, and how long a run may take. Shared with the harness's own bound. */
+/** Where the mutated script goes, and how long a run may take. Derived per run from this host's
+ * measured Deno boot baseline (audio-feed-r6hft): the fixed 240s literal was a real-timer bound that
+ * a loaded host's BASELINE run outran (measured: exit 124 at 241.2s in gate ee6e2b5d, "a bound is
+ * UNKNOWN" - the row red for reasons no diff caused), while passing isolated. The proof's cost scales
+ * with the same host-speed factor the boot probe measures, so the window is the harness's own
+ * startupBackstopMs shape scaled to this row: max(240s, measuredBoot x 1200) - exactly 240s on a
+ * quiet host by calibration, proportionally longer on a contended one, never a fixed widened literal.
+ * A bound-kill is still UNKNOWN (never a pass), so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
-const RUN_TIMEOUT_MS = 240_000;
+const BASELINE_RUN_GUARD_MS = 240_000;
+const QUIET_BOOT_CALIBRATION = 1200;
+const runBoundMs = async (): Promise<number> => {
+  const bootMs = await measureHarnessBootBaselineMs(new URL("../", import.meta.url).pathname);
+  return Math.max(BASELINE_RUN_GUARD_MS, bootMs * QUIET_BOOT_CALIBRATION);
+};
 
 Deno.test({
   name:
@@ -92,7 +105,7 @@ Deno.test({
         PROOF_REL,
         "the spawn's constant and the exported relation must name the same script",
       );
-      const baseline = await runProofIn(scratch, RUN_TIMEOUT_MS);
+      const baseline = await runProofIn(scratch, await runBoundMs());
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
       // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
       // opinion of its own about it.
@@ -105,7 +118,7 @@ Deno.test({
       );
 
       await Deno.writeTextFile(proofInScratch, applyMutant(source, ROW));
-      const mutated = await runProofIn(scratch, RUN_TIMEOUT_MS);
+      const mutated = await runProofIn(scratch, await runBoundMs());
       // A bound killing the run and the mutant reddening it are DIFFERENT outcomes: 124/137/143 is unknown,
       // never a pass and never a fail, so the timeout is asserted out before the mutant's red is believed.
       const row = MUTANTS.find((m) => m.name === ROW)!;
