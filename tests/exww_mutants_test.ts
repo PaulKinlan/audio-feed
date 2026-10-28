@@ -35,17 +35,15 @@ import { assert, assertEquals } from "@std/assert";
 import {
   applyMutant,
   buildScratch,
-  EXWW_MEASURED_BOOT_MS,
-  EXWW_MEASURED_PROOF_MS,
-  EXWW_RUN_GUARD_FLOOR_MS,
+  EXWW_RUN_BASE_GUARD_MS,
+  exwwRunBoundForAttempt,
   interpretRun,
   MUTANTS,
   PROOF,
   PROOF_REL,
-  runBoundFromBootMs,
+  type RunOutcome,
   runProofIn,
 } from "../scripts/exww-mutants.ts";
-import { measureHarnessBootBaselineMs } from "../scripts/proof-helper.ts";
 
 /** Where the mutated script goes, and how long a run may take. Derived per run from this host's
  * measured Deno boot baseline (audio-feed-r6hft): the fixed 240s literal was a real-timer bound that
@@ -56,48 +54,48 @@ import { measureHarnessBootBaselineMs } from "../scripts/proof-helper.ts";
  * quiet host by calibration, proportionally longer on a contended one, never a fixed widened literal.
  * A bound-kill is still UNKNOWN (never a pass), so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
-const runBoundMs = async (): Promise<number> => {
-  // audio-feed-ybwj7 (r6hft review): the probe FAILS OPEN - a probe spawn failure under
-  // load must not red the row as a hard error; it falls back to the quiet-guard floor
-  // (still bounded, a real hang still reds as UNKNOWN) and LOGS the measurement failure.
-  try {
-    const bootMs = await measureHarnessBootBaselineMs(
-      new URL("../", import.meta.url).pathname,
-    );
-    return runBoundFromBootMs(bootMs);
-  } catch (err) {
+const MAX_ATTEMPTS = 3;
+
+/**
+ * audio-feed-ybwj7, second derivation (the boot-baseline proxy is GONE): the follow-up
+ * gate killed the baseline at 240.6s while the boot probe measured FAST, disproving boot
+ * as the observable. The only honest observation is the run's OWN bound-kill: attempt 1
+ * runs under the original r6hft quiet guard; each observed kill doubles the next attempt
+ * (exwwRunBoundForAttempt). A settled run stops the ladder; a run still killed after the
+ * last attempt falls to the caller's interpretRun, which reports UNKNOWN - loud, never a
+ * pass. The kill is the measurement; nothing is widened up front.
+ */
+const runWithDerivedBound = async (scratch: string): Promise<RunOutcome> => {
+  let outcome: RunOutcome | undefined = undefined;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const bound = exwwRunBoundForAttempt(attempt);
+    outcome = await runProofIn(scratch, bound);
+    if (!outcome.timedOut) return outcome;
     console.error(
-      `audio-feed-ybwj7: the boot-baseline probe failed (${
-        err instanceof Error ? err.message : err
-      })` +
-        ` - falling back to the ${EXWW_RUN_GUARD_FLOOR_MS / 1000}s quiet guard; still bounded`,
+      `audio-feed-ybwj7: the exww run hit the ${
+        bound / 1000
+      }s bound (attempt ${attempt}/${MAX_ATTEMPTS})` +
+        ` - the kill is the measurement; the next attempt derives ${
+          exwwRunBoundForAttempt(attempt + 1) / 1000
+        }s from it`,
     );
-    return EXWW_RUN_GUARD_FLOOR_MS;
   }
+  return outcome!;
 };
 
-Deno.test("audio-feed-ybwj7: the exww run bound is the MEASURED boot ratio x 2 safety, floored at the quiet guard - pinned so calibration and measurement cannot drift apart", () => {
-  // The measured quiet case, EXACT: 603ms boot x 434 calibration (the r6hft review's
-  // complaint was a back-fitted constant with nothing pinning it).
-  assertEquals(runBoundFromBootMs(EXWW_MEASURED_BOOT_MS), 261_702);
-  // Proportional by construction - a fixed literal cannot be: 2x the measured boot is
-  // 2x the window, the same load-change shape the 3n0xs pin asserts for startupBackstopMs.
+Deno.test("audio-feed-ybwj7: the exww run bound ladder derives from observed bound-kills - attempt 1 is the original guard, every observed kill doubles the next", () => {
+  // Attempt 1 keeps the original r6hft quiet guard - no widened up-front window.
+  assertEquals(exwwRunBoundForAttempt(1), 240_000);
+  // Each OBSERVED kill doubles the next attempt: the kill is the measurement.
+  assertEquals(exwwRunBoundForAttempt(2), 480_000);
+  assertEquals(exwwRunBoundForAttempt(3), 960_000);
+  // Proportional by construction - the ladder cannot flatten into a fixed literal.
   assertEquals(
-    runBoundFromBootMs(EXWW_MEASURED_BOOT_MS * 2),
-    Math.round(2 * runBoundFromBootMs(EXWW_MEASURED_BOOT_MS)),
+    exwwRunBoundForAttempt(3),
+    Math.round(2 * exwwRunBoundForAttempt(2)),
   );
-  // The floor holds at the calm end: a faster-than-measured boot cannot drop the bound
-  // below the original r6hft quiet guard.
-  assertEquals(runBoundFromBootMs(0), EXWW_RUN_GUARD_FLOOR_MS);
-  assertEquals(runBoundFromBootMs(100), EXWW_RUN_GUARD_FLOOR_MS);
-  // The failure in one assertion: at the MEASURED quiet boot the window carries 2x the
-  // proof's actual measured cost (130.7s) - headroom at the calm end, which the
-  // back-fitted 240s-exact calibration had zero of.
-  assert(
-    runBoundFromBootMs(EXWW_MEASURED_BOOT_MS) >= 2 * EXWW_MEASURED_PROOF_MS,
-    `the calibrated window must carry 2x the measured proof cost ` +
-      `(got ${runBoundFromBootMs(EXWW_MEASURED_BOOT_MS)}, need >= ${2 * EXWW_MEASURED_PROOF_MS})`,
-  );
+  // The ladder is bounded: 3 attempts = 960s max, inside the fleet's 5400s gate budget.
+  assertEquals(EXWW_RUN_BASE_GUARD_MS, 240_000);
 });
 
 Deno.test({
@@ -146,7 +144,7 @@ Deno.test({
         PROOF_REL,
         "the spawn's constant and the exported relation must name the same script",
       );
-      const baseline = await runProofIn(scratch, await runBoundMs());
+      const baseline = await runWithDerivedBound(scratch);
       // Judged by the SAME interpretation the CLI uses (audio-feed-l6b6): two parsers of one outcome is how
       // the suite and the CLI came to disagree about what a killed run means, so this suite no longer has an
       // opinion of its own about it.
@@ -159,7 +157,14 @@ Deno.test({
       );
 
       await Deno.writeTextFile(proofInScratch, applyMutant(source, ROW));
-      const mutated = await runProofIn(scratch, await runBoundMs());
+      // The mutant does the same work as the baseline, so its window derives from the
+      // OBSERVED baseline duration (the ga3jd markerDeadlineFor shape): 2x what the
+      // baseline actually took, min the quiet guard. A killed mutant run is still
+      // UNKNOWN - never an expected red.
+      const mutated = await runProofIn(
+        scratch,
+        Math.max(EXWW_RUN_BASE_GUARD_MS, baseline.seconds * 1000 * 2),
+      );
       // A bound killing the run and the mutant reddening it are DIFFERENT outcomes: 124/137/143 is unknown,
       // never a pass and never a fail, so the timeout is asserted out before the mutant's red is believed.
       const row = MUTANTS.find((m) => m.name === ROW)!;
