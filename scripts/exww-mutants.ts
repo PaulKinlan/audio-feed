@@ -411,6 +411,23 @@ export interface RunOutcome {
   tail: string;
 }
 
+/** The exww row's per-run bound ladder, derived from OBSERVED BOUND-KILLS
+ * (audio-feed-ybwj7, superseding the r6hft boot-baseline calibration: the follow-up gate
+ * killed the baseline at 240.6s while the boot probe measured FAST - a Deno boot does not
+ * track the render+CDP starvation that dominates this proof, so boot was the wrong
+ * observable). Attempt 1 keeps the original r6hft quiet guard; each OBSERVED bound-kill
+ * doubles the next attempt - the kill IS the observation, the ga3jd markerDeadlineFor
+ * shape. Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
+ * KILL-DERIVED LADDER; base and ratio are LITERALS pending measurement: the constants
+ * below are chosen, not calibrated - audio-feed-8u4x1 measures the real cost-per-attempt
+ * ratio under gate load and derives the constant from that data; until it lands, nothing
+ * here claims calibration. Pinned BY NAME in tests/exww_mutants_test.ts. */
+export const EXWW_RUN_BASE_GUARD_MS = 240_000;
+
+export function exwwRunBoundForAttempt(attempt: number): number {
+  return EXWW_RUN_BASE_GUARD_MS * 2 ** (attempt - 1);
+}
+
 export async function runProofIn(
   dir: string,
   timeoutMs = 240_000,
