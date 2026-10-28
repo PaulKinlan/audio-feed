@@ -31,7 +31,7 @@
  * `deno task evidence:mutants` runs all seven when someone wants the matrix. The row is shared with that
  * harness rather than redefined here, so a row cannot drift between the tier and the gate.
  */
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   applyMutant,
   buildScratch,
@@ -72,12 +72,16 @@ const runWithDerivedBound = async (scratch: string): Promise<RunOutcome> => {
     outcome = await runProofIn(scratch, bound);
     if (!outcome.timedOut) return outcome;
     console.error(
+      // The next attempt exists only below MAX_ATTEMPTS - never advertise a bound
+      // that will not run.
       `audio-feed-ybwj7: the exww run hit the ${
         bound / 1000
       }s bound (attempt ${attempt}/${MAX_ATTEMPTS})` +
-        ` - the kill is the measurement; the next attempt derives ${
-          exwwRunBoundForAttempt(attempt + 1) / 1000
-        }s from it`,
+        (attempt < MAX_ATTEMPTS
+          ? ` - the kill is the measurement; the next attempt derives ${
+            exwwRunBoundForAttempt(attempt + 1) / 1000
+          }s from it`
+          : ` - the last attempt; interpretRun reports this as UNKNOWN`),
     );
   }
   return outcome!;
@@ -89,11 +93,10 @@ Deno.test("audio-feed-ybwj7: the exww run bound ladder derives from observed bou
   // Each OBSERVED kill doubles the next attempt: the kill is the measurement.
   assertEquals(exwwRunBoundForAttempt(2), 480_000);
   assertEquals(exwwRunBoundForAttempt(3), 960_000);
-  // Proportional by construction - the ladder cannot flatten into a fixed literal.
-  assertEquals(
-    exwwRunBoundForAttempt(3),
-    Math.round(2 * exwwRunBoundForAttempt(2)),
-  );
+  // Real invariant, not a tautology: strictly increasing - every observed kill buys
+  // strictly more time than the attempt that was killed, or the ladder is dead.
+  assert(exwwRunBoundForAttempt(3) > exwwRunBoundForAttempt(2));
+  assert(exwwRunBoundForAttempt(2) > exwwRunBoundForAttempt(1));
   // The ladder is bounded: 3 attempts = 960s max, inside the fleet's 5400s gate budget.
   assertEquals(EXWW_RUN_BASE_GUARD_MS, 240_000);
 });
