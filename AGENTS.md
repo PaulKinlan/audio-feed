@@ -34,7 +34,12 @@ changes (`deno.json`, `deno.jsonc`, `deno.lock`, `import_map.json`, `tsconfig.js
 name, because a change there can move what every suite resolves and no suite's own code can show
 that), when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a
 changed src file has no covering test, when a changed script has importers but no reachable test,
-when a shared test helper (tests/*.ts that is not `*_test.ts`) changes, when a non-TypeScript file
+when a changed test helper (`tests/*.ts` that is not `*_test.ts`) is observed by NO suite - helpers
+select their observers now (audio-feed-3e4s0): the importers the reverse graph walks from the `tests/`
+start, plus the suites the derived relation names as reading or EXECUTING the helper (a spawned fixture
+like `tests/fixtures/invocation_death_child.ts` has no import edge, and the old blanket rule cost that
+one-file change the FULL gate), so only a helper neither channel connects to any suite falls back - when
+a non-TypeScript file
 under src/ or tests/ changes (assets, HTML fixtures — the import graph cannot see them), or when the
 git diff itself fails (a stale/missing origin/main must never read as "no changes"). Safe beats
 fast.
