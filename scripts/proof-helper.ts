@@ -4516,15 +4516,47 @@ export async function killChromeAndWait(chrome: Deno.ChildProcess): Promise<void
  * Remove a directory that a dying process may still be recreating, and report whether it is finally gone
  * (audio-feed-wj8o2).
  *
- * It re-checks rather than sleeping a fixed time: it returns as soon as a check finds the directory absent, and
- * gives up after `attempts` x `settleMs` (~1s by default). The RETURN VALUE is the point - callers assert it
- * instead of swallowing the failure, because the failure this exists for (a child recreating the profile after
- * cleanup() had removed it) was invisible while every removal ended in `.catch(() => {})`.
+ * QUIET IS AN EVENT, NOT A GAP (audio-feed-xmjah).
+ *
+ * Before: `quiet` was inferred from elapsed time - remove, sleep `settleMs`, and if no directory was there when the
+ * sleep ended, call it quiet and return. A writer that was merely BETWEEN writes (a mid-stream gap) was indistinguish-
+ * able from a writer that had finished, so under gate load - where one inter-write stall stretches past the settle
+ * window - the helper returned a truthful-looking `true` for a directory the writer then recreated. The bead family
+ * hit this on a loaded host, on a comment-only tree. Raising `settleMs` (8b4wx did: 400ms, 20x the writer's cadence)
+ * only moves the red to a slower host, so it is not a fix.
+ *
+ * After: when the caller can observe the writer's completion, it passes it as `settled` - the end-of-stream event
+ * (a child's own `.done` sentinel, an awaited child exit, a stream close). The helper then waits for THAT event and
+ * removes once. No poll interval decides the verdict, and a mid-stream gap cannot produce quiet: nothing is called
+ * quiet until the writer says it has stopped. The caller owns the durability of that event, so a fixture that never
+ * signals it should reject and name itself as broken rather than hang this helper.
+ *
+ * Without `settled` the retrying loop below is retained for the case it is still correct for: the caller has ALREADY
+ * observed its writer exit (`killChromeAndWait`), and the only thing that can recreate the directory is a straggler
+ * that the retries outlast. Callers that cannot show that must pass `settled`.
+ *
+ * The RETURN VALUE is the point in both modes - callers assert it instead of swallowing the failure, because the
+ * failure this exists for (a child recreating the profile after cleanup() had removed it) was invisible while every
+ * removal ended in `.catch(() => {})`.
  */
 export async function removeDirWhenQuiet(
   dir: string,
-  opts: { attempts?: number; settleMs?: number } = {},
+  opts: {
+    attempts?: number;
+    settleMs?: number;
+    /**
+     * The observed event that proves whatever recreates `dir` has finished (audio-feed-xmjah). Resolving it is the
+     * ONLY way this call decides `quiet`; `attempts`/`settleMs` are then unused because no window is consulted.
+     */
+    settled?: Promise<unknown>;
+  } = {},
 ): Promise<boolean> {
+  if (opts.settled) {
+    // The pass path waits exactly as long as the writer actually takes: the event decides, not a window.
+    await opts.settled;
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    return !exists(dir);
+  }
   const attempts = opts.attempts ?? 20;
   const settleMs = opts.settleMs ?? 50;
   for (let attempt = 1; attempt <= attempts; attempt++) {

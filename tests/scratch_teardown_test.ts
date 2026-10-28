@@ -57,7 +57,7 @@ function exists(path: string): boolean {
  *   one inter-write stall must exceed 20x the cadence before the helper can see a false quiet - the host's
  *   measured ~10x timer stretch cannot produce it.
  */
-function spawnLateWriter(dir: string, writes: number): Deno.ChildProcess {
+function spawnLateWriter(dir: string, writes: number, stallMs = 0): Deno.ChildProcess {
   const script = `const dir = ${JSON.stringify(dir)};
     const started = dir + ".started";
     const done = dir + ".done";
@@ -67,7 +67,9 @@ function spawnLateWriter(dir: string, writes: number): Deno.ChildProcess {
         Deno.writeTextFileSync(dir + "/Default/Cache-" + Date.now(), "x");
         Deno.writeTextFileSync(started, "");
       } catch { /* the parent may be removing it, which is fine */ }
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // A deliberate MID-STREAM GAP after the first write (audio-feed-xmjah): longer than any settle window a
+      // caller would pass, so a gap-based quiet detection reports the directory gone while the writer is alive.
+      await new Promise((resolve) => setTimeout(resolve, i === 0 ? ${stallMs} : 20));
     }
     try { Deno.writeTextFileSync(done, ""); } catch { /* nothing waits on it once we are done */ }`;
   const child = new Deno.Command(Deno.execPath(), {
@@ -76,6 +78,28 @@ function spawnLateWriter(dir: string, writes: number): Deno.ChildProcess {
     stderr: "null",
   }).spawn();
   return child;
+}
+
+/**
+ * The writer's own end-of-stream acknowledgement as an EVENT (audio-feed-xmjah).
+ *
+ * The interval below only NOTICES the sentinel; it never decides a verdict - which is exactly the difference between
+ * this and the settle window it replaces. `hangGuardMs` exists so a broken fixture rejects and names itself instead
+ * of hanging `removeDirWhenQuiet`, which awaits the returned promise unbounded on purpose.
+ */
+function endOfStreamEvent(path: string, hangGuardMs: number): Promise<void> {
+  return (async () => {
+    const deadline = Date.now() + hangGuardMs;
+    while (!exists(path)) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `the writer never signalled ${path} within the ${hangGuardMs}ms hang guard: the race fixture is ` +
+            `broken, not the teardown (audio-feed-xmjah)`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  })();
 }
 
 /** Poll until `path` exists or `ms` elapse; the writer's boot time is not ours to guess. */
@@ -134,13 +158,15 @@ Deno.test("audio-feed-wj8o2: removeDirWhenQuiet outlasts a child that keeps recr
       await waitForSentinel(root + ".started", 10_000),
       "the late writer never wrote anything; the race fixture is broken, not the teardown",
     );
-    const gone = await removeDirWhenQuiet(root, { attempts: 30, settleMs: 400 });
+    const gone = await removeDirWhenQuiet(root, {
+      // audio-feed-xmjah: the verdict is the writer's own end-of-stream event, so no gap between polls can be
+      // mistaken for completion. `attempts`/`settleMs` are no longer consulted on this path - kept only below in
+      // the mutation row that pins the old inference red by name.
+      settled: endOfStreamEvent(root + ".done", 10_000),
+    });
     assert(gone, "removeDirWhenQuiet must report the directory gone");
-    // audio-feed-1if0q: the verdict is EVENT-ORDERED, never report-vs-assert raced. Wait for the
-    // writer's own .done sentinel and reap it BEFORE judging final absence: a write queued behind a
-    // stretched timer can land between the helper's return and this row's check, and that used to
-    // redden a truthful report (the only red in 57ape's 2359-row fast gate). A red AFTER the writer
-    // is provably done means the helper declared quiet mid-stream and leaked a recreated directory.
+    // audio-feed-1if0q: the verdict is EVENT-ORDERED, never report-vs-assert raced. The helper has already waited
+    // for the writer's own .done sentinel before removing, so this row reaps the child and checks once.
     assert(
       await waitForSentinel(root + ".done", 10_000),
       "the late writer never signalled completion; the race fixture is broken, not the teardown",
@@ -150,6 +176,48 @@ Deno.test("audio-feed-wj8o2: removeDirWhenQuiet outlasts a child that keeps recr
       !exists(root),
       "the writer is done and the helper reported gone, yet the scratch exists: the helper declared " +
         "quiet during a mid-stream gap and leaked the recreated directory (audio-feed-wj8o2)",
+    );
+  } finally {
+    await child.status.catch(() => {});
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+    await Deno.remove(root + ".started").catch(() => {});
+    await Deno.remove(root + ".done").catch(() => {});
+  }
+});
+
+Deno.test("audio-feed-wj8o2: removeDirWhenQuiet decides quiet from the writer's end-of-stream event, not a gap between polls (audio-feed-xmjah)", async () => {
+  // THE MUTATION ROW for audio-feed-xmjah. The writer writes once, then STALLS for far longer than any settle
+  // window this row passes, then finishes and acknowledges with .done. A helper that infers quiet from a gap
+  // between polls removes during the stall, sees an absent directory at the next check and reports `true` while
+  // the writer still has writes queued - so the absence assertion below reds BY NAME once those writes land.
+  // A helper that waits for the acknowledged end-of-stream event cannot: nothing is quiet until the writer says so,
+  // and the stall is exactly the load-induced gap that reddened this row family on a busy host.
+  const root = await Deno.makeTempDir({ prefix: "xmjah-gap-" });
+  const STALL_MS = 1200; // 24x the settle window below: no plausible "margin" hides the old inference
+  const child = spawnLateWriter(root, 4, STALL_MS);
+  try {
+    assert(
+      await waitForSentinel(root + ".started", 10_000),
+      "the late writer never wrote anything; the race fixture is broken, not the teardown",
+    );
+    const gone = await removeDirWhenQuiet(root, {
+      attempts: 30,
+      settleMs: 50,
+      settled: endOfStreamEvent(root + ".done", 15_000),
+    });
+    assert(
+      gone,
+      "removeDirWhenQuiet must report the directory gone once the writer has said it is done",
+    );
+    assert(
+      await waitForSentinel(root + ".done", 15_000),
+      "the late writer never signalled completion; the race fixture is broken, not the teardown",
+    );
+    await child.status.catch(() => {});
+    assert(
+      !exists(root),
+      "the helper called the directory quiet before the writer's end-of-stream event: the writer still had " +
+        "writes queued across a mid-stream gap and recreated it (audio-feed-xmjah)",
     );
   } finally {
     await child.status.catch(() => {});
