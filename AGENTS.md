@@ -32,7 +32,12 @@ in the static import graph without crossing the app/compose hubs, plus the name-
 select the tests that import them. It falls back to the FULL suite when a module-graph config file
 changes (`deno.json`, `deno.jsonc`, `deno.lock`, `import_map.json`, `tsconfig.json` — checked by
 name, because a change there can move what every suite resolves and no suite's own code can show
-that), when a cross-cutting file (app/compose/router/http/config/server/origin) changes, when a
+that), when a cross-cutting file (app/compose/router/http/config/server/origin) is reached by NO suite -
+core files select their observers now (audio-feed-zyrug): the reverse-graph walk CROSSES hubs when the
+changed file IS the hub (a suite that boots through `src/http.ts` exercises it on every request; the hub
+cut stays for route changes, where booting through the hub exercises the app but not the route), plus the
+suites the derived relation names as reading it, and a core file nothing reaches still runs the FULL
+suite by name - when a
 changed src file has no covering test, when a changed script has importers but no reachable test,
 when a changed test helper (`tests/*.ts` that is not `*_test.ts`) is observed by NO suite - helpers
 select their observers now (audio-feed-3e4s0): the importers the reverse graph walks from the `tests/`

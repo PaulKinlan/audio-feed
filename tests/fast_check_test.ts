@@ -504,16 +504,17 @@ Deno.test("planTests: graph-uncovered with NO name match falls back to the full 
   assertEquals(plan.testFiles, null);
 });
 
-Deno.test("planTests: deno.json, a core file, an UNOBSERVED test helper, and a non-ts asset all fall back", () => {
+Deno.test("planTests: deno.json, an UNOBSERVED core file, an UNOBSERVED test helper, and a non-ts asset all fall back", () => {
   // The tests/fixtures.ts row is a helper NO channel observes in this synthetic setup (no importer in
   // GRAPH, no relation entry): the fail-closed fallback for that shape is unchanged (audio-feed-3e4s0).
-  // An OBSERVED helper selects its observers instead - pinned in the 3e4s0 test below.
+  // An OBSERVED helper selects its observers instead - pinned in the 3e4s0 test below. The src/router.ts
+  // and src/compose/access.ts rows are core files NOTHING reaches in GRAPH: fail-closed to FULL is the
+  // zyrug rule for exactly that case (an OBSERVED core file selects its closure - the zyrug test below).
   for (
     const changed of [
       ["deno.json"],
       ["deno.lock"],
       ["src/router.ts"],
-      ["src/app.ts"],
       ["src/compose/access.ts"],
       ["tests/fixtures.ts"],
       ["src/assets/listen.js"],
@@ -523,6 +524,38 @@ Deno.test("planTests: deno.json, a core file, an UNOBSERVED test helper, and a n
     const plan = planTests(changed, GRAPH, NO_NAMED);
     assertEquals(plan.testFiles, null, `${changed} must run the full suite: ${plan.reason}`);
   }
+});
+
+Deno.test("planTests: an OBSERVED core/hub file selects its closure, crossing hubs (audio-feed-zyrug)", () => {
+  // src/app.ts is a hub; GRAPH has tests/app_test.ts importing it directly. The old rule ran FULL by list
+  // membership; the zyrug rule selects the observers the walk reaches, crossing hubs because the changed
+  // file IS the hub.
+  assertEquals(planTests(["src/app.ts"], GRAPH, NO_NAMED).testFiles, ["tests/app_test.ts"]);
+
+  // Transitively: a core file imported by a route reaches the route's own test AND the app-booting test
+  // through the hub - every one of them exercises the core file on every request.
+  const graph = new Map<string, string[]>([
+    ["src/http.ts", ["src/routes/home.ts"]],
+    ["src/routes/home.ts", ["src/app.ts", "tests/home_test.ts"]],
+    ["src/app.ts", ["tests/app_test.ts"]],
+  ]);
+  assertEquals(
+    planTests(["src/http.ts"], graph, NO_NAMED).testFiles,
+    ["tests/app_test.ts", "tests/home_test.ts"],
+  );
+
+  // Fail CLOSED, never to nothing: a core file NOTHING reaches still runs the FULL suite, by name.
+  const orphan = planTests(["src/config.ts"], graph, NO_NAMED);
+  assertEquals(orphan.testFiles, null);
+  assert(orphan.reason.includes("no test reaches"), orphan.reason);
+
+  // And a resolver-proven data read covers a core file the graph cannot see (the relation outranks the
+  // uncovered fallback): no import edge, one relation entry, that suite selected.
+  const withRelation = new Map([["src/config.ts", ["tests/config_reader_test.ts"]]]);
+  assertEquals(
+    planTests(["src/config.ts"], new Map(), NO_NAMED, withRelation).testFiles,
+    ["tests/config_reader_test.ts"],
+  );
 });
 
 Deno.test("planTests: a tests/ helper selects its OBSERVERS, not the FULL suite (audio-feed-3e4s0)", () => {
