@@ -18,7 +18,14 @@
  *     app-booting test — measured: a listen.ts change selected 58 of 80 files
  *     and saved nothing. Cut + name-matched, the same change selects ~10.
  *   - a changed HUB or cross-cutting file (app/compose/router/http/config/
- *     server/origin) runs the FULL suite — every test exercises it;
+ *     server/origin) selects the suites that actually reach it: the walk is
+ *     allowed to CROSS hubs when the changed file IS the hub (the hub cut
+ *     exists to keep ROUTE changes narrow - a test that reaches a route only
+ *     through the hub boots the app without exercising that route; a test
+ *     that reaches http.ts through the hub exercises http.ts on every
+ *     request). Only a core file NOTHING reaches widens to the FULL suite
+ *     (audio-feed-zyrug: the hardcoded list cost a 90min bound-killed gate
+ *     for a change whose honest observer set is 90 of 159 suites);
  *   - a non-TypeScript file outside src/ and tests/ (a docs/evidence PNG, a shell runner) selects the
  *     suites the DERIVED read relation says read or execute it - the relation is scanned out of the
  *     suites' own code in scripts/test-selection.ts, not listed beside them - and anything the derivation
@@ -334,11 +341,14 @@ function isHub(file: string): boolean {
  * and server.ts into scripts/* (dev tools no test imports), and those interior
  * nodes say nothing about whether the CHANGE is covered.
  *
- * The walk does not cross a hub: app.ts/compose.ts import every route, so
- * crossing them selects every app-booting test for any route change. A test
- * that only reaches the changed file THROUGH the hub boots the whole app but
- * does not exercise that route's behaviour; the changed file's direct tests
- * are the ones that do. scripts/ modules are walked like anything else — a
+ * The walk does not cross a hub FOR A NON-HUB START: app.ts/compose.ts
+ * import every route, so crossing them selects every app-booting test for
+ * any route change, and a test that only reaches the changed file THROUGH
+ * the hub boots the whole app but does not exercise that route's behaviour.
+ * When the changed file IS a hub or core file the rule inverts (audio-feed-
+ * zyrug): a suite that boots through http.ts exercises http.ts on every
+ * request, so the walk crosses hubs and the closure is the observer set.
+ * scripts/ modules are walked like anything else — a
  * tested script (fast-check.ts itself) must select its test; only a script
  * NOTHING imports is exempt (audio-feed-bqd4). tests/ helpers (fixtures.ts,
  * tests/fixtures/*) are walked too (audio-feed-3e4s0): a helper selects the
@@ -359,6 +369,13 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
     }
     if (!/^(src\/|scripts\/|tests\/|main\.ts$)/.test(start)) continue; // docs, assets: no tests
 
+    // audio-feed-zyrug: the hub cut below keeps a ROUTE change narrow (a test that reaches the route only
+    // through app.ts boots the app without exercising that route's behaviour). When the changed file IS a
+    // hub or core file the rule inverts: every suite that boots through it DOES exercise it on every
+    // request, so the walk crosses hubs and the closure is the honest observer set (measured on this tree:
+    // src/http.ts -> 90 suites, where the hardcoded list ran all 159).
+    const crossHubs = isHub(start) || CORE.has(start);
+
     let covered = false;
     const queue = [start];
     const seen = new Set<string>();
@@ -372,7 +389,7 @@ export function reachableTests(reverse: Map<string, string[]>, changed: string[]
         continue; // a test file's own importers are not evidence of anything
       }
       for (const importer of reverse.get(file) ?? []) {
-        if (importer !== start && isHub(importer)) continue; // do not cross hubs
+        if (!crossHubs && importer !== start && isHub(importer)) continue; // do not cross hubs
         queue.push(importer);
       }
     }
@@ -1079,21 +1096,14 @@ export function planTests(
     };
   }
 
-  const coreChanged = codeChanged.filter((f) => CORE.has(f) || isHub(f));
-  if (coreChanged.length) {
-    return { testFiles: null, reason: `cross-cutting file(s) changed: ${coreChanged.join(", ")}` };
-  }
-
-  // audio-feed-3e4s0: a changed tests/ helper used to widen EVERY change to the FULL suite on the
-  // argument that a shared helper (fixtures.ts, listen_client.ts) fans out to dozens of suites anyway.
-  // Measured on this tree, that blanket rule cost a one-file fixture change the full 159-suite gate
-  // (killed at the bound): tests/fixtures/invocation_death_child.ts is observed by exactly ONE suite,
-  // and not even by import - the suite SPAWNS it as a child process. A helper is now observed through
-  // BOTH channels below: the import graph (reachableTests walks tests/ starts, transitively through
-  // other helpers) and the DERIVED relation (a read-as-data or an execute earns a relation without an
-  // import edge). Only a helper NEITHER channel connects to any suite widens, via the uncovered
-  // fallback at the bottom of this function - the fail-closed direction is unchanged.
-  const helpers = codeChanged.filter((f) => f.startsWith("tests/") && !f.endsWith("_test.ts"));
+  // audio-feed-zyrug: a core/hub file (app/compose/router/http/config/server/origin) used to widen EVERY
+  // change to the FULL suite by list membership. The list's intent - a hub change can break any suite that
+  // boots through it - is answered precisely by the graph: the suites that boot through it ARE the closure,
+  // and reachableTests crosses hubs for exactly these starts (the hub cut stays for route changes, where
+  // booting through the hub exercises the app but not the route). What still widens is a core file NOTHING
+  // reaches (stillUncovered below), plus the named-convention and proven data-read suites merged below.
+  // (audio-feed-3e4s0 took the same step for tests/ helpers: observed through the graph walk - which walks
+  // tests/ starts transitively through other helpers - and the relation, never widened by class.)
 
   if (!codeChanged.length) {
     if (data.suites.length) {
@@ -1164,11 +1174,13 @@ export function planTests(
   for (const list of named.values()) for (const f of list) tests.add(f);
   // A data change (a screenshot, a document the app serves) rides alongside the code change.
   for (const suite of data.suites) tests.add(suite);
-  // The second observation channel for a tests/ helper (audio-feed-3e4s0): a suite that READS the
-  // helper as data or EXECUTES it as a child process has no import edge for the graph to walk, but the
-  // derived relation names it (tests/fixtures/invocation_death_child.ts -> the suite that spawns it).
-  for (const helper of helpers) {
-    for (const suite of readRelations.get(helper) ?? []) tests.add(suite);
+  // The second observation channel (audio-feed-3e4s0 for tests/ helpers, extended to every code change
+  // by audio-feed-zyrug): a suite that READS a changed file as data or EXECUTES it as a child process has
+  // no import edge for the graph to walk, but the derived relation names it when the read is resolver-
+  // proven (tests/fixtures/invocation_death_child.ts -> the suite that spawns it; a source-scanner suite
+  // reading a src/*.ts as text -> that suite).
+  for (const file of codeChanged) {
+    for (const suite of readRelations.get(file) ?? []) tests.add(suite);
   }
 
   // audio-feed-x4kc: Any change under tests/ can alter what a suite reads (or change test assertions/invariants
@@ -1193,11 +1205,12 @@ export function planTests(
     };
   }
   // A file with name-matched tests is covered even when the graph cannot
-  // see it (the route tests boot the app through the hub). A tests/ helper is
+  // see it (the route tests boot the app through the hub). Any file is
   // covered the same way when the derived relation names a suite that reads or
-  // executes it (audio-feed-3e4s0) - the graph cannot see a spawn.
+  // executes it (audio-feed-3e4s0 for helpers, audio-feed-zyrug for src) -
+  // the graph cannot see a spawn or a resolver-proven data read.
   const stillUncovered = uncovered.filter((f) =>
-    !named.get(f)?.length && !(f.startsWith("tests/") && readRelations.get(f)?.length)
+    !named.get(f)?.length && !readRelations.get(f)?.length
   );
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
