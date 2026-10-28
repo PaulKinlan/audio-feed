@@ -349,12 +349,52 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
           `${url}: the stuck flip never landed (scrollY=${flip.scrollY}, rectTop=${flip.rectTop})`,
         );
         assert(flip.settled, `${url}: the stuck-style transitions never settled`);
-        const after = await probe();
+        // audio-feed-3y5vv (measured in a loaded full gate): the in-page settle reads stable
+        // styles, but the ASSERTED read is a separate CDP evaluation - under load a
+        // scroll-state re-evaluation can re-enter the transition between settle and probe, and
+        // the probe caught the base colour again ('the stuck edge strengthens
+        // rgb(220,216,232) -> rgb(220,216,232)'). The asserted read is therefore the OBSERVED
+        // FLIP EVENT: poll the probe until the stuck styles differ from base, bounded by a
+        // named guard that throws - never a frame count and never a wider window.
+        const flipped = await (async () => {
+          const guardDeadline = Date.now() + 20_000; // observability guard with load headroom, not a measurement
+          for (;;) {
+            const state = await probe();
+            if (
+              state.shadow !== "none" && state.bg !== before.bg &&
+              state.border !== before.border
+            ) {
+              return state;
+            }
+            if (Date.now() > guardDeadline) {
+              throw new Error(
+                `${url}: the stuck styles never reached the flipped values within 20s of settle ` +
+                  `(last read: shadow=${state.shadow}, bg=${state.bg}, border=${state.border}) - ` +
+                  `the transition either never landed or regressed after settle (audio-feed-3y5vv)`,
+              );
+            }
+            await sleep(50);
+          }
+        })();
+        const after = flipped;
         await evaluate("window.scrollTo(0, 0)");
         const restored = JSON.parse(await evaluate(STUCK_STATE_WAIT(surface, baseKey, false)));
         assert(restored.reached, `${url}: scrolling back never un-stuck the header`);
         assert(restored.settled, `${url}: the un-stick transitions never settled`);
-        const back = await probe();
+        const back = await (async () => {
+          const guardDeadline = Date.now() + 20_000; // same observed-event rule for the un-stick read
+          for (;;) {
+            const state = await probe();
+            if (state.shadow === "none") return state;
+            if (Date.now() > guardDeadline) {
+              throw new Error(
+                `${url}: the header never returned to the un-stuck styles within 20s of scrolling back ` +
+                  `(last read: shadow=${state.shadow}) - the restore regressed after settle (audio-feed-3y5vv)`,
+              );
+            }
+            await sleep(50);
+          }
+        })();
         return { before, after, back };
       };
       return {
