@@ -2023,7 +2023,16 @@ export function suitesObserving(
 ): string[] {
   const suites = new Set<string>();
   for (const [pattern, observed] of relations) {
-    if (pattern.endsWith("/") ? relPath.startsWith(pattern) : relPath === pattern) {
+    // audio-feed-sru1b: a WHOLE-TREE scan earns a DIRECTORY key, and the suite that holds it observes every
+    // file under it - an exact-or-trailing-slash match silently dropped whole-tree scanners from selection
+    // once any graph observer existed (a core file narrowed 159 -> 6 suites and the src/ scanner dropped
+    // out). Three match shapes: exact (a file), trailing-slash prefix ("src/", "docs/evidence/"), and a
+    // bare directory key with no extension ("src", "scripts", "tests/fixtures") matched WITH the slash
+    // anchor so "src" can never claim "src2/x". An extensionless FILE key can only prefix-match paths under
+    // it, and nothing lives under a file, so the file case needs no carve-out.
+    const isObserver = pattern.endsWith("/") ? relPath.startsWith(pattern) : relPath === pattern ||
+      (!/\.[^./]+$/.test(pattern) && relPath.startsWith(pattern + "/"));
+    if (isObserver) {
       for (const suite of observed) suites.add(suite);
     }
   }

@@ -1158,7 +1158,20 @@ Deno.test("no route hand-rolls a content-security-policy header outside csp.ts",
       }
     }
   }
-  await scan("src");
+  // The ENTRY read carries the literal root so the read-relation detector resolves this suite as a
+  // whole-src/ scanner (audio-feed-sru1b): scan("src") crosses a parameter boundary the resolver provably
+  // cannot see through, and a suite that scans all of src/ must be selected for ANY src/ change.
+  for await (const entry of Deno.readDir("src")) {
+    const path = `src/${entry.name}`;
+    if (entry.isDirectory) {
+      await scan(path);
+    } else if (entry.name.endsWith(".ts")) {
+      const text = await Deno.readTextFile(path);
+      if (!allowed.has(path) && /["']content-security-policy["']/i.test(text)) {
+        offenders.push(path);
+      }
+    }
+  }
 
   assertEquals(
     offenders,

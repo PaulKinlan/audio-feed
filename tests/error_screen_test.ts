@@ -83,7 +83,14 @@ Deno.test("audio-feed-sw1r: every phrase in the list has a throw site in this co
       else if (entry.name.endsWith(".ts")) sources.push(await Deno.readTextFile(path));
     }
   };
-  await walk(new URL("../src", import.meta.url).pathname.replace(/\/$/, ""));
+  // The ENTRY read carries the literal root so the read-relation detector resolves this suite as a
+  // whole-src/ scanner (audio-feed-sru1b): a computed root (new URL("../src", import.meta.url)...)
+  // resolves to nothing the relation can name, so a src/ change selected every scanner EXCEPT this one.
+  for await (const entry of Deno.readDir("src")) {
+    const path = `src/${entry.name}`;
+    if (entry.isDirectory) await walk(path);
+    else if (entry.name.endsWith(".ts")) sources.push(await Deno.readTextFile(path));
+  }
   const all = sources.join("\n");
   for (const phrase of KNOWN_ERROR_PHRASES) {
     assert(
