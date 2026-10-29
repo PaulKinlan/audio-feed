@@ -11,7 +11,7 @@
  * promises: subscribe to a feed URL, read the enclosure out of it, and fetch the
  * audio that enclosure points at.
  */
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { assertSafeBlobKey } from "../src/storage/blob_key.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
@@ -294,6 +294,40 @@ Deno.test("a LEGACY episode with a refused audioKey still renders the feed with 
   assert(
     healthyEnclosure.includes(`length="${AUDIO.length}"`),
     `the healthy episode must keep its real size, got: ${healthyEnclosure}`,
+  );
+});
+
+Deno.test("a safe audioKey propagates a blob-store head transport failure during feed generation (audio-feed-1eo68)", async () => {
+  const { stores } = await seededApp();
+  const audioKey = "audio/user-1/direct/episode-transport.mp3";
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-transport",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "ready",
+      mode: "direct",
+      audioKey,
+      byteLength: undefined, // makeEpisode defaults a size; force the head() path
+    }),
+  );
+  stores.blobs.head = (key: string) => {
+    assertEquals(key, audioKey, "the safe key must reach the blob store");
+    return Promise.reject(new Error("S3 head failed (503)"));
+  };
+  const ctx = { config, stores };
+  const handler = createHandlers(ctx).masterFeed!;
+  const request = req("/feed/token-user-1/master.xml");
+  await assertRejects(
+    async () =>
+      await handler({
+        ctx,
+        req: request,
+        url: new URL(request.url),
+        params: { token: "token-user-1" },
+      }),
+    Error,
+    "S3 head failed (503)",
   );
 });
 
