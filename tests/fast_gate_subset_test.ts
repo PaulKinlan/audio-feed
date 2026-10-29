@@ -181,14 +181,34 @@ Deno.test("a changed shell runner selects the suite that executes it (es8y)", ()
   // audio-feed-95pjk: the proof harness now READS the whole scripts/ directory (a readDir over ../scripts/)
   // to assert the listing is unchanged, so under the same bare-"scripts" prefix rule a script change
   // legitimately selects it - again the DERIVATION doing this, not a listed relation, and the row's own
-  // job (prove the listing unchanged) is exactly why the read is right. The pin still reds on anything
-  // truly unexpected; the extras list is only ever as complete as the derivation's truth.
-  assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"], [
-    "tests/evidence_census_test.ts",
-    "tests/evidence_run_test.ts",
-    "tests/evidence_selection_test.ts",
-    "tests/deno-task-coverage_test.ts",
+  // job (prove the listing unchanged) is exactly why the read is right.
+  // audio-feed-bko2q: that job is why l7m1_proof is REQUIRED here rather than tolerated. The old pin
+  // checked only the required direction, so if the harness stopped reading scripts/ the suite would
+  // silently leave this selection and the pin would stay green - guarding over-selection, never
+  // under-selection. Required membership closes the missing direction: delete the listing proof from
+  // tests/l7m1_proof_test.ts and this reds by name.
+  assertSelected(plan.testFiles, [
+    "tests/observability_agent_poll_test.ts",
     "tests/l7m1_proof_test.ts",
+  ], [
+    {
+      file: "tests/evidence_census_test.ts",
+      why:
+        "the census script walks scripts/*.ts as well as docs/evidence/, so it derives a scripts relation; its membership flips with unrelated census-script text (the measured comma bug), so it is tolerated rather than required",
+    },
+    {
+      file: "tests/deno-task-coverage_test.ts",
+      why:
+        "a whole-scripts/ scanner (audio-feed-sru1b): its read IS its job, so any script change selects it through the bare-scripts key",
+    },
+    // audio-feed-bko2q REMOVED TWO DECLARATIONS FROM THIS LIST, measured on the tree this bead landed
+    // on: suitesObserving("scripts/observability-agent-run.sh") is exactly the four suites named above,
+    // and tests/evidence_run_test.ts / tests/evidence_selection_test.ts are NOT among them - they
+    // observe docs/evidence/ and README.md, not scripts/ (their scripts read evidence directories, not
+    // code). Their entries in the old five-string extras list were already STALE: tolerated but never
+    // selected, invisible to the permission-only shape this bead closes. The liveness bound would have
+    // named them on landing; they are gone because the CAUSE is gone, and if either suite ever needs a
+    // scripts/ declaration again the reason should be re-derived rather than assumed.
   ]);
 });
 
@@ -1160,14 +1180,43 @@ Deno.test("an exclusion justifies itself or it is reported (a reason, and a modu
  * exists to protect - that a changed evidence file selects the suites which really assert on it.
  * So the genuine observers are REQUIRED, the declared over-selection is tolerated BY NAME, and
  * anything else is still a failure.
+ *
+ * THE TOLERANCE IS BOUNDED, NOT A PERMANENT PERMISSION (audio-feed-bko2q). Tolerating by name had a
+ * blind side: the pin checked only the required direction, so a tolerated suite could silently LEAVE
+ * the selection - its cause gone from the derivation - while the pin stayed green, and the entry sat
+ * on as untested permission ready to mask a future selection it no longer describes (two of the five
+ * entries were exactly that on landing: measured, see the shell-runner pin). So a tolerance is now
+ * an object carrying its REASON, and the assertion below enforces that every entry is LIVE in this
+ * selection: a tolerated suite that no longer appears is a stale declaration, failed BY NAME, to be
+ * removed or re-derived - the amho pattern, enforced instead of remembered.
  */
+
+/** A tolerated over-selection member. `why` is not decoration: the shape makes an unjustified entry
+ * impossible to add, and the liveness assertion makes a stale one impossible to keep. */
+interface ToleratedSuite {
+  file: string;
+  why: string;
+}
+
 function assertSelected(
   actual: readonly string[] | null | undefined,
   required: readonly string[],
-  overSelection: readonly string[] = [
-    "tests/evidence_census_test.ts",
-    "tests/evidence_run_test.ts",
-    "tests/evidence_selection_test.ts",
+  overSelection: readonly ToleratedSuite[] = [
+    {
+      file: "tests/evidence_census_test.ts",
+      why:
+        "the census script walks docs/evidence/ and scripts/*.ts, so it derives both directory relations; its membership flips with unrelated census-script text (the measured comma bug), so it is tolerated rather than required",
+    },
+    {
+      file: "tests/evidence_run_test.ts",
+      why:
+        "the suite feeds docs/evidence README paths to the evidence-run checks, so it observes evidence-file changes through the docs/evidence/ directory key",
+    },
+    {
+      file: "tests/evidence_selection_test.ts",
+      why:
+        "the suite feeds docs/evidence README paths to the selection checks, so it observes evidence-file changes through the docs/evidence/ directory key",
+    },
     // audio-feed-amho REMOVED A DECLARATION FROM THIS LIST, and the reason it is recorded here rather
     // than silently dropped is that its absence from the diff is otherwise indistinguishable from an
     // oversight. tests/chrome_profile_sweep_sites_test.ts used to be tolerated as an over-selector
@@ -1188,8 +1237,19 @@ function assertSelected(
   for (const file of required) {
     assert(actual.includes(file), `${file} must be selected, got ${JSON.stringify(actual)}`);
   }
-  const unexpected = actual.filter((file) =>
-    !required.includes(file) && !overSelection.includes(file)
+  // THE LIVENESS BOUND (audio-feed-bko2q): a tolerance is an observation of THIS selection, so an
+  // entry that is not selected has lost its cause. Left alone it is a stale permission - untested by
+  // construction, since the permission-only shape only ever filters - and the next author to grow a
+  // selection copies precedent from an entry the derivation no longer backs. Fail by name.
+  const stale = overSelection.filter((t) => !actual!.includes(t.file));
+  assertEquals(
+    stale.map((t) => t.file),
+    [],
+    `stale tolerance(s): declared as over-selection but NOT in this selection, so the cause of the tolerance is gone - remove the declaration or re-derive the reason: ${
+      JSON.stringify(actual)
+    }`,
   );
+  const tolerated = overSelection.map((t) => t.file);
+  const unexpected = actual.filter((file) => !required.includes(file) && !tolerated.includes(file));
   assertEquals(unexpected, [], `unexpected selection member(s): ${JSON.stringify(unexpected)}`);
 }
