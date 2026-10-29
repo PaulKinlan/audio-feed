@@ -1,3 +1,4 @@
+// audio-feed-byh4j: HISTORICAL — no suite executes or reads this script, so it is NOT evidence of current behaviour. Wire it into a suite or re-derive it before citing it.
 /**
  * The P1 finding's own reproduction (audio-feed-pwu4), widened to every shape it names, driven
  * through the REAL app: openStores + bootstrap, the same path a request takes in production.

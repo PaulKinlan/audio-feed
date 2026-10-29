@@ -250,6 +250,18 @@ nothing produces (pzwe).
 `[modern-web]` bead has neither a comment nor a substantive close reason. Run it by hand with
 `deno run -A scripts/check-modern-web-verdicts.ts`.
 
+## Ungated verify_* scripts are bannerred, not evidence (audio-feed-byh4j)
+
+`scripts/verify_*.ts` is the name future readers cite as proof, and a script no suite executes or
+reads is never kept true (verify_i7vi_events.ts once asserted severity bands a later landing had
+moved). The whole-tree scanners "observing" such a script is selection, not coverage (ngrm6): a
+text-scan of scripts/ proves nothing about the script's claims. So the ledger is binary and
+enforced by `tests/verify_script_ledger_test.ts`: every `scripts/verify_*.ts` either has an EXACT
+derived relation from a suite (someone really runs or reads it - c0gj, live_tts, live_e2e_tts,
+main_l7m1_e2e, s3uk today) or carries the line-1 `audio-feed-byh4j: HISTORICAL` banner stating it
+is not evidence of current behaviour. A row that reds names the file and both cures. To promote a
+bannerred script to live evidence, wire it into a suite; never cite a bannerred script as proof.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
