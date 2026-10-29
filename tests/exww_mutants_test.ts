@@ -49,9 +49,11 @@ import {
  * (audio-feed-ybwj7, superseding the r6hft boot-baseline calibration - a follow-up gate
  * killed a baseline at 240.6s while the boot probe measured FAST, so boot was the wrong
  * observable): attempt 1 runs under the original 240s quiet guard; each OBSERVED bound-kill
- * doubles the next attempt. Base and ratio are LITERALS pending measurement
- * (audio-feed-8u4x1); nothing here claims calibration. A bound-kill is still UNKNOWN
- * (never a pass), so a genuinely hung proof stays loud. */
+ * doubles the next attempt. The base and ratio are MEASURED (audio-feed-8u4x1): three runs of
+ * the same unmutated proof under the same 240s guard took 238.7s, 221.4s and 221.0s, so the
+ * cost per attempt is FLAT (0.93x, then 1.00x) and the doubling is load margin, not growth -
+ * see the citation on EXWW_RUN_BASE_GUARD_MS. A bound-kill is still UNKNOWN (never a pass),
+ * so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
 const MAX_ATTEMPTS = 3;
 
@@ -87,6 +89,9 @@ const runWithDerivedBound = async (scratch: string): Promise<RunOutcome> => {
 };
 
 Deno.test("audio-feed-ybwj7: the exww run bound ladder derives from observed bound-kills - attempt 1 is the original guard, every observed kill doubles the next", () => {
+  // MEASURED BASIS (audio-feed-8u4x1): the same unmutated proof ran 238.7s, 221.4s and 221.0s on
+  // three consecutive attempts under identical 240s guards - a FLAT cost per attempt (0.93x, then
+  // 1.00x), so the doubling below is load margin and the attempt-1 guard sits 0.5% above measured cost.
   // Attempt 1 keeps the original r6hft quiet guard - no widened up-front window.
   assertEquals(exwwRunBoundForAttempt(1), 240_000);
   // Each OBSERVED kill doubles the next attempt: the kill is the measurement.
