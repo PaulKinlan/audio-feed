@@ -1118,7 +1118,7 @@ dialog.confirm-dialog .confirm-actions {
 
 /* -------------------------------------------------------------- narrow */
 
-\u0040media (max-width: 30rem) {
+@media (max-width: 30rem) {
   li.episode {
     grid-template-columns: auto minmax(0, 1fr);
     gap: var(--space-2) var(--space-3);
@@ -1142,7 +1142,7 @@ dialog.confirm-dialog .confirm-actions {
   }
 }
 
-\u0040media (prefers-reduced-motion: reduce) {
+@media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
