@@ -331,11 +331,15 @@ function clientAddressCandidate(value: string): string | null {
 const MAX_CLIENT_KEY_LENGTH = 64;
 
 /**
- * Shared throttle for failed admin authentication attempts (audio-feed-bns).
+ * Shared throttle for failed shared-key authentication attempts (audio-feed-bns).
  *
  * Prevents rapid guessing attacks against ADMIN_TOKEN on both:
  *   - The header path (`x-admin-token`, `authorization: bearer ...` via adminGate)
  *   - The bootstrap path (`POST /api/auth/bootstrap` via account_api)
+ *
+ * And against AUDIOFEED_OBSERVABILITY_KEY on `/api/observability/*`
+ * (audio-feed-obslimit), which is exempt from the host gate and so had no bound
+ * at all: a bearer token that can be guessed at line rate is not a secret.
  */
 export interface FailedAuthLimiterOptions {
   /** Maximum failed attempts within window before lockout. Default: 10 */
@@ -347,10 +351,21 @@ export interface FailedAuthLimiterOptions {
    * scaled by the limiter's fixed multiplier.
    */
   unaddressedMaxFailures?: number;
+  /**
+   * Which failure window this limiter reads and writes. Defaults to the
+   * admin-token window, so every caller that names no namespace keeps sharing
+   * ONE bound (audio-feed-2zvc). Two limiter instances over different secrets
+   * must NOT share it: a guesser hammering one secret would then lock out the
+   * other, and a successful login on one would clear the failures on the other.
+   */
+  namespace?: string;
 }
 
 /** Namespaces the admin-token window so it cannot swap rows with another limiter. */
 const ADMIN_AUTH_NAMESPACE = "admin_auth";
+
+/** The observability bearer key's own window — see `createObservabilityAuthLimiter`. */
+const OBSERVABILITY_AUTH_NAMESPACE = "observability_auth";
 
 export class FailedAuthLimiter {
   readonly #limiter: SlidingWindowRateLimiter;
@@ -363,7 +378,7 @@ export class FailedAuthLimiter {
         windowMs,
       },
       store,
-      ADMIN_AUTH_NAMESPACE,
+      options.namespace ?? ADMIN_AUTH_NAMESPACE,
       options.unaddressedMaxFailures !== undefined
         ? { maxRequests: options.unaddressedMaxFailures, windowMs }
         : undefined,
@@ -395,4 +410,19 @@ export class FailedAuthLimiter {
  */
 export function createAdminAuthLimiter(store: RateLimitStore): FailedAuthLimiter {
   return new FailedAuthLimiter(store);
+}
+
+/**
+ * The observability-key failure limiter for a store.
+ *
+ * Same store, same backoff and same thresholds as the admin bound
+ * (audio-feed-obslimit), but its OWN window: `AUDIOFEED_OBSERVABILITY_KEY` and
+ * `ADMIN_TOKEN` are different secrets, so one counter for both would let
+ * guesses against the observability key lock the admin surface out for the same
+ * client — and let a successful admin request clear the observability failures.
+ * Callers passing the same store share this counter, so the bound survives an
+ * isolate being recycled (audio-feed-2zvc).
+ */
+export function createObservabilityAuthLimiter(store: RateLimitStore): FailedAuthLimiter {
+  return new FailedAuthLimiter(store, { namespace: OBSERVABILITY_AUTH_NAMESPACE });
 }

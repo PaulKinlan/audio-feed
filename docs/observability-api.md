@@ -14,12 +14,12 @@ When `severity` is omitted, both `/api/observability/errors` and `/api/observabi
 **default to `severity=warn`**, which includes **`warn` and `error` records only** and excludes all
 `info` and `debug` records:
 
-| `severity` query parameter | severities included              | typical use                                                         |
-| -------------------------- | -------------------------------- | ------------------------------------------------------------------- |
+| `severity` query parameter | severities included              | typical use                                                                |
+| -------------------------- | -------------------------------- | -------------------------------------------------------------------------- |
 | _(omitted)_ or `warn`      | `warn`, `error`                  | **Default.** Failure and warning polling (`totalMatches: 0` = no warn/err) |
-| `error`                    | `error`                          | Terminal failures and unhandled errors only                         |
-| `info`                     | `info`, `warn`, `error`          | Operational events + completions + warnings/errors (no `debug`)     |
-| `all`                      | `debug`, `info`, `warn`, `error` | Full retained event stream, including completion and stage marks    |
+| `error`                    | `error`                          | Terminal failures and unhandled errors only                                |
+| `info`                     | `info`, `warn`, `error`          | Operational events + completions + warnings/errors (no `debug`)            |
+| `all`                      | `debug`, `info`, `warn`, `error` | Full retained event stream, including completion and stage marks           |
 
 > [!IMPORTANT]
 > **Completion and progress checks MUST pass `?severity=all` (or `?severity=info`).** Synthesis
@@ -38,12 +38,20 @@ variable. Header only: a query parameter would be logged by proxies and kept in 
 | ----------------------------------- | ----------------------------------------------------------------- |
 | no key configured on the deployment | `503 observability_not_configured` — closed, and honest about why |
 | missing or wrong key                | `401 unauthorised` + `WWW-Authenticate: Bearer`                   |
+| too many wrong keys from one client | `429 too_many_auth_failures` + `Retry-After`                      |
 | correct key                         | the request proceeds                                              |
 
 The key is compared in constant time, is never logged, never echoed in a response, and never stored
 — the log record for a request carries no headers at all (`audio-feed-ao4s`), which is what makes
 that a guarantee rather than a habit. Authentication is checked before parameter parsing, so an
 unauthenticated caller learns nothing about the query language.
+
+A failed comparison is a counted failure (`audio-feed-obslimit`): ten failures per client address in
+five minutes, then `429` with `Retry-After` until the window passes. It is the limiter the admin
+gate already uses, in its own window, because these paths are exempt from the host gate and the key
+was otherwise guessable at line rate. The key is verified BEFORE the window is consulted, so a
+client holding it is never locked out by anyone else's guessing, and a success resets the count —
+one typo costs a poller nothing.
 
 ## Reachability: these two paths are NOT behind the host gate (`audio-feed-2tbv`)
 
@@ -196,18 +204,18 @@ record carries the same size for the abandonment path: see `bytesAttempted` in `
 `claim.lifecycle` `context`, written as the worker enters the terminal stage (`audio-feed-amhn`).
 
 **The second phase of that type: `synthesis.upload` with `phase: "skipped"` (`audio-feed-wnv8`).**
-When the invocation deadline has already expired by the time the worker reaches the transfer, the PUT
-is **not attempted at all** — the worker records `phase: "skipped"`, `severity: "warn"`, and ends the
-stage with the abort reason it was already carrying. The record exists because a skip that left no
-trace would be indistinguishable from an attempt that never got that far, which is the shape this
-whole read exists to end; and it carries the two numbers that make the decision auditable rather than
-asserted: **`context.deadlineMs`** (the invocation budget it was measured against) and
-**`context.observedMs`** (how long the invocation had actually been running when the check ran), plus
-`context.abortReason` naming what fired. Note the arithmetic a reader must not get wrong: a stage's
-own cutoff is the budget minus its flush margin, so `observedMs` can legitimately sit a few
+When the invocation deadline has already expired by the time the worker reaches the transfer, the
+PUT is **not attempted at all** — the worker records `phase: "skipped"`, `severity: "warn"`, and
+ends the stage with the abort reason it was already carrying. The record exists because a skip that
+left no trace would be indistinguishable from an attempt that never got that far, which is the shape
+this whole read exists to end; and it carries the two numbers that make the decision auditable
+rather than asserted: **`context.deadlineMs`** (the invocation budget it was measured against) and
+**`context.observedMs`** (how long the invocation had actually been running when the check ran),
+plus `context.abortReason` naming what fired. Note the arithmetic a reader must not get wrong: a
+stage's own cutoff is the budget minus its flush margin, so `observedMs` can legitimately sit a few
 milliseconds BELOW `deadlineMs` — `abortReason` is what turns those numbers into a reason, not the
-comparison between them. An `entering` record still means a PUT was handed to the storage layer: the check sits
-BEFORE it, so this phase never appears alongside one.
+comparison between them. An `entering` record still means a PUT was handed to the storage layer: the
+check sits BEFORE it, so this phase never appears alongside one.
 
 Note what this does and does not buy, because the honest claim is small: the transfer it avoids was
 already aborted by its own signal (`src/storage/s3.ts`), so the value is a cleaner record and a
@@ -228,19 +236,19 @@ coverage fields. Neither those indicators nor the structured event fields recons
 
 `/summary` returns
 `{ cursor, since, total, totalMatches, bySeverity, byType, byTypeTruncated, truncated, scanned, invocationDetection, queue, window }`.
-**`totalMatches` is the number of records that MATCHED the filter within the scanned page — it is not
-a store-wide count of events.** Two fields in the same response bound it: `scanned` says how many
-records the scan examined, and `truncated: true` says unscanned records remain inside the requested
-window, so a scan that filled its bound reports one page's matches. Measured on the live deployment,
-`?since=0&severity=all` answered `total: 500` with `scanned: 500` and `truncated: true` while
-`window.newest` was 3071: that response says 500 and 3071 at once, and 500 is the answer to "what did
-this scan see", never to "how much is there". The measurement predates this field's name - 500 is the
-number the response now carries as `totalMatches`, and as `total`, the original name it keeps for a
-consumer running from an older checkout; new readers should use `totalMatches`.
-`byType` lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means other
-types were counted but omitted from that list. An absent type then means **unknown**, not zero —
-fetch `/errors` over the same cursor window to inspect it. This flag is independent of `truncated`,
-which means the scan did not yet reach all sequences in the requested window. `totalMatches: 0` is the
+**`totalMatches` is the number of records that MATCHED the filter within the scanned page — it is
+not a store-wide count of events.** Two fields in the same response bound it: `scanned` says how
+many records the scan examined, and `truncated: true` says unscanned records remain inside the
+requested window, so a scan that filled its bound reports one page's matches. Measured on the live
+deployment, `?since=0&severity=all` answered `total: 500` with `scanned: 500` and `truncated: true`
+while `window.newest` was 3071: that response says 500 and 3071 at once, and 500 is the answer to
+"what did this scan see", never to "how much is there". The measurement predates this field's name -
+500 is the number the response now carries as `totalMatches`, and as `total`, the original name it
+keeps for a consumer running from an older checkout; new readers should use `totalMatches`. `byType`
+lists the 25 most frequent types in the counted window; `byTypeTruncated: true` means other types
+were counted but omitted from that list. An absent type then means **unknown**, not zero — fetch
+`/errors` over the same cursor window to inspect it. This flag is independent of `truncated`, which
+means the scan did not yet reach all sequences in the requested window. `totalMatches: 0` is the
 cheap answer to "has anything happened since my cursor" — one bounded scan instead of a page of
 events. It applies the same cursor rules, including the `410` when retention has moved past the
 cursor, so a poller cannot be told "nothing new" when it has in fact missed events.
@@ -282,21 +290,21 @@ durable episode and run-history storage:
   episode, or `null` when none are queued or the queue read failed.
 - `drain`: `"empty" | "draining" | "stalled" | "unknown" | "unreadable"`
   - `"empty"` — `claimable === 0` AND the last synthesis run is either absent, or started within
-    `3 * SYNTHESIS_TICK_MS` (30 minutes) with no top-level `error` and `failed === 0`. **`"empty"` is
-    EARNED, not assumed** (`audio-feed-n1f7`): negative evidence is allowed to speak, so a run that
-    failed, was recorded with an error, or went stale reports `"stalled"` instead - which was
-    impossible before, because `claimable === 0` short-circuited the verdict ahead of the run history.
-    No run history at all is still `"empty"` when nothing is claimable: there is no evidence to mask,
-    and `lastSynthesisRun: null` carries the caveat.
+    `3 * SYNTHESIS_TICK_MS` (30 minutes) with no top-level `error` and `failed === 0`. **`"empty"`
+    is EARNED, not assumed** (`audio-feed-n1f7`): negative evidence is allowed to speak, so a run
+    that failed, was recorded with an error, or went stale reports `"stalled"` instead - which was
+    impossible before, because `claimable === 0` short-circuited the verdict ahead of the run
+    history. No run history at all is still `"empty"` when nothing is claimable: there is no
+    evidence to mask, and `lastSynthesisRun: null` carries the caveat.
   - `"draining"` — `claimable > 0` and `lastSynthesisRun` started within `3 * SYNTHESIS_TICK_MS` (30
     minutes), had no top-level `error`, and recorded `ready > 0`.
   - `"stalled"` — `claimable > 0` and `lastSynthesisRun` is stale, errored, or finished `0`
     episodes, **or `claimable === 0` while the last run is stale, errored, or recorded a failure**
     (`audio-feed-n1f7`). This second arm is the one that was unreachable before.
-  - `"unknown"` — the run-history read failed (`runsReadError !== null`), **or** `claimable > 0` with
-    no synthesis run retained in `listRuns(20, "synthesis")`. The read-failure case is checked BEFORE
-    the `claimable === 0` arm, because a run history that could not be read is not evidence of a
-    healthy drain (`audio-feed-ciuw`: a failed read must never render as a healthy value).
+  - `"unknown"` — the run-history read failed (`runsReadError !== null`), **or** `claimable > 0`
+    with no synthesis run retained in `listRuns(20, "synthesis")`. The read-failure case is checked
+    BEFORE the `claimable === 0` arm, because a run history that could not be read is not evidence
+    of a healthy drain (`audio-feed-ciuw`: a failed read must never render as a healthy value).
   - `"unreadable"` — the queue read failed (`claimable === null`, `readError !== null`).
 
   **The limit, stated rather than implied:** `drain` is derived from the pending queue and the last
@@ -309,20 +317,20 @@ durable episode and run-history storage:
   and they are not part of this key-gated snapshot. **State that reach as a function of RECORD
   VOLUME, never as a duration:** the bound is "the newest 400 records", and what that equals in wall
   clock moves with cadence. Measured on 2026-10-15 it was about 3.3 hours, because roughly half of
-  those records were the `synthesis.invocation` marks a two-minute synthesis cron writes — change the
-  cron frequency or the log volume and the reach changes with it, so no duration belongs in this
+  those records were the `synthesis.invocation` marks a two-minute synthesis cron writes — change
+  the cron frequency or the log volume and the reach changes with it, so no duration belongs in this
   document.
 
   **And state the FAILURE MODE, not the absence:** an episode abandoned earlier than that window
   reads as `abandoned: 0`, and **a zero here is indistinguishable from a clean state**. That is the
-  cost of not exposing these counts on this endpoint, and it is the reason the counts are deliberately
-  left off rather than approximated: a cheap field that answers `0` for an episode abandoned an hour
-  before the window is worse than a documented gap, because it ends the question a blank column would
-  have started. If a consumer appears that ACTS on the state rather than rendering it — an alert rule,
-  a monitor, a page an operator is told to check — the cheap shape is to derive these counts from the
-  scan this endpoint already performs for overdue invocations (the newest `LOG_READ_LIMIT` records,
-  which contain the report's window in full), at a marginal cost that is CPU-only; that is a deliberate
-  fallback held until a consumer needs it, not an oversight.
+  cost of not exposing these counts on this endpoint, and it is the reason the counts are
+  deliberately left off rather than approximated: a cheap field that answers `0` for an episode
+  abandoned an hour before the window is worse than a documented gap, because it ends the question a
+  blank column would have started. If a consumer appears that ACTS on the state rather than
+  rendering it — an alert rule, a monitor, a page an operator is told to check — the cheap shape is
+  to derive these counts from the scan this endpoint already performs for overdue invocations (the
+  newest `LOG_READ_LIMIT` records, which contain the report's window in full), at a marginal cost
+  that is CPU-only; that is a deliberate fallback held until a consumer needs it, not an oversight.
 - `lastSynthesisRun`: `RunRecord | null` — most recent synthesis run from
   `listRuns(20, "synthesis")`, scoped to `"synthesis"` so feed-poll runs cannot crowd it out
   (`audio-feed-506m`).
@@ -339,9 +347,10 @@ rescan if any writer, including a late terminal, commits before the warning; a p
 prevents concurrent readers from appending two warnings. It reports **only** that no terminal mark
 was observed as of the scan. It cannot establish that an isolate died, whether work is still
 running, or whether a terminal write failed. What it does record is the last activity it was able to
-see, which is a measurement of silence rather than a substitute for those answers (see `What the
-warning records, and what it still cannot know` below). The normal warn/error filter returns the
-event, and summary sees it before deciding a poll is idle.
+see, which is a measurement of silence rather than a substitute for those answers (see
+`What the
+warning records, and what it still cannot know` below). The normal warn/error filter
+returns the event, and summary sees it before deciding a poll is idle.
 
 This is deliberately not an all-history detector. `invocationDetection.scannedFromSeq` and
 `scannedThroughSeq` say which window was actually checked; `olderStartsUnknown` is true when the
@@ -349,9 +358,9 @@ window truncated older retained records, retention pruned earlier records, or a 
 usable recorded budget. `retentionGap` says earlier records were pruned. `moreDue` means the
 per-request attempt/warning cap stopped with visible due work still pending: poll again, never read
 it as "zero overdue". A store read, partial sequence window, or warning-write failure returns
-`503 invocation_detection_unavailable` without a feed cursor or a quiet `totalMatches: 0`. A reader can
-therefore distinguish no overdue start **in the observed window** from an inability to see earlier
-starts. Older starts outside that window are not enumerated by this detector.
+`503 invocation_detection_unavailable` without a feed cursor or a quiet `totalMatches: 0`. A reader
+can therefore distinguish no overdue start **in the observed window** from an inability to see
+earlier starts. Older starts outside that window are not enumerated by this detector.
 
 ### What the warning records, and what it still cannot know (audio-feed-fsd9)
 
@@ -372,15 +381,15 @@ These are measurements of **silence, never of death**. A large `lastSeenAgoMs` i
 with an isolate that was killed, one that is still running something slow, and one whose writes are
 failing, and the warning's wording keeps saying so.
 
-**A surface that has no field, deliberately: the reason a platform-ended invocation ended.** There is
-no `killReason`, `oomBytes` or exit-code field on this record and there should not be one. A kill runs
-none of our code, so a field written at that moment cannot exist; the only way to populate it would be
-to write a value we never observed — a permanently `null` field that looks like coverage while
-answering nothing. The honest surface is the one above: the last stage observed, how long ago it was
-observed, the bytes attempted (`bytesAttempted`, see the terminal-upload records), and this stated
-limit. The kill reason and memory state are available **platform-side only** (Deno Deploy isolate
-logs), which is why an investigation that needs them is an operator request and not a read of this
-API.
+**A surface that has no field, deliberately: the reason a platform-ended invocation ended.** There
+is no `killReason`, `oomBytes` or exit-code field on this record and there should not be one. A kill
+runs none of our code, so a field written at that moment cannot exist; the only way to populate it
+would be to write a value we never observed — a permanently `null` field that looks like coverage
+while answering nothing. The honest surface is the one above: the last stage observed, how long ago
+it was observed, the bytes attempted (`bytesAttempted`, see the terminal-upload records), and this
+stated limit. The kill reason and memory state are available **platform-side only** (Deno Deploy
+isolate logs), which is why an investigation that needs them is an operator request and not a read
+of this API.
 
 The summary's `cursor` is the last sequence it **SCANNED**, never the last it counted. A scan is
 bounded, so a window larger than the bound is examined in part: `truncated: true` says so, `cursor`
@@ -413,8 +422,8 @@ loop:
   durable = cursor                                      # past everything READ, never past a count
 ```
 
-A truncated probe is a reason to drain even when `totalMatches` is 0: the scan bound filled with records
-the filter excluded and the ones you asked for sit behind it (`audio-feed-36qa`).
+A truncated probe is a reason to drain even when `totalMatches` is 0: the scan bound filled with
+records the filter excluded and the ones you asked for sit behind it (`audio-feed-36qa`).
 
 The rule for the consumer is the same one the API holds itself to: **a cursor may only advance over
 what has been consumed.** A PROBE may look past records its filter excluded; a DURABLE cursor may
@@ -427,10 +436,10 @@ and the durable cursor belongs to the reading, not to the check.
 `cursor` on a summary response is where the next SUMMARY call continues from, and it may sit past
 records that filter excluded. The summary counts only the records its filter matched, but its cursor
 advances over everything the scan EXAMINED, so a scan whose bound fills with filtered-out records
-answers `totalMatches: 0, truncated: true`. A caller that treats `totalMatches: 0` as "quiet" stops forever in
-exactly that case: the bound fills with events it did not ask for and the ones it wanted sit behind
-them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means genuinely empty,
-and a full bound means there is more.
+answers `totalMatches: 0, truncated: true`. A caller that treats `totalMatches: 0` as "quiet" stops
+forever in exactly that case: the bound fills with events it did not ask for and the ones it wanted
+sit behind them (`audio-feed-36qa`). `/summary` also reports `scanned` — zero examined means
+genuinely empty, and a full bound means there is more.
 
 The DURABLE cursor is a different thing, and it moves only after a drain. The recipe above reads
 `/errors` from the cursor it last consumed, page by page, and assigns its own cursor only once a
