@@ -226,14 +226,25 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
       rectTop: Math.round(el.getBoundingClientRect().top),
       key: keyOf(),
     });
+    // audio-feed-evhug: publish a MONOTONICALLY ADVANCING observation every iteration so the
+    // host-side monitor can tell three states apart: (a) progress (n advances) - keep waiting,
+    // however slow, because a starved renderer finishes transitions in fewer frames but more
+    // milliseconds and redding a correct row is the flake class this row exists to avoid;
+    // (b) STALL (n frozen - the renderer stopped painting) - bounded below by the host monitor;
+    // (c) ABSENCE (n advancing, condition never reached) - also bounded below. The loops are
+    // still condition-first and double-rAF; no timer exists in the pass path at all.
     let frames = 0;
+    let iter = 0;
     for (;;) {
       const s = state();
+      window.__stuckWait = { phase: ${
+    JSON.stringify(wantStuck ? "flip" : "restore")
+  }, n: ++iter, ...s };
       const reached = ${wantStuck}
         ? s.scrollY > 0 && s.rectTop === 0 && s.key !== base
         : s.scrollY === 0 && s.key === base;
       if (reached) break;
-      if (++frames > 600) return JSON.stringify({ reached: false, settled: false, ...s });
+      if (++frames > 3600) return JSON.stringify({ reached: false, settled: false, ...s });
       await frame();
     }
     let prev = keyOf();
@@ -242,11 +253,112 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
       await frame();
       const cur = keyOf();
       if (cur === prev) break;
-      if (++frames > 600) return JSON.stringify({ reached: true, settled: false, ...state() });
+      window.__stuckWait = { phase: ${
+    JSON.stringify(wantStuck ? "flip" : "restore")
+  }, n: ++iter, ...state() };
+      if (++frames > 3600) return JSON.stringify({ reached: true, settled: false, ...state() });
       prev = cur;
     }
     return JSON.stringify({ reached: true, settled: true, ...state() });
   })()`;
+
+/** audio-feed-evhug (round two, after the deepseek review killed the blanket 8s race): the bound
+ * ARMS ONLY ON OBSERVED ABSENCE OF PROGRESS, so a normal run never trips a timer - measured green
+ * flips on this host swing 0.2s to 6.8s, and any fixed deadline near that is the flake class this
+ * row exists to avoid. The monitor distinguishes:
+ *   - PROGRESS: the page's published counter (window.__stuckWait.n) advances -> keep waiting,
+ *     however slow (a starved renderer finishes transitions in fewer frames but more ms);
+ *   - STALL: the counter is frozen > STALL_LIMIT_MS (20s) -> the renderer stopped painting ->
+ *     throw, named, with the last observation. 20s is >1000 missed frames against a ~16ms frame
+ *     and ~3x the entire worst measured green wait - the ~100x margin precedent
+ *     (tests/grounded_script_test.ts:679) applied to the thing actually being bounded.
+ *   - ABSENCE: the counter advances but the condition never lands for > ABSENCE_LIMIT_MS (45s) ->
+ *     throw. 45s is ~6.6x the worst measured green flip (6.8s) and ~20x the typical - stated so
+ *     the number is a decision, not a leftover; it is still 2.2x better than the ~100s frame cap
+ *     and throws a NAMED diagnostic instead of returning a flag.
+ * (P2 fixes from the same review: the pageWait loser of every race below gets a no-op catch so a
+ * late rejection can never surface unhandled, and the no-observation fallback is JSON null - the
+ * previous '"unavailable"' literal parsed truthy and printed scrollY=undefined.) */
+const STALL_LIMIT_MS = 20_000;
+const ABSENCE_LIMIT_MS = 45_000;
+async function stuckWithDeadline(
+  url: string,
+  phase: "flip" | "restore",
+  pageWait: Promise<string>,
+  // deno-lint-ignore no-explicit-any
+  evaluate: (expr: string) => Promise<any>,
+): Promise<string> {
+  pageWait.catch(() => {}); // a late rejection of the loser must never become an unhandled rejection
+  let done = false;
+  let result: string | undefined;
+  let failure: unknown;
+  let failed = false;
+  pageWait.then((v) => {
+    done = true;
+    result = v;
+  }, (e) => {
+    done = true;
+    failed = true;
+    failure = e;
+  });
+  const started = Date.now();
+  let lastN = -1;
+  let lastProgress = started;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  for (;;) {
+    await sleep(250);
+    if (done) {
+      // (P2, review round two) test the flag, not the value: a rejection can CARRY undefined, and
+      // `failure !== undefined` would then read as success and return undefined into JSON.parse.
+      if (failed) throw failure;
+      return result!;
+    }
+    // Bounded observation read: even a starved renderer services CDP in milliseconds.
+    const raw = await Promise.race([
+      evaluate("JSON.stringify(window.__stuckWait ?? null)"),
+      new Promise<string>((r) => setTimeout(() => r("null"), 2_000)),
+    ]);
+    const obs = (() => {
+      try {
+        return JSON.parse(raw) as
+          | { n?: number; scrollY?: number; rectTop?: number; key?: string }
+          | null;
+      } catch {
+        return null;
+      }
+    })();
+    if (obs && typeof obs.n === "number") {
+      if (obs.n !== lastN) {
+        lastN = obs.n;
+        lastProgress = Date.now();
+      } else if (Date.now() - lastProgress > STALL_LIMIT_MS) {
+        throw new Error(
+          `${url}: the stuck ${phase} STALLED - the page stopped publishing observations for ` +
+            `${
+              STALL_LIMIT_MS / 1000
+            }s (last observed: scrollY=${obs.scrollY}, rectTop=${obs.rectTop}, ` +
+            `last styles=${obs.key}) - the renderer hung mid-wait (audio-feed-evhug)`,
+        );
+      }
+    }
+    if (Date.now() - started > ABSENCE_LIMIT_MS) {
+      throw new Error(
+        `${url}: the stuck ${phase} never landed within ${ABSENCE_LIMIT_MS / 1000}s of observed ` +
+          // (review round two) the whole observation segment is conditional: with nothing ever
+          // published, interpolating obs?.scrollY renders "scrollY=undefined" - nonsense in the
+          // one message whose entire job is to be actionable.
+          `progress (audio-feed-evhug; ${
+            obs
+              ? `last observed: scrollY=${obs.scrollY}, rectTop=${obs.rectTop}, last styles=${
+                obs.key ?? "none"
+              }`
+              : "no observation published"
+          }) - the stuck block is inert or the transition ` +
+          `never started`,
+      );
+    }
+  }
+}
 
 const PROBE = (surfaceSel: string, wrapSel: string) =>
   `(() => {
@@ -343,7 +455,16 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         // stable across two rendered frames - no assertion can land mid-transition.
         const baseKey = [before.shadow, before.bg, before.border].join("|");
         await evaluate("window.scrollTo(0, 2000)");
-        const flip = JSON.parse(await evaluate(STUCK_STATE_WAIT(surface, baseKey, true)));
+        // audio-feed-evhug: the wait is bounded by a HOST deadline that throws with the page's last
+        // published observation - a regression reds in seconds with a diagnostic, not in ~100s.
+        const flip = JSON.parse(
+          await stuckWithDeadline(
+            url,
+            "flip",
+            evaluate(STUCK_STATE_WAIT(surface, baseKey, true)),
+            evaluate,
+          ),
+        );
         assert(
           flip.reached,
           `${url}: the stuck flip never landed (scrollY=${flip.scrollY}, rectTop=${flip.rectTop})`,
@@ -378,7 +499,14 @@ Deno.test("txcz: real scrolling flips the computed stuck styles on both headers;
         })();
         const after = flipped;
         await evaluate("window.scrollTo(0, 0)");
-        const restored = JSON.parse(await evaluate(STUCK_STATE_WAIT(surface, baseKey, false)));
+        const restored = JSON.parse(
+          await stuckWithDeadline(
+            url,
+            "restore",
+            evaluate(STUCK_STATE_WAIT(surface, baseKey, false)),
+            evaluate,
+          ),
+        );
         assert(restored.reached, `${url}: scrolling back never un-stuck the header`);
         assert(restored.settled, `${url}: the un-stick transitions never settled`);
         const back = await (async () => {
