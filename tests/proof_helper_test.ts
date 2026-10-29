@@ -122,6 +122,9 @@ Deno.test({
  *
  * The sandbox is VERIFIED, not assumed: each row asserts that the profile it was handed lives under the scratch
  * root, which is the same guarantee the old "assert the redirect took" line was making about the old mechanism.
+ * Chrome launch rows also use this per-row root: each launch sweeps its profile root before boot, and scanning
+ * the VM's ~16,500 unrelated /tmp entries cost 4-9 seconds per launch (measured with sweepStaleProfiles).
+ * A fresh root per row preserves independent Chrome boots and profile-cleanup assertions without scanning /tmp.
  * Removal of the scratch tree is best-effort because the row that locks a subdirectory to exercise the failure
  * path cannot always unlock it again; a leftover SCRATCH directory holds no `Default/`, so the profile sweep
  * ignores it, and the sweep is now scoped to this root anyway.
@@ -225,31 +228,34 @@ Deno.test({
     "proof-helper: killChromeAndWait reaps the child, and nothing still references the profile afterwards (audio-feed-ft1sj)",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   fn: async () => {
-    const chrome = await launchChrome();
-    const { profileDir, process } = chrome;
-    // A profile under the prefix we just created: this asserts about THIS run's directory, never about other
-    // scratch directories on the machine (audio-feed-wj8o2 left ~708 pre-existing ones, and a teardown fix stops
-    // the leak going forward without emptying them).
-    assertStringIncludes(profileDir, "audiofeed-chrome-");
-    try {
-      // The mechanism under test. If this is not awaited (or not called), the browser is still alive below.
-      await killChromeAndWait(process);
-      // BOTH acceptance assertions, and the second is the one that reddens by NAME when the reap is missing: a
-      // live Chrome carries --user-data-dir=<profileDir> on its own command line.
-      assertEquals(
-        await waitForChromeProfileUnused(profileDir),
-        true,
-        `no process may still carry --user-data-dir=${profileDir} after a reaped kill`,
-      );
-      assertEquals(
-        await removeDirWhenQuiet(profileDir),
-        true,
-        `the profile directory ${profileDir} must be gone after a reaped kill`,
-      );
-    } finally {
-      await killChromeAndWait(process);
-      await removeDirWhenQuiet(profileDir);
-    }
+    await withScratchRoot(async (scratch) => {
+      const chrome = await launchChrome({ profileRoot: scratch });
+      const { profileDir, process } = chrome;
+      // A profile under the prefix we just created: this asserts about THIS run's directory, never about other
+      // scratch directories on the machine (audio-feed-wj8o2 left ~708 pre-existing ones, and a teardown fix stops
+      // the leak going forward without emptying them).
+      assertStringIncludes(profileDir, "audiofeed-chrome-");
+      assert(profileDir.startsWith(scratch), "the live profile must be in this row's scratch root");
+      try {
+        // The mechanism under test. If this is not awaited (or not called), the browser is still alive below.
+        await killChromeAndWait(process);
+        // BOTH acceptance assertions, and the second is the one that reddens by NAME when the reap is missing: a
+        // live Chrome carries --user-data-dir=<profileDir> on its own command line.
+        assertEquals(
+          await waitForChromeProfileUnused(profileDir),
+          true,
+          `no process may still carry --user-data-dir=${profileDir} after a reaped kill`,
+        );
+        assertEquals(
+          await removeDirWhenQuiet(profileDir),
+          true,
+          `the profile directory ${profileDir} must be gone after a reaped kill`,
+        );
+      } finally {
+        await killChromeAndWait(process);
+        await removeDirWhenQuiet(profileDir);
+      }
+    });
   },
 });
 
@@ -1144,21 +1150,24 @@ Deno.test("proof-helper: startInProcessServer binds ephemeral ports and shutdown
 const fakeChromeStub = new URL("./fixtures/fake_chrome.sh", import.meta.url).pathname;
 
 Deno.test("proof-helper: launchChrome with stub exiting immediately rejects and removes profile", async () => {
-  await assertRejects(
-    async () => {
-      await launchChrome({
-        binary: fakeChromeStub,
-        args: ["--mode=exit_immediately"],
-        prefix: "audiofeed-stub-exit-",
-      });
-    },
-    Error,
-    "exited prematurely with code 0 before writing DevToolsActivePort",
-  );
+  await withScratchRoot(async (scratch) => {
+    await assertRejects(
+      async () => {
+        await launchChrome({
+          binary: fakeChromeStub,
+          args: ["--mode=exit_immediately"],
+          prefix: "audiofeed-stub-exit-",
+          profileRoot: scratch,
+        });
+      },
+      Error,
+      "exited prematurely with code 0 before writing DevToolsActivePort",
+    );
 
-  const leftovers = [...Deno.readDirSync("/tmp")]
-    .filter((e) => e.name.startsWith("audiofeed-stub-exit-"));
-  assertEquals(leftovers.length, 0);
+    const leftovers = [...Deno.readDirSync(scratch)]
+      .filter((e) => e.name.startsWith("audiofeed-stub-exit-"));
+    assertEquals(leftovers.length, 0);
+  });
 });
 
 Deno.test("proof-helper: resolveChromeBinary supports explicit override and env var", () => {
@@ -1182,163 +1191,183 @@ Deno.test("proof-helper: resolveChromeBinary supports explicit override and env 
 });
 
 Deno.test("proof-helper: withChrome with stub writing port succeeds, close is idempotent, profile removed", async () => {
-  let capturedProfile = "";
-  let handleRef: ChromeHandle | null = null;
-  const result = await withChrome(
-    async (chrome) => {
-      capturedProfile = chrome.profileDir;
-      handleRef = chrome;
-      assertEquals(chrome.port, 9222);
-      const existsDuringBody = await Deno.stat(capturedProfile).then(() => true, () => false);
-      assertEquals(existsDuringBody, true);
-      return "success-result";
-    },
-    {
-      binary: fakeChromeStub,
-      args: ["--mode=write_port_and_exit"],
-      prefix: "audiofeed-stub-port-",
-    },
-  );
+  await withScratchRoot(async (scratch) => {
+    let capturedProfile = "";
+    let handleRef: ChromeHandle | null = null;
+    const result = await withChrome(
+      async (chrome) => {
+        capturedProfile = chrome.profileDir;
+        handleRef = chrome;
+        assertEquals(chrome.port, 9222);
+        const existsDuringBody = await Deno.stat(capturedProfile).then(() => true, () => false);
+        assertEquals(existsDuringBody, true);
+        return "success-result";
+      },
+      {
+        binary: fakeChromeStub,
+        args: ["--mode=write_port_and_exit"],
+        prefix: "audiofeed-stub-port-",
+        profileRoot: scratch,
+      },
+    );
 
-  assertEquals(result, "success-result");
-  const existsAfter = await Deno.stat(capturedProfile).then(() => true, () => false);
-  assertEquals(existsAfter, false);
+    assertEquals(result, "success-result");
+    assert(
+      capturedProfile.startsWith(scratch),
+      "the stub profile must be in this row's scratch root",
+    );
+    const existsAfter = await Deno.stat(capturedProfile).then(() => true, () => false);
+    assertEquals(existsAfter, false);
 
-  assertEquals(handleRef !== null, true);
-  await handleRef!.close();
+    assertEquals(handleRef !== null, true);
+    await handleRef!.close();
+  });
 });
 
 Deno.test("proof-helper: launchChrome with hanging stub rejects on bounded timeout and removes profile", async () => {
-  await assertRejects(
-    async () => {
-      await launchChrome({
-        binary: fakeChromeStub,
-        args: ["--mode=hang"],
-        portTimeoutMs: 150,
-        prefix: "audiofeed-stub-hang-",
-      });
-    },
-    Error,
-    "Timed out after 150ms waiting for DevToolsActivePort",
-  );
+  await withScratchRoot(async (scratch) => {
+    await assertRejects(
+      async () => {
+        await launchChrome({
+          binary: fakeChromeStub,
+          args: ["--mode=hang"],
+          portTimeoutMs: 150,
+          prefix: "audiofeed-stub-hang-",
+          profileRoot: scratch,
+        });
+      },
+      Error,
+      "Timed out after 150ms waiting for DevToolsActivePort",
+    );
 
-  const leftovers = [...Deno.readDirSync("/tmp")]
-    .filter((e) => e.name.startsWith("audiofeed-stub-hang-"));
-  assertEquals(leftovers.length, 0);
+    const leftovers = [...Deno.readDirSync(scratch)]
+      .filter((e) => e.name.startsWith("audiofeed-stub-hang-"));
+    assertEquals(leftovers.length, 0);
+  });
 });
 
 Deno.test("proof-helper: AUDIOFEED_CHROME_BIN env override redirects launch and cleans up on failure", async () => {
-  // Injected env, not Deno.env.set (audio-feed-w5i0m): the launch reads the same field the process env
-  // would have given it, and no other concurrently running module can see the value.
-  await assertRejects(
-    async () => {
-      await withChrome(
-        async () => {},
-        {
-          prefix: "audiofeed-stub-env-",
-          env: { get: (key: string) => key === "AUDIOFEED_CHROME_BIN" ? "/bin/true" : undefined },
-        },
-      );
-    },
-    Error,
-    "exited prematurely with code 0 before writing DevToolsActivePort",
-  );
-
-  const leftovers = [...Deno.readDirSync("/tmp")]
-    .filter((e) => e.name.startsWith("audiofeed-stub-env-"));
-  assertEquals(leftovers.length, 0);
-});
-
-Deno.test("proof-helper: contract interlock: failing check or body throw in withChrome surfaces failure after guaranteed profile cleanup", async () => {
-  // Case 1: check() failure inside withChrome
-  let profileDir1 = "";
-  const checkErr = await assertRejects(
-    async () => {
-      const checker = createChecker();
-      await withChrome(
-        (chrome) => {
-          profileDir1 = chrome.profileDir;
-          checker.check("contract check", false, "deliberate fail");
-        },
-        {
-          binary: fakeChromeStub,
-          args: ["--mode=write_port_and_exit"],
-          prefix: "audiofeed-contract-check-",
-        },
-      );
-    },
-    CheckFailureError,
-    "Check failed: contract check (deliberate fail)",
-  );
-  assertEquals(checkErr.checkName, "contract check");
-  assertEquals(checkErr.detail, "deliberate fail");
-
-  const exists1 = await Deno.stat(profileDir1).then(() => true, () => false);
-  assertEquals(exists1, false);
-
-  // Case 2: arbitrary body throw inside withChrome
-  let profileDir2 = "";
-  await assertRejects(
-    async () => {
-      await withChrome(
-        (chrome) => {
-          profileDir2 = chrome.profileDir;
-          throw new Error("body crashed during proof");
-        },
-        {
-          binary: fakeChromeStub,
-          args: ["--mode=write_port_and_exit"],
-          prefix: "audiofeed-contract-throw-",
-        },
-      );
-    },
-    Error,
-    "body crashed during proof",
-  );
-
-  const exists2 = await Deno.stat(profileDir2).then(() => true, () => false);
-  assertEquals(exists2, false);
-});
-
-Deno.test("proof-helper: error precedence: body throw propagates with teardown failure attached as cause", async () => {
-  let profileDir = "";
-  let lockedSubdir = "";
-  try {
-    const err = await assertRejects(
+  await withScratchRoot(async (scratch) => {
+    // Injected env, not Deno.env.set (audio-feed-w5i0m): the launch reads the same field the process env
+    // would have given it, and no other concurrently running module can see the value.
+    await assertRejects(
       async () => {
         await withChrome(
-          async (chrome) => {
-            profileDir = chrome.profileDir;
-            lockedSubdir = `${profileDir}/locked-dir`;
-            await Deno.mkdir(lockedSubdir, { recursive: true });
-            await Deno.chmod(lockedSubdir, 0o000);
-            throw new Error("primary body failure");
-          },
+          async () => {},
           {
-            binary: fakeChromeStub,
-            args: ["--mode=write_port_and_exit"],
-            prefix: "audiofeed-err-prec-",
+            prefix: "audiofeed-stub-env-",
+            profileRoot: scratch,
+            env: { get: (key: string) => key === "AUDIOFEED_CHROME_BIN" ? "/bin/true" : undefined },
           },
         );
       },
       Error,
-      "primary body failure",
+      "exited prematurely with code 0 before writing DevToolsActivePort",
     );
 
-    assertEquals(err.message, "primary body failure");
-    assertEquals(err.cause instanceof Error, true);
-    assertStringIncludes(
-      (err.cause as Error).message,
-      "Failed to clean up temp Chrome profile",
+    const leftovers = [...Deno.readDirSync(scratch)]
+      .filter((e) => e.name.startsWith("audiofeed-stub-env-"));
+    assertEquals(leftovers.length, 0);
+  });
+});
+
+Deno.test("proof-helper: contract interlock: failing check or body throw in withChrome surfaces failure after guaranteed profile cleanup", async () => {
+  await withScratchRoot(async (scratch) => {
+    // Case 1: check() failure inside withChrome
+    let profileDir1 = "";
+    const checkErr = await assertRejects(
+      async () => {
+        const checker = createChecker();
+        await withChrome(
+          (chrome) => {
+            profileDir1 = chrome.profileDir;
+            checker.check("contract check", false, "deliberate fail");
+          },
+          {
+            binary: fakeChromeStub,
+            args: ["--mode=write_port_and_exit"],
+            prefix: "audiofeed-contract-check-",
+            profileRoot: scratch,
+          },
+        );
+      },
+      CheckFailureError,
+      "Check failed: contract check (deliberate fail)",
     );
-  } finally {
-    if (lockedSubdir) {
-      await Deno.chmod(lockedSubdir, 0o755).catch(() => {});
+    assertEquals(checkErr.checkName, "contract check");
+    assertEquals(checkErr.detail, "deliberate fail");
+
+    const exists1 = await Deno.stat(profileDir1).then(() => true, () => false);
+    assertEquals(exists1, false);
+
+    // Case 2: arbitrary body throw inside withChrome
+    let profileDir2 = "";
+    await assertRejects(
+      async () => {
+        await withChrome(
+          (chrome) => {
+            profileDir2 = chrome.profileDir;
+            throw new Error("body crashed during proof");
+          },
+          {
+            binary: fakeChromeStub,
+            args: ["--mode=write_port_and_exit"],
+            prefix: "audiofeed-contract-throw-",
+            profileRoot: scratch,
+          },
+        );
+      },
+      Error,
+      "body crashed during proof",
+    );
+
+    const exists2 = await Deno.stat(profileDir2).then(() => true, () => false);
+    assertEquals(exists2, false);
+  });
+});
+
+Deno.test("proof-helper: error precedence: body throw propagates with teardown failure attached as cause", async () => {
+  await withScratchRoot(async (scratch) => {
+    let profileDir = "";
+    let lockedSubdir = "";
+    try {
+      const err = await assertRejects(
+        async () => {
+          await withChrome(
+            async (chrome) => {
+              profileDir = chrome.profileDir;
+              lockedSubdir = `${profileDir}/locked-dir`;
+              await Deno.mkdir(lockedSubdir, { recursive: true });
+              await Deno.chmod(lockedSubdir, 0o000);
+              throw new Error("primary body failure");
+            },
+            {
+              binary: fakeChromeStub,
+              args: ["--mode=write_port_and_exit"],
+              prefix: "audiofeed-err-prec-",
+              profileRoot: scratch,
+            },
+          );
+        },
+        Error,
+        "primary body failure",
+      );
+
+      assertEquals(err.message, "primary body failure");
+      assertEquals(err.cause instanceof Error, true);
+      assertStringIncludes(
+        (err.cause as Error).message,
+        "Failed to clean up temp Chrome profile",
+      );
+    } finally {
+      if (lockedSubdir) {
+        await Deno.chmod(lockedSubdir, 0o755).catch(() => {});
+      }
+      if (profileDir) {
+        await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+      }
     }
-    if (profileDir) {
-      await Deno.remove(profileDir, { recursive: true }).catch(() => {});
-    }
-  }
+  });
 });
 
 Deno.test("proof-helper: launchChrome rejects without creating profile when Chrome binary discovery fails", async () => {
@@ -8248,21 +8277,24 @@ Deno.test({
     "proof-helper: a live Chrome is still a leftover - the detector is scoped, not weaker (audio-feed-ubjt1)",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
   fn: async () => {
-    const chrome = await launchChrome();
-    const { profileDir, process } = chrome;
-    try {
-      // FALSE-NEGATIVE side: a real child carrying --user-data-dir=<profile> must be REPORTED as a leftover.
-      assertEquals(
-        await waitForChromeProfileUnused(profileDir, { timeoutMs: 600 }),
-        false,
-        `a live Chrome carrying --user-data-dir=${profileDir} must still be reported as a leftover`,
-      );
-      await killChromeAndWait(process);
-      assertEquals(await waitForChromeProfileUnused(profileDir), true);
-    } finally {
-      await killChromeAndWait(process);
-      await removeDirWhenQuiet(profileDir);
-    }
+    await withScratchRoot(async (scratch) => {
+      const chrome = await launchChrome({ profileRoot: scratch });
+      const { profileDir, process } = chrome;
+      assert(profileDir.startsWith(scratch), "the live profile must be in this row's scratch root");
+      try {
+        // FALSE-NEGATIVE side: a real child carrying --user-data-dir=<profile> must be REPORTED as a leftover.
+        assertEquals(
+          await waitForChromeProfileUnused(profileDir, { timeoutMs: 600 }),
+          false,
+          `a live Chrome carrying --user-data-dir=${profileDir} must still be reported as a leftover`,
+        );
+        await killChromeAndWait(process);
+        assertEquals(await waitForChromeProfileUnused(profileDir), true);
+      } finally {
+        await killChromeAndWait(process);
+        await removeDirWhenQuiet(profileDir);
+      }
+    });
   },
 });
 
