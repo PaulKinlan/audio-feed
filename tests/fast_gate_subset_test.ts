@@ -178,11 +178,17 @@ Deno.test("a changed shell runner selects the suite that executes it (es8y)", ()
   // unit test. Measured, not assumed - it is the derivation doing this, not a listed relation.
   // audio-feed-sru1b: the bare "scripts" directory key now prefix-matches too, so the deno-task-coverage
   // scan (a whole-scripts/ reader) is selected for any script change - the correct relation for a scanner.
+  // audio-feed-95pjk: the proof harness now READS the whole scripts/ directory (a readDir over ../scripts/)
+  // to assert the listing is unchanged, so under the same bare-"scripts" prefix rule a script change
+  // legitimately selects it - again the DERIVATION doing this, not a listed relation, and the row's own
+  // job (prove the listing unchanged) is exactly why the read is right. The pin still reds on anything
+  // truly unexpected; the extras list is only ever as complete as the derivation's truth.
   assertSelected(plan.testFiles, ["tests/observability_agent_poll_test.ts"], [
     "tests/evidence_census_test.ts",
     "tests/evidence_run_test.ts",
     "tests/evidence_selection_test.ts",
     "tests/deno-task-coverage_test.ts",
+    "tests/l7m1_proof_test.ts",
   ]);
 });
 
