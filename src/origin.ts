@@ -475,6 +475,29 @@ function configuredHostOrigin(entry: string, fallbackProto: "http" | "https"): s
 }
 
 /**
+ * Check whether a request's Origin header is trusted for reporting (audio-feed-cspreports).
+ *
+ * Browser CSP reports sent from this application carry an Origin header matching
+ * the deployment's configured host (PUBLIC_BASE_URL), an allowed host (ALLOWED_HOSTS),
+ * or loopback in local dev. Reports from untrusted or absent origins must not be
+ * counted against a visitor's write budget or mixed into their attribution.
+ */
+export function isTrustedReportOrigin(config: OriginConfig, request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin || origin === "null") return false;
+  try {
+    const url = new URL(origin);
+    const host = bareHost(url.hostname);
+    if (!host) return false;
+    const allowed = allowedHostSet(config);
+    if (allowed.has(host)) return true;
+    return isLoopbackHost(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * `cache-control` for a document built from a resolved origin.
  *
  * A derived origin depends on the request host, so the response must never be

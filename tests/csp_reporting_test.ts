@@ -84,6 +84,7 @@ Deno.test("CSP reporting endpoint: accepts application/reports+json array and fl
       method: "POST",
       headers: {
         "content-type": "application/reports+json",
+        "origin": BASE,
       },
       body: JSON.stringify(reportsPayload),
     }),
@@ -131,6 +132,7 @@ Deno.test("CSP reporting endpoint: accepts application/csp-report legacy object 
       headers: {
         "content-type": "application/csp-report",
         "user-agent": "LegacyBrowser/1.0",
+        "origin": BASE,
       },
       body: JSON.stringify(legacyPayload),
     }),
@@ -193,7 +195,7 @@ Deno.test("CSP reporting endpoint: routes all required report types correctly wi
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(reports),
     }),
   );
@@ -271,7 +273,7 @@ Deno.test("SECURITY: attacker-controlled report fields are sanitized and never r
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(attackPayload),
     }),
   );
@@ -404,6 +406,7 @@ Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited a
         headers: {
           "content-type": "application/reports+json",
           "x-forwarded-for": "203.0.113.195",
+          "origin": BASE,
         },
         body: JSON.stringify(
           Array.from({ length: 10 }, (_, n) => ({
@@ -456,7 +459,7 @@ Deno.test("audio-feed-r49r: uncommitted budget CAS write fails closed with 429 a
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(payload),
     }),
   );
@@ -497,7 +500,7 @@ Deno.test("audio-feed-u58d: benign client-side NEL reports (abandoned, dns.addre
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(reports),
     }),
   );
@@ -508,4 +511,114 @@ Deno.test("audio-feed-u58d: benign client-side NEL reports (abandoned, dns.addre
   for (const log of logs) {
     assertEquals(log.severity, "info");
   }
+});
+
+Deno.test("SECURITY (audio-feed-cspreports): untrusted/absent Origin reports do not consume visitor write budget, while real same-origin reports record and count", async () => {
+  const { app, stores } = await setupApp();
+  const victimIp = "203.0.113.88";
+  const budgetKey = `reports:budget:${victimIp}`;
+
+  // Helper to read the current write budget counter without mutating it
+  const readBudget = async (): Promise<number[] | null> => {
+    const res = await stores.metadata.atomicUpdate<number[]>(budgetKey, () => null);
+    return res.value;
+  };
+
+  assertEquals(await readBudget(), null, "initial victim budget is empty");
+
+  // Row (x.1): Report from untrusted Origin (e.g. cross-origin page attacking visitor)
+  const untrustedPayload = [
+    {
+      type: "csp-violation",
+      url: "https://evil.example.com/exploit",
+      body: { blockedURL: "https://evil.example.com/evil.js" },
+    },
+  ];
+
+  const untrustedRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": "https://evil.example.com",
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(untrustedPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(untrustedRes.status, 204, "untrusted origin body is accepted with 204");
+  assertEquals(
+    await readBudget(),
+    null,
+    "row (x): untrusted Origin must NOT consume victim budget (counter remains unchanged)",
+  );
+
+  // Row (x.2): Report with absent Origin header
+  const absentRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(untrustedPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(absentRes.status, 204, "absent origin body is accepted with 204");
+  assertEquals(
+    await readBudget(),
+    null,
+    "row (x): absent Origin must NOT consume victim budget (counter remains unchanged)",
+  );
+
+  const logsBeforeSameOrigin = await stores.metadata.listLogs();
+  assertEquals(
+    logsBeforeSameOrigin.length,
+    0,
+    "untrusted/absent Origin reports do not pollute the log store",
+  );
+
+  // Row (y): Real same-origin report
+  const sameOriginPayload = [
+    {
+      type: "csp-violation",
+      url: `${BASE}/listen`,
+      body: { blockedURL: "https://unapproved.example.com/bad.js" },
+    },
+  ];
+
+  const sameOriginRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": BASE,
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(sameOriginPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(sameOriginRes.status, 204, "same-origin report flushes with 204");
+
+  const budgetAfterSameOrigin = await readBudget();
+  assert(budgetAfterSameOrigin !== null, "row (y): same-origin report consumes budget");
+  assertEquals(
+    budgetAfterSameOrigin.length,
+    1,
+    "row (y): exactly 1 report counted in victim write budget",
+  );
+
+  const logsAfterSameOrigin = await stores.metadata.listLogs();
+  assertEquals(
+    logsAfterSameOrigin.length,
+    1,
+    "row (y): real same-origin report is recorded in the log store",
+  );
+  assertEquals(logsAfterSameOrigin[0]!.type, "report.csp-violation");
 });

@@ -29,6 +29,7 @@ import {
   type RateLimitConfig,
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
+import { isTrustedReportOrigin } from "../origin.ts";
 
 /** Maximum payload size accepted on the reporting endpoint (64 KiB). */
 export const MAX_REPORT_PAYLOAD_BYTES = 64 * 1024;
@@ -336,6 +337,16 @@ export function createCspReportsHandler(
     }
 
     if (rawReports.length === 0) {
+      return new Response(null, { status: 204 });
+    }
+
+    // Audio-feed security hardening (audio-feed-cspreports):
+    // Browser CSP reporting requires cross-origin POSTs (access-control-allow-origin: *),
+    // but reports from untrusted or absent Origin headers must not consume the visitor's
+    // write budget (25 reports/window) or be mixed into their attribution. We accept
+    // the report body (responding 204) without consuming reports:budget:* or appending
+    // to the log store.
+    if (!isTrustedReportOrigin(ctx.config, req)) {
       return new Response(null, { status: 204 });
     }
 
