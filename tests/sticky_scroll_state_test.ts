@@ -292,11 +292,13 @@ async function stuckWithDeadline(
   let done = false;
   let result: string | undefined;
   let failure: unknown;
+  let failed = false;
   pageWait.then((v) => {
     done = true;
     result = v;
   }, (e) => {
     done = true;
+    failed = true;
     failure = e;
   });
   const started = Date.now();
@@ -306,7 +308,9 @@ async function stuckWithDeadline(
   for (;;) {
     await sleep(250);
     if (done) {
-      if (failure !== undefined) throw failure;
+      // (P2, review round two) test the flag, not the value: a rejection can CARRY undefined, and
+      // `failure !== undefined` would then read as success and return undefined into JSON.parse.
+      if (failed) throw failure;
       return result!;
     }
     // Bounded observation read: even a starved renderer services CDP in milliseconds.
@@ -340,9 +344,15 @@ async function stuckWithDeadline(
     if (Date.now() - started > ABSENCE_LIMIT_MS) {
       throw new Error(
         `${url}: the stuck ${phase} never landed within ${ABSENCE_LIMIT_MS / 1000}s of observed ` +
-          `progress (audio-feed-evhug; last observed: scrollY=${obs?.scrollY}, rectTop=${obs?.rectTop}, ` +
-          `last styles=${
-            obs?.key ?? "none published"
+          // (review round two) the whole observation segment is conditional: with nothing ever
+          // published, interpolating obs?.scrollY renders "scrollY=undefined" - nonsense in the
+          // one message whose entire job is to be actionable.
+          `progress (audio-feed-evhug; ${
+            obs
+              ? `last observed: scrollY=${obs.scrollY}, rectTop=${obs.rectTop}, last styles=${
+                obs.key ?? "none"
+              }`
+              : "no observation published"
           }) - the stuck block is inert or the transition ` +
           `never started`,
       );
