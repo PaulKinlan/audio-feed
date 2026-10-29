@@ -11,8 +11,14 @@
  * protection instead of repairing the hints, which is why "a real change still selects its readers" is here.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { couldBeTheChangedFile, couldHideInertRead, planTests } from "../scripts/fast-check.ts";
 import {
+  couldBeTheChangedFile,
+  couldHideInertRead,
+  planTests,
+  reverseGraph,
+} from "../scripts/fast-check.ts";
+import {
+  deriveDataReadRelations,
   deriveReadRelationReport,
   ROOT,
   suitesObserving,
@@ -758,10 +764,18 @@ Deno.test("audio-feed-axlt / audio-feed-wasy: destructured and namespace imports
     const namespaceReport = await deriveReadRelationReport(root, [
       "tests/namespace_shadowed_test.ts",
     ]);
+    // audio-feed-38f28: the IMPORT of src/dep.ts is a proven relation now (a literal specifier in
+    // the suite's own source), so the map is not empty - what must stay empty is the READ class: no
+    // scope may be guessed for the shadowed FILE read, so no docs/* read relation may appear.
     assertEquals(
-      [...namespaceReport.relations],
+      [...namespaceReport.relations.keys()].filter((k) => k.startsWith("docs/")),
       [],
       "tests/namespace_shadowed_test.ts: no scope may be guessed when shadowed",
+    );
+    assertEquals(
+      namespaceReport.relations.get("src/dep.ts"),
+      ["tests/namespace_shadowed_test.ts"],
+      "the literal import specifier itself is a proven relation (audio-feed-38f28)",
     );
     assertEquals(
       namespaceReport.unresolved,
@@ -772,8 +786,9 @@ Deno.test("audio-feed-axlt / audio-feed-wasy: destructured and namespace imports
     const destructuredUnresolved = await deriveReadRelationReport(root, [
       "tests/destructured_unresolved_test.ts",
     ]);
+    // Same 38f28 scoping: the import relation is true; what must be absent is any READ relation.
     assertEquals(
-      [...destructuredUnresolved.relations],
+      [...destructuredUnresolved.relations.keys()].filter((k) => k.startsWith("docs/")),
       [],
       "tests/destructured_unresolved_test.ts: unexported member cannot resolve",
     );
@@ -1600,4 +1615,51 @@ Deno.test("audio-feed-8kiar: a name-matched observer no longer hides a computed-
   // silent drop the bead exists about. If the fail-closed branch degrades, THIS assertion is what reds.
   const without = planTests(changed, new Map(), named, new Map(), [], [], []);
   assertEquals(without.testFiles, ["tests/widget_test.ts"]);
+});
+
+Deno.test("audio-feed-38f28: src/server.ts's observers are an EXACT, measured set - the six proven importers, and nothing text-only", async () => {
+  // The defect this closes: src/server.ts selected 6 suites via the import graph while carrying ZERO
+  // relation rows - a precise-looking answer that was unmeasured. The derivation now admits a literal
+  // import specifier from a suite's own source as a proven relation (same trust as a resolved read),
+  // and this row asserts the exact set so a silent drop-out reds.
+  const relations = await deriveDataReadRelations(ROOT);
+  assertEquals(
+    relations.get("src/server.ts"),
+    [
+      "tests/admin_observability_test.ts",
+      "tests/admin_throttle_test.ts",
+      "tests/legacy_audio_inventory_test.ts",
+      "tests/log_request_surface_invariant_test.ts",
+      "tests/observability_api_test.ts",
+      "tests/server_bootstrap_test.ts",
+    ],
+    "the server.ts relation must name exactly its importers - a suite gaining or losing the edge is a measured change, not a silent one",
+  );
+  // And the selector agrees with the relation: planTests for a server.ts change selects the same six
+  // via the graph AND the relation (two derivations of one truth, so neither can drift alone).
+  const graph = await reverseGraph();
+  const plan = planTests(["src/server.ts"], graph, NO_MAP, relations);
+  for (const suite of relations.get("src/server.ts") ?? []) {
+    assert(
+      plan.testFiles?.includes(suite),
+      `the selector must still select ${suite} for a src/server.ts change`,
+    );
+  }
+  // The three references the bead's grep found that are NOT observers, said so plainly (coord: if a
+  // static derivation is not possible, say so): deploy_config_test reads deno.json + main.ts and
+  // regexps MAIN.TS's body for the ./src/server.ts re-export line - it never reads server.ts itself;
+  // request_route_logging_test names it in a comment; fast_gate_subset_test uses the path as a
+  // fixture input. A text mention is not a read, and this row is where that judgment stays testable.
+  for (
+    const mention of [
+      "tests/deploy_config_test.ts",
+      "tests/request_route_logging_test.ts",
+      "tests/fast_gate_subset_test.ts",
+    ]
+  ) {
+    assert(
+      !(relations.get("src/server.ts") ?? []).includes(mention),
+      `${mention} mentions src/server.ts as text and must not be claimed as an observer`,
+    );
+  }
 });
