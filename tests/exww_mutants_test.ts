@@ -164,7 +164,7 @@ Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of 
     EXWW_RUN_LADDER_RATIO,
     `the committed evidence derives ratio ${derivation.ratio} but the code ships ${EXWW_RUN_LADDER_RATIO}`,
   );
-  // The load-regime claim in docs/evidence/audio-feed-8u4x1/README.md ("load 1.68-4.74") rests on
+  // The load-regime claim in docs/evidence/audio-feed-8u4x1/README.md ("load 1.688-4.739") rests on
   // the per-attempt loads in this record - assert the band so the claim cannot drift from the
   // evidence it rests on: every attempt carries numeric before/after loads inside the band.
   for (
@@ -178,9 +178,9 @@ Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of 
       "every attempt must record numeric load1 before and after",
     );
     assert(
-      a.load1Before! >= 1.68 && a.load1Before! <= 4.74 && a.load1After! >= 1.68 &&
-        a.load1After! <= 4.74,
-      `the recorded loads must sit inside the stated quiet-to-moderate band, got ${a.load1Before}/${a.load1After}`,
+      a.load1Before! >= 1.688 && a.load1Before! <= 4.739 && a.load1After! >= 1.688 &&
+        a.load1After! <= 4.739,
+      `the recorded loads must sit inside the stated quiet-to-moderate band 1.688-4.739, got ${a.load1Before}/${a.load1After}`,
     );
   }
   // The gate-budget rule the derivation enforces, restated against the SHIPPED ladder.
