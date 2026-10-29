@@ -2103,6 +2103,32 @@ export function suitesObserving(
   return [...suites].sort();
 }
 
+/**
+ * The EXACT-only half of `suitesObserving` (audio-feed-ngrm6): suites tied to this path by a FILE key, with
+ * the directory shapes excluded.
+ *
+ * SELECTION AND COVERAGE ARE DIFFERENT QUESTIONS. A whole-tree scanner's directory key ("src", "src/")
+ * correctly SELECTS the scanner for every change under its tree (audio-feed-sru1b - `planTests` uses the
+ * prefix-matching `suitesObserving` for that), but a text scan of a tree proves nothing about whether any
+ * suite TESTS one file in it. The uncovered-code fallback in `planTests` asks THIS function, so a scanner's
+ * wide key can never answer "is this source file reached?" for a file nothing otherwise observes: an exact
+ * entry is a resolver-proven read/execute OF THE FILE ITSELF, which is the only relation shape that carries
+ * coverage for code. (Non-TypeScript data is the deliberate exception - audio-feed-a5n0q, coord ruling: a
+ * tree scanner genuinely text-reads data files, so `classifyNonTsChanges` keeps the prefix match.)
+ */
+export function suitesObservingExact(
+  relPath: string,
+  relations: DataReadRelations,
+): string[] {
+  const suites = new Set<string>();
+  for (const [pattern, observed] of relations) {
+    if (pattern === relPath) {
+      for (const suite of observed) suites.add(suite);
+    }
+  }
+  return [...suites].sort();
+}
+
 export interface NonTsClassification {
   /**
    * THE INERT BUCKET: files whose change may legally select NOTHING. Markdown that no suite is derived to

@@ -74,6 +74,7 @@ import {
   type ReadRelationReport,
   resolverConfigInputs,
   suitesObserving,
+  suitesObservingExact,
   universeDrift,
 } from "./test-selection.ts";
 import { evidenceReadmesAmong, findUnselectedExecutors } from "./evidence-selection.ts";
@@ -1227,8 +1228,18 @@ export function planTests(
   // covered the same way when the derived relation names a suite that reads or
   // executes it (audio-feed-3e4s0 for helpers, audio-feed-zyrug for src) -
   // the graph cannot see a spawn or a resolver-proven data read.
+  // COVERAGE IS NOT SELECTION (audio-feed-ngrm6): the coverage half asks the EXACT relation
+  // (suitesObservingExact), not the prefix-matching one used for selection above. A whole-tree
+  // scanner's directory key ("src", "scripts") correctly SELECTS the scanner for any change under
+  // its tree, but a text scan of a tree proves nothing about whether a suite TESTS one file in it,
+  // and letting the prefix match answer the coverage question emptied stillUncovered for every file
+  // under a scanned tree - a changed-but-untested src/ or scripts/ file greened the gate on the
+  // scanner's back. An unreached source file still fails closed to the FULL suite, which contains
+  // the scanners anyway, so sru1b's scanners run either way - selection was never the thing at
+  // stake here. Non-TypeScript data is the deliberate exception (audio-feed-a5n0q, coord ruling):
+  // classifyNonTsChanges keeps the prefix match because a tree scanner genuinely text-reads data.
   const stillUncovered = uncovered.filter((f) =>
-    !named.get(f)?.length && !suitesObserving(f, readRelations).length
+    !named.get(f)?.length && !suitesObservingExact(f, readRelations).length
   );
   if (stillUncovered.length) {
     return { testFiles: null, reason: `no test reaches: ${stillUncovered.join(", ")}` };
