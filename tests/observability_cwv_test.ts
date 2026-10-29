@@ -11,17 +11,29 @@ import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, type Stores } from "../src/config.ts";
 import { CWV_RATE_LIMIT, limitBodyStream, MAX_CWV_BODY_BYTES } from "../src/routes/cwv.ts";
-import { cwvRecord, cwvSeverity, parseCwvReport } from "../src/observability/cwv.ts";
+import { buildObservabilityReport } from "../src/observability/admin_report.ts";
+import { cwvRating, cwvRecord, parseCwvReport } from "../src/observability/cwv.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../src/observability/spans.ts";
 
 const BASE = "https://audio.example";
 /** A capability-looking string: nothing about it may survive ingest. */
 const CANARY = "qV7z52CapSECRETfd39Nd";
+const OBS_KEY = "observability-key-under-test";
 
 function app(stores: Stores = memoryStores()) {
-  const config = { port: 8000, publicBaseUrl: BASE, adminToken: "admin-secret" };
+  const config = {
+    port: 8000,
+    publicBaseUrl: BASE,
+    adminToken: "admin-secret",
+    observabilityKey: OBS_KEY,
+  };
   const ctx = { config, stores };
   return { fetch: createApp(ctx, createHandlers(ctx)).fetch, stores };
+}
+
+/** A request carrying the observability key, which is how a poller authenticates. */
+function authed(path: string): Request {
+  return new Request(`${BASE}${path}`, { headers: { authorization: `Bearer ${OBS_KEY}` } });
 }
 
 const beacon = (body: unknown, init: RequestInit = {}) =>
@@ -48,24 +60,79 @@ Deno.test("a report becomes a typed cwv.report record, and never a request field
   assertStringIncludes(record.message, "LCP");
 });
 
-Deno.test("the standard bands decide severity, so a bad metric is an error event", async () => {
+Deno.test("the published bands decide the rating, and a beacon is never an error event", async () => {
   // These are the published web-vitals bands, not thresholds invented here.
-  assertEquals(cwvSeverity("lcp", 2000), "info");
-  assertEquals(cwvSeverity("lcp", 3000), "warn");
-  assertEquals(cwvSeverity("lcp", 5000), "error");
-  assertEquals(cwvSeverity("inp", 150), "info");
-  assertEquals(cwvSeverity("inp", 300), "warn");
-  assertEquals(cwvSeverity("inp", 900), "error");
-  assertEquals(cwvSeverity("cls", 0.05), "info");
-  assertEquals(cwvSeverity("cls", 0.2), "warn");
-  assertEquals(cwvSeverity("cls", 0.5), "error");
+  assertEquals(cwvRating("lcp", 2000), "good");
+  assertEquals(cwvRating("lcp", 3000), "needs-improvement");
+  assertEquals(cwvRating("lcp", 5000), "poor");
+  assertEquals(cwvRating("inp", 150), "good");
+  assertEquals(cwvRating("inp", 300), "needs-improvement");
+  assertEquals(cwvRating("inp", 900), "poor");
+  assertEquals(cwvRating("cls", 0.05), "good");
+  assertEquals(cwvRating("cls", 0.2), "needs-improvement");
+  assertEquals(cwvRating("cls", 0.5), "poor");
 
-  // And the record carries it, which is what puts a bad LCP in the errors feed beside a slow
-  // synthesis rather than in a dashboard nobody reads.
+  // The assessment rides on context.rating at severity info: a stranger's browser can no longer
+  // write error-severity rows into the operator's error feed (2026-10-29 threat model), and the
+  // rating stays queryable for the telemetry page and any cwv.report type query.
   const { fetch, stores } = app();
   await fetch(beacon({ metric: "cls", value: 0.9, page: "home" }));
   const record = (await stores.metadata.listLogs())[0]!;
-  assertEquals(record.severity, "error");
+  assertEquals(record.severity, "info");
+  assertEquals(record.context?.rating, "poor");
+});
+
+Deno.test("a bad field metric is absent from the operator's error queries, beside a real one", async () => {
+  const { fetch, stores } = app();
+  // A genuine server failure, so the error feed is not merely empty.
+  await stores.metadata.appendLog({
+    time: new Date().toISOString(),
+    severity: "error",
+    type: "synthesis.failed",
+    message: "genuine server failure",
+    process: "worker",
+  });
+  // A stranger reports a terrible CLS.
+  const res = await fetch(beacon({ metric: "cls", value: 0.9, page: "home" }));
+  assertEquals(res.status, 204);
+
+  // (x) The obs-1 errors API under the DEFAULT filter (severity=warn) — the query the poller
+  // reads: the beacon must not be an event in it, and the server error must be.
+  const feed = await fetch(authed("/api/observability/errors"));
+  assertEquals(feed.status, 200);
+  const body = await feed.json();
+  const types = (body.events as { type: string }[]).map((event) => event.type);
+  assertEquals(types.filter((type) => type === "cwv.report").length, 0);
+  assert(types.includes("synthesis.failed"), "genuine server errors are still served");
+
+  // The summary the poller diffs, same default filter: the error count is the server's alone and
+  // no cwv.report entry appears in byType.
+  const summary = await fetch(authed("/api/observability/summary")).then((r) => r.json());
+  assertEquals(summary.bySeverity.error, 1);
+  assertEquals(
+    (summary.byType as { type: string }[]).filter((entry) => entry.type === "cwv.report").length,
+    0,
+  );
+
+  // The observability page's failures view answers the same way.
+  const report = await buildObservabilityReport(stores);
+  assertEquals(report.failures.filter((f) => f.type === "cwv.report").length, 0);
+  assert(report.failures.some((f) => f.type === "synthesis.failed"));
+});
+
+Deno.test("a bad field metric is still recorded and retrievable where it belongs", async () => {
+  const { fetch, stores } = app();
+  await fetch(beacon({ metric: "lcp", value: 5000, page: "listen" }));
+  // The type query — what the telemetry page and an operator browsing cwv.report run.
+  const cwv = (await stores.metadata.listLogs()).filter((r) => r.type === "cwv.report");
+  assertEquals(cwv.length, 1);
+  const record = cwv[0]!;
+  assertEquals(record.severity, "info");
+  assertEquals(record.context?.rating, "poor");
+  assertEquals(record.context?.metric, "lcp");
+  assertEquals(record.context?.value, 5000);
+  assertEquals(record.context?.page, "listen");
+  assertStringIncludes(record.message, "LCP");
 });
 
 Deno.test("only numbers in a plausible range are accepted; everything else is refused", () => {

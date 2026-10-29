@@ -21,12 +21,18 @@
  *    from a request to constants (`audio-feed-ao4s`), so smuggling a payload through it would either
  *    be a leak or a lie, and this beacon's whole content is a payload.
  *
- * ## Severity is the point
+ * ## The rating is the signal; the errors feed is not the surface
  *
- * A bad LCP and a slow synthesis are the same class of finding, so a metric whose value is in the
- * standard "needs improvement" or "poor" band is recorded at `warn` or `error`. That is what makes
- * it appear in obs-1's errors feed and in obs-3's poller output beside the traces, rather than in a
- * dashboard nobody looks at.
+ * The published bands still decide how a metric did — good, needs improvement, poor — and that
+ * assessment rides on the record as `context.rating` for the operator's telemetry page and any
+ * `cwv.report` type query. What a band is NOT is a server severity. Records used to elevate bad
+ * metrics to `warn`/`error` so they would land in obs-1's errors feed beside a slow synthesis;
+ * the 2026-10-29 threat model retired that: the beacon is anonymous, so the elevation was an
+ * invitation to write `error`-severity rows into the operator's incident view at will, and even an
+ * honest bad metric is field telemetry about a visitor's browser, not a server event. Every
+ * operator error query filters on severity (obs-1's default `warn`, the observability page's
+ * failures, the issues page's default `warn_error`), so each record is written at `info` and the
+ * error feed stays server-only by construction, with no per-surface exclusion lists to maintain.
  */
 
 import type { LogRecord } from "../storage/mod.ts";
@@ -69,12 +75,15 @@ export interface CwvReport {
 
 export type CwvParseResult = { ok: true; report: CwvReport } | { ok: false; reason: string };
 
-/** The severity a metric value deserves, using the published bands. */
-export function cwvSeverity(metric: CwvMetric, value: number): "info" | "warn" | "error" {
+/** The published-band assessment of one metric value. */
+export type CwvRating = "good" | "needs-improvement" | "poor";
+
+/** How a metric value rates, using the published bands. */
+export function cwvRating(metric: CwvMetric, value: number): CwvRating {
   const rule = METRIC_RULES[metric];
-  if (value > rule.poor) return "error";
-  if (value > rule.good) return "warn";
-  return "info";
+  if (value > rule.poor) return "poor";
+  if (value > rule.good) return "needs-improvement";
+  return "good";
 }
 
 /**
@@ -116,11 +125,14 @@ export function parseCwvReport(input: unknown): CwvParseResult {
 /** The typed record a validated report becomes. */
 export function cwvRecord(report: CwvReport): Omit<LogRecord, "seq"> {
   const rule = METRIC_RULES[report.metric];
-  const severity = cwvSeverity(report.metric, report.value);
+  const rating = cwvRating(report.metric, report.value);
   const shown = `${Math.round(report.value * 1000) / 1000}${rule.unit}`;
   return {
     time: new Date().toISOString(),
-    severity,
+    // Field telemetry, never an operational severity: an elevated severity here would let anyone on
+    // the internet write rows into the operator's error feed. The assessment rides on
+    // `context.rating` instead, so the signal stays queryable without impersonating a server error.
+    severity: "info",
     type: "cwv.report",
     // `app`: this arrives at the app from a browser, unlike the worker spans.
     process: "app",
@@ -132,6 +144,7 @@ export function cwvRecord(report: CwvReport): Omit<LogRecord, "seq"> {
       value: report.value,
       page: report.page,
       unit: rule.unit || null,
+      rating,
     },
   };
 }

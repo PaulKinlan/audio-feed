@@ -102,6 +102,23 @@ const TELEMETRY_PAGE_CSS = `
 `;
 
 /**
+ * The band a CWV record sits in, for the rating cards and per-row labels.
+ *
+ * Records written since the rating change carry the band in `context.rating`; beacons stored by
+ * the previous code carried it as the log severity, so severity stays the fallback and historical
+ * rows keep their Poor / Needs Improvement labels rather than all reading as Good.
+ */
+function cwvRatingOf(record: LogRecord): "good" | "needs-improvement" | "poor" {
+  const rating = record.context?.rating;
+  if (rating === "good" || rating === "needs-improvement" || rating === "poor") return rating;
+  return record.severity === "error"
+    ? "poor"
+    : record.severity === "warn"
+    ? "needs-improvement"
+    : "good";
+}
+
+/**
  * `GET /admin/observability/telemetry` — Telemetry & Diagnostics.
  */
 export async function handleAdminTelemetry(
@@ -153,8 +170,9 @@ export async function handleAdminTelemetry(
     if (metric === "lcp" || metric === "inp" || metric === "cls") {
       cwvCounts[metric]++;
     }
-    if (cwv.severity === "error") cwvRatings.poor++;
-    else if (cwv.severity === "warn") cwvRatings.warn++;
+    const rating = cwvRatingOf(cwv);
+    if (rating === "poor") cwvRatings.poor++;
+    else if (rating === "needs-improvement") cwvRatings.warn++;
     else cwvRatings.good++;
   }
 
@@ -231,14 +249,15 @@ export async function handleAdminTelemetry(
             const value = l.context?.value !== undefined ? String(l.context.value) : "—";
             const unit = String(l.context?.unit ?? "");
             const page = String(l.context?.page ?? "—");
-            const ratingClass = l.severity === "error"
+            const rating = cwvRatingOf(l);
+            const ratingClass = rating === "poor"
               ? "rating-poor"
-              : l.severity === "warn"
+              : rating === "needs-improvement"
               ? "rating-warn"
               : "rating-good";
-            const ratingLabel = l.severity === "error"
+            const ratingLabel = rating === "poor"
               ? "Poor"
-              : l.severity === "warn"
+              : rating === "needs-improvement"
               ? "Needs Improvement"
               : "Good";
             return `<tr>
