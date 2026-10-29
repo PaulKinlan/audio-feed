@@ -417,32 +417,22 @@ export interface RunOutcome {
  * track the render+CDP starvation that dominates this proof, so boot was the wrong
  * observable). Attempt 1 keeps the original r6hft quiet guard; each OBSERVED bound-kill
  * doubles the next attempt - the kill IS the observation, the ga3jd markerDeadlineFor
- * shape. Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
- * shape. Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
+ * shape.
  *
+ * Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
  * MEASURED, NOT CHOSEN ANY MORE (audio-feed-8u4x1): a 12-attempt campaign of the unmutated
- * coao proof (docs/evidence/audio-feed-8u4x1/, 0 censored, load1 1.7-4.7 recorded PER ATTEMPT)
- * measured p50 67.0s, p90 84.2s, p99 88.0s. The stated rules derive ratio =
- * max(2, ceil(p99/p50)) = 2 (p99/p50 is 1.31, so the strictly-increasing FLOOR is what sets it
- * - the 2x is margin by rule) and base = max(240s, ceil-to-60s(p99)).
- *
- * THE BASE'S BINDING TERM IS THE FLOOR, NOT THE DATA (named so the 'derived' contract stays
- * honest): p99 88.0s rounds up to 120s, and max(240, 120) = 240s - the r6hft quiet-guard floor
- * binds, exactly as it did before this campaign. What the measurement buys is a floor that
- * cannot silently lie: re-measured data with p99 over 240s moves the base, and the pin in
+ * coao proof (docs/evidence/audio-feed-8u4x1/, 0 censored, load 1.7-4.7) measured p50 67.0s,
+ * p90 84.2s, p99 88.0s. The stated rules derive ratio = max(2, ceil(p99/p50)) = 2 (p99/p50 is
+ * 1.31, so the strictly-increasing FLOOR is what sets it - the 2x is margin by rule) and base
+ * = max(240s, ceil-to-60s(p99)) = 240s. THE BASE'S BINDING TERM IS THE FLOOR: p99 rounds up to
+ * 120s, so the shipped 240s is the r6hft quiet-guard floor, not a number the data asked for -
+ * the measurement holds the floor honest (re-measured p99 over 240s moves it). The pin in
  * tests/exww_mutants_test.ts RECOMPUTES this derivation from the committed attempts.json, so
  * re-measured data that demands different constants turns the suite red until the constants
- * move with it.
- *
- * SUPERSEDES THE UNCONDITIONED 3-ATTEMPT FIGURE (238.7s / 221.4s / 221.0s): those runs recorded
- * NO load regime, and their wall times sit 3x over this campaign's p50 with the bound-adjacent
- * completions (238.7s under a 240s guard) that full-gate load produces. This VM's own full gate
- * swung 28m30s to 54m35s (~1.9x) on identical suite counts the same day, so host load - not a
- * different proof - is the leading explanation; rather than reconcile an unconditioned figure,
- * the conditioned 12-attempt campaign REPLACES it as the measurement of record. The pin guards
- * the replacement the same way it would have guarded the original.
- *
- * Pinned BY NAME below and by derivation in tests/exww_mutants_test.ts. */
+ * move with it. This campaign supersedes the unconditioned 238.7/221.4/221.0s three-run figure
+ * (no load regime recorded; 3x over p50 with bound-adjacent completions - host load is the
+ * leading explanation, and the conditioned campaign replaces the figure rather than
+ * reconciling it). Pinned BY NAME below and by derivation in tests/exww_mutants_test.ts. */
 export const EXWW_RUN_BASE_GUARD_MS = 240_000;
 
 /** The ladder's ratio: the measured distribution (p99/p50 = 1.31, docs/evidence/audio-feed-8u4x1/)

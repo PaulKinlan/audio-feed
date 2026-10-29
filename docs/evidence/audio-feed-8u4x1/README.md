@@ -21,6 +21,18 @@ the 1-minute load average before/after, and the timestamp.
 - 0 attempts censored
 - derived: ratio = max(2, ceil(88.0/67.0)) = **2**; base = max(240s, ceil-to-60s(88s)) = **240s** —
   both constants the tree already carried are the data's answer; nothing moved
+- **what actually binds, stated plainly (coord, audio-feed-op6yb):** the RATIO's measured term is
+  1.31 and the BASE's measured term is 120s — both sit under their floors, so **the floors bind**
+  (ratio: the strictly-increasing floor of 2; base: the r6hft quiet-guard floor of 240s). The
+  measurement does not set today's constants; it HOLDS THE FLOORS HONEST — re-measured p99 over
+  240s moves the base, p99/p50 at or over 2 raises the ratio, and the pin recomputes both from
+  this file so a constant that drifts from the data reds the suite.
+- **supersession (audio-feed-op6yb):** main's prose carried an unconditioned three-run figure
+  (238.7s / 221.4s / 221.0s, no load regime recorded). It sits ~3x over this campaign's p50 with
+  bound-adjacent completions (238.7s under a 240s guard) — the shape full-gate load produces, and
+  this VM's full gate swung 28m30s → 54m35s (~1.9x) on identical suite counts the same day. Rather
+  than reconcile a figure that recorded no conditions, this conditioned campaign REPLACES it as
+  the measurement of record.
 
 ## The load regime, stated plainly
 

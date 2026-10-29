@@ -124,6 +124,34 @@ Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of 
     .filter((a: { timedOut: boolean }) => !a.timedOut)
     .map((a: { seconds: number }) => a.seconds);
   const derivation = deriveLadderConstants(samples, raw.attempts.length - samples.length);
+  // TAMPER-EVIDENCE, named (coord's falsifiability list): the record must be internally
+  // consistent before the derivation over it means anything.
+  // (a) sample count: dropping attempts changes n and must red, not silently re-derive.
+  assertEquals(
+    raw.attempts.length,
+    12,
+    "the committed campaign is 12 attempts; an edited sample size must re-run, not re-derive",
+  );
+  // (b) timestamps: every attempt carries its startedAt, they are ordered, and the record's
+  // measuredAt closes the campaign - a stale or back-dated record reds here.
+  const started = raw.attempts.map((a: { startedAt: string }) => Date.parse(a.startedAt));
+  assert(
+    started.every((t: number) => Number.isFinite(t)),
+    "every attempt must carry a parseable startedAt",
+  );
+  assert(
+    started.every((t: number, i: number) => i === 0 || t > started[i - 1]!),
+    "attempt timestamps must be strictly ascending",
+  );
+  assert(
+    Date.parse(raw.measuredAt) >= started[started.length - 1]!,
+    "measuredAt must close the campaign it claims to summarise",
+  );
+  // (c) variance: the committed derivation block must be the derivation of THESE samples -
+  // editing the percentiles/summary without the attempts reds, and vice versa.
+  assertEquals(derivation.p50S, raw.derivation.p50S);
+  assertEquals(derivation.p90S, raw.derivation.p90S);
+  assertEquals(derivation.p99S, raw.derivation.p99S);
   assertEquals(
     derivation.baseMs,
     EXWW_RUN_BASE_GUARD_MS,
@@ -139,6 +167,32 @@ Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of 
     EXWW_RUN_BASE_GUARD_MS * EXWW_RUN_LADDER_RATIO ** (MAX_ATTEMPTS - 1) <= 5_400_000,
     "the shipped ladder top must stay inside the fleet's 5400s gate budget",
   );
+  // And the base's binding term is named in the data, not just the prose: with p99 88.0s,
+  // ceil-to-60s gives 120s, so the 240s that ships is the r6hft FLOOR - the measurement holds
+  // the floor honest (p99 over 240s moves the base); it does not set today's number.
+  assertEquals(
+    derivation.baseMs,
+    Math.max(derivation.baseMs, Math.ceil((derivation.p99S * 1000) / 60_000) * 60_000),
+  );
+  assert(
+    Math.ceil((derivation.p99S * 1000) / 60_000) * 60_000 < derivation.baseMs,
+    "this campaign's p99 is UNDER the base floor: the floor binds, and the prose says so",
+  );
+});
+
+Deno.test("audio-feed-8u4x1: a campaign whose bound censors more than 20% of attempts is INCONCLUSIVE, never a derivation", () => {
+  // The tail is exactly what a too-small bound hides: with a quarter of attempts killed by the
+  // bound, p99 is unknowable, so the rules refuse to derive rather than ship a number.
+  let message = "";
+  try {
+    deriveLadderConstants([67, 70, 88], 1); // 1 censored of 4 = 25% > MAX_CENSORED_SHARE (20%)
+  } catch (e) {
+    message = (e as Error).message;
+  }
+  assert(message.includes("INCONCLUSIVE"), `expected INCONCLUSIVE, got: ${message}`);
+  // And the boundary is inclusive on the allowed side: 20% exactly still derives.
+  const atLimit = deriveLadderConstants([67, 88, 80, 90], 1); // 1 of 5 = 20%, not over
+  assertEquals(atLimit.attemptCount, 5);
 });
 
 Deno.test({
