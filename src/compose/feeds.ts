@@ -12,6 +12,7 @@ import type { ChannelMeta, Episode as FeedEpisode } from "../feed/types.ts";
 import { toFeedEpisode } from "../feed/adapter.ts";
 import { isAudioMode } from "../types.ts";
 import { resolveOrigin } from "../origin.ts";
+import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { approvedUserFor, forbidden, loadUserByFeedToken, notFound } from "./shared.ts";
 import type { AppContext, AppHandlers } from "../app.ts";
 import type { ComposeDeps } from "./shared.ts";
@@ -64,7 +65,13 @@ async function publishableEpisodes(
     for (const episode of page.episodes) {
       if (publishable.length >= FEED_EPISODE_CAP) break;
       const needsSize = !episode.byteLength || episode.byteLength <= 0;
-      const info = needsSize && episode.audioKey
+      // A LEGACY metadata row can carry a key the store boundary refuses (a dot or empty segment —
+      // the blobkeys guard made head() throw InvalidBlobKeyError before any network call). One
+      // such row must not abort the whole feed: guard on the shared predicate, so a refused key
+      // degrades to "size omitted" (length="0") exactly as it behaved before the guard existed,
+      // while a genuine transport failure (`S3 head failed (status)`) still surfaces. This is
+      // deliberately NOT a blanket catch — storage outages must stay loud.
+      const info = needsSize && episode.audioKey && isSafeBlobKey(episode.audioKey)
         ? await ctx.stores.blobs.head(episode.audioKey)
         : null;
       const mapped = toFeedEpisode(episode, {

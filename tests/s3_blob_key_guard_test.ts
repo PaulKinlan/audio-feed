@@ -51,6 +51,7 @@ Deno.test("s3 blob store: unsafe key shapes are refused at the store", async () 
     ["trailing empty segment", "audio/u1/direct/"],
     ["backslash", "audio/u1/direct\\..\\e1.wav"],
     ["leading slash", "/audio/u1/direct/e1.wav"],
+    ["absolute-URL key", "//host/x"],
     ["empty key", ""],
     ["NUL byte", "audio/u1/direct/e1\0.wav"],
   ];
@@ -97,7 +98,10 @@ Deno.test("s3 blob store: valid keys encode exactly as before", async () => {
     ["audio/u1/direct/e1.wav", `${BASE}/audio/u1/direct/e1.wav`],
     // A dot INSIDE a filename is not a dot segment and must survive untouched.
     ["audio/u1/direct/a.b.wav", `${BASE}/audio/u1/direct/a.b.wav`],
-    ["audio/u1/deepdive/2026-01-02T03-04-05.123Z.wav", `${BASE}/audio/u1/deepdive/2026-01-02T03-04-05.123Z.wav`],
+    [
+      "audio/u1/deepdive/2026-01-02T03-04-05.123Z.wav",
+      `${BASE}/audio/u1/deepdive/2026-01-02T03-04-05.123Z.wav`,
+    ],
     // Segments that genuinely need encoding still encode per segment, never the separator.
     ["audio/u1/direct/a b+c.wav", `${BASE}/audio/u1/direct/a%20b%2Bc.wav`],
     ["audio/u1/direct/60%25.wav", `${BASE}/audio/u1/direct/60%2525.wav`],
