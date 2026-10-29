@@ -2020,6 +2020,20 @@ export async function deriveReadRelationReport(
   for (const suite of suites) {
     const closure = suiteClosures.get(suite);
     if (!closure) continue;
+    // audio-feed-38f28: a LITERAL import specifier in the suite's OWN source is a proven dependency,
+    // statically visible exactly like a resolver-resolved read - the suite loads and exercises that
+    // module, so a change to it must name this suite. The import graph already follows the edge for
+    // selection, but a graph answer with no relation row is an UNMEASURED one: src/server.ts selected
+    // 6 suites with zero relation rows, which looks precise while nothing pins the set. Admitting the
+    // specifier as an exact relation gives the row something to assert, and a silent drop-out (a
+    // resolver or closure regression) reds it. Proven in the same sense as resolvedPaths; a COMPUTED
+    // specifier stays with the 8kiar fail-closed rule. A specifier that does not LOAD (fixture code
+    // embedded in a template string: the closure regex does not span-check) is not a dependency and
+    // must stay silent - admitting it would land a missing path in the unresolved bucket and disable
+    // the inert class for every change (the lm4d guard).
+    for (const imported of fileImports.get(suite) ?? []) {
+      if (await loadFile(imported)) add(imported, suite, true);
+    }
     for (const relPath of closure) {
       const reads = fileReads.get(relPath);
       if (!reads) continue;

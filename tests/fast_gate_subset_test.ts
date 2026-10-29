@@ -653,12 +653,21 @@ Deno.test("classifyNonTsChanges sorts every changed non-.ts file into one of the
   // READMEs now, so markdown is a real input and the inert bucket is exercised by a document nothing reads.
   assertEquals(classified.inert, ["docs/unread-notes.md"]);
   // audio-feed-sru1b: src/server.ts sits under the whole-tree scanners' directory keys ("src", "src/"),
-  // so the scanners join the bucket; the .ts skip still applies to files NO channel observes.
+  // so the scanners join the bucket. And since audio-feed-38f28 its SIX proven importers are an exact
+  // relation, so classify names them too - the same suitesObserving channel planTests uses for code
+  // changes, so the bucket and the selector cannot disagree. The .ts skip now applies only to files NO
+  // channel observes.
   assertSelected(classified.suites, [
+    "tests/admin_observability_test.ts",
+    "tests/admin_throttle_test.ts",
+    "tests/error_screen_test.ts",
     "tests/evidence_size_test.ts",
     "tests/evidence_size_trap_test.ts",
+    "tests/legacy_audio_inventory_test.ts",
+    "tests/log_request_surface_invariant_test.ts",
+    "tests/observability_api_test.ts",
     "tests/security_audit_test.ts",
-    "tests/error_screen_test.ts",
+    "tests/server_bootstrap_test.ts",
     "tests/tokens_test.ts",
   ]);
   assertEquals(classified.unclassified, [".beads/issues.jsonl", "mystery/payload.bin"]);
