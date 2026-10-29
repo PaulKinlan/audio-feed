@@ -12,12 +12,11 @@
  * 3. A mutant execution killed mid-run leaves the working tree clean (git status reports
  *    no modified PNG) and the committed blob hash unchanged.
  *
- * Follows the pattern established in tests/outbox_proof_test.ts (audio-feed-qqxp):
- * copies the script to a temp file, redirects OUT to an isolated temp directory,
- * injects the mutant into the COPY, runs the COPY as a subprocess, and cleans up in a finally block.
+ * Copies the script into a run-owned temp directory outside the repository, redirects OUT
+ * there, and cleans up in a finally block. SIGKILL may skip cleanup but cannot dirty scripts/.
  */
 
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import process from "node:process";
 
 export const EXPECTED_01_PNG_BLOB = "835349478343356b90b84dc6070b77e0f76328ed";
@@ -103,7 +102,17 @@ function buildMutantSource(
       );
     }
   }
+  // The copy lives outside the repo: resolve only its relative import specifiers against the
+  // original script, rather than against the temp directory (which has no src/ or tests/).
   return originalSource
+    .replace(
+      /(\bfrom ")(\.\.?\/[^\"]+)(")/g,
+      (_match, before, path, after) =>
+        `${before}${new URL(
+          path,
+          new URL("../scripts/verify_main_l7m1_e2e.ts", import.meta.url),
+        )}${after}`,
+    )
     .replace(
       outLine,
       `const OUT = ${
@@ -137,6 +146,19 @@ export async function getFileBytesAndBlobHash(filePath: string): Promise<{
  * By redirecting OUT in the copy, committed evidence files under docs/evidence/audio-feed-l7m1/
  * are unreachable and cannot be overwritten or mutated by the subprocess.
  */
+function assertScratchOutsideRepo(dir: string): void {
+  const repoRoot = new URL("../", import.meta.url).pathname;
+  assert(!dir.startsWith(repoRoot), `mutant scratch must be outside the repository: ${dir}`);
+}
+
+async function scriptsListing(): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(new URL("../scripts/", import.meta.url))) {
+    names.push(entry.name);
+  }
+  return names.sort();
+}
+
 export async function runProofWithInjectedMutant(injectedMutant: string): Promise<{
   code: number;
   stdout: string;
@@ -147,24 +169,30 @@ export async function runProofWithInjectedMutant(injectedMutant: string): Promis
     .pathname;
   const originalSource = await Deno.readTextFile(originalScriptPath);
 
-  const tempEvidenceDir = await Deno.makeTempDir({ prefix: "l7m1-proof-test-evidence-" });
-  // Ensure OUT points to the temporary evidence directory so that tests cannot overwrite committed evidence
-  const modifiedSource = buildMutantSource(originalSource, tempEvidenceDir, injectedMutant);
-
-  const scriptsDir = new URL("../scripts/", import.meta.url).pathname;
-  const tempScriptPath = await Deno.makeTempFile({
-    dir: scriptsDir,
-    prefix: ".l7m1-proof-test-",
-    suffix: ".ts",
-  });
+  const tempRoot = await Deno.makeTempDir({ prefix: "l7m1-proof-test-" });
+  const tempScriptPath = `${tempRoot}/mutant.ts`;
 
   try {
+    assertScratchOutsideRepo(tempRoot);
+    // OUT and the executable copy are both run-owned, outside the tracked tree.
+    const modifiedSource = buildMutantSource(
+      originalSource,
+      `${tempRoot}/evidence`,
+      injectedMutant,
+    );
     await Deno.writeTextFile(tempScriptPath, modifiedSource);
     // --no-check (audio-feed-6gst1): type-checking the whole import graph in the child is the
     // dominant host-variable cost of the run and is redundant with `deno task check` in both
     // gates; skipping it shrinks the loaded-host runtime instead of bounding around it.
     const cmd = new Deno.Command(Deno.execPath(), {
-      args: ["run", "--no-check", "--allow-all", "--unstable-kv", tempScriptPath],
+      args: [
+        "run",
+        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
+        "--no-check",
+        "--allow-all",
+        "--unstable-kv",
+        tempScriptPath,
+      ],
       stdout: "piped",
       stderr: "piped",
     });
@@ -178,26 +206,23 @@ export async function runProofWithInjectedMutant(injectedMutant: string): Promis
       combined: `${stdout}\n${stderr}`,
     };
   } finally {
-    try {
-      await Deno.remove(tempScriptPath);
-    } catch {
-      // ignore
-    }
-    try {
-      await Deno.remove(tempEvidenceDir, { recursive: true });
-    } catch {
-      // ignore
-    }
+    await Deno.remove(tempRoot, { recursive: true });
   }
 }
 
 Deno.test("l7m1-proof: controls-removal mutant on copy exits non-zero naming missing control, leaving committed PNG and README byte-identical (audio-feed-bujv)", async () => {
   // 1. Read committed PNGs and README before the run
+  const scriptsBefore = await scriptsListing();
   const artefactsBefore = await readCommittedEvidenceArtefacts();
   assertArtefactsMatch(artefactsBefore, undefined, "before mutant run");
 
   // 2. Execute the copy with injected mutant and redirected OUT
   const result = await runProofWithInjectedMutant(CONTROLS_REMOVAL_MUTANT);
+  assertEquals(
+    await scriptsListing(),
+    scriptsBefore,
+    "normal mutant run must not leave files in scripts/",
+  );
 
   assertEquals(
     result.code,
@@ -244,6 +269,7 @@ Deno.test("l7m1-proof: controls-removal mutant on copy exits non-zero naming mis
 });
 
 Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and committed PNG unchanged (audio-feed-bujv)", async () => {
+  const scriptsBefore = await scriptsListing();
   const artefactsBefore = await readCommittedEvidenceArtefacts();
   assertArtefactsMatch(artefactsBefore, undefined, "before mid-run kill");
 
@@ -252,22 +278,17 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     .pathname;
   const originalSource = await Deno.readTextFile(originalScriptPath);
 
-  const tempEvidenceDir = await Deno.makeTempDir({ prefix: "l7m1-killed-test-evidence-" });
-  const modifiedSource = buildMutantSource(
-    originalSource,
-    tempEvidenceDir,
-    CONTROLS_REMOVAL_MUTANT,
-  );
-
-  const scriptsDir = new URL("../scripts/", import.meta.url).pathname;
-  const tempScriptPath = await Deno.makeTempFile({
-    dir: scriptsDir,
-    prefix: ".l7m1-killed-test-",
-    suffix: ".ts",
-  });
+  const tempRoot = await Deno.makeTempDir({ prefix: "l7m1-killed-test-" });
+  const tempScriptPath = `${tempRoot}/mutant.ts`;
 
   let pgid = 0;
   try {
+    assertScratchOutsideRepo(tempRoot);
+    const modifiedSource = buildMutantSource(
+      originalSource,
+      `${tempRoot}/evidence`,
+      CONTROLS_REMOVAL_MUTANT,
+    );
     await Deno.writeTextFile(tempScriptPath, modifiedSource);
 
     // Launch under setsid in a distinct process group so the kill signal reaches all children.
@@ -276,7 +297,15 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     // saturation) and is redundant - `deno task check` covers the tree in both gates. Skipping
     // it shrinks the race window instead of widening the bound around it.
     const cmd = new Deno.Command("setsid", {
-      args: [Deno.execPath(), "run", "--no-check", "--allow-all", "--unstable-kv", tempScriptPath],
+      args: [
+        Deno.execPath(),
+        "run",
+        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
+        "--no-check",
+        "--allow-all",
+        "--unstable-kv",
+        tempScriptPath,
+      ],
       stdout: "piped",
       stderr: "piped",
     });
@@ -404,7 +433,10 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
       `child process must be terminated by SIGKILL, got status: ${JSON.stringify(childStatus)}`,
     );
 
-    // 4. Verify git status shows no modified PNGs in the working tree
+    // 4. A SIGKILL skips child cleanup; even so, scripts/ must be byte-for-byte the same listing.
+    assertEquals(await scriptsListing(), scriptsBefore, "SIGKILL must not leave files in scripts/");
+
+    // Verify git status shows no modified PNGs in the working tree
     // pass explicit cwd for the real repository where .git exists and assert exit code 0
     const repoRoot = new URL("../", import.meta.url).pathname;
     const statusCmd = new Deno.Command("git", {
@@ -457,15 +489,6 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
         // process group already terminated
       }
     }
-    try {
-      await Deno.remove(tempScriptPath);
-    } catch {
-      // ignore
-    }
-    try {
-      await Deno.remove(tempEvidenceDir, { recursive: true });
-    } catch {
-      // ignore
-    }
+    await Deno.remove(tempRoot, { recursive: true });
   }
 });
