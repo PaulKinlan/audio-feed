@@ -952,3 +952,83 @@ Deno.test("audio-feed-1qac / audio-feed-ciuw: /api/observability/summary reports
   assertEquals(brokenRuns.queue.readError, null);
   assertStringIncludes(brokenRuns.queue.runsReadError ?? "", "kv runs history unavailable");
 });
+
+// ---------------------------------------------------------------------------
+// audio-feed-obslimit: failed key comparisons are a counted, bounded failure
+// ---------------------------------------------------------------------------
+
+/** The default failure bound the shared limiter applies (src/auth/rate_limit.ts). */
+const FAILURE_BOUND = 10;
+
+/** One guess from a named socket address. `remoteAddr` is what the limiter keys on. */
+function guess(path: string, key: string, hostname: string) {
+  return [
+    new Request(`${BASE}${path}`, { headers: { authorization: `Bearer ${key}` } }),
+    { remoteAddr: { hostname } },
+  ] as const;
+}
+
+Deno.test("audio-feed-obslimit: bad keys are refused with 429 after the failure bound", async () => {
+  const { fetch } = app();
+  const hostname = "203.0.113.7";
+
+  const statuses: number[] = [];
+  for (let i = 0; i < FAILURE_BOUND; i++) {
+    statuses.push(
+      (await fetch(...guess("/api/observability/errors", `guess-${i}`, hostname))).status,
+    );
+  }
+  // Every attempt inside the window gets the unchanged refusal: the throttle does not change what a
+  // wrong key means until the client has spent its attempts.
+  assertEquals(statuses, Array(FAILURE_BOUND).fill(401));
+
+  // The attempt AFTER the bound is refused before the key is considered at all.
+  const [req, info] = guess("/api/observability/errors", "guess-after-bound", hostname);
+  const refused = await fetch(req, info);
+  assertEquals(refused.status, 429, "the eleventh bad guess must be throttled, not answered 401");
+  const retryAfter = Number(refused.headers.get("retry-after"));
+  assert(Number.isFinite(retryAfter) && retryAfter >= 1, "a 429 must say when to come back");
+  const body = await refused.json();
+  assertEquals(body.error, "too_many_auth_failures");
+  // Throttling is not a statement about the key: no challenge header, so the refusal cannot be told
+  // apart from any other exhausted client's.
+  assertEquals(refused.headers.get("www-authenticate"), null);
+
+  // The same client is throttled on the summary path too: one bound, both endpoints.
+  const [summaryReq, summaryInfo] = guess("/api/observability/summary", "guess-summary", hostname);
+  assertEquals((await fetch(summaryReq, summaryInfo)).status, 429);
+});
+
+Deno.test("audio-feed-obslimit: a good key still works — after one typo, and after lockout", async () => {
+  const { fetch } = app();
+  const hostname = "203.0.113.8";
+
+  // A single typo does not cost a legitimate poller anything: the next correct request succeeds and
+  // clears the window.
+  assertEquals(
+    (await fetch(...guess("/api/observability/errors", "one-typo", hostname))).status,
+    401,
+  );
+  assertEquals((await fetch(...guess("/api/observability/errors", KEY, hostname))).status, 200);
+
+  // Spend the window on bad keys, then present the real one. The key is verified BEFORE the lock is
+  // consulted (the admin gate's order), so holding the key is never punished for a stranger's
+  // guessing — and the success resets the counter, which the next (bad) attempt proves.
+  for (let i = 0; i < FAILURE_BOUND + 1; i++) {
+    await fetch(...guess("/api/observability/errors", `exhaust-${i}`, hostname));
+  }
+  assertEquals(
+    (await fetch(...guess("/api/observability/errors", "still-bad", hostname))).status,
+    429,
+  );
+  assertEquals(
+    (await fetch(...guess("/api/observability/errors", KEY, hostname))).status,
+    200,
+    "a correct key must still be answered while the client is locked out",
+  );
+  assertEquals(
+    (await fetch(...guess("/api/observability/errors", "after-reset", hostname))).status,
+    401,
+    "a successful authentication resets the failure window",
+  );
+});

@@ -51,6 +51,7 @@ import type { LogBounds, LogRecord, LogSeverity } from "../storage/mod.ts";
 import { LOG_READ_LIMIT, summarizeRecords } from "../storage/log_shape.ts";
 import { json, problem } from "../http.ts";
 import { timingSafeEqual } from "../ids.ts";
+import { createObservabilityAuthLimiter, extractClientIp } from "../auth/rate_limit.ts";
 import { readQueueSnapshot } from "../observability/admin_report.ts";
 import { detectOverdueInvocations } from "../observability/invocation_overdue.ts";
 
@@ -111,8 +112,26 @@ function presentedKey(req: Request): string | null {
  * Returns a Response when the request must not proceed, and null when it may. Authentication is
  * checked BEFORE any parameter parsing so an unauthenticated caller learns nothing about the query
  * language.
+ *
+ * A failed comparison is a COUNTED failure (audio-feed-obslimit). These paths are exempt from the
+ * host gate (app.ts HOST_GATE_EXEMPT_PATHS), so before this the bearer key was the only thing in
+ * front of them and it could be guessed at line rate: a constant-time comparison bounds how much a
+ * guess tells you, not how many guesses you get. The counter is the repo's FailedAuthLimiter — the
+ * same store, backoff and 429/401 shape as the admin gate
+ * (src/compose/admin.ts:120-160) — in its own window, because this is a different secret
+ * (src/auth/rate_limit.ts `createObservabilityAuthLimiter`).
+ *
+ * The order is the admin gate's, and it is what keeps monitoring alive: the key is verified FIRST,
+ * so a caller holding it is never locked out, and a success resets the window, so a typo does not
+ * count against the next faithful poll. Only a FAILED comparison can be throttled, and the 429 says
+ * nothing the 401 did not already say — it does not reveal whether a key exists, only that this
+ * client has run out of attempts.
  */
-function authorise(ctx: AppContext, req: Request): Response | null {
+async function authorise(
+  ctx: AppContext,
+  req: Request,
+  remoteAddr?: string,
+): Promise<Response | null> {
   const expected = ctx.config.observabilityKey;
   if (!expected) {
     return problem({
@@ -126,16 +145,40 @@ function authorise(ctx: AppContext, req: Request): Response | null {
   // Constant time, and computed against the configured key either way, so a missing header costs
   // the same as a wrong one.
   const ok = presented !== null && timingSafeEqual(presented, expected);
-  if (!ok) {
+
+  // Read from the store per request: the window lives in the shared store, not in module memory
+  // (audio-feed-2zvc), so a fresh instance still reads one deployment-wide bound.
+  const failedAuth = createObservabilityAuthLimiter(ctx.stores.metadata);
+  const clientIp = extractClientIp(req, ctx.config.trustProxyHeaders ?? false, remoteAddr);
+
+  if (ok) {
+    await failedAuth.reset(clientIp);
+    return null;
+  }
+
+  const lock = await failedAuth.isLockedOut(clientIp);
+  if (!lock.allowed) {
     const refused = problem({
-      status: 401,
-      title: "unauthorised",
-      detail: "Present the observability key as: Authorization: Bearer <key>.",
+      status: 429,
+      title: "too_many_auth_failures",
+      detail: "Too many failed observability key attempts from this client. Try again later.",
     });
-    refused.headers.set("www-authenticate", 'Bearer realm="observability"');
+    refused.headers.set("retry-after", Math.max(1, Math.ceil(lock.resetMs / 1000)).toString());
+    refused.headers.set("cache-control", "no-store");
     return refused;
   }
-  return null;
+
+  const failure = await failedAuth.recordFailure(clientIp);
+  const refused = problem({
+    status: 401,
+    title: "unauthorised",
+    detail: "Present the observability key as: Authorization: Bearer <key>.",
+  });
+  refused.headers.set("www-authenticate", 'Bearer realm="observability"');
+  if (!failure.allowed) {
+    refused.headers.set("retry-after", Math.max(1, Math.ceil(failure.resetMs / 1000)).toString());
+  }
+  return refused;
 }
 
 interface ParsedQuery {
@@ -278,8 +321,8 @@ async function invocationScan(ctx: AppContext) {
 }
 
 export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppContext> {
-  return async ({ req }) => {
-    const refused = authorise(ctx, req);
+  return async ({ req, remoteAddr }) => {
+    const refused = await authorise(ctx, req, remoteAddr);
     if (refused) return refused;
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;
@@ -320,8 +363,8 @@ export function createObservabilityErrorsHandler(ctx: AppContext): Handler<AppCo
 }
 
 export function createObservabilitySummaryHandler(ctx: AppContext): Handler<AppContext> {
-  return async ({ req }) => {
-    const refused = authorise(ctx, req);
+  return async ({ req, remoteAddr }) => {
+    const refused = await authorise(ctx, req, remoteAddr);
     if (refused) return refused;
     const parsed = parseQuery(new URL(req.url));
     if ("error" in parsed) return parsed.error;
