@@ -18,6 +18,8 @@ import { renderShell, TOOLTIP_CLIENT, TOOLTIP_HTML } from "../src/routes/shell.t
 import { assetUrl, handleAsset } from "../src/routes/assets.ts";
 import type { RouteContext } from "../src/router.ts";
 import { shippedCss } from "./admin_css.ts";
+import { withChrome } from "../scripts/proof-helper.ts";
+import { connectCdp } from "../scripts/proof-cdp.ts";
 
 async function getListenCss(): Promise<string> {
   const url = assetUrl("listen.css");
@@ -127,6 +129,11 @@ Deno.test("anchor-positioning: the tooltip is a manual popover in every markup, 
     assert(
       css.includes("@starting-style"),
       `${name} must keep the opacity fade across the display:none boundary`,
+    );
+    assert(
+      css.includes("display 0.15s allow-discrete") &&
+        css.includes("overlay 0.15s allow-discrete"),
+      `${name} must keep the closing popover painted in the top layer during its fade`,
     );
   }
 });
@@ -659,6 +666,101 @@ Deno.test({
     } finally {
       await Deno.remove(tempHtmlFile).catch(() => {});
       await Deno.remove(profileDir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "anchor-positioning: native popover tooltip fades in and out over 150ms (audio-feed-lvyit)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const listenCss = await getListenCss();
+    const testHtml = `<!doctype html><html><head><style>
+      :root { --space-1: .25rem; --space-2: .5rem; --surface-3: #e3e0ee;
+        --text: #111; --border: #999; --radius-sm: 6px; --ease: linear; }
+      ${listenCss}
+    </style></head><body>
+      <button id="trigger" data-tooltip="Copy link">Copy</button>
+      ${TOOLTIP_HTML}
+      <div id="results"></div>
+      <script>${TOOLTIP_CLIENT}
+        const tip = document.getElementById("appTooltip");
+        const trigger = document.getElementById("trigger");
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        // Headless Chrome may throttle frames between wall-clock timers. Scrub the
+        // browser's actual CSS transition timeline rather than trusting timer jitter.
+        const sample = (ms) => {
+          // Flush the popover state before enumerating its transitions.
+          getComputedStyle(tip).opacity;
+          const fade = tip.getAnimations().find((a) => a.transitionProperty === "opacity");
+          if (fade) { fade.pause(); fade.currentTime = ms; }
+          return { opacity: Number(getComputedStyle(tip).opacity),
+            display: getComputedStyle(tip).display, open: tip.matches(":popover-open"),
+            hasFade: Boolean(fade) };
+        };
+        (async () => {
+          // Give the hidden popover a paint before promotion, then sample both edges.
+          await sleep(30);
+          trigger.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const enterStart = sample(0);
+          const enterMid = sample(75);
+          const enterEnd = sample(150);
+          tip.getAnimations().forEach((a) => a.finish());
+          document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+          const exitStart = sample(0);
+          const exitMid = sample(75);
+          const exitEnd = sample(150);
+          tip.getAnimations().forEach((a) => a.finish());
+          const exitClosed = sample(150);
+          document.getElementById("results").textContent = JSON.stringify({
+            enterStart, enterMid, enterEnd, exitStart, exitMid, exitEnd, exitClosed
+          });
+        })();
+      </script></body></html>`;
+    const file = await Deno.makeTempFile({ suffix: ".html" });
+    try {
+      await Deno.writeTextFile(file, testHtml);
+      const { s, reduced } = await withChrome(async (chrome) => {
+        const { cdp, js, until, close } = await connectCdp(chrome.port);
+        try {
+          await cdp("Page.enable");
+          const measure = async () => {
+            await cdp("Page.navigate", { url: `file://${file}` });
+            await until(
+              `document.getElementById("results")?.textContent.length > 0`,
+              "fade samples",
+            );
+            return JSON.parse(await js(`document.getElementById("results").textContent`));
+          };
+          const s = await measure();
+          await cdp("Emulation.setEmulatedMedia", {
+            features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+          });
+          return { s, reduced: await measure() };
+        } finally {
+          close();
+        }
+      });
+      console.log("popover opacity samples (0 / 75 / 150ms):", JSON.stringify(s));
+      console.log("reduced motion opacity samples:", JSON.stringify(reduced));
+      assertEquals(s.enterStart.open, true);
+      assert(s.enterStart.hasFade, "popover promotion must create an opacity transition");
+      assert(s.enterStart.opacity < 0.2, "entry should begin transparent");
+      assert(s.enterMid.opacity > 0.01 && s.enterMid.opacity < 0.99, "entry must interpolate");
+      assertEquals(s.enterEnd.opacity, 1);
+      assert(s.exitStart.hasFade, "popover demotion must create an opacity transition");
+      assert(s.exitStart.opacity > 0.8, "exit should begin opaque");
+      assert(s.exitMid.opacity > 0.01 && s.exitMid.opacity < 0.99, "exit must interpolate");
+      assertEquals(s.exitMid.display !== "none", true, "popover must paint during exit");
+      assertEquals(s.exitEnd.opacity, 0);
+      assertEquals(s.exitClosed.display, "none", "closed popover must stop painting");
+      assertEquals(reduced.enterStart.hasFade, false, "reduced motion disables entry fade");
+      assertEquals(reduced.enterStart.opacity, 1);
+      assertEquals(reduced.exitStart.hasFade, false, "reduced motion disables exit fade");
+      assertEquals(reduced.exitStart.display, "none");
+    } finally {
+      await Deno.remove(file).catch(() => {});
     }
   },
 });

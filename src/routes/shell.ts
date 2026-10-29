@@ -242,7 +242,8 @@ export const SHELL_CSS = `
     line-height: 1.2;
     pointer-events: none;
     opacity: 0;
-    transition: opacity 0.15s var(--ease);
+    transition: opacity 0.15s var(--ease), display 0.15s allow-discrete,
+      overlay 0.15s allow-discrete;
     white-space: nowrap;
   }
 
@@ -262,11 +263,16 @@ export const SHELL_CSS = `
   }
 
   /* The display:none -> :popover-open transition needs an explicit starting style
-     for the opacity fade to run. */
+     for the opacity fade to run. The discrete display/overlay transitions above
+     keep a closing popover painted in the top layer until opacity reaches zero. */
   @starting-style {
     .tooltip:popover-open {
       opacity: 0;
     }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tooltip { transition: none; }
   }
 
   @supports (anchor-name: --tooltip-anchor) {
