@@ -15,6 +15,7 @@
 
 import { notFound, problem } from "../http.ts";
 import { parseRangeHeader, RangeNotSatisfiableError } from "../storage/mod.ts";
+import { isSafeBlobKey } from "../storage/blob_key.ts";
 import { redactAudioKey, type RouteContext } from "../router.ts";
 import type { AppContext } from "../app.ts";
 import { isAudioMode, parseAudioBlobKey } from "../types.ts";
@@ -106,13 +107,13 @@ export function userIdFromBlobKey(key: string): string | null {
   return null;
 }
 
-/** Blob keys are path-shaped; reject anything that tries to escape the prefix. */
-export function isSafeBlobKey(key: string): boolean {
-  if (key.length === 0 || key.length > 512) return false;
-  if (key.startsWith("/") || key.includes("//")) return false;
-  if (key.includes("\0") || key.includes("\\")) return false;
-  return !key.split("/").some((segment) => segment === "." || segment === "..");
-}
+/**
+ * Blob keys are path-shaped; reject anything that tries to escape the prefix.
+ *
+ * Defined in `storage/blob_key.ts` so the blob store enforces the SAME predicate at its own
+ * boundary instead of trusting every caller. Re-exported here for existing importers.
+ */
+export { isSafeBlobKey };
 
 /**
  * Restrict keys to canonical audio/ keys (*.wav, *.mp3).

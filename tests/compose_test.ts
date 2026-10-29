@@ -12,6 +12,7 @@
  * audio that enclosure points at.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assertSafeBlobKey } from "../src/storage/blob_key.ts";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
@@ -251,6 +252,49 @@ Deno.test("only publishable episodes are syndicated", async () => {
   const xml = await (await fetch(req("/feed/token-user-1/master.xml"))).text();
   assert(xml.includes("episode-1"), "ready episode must be listed");
   assert(!xml.includes("episode-2"), "an episode with no audio must not be syndicated");
+});
+
+Deno.test("a LEGACY episode with a refused audioKey still renders the feed with its size omitted (blobkeys review delta)", async () => {
+  // The blobkeys guard made the S3/R2 boundary refuse dot/empty-segment keys: head() now throws
+  // InvalidBlobKeyError before any network call (src/storage/s3.ts head -> #objectUrl). A legacy
+  // metadata row can carry such a key, and feed generation used to simply omit its size. The
+  // renderer keeps that behaviour — one refused key must not turn the whole feed into a 500.
+  const { fetch, stores } = await seededApp();
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "episode-legacy",
+      userId: "user-1",
+      sourceId: "stratechery",
+      status: "ready",
+      mode: "direct",
+      audioKey: "audio/user-1/direct/./episode-legacy.mp3", // dot segment: the boundary refuses it
+      contentType: "audio/mpeg",
+      durationSeconds: 9,
+      byteLength: undefined, // makeEpisode defaults a size; the row needs needsSize true, so head() runs
+    }),
+  );
+  // The memory store is permissive; hold it to the S3/R2 boundary contract so this row bites:
+  // without the feeds.ts predicate guard, this head() rejects and the whole feed 500s.
+  const originalHead = stores.blobs.head.bind(stores.blobs);
+  stores.blobs.head = (key: string) => {
+    assertSafeBlobKey(key);
+    return originalHead(key);
+  };
+  const res = await fetch(req("/feed/token-user-1/master.xml"));
+  assertEquals(res.status, 200, "a refused legacy key must degrade, not abort the feed");
+  const xml = await res.text();
+  assert(xml.includes("episode-legacy"), "the legacy episode must still be syndicated");
+  const legacyEnclosure = xml.match(/<enclosure [^>]*episode-legacy[^>]*>/)?.[0] ?? "";
+  assert(
+    legacyEnclosure.includes('length="0"'),
+    `the refused key's size must be omitted (length="0"), got: ${legacyEnclosure}`,
+  );
+  // And the healthy episode beside it is untouched: real sizes still resolve through head().
+  const healthyEnclosure = xml.match(/<enclosure [^>]*episode-1[^>]*>/)?.[0] ?? "";
+  assert(
+    healthyEnclosure.includes(`length="${AUDIO.length}"`),
+    `the healthy episode must keep its real size, got: ${healthyEnclosure}`,
+  );
 });
 
 // ---------------------------------------------------------------------------
