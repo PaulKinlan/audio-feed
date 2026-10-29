@@ -12,8 +12,11 @@
  * stated rules below — the same shape as docs/speed.md's CHECK_TIMEOUT derivation
  * (`ceil(observed_max × 1.1)`, a rule over measurements, never preference).
  *
- *     deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env \
+ *     deno run --allow-read --allow-write --allow-run=timeout,deno --allow-sys --allow-env \
  *       scripts/exww-attempt-measure.ts [--attempts 12] [--bound-s 600] [--deadline-s 4800] [--out <dir>]
+ *   (--allow-sys is REQUIRED: the campaign records Deno.loadavg around every attempt, and without it
+ *   the first attempt dies with NotCapable before measuring anything - measured 2026-10-29, a campaign
+ *   that queued 34 minutes for a heavy slot and then crashed on its first loadavg call.)
  *
  * The baseline (not a mutant row) is the measurement target: it is the run that was killed at
  * 240.6s and 241.2s under gate load (audio-feed-ybwj7's evidence), and the mutant does the same
@@ -276,7 +279,7 @@ export async function runCampaign(
     attempts,
     derivation,
     reproduce:
-      "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env scripts/exww-attempt-measure.ts",
+      "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-sys --allow-env scripts/exww-attempt-measure.ts",
   };
   await Deno.mkdir(resolve(options.outDir), { recursive: true });
   const outPath = join(resolve(options.outDir), "attempts.json");

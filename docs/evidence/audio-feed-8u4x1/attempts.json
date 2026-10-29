@@ -1,0 +1,138 @@
+{
+  "bead": "audio-feed-8u4x1",
+  "proof": "scripts/exww-live-claims-browser-proof.ts (unmutated baseline)",
+  "measuredAt": "2026-10-29T07:26:06.395Z",
+  "bound": {
+    "perAttemptS": 600,
+    "deadlineS": 4800
+  },
+  "stoppedEarly": "attempts",
+  "loadRegime": "the host's 1-minute load average around each attempt (Deno.loadavg), sampled before/after — the campaign runs alongside the fleet's own gates, so the load is the real gate load, not a synthetic one",
+  "attempts": [
+    {
+      "attempt": 1,
+      "seconds": 78.09555946600001,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 1.6884765625,
+      "load1After": 3.55322265625,
+      "startedAt": "2026-10-29T07:12:11.495Z"
+    },
+    {
+      "attempt": 2,
+      "seconds": 67.10759775700001,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.55322265625,
+      "load1After": 2.24658203125,
+      "startedAt": "2026-10-29T07:13:29.592Z"
+    },
+    {
+      "attempt": 3,
+      "seconds": 58.19866919300001,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 2.24658203125,
+      "load1After": 3.96435546875,
+      "startedAt": "2026-10-29T07:14:36.700Z"
+    },
+    {
+      "attempt": 4,
+      "seconds": 66.70318008,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.96435546875,
+      "load1After": 2.42724609375,
+      "startedAt": "2026-10-29T07:15:34.899Z"
+    },
+    {
+      "attempt": 5,
+      "seconds": 84.195540705,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 2.42724609375,
+      "load1After": 2.82373046875,
+      "startedAt": "2026-10-29T07:16:41.602Z"
+    },
+    {
+      "attempt": 6,
+      "seconds": 53.09524629700003,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 2.82373046875,
+      "load1After": 3.53857421875,
+      "startedAt": "2026-10-29T07:18:05.798Z"
+    },
+    {
+      "attempt": 7,
+      "seconds": 68.00969520200003,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.53857421875,
+      "load1After": 3.29736328125,
+      "startedAt": "2026-10-29T07:18:58.894Z"
+    },
+    {
+      "attempt": 8,
+      "seconds": 61.28914054400003,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.29736328125,
+      "load1After": 3.501953125,
+      "startedAt": "2026-10-29T07:20:06.904Z"
+    },
+    {
+      "attempt": 9,
+      "seconds": 67.00085446399997,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.501953125,
+      "load1After": 3.943359375,
+      "startedAt": "2026-10-29T07:21:08.194Z"
+    },
+    {
+      "attempt": 10,
+      "seconds": 64.80744511900004,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 3.943359375,
+      "load1After": 4.73876953125,
+      "startedAt": "2026-10-29T07:22:15.195Z"
+    },
+    {
+      "attempt": 11,
+      "seconds": 77.59182056799996,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 4.73876953125,
+      "load1After": 2.8837890625,
+      "startedAt": "2026-10-29T07:23:20.002Z"
+    },
+    {
+      "attempt": 12,
+      "seconds": 88.00551041099999,
+      "timedOut": false,
+      "exitCode": 0,
+      "load1Before": 2.8837890625,
+      "load1After": 3.68896484375,
+      "startedAt": "2026-10-29T07:24:37.597Z"
+    }
+  ],
+  "derivation": {
+    "attemptCount": 12,
+    "censoredCount": 0,
+    "p50S": 67.00085446399997,
+    "p90S": 84.195540705,
+    "p99S": 88.00551041099999,
+    "ratio": 2,
+    "baseMs": 240000,
+    "rules": {
+      "ratio": "max(2, ceil(p99/p50)) — the floor is the ladder's strictly-increasing invariant; data may only raise it",
+      "base": "max(240s, ceil-to-60s(p99)) — the floor is the original r6hft quiet guard, never narrowed without cause",
+      "budget": "base × ratio^(maxAttempts-1) must stay inside the fleet's 5400s gate budget (docs/speed.md)",
+      "percentile": "nearest-rank over uncensored attempts (with n < 100, p99 IS the worst observed attempt)",
+      "censoring": "a bound-killed attempt is excluded from the percentiles and reported; more than 20% censored is INCONCLUSIVE, not a derivation"
+    }
+  },
+  "reproduce": "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-sys --allow-env scripts/exww-attempt-measure.ts"
+}

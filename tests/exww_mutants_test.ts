@@ -32,10 +32,12 @@
  * harness rather than redefined here, so a row cannot drift between the tier and the gate.
  */
 import { assert, assertEquals } from "@std/assert";
+import { deriveLadderConstants } from "../scripts/exww-attempt-measure.ts";
 import {
   applyMutant,
   buildScratch,
   EXWW_RUN_BASE_GUARD_MS,
+  EXWW_RUN_LADDER_RATIO,
   exwwRunBoundForAttempt,
   interpretRun,
   MUTANTS,
@@ -49,11 +51,12 @@ import {
  * (audio-feed-ybwj7, superseding the r6hft boot-baseline calibration - a follow-up gate
  * killed a baseline at 240.6s while the boot probe measured FAST, so boot was the wrong
  * observable): attempt 1 runs under the original 240s quiet guard; each OBSERVED bound-kill
- * doubles the next attempt. The base and ratio are MEASURED (audio-feed-8u4x1): three runs of
- * the same unmutated proof under the same 240s guard took 238.7s, 221.4s and 221.0s, so the
- * cost per attempt is FLAT (0.93x, then 1.00x) and the doubling is load margin, not growth -
- * see the citation on EXWW_RUN_BASE_GUARD_MS. A bound-kill is still UNKNOWN (never a pass),
- * so a genuinely hung proof stays loud. */
+ * doubles the next attempt. Base and ratio are MEASURED now (audio-feed-8u4x1,
+ * docs/evidence/audio-feed-8u4x1/): a conditioned 12-attempt campaign (load1 recorded per
+ * attempt) supersedes the unconditioned 238.7/221.4/221.0s figure - the pin below recomputes
+ * the derivation from the committed attempts.json and fails the suite if the constants drift
+ * from the data, or if the evidence record itself is tampered with. A bound-kill is still
+ * UNKNOWN (never a pass), so a genuinely hung proof stays loud. */
 const ROW = "wrong-scale";
 const MAX_ATTEMPTS = 3;
 
@@ -103,6 +106,39 @@ Deno.test("audio-feed-ybwj7: the exww run bound ladder derives from observed bou
   assert(exwwRunBoundForAttempt(2) > exwwRunBoundForAttempt(1));
   // The ladder is bounded: 3 attempts = 960s max, inside the fleet's 5400s gate budget.
   assertEquals(EXWW_RUN_BASE_GUARD_MS, 240_000);
+});
+
+Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of the COMMITTED measurement - recompute the evidence, compare the code", async () => {
+  // The pin coord asked for: not a reword, the number. attempts.json is the campaign record
+  // (12 uncensored attempts of the unmutated coao proof, per-attempt wall seconds + the load
+  // regime); the same pure rules the campaign ran turn its samples into constants, and those
+  // constants must BE the ones this tree ships. Re-measure different data, and this row goes
+  // red until the constants move with it - the drift the 'literals pending measurement' era
+  // could never see.
+  const raw = JSON.parse(
+    await Deno.readTextFile(
+      new URL("../docs/evidence/audio-feed-8u4x1/attempts.json", import.meta.url),
+    ),
+  );
+  const samples = raw.attempts
+    .filter((a: { timedOut: boolean }) => !a.timedOut)
+    .map((a: { seconds: number }) => a.seconds);
+  const derivation = deriveLadderConstants(samples, raw.attempts.length - samples.length);
+  assertEquals(
+    derivation.baseMs,
+    EXWW_RUN_BASE_GUARD_MS,
+    `the committed evidence derives base ${derivation.baseMs}ms but the code ships ${EXWW_RUN_BASE_GUARD_MS}ms - re-measured data and the shipped ladder have drifted`,
+  );
+  assertEquals(
+    derivation.ratio,
+    EXWW_RUN_LADDER_RATIO,
+    `the committed evidence derives ratio ${derivation.ratio} but the code ships ${EXWW_RUN_LADDER_RATIO}`,
+  );
+  // The gate-budget rule the derivation enforces, restated against the SHIPPED ladder.
+  assert(
+    EXWW_RUN_BASE_GUARD_MS * EXWW_RUN_LADDER_RATIO ** (MAX_ATTEMPTS - 1) <= 5_400_000,
+    "the shipped ladder top must stay inside the fleet's 5400s gate budget",
+  );
 });
 
 Deno.test({
@@ -165,12 +201,12 @@ Deno.test({
 
       await Deno.writeTextFile(proofInScratch, applyMutant(source, ROW));
       // The mutant does the same work as the baseline, so its window derives from the
-      // OBSERVED baseline duration (the ga3jd markerDeadlineFor shape): 2x what the
-      // baseline actually took, min the quiet guard. A killed mutant run is still
-      // UNKNOWN - never an expected red.
+      // OBSERVED baseline duration (the ga3jd markerDeadlineFor shape): the measured ladder
+      // ratio applied to what the baseline actually took, min the quiet guard. A killed
+      // mutant run is still UNKNOWN - never an expected red.
       const mutated = await runProofIn(
         scratch,
-        Math.max(EXWW_RUN_BASE_GUARD_MS, baseline.seconds * 1000 * 2),
+        Math.max(EXWW_RUN_BASE_GUARD_MS, baseline.seconds * 1000 * EXWW_RUN_LADDER_RATIO),
       );
       // A bound killing the run and the mutant reddening it are DIFFERENT outcomes: 124/137/143 is unknown,
       // never a pass and never a fail, so the timeout is asserted out before the mutant's red is believed.
