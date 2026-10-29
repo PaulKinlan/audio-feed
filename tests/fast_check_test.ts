@@ -558,31 +558,63 @@ Deno.test("planTests: an OBSERVED core/hub file selects its closure, crossing hu
   );
 });
 
-Deno.test("planTests: a whole-tree scan relation covers every file under it (audio-feed-sru1b)", () => {
-  // The post-zyrug hole: once a core file had ANY graph observer the fail-closed rule went quiet, so a
+Deno.test("planTests: a whole-tree scan SELECTS the scanner under its tree, and COVERS none of them (sru1b + ngrm6)", () => {
+  // sru1b's hole: once a core file had ANY graph observer the scanner's narrow selection went quiet, so a
   // suite that scans all of src/ as TEXT (security_audit's CSP scan) silently dropped out of selection.
-  // A directory relation key - bare ("src") or trailing-slash ("src/") - observes every file under it,
-  // and coverage through it defeats the uncovered fallback the same as an exact entry does.
+  // A directory relation key - bare ("src") or trailing-slash ("src/") - therefore SELECTS the scanner
+  // for any change under its tree (the scriptPlan row below). ngrm6's review finding splits the other
+  // half of what this row USED to pin: the directory key must not also answer the COVERAGE question -
+  // a text scan of a tree proves no suite tests one file in it, so an unreached source file still fails
+  // closed to the FULL suite (which runs the scanner anyway: selection was never what the fallback put
+  // at stake). audio-feed-a5n0q drew the matching line for data: non-TypeScript files keep scanner
+  // coverage, code does not.
   const relations = new Map([
     ["src/", ["tests/tree_scan_test.ts"]],
     ["scripts", ["tests/scripts_scan_test.ts"]],
   ]);
+  const orphan = planTests(["src/config.ts"], new Map(), NO_NAMED, relations);
   assertEquals(
-    planTests(["src/config.ts"], new Map(), NO_NAMED, relations).testFiles,
-    ["tests/tree_scan_test.ts"],
-    "a bare/trailing-slash directory key must cover a core file with no graph observer and no exact entry",
+    orphan.testFiles,
+    null,
+    "a directory key must not COVER an unreached source file - the fallback must fire",
   );
+  assert(orphan.reason.includes("no test reaches: src/config.ts"), orphan.reason);
   const scriptPlan = planTests(["scripts/tool.ts"], GRAPH, NO_NAMED, relations);
   assertEquals(
     scriptPlan.testFiles,
     ["tests/scripts_scan_test.ts", "tests/tool_test.ts"],
-    "a bare directory key covers a scripts/ change alongside the graph observers",
+    "a bare directory key still SELECTS the scanner alongside the graph observers",
   );
   // The slash anchor: a bare "src" key must never claim a path outside the tree it scans.
   assertEquals(
     planTests(["src2/config.ts"], new Map(), NO_NAMED, relations).testFiles,
     null,
     "a directory key must not prefix-match a sibling tree (src vs src2)",
+  );
+});
+
+Deno.test("planTests: a tree scanner cannot green untested code - the orphan fails closed by name (audio-feed-ngrm6)", () => {
+  // The review repro, verbatim shape: a whole-src/ scanner relation exists and the changed file is
+  // reached by nothing - no import edge, no name match, no exact relation. The old coverage filter
+  // asked the prefix-matching suitesObserving(), so the scanner's directory key covered EVERY file
+  // under the tree and the fallback never fired: the plan came back [security_audit_test, ...] - a
+  // false green on untested code. The fallback must fire and NAME the file.
+  const relations = new Map([["src/", ["tests/security_audit_test.ts"]]]);
+  const plan = planTests(["src/untested_orphan.ts"], new Map(), NO_NAMED, relations);
+  assertEquals(plan.testFiles, null, "an unreached source file must fail closed");
+  assert(plan.reason.includes("no test reaches: src/untested_orphan.ts"), plan.reason);
+
+  // The same file WITH an exact relation is a different story: a resolver-proven read/execute of the
+  // file ITSELF is coverage, so the plan stays narrow - the scanner (prefix selection) plus the exact
+  // observer. This is the seam the fix draws: prefix selects, exact covers.
+  const both = new Map([
+    ["src/", ["tests/security_audit_test.ts"]],
+    ["src/untested_orphan.ts", ["tests/orphan_reader_test.ts"]],
+  ]);
+  assertEquals(
+    planTests(["src/untested_orphan.ts"], new Map(), NO_NAMED, both).testFiles,
+    ["tests/orphan_reader_test.ts", "tests/security_audit_test.ts"],
+    "an exact relation covers the file and the plan stays narrow",
   );
 });
 

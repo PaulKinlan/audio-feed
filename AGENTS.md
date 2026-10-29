@@ -40,7 +40,12 @@ suites the derived relation names as reading it, and a core file nothing reaches
 suite by name. A suite that declares a WHOLE-TREE scan (a literal `Deno.readDir("src")` earns a directory
 relation key, `"src"` or `"src/"`) observes every file under it and is selected for ANY change under it
 (audio-feed-sru1b; the parameterised `scan("src")` shape earns nothing - the resolver cannot see through
-a parameter - so a scanner's ENTRY read carries the literal). A suite whose dynamic import's SPECIFIER
+a parameter - so a scanner's ENTRY read carries the literal). SELECTION IS NOT COVERAGE, though
+(audio-feed-ngrm6): the uncovered-code fallback asks the EXACT relation (`suitesObservingExact`), so a
+directory key can never green a source file nothing otherwise reaches - an unreached .ts under a scanned
+tree still runs the FULL suite by name, scanners included - while non-TypeScript data keeps scanner
+coverage (audio-feed-a5n0q's ruling: a tree scanner genuinely text-reads data). A suite whose dynamic
+import's SPECIFIER
 is not a literal (`await import(name)`) is attributed to itself and selected for EVERY code change
 (audio-feed-8kiar): the specifier resolves at runtime, so nothing can prove what it reads, and a
 name-matched observer must not hide the drop the way it did once zyrug's hardcoded FULL fallback was
