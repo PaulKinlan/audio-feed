@@ -65,12 +65,18 @@ try {
       `  ${record.severity.padEnd(5)} ${record.message}  context=${JSON.stringify(record.context)}`,
     );
   }
-  // The bands: 1800ms LCP is good, 320ms INP needs improvement, 0.42 CLS is poor.
+  // The bands: 1800ms LCP is good, 320ms INP needs improvement, 0.42 CLS is poor. The band is a
+  // RATING on the record's context, not a severity — every CWV record is written at severity
+  // "info" (a report is an observation, not an error), and the band lives in context.rating
+  // (src/observability/cwv.ts).
   check(
-    "severity follows the published web-vitals bands, so a bad LCP is an error event",
+    "the web-vitals band rides as context.rating at severity info, so a poor CLS is a poor rating, not an error event",
     cwv.find((r) => r.context?.metric === "lcp")?.severity === "info" &&
-      cwv.find((r) => r.context?.metric === "inp")?.severity === "warn" &&
-      cwv.find((r) => r.context?.metric === "cls")?.severity === "error",
+      cwv.find((r) => r.context?.metric === "lcp")?.context?.rating === "good" &&
+      cwv.find((r) => r.context?.metric === "inp")?.severity === "info" &&
+      cwv.find((r) => r.context?.metric === "inp")?.context?.rating === "needs-improvement" &&
+      cwv.find((r) => r.context?.metric === "cls")?.severity === "info" &&
+      cwv.find((r) => r.context?.metric === "cls")?.context?.rating === "poor",
   );
   // A refused beacon IS recorded — a caller being turned away is a finding — while a successful one is
   // not, because a page sends it and a record per report would be an event inside the store being
