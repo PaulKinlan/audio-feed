@@ -730,11 +730,11 @@ export async function launchChrome(
     // bound expired BEFORE Chrome wrote DevToolsActivePort - the proof died with a launch
     // timeout instead of the mutant contract the calling row asserts, which is how the
     // l7m1 row flaked ('Timed out after 10000ms waiting for DevToolsActivePort' at
-    // proof-helper.ts:761). The bound is an observability GUARD on an external binary's
-    // cold start, not a measurement and not a budget under test (the y2ex ruling shape:
-    // headroom against a loaded box, loud failure if genuinely broken), so it carries 4x
-    // headroom. The 50ms poll below is the observed-event wait; premature exit still
-    // fails immediately with the exit code.
+    // proof-helper.ts:761). audio-feed-f8o5o, coord's classification: 40s is a WIDENED
+    // CONSTANT, not a derived or measured bound - acceptable only because this wait is
+    // observation-driven (the poll below reads an event the browser writes, so the figure
+    // sets a ceiling, never a delay) and nothing asserts launch latency. A genuinely broken
+    // launch still fails loud and fast: premature exit names the exit code immediately.
     const portTimeoutMs = opts.portTimeoutMs ?? 40_000;
     const startTime = Date.now();
     let port = 0;
