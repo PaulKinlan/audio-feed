@@ -1035,6 +1035,7 @@ export async function deriveOrWidenReport(
         unattributed: [],
         outOfRepo: [],
         unclassified: [],
+        computedImportSuites: [],
       },
       failure: error instanceof Error ? error.message : String(error),
     };
@@ -1053,6 +1054,7 @@ export function planTests(
   readRelations: DataReadRelations = new Map(),
   configPaths: readonly string[] = [],
   unresolvedReads: readonly string[] = [],
+  computedImportSuites: readonly string[] = [],
 ): { testFiles: string[] | null; reason: string } {
   // The family list is a NET; the DERIVED set of config files the resolver actually reads (configPaths) is
   // what keeps it honest - a resolver input the family does not name still forces the full suite.
@@ -1192,6 +1194,21 @@ export function planTests(
     tests.add("tests/fast_gate_subset_test.ts");
   }
 
+  // audio-feed-8kiar: a suite holding a COMPUTED dynamic import (the specifier resolves at runtime) is a
+  // reader nothing can attribute - the old hardcoded FULL fallback used to cover exactly this shape, and
+  // zyrug's removal of it means a name-matched observer now silently hides the drop. Fail closed per
+  // suite, which is the narrowest loud answer: the suite declares nothing about what it reads, so the
+  // only sound claim is that it may read ANYTHING code-shaped. A docs-only change still selects nothing
+  // (codeChanged is empty), and the escape is in the suite author's hands: a literal specifier turns this
+  // back into an ordinary edge (followed by both graphs), or a whole-tree scan declares its scope
+  // (audio-feed-sru1b's directory relation).
+  const computedImportNote = codeChanged.length && computedImportSuites.length
+    ? ` + computed-import (selected for every code change): ${computedImportSuites.join(", ")}`
+    : "";
+  if (codeChanged.length) {
+    for (const suite of computedImportSuites) tests.add(suite);
+  }
+
   // Property 1 in the narrow case (audio-feed-es8y): a selected module that is NOT in the full gate's
   // universe would make the fast gate run something the full gate never runs - `tests/foo-test.ts` is the
   // name-matching convention but not a Deno discovery pattern, so selecting it would be the mirror image of
@@ -1233,7 +1250,7 @@ export function planTests(
   }
   return {
     testFiles: [...tests].sort(),
-    reason: `affected by: ${codeChanged.join(", ")}${dataNote}`,
+    reason: `affected by: ${codeChanged.join(", ")}${dataNote}${computedImportNote}`,
   };
 }
 
@@ -1410,6 +1427,13 @@ ${auditUniverseDrift}`);
       }${relationReport.unclassified.length > 3 ? ", ..." : ""}`,
     );
   }
+  if (relationReport.computedImportSuites.length) {
+    console.log(
+      `fast-gate: read relation: ${relationReport.computedImportSuites.length} suite(s) hold COMPUTED IMPORT sites (the specifier resolves at runtime, so nothing can prove what they read - they are selected for every code change until a specifier is a literal): ${
+        relationReport.computedImportSuites.slice(0, 3).join(", ")
+      }${relationReport.computedImportSuites.length > 3 ? ", ..." : ""}`,
+    );
+  }
   console.log(
     `fast-gate: selection audit ok: ${fullGateTestFiles.length} full-gate module(s), ${selectionAudit.fastGateUniverse.length} fast-selectable, ${readRelations.size} derived data relation(s)`,
   );
@@ -1473,7 +1497,15 @@ ${auditUniverseDrift}`);
   } else {
     const reverse = await reverseGraph();
     const named = await nameMatchedTests(changed);
-    plan = planTests(changed, reverse, named, readRelations, resolverInputs, inertBlockingReads);
+    plan = planTests(
+      changed,
+      reverse,
+      named,
+      readRelations,
+      resolverInputs,
+      inertBlockingReads,
+      relationReport.computedImportSuites,
+    );
   }
   const { testFiles, reason } = plan;
 

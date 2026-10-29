@@ -1469,6 +1469,10 @@ function readCallAt(source: string, index: number): boolean {
  */
 export interface ReadRelationReport {
   relations: DataReadRelations;
+  /** audio-feed-8kiar: suites whose closure holds a dynamic import whose specifier is NOT a literal.
+   * The specifier resolves at runtime, so no static scan can name what the suite reads; the selector
+   * fails closed by running these suites on every code change. Sorted for a stable reason string. */
+  computedImportSuites: string[];
   /** Hints that did not resolve to an existing path, sorted for a stable reason string. */
   unresolved: string[];
   /**
@@ -1527,6 +1531,9 @@ export async function deriveReadRelationReport(
   const unclassified = new Set<string>();
   const authoredPaths = new Set<string>();
   const tailPaths = new Set<string>();
+  // audio-feed-8kiar: files holding a dynamic import whose specifier is NOT a literal, attributed to
+  // suites after the closures are built (a computed import may hide in a helper the suite imports).
+  const computedImportFiles = new Set<string>();
   // isProvenRead (audio-feed-tziw, A3): true only for a path the RESOLVER RESOLVED, or one the suite
   // EXECUTES. See the guard below for what that does and does not cover.
   const add = (path: string, suite: string, isProvenRead = false) => {
@@ -1627,7 +1634,37 @@ export async function deriveReadRelationReport(
         imports.push(imported);
       }
     }
+    // audio-feed-8kiar: a dynamic import with a LITERAL specifier (`await import("../src/x.ts")`) is a
+    // real dependency edge, exactly as real as a static one - the suite loads and exercises that module.
+    // fast-check.ts's reverseGraph (importsOf) has followed these all along, so a change to the imported
+    // module selected the suite while THIS closure walk never loaded the module - which meant the
+    // module's own read sites were invisible to the relation: a data file read only inside a
+    // dynamically-imported module had no reader, and fell to the full-suite fallback for no reason but
+    // a regex. Following the literal here keeps the closure honest; a COMPUTED specifier is handled
+    // below, where it belongs to the fail-closed rule instead.
+    for (const spec of source.matchAll(/\bimport\s*\(\s*["'](\.[^"']+)["']\s*\)/g)) {
+      const imported = normalisePath(`${dir}/${spec[1]}`);
+      if (imported && !imports.includes(imported)) {
+        imports.push(imported);
+      }
+    }
     fileImports.set(relPath, imports);
+
+    // audio-feed-8kiar: a dynamic import whose SPECIFIER is not a literal resolves at RUNTIME, so no
+    // static scan can name what the file reads. The site itself is still visible, and per the house rule
+    // (a missing relation costs a skipped test; an extra one costs a test run) the safe direction is to
+    // attribute the file to every suite whose closure carries it, so the selector can fail closed: the
+    // suite runs on every code change until its specifier is a literal. String content is excluded first
+    // (the tts_hardening shape: an `import(...)` written into a generated child script is data, not a
+    // site), the same exclusion the read-call scanner applies.
+    for (const match of source.matchAll(/\bimport\s*\(/g)) {
+      const at = match.index ?? 0;
+      if (insideSpans(spans, at)) continue;
+      const rest = source.slice(at + match[0].length).replace(/^[ \t\n\r]*/, "");
+      if (rest.startsWith('"') || rest.startsWith("'")) continue; // literal: an edge, already followed
+      computedImportFiles.add(relPath);
+      break;
+    }
 
     const importedSymbols = new Map<string, Map<string, string>>();
     for (
@@ -1695,6 +1732,18 @@ export async function deriveReadRelationReport(
       }
     }
     suiteClosures.set(suite, closure);
+  }
+
+  // audio-feed-8kiar: attribute computed import sites to SUITES transitively - a computed import in a
+  // helper the suite imports makes the suite a dynamic reader exactly as a static re-export makes it a
+  // static one. Sorted for a stable reason string.
+  const computedImportSuites = new Set<string>();
+  if (computedImportFiles.size) {
+    for (const [suite, closure] of suiteClosures) {
+      for (const file of computedImportFiles) {
+        if (closure.has(file)) computedImportSuites.add(suite);
+      }
+    }
   }
 
   // Phase 2: Compute constants visible to a file: its own constants plus exported constants from the modules it
@@ -2013,6 +2062,7 @@ export async function deriveReadRelationReport(
     unattributed,
     outOfRepo: [...outOfRepoHints].sort(),
     unclassified: [...unclassified].sort(),
+    computedImportSuites: [...computedImportSuites].sort(),
   };
 }
 
