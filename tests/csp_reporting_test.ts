@@ -656,6 +656,20 @@ Deno.test(
         r.type === "csp_report.origin_untrusted_dropped"
       );
 
+    // The drop write is deliberately UNAWAITED in the route (void createLogger(...).event(...),
+    // so the 204 is never delayed), so the record commits a tick after the response. Poll bounded:
+    // settle to `want` records within 2s, else return short and let the assertion red - a deleted
+    // narration times out to a short array and fails on the missing log, never passes on absence.
+    const settleDrops = async (want: number) => {
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        const rows = await dropRecords();
+        if (rows.length >= want) return rows;
+        if (Date.now() >= deadline) return rows;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+
     // Row 1: absent Origin header - the reason must carry the literal "(absent)", so an
     // operator can tell header-absence from an untrusted value.
     const absentRes = await app.fetch(
@@ -670,7 +684,7 @@ Deno.test(
       204,
       "the drop is still accepted with 204 so the browser flushes",
     );
-    const absentDrops = await dropRecords();
+    const absentDrops = await settleDrops(1);
     assertEquals(absentDrops.length, 1, "exactly one drop record for the absent-Origin submission");
     assertEquals(
       absentDrops[0]!.reason,
@@ -694,7 +708,7 @@ Deno.test(
       204,
       "the drop is still accepted with 204 so the browser flushes",
     );
-    const untrustedDrops = await dropRecords();
+    const untrustedDrops = await settleDrops(2);
     assertEquals(untrustedDrops.length, 2, "the second drop appends its own record");
     assertEquals(
       untrustedDrops[1]!.reason,
