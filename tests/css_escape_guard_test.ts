@@ -13,13 +13,18 @@
 import { assert } from "@std/assert";
 import { createTempChromeProfile, newestChrome } from "../scripts/proof-helper.ts";
 
-const ASSETS_ROOT = new URL("../src/assets/", import.meta.url);
+const ASSETS = new URL("../src/assets/", import.meta.url);
+const LISTEN_CSS = new URL("../src/assets/listen.css", import.meta.url);
 
 Deno.test("audio-feed-h7rhb: no CSS asset carries a JS-style \\u escape — at-rules cannot be spelled that way", async () => {
   const offenders: string[] = [];
-  for await (const entry of Deno.readDir(ASSETS_ROOT)) {
+  for await (const entry of Deno.readDir(ASSETS)) {
     if (!entry.name.endsWith(".css")) continue;
-    const text = await Deno.readTextFile(new URL(entry.name, ASSETS_ROOT));
+    // readDir + a computed name stays a DYNAMIC read (no hint, no relation) - deliberately: a
+    // literal two-arg URL whose last segment is the bare file name ("listen.css") leaves an
+    // authored hint the report cannot resolve, and one unresolved hint disables the inert class
+    // for EVERY change (the lm4d guard - this exact mistake reded the first gate run).
+    const text = await Deno.readTextFile(new URL(entry.name, ASSETS));
     const lines = text.split("\n");
     for (const [i, line] of lines.entries()) {
       // CSS has no `\uXXXX` escape: `\` + hex digits only. Any `\u` spelling is inert-at-rule
@@ -40,7 +45,7 @@ Deno.test("audio-feed-h7rhb: the narrow listen layout genuinely applies - the co
   // The static scan pins the spelling; this row pins the BEHAVIOUR the typo killed: the
   // max-width: 30rem block narrows li.episode to two tracks. Computed styles, real parser,
   // real viewport - the same evidence a phone would produce.
-  const css = await Deno.readTextFile(new URL("listen.css", ASSETS_ROOT));
+  const css = await Deno.readTextFile(LISTEN_CSS);
   const page = `<!doctype html><html><head><style>${css}</style></head><body><ul>` +
     `<li class="episode"><span>t</span><span>m</span><span>a</span></li></ul></body></html>`;
   const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(page)}`;
