@@ -418,10 +418,22 @@ export interface RunOutcome {
  * observable). Attempt 1 keeps the original r6hft quiet guard; each OBSERVED bound-kill
  * doubles the next attempt - the kill IS the observation, the ga3jd markerDeadlineFor
  * shape. Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
- * KILL-DERIVED LADDER; base and ratio are LITERALS pending measurement: the constants
- * below are chosen, not calibrated - audio-feed-8u4x1 measures the real cost-per-attempt
- * ratio under gate load and derives the constant from that data; until it lands, nothing
- * here claims calibration. Pinned BY NAME in tests/exww_mutants_test.ts. */
+ * MEASURED (audio-feed-8u4x1): the cost-per-attempt ratio is FLAT, so the 2x factor is a load
+ * margin and NOT a growth rate. The unmutated proof was run three times in ONE scratch tree, each
+ * attempt under the SAME 240s attempt-1 guard, and completed in 238.7s, 221.4s and 221.0s (exit 0,
+ * 60 checks passed, no bound-kill): attempt 2 cost 0.93x attempt 1 and attempt 3 cost 1.00x attempt 2.
+ * A later attempt does not need more time than the one before it - nothing here grows with the
+ * attempt number, so the doubling buys MARGIN, not measured cost. The margin is what the recorded
+ * gate load justifies: of 74 fast-gate runs that reached this row (~/.fleet/checks/*.log* grep
+ * "audio-feed-coao: the exww proof is EXECUTED"), 26 spent over 240s on the row's two runs and none
+ * ever recorded a kill (0 matches for "hit the ... bound") - and the 240.6s baseline kill behind
+ * ybwj7 is the same ~240s cost landing ON the boundary. ARITHMETIC THAT KEEPS THESE VALUES: 238.7s
+ * measured max vs 480s attempt 2 = 2.01x the measured attempt, and the whole ladder spends
+ * 240+480+960 = 1680s worst case, inside the fleet's 5400s gate budget. What the numbers DO say is
+ * that attempt 1 has 0.5% headroom (240s guard vs 238.7s measured cost), so an attempt-1 kill under
+ * load is the expected case - tolerable only because a kill is cheap and reads as UNKNOWN, never a
+ * pass. Reproduce: buildScratch() once, then runProofIn(scratch, EXWW_RUN_BASE_GUARD_MS) three times,
+ * recording outcome.seconds and outcome.timedOut. Pinned BY NAME in tests/exww_mutants_test.ts. */
 export const EXWW_RUN_BASE_GUARD_MS = 240_000;
 
 export function exwwRunBoundForAttempt(attempt: number): number {
