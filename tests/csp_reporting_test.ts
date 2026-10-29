@@ -577,9 +577,16 @@ Deno.test("SECURITY (audio-feed-cspreports): untrusted/absent Origin reports do 
 
   const logsBeforeSameOrigin = await stores.metadata.listLogs();
   assertEquals(
-    logsBeforeSameOrigin.length,
+    logsBeforeSameOrigin.filter((r) => r.type === "report.csp-violation").length,
     0,
-    "untrusted/absent Origin reports do not pollute the log store",
+    "untrusted/absent Origin reports are never stored - no report content record exists",
+  );
+  // The DROP of each untrusted/absent report is narrated as its own operational record
+  // (review delta, coord ruling 2026-10-29): visibility is required, content storage is not.
+  assertEquals(
+    logsBeforeSameOrigin.filter((r) => r.type === "csp_report.origin_untrusted_dropped").length,
+    2,
+    "each dropped submission is narrated with its origin reason",
   );
 
   // Row (y): Real same-origin report
@@ -616,37 +623,40 @@ Deno.test("SECURITY (audio-feed-cspreports): untrusted/absent Origin reports do 
 
   const logsAfterSameOrigin = await stores.metadata.listLogs();
   assertEquals(
-    logsAfterSameOrigin.length,
+    logsAfterSameOrigin.filter((r) => r.type === "report.csp-violation").length,
     1,
     "row (y): real same-origin report is recorded in the log store",
   );
-  assertEquals(logsAfterSameOrigin[0]!.type, "report.csp-violation");
+  assertEquals(
+    logsAfterSameOrigin.find((r) => r.type === "report.csp-violation")!.severity,
+    "warn",
+  );
 });
 
 // Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the untrusted/absent-Origin
-// drop must be VISIBLE. A silent 204 lets "no CSP violations today" mean "every report was
-// discarded by the origin policy" - the Origin-absence false negative the policy can produce.
-// These rows assert the drop IS LOGGED for BOTH cases, so a refactor that deletes the log
-// reds by name instead of shipping silently invisible again.
-Deno.test("SECURITY (audio-feed-cspreports review delta): the origin-policy drop is LOGGED, for absent and untrusted Origin alike", async () => {
-  const { app, stores } = await setupApp();
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    warnings.push(args.map(String).join(" "));
-    originalWarn(...args);
-  };
+// drop must be VISIBLE, narrated through the one logger seam (src/log.ts) rather than a
+// console call. The drop record lands in the log store, so these rows assert it there - that
+// IS the recording-sink assertion: the record exists, its type is the drop's, and its reason
+// carries the origin value or the literal "(absent)" - so a refactor that deletes the log
+// reds by name, and the row cannot pass by grepping unrelated output.
+Deno.test(
+  "SECURITY (audio-feed-cspreports review delta): the origin-policy drop is LOGGED, for absent and untrusted Origin alike",
+  async () => {
+    const { app, stores } = await setupApp();
+    const payload = [
+      {
+        type: "csp-violation",
+        url: `${BASE}/listen`,
+        body: { blockedURL: "https://evil.example.com/evil.js" },
+      },
+    ];
 
-  const payload = [
-    {
-      type: "csp-violation",
-      url: `${BASE}/listen`,
-      body: { blockedURL: "https://evil.example.com/evil.js" },
-    },
-  ];
+    const dropRecords = async () =>
+      (await stores.metadata.listLogs()).filter((r) =>
+        r.type === "csp_report.origin_untrusted_dropped"
+      );
 
-  try {
-    // Row 1: absent Origin header - the log must carry the literal "(absent)", so an
+    // Row 1: absent Origin header - the reason must carry the literal "(absent)", so an
     // operator can tell header-absence from an untrusted value.
     const absentRes = await app.fetch(
       new Request(`${BASE}/api/reports/csp`, {
@@ -660,13 +670,15 @@ Deno.test("SECURITY (audio-feed-cspreports review delta): the origin-policy drop
       204,
       "the drop is still accepted with 204 so the browser flushes",
     );
-    const absentLine = warnings.find((w) => w.includes("csp_report.origin_untrusted_dropped"));
-    assert(absentLine, `the absent-Origin drop must be logged, got: ${JSON.stringify(warnings)}`);
-    assertStringIncludes(absentLine, "(absent)");
-    assertStringIncludes(absentLine, '"reports":1');
+    const absentDrops = await dropRecords();
+    assertEquals(absentDrops.length, 1, "exactly one drop record for the absent-Origin submission");
+    assertEquals(
+      absentDrops[0]!.reason,
+      "(absent)",
+      "a missing Origin header must be logged as the literal (absent)",
+    );
 
-    // Row 2: untrusted Origin - the log must carry the VALUE that was judged untrusted.
-    warnings.length = 0;
+    // Row 2: untrusted Origin - the reason must carry the VALUE that was judged untrusted.
     const untrustedRes = await app.fetch(
       new Request(`${BASE}/api/reports/csp`, {
         method: "POST",
@@ -682,20 +694,18 @@ Deno.test("SECURITY (audio-feed-cspreports review delta): the origin-policy drop
       204,
       "the drop is still accepted with 204 so the browser flushes",
     );
-    const untrustedLine = warnings.find((w) => w.includes("csp_report.origin_untrusted_dropped"));
-    assert(
-      untrustedLine,
-      `the untrusted-Origin drop must be logged, got: ${JSON.stringify(warnings)}`,
-    );
-    assertStringIncludes(untrustedLine, "https://evil.example.com");
-    assert(
-      !untrustedLine.includes("(absent)"),
+    const untrustedDrops = await dropRecords();
+    assertEquals(untrustedDrops.length, 2, "the second drop appends its own record");
+    assertEquals(
+      untrustedDrops[1]!.reason,
+      "https://evil.example.com",
       "an untrusted VALUE must be logged as the value, not as absent",
     );
 
-    // The policy itself is unchanged by the visibility: nothing stored either way.
-    assertEquals((await stores.metadata.listLogs()).length, 0, "dropped reports are never stored");
-  } finally {
-    console.warn = originalWarn;
-  }
-});
+    // The policy itself is unchanged by the visibility: no report CONTENT is stored either way.
+    const reportRecords = (await stores.metadata.listLogs()).filter((r) =>
+      r.type === "report.csp-violation"
+    );
+    assertEquals(reportRecords.length, 0, "dropped reports are never stored");
+  },
+);

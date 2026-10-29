@@ -22,6 +22,7 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import type { LogSeverity } from "../storage/mod.ts";
+import { createLogger } from "../log.ts";
 import { cleanString, MAX_LOG_MESSAGE_LENGTH, redactContext } from "../storage/log_shape.ts";
 import { readBoundedBody } from "../http.ts";
 import {
@@ -350,16 +351,18 @@ export function createCspReportsHandler(
       // Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the drop must be
       // VISIBLE. A silent 204 makes "no CSP violations today" indistinguishable from "every
       // report was discarded by the origin policy" - the Origin-absence false negative this
-      // policy can produce. One structured line, the codebase's event-log shape
-      // (listen.timing, article.corrupt), carrying the origin value or the literal
-      // "(absent)" so an operator can tell the two cases apart.
-      console.warn(
-        JSON.stringify({
-          event: "csp_report.origin_untrusted_dropped",
-          origin: req.headers.get("origin") ?? "(absent)",
-          reports: rawReports.length,
-          action: "accepted-204-not-stored",
-        }),
+      // policy can produce. Narrated through the one logger seam (src/log.ts, the
+      // admin.view shape) so the record lands in the app's log store with the reason field
+      // carrying the origin value - or the literal "(absent)" - and an operator can tell
+      // the two cases apart. Deliberately not awaited: narrating must not delay the 204.
+      void createLogger({ sink: ctx.stores.metadata, process: "app" }).event(
+        "csp_report.origin_untrusted_dropped",
+        "CSP report dropped by the origin policy",
+        {
+          route: "/api/reports/csp",
+          reason: req.headers.get("origin") ?? "(absent)",
+          context: { reports: rawReports.length },
+        },
       );
       return new Response(null, { status: 204 });
     }

@@ -13,9 +13,10 @@ exhaustive analysis.
   budget (`reports:budget:*`), and are not attributed to the visitor.
   - Trusted means the origin host is in the configured allowlist or a loopback host
     (`src/origin.ts`, `isTrustedReportOrigin`); `Origin: null` and a missing header are untrusted.
-  - The drop is logged (event `csp_report.origin_untrusted_dropped`, carrying the origin value or
-    the literal `(absent)`), so "no CSP violations today" cannot silently mean "every report was
-    discarded by the origin policy".
+  - The drop is narrated through the app's logger seam (`src/log.ts`, sink `appendLog`; record type
+    `csp_report.origin_untrusted_dropped`), carrying the origin value or the literal `(absent)` in
+    its reason, so "no CSP violations today" cannot silently mean "every report was discarded by the
+    origin policy".
 - **Residual (documented, accepted):** legacy WebKit engines that POST CSP reports without an
   `Origin` header are indistinguishable from the untrusted case and are dropped the same way — their
   violations are invisible by policy. Accepting them would require trusting origin-less requests on
