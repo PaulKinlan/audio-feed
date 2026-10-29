@@ -8,6 +8,7 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import { assertSafeBlobKey } from "./blob_key.ts";
 import {
   type BlobInfo,
   type BlobObject,
@@ -52,9 +53,21 @@ export class S3BlobStore implements BlobStore {
     });
   }
 
+  /**
+   * Percent-encode a key for a URL, REFUSING unsafe shapes first.
+   *
+   * The store is the boundary, not the callers: `encodeURIComponent` keeps `..` intact, so a
+   * key carrying a dot segment would address an object outside its prefix. Every URL this
+   * store builds goes through here, so a caller that forgets `isSafeBlobKey` cannot reach the
+   * bucket with an escaping key. Valid keys encode byte-identically to before.
+   */
+  #encodeKey(key: string): string {
+    assertSafeBlobKey(key);
+    return key.split("/").map(encodeURIComponent).join("/");
+  }
+
   #objectUrl(key: string): string {
-    const encoded = key.split("/").map(encodeURIComponent).join("/");
-    return `${this.#config.endpoint}/${this.#config.bucket}/${encoded}`;
+    return `${this.#config.endpoint}/${this.#config.bucket}/${this.#encodeKey(key)}`;
   }
 
   async put(
@@ -362,7 +375,7 @@ export class S3BlobStore implements BlobStore {
   async url(key: string, opts?: { expiresInSeconds?: number }): Promise<string | null> {
     if (this.#config.publicBaseUrl) {
       const base = this.#config.publicBaseUrl.replace(/\/+$/, "");
-      return `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
+      return `${base}/${this.#encodeKey(key)}`;
     }
     const expires = opts?.expiresInSeconds ?? this.#config.signedUrlSeconds;
     const target = new URL(this.#objectUrl(key));
