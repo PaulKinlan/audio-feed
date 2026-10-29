@@ -347,6 +347,20 @@ export function createCspReportsHandler(
     // the report body (responding 204) without consuming reports:budget:* or appending
     // to the log store.
     if (!isTrustedReportOrigin(ctx.config, req)) {
+      // Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the drop must be
+      // VISIBLE. A silent 204 makes "no CSP violations today" indistinguishable from "every
+      // report was discarded by the origin policy" - the Origin-absence false negative this
+      // policy can produce. One structured line, the codebase's event-log shape
+      // (listen.timing, article.corrupt), carrying the origin value or the literal
+      // "(absent)" so an operator can tell the two cases apart.
+      console.warn(
+        JSON.stringify({
+          event: "csp_report.origin_untrusted_dropped",
+          origin: req.headers.get("origin") ?? "(absent)",
+          reports: rawReports.length,
+          action: "accepted-204-not-stored",
+        }),
+      );
       return new Response(null, { status: 204 });
     }
 

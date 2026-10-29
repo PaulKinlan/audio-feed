@@ -622,3 +622,80 @@ Deno.test("SECURITY (audio-feed-cspreports): untrusted/absent Origin reports do 
   );
   assertEquals(logsAfterSameOrigin[0]!.type, "report.csp-violation");
 });
+
+// Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the untrusted/absent-Origin
+// drop must be VISIBLE. A silent 204 lets "no CSP violations today" mean "every report was
+// discarded by the origin policy" - the Origin-absence false negative the policy can produce.
+// These rows assert the drop IS LOGGED for BOTH cases, so a refactor that deletes the log
+// reds by name instead of shipping silently invisible again.
+Deno.test("SECURITY (audio-feed-cspreports review delta): the origin-policy drop is LOGGED, for absent and untrusted Origin alike", async () => {
+  const { app, stores } = await setupApp();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+    originalWarn(...args);
+  };
+
+  const payload = [
+    {
+      type: "csp-violation",
+      url: `${BASE}/listen`,
+      body: { blockedURL: "https://evil.example.com/evil.js" },
+    },
+  ];
+
+  try {
+    // Row 1: absent Origin header - the log must carry the literal "(absent)", so an
+    // operator can tell header-absence from an untrusted value.
+    const absentRes = await app.fetch(
+      new Request(`${BASE}/api/reports/csp`, {
+        method: "POST",
+        headers: { "content-type": "application/reports+json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    assertEquals(
+      absentRes.status,
+      204,
+      "the drop is still accepted with 204 so the browser flushes",
+    );
+    const absentLine = warnings.find((w) => w.includes("csp_report.origin_untrusted_dropped"));
+    assert(absentLine, `the absent-Origin drop must be logged, got: ${JSON.stringify(warnings)}`);
+    assertStringIncludes(absentLine, "(absent)");
+    assertStringIncludes(absentLine, '"reports":1');
+
+    // Row 2: untrusted Origin - the log must carry the VALUE that was judged untrusted.
+    warnings.length = 0;
+    const untrustedRes = await app.fetch(
+      new Request(`${BASE}/api/reports/csp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/reports+json",
+          "origin": "https://evil.example.com",
+        },
+        body: JSON.stringify(payload),
+      }),
+    );
+    assertEquals(
+      untrustedRes.status,
+      204,
+      "the drop is still accepted with 204 so the browser flushes",
+    );
+    const untrustedLine = warnings.find((w) => w.includes("csp_report.origin_untrusted_dropped"));
+    assert(
+      untrustedLine,
+      `the untrusted-Origin drop must be logged, got: ${JSON.stringify(warnings)}`,
+    );
+    assertStringIncludes(untrustedLine, "https://evil.example.com");
+    assert(
+      !untrustedLine.includes("(absent)"),
+      "an untrusted VALUE must be logged as the value, not as absent",
+    );
+
+    // The policy itself is unchanged by the visibility: nothing stored either way.
+    assertEquals((await stores.metadata.listLogs()).length, 0, "dropped reports are never stored");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
