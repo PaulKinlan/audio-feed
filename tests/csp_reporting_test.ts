@@ -84,6 +84,7 @@ Deno.test("CSP reporting endpoint: accepts application/reports+json array and fl
       method: "POST",
       headers: {
         "content-type": "application/reports+json",
+        "origin": BASE,
       },
       body: JSON.stringify(reportsPayload),
     }),
@@ -131,6 +132,7 @@ Deno.test("CSP reporting endpoint: accepts application/csp-report legacy object 
       headers: {
         "content-type": "application/csp-report",
         "user-agent": "LegacyBrowser/1.0",
+        "origin": BASE,
       },
       body: JSON.stringify(legacyPayload),
     }),
@@ -193,7 +195,7 @@ Deno.test("CSP reporting endpoint: routes all required report types correctly wi
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(reports),
     }),
   );
@@ -271,7 +273,7 @@ Deno.test("SECURITY: attacker-controlled report fields are sanitized and never r
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(attackPayload),
     }),
   );
@@ -404,6 +406,7 @@ Deno.test("audio-feed-jbpz: repeated anonymous report batches are rate-limited a
         headers: {
           "content-type": "application/reports+json",
           "x-forwarded-for": "203.0.113.195",
+          "origin": BASE,
         },
         body: JSON.stringify(
           Array.from({ length: 10 }, (_, n) => ({
@@ -456,7 +459,7 @@ Deno.test("audio-feed-r49r: uncommitted budget CAS write fails closed with 429 a
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(payload),
     }),
   );
@@ -497,7 +500,7 @@ Deno.test("audio-feed-u58d: benign client-side NEL reports (abandoned, dns.addre
   const res = await app.fetch(
     new Request(`${BASE}/api/reports/csp`, {
       method: "POST",
-      headers: { "content-type": "application/reports+json" },
+      headers: { "content-type": "application/reports+json", "origin": BASE },
       body: JSON.stringify(reports),
     }),
   );
@@ -509,3 +512,214 @@ Deno.test("audio-feed-u58d: benign client-side NEL reports (abandoned, dns.addre
     assertEquals(log.severity, "info");
   }
 });
+
+Deno.test("SECURITY (audio-feed-cspreports): untrusted/absent Origin reports do not consume visitor write budget, while real same-origin reports record and count", async () => {
+  const { app, stores } = await setupApp();
+  const victimIp = "203.0.113.88";
+  const budgetKey = `reports:budget:${victimIp}`;
+
+  // Helper to read the current write budget counter without mutating it
+  const readBudget = async (): Promise<number[] | null> => {
+    const res = await stores.metadata.atomicUpdate<number[]>(budgetKey, () => null);
+    return res.value;
+  };
+
+  assertEquals(await readBudget(), null, "initial victim budget is empty");
+
+  // Row (x.1): Report from untrusted Origin (e.g. cross-origin page attacking visitor)
+  const untrustedPayload = [
+    {
+      type: "csp-violation",
+      url: "https://evil.example.com/exploit",
+      body: { blockedURL: "https://evil.example.com/evil.js" },
+    },
+  ];
+
+  const untrustedRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": "https://evil.example.com",
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(untrustedPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(untrustedRes.status, 204, "untrusted origin body is accepted with 204");
+  assertEquals(
+    await readBudget(),
+    null,
+    "row (x): untrusted Origin must NOT consume victim budget (counter remains unchanged)",
+  );
+
+  // Row (x.2): Report with absent Origin header
+  const absentRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(untrustedPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(absentRes.status, 204, "absent origin body is accepted with 204");
+  assertEquals(
+    await readBudget(),
+    null,
+    "row (x): absent Origin must NOT consume victim budget (counter remains unchanged)",
+  );
+
+  const logsBeforeSameOrigin = await stores.metadata.listLogs();
+  assertEquals(
+    logsBeforeSameOrigin.filter((r) => r.type === "report.csp-violation").length,
+    0,
+    "untrusted/absent Origin reports are never stored - no report content record exists",
+  );
+  // The DROP of each untrusted/absent report is narrated as its own operational record
+  // (review delta, coord ruling 2026-10-29): visibility is required, content storage is not.
+  assertEquals(
+    logsBeforeSameOrigin.filter((r) => r.type === "csp_report.origin_untrusted_dropped").length,
+    2,
+    "each dropped submission is narrated with its origin reason",
+  );
+
+  // Row (y): Real same-origin report
+  const sameOriginPayload = [
+    {
+      type: "csp-violation",
+      url: `${BASE}/listen`,
+      body: { blockedURL: "https://unapproved.example.com/bad.js" },
+    },
+  ];
+
+  const sameOriginRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": BASE,
+        "x-forwarded-for": victimIp,
+      },
+      body: JSON.stringify(sameOriginPayload),
+    }),
+    { remoteAddr: { hostname: victimIp } },
+  );
+
+  assertEquals(sameOriginRes.status, 204, "same-origin report flushes with 204");
+
+  const budgetAfterSameOrigin = await readBudget();
+  assert(budgetAfterSameOrigin !== null, "row (y): same-origin report consumes budget");
+  assertEquals(
+    budgetAfterSameOrigin.length,
+    1,
+    "row (y): exactly 1 report counted in victim write budget",
+  );
+
+  const logsAfterSameOrigin = await stores.metadata.listLogs();
+  assertEquals(
+    logsAfterSameOrigin.filter((r) => r.type === "report.csp-violation").length,
+    1,
+    "row (y): real same-origin report is recorded in the log store",
+  );
+  assertEquals(
+    logsAfterSameOrigin.find((r) => r.type === "report.csp-violation")!.severity,
+    "warn",
+  );
+});
+
+// Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the untrusted/absent-Origin
+// drop must be VISIBLE, narrated through the one logger seam (src/log.ts) rather than a
+// console call. The drop record lands in the log store, so these rows assert it there - that
+// IS the recording-sink assertion: the record exists, its type is the drop's, and its reason
+// carries the origin value or the literal "(absent)" - so a refactor that deletes the log
+// reds by name, and the row cannot pass by grepping unrelated output.
+Deno.test(
+  "SECURITY (audio-feed-cspreports review delta): the origin-policy drop is LOGGED, for absent and untrusted Origin alike",
+  async () => {
+    const { app, stores } = await setupApp();
+    const payload = [
+      {
+        type: "csp-violation",
+        url: `${BASE}/listen`,
+        body: { blockedURL: "https://evil.example.com/evil.js" },
+      },
+    ];
+
+    const dropRecords = async () =>
+      (await stores.metadata.listLogs()).filter((r) =>
+        r.type === "csp_report.origin_untrusted_dropped"
+      );
+
+    // The drop write is deliberately UNAWAITED in the route (void createLogger(...).event(...),
+    // so the 204 is never delayed), so the record commits a tick after the response. Poll bounded:
+    // settle to `want` records within 2s, else return short and let the assertion red - a deleted
+    // narration times out to a short array and fails on the missing log, never passes on absence.
+    const settleDrops = async (want: number) => {
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        const rows = await dropRecords();
+        if (rows.length >= want) return rows;
+        if (Date.now() >= deadline) return rows;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+
+    // Row 1: absent Origin header - the reason must carry the literal "(absent)", so an
+    // operator can tell header-absence from an untrusted value.
+    const absentRes = await app.fetch(
+      new Request(`${BASE}/api/reports/csp`, {
+        method: "POST",
+        headers: { "content-type": "application/reports+json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+    assertEquals(
+      absentRes.status,
+      204,
+      "the drop is still accepted with 204 so the browser flushes",
+    );
+    const absentDrops = await settleDrops(1);
+    assertEquals(absentDrops.length, 1, "exactly one drop record for the absent-Origin submission");
+    assertEquals(
+      absentDrops[0]!.reason,
+      "(absent)",
+      "a missing Origin header must be logged as the literal (absent)",
+    );
+
+    // Row 2: untrusted Origin - the reason must carry the VALUE that was judged untrusted.
+    const untrustedRes = await app.fetch(
+      new Request(`${BASE}/api/reports/csp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/reports+json",
+          "origin": "https://evil.example.com",
+        },
+        body: JSON.stringify(payload),
+      }),
+    );
+    assertEquals(
+      untrustedRes.status,
+      204,
+      "the drop is still accepted with 204 so the browser flushes",
+    );
+    const untrustedDrops = await settleDrops(2);
+    assertEquals(untrustedDrops.length, 2, "the second drop appends its own record");
+    assertEquals(
+      untrustedDrops[1]!.reason,
+      "https://evil.example.com",
+      "an untrusted VALUE must be logged as the value, not as absent",
+    );
+
+    // The policy itself is unchanged by the visibility: no report CONTENT is stored either way.
+    const reportRecords = (await stores.metadata.listLogs()).filter((r) =>
+      r.type === "report.csp-violation"
+    );
+    assertEquals(reportRecords.length, 0, "dropped reports are never stored");
+  },
+);

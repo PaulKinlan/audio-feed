@@ -22,6 +22,7 @@
 import type { AppContext } from "../app.ts";
 import type { Handler } from "../router.ts";
 import type { LogSeverity } from "../storage/mod.ts";
+import { createLogger } from "../log.ts";
 import { cleanString, MAX_LOG_MESSAGE_LENGTH, redactContext } from "../storage/log_shape.ts";
 import { readBoundedBody } from "../http.ts";
 import {
@@ -29,6 +30,7 @@ import {
   type RateLimitConfig,
   SlidingWindowRateLimiter,
 } from "../auth/rate_limit.ts";
+import { isTrustedReportOrigin } from "../origin.ts";
 
 /** Maximum payload size accepted on the reporting endpoint (64 KiB). */
 export const MAX_REPORT_PAYLOAD_BYTES = 64 * 1024;
@@ -336,6 +338,32 @@ export function createCspReportsHandler(
     }
 
     if (rawReports.length === 0) {
+      return new Response(null, { status: 204 });
+    }
+
+    // Audio-feed security hardening (audio-feed-cspreports):
+    // Browser CSP reporting requires cross-origin POSTs (access-control-allow-origin: *),
+    // but reports from untrusted or absent Origin headers must not consume the visitor's
+    // write budget (25 reports/window) or be mixed into their attribution. We accept
+    // the report body (responding 204) without consuming reports:budget:* or appending
+    // to the log store.
+    if (!isTrustedReportOrigin(ctx.config, req)) {
+      // Review delta (audio-feed-cspreports, coord ruling 2026-10-29): the drop must be
+      // VISIBLE. A silent 204 makes "no CSP violations today" indistinguishable from "every
+      // report was discarded by the origin policy" - the Origin-absence false negative this
+      // policy can produce. Narrated through the one logger seam (src/log.ts, the
+      // admin.view shape) so the record lands in the app's log store with the reason field
+      // carrying the origin value - or the literal "(absent)" - and an operator can tell
+      // the two cases apart. Deliberately not awaited: narrating must not delay the 204.
+      void createLogger({ sink: ctx.stores.metadata, process: "app" }).event(
+        "csp_report.origin_untrusted_dropped",
+        "CSP report dropped by the origin policy",
+        {
+          route: "/api/reports/csp",
+          reason: req.headers.get("origin") ?? "(absent)",
+          context: { reports: rawReports.length },
+        },
+      );
       return new Response(null, { status: 204 });
     }
 
