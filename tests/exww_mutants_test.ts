@@ -92,9 +92,11 @@ const runWithDerivedBound = async (scratch: string): Promise<RunOutcome> => {
 };
 
 Deno.test("audio-feed-ybwj7: the exww run bound ladder derives from observed bound-kills - attempt 1 is the original guard, every observed kill doubles the next", () => {
-  // MEASURED BASIS (audio-feed-8u4x1): the same unmutated proof ran 238.7s, 221.4s and 221.0s on
-  // three consecutive attempts under identical 240s guards - a FLAT cost per attempt (0.93x, then
-  // 1.00x), so the doubling below is load margin and the attempt-1 guard sits 0.5% above measured cost.
+  // MEASURED BASIS (audio-feed-8u4x1): a conditioned 12-attempt campaign of the unmutated proof
+  // (load1 recorded per attempt) measured p50 67.0s / p90 84.2s / p99 88.0s. The doubling below
+  // is load margin BY RULE: ratio 2 is the strictly-increasing floor's value (p99/p50 is 1.31),
+  // and the 240s attempt-1 guard is the r6hft quiet-guard FLOOR, not a measured cost - the data
+  // holds the floor honest (re-measured p99 over 240s moves it; the pin recomputes).
   // Attempt 1 keeps the original r6hft quiet guard - no widened up-front window.
   assertEquals(exwwRunBoundForAttempt(1), 240_000);
   // Each OBSERVED kill doubles the next attempt: the kill is the measurement.
@@ -162,6 +164,25 @@ Deno.test("audio-feed-8u4x1: the shipped ladder constants are the derivation of 
     EXWW_RUN_LADDER_RATIO,
     `the committed evidence derives ratio ${derivation.ratio} but the code ships ${EXWW_RUN_LADDER_RATIO}`,
   );
+  // The load-regime claim in docs/evidence/audio-feed-8u4x1/README.md ("load 1.69-4.74") rests on
+  // the per-attempt loads in this record - assert the band so the claim cannot drift from the
+  // evidence it rests on: every attempt carries numeric before/after loads inside the band.
+  for (
+    const a of raw.attempts as Array<{
+      load1Before?: number;
+      load1After?: number;
+    }>
+  ) {
+    assert(
+      typeof a.load1Before === "number" && typeof a.load1After === "number",
+      "every attempt must record numeric load1 before and after",
+    );
+    assert(
+      a.load1Before! >= 1.69 && a.load1Before! <= 4.74 && a.load1After! >= 1.69 &&
+        a.load1After! <= 4.74,
+      `the recorded loads must sit inside the stated quiet-to-moderate band, got ${a.load1Before}/${a.load1After}`,
+    );
+  }
   // The gate-budget rule the derivation enforces, restated against the SHIPPED ladder.
   assert(
     EXWW_RUN_BASE_GUARD_MS * EXWW_RUN_LADDER_RATIO ** (MAX_ATTEMPTS - 1) <= 5_400_000,

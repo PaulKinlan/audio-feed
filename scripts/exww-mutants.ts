@@ -421,7 +421,7 @@ export interface RunOutcome {
  *
  * Three attempts cap the ladder at 960s, inside the fleet's own 5400s gate budget.
  * MEASURED, NOT CHOSEN ANY MORE (audio-feed-8u4x1): a 12-attempt campaign of the unmutated
- * coao proof (docs/evidence/audio-feed-8u4x1/, 0 censored, load 1.7-4.7) measured p50 67.0s,
+ * coao proof (docs/evidence/audio-feed-8u4x1/, 0 censored, load1 1.69-4.74) measured p50 67.0s,
  * p90 84.2s, p99 88.0s. The stated rules derive ratio = max(2, ceil(p99/p50)) = 2 (p99/p50 is
  * 1.31, so the strictly-increasing FLOOR is what sets it - the 2x is margin by rule) and base
  * = max(240s, ceil-to-60s(p99)) = 240s. THE BASE'S BINDING TERM IS THE FLOOR: p99 rounds up to
