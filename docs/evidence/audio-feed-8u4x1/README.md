@@ -37,7 +37,7 @@ the 1-minute load average before/after, and the timestamp.
 ## The load regime, stated plainly
 
 The campaign ran 2026-10-29 ~07:07–07:22 UTC alongside the fleet's gates, and the observed 1-minute
-load average ranged **1.69–4.74** — quiet to moderate, NOT the 5–13 regime observed through
+load average ranged **1.68–4.74** — quiet to moderate, NOT the 5–13 regime observed through
 2026-10-28. The distribution above is honest for the regime it ran in, and the ladder is the
 mechanism for the heavier one: a load-driven tail does not move these constants, it produces
 bound-kills, and each observed kill doubles the next attempt's bound (audio-feed-ybwj7's
