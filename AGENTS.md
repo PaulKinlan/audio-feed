@@ -40,7 +40,13 @@ suites the derived relation names as reading it, and a core file nothing reaches
 suite by name. A suite that declares a WHOLE-TREE scan (a literal `Deno.readDir("src")` earns a directory
 relation key, `"src"` or `"src/"`) observes every file under it and is selected for ANY change under it
 (audio-feed-sru1b; the parameterised `scan("src")` shape earns nothing - the resolver cannot see through
-a parameter - so a scanner's ENTRY read carries the literal) - when a
+a parameter - so a scanner's ENTRY read carries the literal). A suite whose dynamic import's SPECIFIER
+is not a literal (`await import(name)`) is attributed to itself and selected for EVERY code change
+(audio-feed-8kiar): the specifier resolves at runtime, so nothing can prove what it reads, and a
+name-matched observer must not hide the drop the way it did once zyrug's hardcoded FULL fallback was
+gone; the gate output names the suite, and a literal specifier turns it back into an ordinary edge -
+followed by the relation's closure walk too, so a dynamically-imported module's own read sites are
+derived - when a
 changed src file has no covering test, when a changed script has importers but no reachable test,
 when a changed test helper (`tests/*.ts` that is not `*_test.ts`) is observed by NO suite - helpers
 select their observers now (audio-feed-3e4s0): the importers the reverse graph walks from the `tests/`

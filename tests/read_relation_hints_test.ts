@@ -1509,3 +1509,95 @@ Deno.test("audio-feed-yxvz: join() and Deno.realPath() derived from an out-of-re
     );
   });
 });
+
+// audio-feed-8kiar rows. The failure shape from the zyrug review: a dynamic-only reader of a module
+// earns no relation edge, so once ANY name-matched observer exists the selector covers the module and
+// the dynamic reader is silently dropped - the opposite of over-selection, and worse, because nothing
+// downstream notices. Three rows pin the two halves of the fix: literal dynamic imports are real edges
+// (the closure loads the module, so ITS reads are derived too), and a COMPUTED specifier is attributed
+// to the suite so the selector can fail closed instead of guessing.
+
+Deno.test("audio-feed-8kiar: a LITERAL dynamic import is an edge - the closure loads the module, so the module's own reads enter the relation", async () => {
+  const suite = "tests/dyn_test.ts";
+  await withTempTree({
+    "docs/x.md": "x\n",
+    // The module the suite loads dynamically reads a data file. Static-only closures never load this
+    // file, so the read was invisible and the data file had no derived reader at all.
+    "src/mod.ts": [
+      'const DOC = new URL("../docs/x.md", import.meta.url);',
+      "export function readDoc(): Promise<string> {",
+      "  return Deno.readTextFile(DOC);",
+      "}",
+    ].join("\n"),
+    [suite]: [
+      'const mod = await import("../src/mod.ts");',
+      'Deno.test("uses the module", async () => {',
+      "  await mod.readDoc();",
+      "});",
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [suite]);
+    assertEquals(
+      report.relations.get("docs/x.md"),
+      [suite],
+      "a data file read only inside a dynamically-imported module must name the importing suite as its reader",
+    );
+    assertEquals(
+      report.computedImportSuites,
+      [],
+      "a literal specifier is an ordinary edge, not a computed import",
+    );
+  });
+});
+
+Deno.test("audio-feed-8kiar: a dynamic import whose specifier is NOT a literal is attributed to the suite; string content is data, not a site", async () => {
+  const suite = "tests/computed_test.ts";
+  await withTempTree({
+    [suite]: [
+      'const name = Deno.env.get("MOD") ?? "";',
+      "const mod = await import(name);",
+      // The tts_hardening shape: an import( written into a generated child script is string content,
+      // not a site of THIS file - the same exclusion the read-call scanner applies.
+      'const child = `const m = await import(${JSON.stringify("../src/x.ts")});`;',
+      // And a literal dynamic import stays an ordinary edge.
+      'const known = await import("../src/known.ts");',
+    ].join("\n"),
+  }, async (root) => {
+    const report = await deriveReadRelationReport(root, [suite]);
+    assertEquals(
+      report.computedImportSuites,
+      [suite],
+      "the computed specifier must be attributed to the suite that holds it - the selector will fail closed on it",
+    );
+  });
+});
+
+Deno.test("audio-feed-8kiar: a name-matched observer no longer hides a computed-import reader - the suite fails closed into the selection", () => {
+  const changed = ["src/widget.ts"];
+  const named = new Map([["src/widget.ts", ["tests/widget_test.ts"]]]);
+  // The name match alone used to be the whole answer: the module was "covered" and the suite whose
+  // import resolves at runtime was dropped from the selection with nothing downstream noticing.
+  const withReader = planTests(
+    changed,
+    new Map(),
+    named,
+    new Map(),
+    [],
+    [],
+    ["tests/widget_behaviour_test.ts"],
+  );
+  assertEquals(
+    withReader.testFiles,
+    ["tests/widget_behaviour_test.ts", "tests/widget_test.ts"],
+    "the computed-import suite is selected ALONGSIDE the name-matched observer",
+  );
+  assertStringIncludes(
+    withReader.reason,
+    "computed-import",
+    "the reason must say why the suite runs, so a reader can see the fail-closed path",
+  );
+  // The regression record, kept deliberately: without the derivation naming the reader, this is the
+  // silent drop the bead exists about. If the fail-closed branch degrades, THIS assertion is what reds.
+  const without = planTests(changed, new Map(), named, new Map(), [], [], []);
+  assertEquals(without.testFiles, ["tests/widget_test.ts"]);
+});
