@@ -262,20 +262,23 @@ const STUCK_STATE_WAIT = (surfaceSel: string, baseKey: string, wantStuck: boolea
     return JSON.stringify({ reached: true, settled: true, ...state() });
   })()`;
 
-/** audio-feed-evhug (round two, after the deepseek review killed the blanket 8s race): the bound
- * ARMS ONLY ON OBSERVED ABSENCE OF PROGRESS, so a normal run never trips a timer - measured green
- * flips on this host swing 0.2s to 6.8s, and any fixed deadline near that is the flake class this
- * row exists to avoid. The monitor distinguishes:
+/** audio-feed-evhug (round two, after the deepseek review killed the blanket 8s race): only the
+ * STALL bound arms on observed absence of progress - ABSENCE is a flat ceiling measured FROM ENTRY
+ * (Date.now() - started), not from the last observation. So a normal run still never trips a timer -
+ * measured green flips on this host swing 0.2s to 6.8s, and any fixed deadline near that is the
+ * flake class this row exists to avoid. The monitor distinguishes:
  *   - PROGRESS: the page's published counter (window.__stuckWait.n) advances -> keep waiting,
  *     however slow (a starved renderer finishes transitions in fewer frames but more ms);
  *   - STALL: the counter is frozen > STALL_LIMIT_MS (20s) -> the renderer stopped painting ->
  *     throw, named, with the last observation. 20s is >1000 missed frames against a ~16ms frame
  *     and ~3x the entire worst measured green wait - the ~100x margin precedent
- *     (tests/grounded_script_test.ts:679) applied to the thing actually being bounded.
- *   - ABSENCE: the counter advances but the condition never lands for > ABSENCE_LIMIT_MS (45s) ->
- *     throw. 45s is ~6.6x the worst measured green flip (6.8s) and ~20x the typical - stated so
- *     the number is a decision, not a leftover; it is still 2.2x better than the ~100s frame cap
- *     and throws a NAMED diagnostic instead of returning a flag.
+ *     (tests/grounded_script_test.ts:679) applied to the thing actually being bounded. It treats a
+ *     total rAF pause as a hang: an assumption that fits this row, not a proven property.
+ *   - ABSENCE: the counter may well be advancing - this is 45s from ENTRY, not a timer armed after
+ *     progress stops - and the condition simply has not landed by ABSENCE_LIMIT_MS (45s) -> throw.
+ *     45s is ~6.6x the worst measured green flip (6.8s) and ~20x the typical - stated so the number
+ *     is a decision, not a leftover; it is still 2.2x better than the ~100s frame cap and throws a
+ *     NAMED diagnostic instead of returning a flag.
  * (P2 fixes from the same review: the pageWait loser of every race below gets a no-op catch so a
  * late rejection can never surface unhandled, and the no-observation fallback is JSON null - the
  * previous '"unavailable"' literal parsed truthy and printed scrollY=undefined.) */
@@ -343,11 +346,11 @@ async function stuckWithDeadline(
     }
     if (Date.now() - started > ABSENCE_LIMIT_MS) {
       throw new Error(
-        `${url}: the stuck ${phase} never landed within ${ABSENCE_LIMIT_MS / 1000}s of observed ` +
+        `${url}: the stuck ${phase} never landed within ${ABSENCE_LIMIT_MS / 1000}s of the wait ` +
           // (review round two) the whole observation segment is conditional: with nothing ever
           // published, interpolating obs?.scrollY renders "scrollY=undefined" - nonsense in the
           // one message whose entire job is to be actionable.
-          `progress (audio-feed-evhug; ${
+          `starting (audio-feed-evhug; ${
             obs
               ? `last observed: scrollY=${obs.scrollY}, rectTop=${obs.rectTop}, last styles=${
                 obs.key ?? "none"
