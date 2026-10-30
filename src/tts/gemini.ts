@@ -905,6 +905,10 @@ export function formatSpokenDate(date: string | Date): string {
  *
  * First words are the title, followed by publish date, author, and real metadata.
  * Awkward boilerplate ("The following is...") is removed.
+ *
+ * PROMPT-CENSUS:TRANSCRIPT-ONLY — the interpolated literals here carry publisher data
+ * to be SPOKEN and no instruction region, so this builder is declared (not fenced):
+ * see scripts/prompt-census.ts and tests/prompt_census_test.ts.
  */
 export function formatNarrationIntro(input: NarrationInput): string {
   if (input.customIntro) {
@@ -1384,6 +1388,10 @@ export function buildNarrationSystemPrompt(codeHandling: CodeHandling = "skip"):
 
 /**
  * Build the full prompt for single-voice narration (Stratechery style)
+ *
+ * PROMPT-CENSUS:TRANSCRIPT-ONLY — transcript text only, no instruction region, so the
+ * narration instructions stay in buildNarrationSystemPrompt's separate, uninterpolated
+ * system prompt; declared so the prompt census can pin it: see scripts/prompt-census.ts.
  */
 export function formatNarrationPrompt(input: NarrationInput): string {
   const includeIntro = input.includeIntro ?? true;
@@ -1457,6 +1465,10 @@ export function parseScriptIntoTurns(
 
 /**
  * Format a NotebookLM-style dialogue prompt between an expert and a curious foil
+ *
+ * PROMPT-CENSUS:TRANSCRIPT-ONLY — the article fields interpolated into the fallback
+ * turns are transcript text to be spoken, never instructions; declared so the prompt
+ * census can pin it: see scripts/prompt-census.ts and tests/prompt_census_test.ts.
  */
 export function formatDialoguePrompt(input: DialogueInput): FormattedDialogue {
   const speakers: [DialogueSpeaker, DialogueSpeaker] = input.speakers ?? [
