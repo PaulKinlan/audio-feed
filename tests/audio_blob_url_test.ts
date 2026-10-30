@@ -37,6 +37,7 @@ function perKeyStore(inner: Stores["blobs"]): Stores["blobs"] {
     delete: (key) => inner.delete(key),
     get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
     url: (key) => Promise.resolve(key.endsWith(".mp3") ? `https://cdn.example.com/${key}` : null),
+    directUrlOrigin: () => "https://cdn.example.com",
   };
 }
 

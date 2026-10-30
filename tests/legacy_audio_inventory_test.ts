@@ -50,6 +50,8 @@ function wrapBlobs(blobs: Stores["blobs"], overrides: Partial<Stores["blobs"]>):
     head: (k) => overrides.head ? overrides.head(k) : blobs.head(k),
     delete: (k) => overrides.delete ? overrides.delete(k) : blobs.delete(k),
     url: (k, opts) => overrides.url ? overrides.url(k, opts) : blobs.url(k, opts),
+    directUrlOrigin: () =>
+      overrides.directUrlOrigin ? overrides.directUrlOrigin() : blobs.directUrlOrigin(),
     put: (k, body, opts) => overrides.put ? overrides.put(k, body, opts) : blobs.put(k, body, opts),
     putIfAbsent: (k, body, opts) =>
       overrides.putIfAbsent
