@@ -371,7 +371,8 @@ export interface SynthesisOptions {
 
 export type RetryPolicy = "none" | "transient" | "all";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Exponential backoff with jitter, honouring Retry-After when the API sends one.
@@ -448,6 +449,12 @@ export interface GeminiTtsClientConfig {
   retryOn?: RetryPolicy;
   /** Base backoff in ms, doubled per attempt and jittered (default 250). */
   retryBaseDelayMs?: number;
+  /**
+   * The retry wait itself (default a real `setTimeout`). Injected so a test can assert the
+   * DELAY THE PRODUCT COMPUTED - the honour-Retry-After row asserts 0ms against a 60s base -
+   * instead of proving it by out-waiting a real clock (docs/speed.md census row 6).
+   */
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -1896,6 +1903,7 @@ export class GeminiTtsClient {
   private timeoutRetries: number;
   private retryOn: RetryPolicy;
   private retryBaseDelayMs: number;
+  private sleepFn: (ms: number) => Promise<void>;
 
   constructor(config: GeminiTtsClientConfig = {}) {
     let envKey: string | undefined;
@@ -1922,6 +1930,7 @@ export class GeminiTtsClient {
     this.timeoutRetries = config.timeoutRetries ?? DEFAULT_TIMEOUT_RETRIES;
     this.retryOn = config.retryOn ?? "transient";
     this.retryBaseDelayMs = config.retryBaseDelayMs ?? 250;
+    this.sleepFn = config.sleepFn ?? sleep;
   }
 
   getBaseUrl(): string {
@@ -2166,13 +2175,13 @@ export class GeminiTtsClient {
           : error;
         if (timedOut && timeoutRetries < maxTimeoutRetries) {
           timeoutRetries++;
-          await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+          await this.sleepFn(backoffMs(attempt, this.retryBaseDelayMs, null));
           continue;
         }
         // Other network failures stay opt-in (`retryOn: "all"`) — a retry may double-charge.
         if (!timedOut && retryOn === "all" && statusRetries < maxStatusRetries) {
           statusRetries++;
-          await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+          await this.sleepFn(backoffMs(attempt, this.retryBaseDelayMs, null));
           continue;
         }
         throw lastError;
@@ -2198,7 +2207,7 @@ export class GeminiTtsClient {
             // never-retried body read is why one slow segment ended the episode.
             if (timeoutRetries < maxTimeoutRetries) {
               timeoutRetries++;
-              await sleep(backoffMs(attempt, this.retryBaseDelayMs, null));
+              await this.sleepFn(backoffMs(attempt, this.retryBaseDelayMs, null));
               continue;
             }
             throw lastError;
@@ -2260,7 +2269,9 @@ export class GeminiTtsClient {
           (retryOn === "all" && res.status >= 500));
       if (!retryable) throw lastError;
       statusRetries++;
-      await sleep(backoffMs(attempt, this.retryBaseDelayMs, res.headers.get("retry-after")));
+      await this.sleepFn(
+        backoffMs(attempt, this.retryBaseDelayMs, res.headers.get("retry-after")),
+      );
     }
   }
 }
