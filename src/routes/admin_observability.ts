@@ -53,12 +53,11 @@ export const OBSERVABILITY_PAGE_CSS = `
 .phase-pill { display: inline-block; padding: 0.1rem 0.4rem; background: var(--bg-subtle, #f3f4f6); border-radius: 4px; font-size: 0.85em; font-family: monospace; }
 `;
 
-/** Same headers as the admin console: never cached, never indexed, no referrer. */
+/** Same headers as the admin console: never cached, never indexed, no referrer (set by htmlResponse). */
 function baseHeaders(originIsExplicit: boolean): HeadersInit {
   return {
     "cache-control": "no-store",
     ...(originIsExplicit ? {} : { vary: "Host" }),
-    "referrer-policy": "no-referrer",
     "x-robots-tag": "noindex",
   };
 }

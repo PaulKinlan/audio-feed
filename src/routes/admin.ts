@@ -456,8 +456,7 @@ export async function handleAdmin({ ctx, req }: RouteContext<AppContext>): Promi
     "cache-control": "no-store",
     ...(origin.explicit ? {} : { vary: "Host" }),
     // Not a security boundary by itself, but it keeps the console out of
-    // indexes and stops credentials leaking through referrers.
-    "referrer-policy": "no-referrer",
+    // indexes. (Referrer-policy: no-referrer is provided by htmlResponse default, audio-feed-fhnrr).
     "x-robots-tag": "noindex",
   };
 

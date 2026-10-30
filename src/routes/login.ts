@@ -239,8 +239,6 @@ export async function handleLogin({ ctx, req, url }: RouteContext<AppContext>): 
   return htmlResponse(html, nonce, {
     headers: {
       "cache-control": "no-store",
-      // The fragment is never sent in a Referer, but say so anyway.
-      "referrer-policy": "no-referrer",
     },
   });
 }

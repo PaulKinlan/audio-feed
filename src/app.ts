@@ -220,7 +220,6 @@ export function createRouter(
         {
           headers: {
             "cache-control": "no-store",
-            "referrer-policy": "no-referrer",
           },
         },
       );

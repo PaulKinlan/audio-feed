@@ -22,7 +22,6 @@ function baseHeaders(originIsExplicit: boolean): HeadersInit {
   return {
     "cache-control": "no-store",
     ...(originIsExplicit ? {} : { vary: "Host" }),
-    "referrer-policy": "no-referrer",
     "x-robots-tag": "noindex",
   };
 }

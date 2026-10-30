@@ -15,6 +15,7 @@ import { AUDIO_RATE_LIMIT, isAllowedAudioKey, MAX_FANOUT_CANDIDATES } from "../s
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bytes, makeUser } from "./fixtures.ts";
+import { htmlResponse } from "../src/routes/csp.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -85,7 +86,8 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
       "style-src 'self' 'nonce-",
       `${path} CSP missing style-src nonce`,
     );
-    assertStringIncludes(csp!, "media-src 'self' blob: https:", `${path} CSP missing media-src`);
+    assertStringIncludes(csp!, "img-src 'self' data:", `${path} CSP missing img-src`);
+    assertStringIncludes(csp!, "media-src 'self' blob:", `${path} CSP missing media-src`);
     assertStringIncludes(csp!, "connect-src 'self'", `${path} CSP missing connect-src`);
     await res.body?.cancel();
   }
@@ -106,6 +108,70 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
   assertEquals(accountRes.headers.get("x-frame-options"), "DENY");
   assertEquals(accountRes.headers.get("x-content-type-options"), "nosniff");
   await accountRes.body?.cancel();
+});
+
+Deno.test("CSP (audio-feed-327mm): img-src and media-src are exactly the chosen set ('self' data: and 'self' blob:)", async () => {
+  const { fetch } = setupTestApp();
+
+  // Test public HTML landing page
+  const res = await fetch(new Request(`${BASE}/`));
+  const csp = res.headers.get("content-security-policy");
+  assert(csp, "missing content-security-policy");
+
+  const directives = new Map(
+    csp.split(";").map((d) => {
+      const trimmed = d.trim();
+      const space = trimmed.indexOf(" ");
+      return space === -1 ? [trimmed, ""] : [trimmed.slice(0, space), trimmed.slice(space + 1)];
+    }),
+  );
+
+  // Exact set assertions: any future widening (e.g. re-adding wildcard https:) fails here
+  assertEquals(directives.get("img-src"), "'self' data:", "img-src must be exactly 'self' data:");
+  assertEquals(directives.get("media-src"), "'self' blob:", "media-src must be exactly 'self' blob:");
+  assertEquals(directives.get("img-src")?.includes("https:"), false, "img-src must not contain wildcard https:");
+  assertEquals(directives.get("media-src")?.includes("https:"), false, "media-src must not contain wildcard https:");
+  await res.body?.cancel();
+});
+
+Deno.test("Referrer-Policy (audio-feed-fhnrr): htmlResponse attaches no-referrer by default without manual route header", async () => {
+  // 1. Direct htmlResponse constructor with no headers or options sets no-referrer default
+  const direct = htmlResponse("<!doctype html><html></html>", "testnonce");
+  assertEquals(
+    direct.headers.get("referrer-policy"),
+    "no-referrer",
+    "htmlResponse must attach referrer-policy: no-referrer by default",
+  );
+
+  // 2. An actual route (home page /) that never manually sets referrer-policy receives it from htmlResponse
+  const { fetch } = setupTestApp();
+  const homeRes = await fetch(new Request(`${BASE}/`));
+  assertEquals(
+    homeRes.headers.get("referrer-policy"),
+    "no-referrer",
+    "home page must carry referrer-policy: no-referrer via htmlResponse default without manual route setting",
+  );
+  await homeRes.body?.cancel();
+
+  // 3. Explicit opt-out via referrerPolicy: null removes the header
+  const optedOut = htmlResponse("<!doctype html><html></html>", "testnonce", {
+    referrerPolicy: null,
+  });
+  assertEquals(
+    optedOut.headers.get("referrer-policy"),
+    null,
+    "htmlResponse with referrerPolicy: null must not attach referrer-policy",
+  );
+
+  // 4. Custom policy override via referrerPolicy option
+  const custom = htmlResponse("<!doctype html><html></html>", "testnonce", {
+    referrerPolicy: "strict-origin-when-cross-origin",
+  });
+  assertEquals(
+    custom.headers.get("referrer-policy"),
+    "strict-origin-when-cross-origin",
+    "htmlResponse must honour custom referrerPolicy option",
+  );
 });
 
 /**

@@ -738,7 +738,6 @@ export async function handleListen(
     headers: {
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
       "x-robots-tag": "noindex",
       "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
     },
