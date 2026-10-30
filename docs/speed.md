@@ -122,10 +122,20 @@ ratio suggests.
 
 ### Gate wall time cannot detect a cost regression below roughly 4x
 
-Four full gates over the same ~2400-test suite set, one day, no change in suite count: **10m32s /
-14m44s / 34m35s / 43m35s**. That is a 4x spread on identical work — host and hypervisor contention
-dominates wall time, and the longer figure is the `3384e2eb` run itself (2591 s `run_s`, 41m33s of
-test time). The ten-run table above shows the same shape over a longer window (1580 s to 4830 s).
+Four full gates over the same ~2400-test suite set, all between 15:07Z and 16:57Z on 2026-10-29.
+Each figure is the test-phase duration in that gate's own summary line, and each resolves to its own
+job record:
+
+| Test-phase time | Job record                                                                       | Same summary line in that log         |
+| --------------- | -------------------------------------------------------------------------------- | ------------------------------------- |
+| 10m32s          | `f8fc0472e2d4dd9fb39d713d84f3e65a74e8eb58` (run_s 660, sha `ff19542d`, PASS)      | 2402 passed / 0 failed / 2 ignored    |
+| 14m44s          | `d2f1e1011cd2d58e312673a188b57a326aeff36a` (run_s 958, sha `4efecfae`, PASS)      | 2400 passed / 0 failed / 2 ignored    |
+| 34m35s          | `b94f4b4eb9fc1bd9d55168fe87413104c97b8d3b` (run_s 2147, sha `7d0445cb`, FAIL)     | 2399 passed / 1 failed / 2 ignored    |
+| 43m35s          | `f301171b4acacac9dbcdf9de30a9d18216b08a18` (run_s 2761, sha `ed00fa6b`, PASS)     | 2400 passed / 0 failed / 2 ignored    |
+
+That is a 4x spread on identical work: host and hypervisor contention dominates wall time, and the
+difference is not in the suite set the four runs carried. The ten-run table above shows the same shape
+over a longer window (1580 s to 4830 s).
 
 The contract consequence: **gate wall time is not a reliable signal of a test-cost regression below
 roughly a 4x movement.** A change that doubles one suite's cost is invisible in gate wall time, so
@@ -150,8 +160,11 @@ kills was selection width times host speed, not any single suite.
 ### Claims this section supersedes
 
 1. **"The two scanners are the fast gate's cost."** Replaced by the 10.4 s combined measurement
-   above, and by the cause of the 903 s kill: selection width (22 suites) x host speed on a loaded
-   host. The scanners were never the weight.
+   above, and by what the 903 s kill was actually spending its bound on: that record had widened to
+   23 test files (`fast-check: 23 test file(s)` in
+   `~/.fleet/checks/a6d549428c32409198fc12021b20c692a882025e.fast.log`, the `run_s=903` job cited in
+   the previous section), so the wall time was selection width on a loaded host, not one heavy suite.
+   The scanners were never the weight.
 2. **"Two whole-tree scanners."** Replaced by three — `error_screen_test`, `security_audit_test`
    and `tokens_test`. The two-element set is one of the two keys (`src/`), not the whole scanner
    set; `tokens_test` earns the bare `src` key.
