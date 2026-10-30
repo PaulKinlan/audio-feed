@@ -131,11 +131,21 @@ async function waitFor(
   timeoutMs = 5000,
   intervalMs = 5,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
       const details = typeof describe === "function" ? describe() : describe;
-      throw new Error(`timed out waiting ${timeoutMs}ms for ${details}`);
+      // audio-feed-zy3j round two: never a bare "timed out waiting Nms". Name what was waited
+      // for (a lazy describe can report the hook's state AT expiry), the elapsed time, and both
+      // deadline instants, so a loaded-host red is diagnosable from the gate log alone.
+      throw new Error(
+        `waitFor: ${details} did not hold within ${timeoutMs}ms of entry ` +
+          `(entry ${new Date(startedAt).toISOString()}, deadline ${
+            new Date(deadline).toISOString()
+          }, ` +
+          `elapsed ${Date.now() - startedAt}ms)`,
+      );
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
@@ -2145,7 +2155,26 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
-  await waitFor(() => putEntered, "put hook entered", 5000);
+  // audio-feed-zy3j round two (reddened once inside a 66-minute full gate on a loaded host,
+  // passed focused and in eight other sampled gates): the wait is an OBSERVED CONDITION - this
+  // test's own put hook flipping putEntered - so it returns the instant the hook is entered;
+  // only the failure ceiling was a fixed 5000ms guess. Follow the evhug/s3uk shape: a 45s
+  // ABSENCE ceiling measured from the start of this row's own action (waitFor is entered
+  // synchronously right after the batch kickoff, so its deadline IS the action's deadline),
+  // a 5ms poll - the deadline is a failure bound, not a delay - and an expiry that names the
+  // hook state (audio-feed-evhug ceiling, audio-feed-s3uk poll).
+  await waitFor(
+    () => putEntered,
+    () =>
+      `the put hook to be entered (putEntered=${putEntered}; putSignal=${
+        putSignal === undefined
+          ? "not received"
+          : putSignal.aborted
+          ? "received+aborted"
+          : "received, not aborted"
+      })`,
+    45_000,
+  );
   const result = await batchPromise;
   assert(putEntered, "put hook must be entered");
   assert(putSignal !== undefined, "put hook must receive an AbortSignal");
