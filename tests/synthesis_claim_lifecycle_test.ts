@@ -2251,6 +2251,83 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
   assertEquals(count, 0, "daily synthesis count must not be recorded when budget exceeded");
 });
 
+Deno.test("audio-feed-preput: invocation budget deadline aborts deterministically pre-put before storage upload begins", async () => {
+  const { ctx, stores } = await setupEnv();
+  const time = controlledInvocationClock();
+
+  let putCount = 0;
+  const originalPut = stores.blobs.put.bind(stores.blobs);
+  stores.blobs.put = (...args) => {
+    putCount++;
+    return originalPut(...args);
+  };
+
+  // Intercept reserveSynthesisSegment (the durable store write right before blobs.put)
+  // to advance the virtual clock past the budget before blobs.put can be entered.
+  const originalReserve = stores.metadata.reserveSynthesisSegment.bind(stores.metadata);
+  stores.metadata.reserveSynthesisSegment = async (...args) => {
+    const res = await originalReserve(...args);
+    // Fire the 250ms deadline virtually during pre-put durable reservation:
+    // the deadline expires before blobs.put is ever called (audio-feed-wnv8 ordering).
+    await time.advance(250);
+    return res;
+  };
+
+  // Capture the abort reason from the AbortController armed by withInvocationBudget
+  let abortReason: unknown;
+  const originalAbort = AbortController.prototype.abort;
+  AbortController.prototype.abort = function (reason) {
+    abortReason = reason;
+    return originalAbort.call(this, reason);
+  };
+
+  let result: Awaited<ReturnType<typeof runSynthesisBatch>>;
+  try {
+    result = await runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
+      owner: "review-preput-abort-pins-order",
+      maxInvocationDurationMs: 250,
+      estimatedTurnDurationMs: 1,
+      estimatedUploadDurationMs: 1,
+      flushMarginMs: 5,
+      clock: time.clock,
+    });
+  } finally {
+    AbortController.prototype.abort = originalAbort;
+  }
+
+  // ORDER PROPERTY: blobs.put was never entered because the pre-put check aborted first
+  assertEquals(putCount, 0, "blobs.put must never be entered on pre-put deadline abort");
+
+  // INVOCATION RESULT: yields cleanly rather than completing
+  assertEquals(
+    result.ready.length,
+    0,
+    "episode must not be completed ready when budget exceeded pre-put",
+  );
+  assertEquals(result.yielded.length, 1, "episode must cleanly yield when budget exceeded pre-put");
+
+  // ABORT REASON: must be InvocationBudgetAbortError containing "deadline"
+  assert(
+    isInvocationBudgetAbort(abortReason),
+    "abort reason must be an InvocationBudgetAbortError",
+  );
+  assertStringIncludes(
+    (abortReason as Error)?.message ?? "",
+    "deadline",
+    "abort reason must be deadline expiry, not preflight refusal",
+  );
+
+  // NO BILLING OCCURRED
+  const today = new Date().toISOString().slice(0, 10);
+  const count = await stores.metadata.getDailySynthesisCount(today);
+  assertEquals(count, 0, "daily synthesis count must not be recorded when budget exceeded pre-put");
+
+  // METADATA STATE: episode stays pending and phase is upload_retry
+  const episode = await stores.metadata.getEpisode("user-1", "episode-1");
+  assertEquals(episode?.status, "pending", "episode must remain pending after pre-put yield");
+  assertEquals(episode?.phase, "upload_retry", "episode phase must indicate upload retry");
+});
+
 Deno.test("audio-feed-uecw: terminal completion commits episode ready and billing counters in a single atomic transaction", async () => {
   const { ctx, stores } = await setupEnv();
   const today = new Date().toISOString().slice(0, 10);
