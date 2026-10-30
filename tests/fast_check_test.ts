@@ -899,7 +899,8 @@ FAILED | 1 passed | 1 failed (5ms)
 
   const markers = failureMarkers(sample, ["tests/account_test.ts"]);
   assertEquals(markers, [
-    "fast-gate: failed: tests/account_test.ts (account deletion fails)",
+    "fast-gate: failed: tests/account_test.ts",
+    "fast-gate: failing-test: tests/account_test.ts: account deletion fails",
   ]);
 });
 
@@ -926,7 +927,8 @@ FAILED | 0 passed | 1 failed
 
   const markers = failureMarkers(sample);
   assertEquals(markers, [
-    "fast-gate: failed: tests/corrupt_test.ts ((uncaught error))",
+    "fast-gate: failed: tests/corrupt_test.ts",
+    "fast-gate: failing-test: tests/corrupt_test.ts: (uncaught error)",
   ]);
 });
 
@@ -941,7 +943,8 @@ interrupted test case ... FAILED (10ms)
 
   const markers = failureMarkers(sample, ["tests/interrupted_test.ts"]);
   assertEquals(markers, [
-    "fast-gate: failed: tests/interrupted_test.ts (interrupted test case)",
+    "fast-gate: failed: tests/interrupted_test.ts",
+    "fast-gate: failing-test: tests/interrupted_test.ts: interrupted test case",
   ]);
 });
 
@@ -949,13 +952,16 @@ Deno.test("failureMarkers emits unextracted diagnostic without fragile heuristic
   // Single suite known
   assertEquals(
     failureMarkers("", ["tests/single_test.ts"]),
-    ["fast-gate: failed: tests/single_test.ts (unextracted test)"],
+    [
+      "fast-gate: failed: tests/single_test.ts",
+      "fast-gate: failing-test: tests/single_test.ts: unextracted test",
+    ],
   );
 
   // Multiple suites (cannot guess)
   assertEquals(
     failureMarkers("", ["tests/a_test.ts", "tests/b_test.ts"]),
-    ["fast-gate: failed: (unextracted test)"],
+    ["fast-gate: failing-test: unknown: unextracted test"],
   );
 });
 
@@ -1106,7 +1112,8 @@ Deno.test("psjb: a FAILING run's coverage note names the suites that ran, not ze
     "fast-gate: selection audit ok: 103 full-gate module(s), 103 fast-selectable",
     "fast-check: 2 test file(s) (affected by: src/a.ts, tests/b_test.ts)",
     "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
-    "fast-gate: failed: tests/b_test.ts (some assertion)",
+    "fast-gate: failed: tests/b_test.ts",
+    "fast-gate: failing-test: tests/b_test.ts: some assertion",
     "fast-gate: coverage: ran 2 suite(s): tests/a_test.ts tests/b_test.ts",
   ].join("\n");
 
@@ -1130,7 +1137,7 @@ Deno.test("psjb: a gate that never reached the harness says NO INFORMATION, not 
   // A lint failure means the note has no information rather than no coverage; saying so is what stops a
   // lane reading "unmapped: everything" after a lint error and hunting a coverage bug that does not exist.
   const stoppedLog = [
-    "fast-gate: failed: lint",
+    "fast-gate: FAILED: lint",
     "fast-gate: coverage: UNKNOWN - the gate stopped before the test harness: lint",
   ].join("\n");
   const note = coverageNoteFromLog(stoppedLog);
@@ -1459,7 +1466,7 @@ Deno.test(
       "synthetic selection must exit non-zero (code 2)",
     );
     assert(
-      stderr.includes("fast-gate: failed: synthetic selection refused"),
+      stderr.includes("fast-gate: FAILED: synthetic selection refused"),
       `stderr must report refusal: ${stderr}`,
     );
     assert(
@@ -1554,8 +1561,9 @@ Deno.test("audio-feed-vdys: changedFiles API cannot be short-circuited programma
 Deno.test("audio-feed-m4vi: a failing test name containing 'passed:' never pollutes the coverage note", () => {
   const log = [
     "fast-gate: ran: tests/a_test.ts tests/b_test.ts",
-    "fast-gate: failed: tests/b_test.ts (some assertion with passed: words and spaces)",
-    "fast-gate: failed: lint",
+    "fast-gate: failed: tests/b_test.ts",
+    "fast-gate: failing-test: tests/b_test.ts: some assertion with passed: words and spaces",
+    "fast-gate: FAILED: lint",
     "fast-gate: coverage: ran 2 suite(s): tests/a_test.ts tests/b_test.ts",
   ].join("\n");
 
@@ -1567,6 +1575,78 @@ Deno.test("audio-feed-m4vi: a failing test name containing 'passed:' never pollu
     coverageNoteFromLog(log),
     "2 suite(s) ran: tests/a_test.ts tests/b_test.ts",
     "a failing test name containing 'passed:' must not pollute the coverage note",
+  );
+});
+
+/**
+ * The HOST's suite reader (`remote/check-coverage.py`), reproduced only to pin OUR OWN output against it.
+ *
+ * This is not a coverage classifier and must not become one (hub ruling, 2026-10-15 - the repo's
+ * classifier was deleted with audio-feed-toxg): it extracts nothing, it asserts what the gate writes.
+ * The rule is: a marker line whose keyword is in this set carries a SUITE LIST, split on whitespace, and
+ * each token has quotes/brackets stripped before it is recorded.
+ */
+const HOST_SUITE_MARKER = /^fast-gate:\s*(?:running|ran|passed|completed|failed):\s*(.*)$/;
+
+function suiteTokensTheHostWouldRecord(log: readonly string[]): string[] {
+  const tokens: string[] = [];
+  for (const line of log) {
+    const m = HOST_SUITE_MARKER.exec(line);
+    if (!m) continue;
+    for (const raw of m[1]!.split(" ")) {
+      const item = raw.replace(/^["',;()[\]{}]+/, "").replace(/["',;()[\]{}]+$/, "");
+      if (item && !item.startsWith("-")) tokens.push(item);
+    }
+  }
+  return tokens;
+}
+
+Deno.test("garbagenames: a failing run's marker lines hand the host only real suite paths (fleet-zq9cc)", async () => {
+  // The EXACT tail of the gate run at .fleet/checks/bc781c0386696d6b4e99d08cd26129515a1b35cf (tree
+  // 706d9b87): two suites selected, one red row whose TITLE is prose. Its recorded coverage list was
+  // `audio-feed-zy3j: bound budget completion delay exceeds fires invocation mirror terminal when` PLUS
+  // the real files - the title's own words, harvested as eleven suites.
+  const redRun = [
+    "fast-gate: ran: tests/bare_name_relation_test.ts tests/synthesis_claim_lifecycle_test.ts",
+    ...failureMarkers(
+      `\nrunning 1 test from ./tests/synthesis_claim_lifecycle_test.ts
+` +
+        `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror) ... FAILED (45s)
+
+ FAILURES 
+
+` +
+        `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror) => ./tests/synthesis_claim_lifecycle_test.ts:2181:6
+
+FAILED | 367 passed | 1 failed (520s)
+`,
+      ["tests/bare_name_relation_test.ts", "tests/synthesis_claim_lifecycle_test.ts"],
+    ),
+    "fast-gate: coverage: ran 2 suite(s): tests/bare_name_relation_test.ts tests/synthesis_claim_lifecycle_test.ts",
+  ];
+
+  const recorded = suiteTokensTheHostWouldRecord(redRun);
+
+  // Every token the host would record must BE a suite: a real file in this repo, nothing else.
+  for (const suite of recorded) {
+    const stat = await Deno.stat(new URL(`../${suite}`, import.meta.url)).catch(() => null);
+    assert(
+      stat?.isFile === true,
+      `'${suite}' was recorded as a suite name but is not a file in the repo - the gate emitted prose on a suite marker line`,
+    );
+  }
+
+  // The fail-closed tier is NOT narrowed to make that true: the whole selected set is still named,
+  // including the suite that failed (audio-feed-bko2q - under-selection is worse than slowness).
+  assertEquals(recorded, [
+    "tests/bare_name_relation_test.ts",
+    "tests/synthesis_claim_lifecycle_test.ts",
+    "tests/synthesis_claim_lifecycle_test.ts",
+  ]);
+  assertEquals(
+    redRun.some((l) => l.includes("audio-feed-zy3j:")),
+    true,
+    "the failing test's NAME must still be in the log - it is moved, not dropped",
   );
 });
 

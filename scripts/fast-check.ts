@@ -617,12 +617,43 @@ export function extractFailingTests(output: string): FailingTest[] {
 }
 
 /**
- * Machine-readable failure marker naming the failing suite and test.
- * Structured so log parsers / coverage tools can extract the failing suite
- * while keeping the failing test name prominent in the gate's tail.
+ * The keyword every `fast-gate: <keyword>:` marker line uses when its payload is a SUITE LIST.
+ *
+ * The fleet's `remote/check-coverage.py` reads a suite list out of a marker line with
+ * `/^fast-gate:\s*(?:running|ran|passed|completed|failed):\s*(.*)$/` and then splits the payload on
+ * WHITESPACE. Any word on such a line therefore becomes a suite name. `failing-test:` and `FAILED:`
+ * below are deliberately absent from that keyword set for exactly that reason - they carry prose.
  */
-export function failureMarker(file: string, testName: string): string {
-  return `fast-gate: failed: ${file} (${testName})`;
+
+/**
+ * Machine-readable failure marker naming the failing SUITE - the suite list, and nothing else.
+ *
+ * The failing TEST NAME used to live here too, in parentheses (`... test.ts (name words)`), which put
+ * every word of the name into the host's suite list: the run at `.fleet/checks/bc781c0386696d6b4e99d08cd26129515a1b35cf`
+ * recorded `audio-feed-zy3j: bound budget completion delay exceeds fires invocation mirror terminal when`
+ * as eleven extra "suites" because the red row was titled "audio-feed-zy3j: terminal completion
+ * invocation bound fires when delay exceeds budget (mirror)" (fleet-zq9cc, audio-feed-toxg). The name
+ * is emitted by `failingTestMarker()` on its own line, under a keyword the suite regex does not match.
+ */
+export function failureMarker(file: string): string {
+  return `fast-gate: failed: ${file}`;
+}
+
+/**
+ * The failing test NAME, on a line no suite reader tokenises (`failing-test:` is not a suite keyword).
+ * `file` is null when the run's output named no suite at all.
+ */
+export function failingTestMarker(file: string | null, testName: string): string {
+  return `fast-gate: failing-test: ${file ?? "unknown"}: ${testName}`;
+}
+
+/**
+ * A failure that names NO suite: an entry guard refusing to run, or a cheap step (fmt/lint/type-check)
+ * failing before any test executed. Two reasons this is not the `failed:` keyword: there is no suite to
+ * name, and its prose ("deno task check", a guard message) would be recorded as suite names.
+ */
+export function failureNotice(text: string): string {
+  return `fast-gate: FAILED: ${text}`;
 }
 
 /**
@@ -706,19 +737,27 @@ export function failureMarkers(
   }
   const failures = extractFailingTests(stdout);
   if (failures.length > 0) {
-    return failures.map((f) => {
+    const lines: string[] = [];
+    for (const f of failures) {
       const file = f.file ??
-        (fallbackFiles && fallbackFiles.length === 1 ? fallbackFiles[0]! : "unknown");
-      return failureMarker(file, f.name);
-    });
+        (fallbackFiles && fallbackFiles.length === 1 ? fallbackFiles[0]! : null);
+      // The suite line only ever carries a path (see failureMarker): with no suite to name there is
+      // nothing a coverage reader may be handed, so only the name line is emitted.
+      if (file !== null) lines.push(failureMarker(file));
+      lines.push(failingTestMarker(file, f.name));
+    }
+    return lines;
   }
   // When runner stdout could not be parsed for specific test failures (e.g. killed
   // or aborted before formatting failures), do not guess with fragile heuristics:
   // state that it was unextracted.
   if (fallbackFiles && fallbackFiles.length === 1) {
-    return [`fast-gate: failed: ${fallbackFiles[0]} (unextracted test)`];
+    return [
+      failureMarker(fallbackFiles[0]!),
+      failingTestMarker(fallbackFiles[0]!, "unextracted test"),
+    ];
   }
-  return ["fast-gate: failed: (unextracted test)"];
+  return [failingTestMarker(null, "unextracted test")];
 }
 
 /**
@@ -1306,7 +1345,7 @@ if (import.meta.main) {
   // exit status, so nothing was ever installed and nothing was ever said about it.)
   const prepushGuard = await prepushGuardStatus(ROOT);
   if (prepushGuard.state === "not-armed") {
-    console.error(`fast-gate: failed: ${guardNotArmedMessage(prepushGuard)}`);
+    console.error(failureNotice(guardNotArmedMessage(prepushGuard)));
     Deno.exit(1);
   }
   if (prepushGuard.state === "not-a-worktree") {
@@ -1322,7 +1361,9 @@ if (import.meta.main) {
     // audio-feed-8rz5: Any synthetic selection must fail closed immediately with exit code 2
     // so no automated gate or reader (e.g. fleet-check:430) can ever record or cache it as PASS.
     console.error(
-      "fast-gate: failed: synthetic selection refused — --untracked-only is not a supported gate mode (audio-feed-8rz5)",
+      failureNotice(
+        "synthetic selection refused — --untracked-only is not a supported gate mode (audio-feed-8rz5)",
+      ),
     );
     Deno.exit(2);
   }
@@ -1350,7 +1391,9 @@ if (import.meta.main) {
   const skipTypeCheck = Deno.args.includes("--skip-type-check");
   if (skipTypeCheck && !fmtFixture) {
     console.error(
-      "fast-gate: failed: --skip-type-check refused without --fmt-fixture <path> — skipping the type-check is honoured only for the integration-test fixture mode (audio-feed-efgpr, audio-feed-i8e0z)",
+      failureNotice(
+        "--skip-type-check refused without --fmt-fixture <path> — skipping the type-check is honoured only for the integration-test fixture mode (audio-feed-efgpr, audio-feed-i8e0z)",
+      ),
     );
     Deno.exit(2);
   }
@@ -1497,7 +1540,7 @@ ${auditUniverseDrift}`);
     }
     const res = await run(step);
     if (res.code !== 0) {
-      console.log(`fast-gate: failed: ${step.slice(1).join(" ")}`);
+      console.log(failureNotice(step.slice(1).join(" ")));
       cheapStepsFailed = true;
     }
   }
