@@ -7,8 +7,9 @@
  * transcript-only, and the batch continuation prompt interpolates app-computed values only.
  * Nothing stopped the NEXT prompt site from interpolating raw — "which functions build
  * prompts" lived in reviewers' heads. This census makes the set a derived fact and pins it
- * with exact-set equality, so a NEW prompt site reds the row and forces a decision instead
- * of shipping silently.
+ * with exact-set equality, so a new prompt built as an instruction-marker block or an
+ * output-contract literal DOES red and names the site; a single INTERLEAVED literal carrying
+ * an instruction with no output-contract phrase is INVISIBLE (a declared blind spot).
  *
  * The shape follows tests/evidence_census_test.ts and tests/chrome_profile_sweep_sites_test.ts:
  * the predicate lives in scripts/prompt-census.ts with declared limits, synthetic rows pin its
@@ -205,6 +206,32 @@ export function secondUndeclared(name: string): string {
     "the marker must not leak past the function it documents",
   );
 });
+
+Deno.test(
+  "DECLARED LIMIT: a single interleaved instruction literal without output contract is invisible",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "prompt-census-blindspot-" });
+    try {
+      await Deno.mkdir(`${tempDir}/src`, { recursive: true });
+      await Deno.writeTextFile(
+        `${tempDir}/src/blind_spot_prompt.ts`,
+        `
+export function buildInterleavedPrompt(article: string): string {
+  return \`You are an expert audio producer. Summarize the following article: \${article}\`;
+}
+`,
+      );
+      const census = await promptCensus(tempDir);
+      assertEquals(
+        census.sites,
+        [],
+        "this shape is a known blind spot: if this row ever fails, the census grew the ability to see it - update DECLARED LIMITS and the docstring",
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Mutants on the REAL sources: each arm of the census is load-bearing.
