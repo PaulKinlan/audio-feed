@@ -5,6 +5,8 @@ import { memoryStores } from "../src/config.ts";
 import { approveUser, createUser } from "../src/auth/users.ts";
 import { createSession } from "../src/auth/sessions.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
+import { bookmarkletHref, jsStringLiteral } from "../src/routes/bookmarklet.ts";
+import { esc } from "../src/routes/html.ts";
 
 const BASE = "https://audio.example.com";
 
@@ -281,4 +283,234 @@ Deno.test("GET /account explains the CSP refusal and offers the bookmarklet code
     href,
     "the disclosure's snippet and the anchor href must be the same payload",
   );
+});
+
+Deno.test("bookmarkletHref: JS-string injection defense across all interpolation sites (bookmarklet-js-string)", () => {
+  interface TestCase {
+    site: "baseUrl" | "feedLinkSelector" | "feedAnchorSelector";
+    name: string;
+    hostileValue: string;
+  }
+
+  const rows: TestCase[] = [
+    // Site 1: baseUrl
+    {
+      site: "baseUrl",
+      name: "baseUrl with single quote",
+      hostileValue: "https://example.com/site'name",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with backslash",
+      hostileValue: "https://example.com/foo\\bar",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with trailing backslash",
+      hostileValue: "https://example.com/foo\\",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with newline",
+      hostileValue: "https://example.com/foo\nbar",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with carriage return",
+      hostileValue: "https://example.com/foo\rbar",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with line separator U+2028",
+      hostileValue: "https://example.com/foo\u2028bar",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with paragraph separator U+2029",
+      hostileValue: "https://example.com/foo\u2029bar",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with </script> tag",
+      hostileValue: "https://example.com/</script><script>window.__injected=true;</script>",
+    },
+    {
+      site: "baseUrl",
+      name: "baseUrl with JS breakout attempt",
+      hostileValue: "https://example.com';window.__injected=true;'",
+    },
+
+    // Site 2: feedLinkSelector
+    {
+      site: "feedLinkSelector",
+      name: "feedLinkSelector with single quote",
+      hostileValue: "link[rel='alternate']",
+    },
+    {
+      site: "feedLinkSelector",
+      name: "feedLinkSelector with backslash",
+      hostileValue: "link[rel=\\alternate\\]",
+    },
+    {
+      site: "feedLinkSelector",
+      name: "feedLinkSelector with newline",
+      hostileValue: "link[rel=\nalternate]",
+    },
+    {
+      site: "feedLinkSelector",
+      name: "feedLinkSelector with </script> tag",
+      hostileValue: "link</script><script>window.__injected=true;</script>",
+    },
+    {
+      site: "feedLinkSelector",
+      name: "feedLinkSelector with JS breakout attempt",
+      hostileValue: "')||(window.__injected=true)||('",
+    },
+
+    // Site 3: feedAnchorSelector
+    {
+      site: "feedAnchorSelector",
+      name: "feedAnchorSelector with single quote",
+      hostileValue: "a[href*='feed']",
+    },
+    {
+      site: "feedAnchorSelector",
+      name: "feedAnchorSelector with backslash",
+      hostileValue: "a[href*=\\feed\\]",
+    },
+    {
+      site: "feedAnchorSelector",
+      name: "feedAnchorSelector with newline",
+      hostileValue: "a[href*=\nfeed]",
+    },
+    {
+      site: "feedAnchorSelector",
+      name: "feedAnchorSelector with </script> tag",
+      hostileValue: "a</script><script>window.__injected=true;</script>",
+    },
+    {
+      site: "feedAnchorSelector",
+      name: "feedAnchorSelector with JS breakout attempt",
+      hostileValue: "')||(window.__injected=true)||('",
+    },
+  ];
+
+  for (const row of rows) {
+    let href: string;
+    if (row.site === "baseUrl") {
+      href = bookmarkletHref(row.hostileValue);
+    } else if (row.site === "feedLinkSelector") {
+      href = bookmarkletHref("https://audio.example.com", row.hostileValue);
+    } else {
+      href = bookmarkletHref("https://audio.example.com", undefined, row.hostileValue);
+    }
+
+    assert(
+      href.startsWith("javascript:"),
+      `[${row.name}] must generate a javascript: URI`,
+    );
+
+    const jsCode = href.replace(/^javascript:/, "");
+
+    // 1. Must compile without syntax error via new Function
+    let compiledFn: (w: unknown, d: unknown, l: unknown) => void;
+    try {
+      compiledFn = new Function("window", "document", "location", jsCode) as (
+        w: unknown,
+        d: unknown,
+        l: unknown,
+      ) => void;
+    } catch (err) {
+      throw new Error(
+        `[${row.name}] failed to compile as valid JS: ${(err as Error).message}\nCode:\n${jsCode}`,
+      );
+    }
+
+    // 2. Sandbox execution: ensure hostile breakout payloads never execute injected statements
+    let injected = false;
+    let openedDest = "";
+    const sandboxWindow = {
+      open: (dest: string) => {
+        openedDest = dest;
+        return true;
+      },
+      get __injected() {
+        return injected;
+      },
+      set __injected(val: boolean) {
+        injected = val;
+      },
+    };
+    const sandboxDocument = {
+      title: "Test Article",
+      querySelector: (_sel: string) => null,
+    };
+    const sandboxLocation = {
+      href: "https://news.example.com/article-1",
+    };
+
+    compiledFn(sandboxWindow, sandboxDocument, sandboxLocation);
+
+    assertEquals(
+      injected,
+      false,
+      `[${row.name}] breakout payload executed injected statement!`,
+    );
+
+    assert(
+      openedDest.includes("/account?add=") || sandboxLocation.href.includes("/account?add="),
+      `[${row.name}] must construct destination pointing to /account?add=`,
+    );
+
+    // 3. HTML script tag safety: literal </script must not appear in the JS literal
+    if (row.hostileValue.includes("</script>")) {
+      assertEquals(
+        /<\/script/i.test(href),
+        false,
+        `[${row.name}] href must not contain literal '</script' tag closing sequence`,
+      );
+    }
+
+    // 4. HTML attribute safety when layered with esc()
+    const htmlEscaped = esc(href);
+    assertEquals(
+      htmlEscaped.includes('"'),
+      false,
+      `[${row.name}] esc() must remove raw double quotes so attribute context is safe`,
+    );
+    assertEquals(
+      htmlEscaped.includes("<"),
+      false,
+      `[${row.name}] esc() must encode '<' so tag context is safe`,
+    );
+  }
+
+  // Also verify normal execution behavior is preserved
+  const normalHref = bookmarkletHref("https://audio.example.com");
+  let normalOpened = "";
+  const normalFn = new Function(
+    "window",
+    "document",
+    "location",
+    normalHref.replace(/^javascript:/, ""),
+  );
+  normalFn(
+    { open: (url: string) => (normalOpened = url) },
+    { title: "My Article", querySelector: () => null },
+    { href: "https://example.com/post" },
+  );
+  assertEquals(
+    normalOpened,
+    "https://audio.example.com/account?add=https%3A%2F%2Fexample.com%2Fpost&title=My%20Article",
+    "normal bookmarklet execution must preserve target URL and params",
+  );
+
+  // Directly assert jsStringLiteral escaping guarantees
+  assertEquals(jsStringLiteral("foo'bar"), "'foo\\'bar'");
+  assertEquals(jsStringLiteral("foo\\bar"), "'foo\\\\bar'");
+  assertEquals(jsStringLiteral("foo\nbar"), "'foo\\nbar'");
+  assertEquals(jsStringLiteral("foo\rbar"), "'foo\\rbar'");
+  assertEquals(jsStringLiteral("foo\u2028bar"), "'foo\\u2028bar'");
+  assertEquals(jsStringLiteral("foo\u2029bar"), "'foo\\u2029bar'");
+  assertEquals(jsStringLiteral("foo</script>bar"), "'foo\\u003c/script\\u003ebar'");
 });
