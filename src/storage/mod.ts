@@ -1021,6 +1021,26 @@ export interface BlobStore {
    * to proxying through `GET /audio/:key`.
    */
   url(key: string, opts?: { expiresInSeconds?: number }): Promise<string | null>;
+  /**
+   * The origin every direct playback URL from `url()` points at, when the store
+   * can name it synchronously (audio-feed-327mm delta). The CSP builder needs it
+   * because a no-cors `<audio>` load follows audio.ts's 302 to this cross-origin
+   * target, and CSP re-evaluates media-src against the redirect target — so the
+   * player pages must permit this origin by name instead of re-widening to a
+   * wildcard scheme source. Optional (and may return `null`) so stores that never
+   * redirect — `url()` is always `null` — and test fakes need not implement it.
+   */
+  directUrlOrigin?(): string | null;
+}
+
+/**
+ * `store.directUrlOrigin?.() ?? null` — the one read a CSP-building route needs
+ * (audio-feed-327mm delta). `null` means "nothing to permit": the store never
+ * redirects, so media-src stays `'self' blob:` and every no-cors player request
+ * is proxied 200 by the audio route instead.
+ */
+export function blobStoreDirectUrlOrigin(store: BlobStore): string | null {
+  return store.directUrlOrigin?.() ?? null;
 }
 
 /** Thrown for a syntactically valid but unsatisfiable range. */

@@ -115,6 +115,7 @@ import { esc, jsonForScript } from "./html.ts";
 import { assetUrl } from "./assets.ts";
 import { speculationRules } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
+import { blobStoreDirectUrlOrigin } from "../storage/mod.ts";
 import { enclosureUrl } from "../feed/adapter.ts";
 import {
   type AudioMode,
@@ -734,11 +735,15 @@ export async function handleListen(
     failed: activity.failed.length,
   });
 
+  // This page renders the player `<audio src="/audio/...">`. That load is no-cors, so it
+  // follows the audio route's 302 to the blob store's cross-origin direct URL, and CSP
+  // re-evaluates media-src against that target — permit the store's own origin by name
+  // (audio-feed-327mm delta) rather than re-widening to a bare scheme-source.
   return htmlResponse(html, nonce, {
+    mediaSrcOrigin: blobStoreDirectUrlOrigin(ctx.stores.blobs),
     headers: {
       // A capability-bearing page: never in a shared cache.
       "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
       "x-robots-tag": "noindex",
       "server-timing": `db;dur=${dbMs.toFixed(1)}, render;dur=${renderMs.toFixed(1)}`,
     },

@@ -15,6 +15,7 @@ import { AUDIO_RATE_LIMIT, isAllowedAudioKey, MAX_FANOUT_CANDIDATES } from "../s
 import { createSession, SESSION_COOKIE } from "../src/auth/sessions.ts";
 import { SUPPRESSED_MESSAGE } from "../src/observability/error_screen.ts";
 import { bytes, makeUser } from "./fixtures.ts";
+import { htmlResponse } from "../src/routes/csp.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 
 const BASE = "https://audio.example.com";
@@ -85,7 +86,8 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
       "style-src 'self' 'nonce-",
       `${path} CSP missing style-src nonce`,
     );
-    assertStringIncludes(csp!, "media-src 'self' blob: https:", `${path} CSP missing media-src`);
+    assertStringIncludes(csp!, "img-src 'self' data:", `${path} CSP missing img-src`);
+    assertStringIncludes(csp!, "media-src 'self' blob:", `${path} CSP missing media-src`);
     assertStringIncludes(csp!, "connect-src 'self'", `${path} CSP missing connect-src`);
     await res.body?.cancel();
   }
@@ -106,6 +108,225 @@ Deno.test("security headers: HTML responses carry baseline headers (CSP, nosniff
   assertEquals(accountRes.headers.get("x-frame-options"), "DENY");
   assertEquals(accountRes.headers.get("x-content-type-options"), "nosniff");
   await accountRes.body?.cancel();
+});
+
+Deno.test("CSP (audio-feed-327mm): img-src and media-src are exactly the chosen set ('self' data: and 'self' blob:)", async () => {
+  const { fetch } = setupTestApp();
+
+  // Test public HTML landing page
+  const res = await fetch(new Request(`${BASE}/`));
+  const csp = res.headers.get("content-security-policy");
+  assert(csp, "missing content-security-policy");
+
+  const directives = new Map(
+    csp.split(";").map((d) => {
+      const trimmed = d.trim();
+      const space = trimmed.indexOf(" ");
+      return space === -1 ? [trimmed, ""] : [trimmed.slice(0, space), trimmed.slice(space + 1)];
+    }),
+  );
+
+  // Exact set assertions: any future widening (e.g. re-adding wildcard https:) fails here
+  assertEquals(directives.get("img-src"), "'self' data:", "img-src must be exactly 'self' data:");
+  assertEquals(
+    directives.get("media-src"),
+    "'self' blob:",
+    "media-src must be exactly 'self' blob:",
+  );
+  assertEquals(
+    directives.get("img-src")?.includes("https:"),
+    false,
+    "img-src must not contain wildcard https:",
+  );
+  assertEquals(
+    directives.get("media-src")?.includes("https:"),
+    false,
+    "media-src must not contain wildcard https:",
+  );
+  await res.body?.cancel();
+});
+
+/**
+ * The player pages' `<audio>` load is a NO-CORS request (listen.ts renders the player with NO
+ * crossorigin attribute, deliberately), so `isCorsConstrained` (src/routes/audio.ts) returns
+ * false for it and the audio route answers with a 302 to the blob store's cross-origin direct
+ * URL. CSP re-evaluates media-src against that REDIRECT TARGET, so the row that matters is not
+ * "what is the directive" but "does the directive permit where the player actually ends up":
+ * under the shipped policy a no-cors player request to /audio is never a dead end — either it
+ * 302s to an origin the player page's media-src permits, or it is proxied 200.
+ *
+ * This row FAILS if media-src stops permitting the redirect target: the store origin dropping
+ * out of the directive (or the route redirecting somewhere the page does not name) leaves the
+ * browser blocking a 302 it already received — the exact R2/S3 playback outage the 327mm delta
+ * closes (audio-feed-327mm + audio-feed-fhnrr).
+ */
+function mediaSrcDirective(csp: string | null): string {
+  assert(csp, "missing content-security-policy");
+  const directive = csp!.split(";").map((d) => d.trim()).find((d) => d.startsWith("media-src"));
+  assert(directive, "CSP missing media-src");
+  return directive!.slice("media-src".length).trim();
+}
+
+/** CSP source-list membership for a media load target origin ('self' means the app origin). */
+function mediaSrcAllows(directive: string, appOrigin: string, targetOrigin: string): boolean {
+  const sources = directive.split(/\s+/);
+  return sources.includes(targetOrigin) ||
+    (sources.includes("'self'") && targetOrigin === appOrigin);
+}
+
+Deno.test("CSP (audio-feed-327mm delta): a no-cors player request to /audio is never a dead end — it 302s only to an origin media-src permits, else it proxies 200", async () => {
+  const APP_ORIGIN = new URL(BASE).origin;
+  // The exact shape of a browser <audio> media load: NO Origin header, sec-fetch-mode: no-cors.
+  const NO_CORS_HEADERS = { "sec-fetch-mode": "no-cors" };
+
+  // ---- Case A: proxy-only store (memory) — the no-cors player request is proxied 200.
+  {
+    const stores = memoryStores();
+    await stores.metadata.putUser(
+      makeUser({ id: "user-approved", status: "approved", feedToken: "listen-tok-proxy" }),
+    );
+    await stores.blobs.put("audio/user-approved/direct/ep-1.wav", bytes(200), {
+      contentType: "audio/wav",
+    });
+    const { fetch } = setupTestApp(stores);
+
+    const page = await fetch(new Request(`${BASE}/listen/listen-tok-proxy`));
+    assertEquals(page.status, 200);
+    assertEquals(
+      mediaSrcDirective(page.headers.get("content-security-policy")),
+      "'self' blob:",
+      "a store that never redirects must keep plain 'self' blob: media-src",
+    );
+    await page.body?.cancel();
+
+    const audio = await fetch(
+      new Request(`${BASE}/audio/user-approved/direct/ep-1.wav`, { headers: NO_CORS_HEADERS }),
+    );
+    assertEquals(
+      audio.status,
+      200,
+      "no-cors player request on a proxy-only store must be proxied 200, never a dead end",
+    );
+    await audio.body?.cancel();
+  }
+
+  // ---- Case B: redirecting store (R2/S3 shape) — the no-cors player request 302s to the
+  // store's direct URL, and BOTH player pages' media-src permit that target BY NAME.
+  {
+    const stores = memoryStores();
+    const user = makeUser({
+      id: "user-approved",
+      status: "approved",
+      feedToken: "listen-tok-direct",
+    });
+    await stores.metadata.putUser(user);
+    await stores.blobs.put("audio/user-approved/direct/ep-1.wav", bytes(200), {
+      contentType: "audio/wav",
+    });
+    const STORE_ORIGIN = "https://media-store.example.com";
+    stores.blobs.url = (key: string) => Promise.resolve(`${STORE_ORIGIN}/${key}`);
+    stores.blobs.directUrlOrigin = () => STORE_ORIGIN;
+    const { fetch } = setupTestApp(stores);
+
+    // /listen/:token — the player page — must name the redirect target in media-src.
+    const listenPage = await fetch(new Request(`${BASE}/listen/listen-tok-direct`));
+    assertEquals(listenPage.status, 200);
+    const listenMediaSrc = mediaSrcDirective(listenPage.headers.get("content-security-policy"));
+    assertEquals(
+      listenMediaSrc,
+      `'self' blob: ${STORE_ORIGIN}`,
+      "the listen player page's media-src must name the blob store's direct-URL origin",
+    );
+    await listenPage.body?.cancel();
+
+    // /account renders per-episode <audio> too, so it must name the target as well.
+    const token = await createSession(stores.metadata, user.id);
+    const accountPage = await fetch(
+      new Request(`${BASE}/account`, { headers: { cookie: `${SESSION_COOKIE}=${token}` } }),
+    );
+    assertEquals(accountPage.status, 200);
+    const accountMediaSrc = mediaSrcDirective(accountPage.headers.get("content-security-policy"));
+    assertEquals(
+      accountMediaSrc,
+      `'self' blob: ${STORE_ORIGIN}`,
+      "the account page's media-src must name the blob store's direct-URL origin",
+    );
+    await accountPage.body?.cancel();
+
+    // The no-cors player request itself: 302, and the target is permitted by the shipped
+    // media-src — this is the assertion that goes red when media-src stops permitting it.
+    const audio = await fetch(
+      new Request(`${BASE}/audio/user-approved/direct/ep-1.wav`, { headers: NO_CORS_HEADERS }),
+    );
+    assertEquals(
+      audio.status,
+      302,
+      "no-cors player request on a redirecting store must take the 302",
+    );
+    const location = audio.headers.get("location");
+    assert(location, "the 302 must carry a location");
+    const targetOrigin = new URL(location!).origin;
+    assertEquals(targetOrigin, STORE_ORIGIN, "the 302 must land on the store's direct-URL origin");
+    assert(
+      mediaSrcAllows(listenMediaSrc, APP_ORIGIN, targetOrigin),
+      `CSP dead end: the no-cors player request 302s to ${targetOrigin} but the listen page's ` +
+        `shipped media-src "${listenMediaSrc}" does not permit it — the browser blocks playback`,
+    );
+    await audio.body?.cancel();
+
+    // The permit is BY NAME, not a widening: an unrelated origin stays forbidden, and no bare
+    // scheme-source (https:/http: as a standalone token) crept back into the directive.
+    assertEquals(
+      mediaSrcAllows(listenMediaSrc, APP_ORIGIN, "https://evil.example.com"),
+      false,
+      "media-src must not permit unrelated origins",
+    );
+    assertEquals(
+      /(?:^|\s)https?:(?=$|\s)/.test(listenMediaSrc),
+      false,
+      `media-src must not contain a bare scheme-source: "${listenMediaSrc}"`,
+    );
+  }
+});
+
+Deno.test("Referrer-Policy (audio-feed-fhnrr): htmlResponse attaches no-referrer by default without manual route header", async () => {
+  // 1. Direct htmlResponse constructor with no headers or options sets no-referrer default
+  const direct = htmlResponse("<!doctype html><html></html>", "testnonce");
+  assertEquals(
+    direct.headers.get("referrer-policy"),
+    "no-referrer",
+    "htmlResponse must attach referrer-policy: no-referrer by default",
+  );
+
+  // 2. An actual route (home page /) that never manually sets referrer-policy receives it from htmlResponse
+  const { fetch } = setupTestApp();
+  const homeRes = await fetch(new Request(`${BASE}/`));
+  assertEquals(
+    homeRes.headers.get("referrer-policy"),
+    "no-referrer",
+    "home page must carry referrer-policy: no-referrer via htmlResponse default without manual route setting",
+  );
+  await homeRes.body?.cancel();
+
+  // 3. Explicit opt-out via referrerPolicy: null removes the header
+  const optedOut = htmlResponse("<!doctype html><html></html>", "testnonce", {
+    referrerPolicy: null,
+  });
+  assertEquals(
+    optedOut.headers.get("referrer-policy"),
+    null,
+    "htmlResponse with referrerPolicy: null must not attach referrer-policy",
+  );
+
+  // 4. Custom policy override via referrerPolicy option
+  const custom = htmlResponse("<!doctype html><html></html>", "testnonce", {
+    referrerPolicy: "strict-origin-when-cross-origin",
+  });
+  assertEquals(
+    custom.headers.get("referrer-policy"),
+    "strict-origin-when-cross-origin",
+    "htmlResponse must honour custom referrerPolicy option",
+  );
 });
 
 /**
@@ -1137,13 +1358,26 @@ Deno.test("cache control: authenticated and capability HTML routes set no-store 
  * against the code. This test is the thing that notices next time: any
  * content-security-policy header set outside csp.ts (the definition) and
  * router.ts (the strict fallbacks) fails the suite.
+ *
+ * The same walk also guards referrer-policy (audio-feed-fhnrr): htmlResponse
+ * attaches `no-referrer` by default, so a baseHeaders-style helper that re-adds
+ * the header on an HTML route is silent drift — the default and the explicit
+ * opt-out are the only ways an HTML route's referrer-policy is decided. The
+ * allowlist names exactly the NON-HTML responses that set it deliberately.
  */
 Deno.test("no route hand-rolls a content-security-policy header outside csp.ts", async () => {
   const allowed = new Set([
     "src/routes/csp.ts", // the definition: htmlResponse + htmlContentSecurityPolicy
     "src/router.ts", // the strict no-nonce fallbacks for a route that forgot
   ]);
+  const referrerAllowed = new Set([
+    "src/routes/csp.ts", // the definition: no-referrer default + explicit opt-out
+    "src/app.ts", // the 302 redirect to /listen/:token — not an HTML document response
+    "src/routes/pwa.ts", // the service-worker JS response
+    "src/compose/admin.ts", // the JSON 201 setup-link response
+  ]);
   const offenders: string[] = [];
+  const referrerOffenders: string[] = [];
 
   async function scan(dir: string): Promise<void> {
     for await (const entry of Deno.readDir(dir)) {
@@ -1154,6 +1388,9 @@ Deno.test("no route hand-rolls a content-security-policy header outside csp.ts",
         const text = await Deno.readTextFile(path);
         if (!allowed.has(path) && /["']content-security-policy["']/i.test(text)) {
           offenders.push(path);
+        }
+        if (!referrerAllowed.has(path) && /["']referrer-policy["']/i.test(text)) {
+          referrerOffenders.push(path);
         }
       }
     }
@@ -1170,6 +1407,9 @@ Deno.test("no route hand-rolls a content-security-policy header outside csp.ts",
       if (!allowed.has(path) && /["']content-security-policy["']/i.test(text)) {
         offenders.push(path);
       }
+      if (!referrerAllowed.has(path) && /["']referrer-policy["']/i.test(text)) {
+        referrerOffenders.push(path);
+      }
     }
   }
 
@@ -1178,5 +1418,12 @@ Deno.test("no route hand-rolls a content-security-policy header outside csp.ts",
     [],
     "HTML routes must attach CSP via htmlResponse() (src/routes/csp.ts); " +
       "hand-rolled copies are exactly the drift this bead removed: " + offenders.join(", "),
+  );
+  assertEquals(
+    referrerOffenders,
+    [],
+    "referrer-policy is decided by htmlResponse's default/opt-out (src/routes/csp.ts); " +
+      "a baseHeaders-style helper must not re-add it on an HTML route: " +
+      referrerOffenders.join(", "),
   );
 });
