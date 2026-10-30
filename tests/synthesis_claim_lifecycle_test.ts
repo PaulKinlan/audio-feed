@@ -2204,12 +2204,23 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
       }, 5000);
     });
   };
+  // audio-feed-zy3j round three: the budget's clock is one the TEST owns (audio-feed-ugak
+  // contract, src/synthesis/limits.ts). With the real scheduler clock the 250ms budget is armed
+  // at invocation start and the whole pre-put path (claim, dialogue build, digest, checkpoints)
+  // races it: measured on this VM, put entry consumed 191ms focused (54ms of margin) and the
+  // batch settled budget-yielded at ~400ms under load WITHOUT ever entering the put hook, so
+  // the mirror premise - the bound fires DURING the in-flight put - was unreachable and the
+  // wait spun to its 45s ceiling while the event loop kept ticking (242 ticks/45s measured).
+  // Owning the clock turns the deadline into a decision the test makes AFTER observing the
+  // put entry, making the row an order assertion instead of a race against host business.
+  const time = controlledInvocationClock();
   const batchPromise = runSynthesisBatch(ctx, () => Promise.resolve(fakeAudio()), {
     owner: "review-tail-bound-fires",
     maxInvocationDurationMs: 250,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
+    clock: time.clock,
   });
   // audio-feed-zy3j round two (reddened once inside a 66-minute full gate on a loaded host,
   // passed focused and in eight other sampled gates): the wait is an OBSERVED CONDITION - this
@@ -2231,6 +2242,9 @@ Deno.test("audio-feed-zy3j: terminal completion invocation bound fires when dela
       })`,
     45_000,
   );
+  // The put is parked in flight; fire the 250ms deadline VIRTUALLY - the abort must win
+  // against the in-flight transfer (the mirror property), never before the hook is entered.
+  await time.advance(250);
   const result = await batchPromise;
   assert(putEntered, "put hook must be entered");
   assert(putSignal !== undefined, "put hook must receive an AbortSignal");
