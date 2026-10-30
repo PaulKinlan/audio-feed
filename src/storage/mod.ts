@@ -1022,25 +1022,33 @@ export interface BlobStore {
    */
   url(key: string, opts?: { expiresInSeconds?: number }): Promise<string | null>;
   /**
-   * The origin every direct playback URL from `url()` points at, when the store
-   * can name it synchronously (audio-feed-327mm delta). The CSP builder needs it
-   * because a no-cors `<audio>` load follows audio.ts's 302 to this cross-origin
-   * target, and CSP re-evaluates media-src against the redirect target — so the
-   * player pages must permit this origin by name instead of re-widening to a
-   * wildcard scheme source. Optional (and may return `null`) so stores that never
-   * redirect — `url()` is always `null` — and test fakes need not implement it.
+   * The origin every direct playback URL from `url()` points at (audio-feed-327mm
+   * delta). The CSP builder needs it because a no-cors `<audio>` load follows
+   * audio.ts's 302 to this cross-origin target, and CSP re-evaluates media-src
+   * against the redirect target — so the player pages must permit this origin by
+   * name instead of re-widening to a wildcard scheme source.
+   *
+   * REQUIRED, not optional: a store that answers `url()` with an off-origin URL
+   * but omits this method would silently emit `media-src 'self' blob:` while
+   * audio.ts still 302s off-origin — the playback-blocking bug, with no compile
+   * error. Every implementation must state its answer explicitly.
+   *
+   * Returning `null` means "this store never redirects off-origin" — either
+   * `url()` is always `null`, or every direct URL is same-origin — so media-src
+   * stays `'self' blob:` and player requests are proxied instead.
    */
-  directUrlOrigin?(): string | null;
+  directUrlOrigin(): string | null;
 }
 
 /**
- * `store.directUrlOrigin?.() ?? null` — the one read a CSP-building route needs
+ * `store.directUrlOrigin() ?? null` — the one read a CSP-building route needs
  * (audio-feed-327mm delta). `null` means "nothing to permit": the store never
  * redirects, so media-src stays `'self' blob:` and every no-cors player request
- * is proxied 200 by the audio route instead.
+ * is proxied 200 by the audio route instead. The capability is required on every
+ * BlobStore, so a store cannot dodge this read by omitting the method.
  */
 export function blobStoreDirectUrlOrigin(store: BlobStore): string | null {
-  return store.directUrlOrigin?.() ?? null;
+  return store.directUrlOrigin() ?? null;
 }
 
 /** Thrown for a syntactically valid but unsatisfiable range. */

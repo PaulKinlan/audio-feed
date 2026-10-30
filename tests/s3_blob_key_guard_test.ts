@@ -113,3 +113,20 @@ Deno.test("s3 blob store: valid keys encode exactly as before", async () => {
     assertEquals(await store.url(key), expected, `encoding changed for ${key}`);
   }
 });
+
+Deno.test("s3 blob store: directUrlOrigin() is the origin url() actually produces", async () => {
+  // The capability feeds the CSP: whatever origin it names is what media-src permits, so a
+  // wrong derivation would permit the wrong host while audio.ts's 302 goes elsewhere — the
+  // playback-blocking bug, green. Tied to reality over BOTH url() shapes: the public-base
+  // redirect and the signed-endpoint URL. Both are per-store config (the origin is identical
+  // for every key), so exact equality is the honest assertion.
+  for (const store of [publicStore(), signingStore()]) {
+    const direct = await store.url("audio/u1/direct/capability.wav");
+    assertEquals(direct !== null, true, "an http(S)-configured store must produce a direct URL");
+    assertEquals(
+      new URL(direct!).origin,
+      store.directUrlOrigin(),
+      "directUrlOrigin() must equal the origin url() produces for a key",
+    );
+  }
+});

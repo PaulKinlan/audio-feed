@@ -115,10 +115,10 @@ export function boundedBlobStore(
     url(key, opts) {
       return store.url(key, opts);
     },
-    // Delegated only when present (audio-feed-327mm delta): the wrapper must not invent an
-    // origin the inner store never declared, and a fake without the optional capability
-    // must keep meaning "no origin to permit".
-    ...(store.directUrlOrigin ? { directUrlOrigin: () => store.directUrlOrigin!() } : {}),
+    // Delegated unconditionally (directUrlOrigin is REQUIRED on BlobStore): the wrapper
+    // must not invent an origin the inner store never declared, so it forwards the inner
+    // store's own explicit answer — including `null`, which means "never redirects".
+    directUrlOrigin: () => store.directUrlOrigin(),
   };
   return wrapped;
 }
