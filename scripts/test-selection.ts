@@ -1258,6 +1258,12 @@ function pathConstants(
   root: string,
   isOutOfRepoBase: (name: string, offset: number) => boolean = () => false,
   suppressed: Set<string> = new Set(),
+  // Per-derivation memo of `${root}${candidate}` -> isFile||isDirectory. One derivation scans one tree
+  // snapshot, so the same path cannot change its answer mid-derivation; callers pass a shared map so the
+  // 330x-repeated candidates cost one stat, not 330 (measured 2026-10-30: 13,008 statSync calls per
+  // full-tree derivation, 12 hits, 10.9s of ENOENT throwing - the dominant cost of the suites that
+  // derive the whole tree, tests/read_relation_hints_test.ts's three ROOT rows among them).
+  statCache: Map<string, boolean> = new Map(),
 ): {
   all: Map<string, string>;
   exported: Map<string, string>;
@@ -1287,15 +1293,29 @@ function pathConstants(
           : tmplMatch[1],
       );
       if (candidate) {
-        try {
-          if (
-            Deno.statSync(`${root}${candidate}`).isFile ||
-            Deno.statSync(`${root}${candidate}`).isDirectory
-          ) {
+        // The stat attempt is the derivation's dominant cost: every `const X = <rhs>` line's initializer
+        // reaches here, and statSync throws ENOENT on nearly all of them (13,008 calls, 12 hits, measured).
+        // Two guards, both outcome-preserving: only candidates already shaped like repo paths (the same
+        // `REPO_PATH_SHAPE` class toRepoPath applies everywhere else in this module - punctuation-bearing
+        // expressions like `new Promise<void>((r) => {` were guaranteed misses anyway) reach the stat, and
+        // each remaining path is stat'd once per derivation, not once per mentioning line. A miss falls
+        // through to staticPathHints exactly as a stat miss always did.
+        if (REPO_PATH_SHAPE.test(candidate)) {
+          const statKey = `${root}${candidate}`;
+          let usable = statCache.get(statKey);
+          if (usable === undefined) {
+            try {
+              const st = Deno.statSync(statKey);
+              usable = st.isFile || st.isDirectory;
+            } catch {
+              // not found on disk
+              usable = false;
+            }
+            statCache.set(statKey, usable);
+          }
+          if (usable) {
             return candidate;
           }
-        } catch {
-          // not found on disk
         }
       }
     }
@@ -1394,6 +1414,9 @@ export function unclassifiedTail(hint: string): boolean {
 }
 
 /** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
+/** The path shape `toRepoPath` accepts - the module-wide definition of a path-shaped hint. */
+const REPO_PATH_SHAPE = /^[\w@./ -]+$/;
+
 function toRepoPath(
   hint: string,
   moduleDir: string,
@@ -1404,7 +1427,7 @@ function toRepoPath(
   // Only path-shaped hints count. A `Deno.Command` call is full of literals that are not files: CLI flags
   // (`--allow-all`, `-c`), numbers, and punctuation from an args array. Keeping them out is what makes the
   // relation readable and keeps a change from matching junk.
-  if (!/^[\w@./ -]+$/.test(path)) return null;
+  if (!REPO_PATH_SHAPE.test(path)) return null;
   if (path.startsWith("-")) return null;
   if (!path.includes("/") && !/\.[A-Za-z0-9]{1,5}$/.test(path)) return null;
   if (/^[a-z]+:/i.test(path) && !/^file:/i.test(path)) return null; // http(s):, jsr:, node:, data:
@@ -1664,6 +1687,9 @@ export async function deriveReadRelationReport(
     }
   >();
   const suiteClosures = new Map<string, Set<string>>();
+  // One memo for the whole derivation: every loadFile's pathConstants shares it, so a constant path named
+  // in many suites is stat'd once (see pathConstants' statCache note).
+  const statCache = new Map<string, boolean>();
 
   const loadFile = async (relPath: string): Promise<string | null> => {
     const existing = fileSources.get(relPath);
@@ -1755,7 +1781,7 @@ export async function deriveReadRelationReport(
     const scopes = bindingScopes(source, spans);
     const isOutOfRepoBase = (name: string, offset: number) => baseIsOutOfRepo(scopes, name, offset);
 
-    const constants = pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints);
+    const constants = pathConstants(source, dir, root, isOutOfRepoBase, outOfRepoHints, statCache);
     fileConstants.set(relPath, constants);
     return source;
   };
