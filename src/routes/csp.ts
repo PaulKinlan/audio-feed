@@ -54,7 +54,9 @@ export function htmlContentSecurityPolicy(
   reportUrl?: string,
   mediaSrcOrigin?: string | null,
 ): string {
-  const mediaSrc = mediaSrcOrigin ? `media-src 'self' blob: ${mediaSrcOrigin}` : "media-src 'self' blob:";
+  const mediaSrc = mediaSrcOrigin
+    ? `media-src 'self' blob: ${mediaSrcOrigin}`
+    : "media-src 'self' blob:";
   const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
