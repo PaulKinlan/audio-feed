@@ -617,6 +617,49 @@ Deno.test("audio-feed-q0ky: a derivation that THROWS still widens and reports no
   assertEquals(thrown.report.unresolved, []);
   assertEquals(thrown.report.relations.size, 0);
   assertEquals(planForFailedRelation(thrown.failure!).testFiles, null);
+  // audio-feed-076cb: the degraded report is a SECOND producer of ReadRelationReport, so it is checked as a
+  // WHOLE here and not field by field as each signal was added. The type now makes a missing field a compile
+  // error at `emptyReadRelationReport`; this row is the runtime half - every signal is present and EMPTY, so a
+  // degrade path that dropped one (or defaulted it to undefined through a cast) reds here as well, and the
+  // planner below cannot read "the detector found nothing" out of a signal that was never set.
+  const degraded = thrown.report;
+  assertEquals(
+    degraded.computedImportSuites,
+    [],
+    "degraded: no computed-import suite may be claimed",
+  );
+  assertEquals(degraded.unresolved, []);
+  assertEquals(degraded.unattributed, []);
+  assertEquals(degraded.outOfRepo, []);
+  assertEquals(degraded.unclassified, []);
+  assertEquals(Object.keys(degraded).sort(), [
+    "computedImportSuites",
+    "outOfRepo",
+    "relations",
+    "unattributed",
+    "unclassified",
+    "unresolved",
+  ], "a field added to ReadRelationReport must decide its EMPTY form in emptyReadRelationReport");
+  for (const [key, value] of Object.entries(degraded)) {
+    if (key === "relations") {
+      assert(value instanceof Map, "relations must still be a map in the degraded report");
+      assertEquals((value as Map<string, string[]>).size, 0);
+      continue;
+    }
+    assert(Array.isArray(value), `${key} must be an array in the degraded report`);
+    assertEquals(
+      (value as string[]).length,
+      0,
+      `${key} must be PRESENT and EMPTY in the degraded report`,
+    );
+  }
+  // And it still DEGRADES rather than throwing: the caller widens to the full suite with the failure named.
+  const widened = planTests(["src/app.ts"], NO_GRAPH, NO_NAMED, degraded.relations, []);
+  assertEquals(
+    widened.testFiles,
+    null,
+    `the degraded report must still force the full suite: ${widened.reason}`,
+  );
 });
 
 Deno.test("the ordering rule is CHECKED: inert documentation with a derived reader is a named full-suite run (38sn)", () => {
