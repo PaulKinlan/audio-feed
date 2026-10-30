@@ -913,64 +913,65 @@ Deno.test("audio-feed-9wqt: (3) short work still completes in one invocation", a
 Deno.test("audio-feed-vvwb: a stage that would take longer than the budget is aborted at the budget deadline and yields with progress checkpointed", async () => {
   const { ctx, stores } = await setupEnv();
 
+  // docs/speed.md census row 4: inject controlledInvocationClock instead of stubbing performance.now
+  // against the real scheduler. The 40ms deadline fires virtually while the script stage is in flight.
+  const time = controlledInvocationClock();
   let scriptCalls = 0;
-  let simulatedMs = 1;
-  const originalNow = performance.now;
-  performance.now = () => simulatedMs;
+  let abortedByDeadline = false;
 
-  try {
-    const synth = createGeminiSynthesizer(ctx, {
-      flushMarginMs: 5,
-      estimatedTurnDurationMs: 10,
-      scriptGenerator: (_input, options) => {
-        scriptCalls++;
-        return new Promise((resolve, reject) => {
-          // 45ms REAL_INVOCATION_CLOCK deadline vs 200ms stage stub: safe while due timers fire in due order (4.4x margin residual).
-          const timer = setTimeout(() => {
-            simulatedMs += 200;
-            resolve({
-              turns: [{ speaker: "Alex" as const, text: "Hello" }],
-              sources: [],
-              counterarguments: [],
-              researchSummary: "",
-            });
-          }, 200);
-
-          options?.signal?.addEventListener("abort", () => {
-            clearTimeout(timer);
-            simulatedMs = 40;
-            reject(new Error("aborted by deadline"));
+  const synth = createGeminiSynthesizer(ctx, {
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    scriptGenerator: (_input, options) => {
+      scriptCalls++;
+      return new Promise((resolve, reject) => {
+        // The stage would take 200ms of virtual time, but the budget deadline fires at 40ms.
+        const cancelFallback = time.clock.setTimeout(() => {
+          resolve({
+            turns: [{ speaker: "Alex" as const, text: "Hello" }],
+            sources: [],
+            counterarguments: [],
+            researchSummary: "",
           });
-        });
-      },
-    });
+        }, 200);
 
-    await stores.metadata.putEpisode(
-      makeEpisode({
-        id: "ep-budget-abort",
-        userId: "user-1",
-        articleId: "article-1",
-        sourceId: "inbox",
-        status: "pending",
-        mode: "deepdive",
-      }),
-    );
+        options?.signal?.addEventListener("abort", () => {
+          cancelFallback();
+          abortedByDeadline = true;
+          reject(new Error("aborted by deadline"));
+        }, { once: true });
 
-    const result = await runSynthesisBatch(ctx, synth, {
-      owner: "worker-budget-test",
-      maxInvocationDurationMs: 45,
-      flushMarginMs: 5,
-      estimatedTurnDurationMs: 10,
-    });
+        // Advance virtual time so the 40ms deadline fires before the 200ms stage fallback.
+        time.advance(1000).catch(() => {});
+      });
+    },
+  });
 
-    assertEquals(result.yielded.length, 1, "must yield cleanly");
-    assert(simulatedMs <= 45, `elapsed (${simulatedMs}) must be <= budget (45)`);
-    const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort");
-    assertEquals(ep?.status, "pending", "episode must be pending for next tick");
-    assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
-  } finally {
-    performance.now = originalNow;
-  }
+  await stores.metadata.putEpisode(
+    makeEpisode({
+      id: "ep-budget-abort",
+      userId: "user-1",
+      articleId: "article-1",
+      sourceId: "inbox",
+      status: "pending",
+      mode: "deepdive",
+    }),
+  );
+
+  const result = await runSynthesisBatch(ctx, synth, {
+    owner: "worker-budget-test",
+    maxInvocationDurationMs: 45,
+    flushMarginMs: 5,
+    estimatedTurnDurationMs: 10,
+    clock: time.clock,
+  });
+
+  assertEquals(scriptCalls, 1, "script generator was attempted");
+  assert(abortedByDeadline, "stage was aborted by the budget deadline");
+  assertEquals(result.yielded.length, 1, "must yield cleanly");
+  const ep = await stores.metadata.getEpisode("user-1", "ep-budget-abort");
+  assertEquals(ep?.status, "pending", "episode must be pending for next tick");
+  assertEquals(ep?.attempts, 1, "zero-progress yield must preserve attempt count");
 });
 
 Deno.test("audio-feed-vvwb: script generated at budget limit checkpoints scriptTurns and yields before dialogue", async () => {

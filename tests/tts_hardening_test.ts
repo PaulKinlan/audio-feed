@@ -68,12 +68,19 @@ Deno.test("transient 429 is retried and the retry's audio is returned", async ()
 });
 
 Deno.test("retries honour Retry-After instead of the default backoff", async () => {
-  const { fn } = scripted([errorResponse(503, { "retry-after": "0" }), okResponse()]);
+  const { fn, calls } = scripted([errorResponse(503, { "retry-after": "0" }), okResponse()]);
   const started = Date.now();
-  await client(fn, { retryBaseDelayMs: 60_000 }).sendRequest(request);
+  const result = await client(fn, { retryBaseDelayMs: 60_000 }).sendRequest(request);
+  if (calls.length !== 2) throw new Error(`expected 2 attempts, got ${calls.length}`);
+  if (!result.rawBytes || result.rawBytes.length === 0) {
+    throw new Error("expected audio from retry");
+  }
   // A 0-second Retry-After must beat the 60s base delay; jitter cannot mask it.
-  // 5s ceiling vs 0ms backoff: host load only slows in-memory dispatch (never shortens the 60s fallback), with ~inf headroom to absorb scheduler pauses.
-  if (Date.now() - started > 5_000) throw new Error("Retry-After was ignored");
+  // docs/speed.md census row 6: raised ceiling from 5s to 10s to absorb scheduler contention
+  // on loaded hosts, while staying safely below the 15,000ms minimum backoff (60s base capped
+  // at 30s with min 0.5 jitter = 15,000ms).
+  const elapsed = Date.now() - started;
+  if (elapsed > 10_000) throw new Error(`Retry-After was ignored (elapsed ${elapsed}ms > 10000ms)`);
 });
 
 Deno.test("a plain 500 is NOT retried by default (a retry could double-charge)", async () => {
@@ -121,10 +128,14 @@ Deno.test("retryOn: 'none' disables retries entirely", async () => {
 
 Deno.test("a hung request is killed by the per-attempt timeout", async () => {
   // Never resolves unless aborted — the whole reason a default deadline exists.
+  let aborted = false;
   const hang =
     ((_input: RequestInfo | URL, init?: RequestInit) =>
       new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(init.signal!.reason);
+        });
       })) as typeof fetch;
 
   const started = Date.now();
@@ -135,9 +146,12 @@ Deno.test("a hung request is killed by the per-attempt timeout", async () => {
     message = String((error as Error).message);
   }
   const elapsed = Date.now() - started;
+  if (!aborted) throw new Error("fetch signal was not aborted by per-attempt timeout");
   if (!/timed out after 150ms/.test(message)) throw new Error(`unexpected error: ${message}`);
-  // 5s ceiling catches a broken abort rather than measuring duration; the await is state-gated on abort, with 33x margin over the 150ms timeout.
-  if (elapsed > 5_000) throw new Error(`timeout took ${elapsed}ms`);
+  // docs/speed.md census row 7: replaced 5s real-clock ceiling with order assertion (aborted signal)
+  // and lower-bound-only floor (elapsed >= 100ms) against the 150ms timeout. Host scheduler delay only
+  // increases elapsed time, making a lower-bound assertion load-independent.
+  if (elapsed < 100) throw new Error(`timeout fired impossibly fast: ${elapsed}ms < 100ms`);
 });
 
 Deno.test("a per-attempt timeout is named with its deadline even when a caller signal exists (audio-feed-bp6r)", async () => {
