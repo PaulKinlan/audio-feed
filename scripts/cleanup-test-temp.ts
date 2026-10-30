@@ -83,6 +83,8 @@ export interface CleanupOptions {
   pathLiveness?: (path: string) => Promise<"open" | "clear" | "unknown">;
   /** Hard bound for the real lsof probe. Default 10s; tests shorten it to stay fast. */
   lsofTimeoutMs?: number;
+  /** Environment variables to pass to child processes (lsof/ps). */
+  env?: Record<string, string>;
   now?: number;
   log?: (line: string) => void;
 }
@@ -97,12 +99,13 @@ export function isInScope(name: string, isDirectory: boolean): boolean {
 }
 
 /** Best-effort command-line scan: every live process's argv, joined, for substring matches. */
-function liveCmdlines(): string[] {
+function liveCmdlines(env?: Record<string, string>): string[] {
   try {
     const out = new Deno.Command("ps", {
       args: ["-eo", "args"],
       stdout: "piped",
       stderr: "null",
+      ...(env ? { env } : {}),
     }).outputSync();
     return new TextDecoder().decode(out.stdout).split("\n").filter((l) => l.length > 0);
   } catch {
@@ -123,6 +126,7 @@ function liveCmdlines(): string[] {
 export async function lsofPathLiveness(
   path: string,
   timeoutMs = 10_000,
+  env?: Record<string, string>,
 ): Promise<"open" | "clear" | "unknown"> {
   let child: Deno.ChildProcess;
   try {
@@ -130,6 +134,7 @@ export async function lsofPathLiveness(
       args: ["-a", "+D", path, "-Fn"],
       stdout: "piped",
       stderr: "piped",
+      ...(env ? { env } : {}),
     }).spawn();
   } catch {
     // Missing binary or spawn refused: liveness cannot be established. Fail closed.
@@ -165,8 +170,8 @@ export async function cleanupTestTemp(options: CleanupOptions): Promise<CleanupC
     tempRoot,
     maxAgeMs,
     yes,
-    processCmdlines = liveCmdlines,
-    pathLiveness = (path) => lsofPathLiveness(path, options.lsofTimeoutMs ?? 10_000),
+    processCmdlines = () => liveCmdlines(options.env),
+    pathLiveness = (path) => lsofPathLiveness(path, options.lsofTimeoutMs ?? 10_000, options.env),
     now = Date.now(),
     log = (line) => console.log(line),
   } = options;

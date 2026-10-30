@@ -208,13 +208,13 @@ const TEST_FLAGS = [
 // so they run in a second, sequential invocation (no --parallel) in the same run() loop.
 const PARALLEL_TEST_FLAGS = [...TEST_FLAGS, "--parallel"];
 
-const PROCESS_GLOBAL_SUITES = [
+export const PROCESS_GLOBAL_SUITES = [
   "tests/verify_live_e2e_tts_output_test.ts", // Deno.chdir(tmpDir) - CWD is process-wide
   "tests/temporal_test.ts", // Deno.env TZ set/restore - env is process-wide
 ];
 
 /** Split a suite list into the --parallel batch and the process-global sequential carve-out. */
-function splitProcessGlobalSuites(files: string[]): {
+export function splitProcessGlobalSuites(files: string[]): {
   parallelFiles: string[];
   sequentialFiles: string[];
 } {

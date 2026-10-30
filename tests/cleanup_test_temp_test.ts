@@ -160,26 +160,29 @@ async function exists(path: string): Promise<boolean> {
  * — deleting live candidates on a busy host. These rows exercise lsofPathLiveness for real via
  * a controlled fake lsof on PATH: a shell script whose sleep and exit code the row chooses,
  * with a SHORTENED bound so the suite stays fast.
+ *
+ * Injected env, not Deno.env.set (audio-feed-w5i0m): under `deno test --parallel`, mutating
+ * Deno.env("PATH") leaks into every concurrently running module sharing the worker process.
+ * The spawned probe receives the fake PATH directly via child command options, keeping the
+ * process-global environment unpolluted.
  */
 async function withFakeLsofOnPath<T>(
-  body: (fakeDir: string) => Promise<T>,
+  body: (env: Record<string, string>, fakeDir: string) => Promise<T>,
   script: string,
 ): Promise<T> {
   const fakeDir = await Deno.makeTempDir({ prefix: "flr6y-fakebin-" });
-  const oldPath = Deno.env.get("PATH") ?? "";
   try {
     await Deno.writeTextFile(`${fakeDir}/lsof`, script);
     await Deno.chmod(`${fakeDir}/lsof`, 0o755);
-    Deno.env.set("PATH", `${fakeDir}:${oldPath}`);
-    return await body(fakeDir);
+    const env = { PATH: `${fakeDir}:${Deno.env.get("PATH") ?? ""}` };
+    return await body(env, fakeDir);
   } finally {
-    Deno.env.set("PATH", oldPath);
     await Deno.remove(fakeDir, { recursive: true }).catch(() => {});
   }
 }
 
 Deno.test("REAL lsof path: a probe that answers past the bound FAILS CLOSED — unknown, counted, nothing deleted (audio-feed-qdm95)", async () => {
-  await withFakeLsofOnPath(async () => {
+  await withFakeLsofOnPath(async (env) => {
     const root = await makeScratch();
     try {
       const staleProfile = `${root}/audiofeed-chrome-live`;
@@ -192,7 +195,7 @@ Deno.test("REAL lsof path: a probe that answers past the bound FAILS CLOSED — 
         yes: true,
         processCmdlines: () => [],
         // The REAL probe; the fake lsof sleeps 1s — past the 300ms bound — then says "open".
-        pathLiveness: (p) => lsofPathLiveness(p, 300),
+        pathLiveness: (p) => lsofPathLiveness(p, 300, env),
         lsofTimeoutMs: 300,
       });
 
@@ -212,7 +215,7 @@ Deno.test("REAL lsof path: a probe that answers past the bound FAILS CLOSED — 
 });
 
 Deno.test("REAL lsof path: a fast clean verdict admits removal; a fast open verdict skips live (audio-feed-qdm95)", async () => {
-  await withFakeLsofOnPath(async () => {
+  await withFakeLsofOnPath(async (env) => {
     const root = await makeScratch();
     try {
       const stale = `${root}/rvy5n-scratch-cafe0001`;
@@ -229,7 +232,7 @@ Deno.test("REAL lsof path: a fast clean verdict admits removal; a fast open verd
         processCmdlines: () => [],
         // The fake lsof answers instantly: exit 1 = nothing open, then exit 0 = open.
         // 5s timeout on instant exit: host scheduler jitter only lengthens wait time, never flips the clean exit 1 verdict.
-        pathLiveness: (p) => lsofPathLiveness(p, 5_000),
+        pathLiveness: (p) => lsofPathLiveness(p, 5_000, env),
         lsofTimeoutMs: 5_000,
         // Distinguish the two candidates per-call: the fake script reads LSOF_VERDICT.
         // (The wrapper below runs each candidate through the probe; the script honours it.)
@@ -248,7 +251,7 @@ Deno.test("REAL lsof path: a fast clean verdict admits removal; a fast open verd
     }
   }, "#!/bin/sh\nexit 1\n");
 
-  await withFakeLsofOnPath(async () => {
+  await withFakeLsofOnPath(async (env) => {
     const root = await makeScratch();
     try {
       const live = `${root}/audiofeed-chrome-open`;
@@ -259,7 +262,7 @@ Deno.test("REAL lsof path: a fast clean verdict admits removal; a fast open verd
         maxAgeMs: 60 * 60_000,
         yes: true,
         processCmdlines: () => [],
-        pathLiveness: (p) => lsofPathLiveness(p, 5_000),
+        pathLiveness: (p) => lsofPathLiveness(p, 5_000, env),
         lsofTimeoutMs: 5_000,
       });
       assertEquals(counts.skippedLive, 1, "a fast exit-0 lsof verdict must read as OPEN");
@@ -309,7 +312,7 @@ Deno.test("exit contract: 1 only for real errors, 3 for unproven liveness, 0 whe
  * wording on stderr and exits 1 — the verdict must be UNKNOWN, so nothing is deleted.
  */
 Deno.test("REAL lsof path: exit 1 WITH a permission warning is UNKNOWN — never clear, never deleted (audio-feed-nz9dr)", async () => {
-  await withFakeLsofOnPath(async () => {
+  await withFakeLsofOnPath(async (env) => {
     const root = await makeScratch();
     try {
       const live = `${root}/audiofeed-chrome-uninspectable`;
@@ -321,7 +324,7 @@ Deno.test("REAL lsof path: exit 1 WITH a permission warning is UNKNOWN — never
         maxAgeMs: 60 * 60_000,
         yes: true,
         processCmdlines: () => [],
-        pathLiveness: (p) => lsofPathLiveness(p, 5_000),
+        pathLiveness: (p) => lsofPathLiveness(p, 5_000, env),
         lsofTimeoutMs: 5_000,
       });
 
