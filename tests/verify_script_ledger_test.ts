@@ -28,7 +28,9 @@ const BANNER_MARKER = "audio-feed-byh4j: HISTORICAL";
  * Deriving the relation is a whole-tree scan (~45s here), and the three rows below ask the SAME report the
  * same questions. Memoised per process so the ledger costs one derivation, not three.
  */
-let reportOnce: Promise<ReturnType<typeof deriveReadRelationReport>> | undefined;
+// `deriveReadRelationReport` is async, so ReturnType already IS the Promise - an extra Promise
+// wrapper made this assignment `Promise<Promise<...>>` and failed the whole-repo type-check.
+let reportOnce: ReturnType<typeof deriveReadRelationReport> | undefined;
 const ledgerReport = () => (reportOnce ??= deriveReadRelationReport(ROOT));
 
 /**

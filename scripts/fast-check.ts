@@ -1037,6 +1037,7 @@ export async function deriveOrWidenReport(
         outOfRepo: [],
         unclassified: [],
         computedImportSuites: [],
+        executedRelations: new Map(),
       },
       failure: error instanceof Error ? error.message : String(error),
     };
