@@ -840,8 +840,21 @@ Deno.test("audio-feed-lqd6: lost claim when exceeding retry cap reports supersed
 
   // Upload aborts at deadline, retry cap exceeded, but completeEpisode fails
   const oldPut = stores.blobs.put.bind(stores.blobs);
+  // Same shape as the retry-cap row above, and the same defect: a REAL 1800ms budget leaves
+  // 199ms (1800 - 100 flush - 1501 terminal estimate) for the whole pre-put path, measured on this
+  // VM at 603-903ms, so the deadline fired before the put was entered and the row asserted on the
+  // preflight-refusal path instead of an interrupted transfer. The clock is injected and the
+  // deadline fires only once the put it must interrupt is provably in flight; assertions unchanged.
+  const time = controlledInvocationClock();
+  let putStarts = 0;
+  let putEntered: () => void = () => {};
+  const putInFlight = new Promise<void>((resolve) => {
+    putEntered = resolve;
+  });
   stores.blobs.put = async (...args) => {
     const signal = args[2]?.signal;
+    putStarts++;
+    putEntered();
     if (signal?.aborted) throw signal.reason;
     await new Promise<void>((_, reject) => {
       signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -849,15 +862,24 @@ Deno.test("audio-feed-lqd6: lost claim when exceeding retry cap reports supersed
     return oldPut(...args);
   };
 
-  const r = await runSynthesisBatch(ctx, synth, {
+  const running = runSynthesisBatch(ctx, synth, {
     owner: "lqd6-lost-worker",
     maxUploadRetries: 2,
     maxInvocationDurationMs: 1_800,
     estimatedTurnDurationMs: 1,
     estimatedUploadDurationMs: 100,
     flushMarginMs: 100,
+    clock: time.clock,
   });
+  await putInFlight;
+  // 1700ms = the 1800ms budget minus the 100ms flush margin.
+  await time.advance(1_700);
+  const r = await running;
 
+  // The order fact the injected clock buys: the deadline interrupted a put that HAD started. On the
+  // old real-clock shape this was 0 - the preflight refused first - so the row passed without ever
+  // exercising the interrupted-transfer path its name describes (same defect as census row 1).
+  assertEquals(putStarts, 1, "the budget deadline must land mid-put, not on a preflight refusal");
   assertEquals(r.failed.length, 0, "must NOT report failed when terminal write did not succeed");
   assertEquals(r.superseded.length, 1, "must report superseded when terminal write was refused");
 });

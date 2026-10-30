@@ -11,7 +11,7 @@ import { KvMetadataStore } from "../src/storage/kv.ts";
 import { ARTICLE_CHUNK_SIZE } from "../src/storage/kv.ts";
 import type { Article } from "../src/types.ts";
 
-async function roundTrip(content: string, id: string): Promise<string | null> {
+async function roundTripArticle(content: string, id: string): Promise<Article | null> {
   const kv = await Deno.openKv(":memory:");
   const store = new KvMetadataStore(kv, { ownsConnection: true });
   const article: Article = {
@@ -25,11 +25,14 @@ async function roundTrip(content: string, id: string): Promise<string | null> {
   };
   try {
     await store.putArticle(article);
-    const back = await store.getArticle("u1", id);
-    return back?.content ?? null;
+    return await store.getArticle("u1", id);
   } finally {
     kv.close();
   }
+}
+
+async function roundTrip(content: string, id: string): Promise<string | null> {
+  return (await roundTripArticle(content, id))?.content ?? null;
 }
 
 const OVER = ARTICLE_CHUNK_SIZE + 1;
@@ -66,10 +69,17 @@ Deno.test("chunking completes promptly rather than spinning when a chunk cannot 
   // Prove the safety net itself works: a lone surrogate as the very last code unit, with the body sized
   // so the final slice is exactly one code unit. Before the fix this shape never returned.
   const content = "z".repeat(OVER) + "\ud800";
-  const started = Date.now();
-  const back = await roundTrip(content, "invariant");
-  assertEquals(back, content);
-  // A spin would not reach this line at all; a bounded throw would take far longer than a clean write.
-  // 10s ceiling on purely in-memory chunking provides ~2000x margin over microsecond baseline, absorbing severe host contention.
-  assertEquals(Date.now() - started < 10_000, true, "round-trip must complete promptly, not crawl");
+  // docs/speed.md census row 8: this row asserted `Date.now() - started < 10_000`, a real-clock
+  // promptness ceiling on purely in-memory chunking - a timing outcome the host decides, not the
+  // product. "Does not spin" is a STRUCTURE fact here: the chunker's progress invariant throws rather
+  // than looping when a chunk consumes nothing (see the file header), and progress that does happen
+  // yields exactly one chunk per consumed region. Both are asserted below with no clock at all, so a
+  // spin reds as a thrown stall error or a wrong chunk count on any host, loaded or not.
+  const back = await roundTripArticle(content, "invariant");
+  assertEquals(back?.content, content);
+  assertEquals(
+    back?.chunkCount,
+    3,
+    "one chunk per consumed region: 48,000 code units, then 'z', then the lone surrogate",
+  );
 });

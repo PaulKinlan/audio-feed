@@ -58,20 +58,6 @@ function spawnChild(kvPath: string, mode: "hang" | "survive" | "drain", round: n
   }).spawn();
 }
 
-/**
- * The marker bound for each kill round, DERIVED FROM AN OBSERVED EVENT (coord review of
- * audio-feed-ga3jd): round 1 keeps the original 20s guard unchanged; each later round gets
- * 3x the previous round's OBSERVED time-to-marker (min 20s) - a host that needed T ms to
- * reach the put once gets 3T now, so the headroom tracks the machine the row is actually
- * running on instead of a widened literal. The survive round has no marker bound at all
- * (it waits on the child's whole output, behind the controlled clock).
- */
-let lastObservedMarkerMs = 0;
-function markerDeadlineFor(round: number, startedAt: number): number {
-  if (round === 1 || lastObservedMarkerMs === 0) return startedAt + 20_000;
-  return startedAt + Math.max(20_000, lastObservedMarkerMs * 3);
-}
-
 /** Read stdout until the child prints the marker, then SIGKILL it mid-put. */ async function killDuringUpload(
   kvPath: string,
   round: number,
@@ -81,18 +67,17 @@ function markerDeadlineFor(round: number, startedAt: number): number {
   let out = "";
   const buffer = child.stdout.getReader();
   try {
-    // audio-feed-ga3jd: the marker bound is an OBSERVABILITY GUARD derived from the
-    // observed time-to-marker of the previous round (markerDeadlineFor), never a widened
-    // literal: it is the loud-fail line for a child that never reaches the put, and each
-    // read is raced against the child's EXIT so an early-dying child fails with its
-    // stderr immediately instead of after the guard. Every read result is consumed, so
-    // no marker chunk is lost to the race.
-    const markerStart = Date.now();
-    const markerDeadline = markerDeadlineFor(round, markerStart);
+    // docs/speed.md census row 5: this used to stop reading at a REAL-CLOCK deadline
+    // (20s, or 3x the previous round's observed time-to-marker). That bound could never fire
+    // on a live child - the hang child polls for the put for 8s and then exits 3 - so the
+    // loud-fail path was ALWAYS the child-exit race below, and the deadline only ever
+    // contributed a way for a loaded host to abandon a child that was still working. It is
+    // deleted rather than raised: the loop now ends on EVENTS (marker bytes, EOF, the child's
+    // exit), which is order, not elapsed time. Every read result is consumed, so no marker
+    // chunk is lost to the race.
     const exited = child.status.then(() => "exited" as const);
     let childExitedEarly = false;
     for (;;) {
-      if (Date.now() >= markerDeadline) break;
       const race = await Promise.race([buffer.read(), exited]);
       if (race === "exited") {
         childExitedEarly = true;
@@ -101,10 +86,7 @@ function markerDeadlineFor(round: number, startedAt: number): number {
       const { value, done } = race;
       if (done) break;
       out += decoder.decode(value);
-      if (out.includes("MARKER:uploading")) {
-        lastObservedMarkerMs = Date.now() - markerStart;
-        break;
-      }
+      if (out.includes("MARKER:uploading")) break;
     }
     if (childExitedEarly) {
       const status = await child.status;

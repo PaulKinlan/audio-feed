@@ -347,7 +347,12 @@ of those — classifies **79 sites (rows and guards) across 16 files**:
   2. `audio-feed-lqd6: lost claim when exceeding retry cap reports superseded rather than failed (P1
      review finding)`
      — same 1800 ms budget and estimate, one tick; it asserts `superseded` on the same
-     interrupted-upload path. Not fixed here (one-row budget).
+     interrupted-upload path. **Fixed** on `fleet/hazards2` with row 1's pattern exactly: the clock
+     is injected, the row waits until the put is observably in flight, then fires the 1700 ms
+     deadline, so the same host-load accident (a 603-903 ms pre-put path eating the 199 ms margin
+     and turning the tick into a preflight refusal) can no longer decide the path. It also gained
+     the order assertion row 1's probe supplied by hand — `putStarts === 1` — because the
+     `superseded`/`failed` assertions alone pass on the preflight-refusal path.
   3. `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)`
      — tonight's red; fixed on `fleet/starve` (audio-feed-zy3j round three) and not on `main` when
      this census was taken. Left alone so the unmerged fix is not duplicated.
@@ -360,14 +365,21 @@ of those — classifies **79 sites (rows and guards) across 16 files**:
      `clock` option; the 40 ms deadline fires virtually while the script stage is in flight,
      removing `performance.now` stubbing and real timer races entirely.
   5. The hang rounds of `synthesis_invocation_death_test.ts` (`audio-feed-aqms` control and the
-     child's 30 s budget) — the premise "the marker reaches the parent before the deadline" is a
-     real-clock race, deliberately given ~30 s of headroom and a marker bound derived from the
-     previous round's observed time (3x, min 20 s) rather than a clock.
+     child's 30 s budget) — the premise "the marker reaches the parent before the deadline" was a
+     real-clock race, given a marker bound derived from the previous round's observed time (3x, min
+     20 s). **Fixed** on `fleet/hazards2` by deleting the bound rather than deriving it: the hang
+     child polls for the put for 8 s and then exits 3, so the parent's 20 s deadline could never
+     fire on a live child and the real loud-fail path was always the child-exit race. The read loop
+     now ends on events only (marker bytes, EOF, exit) — order, not elapsed time. The 30 s budget
+     stays in the child as kill headroom, which is what it always was.
   6. `retries honour Retry-After instead of the default backoff` (`tests/tts_hardening_test.ts`) —
-     real clock, 5 s ceiling against a 0 ms backoff. **Fixed** on `fleet/hazards`: raised ceiling to
-     10 s so scheduler contention on a loaded host cannot plausibly consume the margin, safely below the
-     15,000 ms minimum default backoff (60,000 ms base capped at 30,000 ms with min 0.5 jitter =
-     15,000 ms), with order assertion that 2 attempts occurred and returned valid audio.
+     real clock, 5 s ceiling against a 0 ms backoff. Partly fixed on `fleet/hazards` (ceiling raised
+     to 10 s, still a real clock and still flake-by-design on a pathologically loaded host). **Fully
+     fixed** on `fleet/hazards2`: `GeminiTtsClient` takes an injected `sleepFn`, so the row now
+     asserts the delay the client COMPUTED — `[0]` ms for `Retry-After: 0` against a 60,000 ms base
+     — and no wall clock is involved. Dropping the elapsed bound alone would have proved nothing: a
+     client that ignored Retry-After would still have passed, just slowly (mutation: ignoring the
+     header reports `retry waited 15319ms, expected 0ms` in 68 ms).
   7. `a hung request is killed by the per-attempt timeout` (same file) — 5 s ceiling against a 150
      ms product timeout. **Fixed** on `fleet/hazards`: replaced the 5 s real-clock ceiling with an
      order assertion that the fetch signal was aborted, the timeout error message matches
@@ -375,12 +387,20 @@ of those — classifies **79 sites (rows and guards) across 16 files**:
      increases elapsed time, making the assertion load-independent.
   8. `chunking completes promptly rather than spinning when a chunk cannot advance`
      (`tests/storage_chunk_surrogate_test.ts`) — a 10 s promptness bound on in-memory work.
+     **Fixed** on `fleet/hazards2`: "does not spin" is a structure fact, not a duration. The row now
+     asserts the round-tripped content and an exact `chunkCount` of 3 (one chunk per consumed
+     region), with no clock at all — the chunker's progress invariant throws rather than looping, so
+     a spin reds as `Article chunking stalled for invariant at index 48001 (sliceLength=0)` in 41
+     ms.
 
-Rows 4, 6 and 7 are fixed on `fleet/hazards`. Rows 5 and 8 carry the rule-2 comment and are kept as
-written; they are listed so the next census does not have to rediscover them. What the fix in row 1
-cost: no timing tolerance was added and no number was raised — the row's wall time is unchanged
-within noise (5.9 s -> 6.6 s including the type-check), because the real budget it used to arm was
-never the mechanism.
+All eight rows are now fixed: row 3 on `fleet/starve` (still unmerged when this was written), rows
+1, 4, 6 and 7 on `fleet/hazards`, and rows 2, 5, 8 plus the row-6 residual on `fleet/hazards2`.
+Nothing was fixed by widening a tolerance except row 6's interim 5 s -> 10 s ceiling, which the
+injected `sleepFn` then made unnecessary. What the fix in row 1 cost: no timing tolerance was added
+and no number was raised — the row's wall time is unchanged within noise (5.9 s -> 6.6 s including
+the type-check), because the real budget it used to arm was never the mechanism. The same held for
+rows 2, 5 and 8: every fixed row asserts an order, an identity or a product-computed figure, and
+each touched file was re-run green with four CPU burners saturating the box.
 
 ## Widening verdict boundary
 

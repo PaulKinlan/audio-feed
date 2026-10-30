@@ -69,18 +69,30 @@ Deno.test("transient 429 is retried and the retry's audio is returned", async ()
 
 Deno.test("retries honour Retry-After instead of the default backoff", async () => {
   const { fn, calls } = scripted([errorResponse(503, { "retry-after": "0" }), okResponse()]);
-  const started = Date.now();
-  const result = await client(fn, { retryBaseDelayMs: 60_000 }).sendRequest(request);
+  // docs/speed.md census row 6: this row used to assert an ELAPSED ceiling on a real clock (>5s,
+  // then 10s) that only discriminated because the ignored-Retry-After path sleeps ~15,000ms. The
+  // sleep is now injected, so the row asserts the DELAY THE CLIENT COMPUTED: 0ms for
+  // `Retry-After: 0` while the configured base backoff is 60,000ms. Dropping the elapsed bound
+  // without this would have proved nothing - a Retry-After-ignoring client would still pass, just
+  // slowly.
+  const delays: number[] = [];
+  const result = await client(fn, {
+    retryBaseDelayMs: 60_000,
+    sleepFn: (ms: number) => {
+      delays.push(ms);
+      return Promise.resolve();
+    },
+  }).sendRequest(request);
   if (calls.length !== 2) throw new Error(`expected 2 attempts, got ${calls.length}`);
   if (!result.rawBytes || result.rawBytes.length === 0) {
     throw new Error("expected audio from retry");
   }
-  // A 0-second Retry-After must beat the 60s base delay; jitter cannot mask it.
-  // docs/speed.md census row 6: raised ceiling from 5s to 10s to absorb scheduler contention
-  // on loaded hosts, while staying safely below the 15,000ms minimum backoff (60s base capped
-  // at 30s with min 0.5 jitter = 15,000ms).
-  const elapsed = Date.now() - started;
-  if (elapsed > 10_000) throw new Error(`Retry-After was ignored (elapsed ${elapsed}ms > 10000ms)`);
+  // A 0-second Retry-After must beat the 60s base delay; jitter cannot mask it, and no wall clock
+  // is involved, so this cannot flake on a loaded host.
+  if (delays.length !== 1) throw new Error(`expected exactly 1 retry wait, got ${delays.length}`);
+  if (delays[0] !== 0) {
+    throw new Error(`Retry-After was ignored: retry waited ${delays[0]}ms, expected 0ms`);
+  }
 });
 
 Deno.test("a plain 500 is NOT retried by default (a retry could double-charge)", async () => {
