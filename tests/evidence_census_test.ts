@@ -23,6 +23,7 @@ import {
   splitCreditedWrites,
   WRITE_CALLS,
 } from "../scripts/evidence-census.ts";
+import { collect } from "../scripts/evidence-run.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
 /**
@@ -848,6 +849,121 @@ Deno.test("audio-feed-cp9j: NEGATIVE CONTROL - sole tenant proof with quantiseEv
     "sole tenant writing evidence must use runProof and writeEvidenceReadme",
   );
 });
+
+// ---------------------------------------------------------------------------
+// UNREGISTERED-PROOF CENSUS (tracked as the "unregistered-proof census" bead; bd writes were
+// failing when this landed): CLOSE THE CLASS, NOT AN INSTANCE. The audio-feed-zwqrx registration
+// row reads ONE README and asserts strings the same commit wrote, so it can never see the class
+// it was meant to catch: a FUTURE proof script with no declaring README passes unnoticed. This
+// row walks the FILESYSTEM instead - every scripts/*-proof.ts and scripts/verify_*.ts must be
+// either (a) declared by some docs/evidence/<id>/README.md `- Script:` line (the relation
+// `deno task evidence` RUNS), or (b) pinned below as intentionally-unregistered WITH A REASON.
+// Both directions are exact-set: a NEW unregistered script reds, and a pinned entry whose facts
+// have moved (script deleted, or since declared) reds too. scripts/repro_*.ts follows the same
+// convention (8 of 10 declared at this tip) and is NOT yet covered - recorded here as known debt
+// rather than silently dropped; widening the pattern below is the one-line fix.
+// ---------------------------------------------------------------------------
+
+/**
+ * The intentionally-unregistered proof scripts, pinned by EXACT SET. An entry is a claim about
+ * the tree RIGHT NOW, so the row re-derives each entry's facts: an entry whose script no longer
+ * exists on disk, or which has meanwhile been declared by an evidence README, is a lie and must
+ * be removed rather than trusted. Growing this set is a decision, not an edit.
+ */
+const INTENTIONALLY_UNREGISTERED: Record<string, string> = {
+  "scripts/home-module-browser-proof.ts":
+    "multi-tenant contributor (audio-feed-7ulw): writes into the SHARED audio-feed-3xq slice owned and declared by scripts/admin-module-browser-proof.ts - a declaring README of its own would clobber the shared one (see MULTI_TENANT_CONTRIBUTOR_PROOFS above)",
+  "scripts/landing-tooltip-browser-proof.ts":
+    "multi-tenant contributor (audio-feed-s9z5): audio-feed-3xq part 4c, owned and declared by scripts/admin-module-browser-proof.ts (see MULTI_TENANT_CONTRIBUTOR_PROOFS above)",
+  "scripts/l7m1-determinism-proof.ts":
+    "disposable determinism probe run by hand; the durable l7m1 assertions live in tests/l7m1_proof_test.ts and the slice's registered proof is scripts/verify_main_l7m1_e2e.ts",
+  "scripts/regenerate-browser-proof.ts":
+    "blocked by audio-feed-ebyy (P2 IN_REVIEW, passkey rotation auth migration); pinned for the same reason in EXEMPT_UNMEDIATED_PROOFS above",
+  "scripts/uploads-six-type-browser-proof.ts":
+    "browser acceptance proof for audio-feed-d82rv, NOT YET REGISTERED with an evidence slice; registration is a decision (run it so its own writeEvidenceReadme declares the slice), not a pinned fact",
+  "scripts/verify_c0gj_scanner_divergence.ts":
+    "one-off committed-artefact harness comparing scanner behaviour ACROSS pinned branches for audio-feed-diqd (investigating audio-feed-c0gj); not an ongoing proof of the current tree",
+  "scripts/verify_i7vi_events.ts":
+    "HISTORICAL per its own header (audio-feed-byh4j): no suite executes or reads this script, so it is NOT evidence of current behaviour; wire it into a suite or re-derive it before citing it",
+  "scripts/verify_s3uk_real_browser.ts":
+    "one-off real-browser INP investigation (audio-feed-s3uk); commits nothing to docs/evidence and is pinned as a mention-only probe by the census tests in this file",
+  "scripts/verify_wzv9_capability_leak.ts":
+    "HISTORICAL per its own header (audio-feed-byh4j): no suite executes or reads this script, so it is NOT evidence of current behaviour; re-derive before citing it",
+};
+
+Deno.test(
+  "unregistered-proof census: every scripts/*-proof.ts and scripts/verify_*.ts is declared by an evidence README or pinned as intentionally-unregistered",
+  async () => {
+    const root = new URL("..", import.meta.url).pathname;
+
+    // DISCOVERED, from the filesystem - not from any list a commit could assert about itself.
+    const discovered: string[] = [];
+    for await (const entry of Deno.readDir(`${root}/scripts`)) {
+      if (!entry.isFile) continue;
+      if (entry.name.endsWith("-proof.ts") || entry.name.startsWith("verify_")) {
+        discovered.push(`scripts/${entry.name}`);
+      }
+    }
+    discovered.sort();
+
+    // DECLARED, by the SAME walker the evidence tier runs (collect() parses every
+    // docs/evidence/<id>/README.md `- Script:` line), so this row and `deno task evidence`
+    // cannot disagree about what a declaration is. Filesystem only: no Chrome, no network.
+    const { declarations } = await collect({
+      list: true,
+      timeoutMs: 300_000,
+      root,
+      explicitTimeout: false,
+    });
+    const declared = new Set(declarations.map((d) => d.declared));
+
+    const unregistered = discovered.filter((s) =>
+      !declared.has(s) && !Object.hasOwn(INTENTIONALLY_UNREGISTERED, s)
+    );
+    assertEquals(
+      unregistered,
+      [],
+      `proof script(s) that NOTHING RUNS: ${unregistered.join(", ")}. For each one: ` +
+        `add docs/evidence/<id>/README.md with a \`- Script:\` line declaring it, ` +
+        `or list it as intentionally-unregistered with a reason in INTENTIONALLY_UNREGISTERED ` +
+        `(tests/evidence_census_test.ts). A proof script no evidence README declares and no ` +
+        `exemption names is a proof nothing is scheduled to run.`,
+    );
+
+    // THE EXEMPTION SET MUST NOT OUTLIVE ITS FACTS: an entry whose script is gone, or which has
+    // meanwhile been declared, is a claim about a tree that no longer exists and reds here.
+    for (const [script, reason] of Object.entries(INTENTIONALLY_UNREGISTERED)) {
+      assert(
+        reason.trim().length > 0,
+        `intentionally-unregistered entry ${script} must carry a reason`,
+      );
+      assert(
+        discovered.includes(script),
+        `stale exemption: ${script} matches no scripts/*-proof.ts or scripts/verify_*.ts on disk - remove the entry`,
+      );
+      assert(
+        !declared.has(script),
+        `stale exemption: ${script} is now declared by an evidence README - remove the entry from INTENTIONALLY_UNREGISTERED`,
+      );
+    }
+    assertEquals(
+      Object.keys(INTENTIONALLY_UNREGISTERED).length,
+      9,
+      "the intentionally-unregistered set is pinned; growing it is a decision, not an edit",
+    );
+
+    // POSITIVE CONTROLS: the walk found a real corpus on both sides, or every exclusion above
+    // would be satisfied by walking nothing - the same guard the other census rows carry.
+    assert(
+      discovered.length >= 40,
+      `expected to discover the proof-script corpus, got ${discovered.length}`,
+    );
+    assert(
+      declared.size >= 30,
+      `expected the evidence READMEs to declare a real corpus, got ${declared.size}`,
+    );
+  },
+);
 
 Deno.test("audio-feed-7ulw: NEGATIVE CONTROL - multi-tenant proof calling writeEvidenceReadme fails audit", () => {
   const syntheticProof = [
