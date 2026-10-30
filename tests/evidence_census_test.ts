@@ -869,3 +869,20 @@ Deno.test("audio-feed-7ulw: NEGATIVE CONTROL - multi-tenant proof calling writeE
     "multi-tenant contributor must NOT call writeEvidenceReadme",
   );
 });
+
+Deno.test("audio-feed-zwqrx: playback-csp-browser-proof executes inside runProof and is registered in evidence declarations", async () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const script = "scripts/playback-csp-browser-proof.ts";
+  const content = await Deno.readTextFile(`${root}/${script}`);
+  assert(content.includes('runProof("playback-proof"'), `${script} must execute inside runProof`);
+
+  const readme = await Deno.readTextFile(`${root}/docs/evidence/audio-feed-zwqrx/README.md`);
+  assert(
+    readme.includes("- Script: scripts/playback-csp-browser-proof.ts"),
+    "audio-feed-zwqrx README must register scripts/playback-csp-browser-proof.ts",
+  );
+  assert(
+    readme.includes("- Asserts:"),
+    "audio-feed-zwqrx README must declare assertions",
+  );
+});
