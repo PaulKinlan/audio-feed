@@ -326,12 +326,41 @@ try {
 
   // Flush CWV via navigation
   console.log("[s3uk] Navigating away to trigger pagehide beacon flush...");
+  const navigateStartedAt = Date.now();
   await cdp("Page.navigate", { url: "about:blank" });
-  await wait(2000);
 
-  const logs = await stores.metadata.listLogs();
-  const cwvReports = logs.filter((r) => r.type === "cwv.report");
-  console.log(`[s3uk] cwv.report records received in KV store: ${cwvReports.length}`);
+  // audio-feed-q6ecj: the beacon flush is an OBSERVED condition, not a constant. The old fixed
+  // wait(2000) read the store before a loaded host had finished pagehide beacon -> POST /api/cwv
+  // -> the awaited appendLog, so the gate row went red with "0 report(s)" while every interaction
+  // assertion was green. Poll like tests/csp_reporting_test.ts's settleDrops: 10ms interval, a
+  // deadline MEASURED FROM THE NAVIGATION and sized for a loaded host. The deadline is a failure
+  // bound, not a delay - the loop returns the moment the records are there.
+  const CWV_SETTLE_DEADLINE_MS = 20_000;
+  // The exact expected count is a runtime property, not a constant: the client (src/assets/cwv.js)
+  // flushes one beacon per metric the page actually observed, up to three, guarded to fire once.
+  // The statically assertable floor is 1 - exactly the assertion under test below. A short return
+  // at the deadline lets the assertion fail on absence; it never passes an empty list silently.
+  const settleCwvReports = async (want: number) => {
+    const deadline = navigateStartedAt + CWV_SETTLE_DEADLINE_MS;
+    for (;;) {
+      const logs = await stores.metadata.listLogs();
+      const reports = logs.filter((r) => r.type === "cwv.report");
+      if (reports.length >= want) return reports;
+      if (Date.now() >= deadline) return reports;
+      await wait(10);
+    }
+  };
+  const cwvReports = await settleCwvReports(1);
+  const settleMs = Date.now() - navigateStartedAt;
+  console.log(
+    `[s3uk] cwv.report records received in KV store: ${cwvReports.length} (settle ${settleMs}ms after navigation)`,
+  );
+  if (cwvReports.length < 1) {
+    // Fail LOUDLY on absence: name what was waited for, how many arrived, and the deadline.
+    console.error(
+      `[s3uk] TIMEOUT: waited ${CWV_SETTLE_DEADLINE_MS}ms after the about:blank navigation for >= 1 cwv.report record (pagehide beacon -> POST /api/cwv -> metadata store); saw ${cwvReports.length}.`,
+    );
+  }
   for (const r of cwvReports) {
     console.log(
       `  report: metric=${r.context?.metric} value=${r.context?.value} page=${r.context?.page}`,
@@ -340,7 +369,7 @@ try {
   check(
     "cwv.report records persisted to metadata store",
     cwvReports.length > 0,
-    `${cwvReports.length} report(s)`,
+    `${cwvReports.length} report(s) (wanted >= 1; deadline ${CWV_SETTLE_DEADLINE_MS}ms from navigation; settle took ${settleMs}ms)`,
   );
 } catch (err) {
   failures++;
