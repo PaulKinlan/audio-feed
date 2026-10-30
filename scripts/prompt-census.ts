@@ -9,8 +9,10 @@
  * src/worker/script.ts) exists to close. Nothing stopped the NEXT prompt site from
  * being written with raw interpolation, because "which functions build prompts" was a
  * fact kept in reviewers' heads. This census makes it a derived fact: the set of
- * prompt sites is measured on every run and pinned to an exact list, so a new site
- * reds the row and forces a decision instead of shipping silently.
+ * prompt sites is measured on every run and pinned to an exact list, so a new prompt
+ * built as an instruction-marker block or an output-contract literal DOES red and
+ * names the site; a single INTERLEAVED literal carrying an instruction with no
+ * output-contract phrase is INVISIBLE (see DECLARED LIMITS below).
  *
  * HOW A SITE IS FOUND — two arms, both deliberately narrow:
  *
@@ -41,8 +43,8 @@
  *   the same literal) with no instruction block is NOT caught by the text net — the
  *   loose imperative wording such a literal shares with HTML/UI copy ("do not", "must
  *   not") makes the same-literal arm a false-positive generator, measured. Such a site
- *   is caught only if its author declares it. This hole is stated in the consuming
- *   test row.
+ *   is caught only if its author declares it. This hole is stated and executably
+ *   pinned in the consuming test row.
  * - Only function declarations are enumerated (the shape of every prompt builder in
  *   this repo); only the src/ tree is walked.
  * - Regex literals are not masked (maskNonCode's own limit), so a regex containing a
