@@ -230,42 +230,26 @@ Deno.test("oversized article is refused before any paid call; empty narration is
   assertEquals(calls, 0);
 });
 
-/**
- * Build a body whose narration prompt splits into EXACTLY n segments under the
- * client's own splitter (audio-feed-cco6g). Paragraph count is found by binary
- * search over a monotone paragraph->segment relation, then pinned with an exact
- * assertion — a per-word growth loop would call the superlinear splitter thousands
- * of times and dominate the suite.
+/** The measured ~2,475-byte paragraphs require 76 and 77 repeats for 64 and 65
+ * segments. Pin the fixture sizes instead of binary-searching the superlinear
+ * splitter on every run; the exact count is still checked with the real splitter.
  */
 const SEGMENT_PARA =
   "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore. "
-    .repeat(25); // ~2,475 bytes: a paragraph is a seam the splitter packs whole.
-
-function promptSegmentCount(body: string): number {
-  return splitTtsText(
-    formatNarrationPrompt({ title: "Boundary", body, includeIntro: false }),
-    MAX_TTS_INPUT_BYTES,
-  ).length;
-}
-
-function bodyOfParagraphCount(k: number): string {
-  return Array.from({ length: k }, () => SEGMENT_PARA).join("\n\n");
-}
-
-function smallestParagraphCountAtLeast(n: number): number {
-  let lo = 1;
-  let hi = n * 3;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (promptSegmentCount(bodyOfParagraphCount(mid)) >= n) hi = mid;
-    else lo = mid + 1;
-  }
-  return lo;
-}
+    .repeat(25);
 
 function bodyWithExactSegmentCount(n: number): string {
-  const body = bodyOfParagraphCount(smallestParagraphCountAtLeast(n));
-  assertEquals(promptSegmentCount(body), n);
+  assert(n === MAX_TTS_SEGMENTS || n === MAX_TTS_SEGMENTS + 1);
+  const paragraphCount = n === MAX_TTS_SEGMENTS ? 76 : 77;
+  const body = Array.from({ length: paragraphCount }, () => SEGMENT_PARA).join("\n\n");
+  assertEquals(
+    splitTtsText(
+      formatNarrationPrompt({ title: "Boundary", body, includeIntro: false }),
+      MAX_TTS_INPUT_BYTES,
+    ).length,
+    n,
+    "boundary fixture must still exercise the exact segment cap",
+  );
   return body;
 }
 
