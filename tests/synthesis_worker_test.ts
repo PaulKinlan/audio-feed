@@ -91,11 +91,21 @@ async function waitFor(
   timeoutMs = 5000,
   intervalMs = 5,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
       const details = typeof describe === "function" ? describe() : describe;
-      throw new Error(`timed out waiting ${timeoutMs}ms for ${details}`);
+      // audio-feed-zy3j family: never a bare "timed out waiting Nms" - identical in behaviour
+      // and message shape to the claim-lifecycle suite's waitFor. Name what was waited for (a
+      // lazy describe reports state AT expiry), the elapsed time, and both deadline instants.
+      throw new Error(
+        `waitFor: ${details} did not hold within ${timeoutMs}ms of entry ` +
+          `(entry ${new Date(startedAt).toISOString()}, deadline ${
+            new Date(deadline).toISOString()
+          }, ` +
+          `elapsed ${Date.now() - startedAt}ms)`,
+      );
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
@@ -377,13 +387,16 @@ Deno.test("the loop runs a tick, stops on abort, and never dies on a bad tick", 
     { intervalMs: 10, onTick: () => completions++ },
   );
   // audio-feed-at5tm: the first-tick gate is the OBSERVABLE EVENT (the loop's own tick
-  // counter), never the clock. waitFor's 5s ceiling is the observability guard that names
+  // counter), never the clock. waitFor's ceiling is the observability guard that names
   // the hang - 'the loop never emitted its first tick' - it does not decide pass/fail:
   // a correct loop ticks on any host, however slow (measured: the old bare 60ms pause
-  // reddened a correct loop when a cold-start stall outlasted it).
+  // reddened a correct loop when a cold-start stall outlasted it). audio-feed-zy3j
+  // family: 45s load-tolerant ABSENCE ceiling, expiry names the counter state.
   await waitFor(
     () => ticks >= 1,
-    () => `the loop never emitted its first tick (ticks=${ticks})`,
+    () =>
+      `the loop never emitted its first tick (ticks=${ticks}; 0 means startSynthesisWorker's first batch never ran)`,
+    45_000,
   );
   await worker.stop();
   assert(ticks >= 1, `expected at least one tick, got ${ticks}`);
@@ -416,7 +429,9 @@ Deno.test("the loop runs a tick, stops on abort, and never dies on a bad tick", 
   );
   await waitFor(
     () => failTicks.n >= 2,
-    () => `failTicks.n >= 2, got ${failTicks.n}`,
+    () =>
+      `the loop to keep ticking after a failing tick (failTicks.n=${failTicks.n}; <2 means the loop stopped or never resumed ticking)`,
+    45_000,
   );
   abort.abort();
   await fragile.stop();

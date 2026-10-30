@@ -131,11 +131,21 @@ async function waitFor(
   timeoutMs = 5000,
   intervalMs = 5,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
       const details = typeof describe === "function" ? describe() : describe;
-      throw new Error(`timed out waiting ${timeoutMs}ms for ${details}`);
+      // audio-feed-zy3j round two: never a bare "timed out waiting Nms". Name what was waited
+      // for (a lazy describe can report the hook's state AT expiry), the elapsed time, and both
+      // deadline instants, so a loaded-host red is diagnosable from the gate log alone.
+      throw new Error(
+        `waitFor: ${details} did not hold within ${timeoutMs}ms of entry ` +
+          `(entry ${new Date(startedAt).toISOString()}, deadline ${
+            new Date(deadline).toISOString()
+          }, ` +
+          `elapsed ${Date.now() - startedAt}ms)`,
+      );
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
@@ -1431,7 +1441,16 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
     maxAttempts: 2,
     clock: time.clock,
   });
-  await waitFor(() => scriptCalls === 1, "the script call to be initiated", 5_000);
+  // audio-feed-zy3j family: the wait polls an OBSERVED CONDITION - this test's own call
+  // counter - entered synchronously after the un-awaited batch kickoff, so the ceiling is
+  // measured from the action's start. 45s is a load-tolerant ABSENCE bound, not a delay
+  // (the 5ms poll returns the instant the call is initiated); expiry names the state.
+  await waitFor(
+    () => scriptCalls === 1,
+    () =>
+      `the first script call to be initiated (scriptCalls=${scriptCalls}; 0 means the generator was never invoked)`,
+    45_000,
+  );
   await time.advance(100); // fires the ~95ms derived deadline virtually
   const r1 = await running1;
   assertEquals(r1.yielded.length, 1);
@@ -1449,7 +1468,14 @@ Deno.test("audio-feed-fsr3: (a) repeated script budget aborts advance attempts a
     maxAttempts: 2,
     clock: time.clock,
   });
-  await waitFor(() => scriptCalls === 2, "the second script call to be initiated", 5_000);
+  // audio-feed-zy3j family: same observed-condition wait, 45s ABSENCE ceiling from the
+  // kickoff (entered synchronously), expiry names the counter state.
+  await waitFor(
+    () => scriptCalls === 2,
+    () =>
+      `the second script call to be initiated (scriptCalls=${scriptCalls}; <2 means the second attempt never started a call)`,
+    45_000,
+  );
   await time.advance(100);
   const r2 = await running2;
   assertEquals(r2.yielded.length, 0, "must not yield indefinitely");
@@ -1524,7 +1550,16 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
     flushMarginMs: 5,
     clock: time.clock,
   });
-  await waitFor(() => paidCalls === 1, "the paid TTS call to be initiated", 5_000);
+  // audio-feed-zy3j family: the wait polls an OBSERVED CONDITION - this test's own call
+  // counter - entered synchronously after the un-awaited batch kickoff, so the ceiling is
+  // measured from the action's start. 45s is a load-tolerant ABSENCE bound, not a delay
+  // (the 5ms poll returns the instant the call is initiated); expiry names the state.
+  await waitFor(
+    () => paidCalls === 1,
+    () =>
+      `the paid TTS call to be initiated (paidCalls=${paidCalls}; 0 means the TTS call was never initiated)`,
+    45_000,
+  );
   await time.advance(100); // fires the ~95ms derived deadline virtually
   const r1 = await running1;
   assertEquals(r1.yielded.length, 1);
@@ -1542,7 +1577,14 @@ Deno.test("audio-feed-o88z: repeated uncommitted TTS budget aborts advance attem
     flushMarginMs: 5,
     clock: time.clock,
   });
-  await waitFor(() => paidCalls === 2, "the second paid TTS call to be initiated", 5_000);
+  // audio-feed-zy3j family: same observed-condition wait, 45s ABSENCE ceiling from the
+  // kickoff (entered synchronously), expiry names the counter state.
+  await waitFor(
+    () => paidCalls === 2,
+    () =>
+      `the second paid TTS call to be initiated (paidCalls=${paidCalls}; <2 means the second attempt never started a call)`,
+    45_000,
+  );
   await time.advance(100);
   const r2 = await running2;
   assertEquals(r2.yielded.length, 0);
@@ -1702,7 +1744,15 @@ Deno.test("audio-feed-dv4p: (b) terminal upload in flight aborts at invocation d
   });
   // Hold the transfer in flight, then fire the 80ms deadline VIRTUALLY: the abort
   // wins while the transfer is parked and undecided.
-  await waitFor(() => putEnteredFlag, "the terminal put to be entered", 5_000);
+  // audio-feed-zy3j family: the transfer is held in flight by putGate, so this wait polls
+  // the observed entry flag, synchronously after the un-awaited kickoff. 45s ABSENCE
+  // ceiling (not a delay); expiry names the flag state at expiry.
+  await waitFor(
+    () => putEnteredFlag,
+    () =>
+      `the terminal put to be entered (putEnteredFlag=${putEnteredFlag}; false means blobs.put was never entered)`,
+    45_000,
+  );
   await time.advance(80);
   const r1 = await running;
   // THE PROPERTY (audio-feed-y2ex cure, restated as state by qz1eb): the batch's yield
@@ -1894,7 +1944,15 @@ Deno.test("audio-feed-mv1d: terminal metadata write is bounded by invocation bud
 
   // Hold the write in flight, then fire the 80ms deadline VIRTUALLY: the yield is
   // decided while the write is parked - the bounded-yield fact, as an order.
-  await waitFor(() => writeEnteredFlag, "the terminal metadata write to be entered", 5_000);
+  // audio-feed-zy3j family: the write is held in flight by writeGate, so this wait polls
+  // the observed entry flag, synchronously after the un-awaited kickoff. 45s ABSENCE
+  // ceiling (not a delay); expiry names the flag state at expiry.
+  await waitFor(
+    () => writeEnteredFlag,
+    () =>
+      `the terminal metadata write to be entered (writeEnteredFlag=${writeEnteredFlag}; false means completeEpisode was never entered)`,
+    45_000,
+  );
   await time.advance(80);
   const result = await running;
 
@@ -2103,7 +2161,15 @@ Deno.test("audio-feed-uecw: synthesis accounting is recorded as part of terminal
     estimatedUploadDurationMs: 1,
     flushMarginMs: 5,
   });
-  await waitFor(() => putEntered, "put hook entered", 5000);
+  // audio-feed-zy3j family (the non-mirror sibling of the fixed invocation-bound row): the
+  // wait polls the observed put-entry flag, synchronously after the un-awaited kickoff.
+  // 45s ABSENCE ceiling (not a delay); expiry names the flag state at expiry.
+  await waitFor(
+    () => putEntered,
+    () =>
+      `the put hook to be entered (putEntered=${putEntered}; false means the put hook was never entered)`,
+    45_000,
+  );
   const result = await batchPromise;
   assert(putEntered, "put hook must be entered");
   assertEquals(result.ready.length, 1, "episode must be completed ready");
