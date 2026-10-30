@@ -632,8 +632,12 @@ Deno.test("audio-feed-q0ky: a derivation that THROWS still widens and reports no
   assertEquals(degraded.unattributed, []);
   assertEquals(degraded.outOfRepo, []);
   assertEquals(degraded.unclassified, []);
+  // audio-feed-q6ecj added executedRelations to ReadRelationReport, so its empty form is part of this set. The
+  // list is exact on purpose: the point is that a NEW field cannot arrive without someone deciding its empty
+  // value here, which is what this row and the mapped type in emptyReadRelationReport enforce together.
   assertEquals(Object.keys(degraded).sort(), [
     "computedImportSuites",
+    "executedRelations",
     "outOfRepo",
     "relations",
     "unattributed",
@@ -641,9 +645,12 @@ Deno.test("audio-feed-q0ky: a derivation that THROWS still widens and reports no
     "unresolved",
   ], "a field added to ReadRelationReport must decide its EMPTY form in emptyReadRelationReport");
   for (const [key, value] of Object.entries(degraded)) {
-    if (key === "relations") {
-      assert(value instanceof Map, "relations must still be a map in the degraded report");
-      assertEquals((value as Map<string, string[]>).size, 0);
+    // Map-valued signals: relations is a DataReadRelations, and audio-feed-q6ecj made executedRelations one too,
+    // so this branch is keyed off the VALUE being a Map rather than off the field's name - a hardcoded name list
+    // is how the next Map field would be mistaken for an array and red for the wrong reason.
+    if (value instanceof Map) {
+      assert(value instanceof Map, `${key} must still be a map in the degraded report`);
+      assertEquals((value as Map<string, string[]>).size, 0, `${key} must be an EMPTY map`);
       continue;
     }
     assert(Array.isArray(value), `${key} must be an array in the degraded report`);
