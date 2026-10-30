@@ -82,6 +82,10 @@ class HangingPutBlobStore implements BlobStore {
   url(): Promise<string | null> {
     return Promise.resolve(null);
   }
+  /** Never redirects off-origin: url() always resolves to null (see BlobStore.directUrlOrigin). */
+  directUrlOrigin(): string | null {
+    return null;
+  }
 }
 
 const [kvPath, mode, roundArg] = Deno.args;

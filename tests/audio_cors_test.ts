@@ -42,6 +42,7 @@ function redirectingStore(inner: Stores["blobs"]): Stores["blobs"] {
     delete: (key) => inner.delete(key),
     get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
     url: (key) => Promise.resolve(`https://r2.example.com/${key}?X-Amz-Signature=abc`),
+    directUrlOrigin: () => "https://r2.example.com",
   };
 }
 

@@ -83,6 +83,7 @@ function guardingStore(
     url(key, opts) {
       return inner.url(key, opts);
     },
+    directUrlOrigin: () => inner.directUrlOrigin(),
   };
   return { store, signed, unsigned, signals };
 }

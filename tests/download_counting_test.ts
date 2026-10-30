@@ -52,6 +52,7 @@ function redirectingStore(inner: Stores["blobs"]): Stores["blobs"] {
     delete: (key) => inner.delete(key),
     get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
     url: (key) => Promise.resolve(`https://cdn.example.com/${key}`),
+    directUrlOrigin: () => "https://cdn.example.com",
   };
 }
 
