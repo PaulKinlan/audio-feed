@@ -301,6 +301,64 @@ typing interface and `:2000` on the pre-fix position, so a reader following them
 rule is about. A row name is unique and line-independent; `grep -n` over the file costs one command and
 cannot silently point at different code. The same standard applies to any row cited from a doc or a bead.
 
+## Real-clock budget rows: the census (`fleet/realtimeclock`, 2026-10-30)
+
+Tonight's gate reds came from one shape: a row armed a product budget on the REAL clock and then waited
+for an event that the budget could abort before, so the wait's condition was permanently false and no
+ceiling could help (audio-feed-ugak, `src/synthesis/limits.ts`; the row is `audio-feed-zy3j: terminal
+completion invocation bound fires when delay exceeds budget (mirror)`). A static sweep of `tests/` for
+that shape — `maxInvocationDurationMs`, `startTimeMonotonicMs`, `withInvocationBudget`,
+`leaseMs`/`ttl`/`retryDelay`/`jitter`, `AbortSignal.timeout`, real timer waits, `Date.now()` /
+`performance.now()` deltas, and polling helpers whose predicate depends on any of those — classifies
+**79 sites (rows and guards) across 16 files**:
+
+- **(a) immune, 28 sites** — the row passes the shared `clock` (`tests/fixtures/invocation_clock.ts`)
+  or drives the shipped fake clock: the `dv4p`, `mv1d`, `avgc`, `o88z`, `091i`, `uswe0`, `5dxrk`,
+  `flkk`/`4qmm` and `72nv9`-clocked rows, plus the `invocation_death_child` survive control.
+- **(b) mostly safe, 43 sites** — real time is tolerated but only a boolean, an order, or a
+  product-computed figure is asserted: preflight arithmetic pinned above the whole budget (`dv4p`
+  preflight, `aqms` cannot-fit), state read after the batch settles, `observedMs`-style readings the
+  product computes (monotone under load, never an upper bound), the `withInvocationBudget` block whose
+  elapsed figure is reported and never asserted (`4qmm`), the rule-2 commented sanity/hang guards in
+  `tts_hardening_test.ts`, `grounded_script_test.ts`, `s3_abort_socket_test.ts`,
+  `storage_chunk_surrogate_test.ts`, `run_history_test.ts` and `c0gj_linear_complexity_test.ts`, and
+  the "lower bound only" shape (`durationMs >= 25`).
+- **(c) asserts a timing outcome on a real clock, 8 sites** — ranked, and only the first is fixed here:
+  1. `audio-feed-lqd6: repeated terminal upload budget aborts advance uploadRetry counter and fail
+     terminally upon exceeding maxUploadRetries` (`tests/synthesis_upload_budget_test.ts`). Real
+     1800 ms budget, 100 ms flush, and a terminal estimate of 1501 ms for 15 MB, so the preflight
+     refuses once the pre-put path exceeds **189 ms**. Measured on this VM: the put is entered
+     603-903 ms after tick start, so all three ticks paid 189 ms of margin against 600-900 ms of work —
+     the hanging put was **never entered** and the row passed on the preflight-refusal path while its
+     name and comment describe an interrupted transfer (probe: 0 put entries across 3 ticks). **Fixed**
+     by injecting the clock and firing the 1700 ms deadline after the put is observed in flight; every
+     assertion unchanged; the probe now shows one put entry per tick.
+  2. `audio-feed-lqd6: lost claim when exceeding retry cap reports superseded rather than failed (P1
+     review finding)` — same 1800 ms budget and estimate, one tick; it asserts `superseded` on the same
+     interrupted-upload path. Not fixed here (one-row budget).
+  3. `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)` —
+     tonight's red; fixed on `fleet/starve` (audio-feed-zy3j round three) and not on `main` when this
+     census was taken. Left alone so the unmerged fix is not duplicated.
+  4. `audio-feed-vvwb: a stage that would take longer than the budget is aborted at the budget deadline
+     and yields with progress checkpointed` — readings half-injected (`performance.now` stubbed, the
+     scheduler real): a real 40 ms deadline against a real 200 ms stage timer. Due order keeps it
+     truthful at 5x, but it asserts `simulatedMs <= 45`, an elapsed figure.
+  5. The hang rounds of `synthesis_invocation_death_test.ts` (`audio-feed-aqms` control and the child's
+     30 s budget) — the premise "the marker reaches the parent before the deadline" is a real-clock
+     race, deliberately given ~30 s of headroom and a marker bound derived from the previous round's
+     observed time (3x, min 20 s) rather than a clock.
+  6. `retries honour Retry-After instead of the default backoff` (`tests/tts_hardening_test.ts`) — real
+     clock, 5 s ceiling against a 0 ms backoff.
+  7. `a hung request is killed by the per-attempt timeout` (same file) — 5 s ceiling against a 150 ms
+     product timeout.
+  8. `chunking completes promptly rather than spinning when a chunk cannot advance`
+     (`tests/storage_chunk_surrogate_test.ts`) — a 10 s promptness bound on in-memory work.
+
+Rows 4-8 carry the rule-2 comment and are kept as written; they are listed so the next census does not
+have to rediscover them. What the fix in row 1 cost: no timing tolerance was added and no number was
+raised — the row's wall time is unchanged within noise (5.9 s -> 6.6 s including the type-check),
+because the real budget it used to arm was never the mechanism.
+
 ## Widening verdict boundary
 
 These records are different gate workloads, not a same-workload before/after widening measurement.

@@ -719,9 +719,22 @@ Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploa
   // Slow put takes 2200ms of an 1800ms budget, so every upload attempt is aborted at the deadline.
   const audio = fakeAudio(15_000_000);
   const oldPut = stores.blobs.put.bind(stores.blobs);
+  // audio-feed-ugak class (docs/speed.md rule 1): the budget clock belongs to the TEST. The old
+  // shape armed a REAL 1700ms deadline per tick and left 199ms of that window (1800 - 100 flush -
+  // 1501 terminal estimate) for the whole pre-put path (claim, checkpoints, digest), measured on
+  // this VM at 603-903ms per tick: the terminal stage's PREFLIGHT refused before the put was ever
+  // entered, so the row passed on the preflight-refusal path while its name and comment describe an
+  // interrupted transfer (probe on the old shape: 0 put entries across the three ticks) - the same
+  // unreachable-premise defect the invocation-bound mirror row had, where no wait ceiling could help
+  // because the event itself never happened. Injected, the deadline is a decision this row makes
+  // after observing the put in flight, and every assertion below is unchanged (probe: 1 entry/tick).
+  const time = controlledInvocationClock();
+  let putEntered: () => void = () => {};
+  let putInFlight = Promise.resolve();
   stores.blobs.put = async (...args) => {
     // Hang until aborted by the signal
     const signal = args[2]?.signal;
+    putEntered();
     if (signal?.aborted) throw signal.reason;
     await new Promise<void>((_, reject) => {
       signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -730,16 +743,29 @@ Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploa
   };
   const synth = () => Promise.resolve(audio);
 
+  /** One tick, with the deadline fired only once the put it must interrupt is provably in
+   * flight: 1700ms = the 1800ms budget minus the 100ms flush margin. */
+  const tick = async (owner: string) => {
+    putInFlight = new Promise<void>((resolve) => {
+      putEntered = resolve;
+    });
+    const running = runSynthesisBatch(ctx, synth, {
+      owner,
+      maxUploadRetries: 2,
+      maxInvocationDurationMs: 1_800,
+      estimatedTurnDurationMs: 1,
+      estimatedUploadDurationMs: 100,
+      flushMarginMs: 100,
+      clock: time.clock,
+    });
+    await putInFlight;
+    await time.advance(1_700);
+    return await running;
+  };
+
   // Configure maxUploadRetries = 2.
   // Tick 1: upload 1 interrupted -> retry 1 recorded (uploadRetry = 1)
-  const r1 = await runSynthesisBatch(ctx, synth, {
-    owner: "lqd6-worker-1",
-    maxUploadRetries: 2,
-    maxInvocationDurationMs: 1_800,
-    estimatedTurnDurationMs: 1,
-    estimatedUploadDurationMs: 100,
-    flushMarginMs: 100,
-  });
+  const r1 = await tick("lqd6-worker-1");
   assertEquals(r1.yielded.length, 1, "tick 1 yields resumably");
   assertEquals(r1.failed.length, 0);
   const ep1 = await stores.metadata.getEpisode("user-1", episodeId);
@@ -749,14 +775,7 @@ Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploa
   assertEquals(ep1?.attempts, 0, "attempts reset to 0 on progress yield");
 
   // Tick 2: upload 2 (1st retry) interrupted -> retry 2 recorded (uploadRetry = 2)
-  const r2 = await runSynthesisBatch(ctx, synth, {
-    owner: "lqd6-worker-2",
-    maxUploadRetries: 2,
-    maxInvocationDurationMs: 1_800,
-    estimatedTurnDurationMs: 1,
-    estimatedUploadDurationMs: 100,
-    flushMarginMs: 100,
-  });
+  const r2 = await tick("lqd6-worker-2");
   assertEquals(r2.yielded.length, 1, "tick 2 yields resumably");
   assertEquals(r2.failed.length, 0);
   const ep2 = await stores.metadata.getEpisode("user-1", episodeId);
@@ -767,14 +786,7 @@ Deno.test("audio-feed-lqd6: repeated terminal upload budget aborts advance uploa
 
   // Tick 3: upload 3 (2nd retry) interrupted -> next retry would be 3 > 2 (exceeds cap)!
   // Must fail TERMINALLY with legible error naming bytes, duration, and the knob.
-  const r3 = await runSynthesisBatch(ctx, synth, {
-    owner: "lqd6-worker-3",
-    maxUploadRetries: 2,
-    maxInvocationDurationMs: 1_800,
-    estimatedTurnDurationMs: 1,
-    estimatedUploadDurationMs: 100,
-    flushMarginMs: 100,
-  });
+  const r3 = await tick("lqd6-worker-3");
   assertEquals(r3.yielded.length, 0, "tick 3 must NOT yield again");
   assertEquals(r3.failed.length, 1, "tick 3 fails terminally upon exceeding retry cap");
   const failedError = r3.failed[0]?.error ?? "";
