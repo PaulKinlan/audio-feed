@@ -31,20 +31,36 @@ export function newCspNonce(): string {
  *    served from `/icon.svg` ('self') or inline `<svg>` elements. Remote podcast artwork (imageUrl)
  *    is parsed from upstream feeds and emitted only into generated RSS XML feeds (src/feed/rss.ts)
  *    for external podcast client consumption; it is never rendered in HTML pages.
- * 2. Media: `<audio>` tags are rendered on `/account` and `/listen` and set src exclusively to
- *    same-origin paths (`/audio/...` and `/assets/voices/...`). Browser requests are handled via
- *    isolate streaming/proxy rather than cross-origin redirects (see `isCorsConstrained` in
- *    src/routes/audio.ts).
+ * 2. Media: `<audio>` tags are rendered on `/account` and `/listen` and set src to same-origin
+ *    paths (`/audio/...`). A browser media load is a no-cors request — listen.ts renders the
+ *    player with NO crossorigin attribute, deliberately (the production playback bug) — and
+ *    `isCorsConstrained` (src/routes/audio.ts) returns false for such a request: it skips the
+ *    redirect ONLY when a request carries an `Origin` header or a cors/same-origin
+ *    `sec-fetch-mode`. The plain player request therefore takes audio.ts's 302 to the blob
+ *    store's direct playback URL, which is CROSS-ORIGIN on an R2/S3 deployment, and CSP
+ *    re-evaluates media-src against the redirect target. So the player pages pass the store's
+ *    direct-URL origin (BlobStore.directUrlOrigin — the same store configuration audio.ts's
+ *    `url()` builds the redirect from) into htmlResponse, and media-src is
+ *    `'self' blob: <store-origin>` there; a store that never redirects (e.g. memory) yields no
+ *    origin, and pages without a player keep plain `'self' blob:` — their no-cors player
+ *    requests do not exist, and one on a redirecting store would otherwise be blocked dead.
  * The previous wildcard `https:` in `img-src` and `media-src` was unneeded boilerplate that
- * permitted arbitrary beaconing out. Tightened to `'self' data:` for images and `'self' blob:` for media.
+ * permitted arbitrary beaconing out. Tightened to `'self' data:` for images, and for media to
+ * `'self' blob:` plus exactly the one origin the blob store itself redirects to — never a bare
+ * scheme-source, which would permit arbitrary beaconing out again.
  */
-export function htmlContentSecurityPolicy(nonce: string, reportUrl?: string): string {
+export function htmlContentSecurityPolicy(
+  nonce: string,
+  reportUrl?: string,
+  mediaSrcOrigin?: string | null,
+): string {
+  const mediaSrc = mediaSrcOrigin ? `media-src 'self' blob: ${mediaSrcOrigin}` : "media-src 'self' blob:";
   const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
     `style-src 'self' 'nonce-${nonce}'`,
     "img-src 'self' data:",
-    "media-src 'self' blob:",
+    mediaSrc,
     "connect-src 'self'",
     "frame-ancestors 'none'",
     "base-uri 'self'",
@@ -74,6 +90,13 @@ export function htmlResponse(
     headers?: HeadersInit;
     reportUrl?: string;
     referrerPolicy?: ReferrerPolicy | "" | null;
+    /**
+     * The blob store's direct-URL origin, when this page renders the player
+     * (audio-feed-327mm delta) — see the media paragraph on htmlContentSecurityPolicy.
+     * Pass `blobStoreDirectUrlOrigin(ctx.stores.blobs)`; `null`/undefined keeps plain
+     * `'self' blob:`.
+     */
+    mediaSrcOrigin?: string | null;
   } = {},
 ): Response {
   const headers = new Headers(init.headers);
@@ -85,6 +108,9 @@ export function htmlResponse(
   } else if (!headers.has("referrer-policy")) {
     headers.set("referrer-policy", "no-referrer");
   }
-  headers.set("content-security-policy", htmlContentSecurityPolicy(nonce, init.reportUrl));
+  headers.set(
+    "content-security-policy",
+    htmlContentSecurityPolicy(nonce, init.reportUrl, init.mediaSrcOrigin),
+  );
   return new Response(html, { status: init.status ?? 200, headers });
 }

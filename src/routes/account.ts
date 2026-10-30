@@ -22,6 +22,7 @@ import type { Episode, PasskeyCredential, Source, User } from "../types.ts";
 import { esc, jsonForScript } from "./html.ts";
 import { CONFIRM_DIALOG_CLIENT, PASSKEY_CLIENT, renderShell, viewerOf } from "./shell.ts";
 import { htmlResponse, newCspNonce } from "./csp.ts";
+import { blobStoreDirectUrlOrigin } from "../storage/mod.ts";
 import { countOutdatedEpisodes } from "../compose.ts";
 import { resolvePasskeyProvider } from "../auth/aaguid.ts";
 
@@ -979,7 +980,12 @@ export async function handleAccount({ ctx, req }: RouteContext<AppContext>): Pro
     prefill,
     nonce,
   });
+  // This page renders per-episode `<audio src="/audio/...">`. That load is no-cors, so it
+  // follows the audio route's 302 to the blob store's cross-origin direct URL, and CSP
+  // re-evaluates media-src against that target — permit the store's own origin by name
+  // (audio-feed-327mm delta) rather than re-widening to a bare scheme-source.
   return htmlResponse(html, nonce, {
+    mediaSrcOrigin: blobStoreDirectUrlOrigin(ctx.stores.blobs),
     headers: {
       "cache-control": "no-store",
       "x-robots-tag": "noindex",

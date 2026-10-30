@@ -386,6 +386,24 @@ export class S3BlobStore implements BlobStore {
     });
     return signed.url;
   }
+
+  /**
+   * The origin `url()` aims every direct playback URL at (audio-feed-327mm delta):
+   * the public base when configured, otherwise the S3/R2 endpoint presigned URLs
+   * are signed against. Derived from the SAME configuration `url()` builds the
+   * redirect from — `url()` itself cannot serve this, because it is per-key, async,
+   * and signs, while the origin is per-store configuration the CSP builder needs
+   * synchronously. Non-HTTP schemes parse to the string origin `"null"`, which
+   * permits nothing; report those (and unparseable config) as `null`.
+   */
+  directUrlOrigin(): string | null {
+    try {
+      const url = new URL(this.#config.publicBaseUrl ?? this.#config.endpoint);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+    } catch {
+      return null;
+    }
+  }
 }
 
 function toRangeHeader(range: ByteRange): string {
