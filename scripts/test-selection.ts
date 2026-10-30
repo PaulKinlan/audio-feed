@@ -1413,10 +1413,15 @@ export function unclassifiedTail(hint: string): boolean {
   return hint.length > 0;
 }
 
-/** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
-/** The path shape `toRepoPath` accepts - the module-wide definition of a path-shaped hint. */
+/**
+ * The path shape this module accepts as a repo path - the definition `toRepoPath` applies to every hint.
+ * `pathConstants` applies the same shape to its stat candidates, so a constant is resolved by a stat only
+ * when it is a path this module could otherwise name at all; punctuation-bearing initialisers (`new
+ * Promise<void>((r) => {`, regex literals) are not paths and were guaranteed stat misses.
+ */
 const REPO_PATH_SHAPE = /^[\w@./ -]+$/;
 
+/** Turn a hint into a repo-relative path or directory prefix, or null when it points outside the repo. */
 function toRepoPath(
   hint: string,
   moduleDir: string,
