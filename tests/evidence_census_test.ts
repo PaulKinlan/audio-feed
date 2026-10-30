@@ -890,6 +890,8 @@ const INTENTIONALLY_UNREGISTERED: Record<string, string> = {
     "one-off real-browser INP investigation (audio-feed-s3uk); commits nothing to docs/evidence and is pinned as a mention-only probe by the census tests in this file",
   "scripts/verify_wzv9_capability_leak.ts":
     "HISTORICAL per its own header (audio-feed-byh4j): no suite executes or reads this script, so it is NOT evidence of current behaviour; re-derive before citing it",
+  "scripts/verify_s2pi_errors_api.ts":
+    "HISTORICAL per its own header (audio-feed-byh4j): no suite executes or reads this script, so it is NOT evidence of current behaviour (audio-feed-opqvh); docs/evidence/audio-feed-s2pi no longer declares it and the live coverage of those error shapes is tests/observability_api_test.ts; re-derive before citing it",
 };
 
 Deno.test(
@@ -953,7 +955,7 @@ Deno.test(
     }
     assertEquals(
       Object.keys(INTENTIONALLY_UNREGISTERED).length,
-      9,
+      10,
       "the intentionally-unregistered set is pinned; growing it is a decision, not an edit",
     );
 

@@ -508,6 +508,56 @@ Deno.test("evidence-run --list shows [executed by: ...] for declared executor an
   }
 });
 
+Deno.test("a proof whose README declares a RESOLVED - Executed by: suite is NOT executed directly by the runner (audio-feed-opqvh)", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "opqvh-suite-owned-" });
+  try {
+    const scriptsDir = join(tempDir, "scripts");
+    const testsDir = join(tempDir, "tests");
+    const evidenceRoot = join(tempDir, "docs", "evidence");
+    await Deno.mkdir(scriptsDir, { recursive: true });
+    await Deno.mkdir(testsDir, { recursive: true });
+
+    // The proof prints this marker ONLY if it is spawned. If the runner honours the declared
+    // suite ownership it never runs, so the marker must be absent from the tier's output while
+    // the skip is named - the pair is the evidence both directions.
+    await Deno.writeTextFile(
+      join(scriptsDir, "proof.ts"),
+      `console.log("PASS executed directly by the runner");\n`,
+    );
+    await Deno.writeTextFile(
+      join(testsDir, "owning_suite_test.ts"),
+      "// the suite that owns this proof\n",
+    );
+
+    await Deno.mkdir(join(evidenceRoot, "audio-feed-owned"), { recursive: true });
+    await Deno.writeTextFile(
+      join(evidenceRoot, "audio-feed-owned", "README.md"),
+      "- Script: scripts/proof.ts\n- Executed by: tests/owning_suite_test.ts\n- Asserts: claim\n",
+    );
+
+    const res = await runTier(tempDir);
+    assertEquals(res.code, 0);
+    assertStringIncludes(
+      res.stdout,
+      "SKIP docs/evidence/audio-feed-owned -> scripts/proof.ts " +
+        "(suite-owned: executed by tests/owning_suite_test.ts; not run directly)",
+    );
+    assertEquals(
+      res.stdout.includes("ok   docs/evidence/audio-feed-owned"),
+      false,
+      "a suite-owned proof must not get a run verdict: the runner did not execute it",
+    );
+    assertEquals(
+      res.stdout.includes("executed directly by the runner"),
+      false,
+      "the proof's own output must be absent: the runner never spawned it",
+    );
+    assertStringIncludes(res.stdout, "1 suite-owned");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 Deno.test("NEGATIVE CONTROL (Unresolved Executor): missing declared executor fails evidence-run (audio-feed-4oe2)", async () => {
   const tempDir = await Deno.makeTempDir({ prefix: "4oe2-run-fail-" });
   try {
