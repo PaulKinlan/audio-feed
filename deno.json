@@ -27,7 +27,6 @@
     "evidence": "deno run --allow-read --allow-run=deno,timeout --allow-env scripts/evidence-run.ts",
     "evidence:mutants": "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env scripts/exww-mutants.ts",
     "proof": "deno run --allow-all --unstable-kv",
-    "proof:playback-csp": "deno run --allow-all --unstable-kv scripts/playback-csp-browser-proof.ts",
     // audio-feed-p2la: the pre-push guard (scripts/hooks/pre-push) refuses an ungated push and a
     // copy of main onto a fleet/* branch, and a guard that is not INSTALLED silently protects
     // nothing — the installation used to be a best-effort call inside scripts/fast-check.ts, gated

@@ -110,12 +110,3 @@ Deno.test("every tree the gate type-checks is also inside the fmt scope (audio-f
     );
   }
 });
-
-Deno.test("proof:playback-csp task exists and targets scripts/playback-csp-browser-proof.ts (audio-feed-zwqrx)", () => {
-  const task = tasks["proof:playback-csp"];
-  assert(task, "the proof:playback-csp task must exist in deno.json");
-  assert(
-    task.includes("scripts/playback-csp-browser-proof.ts"),
-    `proof:playback-csp must target scripts/playback-csp-browser-proof.ts, got: ${task}`,
-  );
-});
