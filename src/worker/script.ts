@@ -439,6 +439,11 @@ export function assertScriptTurnSeams(turns: readonly ScriptBatchTurn[], expecte
 /**
  * The real generator. `fetchFn` is injectable so the tests drive this exact request path
  * with a capturing fetch rather than asserting on a helper the call site might not use.
+ *
+ * PROMPT-CENSUS:APP-VALUES-ONLY — the batch continuation instruction interpolates
+ * segment bookkeeping (validated integers, app-computed) and never publisher-controlled
+ * data: article content reaches the model through structured role parts, not through
+ * this string. Declared so the prompt census can pin it: see scripts/prompt-census.ts.
  */
 export function createGroundedScriptGenerator(deps: GroundedScriptDeps): ScriptGenerator {
   const model = deps.model ?? DEFAULT_SCRIPT_MODEL;
