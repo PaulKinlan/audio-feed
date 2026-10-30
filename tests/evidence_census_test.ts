@@ -855,17 +855,18 @@ Deno.test("audio-feed-cp9j: NEGATIVE CONTROL - sole tenant proof with quantiseEv
 // failing when this landed): CLOSE THE CLASS, NOT AN INSTANCE. The audio-feed-zwqrx registration
 // row reads ONE README and asserts strings the same commit wrote, so it can never see the class
 // it was meant to catch: a FUTURE proof script with no declaring README passes unnoticed. This
-// row walks the FILESYSTEM instead - every scripts/*-proof.ts and scripts/verify_*.ts must be
-// either (a) declared by some docs/evidence/<id>/README.md `- Script:` line (the relation
-// `deno task evidence` RUNS), or (b) pinned below as intentionally-unregistered WITH A REASON.
-// Both directions are exact-set: a NEW unregistered script reds, and a pinned entry whose facts
-// have moved (script deleted, or since declared) reds too. scripts/repro_*.ts follows the same
-// convention (8 of 10 declared at this tip) and is NOT yet covered - recorded here as known debt
-// rather than silently dropped; widening the pattern below is the one-line fix.
+// row walks the FILESYSTEM instead - every scripts/*-proof.ts, scripts/verify_*.ts and
+// scripts/repro_*.ts must be either (a) declared by some docs/evidence/<id>/README.md `- Script:`
+// line (the relation `deno task evidence` RUNS), or (b) pinned below as
+// intentionally-unregistered WITH A REASON. Both directions are exact-set: a NEW unregistered
+// script reds, and a pinned entry whose facts have moved (script deleted, or since declared) reds
+// too. scripts/repro_*.ts was the known debt this row used to record as uncovered; it is covered
+// now, so all three prefixes meet the same rule and the same remedy.
 // ---------------------------------------------------------------------------
 
 /**
- * The intentionally-unregistered proof scripts, pinned by EXACT SET. An entry is a claim about
+ * The intentionally-unregistered proof scripts (scripts/*-proof.ts, scripts/verify_*.ts,
+ * scripts/repro_*.ts), pinned by EXACT SET. An entry is a claim about
  * the tree RIGHT NOW, so the row re-derives each entry's facts: an entry whose script no longer
  * exists on disk, or which has meanwhile been declared by an evidence README, is a lie and must
  * be removed rather than trusted. Growing this set is a decision, not an edit.
@@ -892,7 +893,7 @@ const INTENTIONALLY_UNREGISTERED: Record<string, string> = {
 };
 
 Deno.test(
-  "unregistered-proof census: every scripts/*-proof.ts and scripts/verify_*.ts is declared by an evidence README or pinned as intentionally-unregistered",
+  "unregistered-proof census: every scripts/*-proof.ts, scripts/verify_*.ts and scripts/repro_*.ts is declared by an evidence README or pinned as intentionally-unregistered",
   async () => {
     const root = new URL("..", import.meta.url).pathname;
 
@@ -900,7 +901,10 @@ Deno.test(
     const discovered: string[] = [];
     for await (const entry of Deno.readDir(`${root}/scripts`)) {
       if (!entry.isFile) continue;
-      if (entry.name.endsWith("-proof.ts") || entry.name.startsWith("verify_")) {
+      if (
+        entry.name.endsWith("-proof.ts") || entry.name.startsWith("verify_") ||
+        entry.name.startsWith("repro_")
+      ) {
         discovered.push(`scripts/${entry.name}`);
       }
     }
@@ -923,7 +927,8 @@ Deno.test(
     assertEquals(
       unregistered,
       [],
-      `proof script(s) that NOTHING RUNS: ${unregistered.join(", ")}. For each one: ` +
+      `proof script(s) that NOTHING RUNS: ${unregistered.join(", ")}. This row covers EVERY ` +
+        `scripts/*-proof.ts, scripts/verify_*.ts AND scripts/repro_*.ts, so for each one: ` +
         `add docs/evidence/<id>/README.md with a \`- Script:\` line declaring it, ` +
         `or list it as intentionally-unregistered with a reason in INTENTIONALLY_UNREGISTERED ` +
         `(tests/evidence_census_test.ts). A proof script no evidence README declares and no ` +
@@ -939,7 +944,7 @@ Deno.test(
       );
       assert(
         discovered.includes(script),
-        `stale exemption: ${script} matches no scripts/*-proof.ts or scripts/verify_*.ts on disk - remove the entry`,
+        `stale exemption: ${script} matches no scripts/*-proof.ts, scripts/verify_*.ts or scripts/repro_*.ts on disk - remove the entry`,
       );
       assert(
         !declared.has(script),
