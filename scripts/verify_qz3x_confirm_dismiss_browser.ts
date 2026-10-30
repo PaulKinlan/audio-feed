@@ -1,3 +1,4 @@
+// audio-feed-byh4j: HISTORICAL — no suite executes or reads this script, so it is NOT evidence of current behaviour. Wire it into a suite or re-derive it before citing it.
 /**
  * Browser proof: the confirm dialog's ESCAPE and light-dismiss RESOLUTION path
  * (audio-feed-qz3x).

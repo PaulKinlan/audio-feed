@@ -593,7 +593,7 @@ Deno.test("planTests: a whole-tree scan SELECTS the scanner under its tree, and 
   );
 });
 
-Deno.test("planTests: a tree scanner cannot green untested code - the orphan fails closed by name (audio-feed-ngrm6)", () => {
+Deno.test("planTests: the scanned-tree asymmetry - unreached .ts fails closed, scanned .json selects the scanner (audio-feed-ngrm6 + a5n0q, coord ruling)", () => {
   // The review repro, verbatim shape: a whole-src/ scanner relation exists and the changed file is
   // reached by nothing - no import edge, no name match, no exact relation. The old coverage filter
   // asked the prefix-matching suitesObserving(), so the scanner's directory key covered EVERY file
@@ -604,9 +604,19 @@ Deno.test("planTests: a tree scanner cannot green untested code - the orphan fai
   assertEquals(plan.testFiles, null, "an unreached source file must fail closed");
   assert(plan.reason.includes("no test reaches: src/untested_orphan.ts"), plan.reason);
 
-  // The same file WITH an exact relation is a different story: a resolver-proven read/execute of the
-  // file ITSELF is coverage, so the plan stays narrow - the scanner (prefix selection) plus the exact
-  // observer. This is the seam the fix draws: prefix selects, exact covers.
+  // THE OTHER HALF OF THE SAME RULING (audio-feed-a5n0q, coord): a .json under the scanned tree is
+  // WHOLLY observed by the scanner that text-reads all of src/, so the narrow selection is right -
+  // not a missing fallback. Pinned beside half one so neither side can silently flip: code fails
+  // closed, data keeps scanner coverage.
+  assertEquals(
+    planTests(["src/unread_schema.json"], new Map(), NO_NAMED, relations).testFiles,
+    ["tests/security_audit_test.ts"],
+    "a .json under a scanned tree selects the scanner that text-reads it (genuine content observation)",
+  );
+
+  // The seam, on the .ts side: an EXACT relation (a resolver-proven read/execute of the file ITSELF)
+  // is coverage, so the plan stays narrow - the scanner (prefix selection) plus the exact observer.
+  // This is the seam the fix draws: prefix selects, exact covers.
   const both = new Map([
     ["src/", ["tests/security_audit_test.ts"]],
     ["src/untested_orphan.ts", ["tests/orphan_reader_test.ts"]],

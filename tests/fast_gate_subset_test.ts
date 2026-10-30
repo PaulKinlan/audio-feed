@@ -201,6 +201,11 @@ Deno.test("a changed shell runner selects the suite that executes it (es8y)", ()
       why:
         "a whole-scripts/ scanner (audio-feed-sru1b): its read IS its job, so any script change selects it through the bare-scripts key",
     },
+    {
+      file: "tests/verify_script_ledger_test.ts",
+      why:
+        "a whole-scripts/ scanner (audio-feed-byh4j): the verify-script ledger readDirs scripts/ to enforce the banner-or-suite-referenced binary, so any script change selects it through the bare-scripts key - same class as deno-task-coverage",
+    },
     // audio-feed-bko2q REMOVED TWO DECLARATIONS FROM THIS LIST, measured on the tree this bead landed
     // on: suitesObserving("scripts/observability-agent-run.sh") is exactly the four suites named above,
     // and tests/evidence_run_test.ts / tests/evidence_selection_test.ts are NOT among them - they
