@@ -45,18 +45,19 @@ supersede an earlier status and log, so cite a record that still resolves. The r
 Per the MERGER's measurement table (the merger runs the gates; do not re-derive from logs), this
 window holds TEN full-gate runs — 4830 / 4551 / 3703 / 3602 (INTERRUPTED) / 3259 / 3207 / 2785 /
 2608 / 1622 / 1580 seconds — a wide spread (min 1580 s, max 4830 s) because load and queue shape
-vary per run. That spread is exactly why the TIMEOUT, not test duration, is the binding
-constraint: the bound must clear the observed max, not a typical run, and `run_s` in the cached
-fleet-check record is the value the bound is actually compared against. Gates killed at the bound
-are recorded as KILLED (not a verdict), which forces a cold re-run and taxes every lane behind it.
+vary per run. That spread is exactly why the TIMEOUT, not test duration, is the binding constraint:
+the bound must clear the observed max, not a typical run, and `run_s` in the cached fleet-check
+record is the value the bound is actually compared against. Gates killed at the bound are recorded
+as KILLED (not a verdict), which forces a cold re-run and taxes every lane behind it.
 
-**CHECK_TIMEOUT default = 5400 s**, derived from the merger table: the rule `ceil(observed_max ×
-1.1)` gives 5313 s from the observed max 4830 s, and the shipped default is the next round
-hundred, 5400 s. That clears the slowest observed full gate by the rule's headroom while staying
-low enough that a genuinely hung gate still dies within a bounded window (a hung gate holds its
-heavy slot and the union behind it). Re-derive from the merger's table whenever a full gate lands
-above the current default: the rule is `ceil(observed_max × 1.1)`, from measurements, never from
-preference.
+**CHECK_TIMEOUT default = 5400 s**, derived from the merger table: the rule
+`ceil(observed_max ×
+1.1)` gives 5313 s from the observed max 4830 s, and the shipped default is the
+next round hundred, 5400 s. That clears the slowest observed full gate by the rule's headroom while
+staying low enough that a genuinely hung gate still dies within a bounded window (a hung gate holds
+its heavy slot and the union behind it). Re-derive from the merger's table whenever a full gate
+lands above the current default: the rule is `ceil(observed_max × 1.1)`, from measurements, never
+from preference.
 
 ## Measured selection scope and suite cost (2026-10-29)
 
@@ -67,10 +68,11 @@ on this day, not budgets.
 
 ### Selection scope: how many suites a changed path pulls in
 
-Universe = the full-gate module count printed by the selector's own audit line (`fast-gate:
-selection audit ok: N full-gate module(s)`), which was 159 on the tips below and 160 on later ones
-(`~/.fleet/checks/34ac2871… .fast.log`). Selection sizes are properties of a TREE, so when two tips
-disagree both numbers stay here with their tips attached.
+Universe = the full-gate module count printed by the selector's own audit line
+(`fast-gate:
+selection audit ok: N full-gate module(s)`), which was 159 on the tips below and 160 on
+later ones (`~/.fleet/checks/34ac2871… .fast.log`). Selection sizes are properties of a TREE, so
+when two tips disagree both numbers stay here with their tips attached.
 
 | Changed path                               | Before                                                       | After                                                                                                                                           | Source                                                                                                                                                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -126,16 +128,16 @@ Four full gates over the same ~2400-test suite set, all between 15:07Z and 16:57
 Each figure is the test-phase duration in that gate's own summary line, and each resolves to its own
 job record:
 
-| Test-phase time | Job record                                                                       | Same summary line in that log         |
-| --------------- | -------------------------------------------------------------------------------- | ------------------------------------- |
-| 10m32s          | `f8fc0472e2d4dd9fb39d713d84f3e65a74e8eb58` (run_s 660, sha `ff19542d`, PASS)      | 2402 passed / 0 failed / 2 ignored    |
-| 14m44s          | `d2f1e1011cd2d58e312673a188b57a326aeff36a` (run_s 958, sha `4efecfae`, PASS)      | 2400 passed / 0 failed / 2 ignored    |
-| 34m35s          | `b94f4b4eb9fc1bd9d55168fe87413104c97b8d3b` (run_s 2147, sha `7d0445cb`, FAIL)     | 2399 passed / 1 failed / 2 ignored    |
-| 43m35s          | `f301171b4acacac9dbcdf9de30a9d18216b08a18` (run_s 2761, sha `ed00fa6b`, PASS)     | 2400 passed / 0 failed / 2 ignored    |
+| Test-phase time | Job record                                                                    | Same summary line in that log      |
+| --------------- | ----------------------------------------------------------------------------- | ---------------------------------- |
+| 10m32s          | `f8fc0472e2d4dd9fb39d713d84f3e65a74e8eb58` (run_s 660, sha `ff19542d`, PASS)  | 2402 passed / 0 failed / 2 ignored |
+| 14m44s          | `d2f1e1011cd2d58e312673a188b57a326aeff36a` (run_s 958, sha `4efecfae`, PASS)  | 2400 passed / 0 failed / 2 ignored |
+| 34m35s          | `b94f4b4eb9fc1bd9d55168fe87413104c97b8d3b` (run_s 2147, sha `7d0445cb`, FAIL) | 2399 passed / 1 failed / 2 ignored |
+| 43m35s          | `f301171b4acacac9dbcdf9de30a9d18216b08a18` (run_s 2761, sha `ed00fa6b`, PASS) | 2400 passed / 0 failed / 2 ignored |
 
 That is a 4x spread on identical work: host and hypervisor contention dominates wall time, and the
-difference is not in the suite set the four runs carried. The ten-run table above shows the same shape
-over a longer window (1580 s to 4830 s).
+difference is not in the suite set the four runs carried. The ten-run table above shows the same
+shape over a longer window (1580 s to 4830 s).
 
 The contract consequence: **gate wall time is not a reliable signal of a test-cost regression below
 roughly a 4x movement.** A change that doubles one suite's cost is invisible in gate wall time, so
@@ -166,11 +168,11 @@ which is the record behind the ruling below that a wider bound only moves the wa
    above, and by what the 903 s kill was actually spending its bound on: that record had widened to
    23 test files (`fast-check: 23 test file(s)` in
    `~/.fleet/checks/a6d549428c32409198fc12021b20c692a882025e.fast.log`, the `run_s=903` job cited in
-   the previous section), so the wall time was selection width on a loaded host, not one heavy suite.
-   The scanners were never the weight.
-2. **"Two whole-tree scanners."** Replaced by three — `error_screen_test`, `security_audit_test`
-   and `tokens_test`. The two-element set is one of the two keys (`src/`), not the whole scanner
-   set; `tokens_test` earns the bare `src` key.
+   the previous section), so the wall time was selection width on a loaded host, not one heavy
+   suite. The scanners were never the weight.
+2. **"Two whole-tree scanners."** Replaced by three — `error_screen_test`, `security_audit_test` and
+   `tokens_test`. The two-element set is one of the two keys (`src/`), not the whole scanner set;
+   `tokens_test` earns the bare `src` key.
 3. **"A cross-cutting `src` file now selects the scanners (3 suites)."** Replaced by ~90 suites of
    159/160 for `src/http.ts`, of which the three scanners are a subset. The `2 -> 3` figure was the
    scanner subset, not the selection size.
@@ -257,107 +259,128 @@ kickoff, so each bound measures its own action; no assertion that follows a wait
 the replaced 5 s ceilings had reddened a gate after 66 minutes of work on a loaded host (the zy3j
 record, `b8c0610c`).
 
-**Rule: a ceiling is a FAILURE BOUND, measured from the action it bounds, never a delay.** A fixed
-5 s ceiling is a delay claim — "this normally finishes in 5 s" — and on a loaded host it turns
-correct code into a red gate, which is the same class as the elapsed-time rows in the section below.
+**Rule: a ceiling is a FAILURE BOUND, measured from the action it bounds, never a delay.** A fixed 5
+s ceiling is a delay claim — "this normally finishes in 5 s" — and on a loaded host it turns correct
+code into a red gate, which is the same class as the elapsed-time rows in the section below.
 
 ## Tests must not assert on elapsed real time (audio-feed-n52j3)
 
-Two of the three union-gate reds on 2026-10-23 had nothing to do with the branches under test: the ROWS
-raced wall-clock time. One was `tests/listen_activity_test.ts`, row "the retry button's labels are driven
-by real 429 bodies: rate refusal vs spent ceiling vs queued (audio-feed-8jzgl, audio-feed-rvy5n)", fixed
-in d9571c40 by injecting the measured 429 bodies. The other was `tests/synthesis_worker_test.ts`, row
-"audio-feed-091i: completed staging upload interrupted by budget records a durable cleanup marker that
-sweeps on subsequent failure or ready", fixed under audio-feed-krrws by injecting the budget's clock. Each
-cost a 20-27 minute full-gate run for every lane queued behind it. A row that can fail because the HOST was
-slow while the code was correct is a tax on every landing, so the rule is:
+Two of the three union-gate reds on 2026-10-23 had nothing to do with the branches under test: the
+ROWS raced wall-clock time. One was `tests/listen_activity_test.ts`, row "the retry button's labels
+are driven by real 429 bodies: rate refusal vs spent ceiling vs queued (audio-feed-8jzgl,
+audio-feed-rvy5n)", fixed in d9571c40 by injecting the measured 429 bodies. The other was
+`tests/synthesis_worker_test.ts`, row "audio-feed-091i: completed staging upload interrupted by
+budget records a durable cleanup marker that sweeps on subsequent failure or ready", fixed under
+audio-feed-krrws by injecting the budget's clock. Each cost a 20-27 minute full-gate run for every
+lane queued behind it. A row that can fail because the HOST was slow while the code was correct is a
+tax on every landing, so the rule is:
 
-1. **A test asserts on an INJECTED clock, never on elapsed real time.** No `Date.now`/`performance.now`
-   pair compared against a bound; no real `sleep(N)` whose adequacy the assertion depends on; no real
-   timer raced against a production deadline on `REAL_INVOCATION_CLOCK`. Inject the clock the production
-   seam already offers (`SynthesisWorkerOptions.clock` / `InvocationBudgetSpec.clock`, the
-   `controlledInvocationClock` pattern in `tests/synthesis_resume_test.ts`; stub `performance.now` where
-   that is the seam) and decide in the test WHEN the deadline arrives. The assertion then states an ORDER
-   of operations ("the PUT started before the budget aborted the turn"), not a duration.
-2. **Where a real bound is genuinely unavoidable** (timer liveness, complexity floors, absence-over-a-window
-   proofs), the assertion must carry a comment naming the failure mode it produces on a loaded host and why
-   the bound survives it. The compliant shape is `tests/c0gj_linear_complexity_test.ts`: minimum-of-N
-   iterations, margins measured in tens of multiples of observed contention, the rationale in the header,
-   and a negative control proving the bounds still fail the quadratic implementation. Widening a bound to
-   silence a flake is NOT a fix — it moves the failure to a slower host and hides that the row tested
-   timing rather than behaviour; the fix is to inject the input.
-3. **Order facts beat clock facts.** `putCalls === 0` (preflight refused before any transfer), `putAborted === 1`
-   (the deadline aborted the in-flight transfer), a durable marker written before the PUT — these are true
-   or false regardless of scheduler noise. When a row currently expresses its property as milliseconds,
-   rewrite the property as an order and keep at most a deliberately wide sanity bound with the comment from
-   rule 2 (`audio-feed-y2ex` did this for the dv4p rows).
+1. **A test asserts on an INJECTED clock, never on elapsed real time.** No
+   `Date.now`/`performance.now` pair compared against a bound; no real `sleep(N)` whose adequacy the
+   assertion depends on; no real timer raced against a production deadline on
+   `REAL_INVOCATION_CLOCK`. Inject the clock the production seam already offers
+   (`SynthesisWorkerOptions.clock` / `InvocationBudgetSpec.clock`, the `controlledInvocationClock`
+   pattern in `tests/synthesis_resume_test.ts`; stub `performance.now` where that is the seam) and
+   decide in the test WHEN the deadline arrives. The assertion then states an ORDER of operations
+   ("the PUT started before the budget aborted the turn"), not a duration.
+2. **Where a real bound is genuinely unavoidable** (timer liveness, complexity floors,
+   absence-over-a-window proofs), the assertion must carry a comment naming the failure mode it
+   produces on a loaded host and why the bound survives it. The compliant shape is
+   `tests/c0gj_linear_complexity_test.ts`: minimum-of-N iterations, margins measured in tens of
+   multiples of observed contention, the rationale in the header, and a negative control proving the
+   bounds still fail the quadratic implementation. Widening a bound to silence a flake is NOT a fix
+   — it moves the failure to a slower host and hides that the row tested timing rather than
+   behaviour; the fix is to inject the input.
+3. **Order facts beat clock facts.** `putCalls === 0` (preflight refused before any transfer),
+   `putAborted === 1` (the deadline aborted the in-flight transfer), a durable marker written before
+   the PUT — these are true or false regardless of scheduler noise. When a row currently expresses
+   its property as milliseconds, rewrite the property as an order and keep at most a deliberately
+   wide sanity bound with the comment from rule 2 (`audio-feed-y2ex` did this for the dv4p rows).
 
-A new test that asserts on elapsed real time without the rule-2 comment is a review finding; a row that
-reddens a gate on a loaded host gets the krrws treatment (inject the clock), not a wider bound.
+A new test that asserts on elapsed real time without the rule-2 comment is a review finding; a row
+that reddens a gate on a loaded host gets the krrws treatment (inject the clock), not a wider bound.
 
-**Cite a row by its `Deno.test` NAME, never by a line number (audio-feed-361l7).** Both pointers above
-were first written as line numbers, and both were wrong within a day: `:684` landed on an unrelated CDP
-typing interface and `:2000` on the pre-fix position, so a reader following them could not see the row the
-rule is about. A row name is unique and line-independent; `grep -n` over the file costs one command and
-cannot silently point at different code. The same standard applies to any row cited from a doc or a bead.
+**Cite a row by its `Deno.test` NAME, never by a line number (audio-feed-361l7).** Both pointers
+above were first written as line numbers, and both were wrong within a day: `:684` landed on an
+unrelated CDP typing interface and `:2000` on the pre-fix position, so a reader following them could
+not see the row the rule is about. A row name is unique and line-independent; `grep -n` over the
+file costs one command and cannot silently point at different code. The same standard applies to any
+row cited from a doc or a bead.
 
 ## Real-clock budget rows: the census (`fleet/realtimeclock`, 2026-10-30)
 
-Tonight's gate reds came from one shape: a row armed a product budget on the REAL clock and then waited
-for an event that the budget could abort before, so the wait's condition was permanently false and no
-ceiling could help (audio-feed-ugak, `src/synthesis/limits.ts`; the row is `audio-feed-zy3j: terminal
-completion invocation bound fires when delay exceeds budget (mirror)`). A static sweep of `tests/` for
-that shape — `maxInvocationDurationMs`, `startTimeMonotonicMs`, `withInvocationBudget`,
-`leaseMs`/`ttl`/`retryDelay`/`jitter`, `AbortSignal.timeout`, real timer waits, `Date.now()` /
-`performance.now()` deltas, and polling helpers whose predicate depends on any of those — classifies
-**79 sites (rows and guards) across 16 files**:
+Tonight's gate reds came from one shape: a row armed a product budget on the REAL clock and then
+waited for an event that the budget could abort before, so the wait's condition was permanently
+false and no ceiling could help (audio-feed-ugak, `src/synthesis/limits.ts`; the row is
+`audio-feed-zy3j: terminal
+completion invocation bound fires when delay exceeds budget (mirror)`). A
+static sweep of `tests/` for that shape — `maxInvocationDurationMs`, `startTimeMonotonicMs`,
+`withInvocationBudget`, `leaseMs`/`ttl`/`retryDelay`/`jitter`, `AbortSignal.timeout`, real timer
+waits, `Date.now()` / `performance.now()` deltas, and polling helpers whose predicate depends on any
+of those — classifies **79 sites (rows and guards) across 16 files**:
 
-- **(a) immune, 28 sites** — the row passes the shared `clock` (`tests/fixtures/invocation_clock.ts`)
-  or drives the shipped fake clock: the `dv4p`, `mv1d`, `avgc`, `o88z`, `091i`, `uswe0`, `5dxrk`,
-  `flkk`/`4qmm` and `72nv9`-clocked rows, plus the `invocation_death_child` survive control.
+- **(a) immune, 28 sites** — the row passes the shared `clock`
+  (`tests/fixtures/invocation_clock.ts`) or drives the shipped fake clock: the `dv4p`, `mv1d`,
+  `avgc`, `o88z`, `091i`, `uswe0`, `5dxrk`, `flkk`/`4qmm` and `72nv9`-clocked rows, plus the
+  `invocation_death_child` survive control.
 - **(b) mostly safe, 43 sites** — real time is tolerated but only a boolean, an order, or a
   product-computed figure is asserted: preflight arithmetic pinned above the whole budget (`dv4p`
   preflight, `aqms` cannot-fit), state read after the batch settles, `observedMs`-style readings the
-  product computes (monotone under load, never an upper bound), the `withInvocationBudget` block whose
-  elapsed figure is reported and never asserted (`4qmm`), the rule-2 commented sanity/hang guards in
-  `tts_hardening_test.ts`, `grounded_script_test.ts`, `s3_abort_socket_test.ts`,
+  product computes (monotone under load, never an upper bound), the `withInvocationBudget` block
+  whose elapsed figure is reported and never asserted (`4qmm`), the rule-2 commented sanity/hang
+  guards in `tts_hardening_test.ts`, `grounded_script_test.ts`, `s3_abort_socket_test.ts`,
   `storage_chunk_surrogate_test.ts`, `run_history_test.ts` and `c0gj_linear_complexity_test.ts`, and
   the "lower bound only" shape (`durationMs >= 25`).
-- **(c) asserts a timing outcome on a real clock, 8 sites** — ranked, and only the first is fixed here:
+- **(c) asserts a timing outcome on a real clock, 8 sites** — ranked, and only the first is fixed
+  here:
   1. `audio-feed-lqd6: repeated terminal upload budget aborts advance uploadRetry counter and fail
-     terminally upon exceeding maxUploadRetries` (`tests/synthesis_upload_budget_test.ts`). Real
-     1800 ms budget, 100 ms flush, and a terminal estimate of 1501 ms for 15 MB, so the preflight
-     refuses once the pre-put path exceeds **189 ms**. Measured on this VM: the put is entered
-     603-903 ms after tick start, so all three ticks paid 189 ms of margin against 600-900 ms of work —
-     the hanging put was **never entered** and the row passed on the preflight-refusal path while its
-     name and comment describe an interrupted transfer (probe: 0 put entries across 3 ticks). **Fixed**
-     by injecting the clock and firing the 1700 ms deadline after the put is observed in flight; every
-     assertion unchanged; the probe now shows one put entry per tick.
+     terminally upon exceeding maxUploadRetries`
+     (`tests/synthesis_upload_budget_test.ts`). Real 1800 ms budget, 100 ms flush, and a terminal
+     estimate of 1501 ms for 15 MB (ceil(15,000,044 / 10,000) = 1501 ms, correcting the 1511 ms slip
+     in commit 2b0c91f2), so the preflight refuses once the pre-put path exceeds **199 ms** (1800 -
+     100 - 1501 = 199 ms, correcting the 189 ms slip). Measured on this VM: the put is entered
+     603-903 ms after tick start, so all three ticks paid 199 ms of margin against 600-900 ms of
+     work — the hanging put was **never entered** and the row passed on the preflight-refusal path
+     while its name and comment describe an interrupted transfer (probe: 0 put entries across 3
+     ticks). **Fixed** by injecting the clock and firing the 1700 ms deadline after the put is
+     observed in flight; every assertion unchanged; the probe now shows one put entry per tick.
   2. `audio-feed-lqd6: lost claim when exceeding retry cap reports superseded rather than failed (P1
-     review finding)` — same 1800 ms budget and estimate, one tick; it asserts `superseded` on the same
+     review finding)`
+     — same 1800 ms budget and estimate, one tick; it asserts `superseded` on the same
      interrupted-upload path. Not fixed here (one-row budget).
-  3. `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)` —
-     tonight's red; fixed on `fleet/starve` (audio-feed-zy3j round three) and not on `main` when this
-     census was taken. Left alone so the unmerged fix is not duplicated.
+  3. `audio-feed-zy3j: terminal completion invocation bound fires when delay exceeds budget (mirror)`
+     — tonight's red; fixed on `fleet/starve` (audio-feed-zy3j round three) and not on `main` when
+     this census was taken. Left alone so the unmerged fix is not duplicated.
   4. `audio-feed-vvwb: a stage that would take longer than the budget is aborted at the budget deadline
-     and yields with progress checkpointed` — readings half-injected (`performance.now` stubbed, the
-     scheduler real): a real 40 ms deadline against a real 200 ms stage timer. Due order keeps it
-     truthful at 5x, but it asserts `simulatedMs <= 45`, an elapsed figure.
-  5. The hang rounds of `synthesis_invocation_death_test.ts` (`audio-feed-aqms` control and the child's
-     30 s budget) — the premise "the marker reaches the parent before the deadline" is a real-clock
-     race, deliberately given ~30 s of headroom and a marker bound derived from the previous round's
-     observed time (3x, min 20 s) rather than a clock.
-  6. `retries honour Retry-After instead of the default backoff` (`tests/tts_hardening_test.ts`) — real
-     clock, 5 s ceiling against a 0 ms backoff.
-  7. `a hung request is killed by the per-attempt timeout` (same file) — 5 s ceiling against a 150 ms
-     product timeout.
+     and yields with progress checkpointed`
+     (`tests/synthesis_claim_lifecycle_test.ts`) — readings half-injected (`performance.now`
+     stubbed, the scheduler real): a real 40 ms deadline against a real 200 ms stage timer. Due
+     order keeps it truthful at 5x, but it asserts `simulatedMs <= 45`, an elapsed figure. **Fixed**
+     on `fleet/hazards` by injecting `controlledInvocationClock` through `runSynthesisBatch`'s
+     `clock` option; the 40 ms deadline fires virtually while the script stage is in flight,
+     removing `performance.now` stubbing and real timer races entirely.
+  5. The hang rounds of `synthesis_invocation_death_test.ts` (`audio-feed-aqms` control and the
+     child's 30 s budget) — the premise "the marker reaches the parent before the deadline" is a
+     real-clock race, deliberately given ~30 s of headroom and a marker bound derived from the
+     previous round's observed time (3x, min 20 s) rather than a clock.
+  6. `retries honour Retry-After instead of the default backoff` (`tests/tts_hardening_test.ts`) —
+     real clock, 5 s ceiling against a 0 ms backoff. **Fixed** on `fleet/hazards`: raised ceiling to
+     10 s so scheduler contention on a loaded host cannot plausibly consume the margin, safely below the
+     15,000 ms minimum default backoff (60,000 ms base capped at 30,000 ms with min 0.5 jitter =
+     15,000 ms), with order assertion that 2 attempts occurred and returned valid audio.
+  7. `a hung request is killed by the per-attempt timeout` (same file) — 5 s ceiling against a 150
+     ms product timeout. **Fixed** on `fleet/hazards`: replaced the 5 s real-clock ceiling with an
+     order assertion that the fetch signal was aborted, the timeout error message matches
+     `/timed out after 150ms/`, and a lower-bound floor (`elapsed >= 100ms`). Load delay only
+     increases elapsed time, making the assertion load-independent.
   8. `chunking completes promptly rather than spinning when a chunk cannot advance`
      (`tests/storage_chunk_surrogate_test.ts`) — a 10 s promptness bound on in-memory work.
 
-Rows 4-8 carry the rule-2 comment and are kept as written; they are listed so the next census does not
-have to rediscover them. What the fix in row 1 cost: no timing tolerance was added and no number was
-raised — the row's wall time is unchanged within noise (5.9 s -> 6.6 s including the type-check),
-because the real budget it used to arm was never the mechanism.
+Rows 4, 6 and 7 are fixed on `fleet/hazards`. Rows 5 and 8 carry the rule-2 comment and are kept as
+written; they are listed so the next census does not have to rediscover them. What the fix in row 1
+cost: no timing tolerance was added and no number was raised — the row's wall time is unchanged
+within noise (5.9 s -> 6.6 s including the type-check), because the real budget it used to arm was
+never the mechanism.
 
 ## Widening verdict boundary
 
