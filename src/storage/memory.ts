@@ -138,6 +138,11 @@ export class MemoryBlobStore implements BlobStore {
   url(): Promise<string | null> {
     return Promise.resolve(null);
   }
+
+  /** Never redirects off-origin: `url()` is always `null` (see BlobStore.directUrlOrigin). */
+  directUrlOrigin(): string | null {
+    return null;
+  }
 }
 
 export class MemoryMetadataStore implements MetadataStore {

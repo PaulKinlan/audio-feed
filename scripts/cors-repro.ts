@@ -140,6 +140,9 @@ const redirectingBlobs: BlobStore = {
   delete: (key) => inner.delete(key),
   get: (key, opts): Promise<BlobObject | null> => inner.get(key, opts),
   url: (key) => Promise.resolve(`${storeBase}/${key}?X-Amz-Signature=repro`),
+  // REQUIRED, stated explicitly (audio-feed directUrlOrigin hardening): every url() answer
+  // points at storeBase, so that is the origin the CSP must permit.
+  directUrlOrigin: () => storeBase,
 };
 stores.blobs = redirectingBlobs;
 
