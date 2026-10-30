@@ -1,6 +1,6 @@
 {
   "bead": "audio-feed-0cmu",
-  "ranAt": "2026-10-10T22:48:02.700Z",
+  "ranAt": "2026-10-30T22:44:43.721Z",
   "runtime": "deno 2.9.7",
   "property": "After a timed-out attempt the process must end on its own: the caller's lease timer must not be re-ref'd by an aborted AbortSignal.any composite.",
   "exitIsMeasuredByTheCaller": "This script cannot time its own exit. tests/tts_hardening_test.ts runs the same shape as a child and fails if it has not exited within 15s; on the pre-fix code that child was killed at 20s (measured).",
@@ -8,19 +8,19 @@
     "observation": "A bare AbortSignal.timeout does not hold the loop open; the same timer does once the AbortSignal.any composite around it has aborted. Recorded, not asserted: it is Deno's behaviour, not this repo's, and a future runtime may change it.",
     "unfiredTimeoutAlone": {
       "code": "AbortSignal.timeout(600_000); console.log(\"created\");",
-      "elapsedMs": 27,
+      "elapsedMs": 700,
       "exitCode": 0,
       "exitedOnItsOwn": true
     },
     "compositeNeverAborted": {
       "code": "AbortSignal.any([AbortSignal.timeout(600_000)]); console.log(\"created\");",
-      "elapsedMs": 28,
+      "elapsedMs": 601,
       "exitCode": 0,
       "exitedOnItsOwn": true
     },
     "compositeAfterAbort": {
       "code": "const any = AbortSignal.any([AbortSignal.timeout(600_000), AbortSignal.timeout(100)]); any.addEventListener(\"abort\", () => console.log(\"aborted\")); await new Promise((r) => setTimeout(r, 300)); console.log(\"work done\");",
-      "elapsedMs": 5004,
+      "elapsedMs": 5197,
       "exitCode": 137,
       "exitedOnItsOwn": false
     }
@@ -49,5 +49,5 @@
       "message": "script request timed out after 200ms"
     }
   },
-  "finishedAtMs": 5736
+  "finishedAtMs": 11201
 }
