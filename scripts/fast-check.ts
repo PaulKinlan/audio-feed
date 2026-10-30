@@ -65,6 +65,7 @@ import {
   type DataReadRelations,
   deriveReadRelationReport,
   discoverFullGateTestFiles,
+  emptyReadRelationReport,
   GRAPH_CONFIG_FILES,
   inertContradictions,
   isDocumentation,
@@ -1022,7 +1023,13 @@ export function couldBeTheChangedFile(hint: string, changed: ReadonlyArray<strin
   return changed.some((file) => file === hint || file.endsWith(`/${hint}`));
 }
 
-/** The same fail-safe for the REPORTING derivation, which carries the incompleteness signal with it. */
+/**
+ * The same fail-safe for the REPORTING derivation, which carries the incompleteness signal with it.
+ *
+ * The degraded report is built by `emptyReadRelationReport` (audio-feed-076cb), not spelled out here: the
+ * literal that used to stand in this spot went stale in silence when the report type grew, so the empty form
+ * of a new field is now a compile error at the type's own declaration rather than a missing key 500 lines away.
+ */
 export async function deriveOrWidenReport(
   derive: () => Promise<ReadRelationReport>,
 ): Promise<{ report: ReadRelationReport; failure: string | null }> {
@@ -1030,14 +1037,7 @@ export async function deriveOrWidenReport(
     return { report: await derive(), failure: null };
   } catch (error) {
     return {
-      report: {
-        relations: new Map(),
-        unresolved: [],
-        unattributed: [],
-        outOfRepo: [],
-        unclassified: [],
-        computedImportSuites: [],
-      },
+      report: emptyReadRelationReport(),
       failure: error instanceof Error ? error.message : String(error),
     };
   }

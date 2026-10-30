@@ -1503,6 +1503,36 @@ export interface ReadRelationReport {
   unclassified: string[];
 }
 
+/**
+ * The report a FAILED derivation degrades to (audio-feed-076cb): nothing derived, and the empty form of every
+ * signal the report carries.
+ *
+ * WHY THIS IS A DECLARED FUNCTION BESIDE THE TYPE AND NOT A LITERAL AT THE CALL SITE. `deriveReadRelationReport`
+ * is not the only producer of a `ReadRelationReport`; a derivation that THROWS must still produce one, so the
+ * degraded path is a second producer whose whole content is "nothing was derived". That literal used to live in
+ * `fast-check.ts`'s `deriveOrWidenReport`, ~500 lines from this interface, and when a field was added here the
+ * literal was not updated - the degrade path was one annotation away from silently dropping a signal that the
+ * rest of the gate reads as "the detector was complete". It failed only because that literal happened to be
+ * contextually typed by its return position.
+ *
+ * The mapped annotation below makes that failure structural rather than accidental: every key of
+ * `ReadRelationReport` is REQUIRED here, so adding a field to the interface is a TS2741 at THIS declaration that
+ * NAMES the missing property - the one place that has to decide what "nothing" means for the new signal - and
+ * `deriveOrWidenReport` cannot compile without it. A cast, a `Partial` or an `any` would defeat exactly that,
+ * which is why none is used.
+ */
+export function emptyReadRelationReport(): ReadRelationReport {
+  const empty: { [K in keyof ReadRelationReport]-?: ReadRelationReport[K] } = {
+    relations: new Map(),
+    computedImportSuites: [],
+    unresolved: [],
+    unattributed: [],
+    outOfRepo: [],
+    unclassified: [],
+  };
+  return empty;
+}
+
 /** The relation alone, for callers that do not need the incompleteness signal. */
 export async function deriveDataReadRelations(
   root: string = ROOT,
