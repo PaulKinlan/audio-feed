@@ -1495,6 +1495,17 @@ export interface ReadRelationReport {
    */
   outOfRepo: string[];
   /**
+   * The EXECUTE half of `relations` on its own (audio-feed-q6ecj): paths a suite SPAWNS, kept apart because
+   * "a suite runs this file" and "a suite reads this file as text" are different facts about it.
+   *
+   * Why the split, and why here: a read is enough to SELECT a suite when the file changes, but it is not
+   * evidence that a checked-in `verify_*` script's assertions still hold - a suite that scans the script's
+   * source proves the source says something, not that it passes. The verify-script ledger needs that
+   * distinction and `relations` merges both kinds into one map, so the execute class is reported separately
+   * rather than re-derived by a second scanner. Same key/normalisation as `relations`.
+   */
+  executedRelations: DataReadRelations;
+  /**
    * Runtime-assembled read suffixes that NO OTHER BUCKET accounts for (audio-feed-3ttu, audio-feed-snww),
    * sorted for a stable reason string: not a repo path, not a fragment, not out-of-repo. Reported for the same
    * reason as `outOfRepo` and, like it, they neither enter the relation nor disable the inert class. The rule is
@@ -1529,6 +1540,7 @@ export function emptyReadRelationReport(): ReadRelationReport {
     unattributed: [],
     outOfRepo: [],
     unclassified: [],
+    executedRelations: new Map(),
   };
   return empty;
 }
@@ -1557,6 +1569,7 @@ export async function deriveReadRelationReport(
   };
 
   const relations: DataReadRelations = new Map();
+  const executedRelations: DataReadRelations = new Map();
   const outOfRepoHints = new Set<string>();
   const unclassified = new Set<string>();
   const authoredPaths = new Set<string>();
@@ -1566,7 +1579,7 @@ export async function deriveReadRelationReport(
   const computedImportFiles = new Set<string>();
   // isProvenRead (audio-feed-tziw, A3): true only for a path the RESOLVER RESOLVED, or one the suite
   // EXECUTES. See the guard below for what that does and does not cover.
-  const add = (path: string, suite: string, isProvenRead = false) => {
+  const add = (path: string, suite: string, isProvenRead = false, isExecute = false) => {
     // TypeScript is covered by the import graph, so a relation to a .ts path is recorded nowhere: it could
     // never be consulted, and it would bury the non-TS paths that matter.
     //
@@ -1626,6 +1639,11 @@ export async function deriveReadRelationReport(
     const list = relations.get(path) ?? [];
     if (!list.includes(suite)) list.push(suite);
     relations.set(path, list);
+    if (isExecute) {
+      const executed = executedRelations.get(path) ?? [];
+      if (!executed.includes(suite)) executed.push(suite);
+      executedRelations.set(path, executed);
+    }
   };
 
   // audio-feed-3xla: resolve a name against the file being scanned plus the modules it imports, never against
@@ -2081,7 +2099,8 @@ export async function deriveReadRelationReport(
         add(path, suite, true);
       }
       for (const path of reads.executedPaths) {
-        add(path, suite, true);
+        // isExecute: this edge is a SPAWN, so it also records the execute class (audio-feed-q6ecj).
+        add(path, suite, true, true);
       }
     }
   }
@@ -2097,11 +2116,16 @@ export async function deriveReadRelationReport(
     if (stat) existing.set(path, observers);
     else if (!authoredPaths.has(path) && tailPaths.has(path)) unattributed.push(path);
     else unresolved.push(path);
+    // The execute class is kept to the same existing-path filter as `relations`, so the two maps never
+    // disagree about which keys are real.
+    if (!stat) executedRelations.delete(path);
   }
+  for (const list of executedRelations.values()) list.sort();
   unresolved.sort();
   unattributed.sort();
   return {
     relations: existing,
+    executedRelations,
     unresolved,
     unattributed,
     outOfRepo: [...outOfRepoHints].sort(),
