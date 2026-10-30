@@ -43,6 +43,14 @@
  * WHAT IT DELIBERATELY DOES NOT DO, so nobody reads more into a green run than it says:
  * - it does not check that a proof asserts what its README CLAIMS (that is the declaration and
  *   evidence-size work);
+ * - it does not run proofs whose README declares `- Executed by: <suite>` with an existing suite.
+ *   That declaration (audio-feed-4oe2) means the SUITE owns the proof's execution — the gate even
+ *   selects the suite from it (scripts/fast-check.ts, audio-feed-ruqh) — so executing it here as
+ *   well would run a proof under a bound the suite never chose: audio-feed-8u4x1's campaign runs
+ *   12 attempts under a 600s per-attempt bound and a 4800s deadline, and the tier's 300s default
+ *   SIGKILLed it before it could write its record, every time, while --list correctly labelled it
+ *   `[executed by: ...]`. Such proofs are SKIPped BY NAME in a run (a skip that is not printed is
+ *   a test that stopped testing) and stay in the inventory.
  * - it does not run directories that declare nothing. It COUNTS them, because "there is no proof
  *   here" is a different fact from "the proof here passes", and printing the count keeps the debt
  *   visible instead of letting it read as coverage;
@@ -622,6 +630,7 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   }
   const debt = printDebt();
   const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
+  const suiteOwned: Declaration[] = [];
   let running: number | null = null;
   try {
     for (const declaration of declarations) {
@@ -630,6 +639,17 @@ export async function main(args: string[] = Deno.args): Promise<void> {
           `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (UNRESOLVED: not a file)`,
         );
         results.push({ declaration });
+        continue;
+      }
+      // Suite-owned (audio-feed-opqvh): the unresolved-executor refusal above guarantees any
+      // declared executor exists, so reaching here with an executor means the suite runs this
+      // proof and the tier must not also run it. SKIP by name; the summary counts it.
+      if (declaration.executedBy !== null) {
+        console.log(
+          `[evidence] SKIP ${declaration.dir} -> ${declaration.declared} ` +
+            `(suite-owned: executed by ${declaration.executedBy}; not run directly)`,
+        );
+        suiteOwned.push(declaration);
         continue;
       }
       const result = await runProof(options, declaration, (pid) => running = pid);
@@ -666,7 +686,8 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   console.log(
     `[evidence] ${passed} passed, ${failed} failed, ${unknown} unknown (exceeded the bound) of ` +
       `${declarations.length} declared ` +
-      `(${unresolved.length} unresolved, ${undeclared.length} declare nothing, ` +
+      `(${unresolved.length} unresolved, ${suiteOwned.length} suite-owned not run directly, ` +
+      `${undeclared.length} declare nothing, ` +
       `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
   );
   if (failed > 0 || unknown > 0) {
@@ -684,7 +705,12 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     );
     Deno.exit(2);
   }
-  console.log(`[evidence] every declared proof passed on this tree (${passed} proof(s))`);
+  const suiteNote = suiteOwned.length > 0
+    ? `, ${suiteOwned.length} suite-owned not run directly`
+    : "";
+  console.log(
+    `[evidence] every declared proof passed on this tree (${passed} proof(s)${suiteNote})`,
+  );
 }
 
 if (import.meta.main) {
