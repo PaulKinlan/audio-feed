@@ -155,7 +155,10 @@ against it while their suites were still running: eight cached fast records are 
 2026-10-29) and `~/.fleet/checks/a6d549428c32409198fc12021b20c692a882025e.fast.json` (`run_s=903`,
 sha `c1dec379`, 2026-10-29). A bound-killed fast gate is not a verdict: it forces a cold re-run and
 taxes every lane behind it. The bound stays a ceiling, not a speed budget, and the cause of those
-kills was selection width times host speed, not any single suite.
+kills was selection width times host speed, not any single suite. Raising it did not change that
+cause: at 1800 s a fast gate was killed at `run_s=1801` on a small diff
+(`~/.fleet/checks/844ed4e3b932d9298d9f37d0b24cb230e2b25ede.fast.json`, sha `f47f7fa4`, 2026-10-30),
+which is the record behind the ruling below that a wider bound only moves the wall.
 
 ### Claims this section supersedes
 
@@ -171,6 +174,92 @@ kills was selection width times host speed, not any single suite.
 3. **"A cross-cutting `src` file now selects the scanners (3 suites)."** Replaced by ~90 suites of
    159/160 for `src/http.ts`, of which the three scanners are a subset. The `2 -> 3` figure was the
    scanner subset, not the selection size.
+
+## Where the gate's time goes, and why the bound is not the lever (2026-10-30)
+
+Four measurements, each naming its record: a commit body, a cross-family clearance record
+(host-local, outside this repo, cited by branch and tip), or a cached fleet-check job. Together they
+answer the question this file previously left open: a slow gate is fixed by making the gate cheaper.
+
+### Derivation cost: 13,008 stats to find 12 paths (`fleet/ci-cost-verify`, tip `eb47024f`)
+
+The selector's constant resolver stat'd every `const X = <rhs>` initialiser once per mentioning
+line: **13,008 `statSync` calls per full-tree derivation, 12 hits, and ~10.9 s of ENOENT throwing**
+(commit body `eb47024f`; the WIP it replaced, `f61a7dc3`, recorded the same counts with no
+after-measurement). Memoising those lookups — and gating the survivors on the `REPO_PATH_SHAPE`
+class `toRepoPath` already applies — took the selector-audit median **44.6 s -> 33.3 s (-25 %)** and
+`tests/read_relation_hints_test` from **~121 s to ~92 s (-24 %)**, medians and not best runs (the
+cross-family clearance record for `eb47024f`; that record's single same-workload run read 48.2 s ->
+38.1 s, the same direction, and is not the figure used here).
+
+Equivalence is a record, not an argument: `--list-relations` output is identical at parent
+`c5cd7121` and tip `eb47024f` — 154 lines, 181 modules (clearance record; the commit body counts 151
+of those lines as derived data paths). Safety was checked in the direction that actually loses a
+test, under-selection: **0 tracked paths fail the guard** under `git ls-files`, under `LC_ALL=C` (so
+locale matching cannot hide a high byte), and against a direct non-ASCII probe.
+
+### Parallel execution: 1.92x wall at equal CPU (`fleet/parallel`, tip `8bd44611`)
+
+Before this branch the gate ran ONE `deno test` invocation, sequential across files. Over a
+~10-suite closure slice: **sequential 5:34.29 wall / user 300.94 s vs `--parallel` 2:54.09 wall /
+user 318.73 s, both exit 0** — ~1.92x wall at equal CPU, so the win is overlap, not less work
+(commit body `8bd44611`; the branch's own source comment records the same pair as 5m34s vs 2m54s on
+8 CPUs). Deno 2.9.7 `--parallel` parallelises across test MODULES only; rows inside a file stay
+serial. The two suites that mutate process-global state — `tests/verify_live_e2e_tts_output_test.ts`
+(`Deno.chdir`) and `tests/temporal_test.ts` (`Deno.env` TZ) — are carved into a second sequential
+batch in the same run loop and skipped entirely when not selected (`splitProcessGlobalSuites` over
+`PROCESS_GLOBAL_SUITES`, `scripts/fast-check.ts` on that branch).
+
+### Selection width is a deliberate NON-CHANGE, and this is the ruling
+
+Fast gates keep dying at their bound on small diffs: **901 s and 903 s against the 900 s bound**
+(the `ccb09239...` and `a6d54942...` records cited in the `CHECK_FAST_TIMEOUT` section above) and,
+once the bound was 1800 s, **1801 s against it**
+(`~/.fleet/checks/844ed4e3b932d9298d9f37d0b24cb230e2b25ede.fast.json`, `run_s=1801`, sha `f47f7fa4`,
+2026-10-30T12:36:06Z, `INTERRUPTED`).
+
+The weight is selection width, not a heavy suite. A change to a hub like `src/worker/script.ts` or
+`src/tts/gemini.ts` selects that hub's whole relation closure — **~21 behavioural suites** — plus
+the **nine computed-import suites that are selected for EVERY code change** as a fail-closed default
+(`scripts/test-selection.ts`, audio-feed-8kiar, which attributes a computed import to every suite
+whose closure reaches it; selection audit of 2026-10-30). The 1801 s record has the same shape on a
+real diff: two hubs, a script and its pinned suite selected **124 test files** of a **165-module**
+universe (`fast-gate: selection audit ok: 165 full-gate module(s)`, `fast-check: 124 test file(s)`,
+same log).
+
+Making comment-only diffs cheap was investigated on 2026-10-30 and **REJECTED**, on four grounds:
+
+1. The comment-wording rows (beads audio-feed-ju820, audio-feed-f8o5o) are rows, so a comment-only
+   diff must still be selected: it can legitimately red them.
+2. Directive comments — `@ts-expect-error`, `deno-lint-ignore`, `/// <reference>` — change compiler
+   outcomes with no code change, so "comment-only" is not "outcome-free".
+3. Comment insertion shifts line numbers, and suites pin line numbers.
+4. The only stripper available, `scripts/source-mask.ts:57-62`, documents its own silent
+   under-detection holes: a regex literal is not masked, and a template nested inside another
+   template's `${...}` is treated as code. Skipping suites with it would under-select in the silent
+   direction.
+
+**Ruling: raising the bound only moves the wall.** 900 s -> 1800 s produced a 1801 s kill on the
+same kind of diff, so a wider bound is not a fix and must not become the lever. Narrowing the
+fail-closed selection rules would trade slowness for a skipped test, and this repo refuses that
+trade: a skipped test is the one outcome no bound can detect. **The correct lever is cost** — the
+derivation figure and the overlap figure above. A slow gate is answered by making the gate cheaper,
+never by widening what it may skip or how long it may run.
+
+### A wait ceiling is a failure bound, never a delay (`fleet/waits`, tip `3b95c0c2`)
+
+Nine fixed 5 s `waitFor` ceilings in `tests/synthesis_claim_lifecycle_test.ts` and
+`tests/synthesis_worker_test.ts` became 45 s ABSENCE ceilings measured from the row's own action
+start, keeping the 5 ms poll and making expiry name the waited-for signal plus the hook state at
+expiry through a lazy describer (commit body and clearance record for `3b95c0c2`: all seven
+claim-lifecycle sites and both worker sites enter `waitFor` synchronously after an un-awaited
+kickoff, so each bound measures its own action; no assertion that follows a wait changed). One of
+the replaced 5 s ceilings had reddened a gate after 66 minutes of work on a loaded host (the zy3j
+record, `b8c0610c`).
+
+**Rule: a ceiling is a FAILURE BOUND, measured from the action it bounds, never a delay.** A fixed
+5 s ceiling is a delay claim — "this normally finishes in 5 s" — and on a loaded host it turns
+correct code into a red gate, which is the same class as the elapsed-time rows in the section below.
 
 ## Tests must not assert on elapsed real time (audio-feed-n52j3)
 
