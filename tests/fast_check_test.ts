@@ -25,9 +25,11 @@ import {
   ignoredSummary,
   nameMatchedTests,
   planTests,
+  PROCESS_GLOBAL_SUITES,
   reachableTests,
   reverseGraph,
   run,
+  splitProcessGlobalSuites,
   stripCapturedTestOutput,
   suiteMarker,
   testSuiteSummary,
@@ -1761,4 +1763,46 @@ Deno.test("audio-feed-tyt5: findHiddenTrackedMutations detects assume-unchanged 
     ["src/multi\nline.ts", "src/skip.ts"],
     "NUL-separated Git output must not split a tracked path containing a newline",
   );
+});
+
+Deno.test("splitProcessGlobalSuites: carves process-global suites into sequential batch", () => {
+  const carvedA = PROCESS_GLOBAL_SUITES[0];
+  const carvedB = PROCESS_GLOBAL_SUITES[1];
+  assert(carvedA !== undefined && carvedB !== undefined);
+  const ordinary1 = "tests/app_test.ts";
+  const ordinary2 = "tests/listen_test.ts";
+  const ordinary = [ordinary1, ordinary2];
+
+  // (i) a selection containing both carved suites
+  const both = splitProcessGlobalSuites([carvedA, ordinary1, carvedB, ordinary2]);
+  assertEquals(both.parallelFiles, ordinary);
+  assertEquals(both.sequentialFiles, [carvedA, carvedB]);
+
+  // (ii) containing neither
+  const neither = splitProcessGlobalSuites(ordinary);
+  assertEquals(neither.parallelFiles, ordinary);
+  assertEquals(neither.sequentialFiles, []);
+
+  // (iii) containing only one
+  for (const carved of PROCESS_GLOBAL_SUITES) {
+    const onlyOne = splitProcessGlobalSuites([ordinary1, carved, ordinary2]);
+    assertEquals(onlyOne.parallelFiles, ordinary);
+    assertEquals(onlyOne.sequentialFiles, [carved]);
+  }
+});
+
+Deno.test("splitProcessGlobalSuites: every carved suite exists in the fast-gate universe", async () => {
+  // (iv) an assertion that every path in PROCESS_GLOBAL_SUITES exists in the fast-gate universe
+  // (so a rename reds instead of silently un-carving).
+  assert(
+    PROCESS_GLOBAL_SUITES.length >= 2,
+    "PROCESS_GLOBAL_SUITES must define the expected process-global suites",
+  );
+  const fastUniverse = new Set(await allTestFiles());
+  for (const suite of PROCESS_GLOBAL_SUITES) {
+    assert(
+      fastUniverse.has(suite),
+      `Carved suite '${suite}' must exist in the fast-gate universe (allTestFiles); a rename without updating PROCESS_GLOBAL_SUITES would silently drop the carve-out`,
+    );
+  }
 });

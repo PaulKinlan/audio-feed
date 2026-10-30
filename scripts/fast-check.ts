@@ -198,6 +198,32 @@ const TEST_FLAGS = [
   "--no-check",
 ];
 
+// Gate parallelism: --parallel fans test MODULES out across worker processes (deno 2.9.7;
+// parallelism defaults to CPU count, no -j/--jobs knob). Fleet-wide isolation is already
+// per-test (ephemeral ports, :memory: KV, per-test user-data-dirs and temp dirs, no repo-tree
+// writes), and measured on the 10-suite worker/script.ts selection: 572 passed / 0 failed
+// both ways, 5m34s sequential vs 2m54s parallel on 8 CPUs. The two suites below mutate
+// PROCESS globals (Deno.chdir; Deno.env TZ) and stay out of the worker pool: whether deno
+// 2.9.7 workers share env/CWD with sibling modules in the same worker process is unverified,
+// so they run in a second, sequential invocation (no --parallel) in the same run() loop.
+const PARALLEL_TEST_FLAGS = [...TEST_FLAGS, "--parallel"];
+
+export const PROCESS_GLOBAL_SUITES = [
+  "tests/verify_live_e2e_tts_output_test.ts", // Deno.chdir(tmpDir) - CWD is process-wide
+  "tests/temporal_test.ts", // Deno.env TZ set/restore - env is process-wide
+];
+
+/** Split a suite list into the --parallel batch and the process-global sequential carve-out. */
+export function splitProcessGlobalSuites(files: string[]): {
+  parallelFiles: string[];
+  sequentialFiles: string[];
+} {
+  return {
+    sequentialFiles: files.filter((f) => PROCESS_GLOBAL_SUITES.includes(f)),
+    parallelFiles: files.filter((f) => !PROCESS_GLOBAL_SUITES.includes(f)),
+  };
+}
+
 /**
  * Repo paths are always relative POSIX strings, so the tiny bit of joining and
  * normalising this script needs is done by hand: importing @std/path would
@@ -1565,21 +1591,29 @@ ${auditUniverseDrift}`);
   if (testFiles === null) {
     console.log(`fast-check: FULL suite (${reason})`);
     const wholeSuite = fastUniverse;
-    const res = await run(["deno", "test", ...TEST_FLAGS]);
-    const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
-    if (res.code !== 0 || staleReason !== null) {
-      if (!staleReason) console.log(suiteMarker("ran", wholeSuite));
-      console.log(
-        coverageMarker(
-          staleReason
-            ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
-            : coverageRan(wholeSuite),
-        ),
-      );
-      for (const m of failureMarkers(res.stdout, wholeSuite, staleReason)) {
-        console.log(m);
+    const { parallelFiles, sequentialFiles } = splitProcessGlobalSuites(wholeSuite);
+    const batches: [string[], string[]][] = [
+      [PARALLEL_TEST_FLAGS, parallelFiles],
+      [TEST_FLAGS, sequentialFiles], // the process-global carve-out; skipped when empty
+    ];
+    for (const [flags, files] of batches) {
+      if (files.length === 0) continue;
+      const res = await run(["deno", "test", ...flags, ...files]);
+      const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
+      if (res.code !== 0 || staleReason !== null) {
+        if (!staleReason) console.log(suiteMarker("ran", wholeSuite));
+        console.log(
+          coverageMarker(
+            staleReason
+              ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
+              : coverageRan(wholeSuite),
+          ),
+        );
+        for (const m of failureMarkers(res.stdout, wholeSuite, staleReason)) {
+          console.log(m);
+        }
+        Deno.exit(1);
       }
-      Deno.exit(1);
     }
     console.log(suiteMarker("passed", wholeSuite));
     console.log(coverageMarker(coverageRan(wholeSuite)));
@@ -1601,21 +1635,29 @@ ${auditUniverseDrift}`);
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
     for (const f of testFiles) console.log(`  ${f}`);
-    const res = await run(["deno", "test", ...TEST_FLAGS, ...testFiles]);
-    const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
-    if (res.code !== 0 || staleReason !== null) {
-      if (!staleReason) console.log(suiteMarker("ran", testFiles));
-      console.log(
-        coverageMarker(
-          staleReason
-            ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
-            : coverageRan(testFiles),
-        ),
-      );
-      for (const m of failureMarkers(res.stdout, testFiles, staleReason)) {
-        console.log(m);
+    const { parallelFiles, sequentialFiles } = splitProcessGlobalSuites(testFiles);
+    const batches: [string[], string[]][] = [
+      [PARALLEL_TEST_FLAGS, parallelFiles],
+      [TEST_FLAGS, sequentialFiles], // the process-global carve-out; skipped when empty
+    ];
+    for (const [flags, files] of batches) {
+      if (files.length === 0) continue;
+      const res = await run(["deno", "test", ...flags, ...files]);
+      const staleReason = detectStaleRun(snapshotBefore, await captureWorktreeSnapshot());
+      if (res.code !== 0 || staleReason !== null) {
+        if (!staleReason) console.log(suiteMarker("ran", testFiles));
+        console.log(
+          coverageMarker(
+            staleReason
+              ? `UNKNOWN - run was invalidated while tests were executing (${staleReason})`
+              : coverageRan(testFiles),
+          ),
+        );
+        for (const m of failureMarkers(res.stdout, testFiles, staleReason)) {
+          console.log(m);
+        }
+        Deno.exit(1);
       }
-      Deno.exit(1);
     }
     console.log(suiteMarker("passed", testFiles));
     console.log(coverageMarker(coverageRan(testFiles)));
