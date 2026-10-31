@@ -27,6 +27,7 @@ import {
   stripAnsi,
   validateRunRecord,
 } from "../scripts/evidence-run.ts";
+import { stripComments } from "../scripts/test-selection.ts";
 import type { RunRecord } from "../scripts/evidence-run.ts";
 
 const EVIDENCE_RUN_SCRIPT = new URL("../scripts/evidence-run.ts", import.meta.url).pathname;
@@ -1748,6 +1749,82 @@ Deno.test(
       );
       assertStringIncludes(res.stdout, "declared   docs/evidence/h22ml-nogit -> scripts/proof.ts");
       assertStringIncludes(res.stdout, "it exits 0 and runs nothing");
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "audio-feed-vavnp: the tier FAILS a dir whose proof would delete a hand-written README section, and the section survives on disk",
+  async () => {
+    // End-to-end through the tier, because the seeding run is where the 8eh loss actually happened:
+    // a proof whose writeEvidenceReadme call refuses must fail its directory (exit 1) while the
+    // committed README keeps every byte - a red dir, never a smaller README.
+    const tempDir = await Deno.makeTempDir({ prefix: "vavnp-tier-" });
+    try {
+      const evidenceRoot = join(tempDir, "docs", "evidence");
+      const proofDir = join(evidenceRoot, "audio-feed-fixt");
+      await Deno.mkdir(proofDir, { recursive: true });
+      await Deno.mkdir(join(tempDir, "scripts"), { recursive: true });
+      // The scratch proof imports the real writer, so the refusal under test is the shipped one.
+      // A bare-specifier import needs an import map, and runProof spawns with cwd = root, so the
+      // fixture carries the repo's import map into the scratch root.
+      const repoDenoJson = JSON.parse(
+        stripComments(
+          await Deno.readTextFile(new URL("../deno.json", import.meta.url)),
+        ).stripped,
+      );
+      await Deno.writeTextFile(
+        join(tempDir, "deno.json"),
+        JSON.stringify({ imports: repoDenoJson.imports }),
+      );
+      const helperPath = new URL("../scripts/proof-helper.ts", import.meta.url).pathname;
+      const handwritten = [
+        "# Fixture proof",
+        "",
+        "- Script: scripts/proof.ts",
+        "- Asserts: always passes",
+        "",
+        "## Hand-written Declaration",
+        "",
+        "This paragraph must survive; the proof does not generate it.",
+        "",
+      ].join("\n");
+      const readmePath = join(proofDir, "README.md");
+      await Deno.writeTextFile(readmePath, handwritten);
+      await Deno.writeTextFile(
+        join(tempDir, "scripts", "proof.ts"),
+        `import { writeEvidenceReadme } from ${JSON.stringify(helperPath)};
+
+await writeEvidenceReadme({
+  dir: ${JSON.stringify(proofDir)},
+  title: "Fixture proof",
+  script: "scripts/proof.ts",
+  asserts: ["always passes"],
+  allowOutsideProof: true,
+});
+console.log("PASS always passes");
+`,
+      );
+
+      const res = await runTier(tempDir);
+      assertEquals(
+        res.code,
+        1,
+        `the tier must fail a run that would delete hand-written content:\n${res.stdout}\n${res.stderr}`,
+      );
+      assertStringIncludes(res.stdout, "FAIL docs/evidence/audio-feed-fixt");
+      assertStringIncludes(
+        res.stdout,
+        "Refusing to overwrite",
+        "the proof's refusal, not a silent smaller write, must be what the tier reports",
+      );
+      assertEquals(
+        await Deno.readTextFile(readmePath),
+        handwritten,
+        "a failed run must not leave a smaller README behind",
+      );
     } finally {
       await Deno.remove(tempDir, { recursive: true });
     }
