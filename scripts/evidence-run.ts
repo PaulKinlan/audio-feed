@@ -149,13 +149,26 @@ export const RECORD_MAX_AGE_DAYS = 30;
  * ARMING CHECKLIST - the one place to read before flipping this to true:
  *
  * 1. SEED RUN. `deno task evidence` over the whole tree (no `--only`, real bounds) writes a
- *    run.json per runnable declared dir. As of 23ed894e, 0 of 41 such dirs have one, so arming
- *    now would red the tier on 41 seeded-in-the-same-run dirs and prove nothing.
+ *    run.json per runnable declared dir (43 declared - 2 suite-owned = 41 such dirs). The seed
+ *    advances INCREMENTALLY - the run path writes a record after every proof it actually runs -
+ *    so a partial seed is honest progress and nothing else: a record exists only where a proof
+ *    ran. Census at 912b310c (audio-feed-evidence-arming lane, 2026-10-31): 4 of 41 seeded
+ *    (audio-feed-wzv9 exit 1 - REAL red at main, CheckFailureError from
+ *    repro_wzv9_claim_forensics.ts:85; audio-feed-icl4 exit 1 - REAL red at main;
+ *    audio-feed-m182 and audio-feed-0rmn exit 0). 37 remain, nearly all browser proofs or
+ *    live-network verifies that need the heavy slot - THAT IS THE BLOCKER ON ARMING: with 37
+ *    dirs unseeded, the armed missing-record rule would exit-1 the tier's first run over any of
+ *    them. A `--plan`-style mode writing declared-but-unrun records was weighed and REJECTED:
+ *    the format must not be able to represent a run that did not happen. A complete-shaped
+ *    record (exit 0, marker true, ISO stamps, current sha, on-disk artefact hashes) for a run
+ *    that never happened would pass EVERY validator rule, so no status field is added and
+ *    ABSENCE stays the only honest never-run marker. Arming waits for the real runs.
  * 2. JUDGE THE SEED BY READING THE RECORDS, not by the tier's exit code. `deno task evidence`
- *    exits non-zero on any red proof, and at least one is red for environmental reasons: on Deno
- *    2.9.7 a `deno eval` child that owns an aborted `AbortSignal.any` composite does not exit on
- *    its own, so docs/evidence/audio-feed-0cmu records exit 1 / marker false from its mechanism
- *    probe. Its seed record must therefore say so honestly; fixing that proof is a separate bead
+ *    exits non-zero on any red proof, and reds ALREADY EXIST in the seed: on Deno 2.9.7 a
+ *    `deno eval` child that owns an aborted `AbortSignal.any` composite does not exit on its
+ *    own, so docs/evidence/audio-feed-0cmu is expected to record exit 1 / marker false from its
+ *    mechanism probe, and wzv9 + icl4 recorded exit 1 at 912b310c (step 1). Each is a fact for a
+ *    judge to read before arming, never silence to skip; fixing any of them is a separate bead
  *    from arming this constant.
  * 3. COMMIT THE SEED ON ITS OWN, then flip this constant in a SEPARATE commit whose body names
  *    that commit as the arming commit. The same commit arms the census row in

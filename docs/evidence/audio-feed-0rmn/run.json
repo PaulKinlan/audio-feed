@@ -1,0 +1,15 @@
+{
+  "script": "scripts/repro_0rmn_script_body_read.ts",
+  "sha": "912b310c9fc48dc59df8bf6270e3cbffbd7541f6",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T16:21:49.171Z",
+  "endedAt": "2026-10-31T16:21:49.678Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "repro.json": "sha256:8fab3ba7cb2c99a247d8599f4eb823a25142acb4e607ed6c87ba516bb17ae616"
+  }
+}
