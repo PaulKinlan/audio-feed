@@ -702,6 +702,65 @@ Deno.test("report origin row (v): an absent (or literal `null`) Origin is refuse
   );
 });
 
+Deno.test("report origin row (vi): with trustProxyHeaders:false an x-forwarded-host is IGNORED — the decision follows the URL host", () => {
+  // The direction rows (i)-(v) do not pin: a forwarded header arriving WITHOUT the proxy
+  // opt-in is untrusted text like any other header. `requestHostAllowed`'s model applies
+  // unchanged — the exemption follows the URL host the report actually arrived on, never
+  // the forwarded claim. Both directions, so neither an over-trusting nor an
+  // under-trusting reading of the header passes.
+  const config = {
+    trustProxyHeaders: false,
+    allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"],
+  };
+  // A loopback arrival stays trusted even though a forwarded header is present:
+  // honouring the header would flag the arrival as forwarded and refuse it.
+  assertEquals(
+    isTrustedReportOrigin(
+      config,
+      req(`http://localhost:8000${REPORTS_PATH}`, {
+        origin: "http://localhost:3000",
+        "x-forwarded-host": "evil.example",
+      }),
+    ),
+    true,
+    "an untrusted forwarded header must be ignored, not honoured",
+  );
+  // A deployed arrival stays refused even though the forwarded header CLAIMS loopback:
+  // honouring it would move the arrival onto loopback and trust the forged Origin.
+  assertEquals(
+    isTrustedReportOrigin(
+      config,
+      req(`${DEPLOYED}${REPORTS_PATH}`, {
+        origin: "http://localhost:3000",
+        "x-forwarded-host": "127.0.0.1",
+      }),
+    ),
+    false,
+    "a forwarded header without the opt-in cannot move the arrival onto loopback",
+  );
+});
+
+Deno.test("report origin row (vii): a literal `x-forwarded-host: 127.0.0.1` is refused — the forwarded flag, not the value, refuses it", () => {
+  // Row (iii) used `localhost` spellings; this row pins that the refusal does not
+  // depend on how loopback is written: under the proxy opt-in ANY forwarded host is
+  // client-supplied text and never earns the exemption, a loopback value included.
+  const config = {
+    trustProxyHeaders: true,
+    allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"],
+  };
+  assertEquals(
+    isTrustedReportOrigin(
+      config,
+      req(`http://localhost:8000${REPORTS_PATH}`, {
+        origin: "http://localhost:3000",
+        "x-forwarded-host": "127.0.0.1",
+      }),
+    ),
+    false,
+    "a forwarded 127.0.0.1 is still a client-supplied forwarded host",
+  );
+});
+
 Deno.test("fp4r: IPv6 hosts can be listed and match", () => {
   const config = { allowedHosts: ["[2001:db8::1]"] };
   assertEquals(requestHostAllowed(config, req("http://[2001:db8::1]:8080/")), true);
