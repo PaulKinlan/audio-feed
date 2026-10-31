@@ -264,6 +264,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `location.pathname === "/" && !!document.querySelector('.who .sign-in')`,
           "signed out",
+          UNTIL_HANG_BOUND_MS,
         );
         await go("/account");
         recordCheck(
@@ -296,6 +297,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("profileFeedback").textContent === "Saved."`,
           "profile saved",
+          UNTIL_HANG_BOUND_MS,
         );
         await sleep(900);
         await go("/account");
@@ -315,6 +317,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("sendFeedback").textContent.startsWith("Queued")`,
           "send to audio",
+          UNTIL_HANG_BOUND_MS,
         );
         const sendFeedbackText = await js(
           `document.getElementById("sendFeedback")?.textContent ?? ""`,
@@ -346,11 +349,13 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("regenFeedback").textContent === "Queued for regeneration."`,
           "regenerate one episode",
+          UNTIL_HANG_BOUND_MS,
         );
         const firstConfirm = await js(`window.__confirms[0]`);
         await until(
           `document.getElementById("regenOutdated").textContent === "Regenerate outdated (1)"`,
           "count drops after the reload",
+          UNTIL_HANG_BOUND_MS,
         );
         await js(`
           window.__confirms = [${JSON.stringify(firstConfirm)}];
@@ -362,6 +367,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("regenFeedback").textContent.includes("queued for regeneration")`,
           "regenerate outdated",
+          UNTIL_HANG_BOUND_MS,
         );
         const regen = await js(
           `[window.__confirms, document.getElementById("regenFeedback").textContent]`,
@@ -385,6 +391,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("usersBody").children.length === 3`,
           "admin user list",
+          UNTIL_HANG_BOUND_MS,
         );
         recordCheck(
           "admin console loads subscriber data on session with token controls removed (audio-feed-0jp)",
@@ -400,6 +407,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("setupLinkUrl").value.includes("#setup=")`,
           "setup link from console",
+          UNTIL_HANG_BOUND_MS,
         );
         const ritaLink = await js(`document.getElementById("setupLinkUrl").value`);
         recordCheck(
