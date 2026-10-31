@@ -103,6 +103,19 @@ try {
           return r.result?.value;
         }
 
+        /**
+         * The two-argument until() calls below pass no timeout, so each inherits the private
+         * copy's 8s default. This host has MEASURED a bare `readyState === "complete"`
+         * evaluate legitimately exceeding 8s under eight-way CPU saturation
+         * (audio-feed-6gst1). That measured starved floor is the unit.
+         *
+         * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+         * bound: a page whose main thread never answers still fails, in two minutes rather
+         * than hanging until something outside the proof kills the lane - and it fails with
+         * a message naming what was asked and the budget it had.
+         */
+        const MEASURED_STARVED_POLL_MS = 8_000;
+        const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
         async function until(expr: string, desc: string, timeoutMs = 8000) {
           const t0 = Date.now();
           while (Date.now() - t0 < timeoutMs) {
@@ -138,6 +151,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 5`,
           "page load 5 rows",
+          UNTIL_HANG_BOUND_MS,
         );
 
         checker.check(
@@ -155,6 +169,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 2`,
           "filtered to 2 Verge rows",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const vergeCount = await js(`document.getElementById("episodeCount")?.textContent`);
@@ -182,6 +197,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 1`,
           "filtered to 1 Marco row",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const marcoCount = await js(`document.getElementById("episodeCount")?.textContent`);
@@ -200,6 +216,7 @@ try {
         await until(
           `!document.getElementById("filterEmpty")?.classList.contains("hidden")`,
           "filterEmpty shown",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const filterEmptyMsg = await js(
@@ -226,6 +243,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 5`,
           "reset to 5 rows",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const resetCount = await js(`document.getElementById("episodeCount")?.textContent`);
@@ -244,6 +262,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 3`,
           "filtered to 3 Stratechery rows",
+          UNTIL_HANG_BOUND_MS,
         );
 
         // Reload page
@@ -251,6 +270,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 3`,
           "reload restores 3 rows",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const reloadedSource = await js(`document.getElementById("filterSource")?.value`);
@@ -297,7 +317,11 @@ try {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-        await until(`document.querySelectorAll("#episodes .episode").length === 3`, "mobile load");
+        await until(
+          `document.querySelectorAll("#episodes .episode").length === 3`,
+          "mobile load",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const overflow = await js(
           `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
@@ -435,6 +459,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 3`,
           "mobile reload for the floor-only measure",
+          UNTIL_HANG_BOUND_MS,
         );
         await js(`document.getElementById("filterSection").classList.remove("hidden")`);
         const removedAlone = await js(DELETE_FLOOR_RULES) as number;
@@ -457,6 +482,7 @@ try {
         await until(
           `document.querySelectorAll("#episodes .episode").length === 3`,
           "mobile reload after the floor measurements",
+          UNTIL_HANG_BOUND_MS,
         );
       }, { prefix: "audiofeed-listen-filter-" });
     } finally {
