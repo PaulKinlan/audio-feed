@@ -31,7 +31,11 @@ import type { RunRecord } from "../scripts/evidence-run.ts";
 
 const EVIDENCE_RUN_SCRIPT = new URL("../scripts/evidence-run.ts", import.meta.url).pathname;
 
-async function runTier(root: string, extraArgs: string[] = []): Promise<{
+async function runTier(
+  root: string,
+  extraArgs: string[] = [],
+  env?: Record<string, string>,
+): Promise<{
   code: number;
   stdout: string;
   stderr: string;
@@ -46,6 +50,7 @@ async function runTier(root: string, extraArgs: string[] = []): Promise<{
       root,
       ...extraArgs,
     ],
+    ...(env ? { env: { ...Deno.env.toObject(), ...env } } : {}),
     stdout: "piped",
     stderr: "piped",
   });
@@ -1616,5 +1621,52 @@ Deno.test(
       `someone deleted the records - every declared evidence dir must carry a parseable ${RECORD_FILE}: ` +
         missing.join(", "),
     );
+  },
+);
+
+Deno.test(
+  "AMENDMENT 2: --list exits 0 on record state even when git cannot be run at all (audio-feed-h22ml)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "h22ml-nogit-" });
+    try {
+      const dirAbs = join(tempDir, "docs", "evidence", "h22ml-nogit");
+      await Deno.mkdir(dirAbs, { recursive: true });
+      await Deno.mkdir(join(tempDir, "scripts"), { recursive: true });
+      await Deno.writeTextFile(join(tempDir, "scripts", "proof.ts"), 'console.log("PASS");\n');
+      await Deno.writeTextFile(
+        join(dirAbs, "README.md"),
+        "- Script: scripts/proof.ts\n- Asserts: nothing; this row is about the inventory path\n",
+      );
+      // A record whose sha can never be checked because there is no git to check it with. Without
+      // the no-throw gitCapture this made --list CRASH (non-zero) merely for holding a record, which
+      // is the one thing amendment 2 forbids of the inventory path.
+      await Deno.writeTextFile(
+        join(dirAbs, RECORD_FILE),
+        JSON.stringify(
+          {
+            script: "scripts/proof.ts",
+            sha: "a".repeat(40),
+            bound: { ms: 300_000, provenance: "default" },
+            startedAt: new Date().toISOString(),
+            endedAt: new Date().toISOString(),
+            exit: 0,
+            marker: true,
+            artefacts: {},
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      const res = await runTier(tempDir, ["--list"], { PATH: "" });
+      assertEquals(res.code, 0, `--list must exit 0 with no git: ${res.stdout}\n${res.stderr}`);
+      assertStringIncludes(
+        res.stdout,
+        `records are written but not history-checked under ${tempDir} (no git HEAD)`,
+      );
+      assertStringIncludes(res.stdout, "declared   docs/evidence/h22ml-nogit -> scripts/proof.ts");
+      assertStringIncludes(res.stdout, "it exits 0 and runs nothing");
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
   },
 );

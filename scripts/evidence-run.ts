@@ -86,9 +86,9 @@
  * AMENDMENT 1 (Paul): the "no run.json => exit 1" rule must NOT be armed until the records exist.
  * It lives behind the single constant EVIDENCE_RECORDS_ENFORCED below. While it is false the run path
  * quietly seeds a record for any dir that lacks one ("a red wall nobody reads is how a rule gets
- * disabled" - 44 dirs have no record tonight); ARming is the one-line commit that flips it to true
- * AFTER the full-tree seed lands. The other rules need an existing record to fire at all, so they
- * self-gate and arm with this commit. Suite-owned proofs (skipped by name, executed by their suite)
+ * disabled" - 41 dirs have no record at 23ed894e); arming is the one-line commit that flips it to
+ * true AFTER the full-tree seed lands, and the checklist sits beside the constant itself. The other
+ * rules need an existing record to fire at all, so they self-gate and arm with this commit. Suite-owned proofs (skipped by name, executed by their suite)
  * and UNRESOLVED declarations never run here, so they are EXEMPT from the record rules rather than
  * permanently red; their record is the owning suite's gate.
  *
@@ -140,11 +140,29 @@ export const RECORD_MAX_AGE_DAYS = 30;
 
 /**
  * AMENDMENT 1 (audio-feed-h22ml). FALSE while the seed is out: the run path then quietly seeds a
- * record wherever one is missing, and --list annotates `[no record]` without failing. ARming is the
+ * record wherever one is missing, and --list annotates `[no record]` without failing. Arming is the
  * one-line follow-up commit that flips this to true AFTER the full-tree seed (run.json for every
  * runnable declared dir) has landed; from that commit on, a MISSING record is a named run-path
  * incident that exits non-zero (the run still executes and seeds the record, so arming can never
  * deadlock a new or deleted record). Nothing else is gated on this constant.
+ *
+ * ARMING CHECKLIST - the one place to read before flipping this to true:
+ *
+ * 1. SEED RUN. `deno task evidence` over the whole tree (no `--only`, real bounds) writes a
+ *    run.json per runnable declared dir. As of 23ed894e, 0 of 41 such dirs have one, so arming
+ *    now would red the tier on 41 seeded-in-the-same-run dirs and prove nothing.
+ * 2. JUDGE THE SEED BY READING THE RECORDS, not by the tier's exit code. `deno task evidence`
+ *    exits non-zero on any red proof, and at least one is red for environmental reasons: on Deno
+ *    2.9.7 a `deno eval` child that owns an aborted `AbortSignal.any` composite does not exit on
+ *    its own, so docs/evidence/audio-feed-0cmu records exit 1 / marker false from its mechanism
+ *    probe. Its seed record must therefore say so honestly; fixing that proof is a separate bead
+ *    from arming this constant.
+ * 3. COMMIT THE SEED ON ITS OWN, then flip this constant in a SEPARATE commit whose body names
+ *    that commit as the arming commit. The same commit arms the census row in
+ *    tests/evidence_run_test.ts (it is otherwise gated on this constant) and turns the
+ *    missing-record incident on in the run path.
+ * 4. NOTHING ELSE IS GATED on this constant: the post-run "the tier ran <dir> and wrote no
+ *    record" guarantee is always on, because it is the detector for the silence this bead closes.
  */
 export const EVIDENCE_RECORDS_ENFORCED = false;
 
@@ -361,12 +379,23 @@ export function resolveBound(
   return { timeoutMs, boundSec, provenance };
 }
 
+/**
+ * Run git and NEVER throw: a git that cannot be spawned (no binary on PATH) is reported as code -1,
+ * which shaIsAncestor turns into `unverifiable` (fail closed) and --list turns into an annotation.
+ * Throwing here would make --list exit non-zero for a record state, which amendment 2 forbids
+ * (audio-feed-h22ml).
+ */
 async function gitCapture(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const command = new Deno.Command("git", { args, cwd: root, stdout: "piped", stderr: "piped" });
-  const output = await command.output();
+  let output: Deno.CommandOutput;
+  try {
+    const command = new Deno.Command("git", { args, cwd: root, stdout: "piped", stderr: "piped" });
+    output = await command.output();
+  } catch (err) {
+    return { code: -1, stdout: "", stderr: `git could not be run: ${(err as Error).message}` };
+  }
   return {
     code: output.code,
     stdout: new TextDecoder().decode(output.stdout).trim(),
