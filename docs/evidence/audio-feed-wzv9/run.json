@@ -1,0 +1,16 @@
+{
+  "script": "scripts/repro_wzv9_claim_forensics.ts",
+  "sha": "912b310c9fc48dc59df8bf6270e3cbffbd7541f6",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T16:21:56.824Z",
+  "endedAt": "2026-10-31T16:21:57.348Z",
+  "exit": 1,
+  "marker": true,
+  "artefacts": {
+    "capability-leak-verify.txt": "sha256:a08de3c8b522cc955da4f8e3f85c8982e4c41150e2ea2dbc759c3f9b93d908b6",
+    "claim-forensics.txt": "sha256:07cce10d5ac37e93ac7ab4730fbddefebacfbcb89db1c8a0e4657400ae2b82c5"
+  }
+}

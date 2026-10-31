@@ -1,0 +1,16 @@
+{
+  "script": "scripts/repro_m182_global_ceiling.ts",
+  "sha": "912b310c9fc48dc59df8bf6270e3cbffbd7541f6",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T16:20:55.934Z",
+  "endedAt": "2026-10-31T16:20:56.734Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "before.json": "sha256:de08d181e3dbe9cbc2822ed664ffd94085ab43280759747b832dd81f29aee2c9",
+    "repro.json": "sha256:cd3a0dac140e69213be862868fd07387506a75729fa93093404e3aca08438407"
+  }
+}
