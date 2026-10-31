@@ -93,6 +93,19 @@ try {
           return r.result?.value;
         }
 
+        /**
+         * The two-argument until() calls below pass no timeout, so each inherits the private
+         * copy's 8s default. This host has MEASURED a bare `readyState === "complete"`
+         * evaluate legitimately exceeding 8s under eight-way CPU saturation
+         * (audio-feed-6gst1). That measured starved floor is the unit.
+         *
+         * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+         * bound: a page whose main thread never answers still fails, in two minutes rather
+         * than hanging until something outside the proof kills the lane - and it fails with
+         * a message naming what was asked and the budget it had.
+         */
+        const MEASURED_STARVED_POLL_MS = 8_000;
+        const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
         async function until(expr: string, desc: string, timeoutMs = 8000) {
           const t0 = Date.now();
           while (Date.now() - t0 < timeoutMs) {
@@ -114,7 +127,7 @@ try {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "homepage loaded");
+        await until(`document.readyState === "complete"`, "homepage loaded", UNTIL_HANG_BOUND_MS);
 
         const headerNavLink = await js(`!!document.querySelector('.site-nav a[href="/listen"]')`);
         checker.check(
@@ -131,7 +144,7 @@ try {
         );
 
         await js(`document.querySelector('.site-nav a[href="/listen"]').click()`);
-        await until(`location.pathname === "/listen"`, "navigate to /listen");
+        await until(`location.pathname === "/listen"`, "navigate to /listen", UNTIL_HANG_BOUND_MS);
 
         const landingHeader = await js(`document.querySelector("h1")?.textContent`);
         checker.check(
@@ -164,15 +177,24 @@ try {
         const setupUrl = (await setupRes.json()).url;
 
         await cdp("Page.navigate", { url: setupUrl });
-        await until(`!document.getElementById("createPasskey")?.disabled`, "setup options");
+        await until(
+          `!document.getElementById("createPasskey")?.disabled`,
+          "setup options",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.getElementById("createPasskey").click()`);
-        await until(`location.pathname === "/account"`, "account after register");
+        await until(
+          `location.pathname === "/account"`,
+          "account after register",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         // Visit homepage again as authenticated user
         await cdp("Page.navigate", { url: `${BASE}/` });
         await until(
           `!document.getElementById("returningSubscriber")?.hidden`,
           "returning subscriber banner",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const returningVisible = await js(
@@ -218,6 +240,7 @@ try {
         await until(
           `location.pathname.startsWith("/listen/")`,
           "restored to /listen/:token",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const redirectedPath = await js(`location.pathname`);
@@ -237,6 +260,7 @@ try {
         await until(
           `document.readyState === "complete"`,
           "homepage loaded for the token-identity check",
+          UNTIL_HANG_BOUND_MS,
         );
         const leaked = await js(`(() => {
           const token = ${JSON.stringify(userToken)};
@@ -274,6 +298,7 @@ try {
         await until(
           `document.getElementById("sendForm") !== null`,
           "account send form rendered",
+          UNTIL_HANG_BOUND_MS,
         );
         await js(`
         document.getElementById("sendUrl").value = "https://example.com/front-door-article";
@@ -282,6 +307,7 @@ try {
         await until(
           `document.getElementById("sendFeedback")?.textContent?.startsWith("Queued: ") === true`,
           "queued success state on /account",
+          UNTIL_HANG_BOUND_MS,
         );
         const sendFeedback = await js(`(() => {
           const el = document.getElementById("sendFeedback");
@@ -322,7 +348,7 @@ try {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "mobile load");
+        await until(`document.readyState === "complete"`, "mobile load", UNTIL_HANG_BOUND_MS);
 
         const overflow = await js(
           `document.documentElement.scrollWidth > document.documentElement.clientWidth`,

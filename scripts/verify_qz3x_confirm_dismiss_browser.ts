@@ -98,6 +98,19 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         }
         return r?.result?.value;
       }
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000): Promise<void> {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
@@ -181,10 +194,15 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
          */
         const gotoAccount = async (): Promise<void> => {
           await cdp("Page.navigate", { url: `${BASE}/account` });
-          await until(`document.readyState === "complete"`, "account page loaded");
+          await until(
+            `document.readyState === "complete"`,
+            "account page loaded",
+            UNTIL_HANG_BOUND_MS,
+          );
           await until(
             `typeof askConfirm === "function" && !!document.getElementById("confirmDialog")`,
             "the confirm dialog client and markup are present",
+            UNTIL_HANG_BOUND_MS,
           );
         };
 
@@ -201,9 +219,17 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         // ---- ROW 1: Escape on a freshly loaded page resolves false -------------
         await gotoAccount();
         await arm("__qz3xEscape", "Delete everything?");
-        await until(`document.getElementById("confirmDialog")?.open === true`, "dialog open");
+        await until(
+          `document.getElementById("confirmDialog")?.open === true`,
+          "dialog open",
+          UNTIL_HANG_BOUND_MS,
+        );
         await pressEscape();
-        await until(`document.getElementById("confirmDialog")?.open !== true`, "escape closed it");
+        await until(
+          `document.getElementById("confirmDialog")?.open !== true`,
+          "escape closed it",
+          UNTIL_HANG_BOUND_MS,
+        );
         const escapeFresh = await settled("__qz3xEscape");
         checker.check(
           "Escape on a fresh dialog CLOSES it and resolves FALSE",
@@ -216,9 +242,17 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         // ---- ROW 2: the OK button, the only route the existing proofs exercise -
         await gotoAccount();
         await arm("__qz3xOk", "Delete everything?");
-        await until(`document.getElementById("confirmDialog")?.open === true`, "dialog open");
+        await until(
+          `document.getElementById("confirmDialog")?.open === true`,
+          "dialog open",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.getElementById("confirmOkBtn")?.click()`);
-        await until(`document.getElementById("confirmDialog")?.open !== true`, "OK closed it");
+        await until(
+          `document.getElementById("confirmDialog")?.open !== true`,
+          "OK closed it",
+          UNTIL_HANG_BOUND_MS,
+        );
         const okResolved = await settled("__qz3xOk");
         checker.check(
           "the OK button resolves TRUE",
@@ -229,13 +263,18 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         // ---- ROW 3: a real backdrop click (native light-dismiss, no result) ----
         await gotoAccount();
         await arm("__qz3xBackdrop", "Delete everything?");
-        await until(`document.getElementById("confirmDialog")?.open === true`, "dialog open");
+        await until(
+          `document.getElementById("confirmDialog")?.open === true`,
+          "dialog open",
+          UNTIL_HANG_BOUND_MS,
+        );
         await clickBackdrop();
         let backdropClosed = true;
         try {
           await until(
             `document.getElementById("confirmDialog")?.open !== true`,
             "backdrop closed it",
+            UNTIL_HANG_BOUND_MS,
           );
         } catch {
           backdropClosed = false;
@@ -257,11 +296,16 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         // same page: approve one dialog (returnValue becomes "confirm"), then Escape
         // the next one and require that the user's dismissal is still honoured.
         await arm("__qz3xLeakConfirm", "First: the user approves this one");
-        await until(`document.getElementById("confirmDialog")?.open === true`, "first dialog open");
+        await until(
+          `document.getElementById("confirmDialog")?.open === true`,
+          "first dialog open",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.getElementById("confirmOkBtn")?.click()`);
         await until(
           `document.getElementById("confirmDialog")?.open !== true`,
           "first dialog closed",
+          UNTIL_HANG_BOUND_MS,
         );
         const stale = await returnValue();
         checker.check(
@@ -274,6 +318,7 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         await until(
           `document.getElementById("confirmDialog")?.open === true`,
           "second dialog open",
+          UNTIL_HANG_BOUND_MS,
         );
         // Evidence: the second dialog open on the FIXED tree, i.e. after the reset has run, so
         // returnValue is empty here. The image documents the surface this row drives; the STALE state
@@ -287,6 +332,7 @@ await runProof("qz3x-confirm-dismiss", async (checker) => {
         await until(
           `document.getElementById("confirmDialog")?.open !== true`,
           "second dialog closed",
+          UNTIL_HANG_BOUND_MS,
         );
         const leaked = await settled("__qz3xLeakEscape");
         checker.check(
