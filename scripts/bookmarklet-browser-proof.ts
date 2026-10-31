@@ -154,6 +154,19 @@ await runProof("audio-feed-ep1", async (checker) => {
         return r.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -196,7 +209,11 @@ await runProof("audio-feed-ep1", async (checker) => {
 
         // A. Visit /account
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "account loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "account loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const bookmarkletHref = await js(
           `document.querySelector("a.bookmarklet-btn")?.getAttribute("href")`,
@@ -235,7 +252,11 @@ await runProof("audio-feed-ep1", async (checker) => {
         }&feed=${encodeURIComponent(targetFeed)}`;
 
         await cdp("Page.navigate", { url: bookmarkletUrl });
-        await until(`!!document.getElementById("quickAddPanel")`, "quick add panel rendered");
+        await until(
+          `!!document.getElementById("quickAddPanel")`,
+          "quick add panel rendered",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const cardCount = await js(`document.querySelectorAll("#quickAddPanel").length`);
         const formCount = await js(`document.querySelectorAll("#sendForm").length`);
@@ -270,6 +291,7 @@ await runProof("audio-feed-ep1", async (checker) => {
         await until(
           `document.getElementById("quickFeedback")?.textContent.includes("Queued")`,
           "single episode queued",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const feedbackText = await js(`document.getElementById("quickFeedback")?.textContent`);
@@ -286,6 +308,7 @@ await runProof("audio-feed-ep1", async (checker) => {
         await until(
           `document.getElementById("quickFeedback")?.textContent.includes("Subscribed")`,
           "feed subscribed",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const subFeedback = await js(`document.getElementById("quickFeedback")?.textContent`);
@@ -303,7 +326,11 @@ await runProof("audio-feed-ep1", async (checker) => {
           encodeURIComponent("Article Without A Declared Feed")
         }`;
         await cdp("Page.navigate", { url: quietUrl });
-        await until(`!!document.getElementById("quickAddPanel")`, "unified card rendered");
+        await until(
+          `!!document.getElementById("quickAddPanel")`,
+          "unified card rendered",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const quietCards = await js(`document.querySelectorAll("#quickAddPanel").length`);
         const quietForms = await js(`document.querySelectorAll("#sendForm").length`);
@@ -350,10 +377,15 @@ await runProof("audio-feed-ep1", async (checker) => {
           encodeURIComponent("Article With A Declared Feed")
         }`;
         await cdp("Page.navigate", { url: declaresUrl });
-        await until(`!!document.getElementById("quickAddPanel")`, "unified card rendered again");
+        await until(
+          `!!document.getElementById("quickAddPanel")`,
+          "unified card rendered again",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.getElementById("detectedFeed")?.hidden === false`,
           "discovered feed offered",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const declaresCards = await js(`document.querySelectorAll("#quickAddPanel").length`);
@@ -390,6 +422,7 @@ await runProof("audio-feed-ep1", async (checker) => {
         await until(
           `document.getElementById("quickFeedback")?.textContent.includes("Subscribed")`,
           "discovered feed subscribed",
+          UNTIL_HANG_BOUND_MS,
         );
         const discoveredFeedback = await js(
           `document.getElementById("quickFeedback")?.textContent`,
@@ -411,7 +444,11 @@ await runProof("audio-feed-ep1", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: bookmarkletUrl });
-        await until(`!!document.getElementById("quickAddPanel")`, "mobile quick add loaded");
+        await until(
+          `!!document.getElementById("quickAddPanel")`,
+          "mobile quick add loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const mobileCards = await js(`document.querySelectorAll("#quickAddPanel").length`);
         const mobileForms = await js(`document.querySelectorAll("#sendForm").length`);
@@ -438,7 +475,11 @@ await runProof("audio-feed-ep1", async (checker) => {
             encodeURIComponent(targetFeed)
           }`,
         });
-        await until(`document.readyState === "complete"`, "front door loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "front door loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const prefilledUrl = await js(`document.getElementById("url")?.value`);
         const prefilledFeed = await js(`document.getElementById("feed-url")?.value`);
