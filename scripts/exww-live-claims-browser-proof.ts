@@ -345,6 +345,19 @@ const proof = runProof("audio-feed-exww", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 10_000) {
         const start = performance.now();
         while (performance.now() - start < timeout) {
@@ -381,10 +394,15 @@ const proof = runProof("audio-feed-exww", async (checker) => {
 
       const load = async () => {
         await cdp("Page.navigate", { url: `${BASE}/admin/observability` });
-        await until(`document.readyState === "complete"`, "observability page loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "observability page loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.body.textContent.includes("Live claims")`,
           "the live-claims section rendered",
+          UNTIL_HANG_BOUND_MS,
         );
       };
 
