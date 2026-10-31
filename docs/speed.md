@@ -402,6 +402,60 @@ the type-check), because the real budget it used to arm was never the mechanism.
 rows 2, 5 and 8: every fixed row asserts an order, an identity or a product-computed figure, and
 each touched file was re-run green with four CPU burners saturating the box.
 
+### Browser/CDP waits: unbounded `until()` polls and `js()` evaluates in the proof scripts (`fleet/cdp-census`, 2026-10-31)
+
+The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection is the
+BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait surface one gate red
+at a time. Measured directly on `origin/main` at `ea949d2e`:
+
+- **101 `until()` call sites pass only the two required arguments** (expression, description) and inherit the
+  8s default, spread over **28 files** under `scripts/`. Method: a balanced-paren scan of every `.ts` file in
+  `scripts/` counting top-level commas inside each `until(` argument list, with definitions and type
+  positions excluded — 75 other sites pass an explicit third argument and are not part of this count. An
+  earlier review measured 97 sites across 26 files; the delta is base drift as branches land, not a
+  disagreement about the shape.
+- **The 8s default is re-declared 25 times.** `scripts/proof-cdp.ts:61` owns the shared harness copy
+  (`until(expr, desc, timeoutMs = 8000)`), and 25 private copies live beside it: **14 default
+  `timeoutMs = 8000`** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-, request-access-,
+  playback-position-, spend-visibility-, voice-audition-, home-player-link- and listen-filter-browser-proof.ts,
+  verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts, verify_qz3x_confirm_dismiss_browser.ts —
+  this confirms the earlier count of 14), 7 default to 15s and 4 to 10s. There is no single file to fix: the
+  default itself is forked per script.
+- **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()` layout reads
+  (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five inline asserts/reads at
+  398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all still unbounded on `main`. The four
+  reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the remaining evaluates on `fleet/js-waits`
+  (`9921a815`, in progress); neither branch is merged into the base this census measured, so on `main` a
+  hung evaluate waits for the lane's killer, not for any timeout.
+
+Two fixes exist and are the pattern to copy, not a complaint to file:
+
+- **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes an
+  explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS` (8_000), and `proof-cdp.ts`'s timeout error
+  now names the expression, deadline, elapsed time, poll count and last polled value, so a red says which
+  wait failed and whether the page ever got a slice.
+- **`fleet/proof-waits` (`0ef5368f`)** — six `until` call sites in `listen-browser-proof.ts` and
+  `tooltip-top-layer-browser-proof.ts`, one derived constant per file
+  (`LOAD_AND_RENDER_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`).
+- **`fleet/measure-waits` (`4cc6b4b3`)** is the variant for single reads: RACE the one evaluate against a
+  timer rather than polling it, because a poll would re-run the read and could report a box from a later
+  state than the call asked about.
+
+The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured starved-poll
+floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under an eight-way
+saturated host (audio-feed-6gst1) — a HANG bound, never a latency promise about the page. One myth this
+census kills by measurement: the precedent sometimes cited, "`verify_main_l7m1_e2e.ts` runs 120 s", is
+FALSE — that file's local `until` defaults to `timeoutMs = 8000` (line 248) and the file contains no
+`120000` anywhere; even the fix branches' comments repeat the claim. The 8s default IS the measured floor,
+and the derived bound is 15× it.
+
+Failure modes, kept explicit: an inherited 8s default that fires early on a loaded host reports a HEALTHY
+page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A missing bound on a
+bare `js()` evaluate has no ceiling at all and hangs until the lane is killed — it consumes a LANE, not a
+gate slot, which is strictly worse. The 101-site count is the map for extending the anchor/proof-waits idiom
+file by file; the layout proof's bare evaluates are the only sites where a poll is wrong in principle and
+the race is required.
+
 ## Widening verdict boundary
 
 These records are different gate workloads, not a same-workload before/after widening measurement.
