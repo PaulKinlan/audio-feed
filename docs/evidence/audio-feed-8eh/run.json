@@ -1,0 +1,15 @@
+{
+  "script": "scripts/bootstrap-browser-proof.ts",
+  "sha": "8a94b7ed16a4244f6aff459b4e9270181b28fc05",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T21:55:43.717Z",
+  "endedAt": "2026-10-31T21:55:56.114Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-admin-bootstrap-success.png": "sha256:cda5c3d25340a692366c7662707e5a6f31bd1434b5f5ae733aa2101316102f09"
+  }
+}
