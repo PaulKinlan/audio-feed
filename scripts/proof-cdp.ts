@@ -4,9 +4,51 @@
  * Extracted verbatim from proof harness implementations:
  * establishes DevTools WebSocket connection, manages message-id dispatch,
  * and provides js() evaluate and until() poll helpers.
+ *
+ * Every wait in here is a HANG bound, never a latency promise about the page. The two
+ * numbers below are the fleet-wide derivation (sweeps `fleet/proof-waits`,
+ * `fleet/measure-waits`, `fleet/js-waits`, `fleet/until-sweep-*`) applied at the one place
+ * this file's importers all share:
+ *
+ * - `MEASURED_STARVED_POLL_MS = 8_000` is MEASURED, not guessed: under eight-way CPU
+ *   saturation a bare `document.readyState === "complete"` evaluate legitimately exceeded
+ *   8s on this host (audio-feed-6gst1).
+ * - `HANG_BOUND_MS = 15 x` that floor = 120s. A page that never answers still fails, in two
+ *   minutes instead of eight, and it fails by name instead of waiting for the lane's killer.
+ *
+ * BOTH helpers default to `HANG_BOUND_MS`, including `until()`, whose old default was the
+ * un-derived 8s. That default is what a caller who states no budget inherits, and on this host
+ * it is a false-failure generator: it fires while a healthy page is merely starved. Changing it
+ * is a behaviour change ONLY for a call site that omits the third argument, and an arity census
+ * of every importer at the time of writing (2026-10-31, `scripts/call-arity.ts until`, 5 files
+ * scanned) found none: 3 waits in `listen-browser-proof.ts`, 2 in `playback-csp-browser-proof.ts`,
+ * 3 in `tooltip-top-layer-browser-proof.ts` and 1 in `tests/anchor_positioning_test.ts` all pass
+ * an explicit 15x-derived bound, and `tests/proof_cdp_test.ts` passes explicit 500/150ms bounds.
+ * No existing wait moves by a millisecond; the default only decides what the next caller inherits.
  */
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The measured starved-poll floor: 8s of host starvation is not 8s of page work. */
+export const MEASURED_STARVED_POLL_MS = 8_000;
+
+/** The hang bound every wait in this file defaults to: 15 x the measured starved-poll floor. */
+export const HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
+
+/**
+ * One `Runtime.evaluate` got no answer inside the hang bound in force.
+ *
+ * A class, not a bare `Error`, so a caller can separate "the host never answered" from "the
+ * expression threw" (which `js()` still reports as a plain `Error` carrying exceptionDetails)
+ * without parsing a message. `js()` rejects with this; `until()` catches ONLY this class, and
+ * only to report its own deadline, so no other failure is swallowed or retried.
+ */
+export class CdpHangBoundExceeded extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CdpHangBoundExceeded";
+  }
+}
 
 /** Render a polled expression's last value for a timeout message without throwing on it. */
 function renderValue(value: unknown): string {
@@ -17,12 +59,26 @@ function renderValue(value: unknown): string {
   }
 }
 
+/**
+ * Render an evaluated expression for a timeout message: one line, head-truncated.
+ *
+ * The proofs evaluate multi-line IIFEs of 40+ lines; a message that pastes one whole is
+ * unreadable in a gate log, and a message that names nothing at all cannot be acted on.
+ */
+function renderExpression(expression: string): string {
+  const oneLine = expression.replace(/\s+/g, " ").trim();
+  const limit = 200;
+  return oneLine.length <= limit
+    ? oneLine
+    : `${oneLine.slice(0, limit)}... (${oneLine.length} chars in full)`;
+}
+
 export interface CdpClient {
   ws: WebSocket;
   // deno-lint-ignore no-explicit-any
   cdp: (method: string, params?: Record<string, unknown>) => Promise<any>;
   // deno-lint-ignore no-explicit-any
-  js: (expression: string) => Promise<any>;
+  js: (expression: string, timeoutMs?: number) => Promise<any>;
   until: (expr: string, desc: string, timeoutMs?: number) => Promise<void>;
   close: () => void;
 }
@@ -54,26 +110,73 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
   }
 
   // deno-lint-ignore no-explicit-any
-  async function js(expression: string): Promise<any> {
-    const r = await cdp("Runtime.evaluate", {
+  async function js(expression: string, timeoutMs = HANG_BOUND_MS): Promise<any> {
+    // The bound is applied by RACING the one evaluate against a timer, the way
+    // `fleet/measure-waits` bounded its layout reads: a poll would re-run the read and could
+    // report a value from a later state than the call asked about, which is a measurement
+    // change, not a bound. Exactly one `Runtime.evaluate` is sent either way, so what is
+    // measured is unchanged; only an answer that never comes now fails by name.
+    let timer: ReturnType<typeof setTimeout> | 0 = 0;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new CdpHangBoundExceeded(
+              `js: the evaluate of \`${renderExpression(expression)}\` got no answer in ` +
+                `${timeoutMs}ms - the hang bound in force (${HANG_BOUND_MS}ms by default, ` +
+                `15 x the ${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor, ` +
+                `audio-feed-6gst1). This is a HANG bound on ONE Runtime.evaluate, not a latency ` +
+                `bound, and this was NOT polled: the expression was evaluated exactly once and ` +
+                `that single evaluate is the one that never came back, so the page's main ` +
+                `thread never answered it.`,
+            ),
+          ),
+        timeoutMs,
+      );
+    });
+    const evaluate = cdp("Runtime.evaluate", {
       expression,
       awaitPromise: true,
       returnByValue: true,
       userGesture: true,
     });
+    // deno-lint-ignore no-explicit-any
+    let r: any;
+    try {
+      r = await Promise.race([evaluate, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
     if (r.exceptionDetails) {
       throw new Error(`${expression}: ${JSON.stringify(r.exceptionDetails)}`);
     }
     return r.result?.value;
   }
 
-  async function until(expr: string, desc: string, timeoutMs = 8000) {
+  async function until(expr: string, desc: string, timeoutMs = HANG_BOUND_MS) {
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
     let polls = 0;
     let last: unknown;
+    let starvedPollMs = 0;
     while (Date.now() - startedAt < timeoutMs) {
-      last = await js(expr);
+      // EACH poll is bounded by what is left of THIS wait's budget. Without that, `await js(expr)`
+      // could outlive the deadline it was serving: an evaluate that never answers is awaited
+      // before the loop test runs again, so a 15s wait could hang for as long as the lane lives -
+      // the timeoutMs never reached a pending evaluate. The bound changes nothing about what is
+      // measured (same expression, same 50ms poll interval, same truthiness test); it only makes
+      // the deadline in force a deadline.
+      const remainingMs = Math.max(1, deadline - Date.now());
+      try {
+        last = await js(expr, remainingMs);
+      } catch (err) {
+        // ONLY our own hang bound becomes the deadline error below. A thrown expression or a
+        // syntax error is the caller's bug and still escapes immediately, unwrapped and
+        // unretried - converting it would turn one error into two thousand polls.
+        if (!(err instanceof CdpHangBoundExceeded)) throw err;
+        starvedPollMs = remainingMs;
+        break;
+      }
       if (last) return;
       polls++;
       await sleep(50);
@@ -88,7 +191,12 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
         `(expression \`${expr}\`, entry ${new Date(startedAt).toISOString()}, ` +
         `deadline ${new Date(deadline).toISOString()}, ` +
         `elapsed ${Date.now() - startedAt}ms, polls ${polls}, ` +
-        `last value ${renderValue(last)})`,
+        `last value ${renderValue(last)}` +
+        (starvedPollMs
+          ? `; the final poll's evaluate got no answer in the ${starvedPollMs}ms left of that ` +
+            "budget, so the host starved the poll rather than the page refusing to get there"
+          : "") +
+        ")",
     );
   }
 
