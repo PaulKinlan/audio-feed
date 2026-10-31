@@ -134,7 +134,17 @@ const caseTtsRequest = {
 };
 
 // Case B — the whole worker batch, with the claim lease a real episode gets.
-const config: AppConfig = { port: 8000, publicBaseUrl: "https://audio.example.com" };
+// The per-attempt deadline is declared on the CONFIG, not only on the injected client: since #ec6c6765
+// the worker states the turn's own `timeoutMs` (`deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ??
+// DEFAULT_TIMEOUT_MS`), so a deadline set only on the client is never reached — the turn runs until
+// the invocation budget aborts it and is classified as a zero-progress yield instead of a named
+// timeout. Production is unaffected (both sides read `config.ttsTimeoutMs`); this harness was the one
+// place they disagreed.
+const config: AppConfig = {
+  port: 8000,
+  publicBaseUrl: "https://audio.example.com",
+  ttsTimeoutMs: 200,
+};
 const stores = memoryStores();
 await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
 await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
