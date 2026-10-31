@@ -272,7 +272,7 @@ Deno.test("l7m1-proof: controls-removal mutant on copy exits non-zero naming mis
   );
 });
 
-Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and committed PNG unchanged (audio-feed-bujv)", async () => {
+Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory clean and committed PNG unchanged (audio-feed-bujv)", async () => {
   const scriptsBefore = await scriptsListing();
   const artefactsBefore = await readCommittedEvidenceArtefacts();
   assertArtefactsMatch(artefactsBefore, undefined, "before mid-run kill");
