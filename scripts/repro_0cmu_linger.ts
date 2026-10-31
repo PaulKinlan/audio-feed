@@ -54,12 +54,22 @@ async function childProbe(code: string, boundMs: number): Promise<Record<string,
     stderr: "piped",
   })
     .spawn();
-  const kill = setTimeout(() => job.kill("SIGKILL"), boundMs);
+  // "Exited on its own" is a kill fact, not a clock reading: the parent knows whether its own
+  // SIGKILL-at-bound had to run, and that flag decides the field. The old wall-clock margin
+  // (`elapsedMs < boundMs - 500`) reported a child the host merely ran slowly as if it had been
+  // killed — a spurious failure on a loaded evidence box, the same false red audio-feed-1xfvx
+  // removed from the tts_hardening child guard, which reads the kill/exit facts instead
+  // (tests/tts_hardening_test.ts). A child cannot be killed by a timer that never fired.
+  let killedAtBound = false;
+  const kill = setTimeout(() => {
+    killedAtBound = true;
+    job.kill("SIGKILL");
+  }, boundMs);
   const started = performance.now();
   const { code: exitCode } = await job.output();
   clearTimeout(kill);
   const elapsedMs = Math.round(performance.now() - started);
-  return { code, elapsedMs, exitCode, exitedOnItsOwn: elapsedMs < boundMs - 500 };
+  return { code, elapsedMs, exitCode, exitedOnItsOwn: !killedAtBound };
 }
 
 // A regression leaves the process alive; fail loudly instead of hanging a lane for the lease.
