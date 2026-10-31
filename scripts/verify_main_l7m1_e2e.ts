@@ -245,6 +245,19 @@ try {
           if (!pass) throw new Error(`step failed: ${name}`);
         };
 
+        /**
+         * The two-argument until() calls below pass no timeout, so each inherits this copy's
+         * 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+         * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+         * measured starved floor is the unit.
+         *
+         * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+         * bound: a page whose main thread never answers still fails, in two minutes rather
+         * than hanging until something outside the proof kills the lane - and it fails with
+         * a message naming what was asked and the budget it had.
+         */
+        const MEASURED_STARVED_POLL_MS = 8_000;
+        const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
         const until = async (expr: string, desc: string, timeoutMs = 8000) => {
           const t0 = Date.now();
           while (Date.now() - t0 < timeoutMs) {
@@ -275,7 +288,11 @@ try {
 
         const adminStartIndex = consoleEntries.length;
         await cdp("Page.navigate", { url: `${BASE}/admin/observability` });
-        await until(`document.readyState === "complete"`, "admin observability loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "admin observability loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const pageTitle = await js(`document.querySelector("h1")?.textContent`);
         check("admin observability page loads with h1 header", pageTitle === "Observability");
@@ -423,7 +440,11 @@ try {
         );
         const homeStartIndex = consoleEntries.length;
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "homepage loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "homepage loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         const homePath = await js(`location.pathname`);
         check("front door remains on logged-out /", homePath === "/", `path: ${homePath}`);
 
@@ -466,6 +487,7 @@ try {
         await until(
           `document.querySelector("details.bookmarklet-code")?.open === true`,
           "details open",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const isOpen = await js(`document.querySelector("details.bookmarklet-code")?.open`);
@@ -590,10 +612,15 @@ try {
         // D. Navigate to Web Player (/listen/:feedToken) in Chrome
         const listenStartIndex = consoleEntries.length;
         await cdp("Page.navigate", { url: `${BASE}/listen/${subscriber.feedToken}` });
-        await until(`document.readyState === "complete"`, "listen page loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "listen page loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `Boolean(document.querySelector(".ep-title"))`,
           "episodes rendered in playlist",
+          UNTIL_HANG_BOUND_MS,
         );
 
         const playerTitle = await js(
@@ -731,7 +758,11 @@ try {
         );
 
         // D2. Test pagehide/visibilitychange saving position
-        await until(`Boolean(document.querySelector(".ep-title"))`, "episode title loaded");
+        await until(
+          `Boolean(document.querySelector(".ep-title"))`,
+          "episode title loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.querySelector(".ep-title").click()`);
         await sleep(500); // give it time to load current episode
         await js(`(async () => {
@@ -761,10 +792,15 @@ try {
           secure: true,
         });
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "account page loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "account page loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `Boolean(document.querySelector(".bookmarklet-btn"))`,
           "bookmarklet anchor rendered",
+          UNTIL_HANG_BOUND_MS,
         );
 
         await js(`document.querySelector(".bookmarklet-btn").click()`);
