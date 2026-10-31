@@ -508,6 +508,32 @@ export function suiteMarker(kind: "passed" | "ran" | "unmapped", files: string[]
 }
 
 /**
+ * The `unmapped:` marker, or `null` when it would name NOTHING (audio-feed-p14sc).
+ *
+ * An empty marker is a warning-shaped line that makes no claim: `fast-gate: unmapped: ` is a coverage
+ * marker with no coverage statement in it, and a human reading the gate log (or a lane quoting the host's
+ * banner) reads the marker's presence as "something is uncovered" even when the list is empty. The fleet
+ * prints exactly that shape - `COVERAGE WARNING: 0 unmapped changed file(s):  (omitted: ...)` - whenever a
+ * candidate suite was omitted (bin/fleet-check: the warning condition is `num_unmapped -gt 0 ||
+ * num_omitted -gt 0`), so anything this repo adds must never be the empty half of that line.
+ *
+ * NOT LOAD-BEARING, and verified rather than assumed: the host reads this marker token by token
+ * (`remote/check-coverage.py`: `m_unm.group(1).split()`, each token added to `explicit_unmapped`), and
+ * sets no flag from its presence. An empty payload therefore contributes nothing to `explicit_unmapped`,
+ * so emitting nothing where we used to emit an empty list is behaviour-identical host-side - and the
+ * distinct states the empty selection needs (`fast-check: NO SUITES SELECTED`,
+ * `fast-gate: coverage: ran 0 suite(s) - no suite observes the changed files`) are still emitted.
+ *
+ * The list is non-empty at today's only call site by construction (`planTests` returns an empty selection
+ * only for a non-empty, provably-inert change set), so this guard is the invariant at the one site that
+ * speaks the marker: a future empty change set must say NOTHING here rather than emit a warning-shaped
+ * line about zero files.
+ */
+export function unmappedMarker(files: readonly string[]): string | null {
+  return files.length ? suiteMarker("unmapped", [...files]) : null;
+}
+
+/**
  * The suites the gate EXECUTED, in the vocabulary the fleet runner already uses. The runner prints
  * `coverage: ran N suite(s): <files>` for a finished run, so this reuses that wording rather than inventing
  * a second dialect for one concept (coord's guidance on audio-feed-psjb): a reader who has seen the
@@ -1673,7 +1699,8 @@ ${auditUniverseDrift}`);
       "  This is a statement about the changed files, NOT a test result: no suite in this repo observes",
     );
     console.log("  them (documentation and declared-inert files only).");
-    console.log(suiteMarker("unmapped", changed ?? []));
+    const unmapped = unmappedMarker(changed ?? []);
+    if (unmapped) console.log(unmapped);
     console.log(coverageMarker(`${coverageRan([])} - no suite observes the changed files`));
   } else {
     console.log(`fast-check: ${testFiles.length} test file(s) (${reason})`);
