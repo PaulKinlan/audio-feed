@@ -170,6 +170,18 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       assertEquals(MEASURED_STARVED_POLL_MS, 8_000);
       assertEquals(HANG_BOUND_MS, 120_000);
       assertEquals(HANG_BOUND_MS, 15 * MEASURED_STARVED_POLL_MS);
+      // Both defaults are SIGNATURE defaults, so observing them through behaviour would mean
+      // waiting out a two-minute hang. This is a source assertion instead, and it says so: it
+      // pins the wiring (`= HANG_BOUND_MS`, never a literal like the old 8000) so a later edit
+      // that quietly re-inherits a fixed default is a test failure rather than drift.
+      const sharedSource = await Deno.readTextFile(
+        new URL("../scripts/proof-cdp.ts", import.meta.url),
+      );
+      assertStringIncludes(
+        sharedSource,
+        "until(expr: string, desc: string, timeoutMs = HANG_BOUND_MS)",
+      );
+      assertStringIncludes(sharedSource, "js(expression: string, timeoutMs = HANG_BOUND_MS)");
 
       // 10. js() BOUNDS one evaluate: an expression the page never answers rejects as its own
       // class, inside its own bound, naming what was evaluated, the bound in force, and denying
