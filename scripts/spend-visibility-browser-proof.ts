@@ -106,6 +106,19 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
     checker.check(name, pass, detail);
   }
 
+  /**
+   * The two-argument until() calls below pass no explicit budget, so each inherits this
+   * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+   * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+   * That measured starved floor is the unit.
+   *
+   * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+   * bound: a page whose main thread never answers still fails, in two minutes rather
+   * than hanging until something outside the proof kills the lane - and it fails with a
+   * message naming what was asked and the budget it had.
+   */
+  const MEASURED_STARVED_POLL_MS = 8_000;
+  const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
   async function until(expr: string, desc: string, timeoutMs = 8000) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -139,18 +152,30 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
 
     // 1. Bootstrap admin passkey on this device
     await cdp("Page.navigate", { url: `${BASE}/login#bootstrap` });
-    await until(`document.getElementById("bootstrapDetails")?.open === true`, "bootstrap open");
+    await until(
+      `document.getElementById("bootstrapDetails")?.open === true`,
+      "bootstrap open",
+      UNTIL_HANG_BOUND_MS,
+    );
 
     await js(`
     document.getElementById("bootstrapEmail").value = "spendadmin@example.com";
     document.getElementById("bootstrapToken").value = "harness-admin";
     document.getElementById("bootstrapForm").requestSubmit();
   `);
-    await until(`location.pathname === "/admin"`, "redirect to admin");
+    await until(`location.pathname === "/admin"`, "redirect to admin", UNTIL_HANG_BOUND_MS);
 
     // 2. Wait for console data to load
-    await until(`document.getElementById("usersBody")?.children?.length > 0`, "users loaded");
-    await until(`document.getElementById("statRuns")?.textContent !== "—"`, "stats loaded");
+    await until(
+      `document.getElementById("usersBody")?.children?.length > 0`,
+      "users loaded",
+      UNTIL_HANG_BOUND_MS,
+    );
+    await until(
+      `document.getElementById("statRuns")?.textContent !== "—"`,
+      "stats loaded",
+      UNTIL_HANG_BOUND_MS,
+    );
 
     // 3. Verify synthesis table elements
     const tableExists = await js(`!!document.getElementById("synthesisBody")`);
