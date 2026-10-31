@@ -2,6 +2,14 @@
  * Browser proof for audio-feed-syhu: the emitted CSP carries a per-response nonce, not
  * 'unsafe-inline', and the real pages still render and run under enforcement.
  *
+ * KNOWN WRONG SURFACE (audio-feed-38qar, measured by the evidence seed pilot audio-feed-9x9e1):
+ * since src/routes/home.ts:263-273 (audio-feed-irgu) answers a signed-in `GET /` with a 303 to
+ * /account, and this proof sets its session cookie BEFORE the page loop, `home-1280x900.png`
+ * captures the /account document and the four `home:` checks are duplicates of the account ones.
+ * The pre-irgu signed-in home view it used to capture cannot be reproduced today, and no row
+ * asserts home's `location.pathname`, so nothing goes red - the fix is a per-row choice between
+ * capturing home signed-out (and asserting it stays `/`) or asserting the redirect instead.
+ *
  * For each HTML surface it asserts, in headless Chrome with the CSP enforced:
  *   1. zero `securitypolicyviolation` events (nothing the page ships was blocked);
  *   2. zero console errors/warnings/exceptions;
@@ -297,6 +305,10 @@ await runProof("audio-feed-syhu", async (checker) => {
           title: "audio-feed-syhu — drop 'unsafe-inline' from the HTML CSP",
           script: "scripts/csp-nonce-browser-proof.ts",
           asserts: checks.map((c) => c.name),
+          notes: [
+            "KNOWN WRONG SURFACE (audio-feed-38qar): src/routes/home.ts:263-273 (audio-feed-irgu) 303-redirects a signed-in GET / to /account and this proof sets its session cookie before the page loop, so home-1280x900.png is the /account document byte for byte and the four home checks duplicate the account ones",
+            "the pre-irgu signed-in home view cannot be reproduced today, so the earlier home capture was that removed behaviour rather than a current one, and the fix is a per-row choice between capturing home signed-out or asserting the redirect",
+          ],
           sections: [
             {
               heading: "What changed",
