@@ -1,0 +1,19 @@
+{
+  "script": "scripts/tokens-browser-proof.ts",
+  "sha": "ba57e2c5333e3dca959864fbf34b165233208992",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T21:59:54.111Z",
+  "endedAt": "2026-10-31T22:00:01.047Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-home-tokens-desktop.png": "sha256:fe71849c52bca033448b3fd383447aa58d8c97d0c75c7f06c8722f2ab732d49a",
+    "02-admin-tokens-desktop.png": "sha256:d03bd6db127e812bfdf28d68a4cb08d43c215177aa1f8ea363972b4724440745",
+    "03-listen-landing-tokens-desktop.png": "sha256:1ce4099eef88c3672ce4b9f8c400d083e04cf2314ed2366f00a7ccc5a84ca685",
+    "04-player-tokens-desktop.png": "sha256:2f76f1ee65dfac7fff424aaeca362d751abfcd46a8c663fa717c6e652f62a432",
+    "05-player-tokens-mobile-390.png": "sha256:70e9ad30d9b671dc3a16a1f61c58985d2e85e8ac046ab9efb5c01e55cadf67b9"
+  }
+}
