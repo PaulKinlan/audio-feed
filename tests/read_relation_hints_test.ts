@@ -717,6 +717,44 @@ Deno.test("audio-feed-97qyp: a bare filename composed onto a runtime base is a F
       });
     },
   );
+
+  await t.step(
+    "a composer it does NOT recognise stays loud (an unrecognised shape is not a fragment)",
+    async () => {
+      // The last boundary, and the one with no other step: the fragment rule is a classification of the shapes
+      // `isJoinedSegment` can actually read, not a licence for "anything that takes a base". The helper matches
+      // only `join`/`resolve` immediately before the open paren; a wrapper call - `compose(dirAbs, RECORD_FILE)`,
+      // the same composition written through a project helper - matches neither, so the constant keeps the loud
+      // `unresolved` verdict. If this step ever fails, every composition spelling the helper does not know has
+      // silently stopped blocking, which is the global loosening these boundaries exist to forbid.
+      await withTempTree({
+        "tests/record_test.ts": [
+          'const RECORD_FILE = "run.json";',
+          "function compose(dirAbs: string, name: string) {",
+          "  return `${dirAbs}/${name}`;",
+          "}",
+          "export async function readRecord(dirAbs: string) {",
+          "  return await Deno.readTextFile(compose(dirAbs, RECORD_FILE));",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/record_test.ts"]);
+        assertEquals(
+          report.unresolved,
+          ["run.json"],
+          `a shape the helper does not recognise is still a read it must resolve: ${
+            JSON.stringify(report)
+          }`,
+        );
+        assertEquals(
+          report.unattributed,
+          [],
+          "and an unrecognised composer is not softened into a fragment",
+        );
+      });
+    },
+  );
 });
 
 Deno.test("audio-feed-snww: a LITERAL command name and its flags stay silent - the bucket is for reads", async () => {
