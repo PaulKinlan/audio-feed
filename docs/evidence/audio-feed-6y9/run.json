@@ -1,0 +1,17 @@
+{
+  "script": "scripts/admin-retry-browser-proof.ts",
+  "sha": "fe8cdbb25a21ea1d67839ab54a4860a1a3d1b3b0",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T22:00:43.728Z",
+  "endedAt": "2026-10-31T22:00:51.927Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-admin-retry-failed-episodes.png": "sha256:049f0afd807e24ee1907469eb9e8b5f0c6724e5219347f3e687a40b2e6d90424",
+    "02-player-activity-failed-episode.png": "sha256:34a8c65f0efb445d11193a03f88e34d48043fe6de2bc027e28ff978c7ada374a",
+    "03-account-retry-failed-episodes.png": "sha256:a86c14a304674cdb173046f1a399d99334a83a8145ee517b875824ccc73e7ef6"
+  }
+}
