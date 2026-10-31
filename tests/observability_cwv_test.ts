@@ -10,7 +10,13 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp } from "../src/app.ts";
 import { createHandlers } from "../src/compose.ts";
 import { memoryStores, type Stores } from "../src/config.ts";
-import { CWV_RATE_LIMIT, limitBodyStream, MAX_CWV_BODY_BYTES } from "../src/routes/cwv.ts";
+import { SlidingWindowRateLimiter } from "../src/auth/rate_limit.ts";
+import {
+  createCwvHandler,
+  CWV_RATE_LIMIT,
+  limitBodyStream,
+  MAX_CWV_BODY_BYTES,
+} from "../src/routes/cwv.ts";
 import { buildObservabilityReport } from "../src/observability/admin_report.ts";
 import { cwvRating, cwvRecord, parseCwvReport } from "../src/observability/cwv.ts";
 import { spanSeverity, SYNTHESIS_SPAN_EVENT, synthesisSpan } from "../src/observability/spans.ts";
@@ -228,6 +234,38 @@ Deno.test("the beacon is rate limited per client", async () => {
     }
   }
   assertEquals(refused, 1);
+});
+
+Deno.test("an unaddressed refusal whose window has expired answers retry-after >= 1, never 0", async () => {
+  // Proof the floor is load-bearing, which the row above cannot give: there the window is always
+  // live, so ceil(resetMs/1000) is already >= 1 and the row would stay green with the clamp
+  // deleted. Here the limiter is the CONCRETE class (the dep type is not widened) with an
+  // `unaddressed` override — one hit on a 60s window — while the per-client config keeps 1s, and
+  // `#untilOldestExpires` always reads the per-client window; once that hit is more than 1s old a
+  // refusal computes a negative reset and `Math.max(0, ...)` answers 0. Remove the Math.max(1, ...)
+  // floor in src/routes/cwv.ts and this row goes red with retry-after: 0.
+  const stores = memoryStores();
+  const ctx = {
+    config: { port: 8000, publicBaseUrl: BASE, adminToken: "a", observabilityKey: "o" },
+    stores,
+  };
+  const limiter = new SlidingWindowRateLimiter(
+    { maxRequests: 60, windowMs: 1_000 },
+    stores.metadata,
+    "cwv-zero-proof",
+    { maxRequests: 1, windowMs: 60_000 },
+  );
+  const fetchCwv = createApp(ctx, { cwvBeacon: createCwvHandler(ctx, { limiter }) }).fetch;
+  const send = () => fetchCwv(beacon({ metric: "lcp", value: 1, page: "home" }));
+  assertEquals((await send()).status, 204);
+  await new Promise((r) => setTimeout(r, 1_500)); // past the 1s per-client window, inside the 60s one
+  const res = await send();
+  assertEquals(res.status, 429);
+  const retryAfter = Number(res.headers.get("retry-after"));
+  assert(
+    Number.isFinite(retryAfter) && retryAfter >= 1,
+    `a refusal on an expired window must still be bounded below by 1, got ${retryAfter}`,
+  );
 });
 
 Deno.test("a job span carries the phases and they sum to the total", () => {
