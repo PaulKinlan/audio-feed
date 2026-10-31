@@ -406,14 +406,26 @@ each touched file was re-run green with four CPU burners saturating the box.
 
 The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection is the
 BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait surface one gate red
-at a time. Measured directly on `origin/main` at `ea949d2e`:
+at a time. First measured directly on `origin/main` at `ea949d2e`; recounted 2026-10-31 at
+`origin/main` `275df1da` with a trailing-comma-safe walker — the recount is the aggregate below:
 
-- **101 `until()` call sites pass only the two required arguments** (expression, description) and inherit the
-  8s default, spread over **28 files** under `scripts/`. Method: a balanced-paren scan of every `.ts` file in
-  `scripts/` counting top-level commas inside each `until(` argument list, with definitions and type
-  positions excluded — 75 other sites pass an explicit third argument and are not part of this count. An
-  earlier review measured 97 sites across 26 files; the delta is base drift as branches land, not a
-  disagreement about the shape.
+- **164 `until()` call sites pass only the two required arguments** (expression, description) and
+  inherit their file's default, spread over **26 files** under `scripts/`, out of 176 `until(` calls
+  in 29 files. Method (2026-10-31, `275df1da`): paren/quote/template-aware walk of each `until(`
+  argument list, counting only non-empty argument spans, with definitions and type positions
+  excluded — **12** sites pass an explicit third argument and are not part of this count. The originally published aggregate for the base this census first
+  measured (`ea949d2e`) — 101 two-argument sites across 28 files, 75 explicit-bound — was an
+  undercount: re-walking that same `ea949d2e` with the safe walker gives **170 two-argument sites
+  across 28 files, 6 explicit-bound**, so 69 sites tree-wide had been misfiled as bounded. The
+  trap: a scanner that splits an argument list on top-level commas reads a trailing comma before
+  the closing paren as one more argument, which is how the eight unbounded waits in
+  `scripts/account-browser-proof.ts` (15 two-argument calls, none explicit at either base) were
+  described as bounded. The six-site drop from `ea949d2e` to `275df1da` (170 → 164) is
+  `fleet/proof-waits` landing, not drift. Landed check (`git merge-base --is-ancestor` against
+  `origin/main`, 2026-10-31): `fleet/anchor-wait` (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`),
+  `fleet/measure-waits` (`4cc6b4b3`) and `fleet/js-waits` (`9921a815`) are in; `fleet/until-sweep-1`
+  (`0f21af94` plus fixup `8d423e7d`), `fleet/until-sweep-2` (`cb4cefd1`), the cwv retry-after row
+  (`11ba107c`) and this census commit (`789eeca7`) are not on `origin/main` yet.
 - **The 8s default is re-declared 25 times.** `scripts/proof-cdp.ts:61` owns the shared harness copy
   (`until(expr, desc, timeoutMs = 8000)`), and 25 private copies live beside it: **14 default
   `timeoutMs = 8000`** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-, request-access-,
@@ -427,9 +439,9 @@ at a time. Measured directly on `origin/main` at `ea949d2e`:
   census measured (`ea949d2e`). The four reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the
   remaining evaluates on `fleet/js-waits` (`9921a815`, in progress); neither branch is merged into the base
   this census measured, so on `main` a hung evaluate waits for the lane's killer, not for any timeout.
-  (Landed after, checked 2026-10-31: `fleet/measure-waits` has since merged into `origin/main` as
-  `9210dd55`, so the four reads are bounded on `main` today; `fleet/js-waits` (`9921a815`) has not, and
-  the bare evaluates still wait as described.)
+  (Landed after, checked 2026-10-31: `fleet/measure-waits` merged into `origin/main` as `9210dd55`,
+  and `fleet/js-waits` (`9921a815`) has now merged too — `origin/main` tip `275df1da` is that
+  merge — so the four reads and the bare evaluates are all bounded on `main` today.)
 
 Three fixes exist and are the pattern to copy, not a complaint to file:
 
@@ -456,7 +468,7 @@ Failure modes, kept explicit: an inherited 8s default that fires early on a load
 page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A missing bound on a
 bare `js()` evaluate has no per-wait ceiling: it runs until the lane's killer or the gate's own
 `CHECK_FAST_TIMEOUT` (the 1800 s ceiling in the section above) fires, so it burns a lane AND a gate slot,
-which is strictly worse. The 101-site count is the map for extending the anchor/proof-waits idiom
+which is strictly worse. The 164-site count is the map for extending the anchor/proof-waits idiom
 file by file; the layout proof's bare evaluates are the only sites where a poll is wrong in principle and
 the race is required.
 
