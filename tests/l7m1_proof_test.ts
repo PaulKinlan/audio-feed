@@ -440,7 +440,14 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     // pass explicit cwd for the real repository where .git exists and assert exit code 0
     const repoRoot = new URL("../", import.meta.url).pathname;
     const statusCmd = new Deno.Command("git", {
-      args: ["status", "--porcelain", "docs/evidence/"],
+      // SCOPED to this proof's own directory. Asserting the WHOLE docs/evidence/ tree is
+      // clean makes this row fail whenever any OTHER suite in the same `deno test --parallel`
+      // batch writes an evidence artefact - which is cross-test interference, not a defect in
+      // the killed mutant. Observed twice tonight on unrelated trees (ee6e2b5d, f0d66445) and
+      // once here via docs/evidence/audio-feed-bp6r/repro.json written by a concurrent run.
+      // The row still proves the thing it is named for: a killed mutant leaves ITS OWN
+      // artefacts unmodified, and the blob asserts below cover the committed PNG/README.
+      args: ["status", "--porcelain", "docs/evidence/audio-feed-l7m1/"],
       cwd: repoRoot,
     });
     const statusOut = await statusCmd.output();
