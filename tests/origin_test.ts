@@ -23,6 +23,7 @@ import { createHandlers } from "../src/compose.ts";
 import { memoryStores } from "../src/config.ts";
 import {
   hostGateRefusal,
+  isTrustedReportOrigin,
   isUnusableOrigin,
   originCacheControl,
   requestHostAllowed,
@@ -571,6 +572,133 @@ Deno.test("fp4r: a client-supplied forwarded loopback never earns the exemption"
   assertEquals(
     requestHostAllowed(config, req(`${DEPLOYED}/`, { "x-forwarded-host": "app.localhost" })),
     false,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// isTrustedReportOrigin — the loopback exemption is ENFORCED, not assumed
+//
+// `Origin` is a plain request header: a non-browser sets it to any text it
+// likes, so "the Origin says localhost" is a claim about the client, never
+// evidence about where the report came from. The predicate therefore applies
+// `requestHostAllowed`'s rule to the ARRIVAL host too, and these rows pin both
+// directions: a local dev request keeps its exemption, a deployed arrival does
+// not inherit one from text in a header.
+// ---------------------------------------------------------------------------
+
+const REPORTS_PATH = "/api/reports/csp";
+
+Deno.test("report origin row (i): a loopback Origin on a request that ARRIVED on loopback is trusted, so dev/test is unchanged", () => {
+  // The shape `deno task dev` runs in: nothing configured, everything on loopback.
+  for (const arrival of ["http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"]) {
+    assertEquals(
+      isTrustedReportOrigin(
+        {},
+        req(`${arrival}${REPORTS_PATH}`, { origin: "http://localhost:3000" }),
+      ),
+      true,
+      `${arrival}: unconfigured local dev must keep working`,
+    );
+  }
+  // And with the deployed allow-list set, which is what a dev machine that also
+  // knows its public host looks like.
+  assertEquals(
+    isTrustedReportOrigin(
+      { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] },
+      req(`http://localhost:8000${REPORTS_PATH}`, { origin: "http://127.0.0.1:3000" }),
+    ),
+    true,
+  );
+});
+
+Deno.test("report origin row (ii): a loopback Origin on a request that arrived on a DEPLOYED host is refused — the Origin is forged text", () => {
+  // The defect this predicate shipped with: `return isLoopbackHost(host)` trusted
+  // the header alone, so any client could mint a trusted report by writing
+  // `Origin: http://localhost` at a production host and spend the visitor's
+  // write budget, or land attribution against a real visitor.
+  for (
+    const config of [{ allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] }, {
+      publicBaseUrl: DEPLOYED,
+    }]
+  ) {
+    assertEquals(
+      isTrustedReportOrigin(
+        config,
+        req(`${DEPLOYED}${REPORTS_PATH}`, { origin: "http://localhost:3000" }),
+      ),
+      false,
+      "a loopback Origin must not be trusted on a deployed arrival",
+    );
+  }
+});
+
+Deno.test("report origin row (iii): a loopback Origin with a client-supplied forwarded host is refused even though the arrival looks loopback", () => {
+  const config = {
+    trustProxyHeaders: true,
+    allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"],
+  };
+  // A forwarded host is client-supplied text (that is why the proxy opt-in
+  // exists), so it can never earn the loopback exemption — the same rule
+  // `fp4r: a client-supplied forwarded loopback never earns the exemption`
+  // pins for the arrival host.
+  assertEquals(
+    isTrustedReportOrigin(
+      config,
+      req(`http://localhost:8000${REPORTS_PATH}`, {
+        origin: "http://localhost:3000",
+        "x-forwarded-host": "localhost",
+      }),
+    ),
+    false,
+  );
+  assertEquals(
+    isTrustedReportOrigin(
+      config,
+      req(`${DEPLOYED}${REPORTS_PATH}`, {
+        origin: "http://localhost:3000",
+        "x-forwarded-host": "localhost:8000",
+      }),
+    ),
+    false,
+  );
+});
+
+Deno.test("report origin row (iv): a foreign Origin is refused on a deployed host and on loopback alike", () => {
+  for (const url of [`${DEPLOYED}${REPORTS_PATH}`, `http://localhost:8000${REPORTS_PATH}`]) {
+    assertEquals(
+      isTrustedReportOrigin(
+        { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] },
+        req(url, { origin: "https://evil.example.com" }),
+      ),
+      false,
+      `${url}: a foreign Origin must never be trusted`,
+    );
+  }
+  // `.localhost` is not loopback (fp4r), so it does not sneak in either.
+  assertEquals(
+    isTrustedReportOrigin(
+      { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] },
+      req(`http://localhost:8000${REPORTS_PATH}`, { origin: "http://evil.localhost" }),
+    ),
+    false,
+  );
+});
+
+Deno.test("report origin row (v): an absent (or literal `null`) Origin is refused", () => {
+  assertEquals(
+    isTrustedReportOrigin(
+      { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] },
+      req(`${DEPLOYED}${REPORTS_PATH}`),
+    ),
+    false,
+  );
+  assertEquals(
+    isTrustedReportOrigin(
+      { allowedHosts: ["audio-feed.paulkinlan-ea.deno.net"] },
+      req(`${DEPLOYED}${REPORTS_PATH}`, { origin: "null" }),
+    ),
+    false,
+    "a sandboxed document sends the literal `null` origin, which names no host",
   );
 });
 
