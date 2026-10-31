@@ -34,6 +34,7 @@ import {
   startSynthesisWorker,
 } from "../src/worker/synthesis.ts";
 import { makeArticle, makeEpisode, makeSource, makeUser } from "./fixtures.ts";
+import { controlledInvocationClock } from "./fixtures/invocation_clock.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import type { SynthesisWorkerOptions } from "../src/worker/synthesis.ts";
@@ -223,9 +224,23 @@ Deno.test("an operator's fleet ceiling is reported as configured, and a default 
   // test here — the two interacting is asserted separately below.
   const other: Stores = memoryStores();
   await seedInto(other, "user-a", DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET + 1);
+  // The 90s invocation budget must not decide this row: under the real clock a loaded host once
+  // cut the sweep at 268 of 501 turns, `deferred` came back empty, and the row was silently
+  // testing nothing while still passing on a quiet box. The shared fixture's clock never moves
+  // unless this row advances it, so the preflight break never fires and the CEILING decides the
+  // last episode — which is what this row is about.
+  const time = controlledInvocationClock();
   const unconfigured = await spend(other, {
     batchSize: DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET + 5,
+    clock: time.clock,
   }, { ...config, defaultDailyEpisodeBudget: 1000 });
+  // If fewer episodes were considered than were seeded, the invocation budget cut the batch —
+  // say so, instead of a bare "actual 268, expected 500".
+  assertEquals(
+    unconfigured.paid + unconfigured.deferred.length,
+    DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET + 1,
+    "the sweep must consider every seeded episode for the ceiling to decide the last one; fewer means the invocation budget cut the batch early (inject tests/fixtures/invocation_clock.ts and never advance it) — not the ceiling under test",
+  );
   assertEquals(unconfigured.paid, DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET);
   assertEquals(unconfigured.deferred.length, 1);
   assertStringIncludes(unconfigured.deferred[0]!, "source: built-in default");
