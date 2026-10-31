@@ -3,9 +3,11 @@
  * off-by-one that miscounted `until()` twice in one night (2026-02): a
  * top-level-comma splitter reads a MULTI-LINE call whose last argument has a
  * trailing comma as three arguments, a census published 101 two-argument sites
- * where the truth was 170, and a sweep plus its review both certified a file as
- * swept with eight unbounded calls left. Every rule below is one of the ways
- * that mistake happened or hid.
+ * where the truth on ITS base was 170, and a sweep plus its review both
+ * certified a file as swept with eight unbounded calls left. (170 is the census
+ * base; the tree this tool was published against had 164 two-argument sites, 176
+ * calls in 29 files. Every figure carries its base or it is a wrong figure.)
+ * Every rule below is one of the ways that mistake happened or hid.
  *
  * The shape follows tests/prompt_census_test.ts: the predicate lives in
  * scripts/call-arity.ts with declared limits, synthetic sources pin each rule
@@ -32,6 +34,42 @@ Deno.test("multi-line trailing-comma call counts 2, not 3", () => {
 );
 `;
   assertEquals(argcs(source, "until"), [2]);
+});
+
+// (a2) THE SAME BUG FROM THE OTHER SIDE, and the one the header's own rule 1
+// was contradicted by: emptiness must be decided on the RAW span with comment
+// syntax stripped. maskNonCode() blanks a comment's interior but leaves the
+// delimiters, so a masked span holding `/* c */` or `// c` reads as
+// non-whitespace and used to add a phantom argument. These are the shapes that
+// bit real code: `"desc", // note` on the last line of a multi-line call.
+Deno.test("a block comment where the trailing argument would be is not an argument", () => {
+  assertEquals(argcs(`until(a, /* c */ )`, "until"), [1]);
+  assertEquals(argcs("until(a, /* c\n   */\n)", "until"), [1]);
+});
+
+Deno.test("a line comment where the trailing argument would be is not an argument", () => {
+  assertEquals(argcs(`until(a, // c\n)`, "until"), [1]);
+  // the real-world shape: the comment sits after the last real argument of a
+  // multi-line call, on the same line as its comma.
+  const source = `await until(
+  \`location.pathname === "/"\`,
+  "signed out", // note
+);
+`;
+  assertEquals(argcs(source, "until"), [2]);
+});
+
+Deno.test("an argument list holding only a block comment counts 0", () => {
+  assertEquals(argcs(`until(/* x */)`, "until"), [0]);
+});
+
+// The case most likely to break when emptiness moves to the raw text: quote
+// delimiters survive comment-stripping, so an empty string literal is still
+// TEXT — one argument, never zero.
+Deno.test("an empty string literal is one argument, not zero", () => {
+  assertEquals(argcs(`until("")`, "until"), [1]);
+  assertEquals(argcs(`until('')`, "until"), [1]);
+  assertEquals(argcs(`until(a, "")`, "until"), [2]);
 });
 
 // (b) the plain single-line two-argument call.

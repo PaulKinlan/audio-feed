@@ -21,7 +21,9 @@
  * COUNTING RULES (each pinned by a test):
  * 1. COMMENTS and the INTERIOR of string/template literals are masked first
  *    (maskNonCode), so a mention of the callee inside a comment or a string is
- *    never counted; argument text and positions come from the raw source.
+ *    never counted; argument text and positions come from the raw source. The
+ *    MASK is for finding calls and counting brackets — never for deciding
+ *    whether an argument exists (see rule 4, and the P0 it used to hide).
  * 2. A CALL is the bare identifier `callee` followed, after optional whitespace
  *    (newlines included), by `(`. A mention not followed by `(` is not a call.
  *    An occurrence preceded by `.` or another identifier character (a member
@@ -29,11 +31,20 @@
  *    not counted.
  * 3. THE DECLARATION IS NOT A CALL: an occurrence whose preceding word is
  *    `function` (covering `async function until(a, b, c = 1)`) is skipped.
- * 4. TRAILING COMMA SAFE: the argument list is walked paren/bracket/brace-aware
- *    (commas inside nested calls, arrays, objects, template `${}` expressions
- *    and arrow bodies sit at depth > 0 and never split an argument). After the
- *    LAST top-level comma, a span that holds only whitespace before the closing
- *    paren is EMPTY — it is the trailing comma, not an argument. `f()` counts 0.
+ * 4. TRAILING COMMA SAFE, AND EMPTINESS DECIDED ON THE RAW SPAN: the argument
+ *    list is walked paren/bracket/brace-aware (commas inside nested calls,
+ *    arrays, objects, template `${}` expressions and arrow bodies sit at depth
+ *    > 0 and never split an argument). After the LAST top-level comma, a span
+ *    that holds only whitespace AND COMMENTS before the closing paren is EMPTY
+ *    — it is the trailing comma, not an argument; the same test gives `f()` its
+ *    0. The test is `onlyComments()` on the RAW span, because maskNonCode blanks
+ *    a comment's INTERIOR while leaving its delimiters visible: a masked span
+ *    holding a block comment or a line comment is NON-empty, which counted three
+ *    arguments for a two-argument call carrying a trailing `// note` — the exact
+ *    shape this file exists to prevent, reproduced by the file itself. Raw is
+ *    safe on the other side too: string delimiters survive masking and survive
+ *    comment-stripping, so `until("")`, `until(a, "")` and a span holding only
+ *    a string literal stay NON-empty and count as arguments.
  * 5. An argument list that never closes (truncated source) is skipped and
  *    reported on stderr rather than guessed at.
  *
@@ -41,8 +52,19 @@
  * type-parameter instantiation `callee<T>(...)`, tagged templates on the callee,
  * and comma-operator arguments (`f((a, b), c)`) are not modelled — none appears
  * in this repository's call sites. Regex literals are not masked (maskNonCode's
- * own declared limit), so a callee name or a stray top-level comma inside a
- * regex could still confuse the walk; none in this repo does.
+ * own declared limit), so the limit is scoped to a call whose OWN argument list
+ * contains a regex literal: a callee name or a stray top-level comma inside that
+ * regex could confuse the walk, and comment syntax inside it could confuse the
+ * raw-span emptiness strip (rule 4). It is not a file-wide hazard — a regex
+ * anywhere else in the file cannot move a `callee(` match or a comma in another
+ * call's argument list. None in this repo does either.
+ *
+ * THE PUBLISHED NUMBERS AND THEIR BASES, because a stale base reads as a wrong
+ * tool: the census that published 101 two-argument sites counted on ITS base,
+ * where the truth was 170 two-argument `until()` sites. On `main` when this tool
+ * was published the truth is 164 (176 calls in 29 files). Re-measure rather than
+ * trusting either figure: `deno run --allow-read scripts/call-arity.ts until
+ * scripts` prints the count for the tree you are standing on.
  */
 
 import { maskNonCode } from "./source-mask.ts";
@@ -58,12 +80,32 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Count the arguments of the call whose `(` is at `open` in MASKED source, or
- * null when the parens never close. Depth-aware over (), [], {}; a comma is a
- * separator only at depth 0. The span after the last top-level comma that holds
- * only whitespace before `)` is the trailing comma and adds NO argument.
+ * True when an argument SPAN holds no argument: only whitespace and comments.
+ *
+ * It runs on RAW text on purpose. maskNonCode() blanks a comment's interior but
+ * leaves its opening and closing DELIMITERS visible, so asking the mask whether a
+ * span is empty answers "no" for a block comment and for a line comment — and a
+ * trailing `// note` on the last line of a multi-line call then counted as a
+ * third argument. Stripping comment syntax from the raw span answers what the rule
+ * asks: is there any argument text here at all?
+ *
+ * Quoted text is untouched by both replacements, and a string literal always
+ * keeps its own delimiter characters, so a span holding only `""` stays
+ * NON-empty — `until("")` is one argument, not zero.
  */
-function argcAt(masked: string, open: number): number | null {
+function onlyComments(span: string): boolean {
+  return span.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "").trim() === "";
+}
+
+/**
+ * Count the arguments of the call whose `(` is at `open`, or null when the parens
+ * never close. Depth-aware over (), [], {}; a comma is a separator only at depth
+ * 0, and both texts are walked together because maskNonCode preserves OFFSETS —
+ * a slice at a masked index is the same slice in the raw source. The span after
+ * the last top-level comma that holds only whitespace and comments before `)` is
+ * the trailing comma and adds NO argument.
+ */
+function argcAt(raw: string, masked: string, open: number): number | null {
   let parens = 0;
   let brackets = 0;
   let braces = 0;
@@ -90,12 +132,13 @@ function argcAt(masked: string, open: number): number | null {
   }
   if (close < 0) return null;
   if (commas === 0) {
-    return masked.slice(open + 1, close).trim() === "" ? 0 : 1;
+    return onlyComments(raw.slice(open + 1, close)) ? 0 : 1;
   }
   // TRAILING COMMA RULE: a span that ends at the closing paren holding only
-  // whitespace is EMPTY, not an argument (audio-feed arity bug, 2026-02).
-  const last = masked.slice(lastComma + 1, close);
-  return last.trim() === "" ? commas : commas + 1;
+  // whitespace and comments is EMPTY, not an argument (audio-feed arity bug,
+  // 2026-02). Read from RAW: the mask leaves comment delimiters visible.
+  const last = raw.slice(lastComma + 1, close);
+  return onlyComments(last) ? commas : commas + 1;
 }
 
 /** True when the identifier at `start` is the name of a declaration, not a call: the preceding word is `function`. */
@@ -125,7 +168,7 @@ export function callAritySites(source: string, callee: string): CallArity[] {
     while (open < masked.length && /\s/.test(masked[open]!)) open++;
     if (masked[open] !== "(") continue; // a mention, not a call
     if (isDeclaration(masked, nameAt)) continue; // the declaration itself
-    const argc = argcAt(masked, open);
+    const argc = argcAt(source, masked, open);
     if (argc === null) {
       const line = source.slice(0, nameAt).split("\n").length;
       console.error(`call-arity: unterminated argument list at ${callee} line ${line}; skipped`);
