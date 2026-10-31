@@ -35,8 +35,19 @@ export interface EvidenceArtefacts {
   readme: { bytes: Uint8Array; blobHash: string };
 }
 
+/**
+ * The evidence directory this proof writes, and the only directory this file asserts on.
+ *
+ * audio-feed-47e8m: ONE spelling, because the killed-mutant row scopes `git status --porcelain`
+ * to it. Three hand-copied literals (this read, the script's OUT anchor, the status path) let the
+ * scoped assertion drift onto a directory the proof no longer writes: the row would still pass
+ * while checking nothing, which is the failure mode the scoped form exists to remove. Deriving the
+ * OUT anchor below from this constant makes that drift a named failure instead.
+ */
+export const L7M1_EVIDENCE_DIR = "docs/evidence/audio-feed-l7m1/";
+
 export async function readCommittedEvidenceArtefacts(): Promise<EvidenceArtefacts> {
-  const dir = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;
+  const dir = new URL(`../${L7M1_EVIDENCE_DIR}`, import.meta.url).pathname;
   const [png01, png02, png03, readme] = await Promise.all([
     getFileBytesAndBlobHash(`${dir}01-admin-observability.png`),
     getFileBytesAndBlobHash(`${dir}02-homepage-bookmarklet-main.png`),
@@ -87,8 +98,10 @@ function buildMutantSource(
   tempEvidenceDir: string,
   injectedMutant: string,
 ): string {
-  const outLine =
-    'const OUT = new URL("../docs/evidence/audio-feed-l7m1/", import.meta.url).pathname;';
+  // audio-feed-47e8m: deriving this anchor from L7M1_EVIDENCE_DIR is the drift check for the
+  // SCOPED assertion below - if the script writes anywhere else, the anchor is absent and this row
+  // fails by name rather than passing over a directory the proof no longer touches.
+  const outLine = `const OUT = new URL("../${L7M1_EVIDENCE_DIR}", import.meta.url).pathname;`;
   const marker = "const captureIdentity = (await js(`(() => {";
   const untilDefault = "timeoutMs = 8000";
   for (
@@ -458,7 +471,7 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
       // of scripts/verify_main_l7m1_e2e.ts is this directory - the row exists so a mid-run kill
       // can never silently overwrite the committed evidence. Writes anywhere else in
       // docs/evidence/ belong to other lanes and are deliberately invisible here.
-      args: ["status", "--porcelain", "docs/evidence/audio-feed-l7m1/"],
+      args: ["status", "--porcelain", L7M1_EVIDENCE_DIR],
       cwd: repoRoot,
     });
     const statusOut = await statusCmd.output();
@@ -473,7 +486,7 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves ITS OWN evidence directory c
     assertEquals(
       statusText,
       "",
-      "docs/evidence/audio-feed-l7m1/ (this proof's own evidence dir only, not the whole " +
+      `${L7M1_EVIDENCE_DIR} (this proof's own evidence dir only, not the whole ` +
         "docs/evidence/ tree) must have no git modifications after mid-run kill",
     );
 
