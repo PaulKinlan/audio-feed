@@ -1,0 +1,16 @@
+{
+  "script": "scripts/bootstrap-refusal-browser-proof.ts",
+  "sha": "18a6b738051a771c532f61d4c835ad8a5dede297",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T21:46:11.445Z",
+  "endedAt": "2026-10-31T21:46:15.839Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-existing-account-refusal.png": "sha256:5f6f5dcbb170906de744113e179e9b125357cc2446edbe4bf118893705479b5a",
+    "02-new-admin-bootstrap-success.png": "sha256:e33d04d78bf35c03a39dc937a801afeda1d0c00d9606a26e93a74bfaf05dd766"
+  }
+}
