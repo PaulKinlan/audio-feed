@@ -670,6 +670,32 @@ Deno.test({
   },
 });
 
+/**
+ * The fade row's wait bound, DERIVED rather than picked (audio-feed-ev6wj).
+ *
+ * The page's own timeline is short and fixed (see the inline script in the row below): a 30ms
+ * pre-paint sleep, two requestAnimationFrame hops so the promoted popover creates its opacity
+ * transition, then six samples. The 0/75/150ms marks cost no wall clock - `sample()` calls
+ * pause() and seeks `currentTime`, so each mark is a few synchronous style recalcs, not a
+ * 150ms wait. Nominal page work is therefore ~30 + 2x17 + 6x2 = ~76ms, which is why an 8s
+ * default looked generous.
+ *
+ * The page is not what bounds this wait. `until` polls over a CDP round-trip, and on a loaded
+ * host the navigation, the first evaluate and every later poll are scheduled behind other
+ * work. This repo has already MEASURED how far that stretches a poll: under eight-way CPU
+ * saturation a bare `document.readyState === "complete"` wait legitimately exceeded 8s, which
+ * is why verify_main_l7m1_e2e.ts's copy of `until` runs with 120s (audio-feed-6gst1). This row
+ * was observed on a gate host at 3m35s wall for launch + wait + teardown while its 8s default
+ * fired with the page healthy, so the WAIT reddened the row and every assertion below it never
+ * ran - a slow host was reported as a broken page.
+ *
+ * 120s = 15x that measured starved-poll floor, and ~1600x this page's own 76ms timeline. It is
+ * a HANG bound, not a latency bound: a page that never writes #results still fails, in two
+ * minutes rather than eight seconds, with the message naming what it waited for and how long.
+ */
+const MEASURED_STARVED_POLL_MS = 8_000;
+const FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS;
+
 Deno.test({
   name: "anchor-positioning: native popover tooltip fades in and out over 150ms (audio-feed-lvyit)",
   ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
@@ -729,7 +755,8 @@ Deno.test({
             await cdp("Page.navigate", { url: `file://${file}` });
             await until(
               `document.getElementById("results")?.textContent.length > 0`,
-              "fade samples",
+              "the fade row's #results JSON (enter/exit opacity samples at 0/75/150ms)",
+              FADE_SAMPLES_WAIT_MS,
             );
             return JSON.parse(await js(`document.getElementById("results").textContent`));
           };

@@ -9,11 +9,11 @@
  * - js() sends Runtime.evaluate and extracts result.value
  * - js() throws when response includes exceptionDetails
  * - until() polls until expression evaluates truthy
- * - until() throws descriptive error upon timeout
+ * - until() honours an explicit timeoutMs and its timeout error names what was waited for
  * - close() closes the WebSocket cleanly
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { connectCdp } from "../scripts/proof-cdp.ts";
 
 Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, until, and error cases", async () => {
@@ -113,12 +113,29 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       // 6. Test until() success
       await client.until("poll_counter", "counter ready", 500);
 
-      // 7. Test until() timeout
+      // 7. Test until() timeout: an explicit timeoutMs is HONOURED (bounded by ~150ms, not the
+      // 8s default) and the error names what was waited for, which expression it polled, how
+      // long it waited and how many polls it managed (audio-feed-ev6wj).
+      const timeoutStart = Date.now();
       await assertRejects(
         async () => await client.until("never_ready", "waiting for never", 150),
         Error,
-        "timed out waiting for: waiting for never",
+        "until: 'waiting for never' did not hold within 150ms of entry",
       );
+      const timeoutElapsed = Date.now() - timeoutStart;
+      assert(
+        timeoutElapsed < 4_000,
+        `an explicit 150ms timeout must not wait out the 8s default; elapsed ${timeoutElapsed}ms`,
+      );
+      // The message carries the evidence a gate log needs: the expression, the elapsed time and
+      // the poll count, so "never got a slice" and "page never got there" are distinguishable.
+      const timeoutError = await client.until("never_ready", "waiting for never", 150).then(
+        () => null,
+        (err: Error) => err.message,
+      );
+      assertStringIncludes(timeoutError ?? "", "expression `never_ready`");
+      assertStringIncludes(timeoutError ?? "", "polls ");
+      assertStringIncludes(timeoutError ?? "", "last value false");
     } finally {
       client.close();
     }
