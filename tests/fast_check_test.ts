@@ -302,7 +302,14 @@ Deno.test("abh1: route registrations discover the complete HTTP test set before 
       exercises: ["tests/csp_reporting_test.ts"],
       // admin_subpages seeds a report log; the CSP report-URL suite (audio-feed-s2esl) asserts the
       // `report-uri` that POINTS at this route in other routes' headers and never POSTs to it.
-      mentionsOnly: ["tests/admin_subpages_test.ts", "tests/router_csp_report_url_test.ts"],
+      // origin_test unit-pins the `isTrustedReportOrigin` predicate (src/origin.ts, the gate the
+      // handler itself calls): it builds report-shaped Requests with the real path but never
+      // POSTs through the handler — csp_reporting_test is the suite that drives it.
+      mentionsOnly: [
+        "tests/admin_subpages_test.ts",
+        "tests/router_csp_report_url_test.ts",
+        "tests/origin_test.ts",
+      ],
       mentions: (source: string) => source.includes("/api/reports/csp"),
     },
   ];

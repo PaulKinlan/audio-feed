@@ -723,3 +723,100 @@ Deno.test(
     assertEquals(reportRecords.length, 0, "dropped reports are never stored");
   },
 );
+
+// The loopback exemption belongs to the ARRIVAL, not to the Origin header.
+// `Origin` is text any non-browser can write, so a report that ARRIVES on the
+// deployed host while CLAIMING a loopback origin must be dropped like any other
+// untrusted origin — while a request that really did arrive on loopback
+// (`deno task dev`, this harness) keeps its exemption. The predicate's own rows
+// live in tests/origin_test.ts; this row drives the route, so the visitor
+// budget the predicate protects is asserted where it is actually spent.
+Deno.test("SECURITY: a forged loopback Origin on a deployed arrival spends no visitor budget, while a real loopback arrival still records", async () => {
+  const { app, stores } = await setupApp();
+  const payload = [
+    {
+      type: "csp-violation",
+      url: `${BASE}/listen`,
+      body: { blockedURL: "https://evil.example.com/evil.js" },
+    },
+  ];
+  const readBudget = async (ip: string): Promise<number[] | null> => {
+    const res = await stores.metadata.atomicUpdate<number[]>(`reports:budget:${ip}`, () => null);
+    return res.value;
+  };
+  const reportRecords = async () =>
+    (await stores.metadata.listLogs()).filter((r) => r.type === "report.csp-violation");
+  const dropRecords = async () =>
+    (await stores.metadata.listLogs()).filter((r) =>
+      r.type === "csp_report.origin_untrusted_dropped"
+    );
+  const settleDrops = async (want: number) => {
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      const rows = await dropRecords();
+      if (rows.length >= want) return rows;
+      if (Date.now() >= deadline) return rows;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+
+  // Row (ii): the forged case. The request arrives on the deployed host and the
+  // Origin header says localhost — before the fix that header alone earned trust.
+  const forgedIp = "203.0.113.41";
+  const forgedRes = await app.fetch(
+    new Request(`${BASE}/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": "http://localhost:3000",
+        "x-forwarded-for": forgedIp,
+      },
+      body: JSON.stringify(payload),
+    }),
+    { remoteAddr: { hostname: forgedIp } },
+  );
+  assertEquals(forgedRes.status, 204, "the drop is still a 204 so the browser flushes");
+  assertEquals(
+    await readBudget(forgedIp),
+    null,
+    "row (ii): a loopback Origin on a deployed arrival must NOT consume visitor write budget",
+  );
+  assertEquals(
+    (await reportRecords()).length,
+    0,
+    "row (ii): the forged report content is never stored",
+  );
+  const drops = await settleDrops(1);
+  assertEquals(
+    drops[0]?.reason,
+    "http://localhost:3000",
+    "row (ii): the drop names the value that was judged untrusted, so an operator can see it",
+  );
+
+  // Row (i): the same claim from a request that genuinely arrived on loopback is
+  // trusted, so local development is not broken by the production rule.
+  const devIp = "203.0.113.42";
+  const devRes = await app.fetch(
+    new Request(`http://localhost:8000/api/reports/csp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/reports+json",
+        "origin": "http://localhost:8000",
+        "x-forwarded-for": devIp,
+      },
+      body: JSON.stringify(payload),
+    }),
+    { remoteAddr: { hostname: devIp } },
+  );
+  assertEquals(devRes.status, 204, "the dev report flushes with 204");
+  assert(
+    (await readBudget(devIp)) !== null,
+    "row (i): a real loopback arrival still spends the budget, so dev/test behaves as before",
+  );
+  assertEquals(
+    (await reportRecords()).length,
+    1,
+    "row (i): the loopback-arrival report is recorded in the log store",
+  );
+  assertEquals((await settleDrops(2)).length, 1, "row (i) produced no second drop record");
+});
