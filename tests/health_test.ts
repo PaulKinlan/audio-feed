@@ -11,8 +11,8 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createApp, DEPLOY_COMMIT_ENV_VARS, deployFingerprint } from "../src/app.ts";
-import { memoryStores } from "../src/config.ts";
-import type { AppConfig } from "../src/config.ts";
+import { memoryStores, selectBlobStore } from "../src/config.ts";
+import type { AppConfig, Stores } from "../src/config.ts";
 
 const config: AppConfig = {
   port: 8000,
@@ -184,4 +184,51 @@ Deno.test("likz/lq6c/fciz: AGENTS.md documents exactly the set of DEPLOY_COMMIT_
       `AGENTS.md must not contain duplicate enumeration of ${varName} outside the authoritative clause`,
     );
   }
+});
+
+/**
+ * hltbk: `GET /health` is unauthenticated, so it may report which blob backend KIND is in use
+ * and must never name the bucket.
+ *
+ * The storage string used to be `blobs=s3(<bucket>)`, which handed an anonymous caller the
+ * R2/S3 bucket (the account name), the provider fingerprint and, by implication, where the
+ * audio for every subscriber lives — from a bare GET with no credential.
+ */
+Deno.test("hltbk: /health names the blob backend kind and never the bucket", async () => {
+  // A distinctive bucket: asserting its absence is meaningful only if a leak would be visible
+  // as this exact string.
+  const BUCKET = "acme-audio-private-bucket-9f3c1d7e";
+  const blob = selectBlobStore(
+    fakeEnv({
+      STORAGE_BUCKET: BUCKET,
+      STORAGE_ENDPOINT: "https://r2.audit.invalid",
+      STORAGE_ACCESS_KEY_ID: "test-access-key-id",
+      STORAGE_SECRET_ACCESS_KEY: "test-secret-access-key",
+    }),
+  );
+  const stores: Stores = { ...memoryStores(), blobs: blob.store, describe: blob.describe };
+  const { fetch } = createApp({ config, stores, env: fakeEnv({}) }, {});
+  const res = await fetch(get("/health"));
+  assertEquals(res.status, 200);
+
+  // Assert on the WIRE TEXT rather than one field: a leak in a nested value or a key name is a
+  // leak too, and the route composes its body.
+  const text = await res.text();
+  assert(!text.includes(BUCKET), `health body must not name the bucket (got ${text})`);
+  assert(
+    !text.includes("r2.audit.invalid"),
+    `health body must not name the endpoint (got ${text})`,
+  );
+
+  const body: { status: string; storage: string; deploy: string; time: string } = JSON.parse(text);
+  // The backend KIND is still there — this is a disclosure fix, not a removal of the field.
+  assertEquals(body.storage, "blobs=s3");
+  // The rest of the health contract is unchanged.
+  assertEquals(body.status, "ok");
+  assert(typeof body.deploy === "string" && body.deploy.length > 0);
+  assert(typeof body.time === "string" && body.time.length > 0);
+
+  // And the same string asserted before any HTTP is involved, so a red says where the leak was
+  // configured as well as that it reached the wire.
+  assertEquals(blob.describe, "blobs=s3");
 });

@@ -369,7 +369,13 @@ export function loadConfig(reader: EnvReader = Deno.env): AppConfig {
 export interface Stores {
   metadata: MetadataStore;
   blobs: BlobStore;
-  /** What was actually selected — logged at boot so prod misconfig is visible. */
+  /**
+   * What was actually selected — logged at boot so prod misconfig is visible.
+   *
+   * PUBLIC. `GET /health` returns this to an unauthenticated caller (src/app.ts), so it names
+   * the backend KIND only. The bucket, endpoint and account are identifying detail about the
+   * deployment's storage and must never reach this string.
+   */
   describe: string;
 }
 
@@ -410,7 +416,8 @@ export function selectBlobStore(
       region: envFrom(reader, "STORAGE_REGION"),
       publicBaseUrl: envFrom(reader, "STORAGE_PUBLIC_BASE_URL"),
     }),
-    describe: `blobs=s3(${bucket})`,
+    // Kind only: the bucket name is not published (see Stores.describe).
+    describe: "blobs=s3",
   };
 }
 
