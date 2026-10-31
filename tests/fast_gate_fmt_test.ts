@@ -87,16 +87,24 @@ const NESTED_GATE_BOUND_SECONDS = 1800;
  * the group if the first signal is ignored, and SIGKILL cannot be ignored, so `.output()` unblocks
  * at <= bound + 30s by construction and no JS backstop is needed. Exit convention: 124 means the
  * bound was hit, and `timeout` passes every other exit status through unchanged.
+ *
+ * cwd is passed through to the spawn UNCHANGED (audio-feed-66crb review fix): undefined inherits
+ * the caller's working directory, a string becomes Deno.Command's cwd. This is load-bearing — the
+ * nested gate MUST run in the disposable clone (the row's scratch `.md` and its pinned origin/main
+ * exist only there), and the 66crb proof row below asserts a command's reported cwd so a dropped
+ * passthrough fails instead of silently rerunning the gate in the wrong tree.
  */
 async function runBounded(
   command: readonly string[],
   boundSeconds: number,
   what: string,
   env?: Record<string, string>,
+  cwd?: string,
 ): Promise<GateRun> {
   const out = await new Deno.Command("timeout", {
     args: ["-k", "30", `${boundSeconds}`, ...command],
     env: { ...Deno.env.toObject(), ...(env ?? {}) },
+    cwd,
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -216,8 +224,10 @@ async function runGateInDisposableClone(
   );
 
   try {
-    // audio-feed-66crb: the nested gate runs under NESTED_GATE_BOUND_SECONDS via runBounded - the
-    // SAME spawn as before (same binary, args, cwd, env), now with a wall-clock bound and a legible
+    // audio-feed-66crb (review fix): the nested gate runs under NESTED_GATE_BOUND_SECONDS via
+    // runBounded - the SAME spawn as the pre-bound code (same binary, args, cwd and env, with cwd
+    // now travelling through runBounded's own parameter after an intermediate revision dropped it
+    // and silently ran the gate in the OUTER checkout), plus a wall-clock bound and a legible
     // bound-kill, so a loaded host cannot spend the outer gate's bound on one row.
     return await runBounded(
       [
@@ -240,6 +250,10 @@ async function runGateInDisposableClone(
       NESTED_GATE_BOUND_SECONDS,
       `the nested fast gate in the disposable clone at ${dir} (fixture ${fixturePath})`,
       { IN_FAST_GATE_INTEGRATION_TEST: "1" },
+      // The clone, not the test process's cwd: the scratch `.md`, the pinned origin/main and the
+      // armed guard all live in the clone, so the inner gate's change-set resolution is only
+      // correct if it runs there (the 66crb proof row asserts this passthrough).
+      dir,
     );
   } finally {
     await Deno.remove(scratch).catch(() => {});
@@ -373,14 +387,26 @@ Deno.test({
   fn: async () => {
     // (a) A normal exit passes through the wrapper UNCHANGED, so the 8qnu rows' exit-code
     // assertions still mean the gate's own status, not the wrapper's.
-    const passed = await runBounded(["git", "--version"], 60, "bound-proof passthrough");
+    const passed = await runBounded(
+      ["git", "--version"],
+      60,
+      "bound-proof passthrough",
+      undefined,
+      undefined,
+    );
     assertEquals(passed.code, 0, "a command exiting 0 under a 60s bound must exit 0 unchanged");
 
     // (b) The bound fires, and the failure NAMES the bound and says the kill is contention or a
     // hang rather than a product failure, so the next reader does not bisect a product bug
     // (audio-feed-66crb).
     const error = await assertRejects(() =>
-      runBounded(["sleep", "30"], 2, "bound-proof: sleep 30 under a 2s bound")
+      runBounded(
+        ["sleep", "30"],
+        2,
+        "bound-proof: sleep 30 under a 2s bound",
+        undefined,
+        undefined,
+      )
     );
     assert(error instanceof Error, "a bound-kill must surface as an Error");
     assertStringIncludes(error.message, "BOUND KILL");
@@ -394,5 +420,31 @@ Deno.test({
       "NOT a product failure",
       "the bound-kill message must say the kill is host contention or a hang",
     );
+
+    // (c) THE CWD REACHES THE COMMAND. The pre-bound spawn passed `cwd: dir` straight to
+    // Deno.Command; runBounded must pass it through just as faithfully, because the nested gate is
+    // only correct if it runs in the disposable clone (its scratch `.md`, pinned origin/main and
+    // armed guard exist only there). This assertion is what was missing when the parameter was
+    // dropped: (a) and (b) prove passthrough with commands (`git --version`, `sleep`) that behave
+    // identically anywhere, so a missing cwd was invisible. A command that REPORTS its own working
+    // directory makes the drop a loud red instead of a silently wrong gate.
+    const cwdDir = await Deno.makeTempDir({ prefix: "audio-feed-bound-cwd-proof-" });
+    try {
+      const inDir = await runBounded(
+        ["deno", "eval", "console.log(Deno.cwd())"],
+        60,
+        "bound-proof cwd passthrough",
+        undefined,
+        cwdDir,
+      );
+      assertEquals(inDir.code, 0, "deno eval reporting its cwd must exit 0 under the bound");
+      assertStringIncludes(
+        inDir.stdout,
+        cwdDir,
+        `the spawned command must run with cwd set to the temp dir; it reported: ${inDir.stdout.trim()}`,
+      );
+    } finally {
+      await Deno.remove(cwdDir, { recursive: true }).catch(() => {});
+    }
   },
 });
