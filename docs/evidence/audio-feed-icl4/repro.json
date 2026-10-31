@@ -1,6 +1,6 @@
 {
   "bead": "audio-feed-icl4",
-  "capturedAt": "2026-10-10T22:16:13.763Z",
+  "capturedAt": "2026-10-31T17:25:30.600Z",
   "capturedAgainst": "post-fix; the pre-fix persisted string is quoted from the reviewer's bead evidence",
   "preFixPersistedError": "TTS turn failed; refusing whole-episode retry: Gemini API HTTP error 503: Service Unavailable [model=gemini-3.8-flash-tts, inputBytes=..., estimatedInputTokens<=..., maxOutputTokens=16384] [mode direct; claim 1/3; provider status 503]",
   "caseA_deadlineKilledErrorBody": {

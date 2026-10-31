@@ -92,7 +92,14 @@ const report: Record<string, unknown> = {
     retryOn: "none",
     retryBaseDelayMs: 1,
   });
-  const synthesize = createGeminiSynthesizer(ctx, { client, scriptGenerator: null });
+  // The per-turn deadline is owned by the per-call option, not the client constructor (the batch
+  // spreads timeoutMs: deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ?? default into every call;
+  // audio-feed-9d7l5, documented in audio-feed-1qvdl) — so the short 200ms deadline is passed here.
+  const synthesize = createGeminiSynthesizer(ctx, {
+    client,
+    scriptGenerator: null,
+    perTurnTimeoutMs: 200,
+  });
   const result = await runSynthesisBatch(ctx, synthesize, {
     leaseMs: LEASE_MS,
     retryBaseDelayMs: 1,
