@@ -128,7 +128,14 @@ export function createCwvHandler(ctx: AppContext, deps: CwvDeps = {}): Handler<A
         title: "too_many_reports",
         detail: "Too many CWV reports from this client; retry later.",
       });
-      refused.headers.set("retry-after", String(Math.ceil(limit.resetMs / 1000)));
+      // Same header and the same window-derived value as every other refusal in this tree, and the
+      // same one-second floor they all clamp to: the limiter floors its own reset at 0
+      // (`#untilOldestExpires`), so an unclamped `Math.ceil` can answer `retry-after: 0` — which
+      // reads as "retry now" and is not what a refusal means.
+      refused.headers.set(
+        "retry-after",
+        String(Math.max(1, Math.ceil(limit.resetMs / 1000))),
+      );
       return refused;
     }
 

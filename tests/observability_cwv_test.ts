@@ -217,7 +217,14 @@ Deno.test("the beacon is rate limited per client", async () => {
     const res = await fetch(beacon({ metric: "lcp", value: 1000, page: "home" }), client);
     if (res.status === 429) {
       refused++;
-      assert(res.headers.get("retry-after"), "a refused client is told when to come back");
+      // A numeric floor, not mere presence: `retry-after: 0` is a truthy string and would have
+      // passed a presence check while telling the client to retry immediately.
+      const retryAfter = Number(res.headers.get("retry-after"));
+      assert(
+        Number.isFinite(retryAfter) && retryAfter >= 1,
+        "a refused client is told when to come back, at least a second from now",
+      );
+      assertEquals((await res.json()).error, "too_many_reports");
     }
   }
   assertEquals(refused, 1);
