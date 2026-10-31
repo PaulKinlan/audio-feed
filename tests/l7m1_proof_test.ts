@@ -9,8 +9,12 @@
  *    and README are protected by construction (output redirected to a temp dir) and
  *    remain byte-identical and blob-identical to their committed hashes before and after
  *    the run, with no restore step required or performed.
- * 3. A mutant execution killed mid-run leaves the working tree clean (git status reports
- *    no modified PNG) and the committed blob hash unchanged.
+ * 3. A mutant execution killed mid-run leaves THIS PROOF'S OWN evidence directory
+ *    (docs/evidence/audio-feed-l7m1/) unmodified - git status reports no modified PNG there -
+ *    and the committed blob hash unchanged. It deliberately does NOT assert that the whole
+ *    docs/evidence/ tree is clean: other suites write evidence artefacts concurrently under
+ *    `deno test --parallel`, and a shared-machine-state assertion reds a correct run for
+ *    reasons that have nothing to do with the code (docs/speed.md).
  *
  * Copies the script into a run-owned temp directory outside the repository, redirects OUT
  * there, and cleans up in a finally block. SIGKILL may skip cleanup but cannot dirty scripts/.
@@ -436,7 +440,7 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     // 4. A SIGKILL skips child cleanup; even so, scripts/ must be byte-for-byte the same listing.
     assertEquals(await scriptsListing(), scriptsBefore, "SIGKILL must not leave files in scripts/");
 
-    // Verify git status shows no modified PNGs in the working tree
+    // Verify git status shows no modified PNGs in this proof's working tree.
     // pass explicit cwd for the real repository where .git exists and assert exit code 0
     const repoRoot = new URL("../", import.meta.url).pathname;
     const statusCmd = new Deno.Command("git", {
@@ -447,6 +451,13 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
       // once here via docs/evidence/audio-feed-bp6r/repro.json written by a concurrent run.
       // The row still proves the thing it is named for: a killed mutant leaves ITS OWN
       // artefacts unmodified, and the blob asserts below cover the committed PNG/README.
+      //
+      // A cleaner tree is not a property a concurrently-running test can assert (docs/speed.md),
+      // so this stays an OBJECT-OWNERSHIP check: docs/evidence/audio-feed-l7m1/ is the resource
+      // this row guards. A write there is a real finding whoever made it, because the default OUT
+      // of scripts/verify_main_l7m1_e2e.ts is this directory - the row exists so a mid-run kill
+      // can never silently overwrite the committed evidence. Writes anywhere else in
+      // docs/evidence/ belong to other lanes and are deliberately invisible here.
       args: ["status", "--porcelain", "docs/evidence/audio-feed-l7m1/"],
       cwd: repoRoot,
     });
@@ -462,7 +473,8 @@ Deno.test("l7m1-proof: mutant killed mid-run leaves working tree clean and commi
     assertEquals(
       statusText,
       "",
-      "docs/evidence/ must have no git modifications after mid-run kill",
+      "docs/evidence/audio-feed-l7m1/ (this proof's own evidence dir only, not the whole " +
+        "docs/evidence/ tree) must have no git modifications after mid-run kill",
     );
 
     // 5. Verify committed PNG and README blob hashes are unchanged
