@@ -263,8 +263,14 @@ await runProof("audio-feed-lma7", async (checker) => {
         const start = Date.now();
         while (Date.now() - start < timeout) {
           try {
-            if (await js(expr)) return;
-          } catch { /* transient during navigation */ }
+            if (await withHangBound(js(expr), `${label} poll: ${expr}`)) return;
+          } catch (err) {
+            // A hang bound is not the transient navigation error this loop retries: the main thread
+            // did not answer within MEASURE_HANG_BOUND_MS, so re-polling would hang identically and
+            // the caller would only ever see "Timed out waiting for", which names no bound.
+            if (err instanceof HangBoundExceeded) throw err;
+            /* transient during navigation */
+          }
           await sleep(100);
         }
         throw new Error(`Timed out waiting for ${label}`);
@@ -370,6 +376,51 @@ await runProof("audio-feed-lma7", async (checker) => {
         }
       }
 
+      /**
+       * HANG BOUNDS, NOT LATENCY BOUNDS - the same race `measure()` runs, for the evaluates that are
+       * NOT the layout read: `until()`'s readiness poll, the `/account` pathname read, the two
+       * Profile/Passkeys pairing reads and `clipAround`. Every one of them is a synchronous read of
+       * the document - `readyState`, `location.pathname`, `querySelector`, `getBoundingClientRect()` -
+       * so a healthy answer costs microseconds to one forced reflow, and nothing inside it waits on
+       * the network or on a timer. What can take arbitrarily long is the EVALUATE being scheduled at
+       * all: `Runtime.evaluate` queues behind whatever the page's main thread is doing, and this host
+       * has MEASURED a bare `readyState === "complete"` evaluate legitimately exceeding 8s under
+       * eight-way CPU saturation (audio-feed-6gst1). 120s = 15 x that measured floor.
+       *
+       * `measure()` keeps its own copy of this race rather than calling this helper: its
+       * `MeasureTimeout` message was reviewed and cleared at 4cc6b4b3, and a shared message builder
+       * would have had to reword it. The timer semantics here are identical - one timer, cleared in
+       * `finally`, with the abandoned evaluate left pending for `withChrome`'s teardown.
+       */
+      class HangBoundExceeded extends Error {}
+
+      async function withHangBound<T>(
+        pending: Promise<T>,
+        whatWasEvaluated: string,
+        timeoutMs = MEASURE_HANG_BOUND_MS,
+      ): Promise<T> {
+        let timer: ReturnType<typeof setTimeout> | 0 = 0;
+        const expired = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new HangBoundExceeded(
+                  `HangBoundExceeded: the ${whatWasEvaluated} evaluate got no answer in ` +
+                    `${timeoutMs}ms - the hang bound in force (15 x the ${MEASURED_STARVED_POLL_MS}ms ` +
+                    `measured starved-poll floor), not a latency bound: that expression is a ` +
+                    `synchronous DOM read, so that long means the page's main thread never answered it.`,
+                ),
+              ),
+            timeoutMs,
+          );
+        });
+        try {
+          return await Promise.race([pending, expired]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
       async function screenshot(name: string, clip: Record<string, number>) {
         const shot = (await cdp("Page.captureScreenshot", {
           format: "png",
@@ -439,8 +490,20 @@ await runProof("audio-feed-lma7", async (checker) => {
         await until(`document.readyState === "complete"`, "served /account");
         check(
           "the browser is on the served /account page, not redirected to /login",
-          String(await js(`window.location.pathname`)) === "/account",
-          `pathname: ${String(await js(`window.location.pathname`))}`,
+          String(
+            await withHangBound(
+              js(`window.location.pathname`),
+              "window.location.pathname for the served-/account check",
+            ),
+          ) === "/account",
+          `pathname: ${
+            String(
+              await withHangBound(
+                js(`window.location.pathname`),
+                "window.location.pathname for the served-/account check's detail line",
+              ),
+            )
+          }`,
         );
         const fixedAt390 = await measure(MEASURE_HANG_BOUND_MS);
         const servedEscaped = fixedAt390.panels.filter((p) => !p.insideWrap);
@@ -491,13 +554,16 @@ await runProof("audio-feed-lma7", async (checker) => {
           check(
             `at ${width}x${height} the two-column pair is ONE column (Profile stacked over Passkeys)`,
             Boolean(
-              await js(`(() => {
-                const a = document.querySelector('section.panel[aria-labelledby="profile-h"]');
-                const b = document.querySelector('section.panel[aria-labelledby="passkeys-h"]');
-                if (!a || !b) return false;
-                const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-                return Math.abs(ra.left - rb.left) < 1 && rb.top >= ra.top;
-              })()`),
+              await withHangBound(
+                js(`(() => {
+                  const a = document.querySelector('section.panel[aria-labelledby="profile-h"]');
+                  const b = document.querySelector('section.panel[aria-labelledby="passkeys-h"]');
+                  if (!a || !b) return false;
+                  const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                  return Math.abs(ra.left - rb.left) < 1 && rb.top >= ra.top;
+                })()`),
+                `the Profile/Passkeys stacked-column read at ${width}x${height}`,
+              ),
             ),
             "profile and passkeys share a left edge and stack vertically",
           );
@@ -508,7 +574,10 @@ await runProof("audio-feed-lma7", async (checker) => {
         await viewport(390, 844);
         await cdp("Page.navigate", { url: `${BASE}/account` });
         await until(`document.readyState === "complete"`, "mobile /account for capture");
-        const afterClip = (await js(clipAround)) as Record<string, number> | null;
+        const afterClip = (await withHangBound(
+          js(clipAround),
+          "clipAround (the Your feeds panel box framed by 01/02-*-390x844)",
+        )) as Record<string, number> | null;
         check(
           "the 'Your feeds' panel was found on the served page to frame the screenshot",
           afterClip !== null,
@@ -534,13 +603,16 @@ await runProof("audio-feed-lma7", async (checker) => {
         check(
           "at 1280x900 Profile and Passkeys pair into two columns",
           Boolean(
-            await js(`(() => {
-              const a = document.querySelector('section.panel[aria-labelledby="profile-h"]');
-              const b = document.querySelector('section.panel[aria-labelledby="passkeys-h"]');
-              if (!a || !b) return false;
-              const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-              return rb.left > ra.right - 1 && Math.abs(rb.top - ra.top) < 1;
-            })()`),
+            await withHangBound(
+              js(`(() => {
+                const a = document.querySelector('section.panel[aria-labelledby="profile-h"]');
+                const b = document.querySelector('section.panel[aria-labelledby="passkeys-h"]');
+                if (!a || !b) return false;
+                const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                return rb.left > ra.right - 1 && Math.abs(rb.top - ra.top) < 1;
+              })()`),
+              "the Profile/Passkeys desktop pairing read at 1280x900",
+            ),
           ),
           "passkeys sits to the right of profile on the same row",
         );
