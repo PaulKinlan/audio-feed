@@ -1,0 +1,15 @@
+{
+  "script": "scripts/repro_0cmu_linger.ts",
+  "sha": "36f19e07f8361d5b4f2d94e36922fe29e72728e4",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T18:36:17.838Z",
+  "endedAt": "2026-10-31T18:36:26.129Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "repro.json": "sha256:2f119dc6a5f44d33fe1152d5c5ea13e5f1d66ab90be315be8a6385382bc6add6"
+  }
+}
