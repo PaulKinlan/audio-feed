@@ -1,0 +1,16 @@
+{
+  "script": "scripts/failure-diagnostics-browser-proof.ts",
+  "sha": "ba57e2c5333e3dca959864fbf34b165233208992",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T22:00:01.231Z",
+  "endedAt": "2026-10-31T22:00:11.614Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-admin-runs-expanded-errors.png": "sha256:de24e8a20127a6c5bddf1049954a3d0bd683f0e595f4a3603bf935d52c5c5a0f",
+    "02-player-download-error-inline.png": "sha256:0d5110f8c01253c6a2c20770a5c4c4153bf87a645189bb71b5b1369c1bce10de"
+  }
+}
