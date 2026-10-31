@@ -144,6 +144,19 @@ await runProof("audio-feed-3xq", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 15s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 15_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -174,10 +187,15 @@ await runProof("audio-feed-3xq", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/admin` });
-        await until(`document.readyState === "complete"`, "admin page loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "admin page loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.getElementById("usersBody")?.children?.length > 0`,
           "users auto-loaded",
+          UNTIL_HANG_BOUND_MS,
         );
 
         // 1. The module was fetched, content-addressed, with the caching headers it promises.
@@ -236,10 +254,15 @@ await runProof("audio-feed-3xq", async (checker) => {
           .find((tr) => tr.textContent.includes("sub@example.com"))
           .querySelector('button[aria-label^="Manage "]').click()
       `);
-        await until(`!document.getElementById("manageSection")?.hidden`, "manage pane open");
+        await until(
+          `!document.getElementById("manageSection")?.hidden`,
+          "manage pane open",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.getElementById("manageSourcesBody")?.children?.length > 0`,
           "manage sources loaded",
+          UNTIL_HANG_BOUND_MS,
         );
         const sourceTitle = String(
           await js(`document.querySelector("#manageSourcesBody td")?.textContent`),
@@ -257,7 +280,11 @@ await runProof("audio-feed-3xq", async (checker) => {
         await js(
           `[...document.querySelectorAll("#manageSourcesBody button")].find((b) => b.textContent === "Remove").click()`,
         );
-        await until(`document.getElementById("confirmDialog")?.open`, "confirm dialog open");
+        await until(
+          `document.getElementById("confirmDialog")?.open`,
+          "confirm dialog open",
+          UNTIL_HANG_BOUND_MS,
+        );
         const dialogMessage = String(
           await js(`document.getElementById("confirmMessage")?.textContent`),
         );
@@ -267,7 +294,11 @@ await runProof("audio-feed-3xq", async (checker) => {
           dialogMessage,
         );
         await js(`document.getElementById("confirmCancelBtn").click()`);
-        await until(`!document.getElementById("confirmDialog")?.open`, "dialog closed");
+        await until(
+          `!document.getElementById("confirmDialog")?.open`,
+          "dialog closed",
+          UNTIL_HANG_BOUND_MS,
+        );
         await sleep(250);
         const deletesAfterCancel = events.filter(
           (e) => e.method === "Network.requestWillBeSent" && e.params.request?.method === "DELETE",
@@ -281,7 +312,11 @@ await runProof("audio-feed-3xq", async (checker) => {
         await js(
           `[...document.querySelectorAll("#manageSourcesBody button")].find((b) => b.textContent === "Remove").click()`,
         );
-        await until(`document.getElementById("confirmDialog")?.open`, "confirm dialog open again");
+        await until(
+          `document.getElementById("confirmDialog")?.open`,
+          "confirm dialog open again",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.getElementById("confirmOkBtn").click()`);
         await sleep(500);
         const deleteReqs = events.filter(
@@ -323,10 +358,15 @@ await runProof("audio-feed-3xq", async (checker) => {
           mobile: true,
         });
         await cdp("Page.navigate", { url: `${BASE}/admin` });
-        await until(`document.readyState === "complete"`, "admin page reloaded at 390x844");
+        await until(
+          `document.readyState === "complete"`,
+          "admin page reloaded at 390x844",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.getElementById("usersBody")?.children?.length > 0`,
           "users loaded at 390x844",
+          UNTIL_HANG_BOUND_MS,
         );
         const phoneErrors = events.filter((e) =>
           (e.method === "Runtime.consoleAPICalled" &&
