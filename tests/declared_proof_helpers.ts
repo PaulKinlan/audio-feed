@@ -55,31 +55,53 @@ async function restoreDir(
       problems.push(`${rel}: rewrite failed (${(err as Error).message})`);
     }
   }
-  for await (const entry of Deno.readDir(`${ROOT}${relDir}`)) {
-    const child = `${relDir}/${entry.name}`;
-    if (!snapshot.has(child)) {
-      try {
-        await Deno.remove(`${ROOT}${child}`, { recursive: true });
-      } catch (err) {
-        problems.push(`${child}: removal of proof-created file failed (${(err as Error).message})`);
+  // The extras sweep walks RECURSIVELY (audio-feed-3zdrz): a top-level-only readDir saw nothing
+  // below existing subdirectories, so a NEW file inside one was neither removed nor reported. A
+  // directory is original only if the snapshot holds a file under it (snapshotDir records files,
+  // not directories); original directories are descended for nested extras, and everything not in
+  // the snapshot is proof-created and removed whole.
+  const sweepExtras = async (rel: string): Promise<void> => {
+    for await (const entry of Deno.readDir(`${ROOT}${rel}`)) {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory) {
+        const prefix = `${child}/`;
+        if ([...snapshot.keys()].some((key) => key.startsWith(prefix))) {
+          await sweepExtras(child);
+          continue;
+        }
+      }
+      if (!snapshot.has(child)) {
+        try {
+          await Deno.remove(`${ROOT}${child}`, { recursive: true });
+        } catch (err) {
+          problems.push(
+            `${child}: removal of proof-created file failed (${(err as Error).message})`,
+          );
+        }
       }
     }
-  }
+  };
+  await sweepExtras(relDir);
   return problems;
 }
 
 /**
- * Run one already-spawned proof child under the suite's backstop bound and restore its evidence
- * directory afterwards. The failure message names the proof's directory and quotes its output tail,
+ * Run one proof child under the suite's backstop bound and restore its evidence directory
+ * afterwards. The failure message names the proof's directory and quotes its output tail,
  * so a red row says WHICH demonstration stopped holding and what the proof last printed, not just
- * "non-zero". The CHILD is built by the caller (see the load-bearing-shape note in the suites); this
- * helper owns snapshot → run → restore → assert.
+ * "non-zero". The caller supplies a CLOSURE that builds and spawns the child (see the
+ * load-bearing-shape note in the suites), and this helper invokes it only AFTER snapshotDir has
+ * captured the directory: spawning any earlier lets a proof that writes on startup have its
+ * partially-written artefact captured as the "original", so the post-restore comparison matches
+ * the pollution and the tree-vs-HEAD mismatch surfaces later as "worktree modified during gate
+ * run" (audio-feed-3zdrz). This helper owns snapshot → spawn → run → restore → assert.
  */
 export async function runAndRestore(
   dir: string,
-  child: Deno.ChildProcess,
+  spawnChild: () => Deno.ChildProcess,
 ): Promise<void> {
   const snapshot = await snapshotDir(dir);
+  const child = spawnChild();
   let output: Deno.CommandOutput;
   const backstop = setTimeout(() => {
     try {

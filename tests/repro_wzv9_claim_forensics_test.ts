@@ -20,6 +20,10 @@
 //    a backstop timer SIGKILLs the child at PROOF_BOUND_MS — the same bound mechanism
 //    scripts/evidence-run.ts uses for proofs — so a hanging proof turns into a non-zero exit and a
 //    red row instead of a hung gate.
+// 4. THE ORDER: the child is spawned by a closure INSIDE runAndRestore, so the evidence snapshot is
+//    taken BEFORE the proof process exists and can write (audio-feed-3zdrz) — an early-writing
+//    proof must never have its partial artefact captured as the "original" that restore compares
+//    against.
 //
 // Artefact restore (always, even on red) is runAndRestore's job; see
 // tests/declared_proof_helpers.ts for why that is load-bearing too.
@@ -30,12 +34,12 @@ Deno.test(
   "declared proof runs green, bounded: scripts/repro_wzv9_claim_forensics.ts (audio-feed-u9e7s)",
   async () => {
     const dir = "docs/evidence/audio-feed-wzv9";
-    const child = new Deno.Command(Deno.execPath(), {
-      args: ["run", "--allow-all", "--unstable-kv", "scripts/repro_wzv9_claim_forensics.ts"],
-      cwd: new URL("..", import.meta.url).pathname,
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    await runAndRestore(dir, child);
+    await runAndRestore(dir, () =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["run", "--allow-all", "--unstable-kv", "scripts/repro_wzv9_claim_forensics.ts"],
+        cwd: new URL("..", import.meta.url).pathname,
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn());
   },
 );
