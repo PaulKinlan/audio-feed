@@ -210,16 +210,18 @@ async function main(): Promise<void> {
     }
     const files = await resolveTargets(paths);
     let count = 0;
+    let withTwoArg = 0;
     for (const file of files) {
       const source = await Deno.readTextFile(file);
-      for (const site of callAritySites(source, callee)) {
-        if (site.argc === 2) {
-          console.log(`${file}:${site.line}`);
-          count++;
-        }
-      }
+      const sites = callAritySites(source, callee).filter((site) => site.argc === 2);
+      if (sites.length === 0) continue;
+      withTwoArg++;
+      for (const site of sites) console.log(`${file}:${site.line}`);
+      count += sites.length;
     }
-    console.log(`# ${count} two-argument call(s) to ${callee} in ${files.length} file(s)`);
+    console.log(
+      `# ${count} two-argument call(s) to ${callee} in ${withTwoArg} file(s) (${files.length} scanned)`,
+    );
     return;
   }
   const [callee, ...paths] = rest;
@@ -230,16 +232,20 @@ async function main(): Promise<void> {
   const files = await resolveTargets(paths);
   let total = 0;
   let twoArg = 0;
+  let withCalls = 0;
   for (const file of files) {
     const source = await Deno.readTextFile(file);
-    for (const site of callAritySites(source, callee)) {
+    const sites = callAritySites(source, callee);
+    if (sites.length === 0) continue;
+    withCalls++;
+    for (const site of sites) {
       console.log(`${file}  ${callee}  ${site.argc}`);
       total++;
       if (site.argc === 2) twoArg++;
     }
   }
   console.log(
-    `# ${total} call(s) to ${callee} in ${files.length} file(s), ${twoArg} two-argument`,
+    `# ${total} call(s) to ${callee} in ${withCalls} file(s) with calls (${files.length} scanned), ${twoArg} two-argument`,
   );
 }
 
