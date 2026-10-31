@@ -407,14 +407,18 @@ each touched file was re-run green with four CPU burners saturating the box.
 The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection
 is the BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait
 surface one gate red at a time. First measured directly on `origin/main` at `ea949d2e`; recounted
-2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker — the recount is the
-aggregate below:
+2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker, and recounted again the
+same day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges — the `ed7116fb`
+recount is the aggregate below:
 
-- **164 `until()` call sites pass only the two required arguments** (expression, description) and
-  inherit their file's default, spread over **26 files** under `scripts/`, out of 176 `until(` calls
-  in 29 files. Method (2026-10-31, `275df1da`): paren/quote/template-aware walk of each `until(`
+- **31 `until()` call sites pass only the two required arguments** (expression, description) and
+  inherit their file's default, spread over **10 files** under `scripts/`, out of 176 `until(` calls
+  in 29 files. Method (2026-10-31, `ed7116fb`): paren/quote/template-aware walk of each `until(`
   argument list, counting only non-empty argument spans, with definitions and type positions
-  excluded — **12** sites pass an explicit third argument and are not part of this count. The
+  excluded — **145** sites pass an explicit third argument and are not part of this count. Count it
+  rather than trusting either figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
+  which prints each two-argument site as `file:line` and then the file tally. All 31 sit in files
+  that declare their own `until`, so none of them inherits the shared `proof-cdp.ts` default. The
   originally published aggregate for the base this census first measured (`ea949d2e`) — 101
   two-argument sites across 28 files, 75 explicit-bound — was an undercount: re-walking that same
   `ea949d2e` with the safe walker gives **170 two-argument sites across 28 files, 6
@@ -422,19 +426,28 @@ aggregate below:
   splits an argument list on top-level commas reads a trailing comma before the closing paren as one
   more argument, which is how the eight unbounded waits in `scripts/account-browser-proof.ts` (15
   two-argument calls, none explicit at either base) were described as bounded. The six-site drop
-  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift. Landed check
-  (`git merge-base --is-ancestor` against `origin/main`, 2026-10-31): `fleet/anchor-wait`
-  (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`), `fleet/measure-waits` (`4cc6b4b3`) and
-  `fleet/js-waits` (`9921a815`) are in; `fleet/until-sweep-1` (`0f21af94` plus fixup `8d423e7d`),
-  `fleet/until-sweep-2` (`cb4cefd1`), the cwv retry-after row (`11ba107c`) and this census commit
-  (`789eeca7`) are not on `origin/main` yet.
-- **The 8s default is re-declared 25 times.** `scripts/proof-cdp.ts:61` owns the shared harness copy
-  (`until(expr, desc, timeoutMs = 8000)`), and 25 private copies live beside it: **14 default
-  `timeoutMs = 8000`** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-,
-  request-access-, playback-position-, spend-visibility-, voice-audition-, home-player-link- and
+  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift, and the
+  164 → 31 drop is the five sweeps below, not drift either. Landed check
+  (`git merge-base --is-ancestor` against `origin/main` `ed7116fb`, 2026-10-31): `fleet/anchor-wait`
+  (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`), `fleet/measure-waits` (`4cc6b4b3`),
+  `fleet/js-waits` (`9921a815`), this census commit (`789eeca7`), the cwv retry-after row
+  (`11ba107c`) and all five sweeps — `fleet/until-sweep-1` (`f5cafa86`, 30 sites), `-2` (`64cfdead`,
+  24), `-3` (`081f7006`, 32), `-4` (`912b310c`, 23) and `-5` (`f8b5a0ab`, 24) — are in; those 133
+  converted sites are the whole of the 164 → 31 drop.
+- **The shared helper no longer defaults to 8s; that default survives only in private copies.**
+  `scripts/proof-cdp.ts` exports `MEASURED_STARVED_POLL_MS = 8_000` and derives
+  `HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS` = **120_000**, and that derived bound is the
+  default for BOTH helpers: `until(expr, desc, timeoutMs = HANG_BOUND_MS)` (`:156`) and
+  `js(expression, timeoutMs = HANG_BOUND_MS)` (`:113`), which races its ONE `Runtime.evaluate`
+  against the timer and rejects with `CdpHangBoundExceeded` rather than polling
+  (`fleet/shared-proof-bound`, merge `7a3df3be`). 26 private `until` copies live beside it:
+  **15 default `timeoutMs = 8000`**
+  (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-, request-access-,
+  playback-position-, spend-visibility-, voice-audition-, home-player-link- and
   listen-filter-browser-proof.ts, verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts,
-  verify_qz3x_confirm_dismiss_browser.ts — this confirms the earlier count of 14), 7 default to 15s
-  and 4 to 10s. There is no single file to fix: the default itself is forked per script.
+  verify_qz3x_confirm_dismiss_browser.ts and verify_main_l7m1_e2e.ts — one more than the earlier
+  count of 14, which missed the arrow-function copy at `:261`), 7 default to 15s and 4 to 10s. There
+  is no single file to fix: the default itself is forked per script.
 - **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()`
   layout reads (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five
   inline asserts/reads at 398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all
@@ -462,16 +475,19 @@ Three fixes exist and are the pattern to copy, not a complaint to file:
 The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured
 starved-poll floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under
 an eight-way saturated host (audio-feed-6gst1) — a HANG bound, never a latency promise about the
-page. One myth this census kills by measurement: the precedent sometimes cited,
-"`verify_main_l7m1_e2e.ts` runs 120 s", is FALSE — that file's local `until` defaults to
-`timeoutMs = 8000` (line 248) and the file contains no `120000` anywhere; even the fix branches'
-comments repeat the claim. The 8s default IS the measured floor, and the derived bound is 15× it.
+page. One myth this census killed by measurement: the precedent sometimes cited,
+"`verify_main_l7m1_e2e.ts` runs 120 s", was FALSE at the base this census measured — that file's
+local `until` defaulted to `timeoutMs = 8000` (`:248` then, `:261` today) and the file contained no
+`120000` anywhere; even the fix branches' comments repeated the claim. (`fleet/until-sweep-4`,
+`912b310c`, has since made it true from the other end: all eight of that file's `until` calls now
+pass an explicit `UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS`.) The 8s default IS the
+measured floor, and the derived bound is 15× it.
 
 Failure modes, kept explicit: an inherited 8s default that fires early on a loaded host reports a
 HEALTHY page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A
 missing bound on a bare `js()` evaluate has no per-wait ceiling: it runs until the lane's killer or
 the gate's own `CHECK_FAST_TIMEOUT` (the 1800 s ceiling in the section above) fires, so it burns a
-lane AND a gate slot, which is strictly worse. The 164-site count is the map for extending the
+lane AND a gate slot, which is strictly worse. The 31-site count is the map for extending the
 anchor/proof-waits idiom file by file; the layout proof's bare evaluates are the only sites where a
 poll is wrong in principle and the race is required.
 
@@ -526,11 +542,14 @@ lane while the other is not a real-clock budget row at all.
    text. So on a starved host it **times out waiting for samples instead of failing an assertion** —
    every assertion in the row (`:747-761`) is downstream of the wait and never runs.
 
-   **The bound is FIXED, not derived:** `until(expr, desc, timeoutMs = 8000)` in
-   `scripts/proof-cdp.ts:61` hard-codes 8 s, derives nothing from any observed time, and this call
-   site passes no override — 8 s of polling for a page timeline of 30 ms plus two animation frames
-   plus two 150 ms samples. The fix is left to a separate bead: nothing here is changed, and the row
-   still carries its fixed 8 s bound.
+   **The bound is derived, not fixed:** `scripts/proof-cdp.ts` defaults `until()` to
+   `HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS` = 120 s (`fleet/shared-proof-bound`, merge
+   `7a3df3be`), and this call site states its own derived
+   `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`
+   (`tests/anchor_positioning_test.ts:696-697`) and passes it at `:756-760` — so the row now polls
+   for 120 s rather than 8 s over a page timeline of 30 ms plus two animation frames plus two 150 ms
+   samples. That is a HANG bound on a host that starved the poll, not a latency promise about the
+   page.
 
 ## Widening verdict boundary
 
