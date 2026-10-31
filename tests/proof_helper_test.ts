@@ -200,7 +200,19 @@ Deno.test({
     // readiness genuinely never arrives, and then the error NAMES which
     // condition never became true. The production fail-fast window and the
     // timeout mechanism are pinned by the rows below.
-    const harness = await spawnHarness("scripts/account-harness.ts", [], { timeoutMs: 120_000 });
+    // audio-feed-3n0xs / merger finding: `timeoutMs` is the HEALTH-CHECK timeout; the STARTUP
+    // window is a different option and, when it is absent, spawnHarness derives one as 60x a
+    // BARE-Deno-boot probe (BOOT_BASELINE_PROBE_SOURCE imports nothing). That multiple is
+    // calibrated for a probe child, not for a child that boots the app's module graph, so on a
+    // loaded host the derived window can be ~1.3s and this row fails with "timed out after 1260ms
+    // ... the child never logged its READY line" while the harness is healthy - observed in a gate
+    // at loadavg ~4 after 2461 rows had passed. The row's own comment says the 120s is an OUTER
+    // GUARD and the pass condition is the readiness SIGNAL, so state that guard explicitly for the
+    // startup phase too. The production window derivation stays pinned by the rows below.
+    const harness = await spawnHarness("scripts/account-harness.ts", [], {
+      timeoutMs: 120_000,
+      startupTimeoutMs: 120_000,
+    });
     try {
       // spawnHarness ALWAYS passes "0", so this must be an EPHEMERAL bind.
       // `port > 0` alone was satisfied by the pinned default too, so a green row
