@@ -20,6 +20,7 @@ import {
   fetchArticle,
   IngestError,
   MAX_ARTICLE_CONTENT_CHARS,
+  MAX_CONCURRENT_PDF_PARSES,
   MAX_PDF_BYTES,
   truncateAtReferencesSection,
 } from "../src/ingest/url.ts";
@@ -450,4 +451,29 @@ Deno.test("extractPdfArticle: enforces bounded parse timeout (audio-feed-a3y)", 
   );
   assertEquals(err.status, 504);
   assertStringIncludes(err.message, "PDF parsing timed out");
+});
+
+Deno.test("extractPdfArticle: refuses a parse beyond the concurrency cap, then returns the slots (audio-feed-ppikk)", async () => {
+  const bytes = makeSyntheticPdf({
+    title: "Capped Parse",
+    lines: [LONG_PARA_1, LONG_PARA_2],
+  });
+
+  // Launched in ONE tick, so every call reaches the counter before any parse can settle: the
+  // first MAX_CONCURRENT_PDF_PARSES acquire a slot and the next one is refused, not queued.
+  const admitted = Array.from(
+    { length: MAX_CONCURRENT_PDF_PARSES },
+    () => extractPdfArticle(bytes, "https://example.com/cap.pdf"),
+  );
+  const refused = await assertRejects(
+    () => extractPdfArticle(bytes, "https://example.com/cap.pdf"),
+    IngestError,
+  );
+  assertEquals(refused.status, 429);
+  assertStringIncludes(refused.message, "PDF parsing is busy");
+
+  // The admitted parses still complete normally, and settling hands their slots back.
+  assertEquals((await Promise.all(admitted)).length, MAX_CONCURRENT_PDF_PARSES);
+  const afterCap = await extractPdfArticle(bytes, "https://example.com/cap.pdf");
+  assertEquals(afterCap.title, "Capped Parse");
 });
