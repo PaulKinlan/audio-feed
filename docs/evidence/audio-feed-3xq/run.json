@@ -1,0 +1,21 @@
+{
+  "script": "scripts/admin-module-browser-proof.ts",
+  "sha": "fe8cdbb25a21ea1d67839ab54a4860a1a3d1b3b0",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T22:00:52.118Z",
+  "endedAt": "2026-10-31T22:00:58.130Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "part4a-admin-1280x900.png": "sha256:b27eca34194e45b8fd78379633fba03fada433cb6d203961babb6b052c6eaa39",
+    "part4a-admin-390x844.png": "sha256:c0aca2815ea3a855697c0a768d1ecbb9e410e8493e7ebb49dcf8d52d17580d8b",
+    "part4b-home-1280x900.png": "sha256:87eae0181fb07a3c7a41472bada17bd7e9f5c59ed1d30ca53b55d60f471bd54c",
+    "part4b-home-390x844.png": "sha256:3bad798f8ec1f3f5dbd4a4a30bbe18288381a6e62caae9d8512094f7cb62a726",
+    "part4c-home-tooltip-visible-1280x900.png": "sha256:07dea0ca7062ca41d627f9506a256b6f591b5b95bbc0649adc9cb54f1333ba14",
+    "part4c-listen-landing-1280x900.png": "sha256:93817be6e604a0e4c89e3c818bb514452226ca7a42413dfc37ebdfa0d43ba8b1",
+    "part4c-listen-landing-390x844.png": "sha256:2fc6c6b20c4c041133e7fae42dd93b8bb08f5f888471113d4a29f8d216d0028f"
+  }
+}
