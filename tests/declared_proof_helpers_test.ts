@@ -27,6 +27,28 @@ const repoRoot = new URL("..", import.meta.url).pathname;
 const sandboxRel = () => `docs/evidence/tmp-declared-proof-helpers-${Deno.pid}`;
 
 /** A fake proof child: writes one file (path composed at runtime) and exits 0. */
+/**
+ * audio-feed-3zdrz MUTATION CONTROL (merger-added). `fakeProof` writes from a CHILD, so it lands
+ * tens of milliseconds after spawn and the snapshot usually wins the race even when the helper
+ * spawns first - I verified that: wiring `spawnChild()` BEFORE `snapshotDir()` leaves the existing
+ * ordering row GREEN, so that row proves the race does not usually bite, not that the order is
+ * what it claims. This closure writes SYNCHRONOUSLY before returning the child, so the snapshot's
+ * position relative to the spawn call is the only thing that decides the outcome. With the helper
+ * as shipped (snapshot, then spawn) this row is green; with the two lines swapped it reds with
+ * "captured as the original: snapshot did not precede the spawn call".
+ */
+function syncWritingProof(writeRelPath: string): () => Deno.ChildProcess {
+  return () => {
+    Deno.writeTextFileSync(`${repoRoot}${writeRelPath}`, "proof-wrote-this");
+    return new Deno.Command(Deno.execPath(), {
+      args: ["eval", "0"],
+      cwd: repoRoot,
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+  };
+}
+
 function fakeProof(writeRelPath: string): () => Deno.ChildProcess {
   return () =>
     new Deno.Command(Deno.execPath(), {
@@ -56,6 +78,29 @@ Deno.test(
         survived,
         null,
         "the proof's early write was captured as the 'original' and restored back — the snapshot did not precede the spawn",
+      );
+    } finally {
+      await Deno.remove(sandboxAbs, { recursive: true }).catch(() => {});
+    }
+  },
+);
+
+Deno.test(
+  "runAndRestore snapshots BEFORE spawning: a SYNCHRONOUS closure write is never captured as the original (audio-feed-3zdrz control)",
+  async () => {
+    const dir = sandboxRel();
+    const sandboxAbs = `${repoRoot}${dir}`;
+    await Deno.mkdir(sandboxAbs, { recursive: true });
+    try {
+      await runAndRestore(dir, syncWritingProof(`${dir}/sync-write.txt`));
+      let survived: string | null = null;
+      try {
+        survived = await Deno.readTextFile(`${sandboxAbs}/sync-write.txt`);
+      } catch { /* gone: correct */ }
+      assertEquals(
+        survived,
+        null,
+        "captured as the original: snapshot did not precede the spawn call",
       );
     } finally {
       await Deno.remove(sandboxAbs, { recursive: true }).catch(() => {});
