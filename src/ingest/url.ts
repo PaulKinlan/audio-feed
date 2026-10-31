@@ -41,6 +41,12 @@ export class IngestError extends Error {
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 export const PDF_PARSE_TIMEOUT_MS = 10_000;
+/**
+ * pdf-parse runs allowed to execute at once (audio-feed-ppikk). PDF parsing is CPU-bound and
+ * pdf-parse cannot be cancelled, so two documents in flight already saturate an isolate; the cap
+ * exists to stop hostile uploads from stacking more of them, not to raise throughput.
+ */
+export const MAX_CONCURRENT_PDF_PARSES = 2;
 export const MAX_ARTICLE_CONTENT_CHARS = 2_000_000;
 const TIMEOUT_MS = 15_000;
 
@@ -789,12 +795,23 @@ export function extractArticle(html: string, sourceUrl: string): ExtractedArticl
   };
 }
 
+/** pdf-parse runs still executing, including runs whose request already answered 504 (ppikk). */
+let activePdfParses = 0;
+
 /**
  * Run pdf-parse with bounded wall-clock execution and suppressed PDF.js log noise (audio-feed-a3y).
- * Note on cancellation: pdf-parse does not accept an AbortSignal into its worker loop,
- * so a timed-out parse promise will continue running in the background until the isolate
- * finishes or garbage-collects; bounding with Promise.race protects the request pipeline
- * from hanging indefinitely.
+ *
+ * WHAT IS NOT BOUNDED (audio-feed-ppikk, accepted limitation of audio-feed-a3y): pdf-parse does
+ * not accept an AbortSignal into its worker loop, so a parse that loses the Promise.race below
+ * keeps burning CPU after its request answered 504, until it finishes or the isolate recycles.
+ * No code here can stop that run; the request stops waiting, the work does not stop.
+ *
+ * WHAT IS BOUNDED INSTEAD: (1) input size — MAX_PDF_BYTES; (2) per-request wall clock — the
+ * Promise.race answers 504 and never hangs the pipeline; (3) the NUMBER of parses executing at
+ * once — MAX_CONCURRENT_PDF_PARSES, where a slot is held by the parse itself and is therefore
+ * still held after a 504 until that abandoned parse settles. A request arriving while every slot
+ * is taken is refused with 429 instead of starting another CPU-bound run, so a flood of hostile
+ * PDFs cannot multiply the leak beyond the cap. The counter is module state, i.e. per isolate.
  */
 async function parsePdfBounded(
   bytes: Uint8Array,
@@ -803,6 +820,21 @@ async function parsePdfBounded(
   if (timeoutMs <= 0) {
     throw new IngestError(504, "PDF parsing timed out.");
   }
+  // Refuse rather than queue: a queue would hold up to MAX_PDF_BYTES of attacker bytes per waiter
+  // and would hand each waiter a parse that can outlive its request all the same.
+  if (activePdfParses >= MAX_CONCURRENT_PDF_PARSES) {
+    throw new IngestError(
+      429,
+      `PDF parsing is busy: ${activePdfParses} document(s) are being parsed. Try again shortly.`,
+    );
+  }
+  activePdfParses++;
+  let released = false;
+  const releaseSlot = () => {
+    if (released) return;
+    released = true;
+    activePdfParses--;
+  };
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -826,11 +858,16 @@ async function parsePdfBounded(
     origLog(...args);
   };
 
-  const parsePromise = pdfParse(bytes);
-  // Attach no-op catch so a later rejection after timeout loss is explicitly handled
-  parsePromise.catch(() => {});
-
+  let parseStarted = false;
   try {
+    const parsePromise = pdfParse(bytes);
+    parseStarted = true;
+    // The slot belongs to the PARSE, not to this request: a 504 leaves the parse running, so a
+    // slot returned here would let the next request start another one behind it (audio-feed-ppikk).
+    parsePromise.then(releaseSlot, releaseSlot);
+    // Attach no-op catch so a later rejection after timeout loss is explicitly handled
+    parsePromise.catch(() => {});
+
     return await Promise.race([parsePromise, timeoutPromise]);
   } catch (err) {
     if (err instanceof IngestError) throw err;
@@ -839,6 +876,8 @@ async function parsePdfBounded(
       `Unable to parse PDF document: ${(err as Error)?.message || "corrupt or invalid format"}.`,
     );
   } finally {
+    // A synchronous throw from pdfParse returned no promise to release the slot.
+    if (!parseStarted) releaseSlot();
     clearTimeout(timer);
     console.log = origLog;
   }
