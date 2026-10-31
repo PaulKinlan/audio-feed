@@ -1,0 +1,17 @@
+{
+  "script": "scripts/repro_khk3_unbounded_budget.ts",
+  "sha": "265131c3eb04a685c2d85366087de946f21d3f94",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T18:34:57.956Z",
+  "endedAt": "2026-10-31T18:34:59.930Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "before.json": "sha256:f47dcffc551e67d84b7d0ba31de384afc6b056ac1cbc86a9225ab25f618a1c00",
+    "manual-path-v2ym.json": "sha256:33185b151a710156b3c8e477c27cd77b74bcf3395b1aa9a8c7055908df0d3d60",
+    "repro.json": "sha256:c80147339ae98a1967094d5f62ab4f2fd9840b97c5dd131b8a8b85c7413619a2"
+  }
+}
