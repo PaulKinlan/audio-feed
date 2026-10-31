@@ -120,6 +120,19 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     return res.result?.value;
   }
 
+  /**
+   * The two-argument until() calls below pass no timeout, so each inherits the private
+   * copy's 15s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+   * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+   * measured starved floor is the unit.
+   *
+   * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+   * bound: a page whose main thread never answers still fails, in two minutes rather
+   * than hanging until something outside the proof kills the lane - and it fails with a
+   * message naming what was asked and the budget it had.
+   */
+  const MEASURED_STARVED_POLL_MS = 8_000;
+  const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
   async function until(expr: string, desc = expr, timeout = 15_000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
@@ -136,7 +149,11 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
   async function navigate(url: string) {
     events.length = 0;
     await cdp("Page.navigate", { url });
-    await until(`document.readyState === "complete"`, `loaded ${url}`);
+    await until(
+      `document.readyState === "complete"`,
+      `loaded ${url}`,
+      UNTIL_HANG_BOUND_MS,
+    );
   }
 
   const checks: { name: string; pass: boolean; detail: string }[] = [];
@@ -222,8 +239,16 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
       document.getElementById("restore").requestSubmit();
     })()
   `);
-    await until(`location.pathname === "/listen/${TOKEN}"`, "form submit navigated to the player");
-    await until(`document.getElementById("episodeCount") !== null`, "player rendered");
+    await until(
+      `location.pathname === "/listen/${TOKEN}"`,
+      "form submit navigated to the player",
+      UNTIL_HANG_BOUND_MS,
+    );
+    await until(
+      `document.getElementById("episodeCount") !== null`,
+      "player rendered",
+      UNTIL_HANG_BOUND_MS,
+    );
     check(
       "form submit turns a pasted feed URL into the player for that token",
       await js(`location.pathname`) === `/listen/${TOKEN}`,
@@ -246,6 +271,7 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     await until(
       `location.pathname === "/listen/${TOKEN}"`,
       "stored token redirected to the player",
+      UNTIL_HANG_BOUND_MS,
     );
     check(
       "a stored token redirects straight to the player",
@@ -262,7 +288,11 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
     // --- shell tooltip client on the homepage ----------------------------------
     await js(`localStorage.removeItem("audio-feed-token")`);
     await navigate(BASE);
-    await until(`document.querySelector("[data-tooltip]") !== null`, "tooltip target present");
+    await until(
+      `document.querySelector("[data-tooltip]") !== null`,
+      "tooltip target present",
+      UNTIL_HANG_BOUND_MS,
+    );
     const shown = await js(`
     (() => {
       const t = document.querySelector("[data-tooltip]");
@@ -313,7 +343,11 @@ await runProof("landing-tooltip-browser-proof", async (checker) => {
       mobile: true,
     });
     await navigate(`${BASE}/listen`);
-    await until(`document.getElementById("feedUrl") !== null`, "landing form at 390x844");
+    await until(
+      `document.getElementById("feedUrl") !== null`,
+      "landing form at 390x844",
+      UNTIL_HANG_BOUND_MS,
+    );
     check(
       "no console errors at 390x844",
       consoleBad().length === 0,
