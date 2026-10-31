@@ -9,17 +9,25 @@
  *     tests/evidence_readme_test.ts
  */
 
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import { join } from "@std/path";
 import {
   GENERATED_BEGIN,
   GENERATED_END,
   hasGeneratedRegion,
+  headingsNotReproduced,
   isRegenerationStable,
   mergeGeneratedRegion,
   splitGeneratedRegion,
   wrapGeneratedRegion,
 } from "../scripts/evidence-readme.ts";
-import { formatEvidenceReadme } from "../scripts/proof-helper.ts";
+import { formatEvidenceReadme, writeEvidenceReadme } from "../scripts/proof-helper.ts";
 import { PLAYBACK_POSITION_EVIDENCE } from "../scripts/playback-position-evidence.ts";
 
 const GENERATED_BODY = "PASS  a generated row\nPASS  another generated row";
@@ -201,5 +209,167 @@ Deno.test(
       !committed.includes("- Debt: admitted"),
       "a declaring directory must not also carry a debt admission (audio-feed-t5gt)",
     );
+  },
+);
+
+Deno.test(
+  "audio-feed-vavnp: headingsNotReproduced names the headings an overwrite would delete, and only those",
+  () => {
+    // The unit contract behind writeEvidenceReadme's refusal: a heading counts as reproduced only
+    // when the fresh generation carries the identical line, and level-1 is excluded because the
+    // title is the generator's to state.
+    const existing = [
+      "# Fresh title",
+      "",
+      "## Feature",
+      "",
+      "body",
+      "",
+      "### Hand-written sub-section",
+      "",
+      "prose",
+      "",
+      "## Reproducibility (fixture)",
+      "",
+      "declaration",
+      "",
+    ].join("\n");
+    const generated = ["# Fresh title", "", "- Asserts: x", "", "## Feature", "", "body", ""]
+      .join("\n");
+    assertEquals(headingsNotReproduced(existing, generated), [
+      "### Hand-written sub-section",
+      "## Reproducibility (fixture)",
+    ]);
+    // Nothing to lose when the file does not exist or carries no sections.
+    assertEquals(headingsNotReproduced("", generated), []);
+    assertEquals(headingsNotReproduced("# Title only\n", generated), []);
+    // A heading whose line the generation carries exactly is reproduced, at the same level only.
+    assertEquals(
+      headingsNotReproduced("## Feature\n", generated),
+      [],
+      "an identical heading line is reproduced by definition",
+    );
+  },
+);
+
+Deno.test(
+  "audio-feed-vavnp: writeEvidenceReadme REFUSES to overwrite a hand-written section it will not reproduce",
+  async () => {
+    // The seeding-run hazard, pinned: regenerating docs/evidence/audio-feed-8eh silently deleted the
+    // hand-written `## Reproducibility (audio-feed-rxo1)` section because the generator has no such
+    // section and nothing refused the write. An unmarked README that carries a section the incoming
+    // generation does not produce must FAIL the write, naming the section and the way out.
+    const dir = await Deno.makeTempDir({ prefix: "vavnp-refuse-" });
+    try {
+      const handwritten = [
+        "# Fixture proof",
+        "",
+        "- Script: scripts/some-proof.ts",
+        "- Asserts: always passes",
+        "",
+        "## Feature",
+        "",
+        "Generator-owned body.",
+        "",
+        "## Reproducibility (fixture)",
+        "",
+        "A human wrote this declaration; no assert expresses it.",
+        "",
+      ].join("\n");
+      const readmePath = join(dir, "README.md");
+      await Deno.writeTextFile(readmePath, handwritten);
+      const options = {
+        dir,
+        title: "Fixture proof",
+        script: "scripts/some-proof.ts",
+        asserts: ["always passes"],
+        sections: [{ heading: "Feature", body: "Generator-owned body." }],
+        allowOutsideProof: true,
+      };
+      const err = await assertRejects(
+        () => writeEvidenceReadme(options),
+        Error,
+        "would DELETE",
+      );
+      assertStringIncludes(err.message, "## Reproducibility (fixture)");
+      assertStringIncludes(err.message, "`notes`", "the error must point at the notes field");
+      assertEquals(
+        await Deno.readTextFile(readmePath),
+        handwritten,
+        "the refusal must leave the committed README exactly as it was",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "audio-feed-vavnp: a clean dir writes normally, and regenerating the SAME headings is still allowed",
+  async () => {
+    // The refusal must not turn every regeneration into a dead end: a fresh dir has nothing to lose,
+    // and a re-run over an unmarked file whose sections the generator reproduces is the normal path.
+    const dir = await Deno.makeTempDir({ prefix: "vavnp-clean-" });
+    try {
+      const options = {
+        dir,
+        title: "Fixture proof",
+        script: "scripts/some-proof.ts",
+        asserts: ["always passes"],
+        sections: [{ heading: "Feature", body: "Generator-owned body." }],
+        allowOutsideProof: true,
+      };
+      const readmePath = await writeEvidenceReadme(options);
+      assertEquals(
+        await Deno.readTextFile(readmePath),
+        formatEvidenceReadme(options),
+      );
+      // A second run over the unmarked file must stay a plain, allowed overwrite.
+      const again = await writeEvidenceReadme(options);
+      assertEquals(again, readmePath);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "audio-feed-vavnp: KNOWN LIMIT, pinned - prose under a heading the generator DOES emit is replaced without refusal",
+  async () => {
+    // The guard's granularity is the heading line. A section whose heading the generation carries is
+    // generator-owned by that match, so hand-written prose under it is replaced rather than refused.
+    // Anything that must survive belongs in `notes`, outside the generated region, or behind a
+    // heading the generator does not claim.
+    const dir = await Deno.makeTempDir({ prefix: "vavnp-limit-" });
+    try {
+      const readmePath = join(dir, "README.md");
+      await Deno.writeTextFile(
+        readmePath,
+        [
+          "# Fixture proof",
+          "",
+          "- Script: scripts/some-proof.ts",
+          "- Asserts: always passes",
+          "",
+          "## Feature",
+          "",
+          "Hand-written prose under a generator-owned heading.",
+          "",
+        ].join("\n"),
+      );
+      await writeEvidenceReadme({
+        dir,
+        title: "Fixture proof",
+        script: "scripts/some-proof.ts",
+        asserts: ["always passes"],
+        sections: [{ heading: "Feature", body: "Generator-owned body." }],
+        allowOutsideProof: true,
+      });
+      const after = await Deno.readTextFile(readmePath);
+      assert(!after.includes("Hand-written prose under a generator-owned heading."));
+      assertStringIncludes(after, "Generator-owned body.");
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
   },
 );

@@ -151,3 +151,29 @@ export function mergeGeneratedRegion(committed: string, generated: string): stri
 export function isRegenerationStable(committed: string, generated: string): boolean {
   return mergeGeneratedRegion(committed, generated) === committed;
 }
+
+/**
+ * The headings a whole-file overwrite would DELETE: the level-2..6 heading lines in `existing` that
+ * the fresh `generated` output does not carry (audio-feed-vavnp). A heading counts as reproduced
+ * only when the generation contains the identical line, and level-1 is excluded because the title
+ * is the generator's to state. This is the check behind writeEvidenceReadme's refusal for READMEs
+ * WITHOUT generated-region markers - marker-delimited READMEs never reach it, because
+ * mergeGeneratedRegion preserves everything outside the region by construction. Its granularity is
+ * the heading line, stated plainly: prose under a heading the generation DOES carry is replaced,
+ * because by that match the section is generator-owned.
+ *
+ * WHY IT EXISTS: the 2026-10-31 seeding run regenerated docs/evidence/audio-feed-8eh and silently
+ * deleted the hand-written `## Reproducibility (audio-feed-rxo1)` declaration - the generator has
+ * no such section, the README had no markers, and nothing refused the write. This function is what
+ * turns that class of loss into a named failure instead of a quiet diff.
+ */
+export function headingsNotReproduced(existing: string, generated: string): string[] {
+  const generatedLines = new Set(generated.split("\n").map((line) => line.trim()));
+  const dropped: string[] = [];
+  for (const line of existing.split("\n")) {
+    const heading = line.trim();
+    if (!/^#{2,6} /.test(heading)) continue;
+    if (!generatedLines.has(heading)) dropped.push(heading);
+  }
+  return dropped;
+}

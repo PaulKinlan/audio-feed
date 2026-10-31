@@ -20,6 +20,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
   hasGeneratedRegion,
+  headingsNotReproduced,
   mergeGeneratedRegion,
   readEvidenceReadmeIfExists,
 } from "./evidence-readme.ts";
@@ -4384,6 +4385,26 @@ export async function writeEvidenceReadme(
     // exactly as it was, rather than half-written or overwritten.
     await Deno.writeTextFile(readmePath, mergeGeneratedRegion(existing, content));
     return readmePath;
+  }
+  // audio-feed-vavnp: the write below is still the historical whole-file overwrite for READMEs that
+  // have not migrated to markers, and that overwrite is what silently DELETED a hand-written section
+  // in the 2026-10-31 seeding run: regenerating docs/evidence/audio-feed-8eh dropped the hand-written
+  // `## Reproducibility (audio-feed-rxo1)` declaration because the generator has no such section and
+  // nothing refused the write. Refuse when the committed README carries a section this generation
+  // will not reproduce, so silent loss becomes a named failure and the caller picks a real home for
+  // the fact: `notes`/`sections` so the generator re-emits it, or a deliberate migration to the
+  // marker-delimited shape (scripts/evidence-readme.ts) so the prose lives outside the region.
+  if (existing !== null) {
+    const dropped = headingsNotReproduced(existing, content);
+    if (dropped.length > 0) {
+      throw new Error(
+        `Refusing to overwrite ${readmePath}: this regeneration would DELETE ` +
+          `${dropped.length} section(s) the generator does not produce: ${dropped.join("; ")}. ` +
+          `Fold facts that must survive regeneration into this call's \`notes\` (or \`sections\`), ` +
+          `or migrate the README to the marker-delimited shape (scripts/evidence-readme.ts) so ` +
+          `hand-written prose lives outside the generated region.`,
+      );
+    }
   }
   await Deno.writeTextFile(readmePath, content);
   return readmePath;
