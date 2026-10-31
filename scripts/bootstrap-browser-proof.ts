@@ -197,6 +197,9 @@ await runProof("audio-feed-8eh", async (checker) => {
           title: "Browser Acceptance Proof: audio-feed-8eh",
           script: "scripts/bootstrap-browser-proof.ts",
           asserts: steps.map((s) => s.name),
+          notes: [
+            "audio-feed-rxo1: NOT bit-reproducible - the same proof at one commit produced THREE DISTINCT IMAGES IN FOUR CAPTURES, so a re-run whose pixels differ is EXPECTED and is not a failure; the five assertions in the Execution Log are the check, the screenshot is the receipt (spread-declared in docs/evidence/README.md's determinism table)",
+          ],
           sections: [
             {
               heading: "Feature",
