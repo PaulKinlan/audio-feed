@@ -16,6 +16,11 @@
  * After it the key is the LAST entry — the one the trusted hop appended — so the whole run is one
  * bucket and the bound arrives on schedule.
  *
+ * The cf-connecting-ip-only rotation families have no usable forwarded chain, and every value
+ * they rotate is rejected as an address, so post-fix they share the ONE unaddressed bucket with
+ * its multiplier-scaled quota (audio-feed-0t8el). They send past that bound and assert the exact
+ * allowed count, so a moved multiplier reddens this proof instead of silently unbounding it.
+ *
  * The script exits non-zero when the bound was evaded, so it is a regression gate as well as a
  * measurement, and it writes the numbers to docs/evidence/audio-feed-u2ve/.
  */
@@ -29,7 +34,18 @@ const OUT = new URL("../docs/evidence/audio-feed-u2ve/repro.json", import.meta.u
 
 /** What the limiter is configured to allow, and therefore how many requests to send. */
 const MAX_REQUESTS = 5;
-const ATTEMPTS = MAX_REQUESTS * 4;
+/**
+ * Every value the rotation families below use is rejected by `extractClientIp` as an address, so
+ * they all land in the ONE unaddressed bucket, whose quota is `maxRequests *` this multiplier —
+ * the deployment-sized bound audio-feed-0t8el gives the indistinguishable-client population
+ * (src/auth/rate_limit.ts, which does not export the constant). The proof pins that contract
+ * exactly: rotation must buy 25x the per-client quota — one shared bucket, bounded — not a
+ * fresh bucket per value and not infinity. If the multiplier moves, this proof must be
+ * re-measured against the new bound, not relaxed.
+ */
+const UNADDRESSED_QUOTA_MULTIPLIER = 25;
+const UNADDRESSED_BOUND = MAX_REQUESTS * UNADDRESSED_QUOTA_MULTIPLIER;
+const ATTEMPTS = UNADDRESSED_BOUND + 5;
 /** The address the trusted hop saw. A caller cannot choose this: the hop appends it. */
 const REAL_CLIENT = "203.0.113.7";
 
@@ -188,7 +204,11 @@ const count = (statuses: number[], code: number) => statuses.filter((s) => s ===
 const report = {
   bead: "audio-feed-u2ve",
   trustProxyHeaders: true,
-  bound: { maxRequests: MAX_REQUESTS, windowMs: 60_000 },
+  bound: {
+    maxRequests: MAX_REQUESTS,
+    windowMs: 60_000,
+    unaddressedBucketQuota: UNADDRESSED_BOUND,
+  },
   attempts: ATTEMPTS,
   rotatingForgedPrefix: {
     statuses: rotatingStatuses,
@@ -287,19 +307,33 @@ console.log(
   `rotating dotted-tail cf-connecting-ip values: ${report.rotatingDottedTailCfOnly.tooManyRequests} x 429, ${report.rotatingDottedTailCfOnly.allowedThrough} allowed through`,
 );
 
-if (report.rotatingDottedTailCfOnly.evaded) {
+if (
+  report.rotatingDottedTailCfOnly.evaded ||
+  report.rotatingDottedTailCfOnly.allowedThrough !== UNADDRESSED_BOUND
+) {
   console.error(
-    "FAIL: a client that rotates dotted-tail cf-connecting-ip values was never limited",
+    `FAIL: rotating dotted-tail cf-connecting-ip values must land in the one unaddressed bucket, ` +
+      `bounded at exactly ${UNADDRESSED_BOUND} allowed (got ${report.rotatingDottedTailCfOnly.allowedThrough} allowed, ${report.rotatingDottedTailCfOnly.tooManyRequests} x 429 of ${ATTEMPTS})`,
   );
   Deno.exit(1);
 }
-if (report.rotatingMalformedCfOnly.evaded) {
-  console.error("FAIL: a client that rotates malformed cf-connecting-ip values was never limited");
+if (
+  report.rotatingMalformedCfOnly.evaded ||
+  report.rotatingMalformedCfOnly.allowedThrough !== UNADDRESSED_BOUND
+) {
+  console.error(
+    `FAIL: rotating malformed cf-connecting-ip values must land in the one unaddressed bucket, ` +
+      `bounded at exactly ${UNADDRESSED_BOUND} allowed (got ${report.rotatingMalformedCfOnly.allowedThrough} allowed, ${report.rotatingMalformedCfOnly.tooManyRequests} x 429 of ${ATTEMPTS})`,
+  );
   Deno.exit(1);
 }
-if (report.rotatingForgedCfOnly.evaded) {
+if (
+  report.rotatingForgedCfOnly.evaded ||
+  report.rotatingForgedCfOnly.allowedThrough !== UNADDRESSED_BOUND
+) {
   console.error(
-    `FAIL: a client that rotates a forged cf-connecting-ip was never limited (${ATTEMPTS} attempts, no 429)`,
+    `FAIL: rotating a forged cf-connecting-ip must land in the one unaddressed bucket, ` +
+      `bounded at exactly ${UNADDRESSED_BOUND} allowed (got ${report.rotatingForgedCfOnly.allowedThrough} allowed, ${report.rotatingForgedCfOnly.tooManyRequests} x 429 of ${ATTEMPTS})`,
   );
   Deno.exit(1);
 }
