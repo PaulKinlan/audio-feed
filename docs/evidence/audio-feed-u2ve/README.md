@@ -2,9 +2,11 @@
 
 - Script: scripts/repro_u2ve_rate_limit_ff.ts
 - Asserts: bound holds against a rotating forged x-forwarded-for prefix; one honest client gets 429
-  at attempt 6; two distinct trusted-hop values land in separate buckets; bound holds against
-  rotating forged cf-connecting-ip; bound holds against rotating malformed cf-connecting-ip; bound
-  holds against rotating dotted-tail cf-connecting-ip
+  at attempt 6; two distinct trusted-hop values land in separate buckets; each cf-connecting-ip-only
+  rotation family lands in the ONE unaddressed bucket at exactly maxRequests *
+  UNADDRESSED_QUOTA_MULTIPLIER = 125 allowed (the deployment-sized quota audio-feed-0t8el gives
+  indistinguishable clients) — rotation buys 25x the per-client bound, not a fresh bucket per value
+  and not infinity
 
 `before.json` and `repro.json` are the same probe (`scripts/repro_u2ve_rate_limit_ff.ts`) run
 against the unfixed and fixed trees, with the same limiter configuration **actually in effect** (5
@@ -17,12 +19,12 @@ public `POST /api/request-access` route with `x-forwarded-for: <forged>, <real>`
 shape of that header: every hop **appends** the address it saw, so anything a client supplies sits
 to the LEFT of the address the trusted hop added.
 
-| bound: 5 requests / 60s, 20 attempts     | before               | after            |
-| ---------------------------------------- | -------------------- | ---------------- |
-| rotating forged prefix → `429`s          | **0**                | **15**           |
-| rotating forged prefix → allowed through | **20 (all of them)** | **5**            |
-| one honest client → first `429`          | attempt 6            | attempt 6        |
-| two distinct trusted-hop values          | separate buckets     | separate buckets |
+| bound: 5 requests / 60s, 130 attempts    | before               | after            |
+| ----------------------------------------- | -------------------- | ---------------- |
+| rotating forged prefix → `429`s           | **0**                | **125**          |
+| rotating forged prefix → allowed through  | **20 (all of them)** | **5**            |
+| one honest client → first `429`           | attempt 6            | attempt 6        |
+| two distinct trusted-hop values           | separate buckets     | separate buckets |
 
 Before: the bound did not exist for a caller who rotated the header — 20 requests, no `429`, because
 the key was the first (client-supplied) entry and each request therefore landed in a fresh bucket.
@@ -54,10 +56,10 @@ unbounded key.
 
 The probe now covers it, so both measurements are in the same file:
 
-| 20 attempts, bound 5/60s, no forwarded chain               | before 5vvw  | after     |
+| 130 attempts, bound 5/60s, no forwarded chain              | before 5vvw  | after     |
 | ---------------------------------------------------------- | ------------ | --------- |
-| rotating forged `cf-connecting-ip` → `429`s                | **0**        | **15**    |
-| rotating forged `cf-connecting-ip` → allowed through       | **20 (all)** | **5**     |
+| rotating forged `cf-connecting-ip` → `429`s                | **0**        | **5**     |
+| rotating forged `cf-connecting-ip` → allowed through       | **20 (all)** | **125**   |
 | a well-formed `cf-connecting-ip` → first `429`             | attempt 6    | attempt 6 |
 | rotating forged `x-forwarded-for` prefix → allowed through | 5            | 5         |
 
@@ -84,10 +86,10 @@ which is the same bypass this rule exists to close, reached through the rule its
 Reproduced with the reviewer's reproducer as its own section of the probe, measured against the
 exact tip they reviewed (`c78ce8f`) and then against the fix:
 
-| malformed `cf-connecting-ip` values `0:` .. `13:`, bound 5/60s, 20 attempts | 429s   | allowed      |
-| --------------------------------------------------------------------------- | ------ | ------------ |
-| before (`hzg1-before.json`)                                                 | **0**  | **20 (all)** |
-| after (`repro.json`)                                                        | **15** | **5**        |
+| malformed `cf-connecting-ip` values `0:` .. `81:`, bound 5/60s, 130 attempts | 429s  | allowed      |
+| ---------------------------------------------------------------------------- | ----- | ------------ |
+| before (`hzg1-before.json`)                                                  | **0** | **20 (all)** |
+| after (`repro.json`)                                                         | **5** | **125**      |
 
 The rule now requires the _structure_ of an address: without `::` an IPv6 address has exactly eight
 groups, and with it at most seven may be written (since `::` stands for at least one elided group);
@@ -129,12 +131,12 @@ this finding before it reached review. Rejecting host-with-port outright was the
 is the wrong one: it collapses distinct clients onto one socket-address bucket, which is the failure
 audio-feed-hn4 was a P2 about.
 
-| 20 rotated values, bound 5/60s, no forwarded chain | before                   | after                    |
-| -------------------------------------------------- | ------------------------ | ------------------------ |
-| dotted-quad tail (`1:2:3:4:5:6:X::192.0.2.1`)      | **0 x 429 / 20 allowed** | **15 x 429 / 5 allowed** |
-| single hex group + colon (`0:` .. `13:`)           | 15 x 429 / 5 allowed     | 15 x 429 / 5 allowed     |
-| over-long forged value                             | 15 x 429 / 5 allowed     | 15 x 429 / 5 allowed     |
-| a well-formed `cf-connecting-ip`                   | locks out at attempt 6   | locks out at attempt 6   |
+| 130 rotated values, bound 5/60s, no forwarded chain | before                   | after                     |
+| --------------------------------------------------- | ------------------------ | ------------------------- |
+| dotted-quad tail (`1:2:3:4:5:6:X::192.0.2.1`)       | **0 x 429 / 20 allowed** | **5 x 429 / 125 allowed** |
+| single hex group + colon (`0:` .. `81:`)            | 15 x 429 / 5 allowed     | 5 x 429 / 125 allowed     |
+| over-long forged value                              | 15 x 429 / 5 allowed     | 5 x 429 / 125 allowed     |
+| a well-formed `cf-connecting-ip`                    | locks out at attempt 6   | locks out at attempt 6    |
 
 `tests/rate_limit_key_test.ts` now carries the corpus this needed from the start: one table of every
 family that has ever rotated a key (`0:`, `abc:`, over-long, nine and ten groups, both dotted-tail
@@ -146,3 +148,22 @@ holds for each while a well-formed address still locks out at 6.
 produced three different holes, and the fourth round is only safe because it stopped asking me to be
 the authority on IPv6. When a guard has to be right about a standard format, the standard format
 belongs in the platform.
+
+## audio-feed-r4zjd — the unaddressed bucket got a deployment-sized quota, and the probe now pins it
+
+audio-feed-0t8el (e4924f19, 2026-10-21 — after this probe was captured) sized the unaddressed
+bucket at `maxRequests * UNADDRESSED_QUOTA_MULTIPLIER` = 5 × 25 = **125** per window
+(`src/auth/rate_limit.ts`), because indistinguishable clients must not share a per-client-sized
+bucket. The probe's 20 attempts could then never reach a `429` on the cf-connecting-ip-only
+families: every value they rotate is rejected as an address, so all of them land in that one
+shared bucket — the tier's first seed run recorded the proof RED on exactly that (exit 1, "a
+client that rotates dotted-tail cf-connecting-ip values was never limited", 0 × 429 of 20). Not a
+classified regression in key selection — a stale bound arithmetic in the probe.
+
+The probe now sends **130 attempts** and asserts the bound exactly: each cf-only rotation family
+must show **125 allowed / 5 × 429** — one bucket, exactly the multiplier-scaled quota. The
+multiplier is stated as a named input mirroring the unexported `UNADDRESSED_QUOTA_MULTIPLIER`, so
+if it moves again this proof reddens and forces a re-measure instead of silently asserting
+nothing. Rotation therefore buys 25x the per-client bound, not a fresh bucket per value and not
+infinity — which is the property this probe has existed to assert since u2ve: rotating the header
+is not an evasion.
