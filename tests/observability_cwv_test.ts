@@ -237,6 +237,12 @@ Deno.test("the beacon is rate limited per client", async () => {
 });
 
 Deno.test("an unaddressed refusal whose window has expired answers retry-after >= 1, never 0", async () => {
+  // REACHABILITY (audio-feed-cwv429): reaching resetMs 0 needs the two windows to DIFFER - a 1s
+  // per-client window that has expired inside a 60s unaddressed window. With the production default
+  // both windows are 1s, so a live 429 cannot produce retry-after: 0; this row is the floor's
+  // DEFENSIVE proof, not a reproduction of a production 429. Do not read it as evidence that users
+  // can hit the zero case today.
+  //
   // Proof the floor is load-bearing, which the row above cannot give: there the window is always
   // live, so ceil(resetMs/1000) is already >= 1 and the row would stay green with the clamp
   // deleted. Here the limiter is the CONCRETE class (the dep type is not widened) with an
