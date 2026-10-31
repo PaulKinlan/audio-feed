@@ -61,6 +61,7 @@
  *   evening.
  */
 import { fromFileUrl, join, relative, resolve } from "@std/path";
+import { stripComments } from "./test-selection.ts";
 
 export interface Declaration {
   /** `docs/evidence/<dir>` relative to the root. */
@@ -77,7 +78,7 @@ export interface Declaration {
   executedBy: string | null;
   /** Whether the executedBy file exists under root, if declared. */
   executorExists?: boolean;
-  /** Whether every declared executor suite references the proof by path or basename (audio-feed-zmwa1). */
+  /** Whether every declared executor suite names the proof PATH in code (audio-feed-zmwa1, audio-feed-377of). */
   executorReferencesProof?: boolean;
   /** Declared per-proof timeout in milliseconds, if present in README. */
   timeoutMs?: number;
@@ -332,7 +333,6 @@ export async function collect(options: Options): Promise<{
     let executorReferencesProof: boolean | undefined = undefined;
     if (info.executedBy) {
       const targets = info.executedBy.split(",").map((s) => s.trim()).filter(Boolean);
-      const proofBasename = info.declared.split("/").pop() ?? info.declared;
       let allExist = targets.length > 0;
       let allLinked = targets.length > 0;
       for (const target of targets) {
@@ -344,12 +344,14 @@ export async function collect(options: Options): Promise<{
             allLinked = false;
             break;
           }
-          // LINKAGE (audio-feed-zmwa1): existence alone let any file named as `- Executed by:`
-          // silence a broken proof. Ownership is proven only if the suite NAMES the proof - an
-          // import or spawned command carries the path, and even a --list-style mention or a
-          // comment naming it is the realistic minimum for a proof the suite runs out-of-process.
+          // LINKAGE (audio-feed-zmwa1, tightened by audio-feed-377of): existence alone let any file
+          // named as `- Executed by:` silence a broken proof, so the suite must NAME the proof. The
+          // first version accepted that name anywhere in the text, and review found two ways for a
+          // cosmetic mention to buy silence: a COMMENT naming the proof executes nothing, and a bare
+          // basename matched an unrelated file. The mention must now be the proof PATH, inside a
+          // quoted code context, with comments stripped first.
           const suiteText = await Deno.readTextFile(targetPath);
-          if (!suiteText.includes(info.declared) && !suiteText.includes(proofBasename)) {
+          if (!referencesProofInCode(suiteText, info.declared)) {
             allLinked = false;
           }
         } catch {
@@ -376,6 +378,40 @@ export async function collect(options: Options): Promise<{
     });
   }
   return { declarations, undeclared, withoutReadme, refused, symlinks, malformedTimeouts };
+}
+
+/**
+ * Whether `suiteText` names the proof `declared` in a CODE context (audio-feed-377of).
+ *
+ * THE RULE: comments are stripped, and the proof must then appear as its PATH - `scripts/<name>.ts`
+ * or with a relative prefix like `../scripts/<name>.ts` - between quotes, i.e. an import specifier
+ * or a string literal. A comment naming the proof is stripped away, so a cosmetic mention cannot
+ * silence the tier; a bare basename is not the declared path, so it no longer matches an unrelated
+ * file.
+ *
+ * WHY STRIPPING AND A QUOTE BOTH, rather than either alone: stripping alone still accepts a path
+ * that merely sits in code position (a regex literal, an identifier fragment), and a quoted-specifier
+ * check alone still accepts a path inside a comment that happens to quote it. The pair is narrow in
+ * the direction that matters here - a false LINK is a false SKIP, which is a test that stopped
+ * testing.
+ *
+ * THE STRIPPER IS THE REPO'S OWN (scripts/test-selection.ts stripComments, audio-feed-ywjz/dmrw),
+ * NOT scripts/source-mask.ts maskNonCode: the masker blanks the INTERIOR of string and template
+ * literals, which is exactly where an import specifier lives, so it would refuse every honest suite.
+ *
+ * DECLARED HOLE, INHERITED AND NOT FIXED HERE: stripComments deliberately KEEPS the tail of an
+ * UNTERMINATED block comment as code (tests/strip_comments_unterminated_test.ts explains why - a
+ * hidden import narrows the selector, and narrowing is the dangerous direction there). In an
+ * ILL-FORMED suite, a quoted path after a never-closed `/*` therefore still links. It is stated
+ * rather than assumed away, and it requires BOTH an unbalanced comment AND a quoted path inside it.
+ * Also not treated as linkage: a path assembled from fragments (`"../scripts/" + "proof.ts"`).
+ */
+export function referencesProofInCode(suiteText: string, declared: string): boolean {
+  const { stripped } = stripComments(suiteText);
+  const path = declared.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Quotes on BOTH sides make the path a complete literal, and a relative prefix of `./`/`../`
+  // segments is allowed so a suite in tests/ can write `../scripts/<name>.ts`.
+  return new RegExp(`["'\`](?:\\.\\.?/)*${path}["'\`]`).test(stripped);
 }
 
 export function stripAnsi(text: string): string {
@@ -634,12 +670,13 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     for (const declaration of unlinkedExecutors) {
       console.error(
         `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} ` +
-          `(UNLINKED EXECUTOR: ${declaration.executedBy} does not reference the proof by path or name)`,
+          `(UNLINKED EXECUTOR: ${declaration.executedBy} has no code reference to ${declaration.declared} - ` +
+          `the suite must name the proof path in an import or string literal, not in a comment or a bare basename)`,
       );
     }
     console.error(
       `[evidence] RED: ${unlinkedExecutors.length} declared executor(s) never reference the proof they are declared to own; refusing run - ` +
-        `suite ownership must be visible in the suite itself`,
+        `suite ownership must be visible in the suite's own code, not in a comment`,
     );
     Deno.exit(1);
   }

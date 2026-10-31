@@ -9,12 +9,14 @@
  *
  * Both fixes carry mandatory negative controls (audio-feed-t9w1).
  */
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { fromFileUrl, join } from "@std/path";
 import {
+  collect,
   findNestedEvidence,
   parseOptions,
   readDeclaration,
+  referencesProofInCode,
   resolveBound,
   stripAnsi,
 } from "../scripts/evidence-run.ts";
@@ -458,9 +460,11 @@ Deno.test("evidence-run --list shows [executed by: ...] for declared executor an
 
     await Deno.writeTextFile(join(scriptsDir, "proof.ts"), "console.log('PASS ok');\n");
     // audio-feed-zmwa1: a valid executor must REFERENCE the proof, not merely exist.
+    // audio-feed-377of: the reference must be in CODE - a path constant the suite uses to spawn the
+    // proof - because a comment naming the proof executes nothing and bought silence for free.
     await Deno.writeTextFile(
       join(testsDir, "my_suite_test.ts"),
-      "// suite: runs scripts/proof.ts as part of its coverage\n",
+      'const proofPath = new URL("../scripts/proof.ts", import.meta.url);\n',
     );
 
     // Valid executor
@@ -524,15 +528,15 @@ Deno.test("a proof whose README declares a RESOLVED - Executed by: suite is NOT 
     // The proof prints this marker ONLY if it is spawned. If the runner honours the declared
     // suite ownership it never runs, so the marker must be absent from the tier's output while
     // the skip is named - the pair is the evidence both directions. The suite REFERENCES the
-    // proof (audio-feed-zmwa1: ownership must be visible in the suite's own text) - a comment
-    // naming the proof is the realistic minimum for a proof the suite runs out-of-process.
+    // proof (audio-feed-zmwa1: ownership must be visible in the suite's own text), and since
+    // audio-feed-377of that reference must be CODE: the suite's own spawn target, not a comment.
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
       `console.log("PASS executed directly by the runner");\n`,
     );
     await Deno.writeTextFile(
       join(testsDir, "owning_suite_test.ts"),
-      "// owning suite: spawns scripts/proof.ts out-of-process and asserts its PASS marker\n",
+      'const proofPath = new URL("../scripts/proof.ts", import.meta.url).pathname;\n',
     );
 
     await Deno.mkdir(join(evidenceRoot, "audio-feed-owned"), { recursive: true });
@@ -597,7 +601,8 @@ Deno.test(
       assertStringIncludes(
         res.stderr,
         "[evidence] FAIL docs/evidence/audio-feed-zmwa1 -> scripts/proof.ts " +
-          "(UNLINKED EXECUTOR: tests/owning_suite_test.ts does not reference the proof by path or name)",
+          "(UNLINKED EXECUTOR: tests/owning_suite_test.ts has no code reference to scripts/proof.ts - " +
+          "the suite must name the proof path in an import or string literal, not in a comment or a bare basename)",
       );
       assertStringIncludes(
         res.stderr,
@@ -612,6 +617,198 @@ Deno.test(
         res.stdout.includes("executed directly by the runner"),
         false,
         "an unlinked executor must not silently execute the proof either: the declaration says the suite owns it",
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+/**
+ * audio-feed-377of: THE LINKAGE RULE, TIGHTENED - a cosmetic comment must not be able to buy a skip.
+ *
+ * The unit rows below pin the RULE in both directions, and they are written against the two shapes
+ * that review measured on fleet/executor-link 01576e93: a comment naming the proof (executes nothing)
+ * and a bare basename (matches an unrelated file). The tier rows that follow prove the same two
+ * shapes end to end, through the CLI, because a rule that only the unit rows can see is not a tier.
+ */
+Deno.test("referencesProofInCode accepts a quoted path in code and rejects a comment or a bare basename (audio-feed-377of)", () => {
+  assert(
+    referencesProofInCode(
+      'import { deriveLadderConstants } from "../scripts/exww-attempt-measure.ts";\n',
+      "scripts/exww-attempt-measure.ts",
+    ),
+    "an import specifier naming the proof path is the canonical code reference",
+  );
+  assert(
+    referencesProofInCode(
+      'const proofPath = new URL("../scripts/outbox-proof.ts", import.meta.url).pathname;\n',
+      "scripts/outbox-proof.ts",
+    ),
+    "a string literal naming the proof path is a code reference",
+  );
+  assert(
+    referencesProofInCode('const same = "./scripts/outbox-proof.ts";\n', "scripts/outbox-proof.ts"),
+    "a ./ prefixed relative path is the same file and must link",
+  );
+  assertEquals(
+    referencesProofInCode(
+      "// owning suite: spawns scripts/outbox-proof.ts out-of-process and asserts its PASS marker\n",
+      "scripts/outbox-proof.ts",
+    ),
+    false,
+    "a comment naming the proof executes nothing: one cosmetic comment must not silence the tier",
+  );
+  assertEquals(
+    referencesProofInCode(
+      '/* spawns "../scripts/outbox-proof.ts" per the audit */\nconst x = 1;\n',
+      "scripts/outbox-proof.ts",
+    ),
+    false,
+    "a QUOTED path inside a well-formed block comment is still a comment, not code",
+  );
+  assertEquals(
+    referencesProofInCode('const target = "outbox-proof.ts";\n', "scripts/outbox-proof.ts"),
+    false,
+    "a bare basename is not the declared path and can match an unrelated file",
+  );
+  assertEquals(
+    referencesProofInCode(
+      'const target = "other/scripts/outbox-proof.ts";\n',
+      "scripts/outbox-proof.ts",
+    ),
+    false,
+    "a longer path that merely ends in the declared path is a different file",
+  );
+});
+
+Deno.test("the two real suite-owned declarations still LINK after the tightening (audio-feed-377of)", async () => {
+  const root = fromFileUrl(new URL("../", import.meta.url));
+  const { declarations } = await collect({
+    list: true,
+    timeoutMs: 300_000,
+    root,
+    explicitTimeout: false,
+  });
+  const expected = [
+    {
+      dir: "docs/evidence/audio-feed-8u4x1",
+      declared: "scripts/exww-attempt-measure.ts",
+      executedBy: "tests/exww_mutants_test.ts",
+    },
+    {
+      dir: "docs/evidence/audio-feed-np5",
+      declared: "scripts/outbox-proof.ts",
+      executedBy: "tests/outbox_proof_test.ts",
+    },
+  ];
+  for (const want of expected) {
+    const declaration = declarations.find((d) => d.dir === want.dir);
+    assert(declaration, `the real tree must still declare ${want.dir}`);
+    assertEquals(declaration.declared, want.declared);
+    assertEquals(declaration.executedBy, want.executedBy);
+    assertEquals(
+      declaration.executorReferencesProof,
+      true,
+      `${want.executedBy} names ${want.declared} in code, so the tightened rule must still link it ` +
+        `- if this row fails the DECLARATION needs fixing, not the rule`,
+    );
+  }
+});
+
+Deno.test(
+  "NEGATIVE CONTROL (Cosmetic Comment): a suite that names the proof only in a comment refuses (audio-feed-377of)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "377of-comment-only-" });
+    try {
+      const scriptsDir = join(tempDir, "scripts");
+      const testsDir = join(tempDir, "tests");
+      const evidenceRoot = join(tempDir, "docs", "evidence");
+      await Deno.mkdir(scriptsDir, { recursive: true });
+      await Deno.mkdir(testsDir, { recursive: true });
+
+      // THIS IS THE ROW THE TIGHTENING EXISTS FOR. The suite's comment names the proof, which the
+      // first linkage rule accepted, and the suite executes nothing: one cosmetic comment bought a
+      // SKIP for a proof nobody ran.
+      await Deno.writeTextFile(
+        join(scriptsDir, "proof.ts"),
+        `console.log("PASS executed directly by the runner");\n`,
+      );
+      await Deno.writeTextFile(
+        join(testsDir, "owning_suite_test.ts"),
+        "// owning suite: spawns scripts/proof.ts out-of-process and asserts its PASS marker\n",
+      );
+
+      await Deno.mkdir(join(evidenceRoot, "audio-feed-377of"), { recursive: true });
+      await Deno.writeTextFile(
+        join(evidenceRoot, "audio-feed-377of", "README.md"),
+        "- Script: scripts/proof.ts\n- Executed by: tests/owning_suite_test.ts\n- Asserts: claim\n",
+      );
+
+      const res = await runTier(tempDir);
+      assertEquals(res.code, 1, "a comment is not ownership: the tier must refuse, not skip");
+      assertStringIncludes(
+        res.stderr,
+        "[evidence] FAIL docs/evidence/audio-feed-377of -> scripts/proof.ts " +
+          "(UNLINKED EXECUTOR: tests/owning_suite_test.ts has no code reference to scripts/proof.ts - " +
+          "the suite must name the proof path in an import or string literal, not in a comment or a bare basename)",
+      );
+      assertEquals(
+        res.stdout.includes("SKIP docs/evidence/audio-feed-377of"),
+        false,
+        "a comment-only reference must not be honoured as a skip",
+      );
+      assertEquals(
+        res.stdout.includes("executed directly by the runner"),
+        false,
+        "and it must not be silently executed either: the declaration says the suite owns it",
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "NEGATIVE CONTROL (Bare Basename): a suite naming only the proof's basename refuses (audio-feed-377of)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "377of-basename-" });
+    try {
+      const scriptsDir = join(tempDir, "scripts");
+      const testsDir = join(tempDir, "tests");
+      const evidenceRoot = join(tempDir, "docs", "evidence");
+      await Deno.mkdir(scriptsDir, { recursive: true });
+      await Deno.mkdir(testsDir, { recursive: true });
+
+      // A bare basename is a DIFFERENT file's name as often as the proof's: `proof.ts` exists in
+      // three directories of this repository. Naming it without the path used to link.
+      await Deno.writeTextFile(
+        join(scriptsDir, "proof.ts"),
+        `console.log("PASS executed directly by the runner");\n`,
+      );
+      await Deno.writeTextFile(
+        join(testsDir, "owning_suite_test.ts"),
+        'const unrelated = "proof.ts";\n',
+      );
+
+      await Deno.mkdir(join(evidenceRoot, "audio-feed-basename"), { recursive: true });
+      await Deno.writeTextFile(
+        join(evidenceRoot, "audio-feed-basename", "README.md"),
+        "- Script: scripts/proof.ts\n- Executed by: tests/owning_suite_test.ts\n- Asserts: claim\n",
+      );
+
+      const res = await runTier(tempDir);
+      assertEquals(res.code, 1, "a bare basename must refuse the run, not honour the skip");
+      assertStringIncludes(
+        res.stderr,
+        "[evidence] FAIL docs/evidence/audio-feed-basename -> scripts/proof.ts " +
+          "(UNLINKED EXECUTOR: tests/owning_suite_test.ts has no code reference to scripts/proof.ts - " +
+          "the suite must name the proof path in an import or string literal, not in a comment or a bare basename)",
+      );
+      assertEquals(
+        res.stdout.includes("SKIP docs/evidence/audio-feed-basename"),
+        false,
+        "a basename is not the proof path: it must not buy a skip",
       );
     } finally {
       await Deno.remove(tempDir, { recursive: true });
