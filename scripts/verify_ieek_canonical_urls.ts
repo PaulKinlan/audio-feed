@@ -618,6 +618,19 @@ export async function runVerification(): Promise<VerificationResult> {
       }
 
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -640,7 +653,11 @@ export async function runVerification(): Promise<VerificationResult> {
 
       // Navigate to blank to initialize localStorage before loading page
       await cdp("Page.navigate", { url: `${serverBaseUrl}/` });
-      await until(`document.readyState === "complete"`, "homepage complete");
+      await until(
+        `document.readyState === "complete"`,
+        "homepage complete",
+        UNTIL_HANG_BOUND_MS,
+      );
 
       // Pre-seed legacy localStorage keys to test adoptScopedKey migration in listen.js
       await js(`
@@ -650,11 +667,20 @@ export async function runVerification(): Promise<VerificationResult> {
 
       // Navigate to /listen/:token
       await cdp("Page.navigate", { url: `${serverBaseUrl}/listen/${userCanonical.feedToken}` });
-      await until(`document.readyState === "complete"`, "listen page complete");
-      await until(`!!document.querySelector("#player-data")`, "player-data loaded");
+      await until(
+        `document.readyState === "complete"`,
+        "listen page complete",
+        UNTIL_HANG_BOUND_MS,
+      );
+      await until(
+        `!!document.querySelector("#player-data")`,
+        "player-data loaded",
+        UNTIL_HANG_BOUND_MS,
+      );
       await until(
         `document.querySelectorAll("#episodes .episode").length >= 1`,
         "episodes rendered",
+        UNTIL_HANG_BOUND_MS,
       );
 
       browserLoaded = true;
@@ -674,13 +700,18 @@ export async function runVerification(): Promise<VerificationResult> {
 
       // Verify episode row in list
       const epPlayBtnSelector = `#episodes .episode button[data-action='play']`;
-      await until(`!!document.querySelector("${epPlayBtnSelector}")`, "play button available");
+      await until(
+        `!!document.querySelector("${epPlayBtnSelector}")`,
+        "play button available",
+        UNTIL_HANG_BOUND_MS,
+      );
 
       // Click play button to load it into the player
       await js(`document.querySelector("${epPlayBtnSelector}").click()`);
       await until(
         `document.querySelector("#audio")?.src?.includes("user-canonical")`,
         "audio src populated",
+        UNTIL_HANG_BOUND_MS,
       );
 
       audioSrcAttribute = await js(`document.querySelector("#audio")?.src`);
