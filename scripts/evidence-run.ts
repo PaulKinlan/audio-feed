@@ -43,8 +43,10 @@
  * WHAT IT DELIBERATELY DOES NOT DO, so nobody reads more into a green run than it says:
  * - it does not check that a proof asserts what its README CLAIMS (that is the declaration and
  *   evidence-size work);
- * - it does not run proofs whose README declares `- Executed by: <suite>` with an existing suite.
- *   That declaration (audio-feed-4oe2) means the SUITE owns the proof's execution — the gate even
+ * - it does not run proofs whose README declares `- Executed by: <suite>` with an existing suite
+ *   that references the proof (audio-feed-zmwa1: a suite that never names the proof is not its
+ *   owner, and the tier refuses the run rather than trusting the name). That declaration
+ *   (audio-feed-4oe2) means the SUITE owns the proof's execution — the gate even
  *   selects the suite from it (scripts/fast-check.ts, audio-feed-ruqh) — so executing it here as
  *   well would run a proof under a bound the suite never chose: audio-feed-8u4x1's campaign runs
  *   12 attempts under a 600s per-attempt bound and a 4800s deadline, and the tier's 300s default
@@ -75,6 +77,8 @@ export interface Declaration {
   executedBy: string | null;
   /** Whether the executedBy file exists under root, if declared. */
   executorExists?: boolean;
+  /** Whether every declared executor suite references the proof by path or basename (audio-feed-zmwa1). */
+  executorReferencesProof?: boolean;
   /** Declared per-proof timeout in milliseconds, if present in README. */
   timeoutMs?: number;
   /** Raw timeout string as declared in README. */
@@ -325,22 +329,37 @@ export async function collect(options: Options): Promise<{
       exists = false;
     }
     let executorExists: boolean | undefined = undefined;
+    let executorReferencesProof: boolean | undefined = undefined;
     if (info.executedBy) {
       const targets = info.executedBy.split(",").map((s) => s.trim()).filter(Boolean);
+      const proofBasename = info.declared.split("/").pop() ?? info.declared;
       let allExist = targets.length > 0;
+      let allLinked = targets.length > 0;
       for (const target of targets) {
         const targetRel = target.startsWith("tests/") ? target : `tests/${target}`;
         try {
-          if (!(await Deno.stat(join(options.root, targetRel))).isFile) {
+          const targetPath = join(options.root, targetRel);
+          if (!(await Deno.stat(targetPath)).isFile) {
             allExist = false;
+            allLinked = false;
             break;
+          }
+          // LINKAGE (audio-feed-zmwa1): existence alone let any file named as `- Executed by:`
+          // silence a broken proof. Ownership is proven only if the suite NAMES the proof - an
+          // import or spawned command carries the path, and even a --list-style mention or a
+          // comment naming it is the realistic minimum for a proof the suite runs out-of-process.
+          const suiteText = await Deno.readTextFile(targetPath);
+          if (!suiteText.includes(info.declared) && !suiteText.includes(proofBasename)) {
+            allLinked = false;
           }
         } catch {
           allExist = false;
+          allLinked = false;
           break;
         }
       }
       executorExists = allExist;
+      executorReferencesProof = allLinked;
     }
     declarations.push({
       dir,
@@ -350,6 +369,7 @@ export async function collect(options: Options): Promise<{
       asserts: info.asserts,
       executedBy: info.executedBy,
       executorExists,
+      executorReferencesProof,
       timeoutMs: info.timeoutSec !== null ? Math.round(info.timeoutSec * 1000) : undefined,
       rawTimeout: info.rawTimeout,
       timeoutMalformed: info.timeoutMalformed,
@@ -471,6 +491,15 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   const unresolvedExecutors = declarations.filter(
     (declaration) => declaration.executedBy !== null && declaration.executorExists === false,
   );
+  // An executor that EXISTS but never references the proof is not an owner (audio-feed-zmwa1):
+  // trusting the name alone let `- Executed by: tests/anything` silence a broken proof. Gated on
+  // executorExists so a nonexistent suite reports only as UNRESOLVED, never twice.
+  const unlinkedExecutors = declarations.filter(
+    (declaration) =>
+      declaration.executedBy !== null &&
+      declaration.executorExists === true &&
+      declaration.executorReferencesProof === false,
+  );
 
   /**
    * A DECLARATION OUTCOME IS PRINTED, NEVER IMPLIED. Three facts are debt rather than failure - a
@@ -523,9 +552,11 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     }
     for (const declaration of declarations) {
       const execSuffix = declaration.executedBy
-        ? declaration.executorExists
-          ? ` [executed by: ${declaration.executedBy}]`
-          : ` [UNRESOLVED EXECUTOR: ${declaration.executedBy}]`
+        ? declaration.executorExists === false
+          ? ` [UNRESOLVED EXECUTOR: ${declaration.executedBy}]`
+          : declaration.executorReferencesProof === false
+          ? ` [UNLINKED EXECUTOR: ${declaration.executedBy}]`
+          : ` [executed by: ${declaration.executedBy}]`
         : "";
       const timeoutSuffix = declaration.timeoutMalformed
         ? ` [MALFORMED TIMEOUT: ${declaration.rawTimeout}]`
@@ -538,9 +569,10 @@ export async function main(args: string[] = Deno.args): Promise<void> {
         } ${declaration.dir} -> ${declaration.declared}${execSuffix}${timeoutSuffix}`,
       );
     }
-    const unresolvedExecNote = unresolvedExecutors.length > 0
+    const unresolvedExecNote = (unresolvedExecutors.length > 0
       ? `, ${unresolvedExecutors.length} unresolved executor(s)`
-      : "";
+      : "") +
+      (unlinkedExecutors.length > 0 ? `, ${unlinkedExecutors.length} unlinked executor(s)` : "");
     console.log(
       `[evidence] inventory: ${declarations.length} declared proof(s), ${unresolved.length} unresolved, ` +
         `${undeclared.length} directory(ies) declare nothing, ${withoutReadme.length} have no README` +
@@ -594,6 +626,24 @@ export async function main(args: string[] = Deno.args): Promise<void> {
     Deno.exit(1);
   }
 
+  // A declared executor that exists but does not reference the proof is UNLINKED (audio-feed-zmwa1):
+  // the tier must neither silently skip (the suite may never run it) nor silently execute (the
+  // declaration says the suite owns it). It refuses, naming declaration, suite, and the gap.
+  if (unlinkedExecutors.length > 0) {
+    printDebt();
+    for (const declaration of unlinkedExecutors) {
+      console.error(
+        `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} ` +
+          `(UNLINKED EXECUTOR: ${declaration.executedBy} does not reference the proof by path or name)`,
+      );
+    }
+    console.error(
+      `[evidence] RED: ${unlinkedExecutors.length} declared executor(s) never reference the proof they are declared to own; refusing run - ` +
+        `suite ownership must be visible in the suite itself`,
+    );
+    Deno.exit(1);
+  }
+
   // A declared timeout that is malformed is an UNRESOLVED failure.
   if (malformedTimeouts.length > 0) {
     printDebt();
@@ -641,9 +691,10 @@ export async function main(args: string[] = Deno.args): Promise<void> {
         results.push({ declaration });
         continue;
       }
-      // Suite-owned (audio-feed-opqvh): the unresolved-executor refusal above guarantees any
-      // declared executor exists, so reaching here with an executor means the suite runs this
-      // proof and the tier must not also run it. SKIP by name; the summary counts it.
+      // Suite-owned (audio-feed-opqvh, audio-feed-zmwa1): the refusals above guarantee every
+      // declared executor EXISTS and REFERENCES the proof, so reaching here with an executor means
+      // ownership is demonstrated in the suite's own text and the tier must not also run it.
+      // SKIP by name; the summary counts it.
       if (declaration.executedBy !== null) {
         console.log(
           `[evidence] SKIP ${declaration.dir} -> ${declaration.declared} ` +

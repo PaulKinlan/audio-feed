@@ -457,7 +457,11 @@ Deno.test("evidence-run --list shows [executed by: ...] for declared executor an
     await Deno.mkdir(testsDir, { recursive: true });
 
     await Deno.writeTextFile(join(scriptsDir, "proof.ts"), "console.log('PASS ok');\n");
-    await Deno.writeTextFile(join(testsDir, "my_suite_test.ts"), "// test\n");
+    // audio-feed-zmwa1: a valid executor must REFERENCE the proof, not merely exist.
+    await Deno.writeTextFile(
+      join(testsDir, "my_suite_test.ts"),
+      "// suite: runs scripts/proof.ts as part of its coverage\n",
+    );
 
     // Valid executor
     await Deno.mkdir(join(evidenceRoot, "audio-feed-valid"), { recursive: true });
@@ -519,14 +523,16 @@ Deno.test("a proof whose README declares a RESOLVED - Executed by: suite is NOT 
 
     // The proof prints this marker ONLY if it is spawned. If the runner honours the declared
     // suite ownership it never runs, so the marker must be absent from the tier's output while
-    // the skip is named - the pair is the evidence both directions.
+    // the skip is named - the pair is the evidence both directions. The suite REFERENCES the
+    // proof (audio-feed-zmwa1: ownership must be visible in the suite's own text) - a comment
+    // naming the proof is the realistic minimum for a proof the suite runs out-of-process.
     await Deno.writeTextFile(
       join(scriptsDir, "proof.ts"),
       `console.log("PASS executed directly by the runner");\n`,
     );
     await Deno.writeTextFile(
       join(testsDir, "owning_suite_test.ts"),
-      "// the suite that owns this proof\n",
+      "// owning suite: spawns scripts/proof.ts out-of-process and asserts its PASS marker\n",
     );
 
     await Deno.mkdir(join(evidenceRoot, "audio-feed-owned"), { recursive: true });
@@ -557,6 +563,61 @@ Deno.test("a proof whose README declares a RESOLVED - Executed by: suite is NOT 
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+Deno.test(
+  "NEGATIVE CONTROL (Unlinked Executor): a declared suite that never references the proof refuses the run (audio-feed-zmwa1)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "zmwa1-unlinked-" });
+    try {
+      const scriptsDir = join(tempDir, "scripts");
+      const testsDir = join(tempDir, "tests");
+      const evidenceRoot = join(tempDir, "docs", "evidence");
+      await Deno.mkdir(scriptsDir, { recursive: true });
+      await Deno.mkdir(testsDir, { recursive: true });
+
+      // The suite EXISTS but its text never mentions scripts/proof.ts - exactly the fixture shape
+      // that used to silence the proof. The runner must refuse loudly, not skip and not execute.
+      await Deno.writeTextFile(
+        join(scriptsDir, "proof.ts"),
+        `console.log("PASS executed directly by the runner");\n`,
+      );
+      await Deno.writeTextFile(
+        join(testsDir, "owning_suite_test.ts"),
+        "// unrelated suite: exercises a module with no connection to any proof\n",
+      );
+
+      await Deno.mkdir(join(evidenceRoot, "audio-feed-zmwa1"), { recursive: true });
+      await Deno.writeTextFile(
+        join(evidenceRoot, "audio-feed-zmwa1", "README.md"),
+        "- Script: scripts/proof.ts\n- Executed by: tests/owning_suite_test.ts\n- Asserts: claim\n",
+      );
+
+      const res = await runTier(tempDir);
+      assertEquals(res.code, 1, "an unlinked executor must refuse the run, not honour the skip");
+      assertStringIncludes(
+        res.stderr,
+        "[evidence] FAIL docs/evidence/audio-feed-zmwa1 -> scripts/proof.ts " +
+          "(UNLINKED EXECUTOR: tests/owning_suite_test.ts does not reference the proof by path or name)",
+      );
+      assertStringIncludes(
+        res.stderr,
+        "[evidence] RED: 1 declared executor(s) never reference the proof they are declared to own",
+      );
+      assertEquals(
+        res.stdout.includes("SKIP docs/evidence/audio-feed-zmwa1"),
+        false,
+        "an unlinked executor must not be honoured as a skip: existence alone is not ownership",
+      );
+      assertEquals(
+        res.stdout.includes("executed directly by the runner"),
+        false,
+        "an unlinked executor must not silently execute the proof either: the declaration says the suite owns it",
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
 
 Deno.test("NEGATIVE CONTROL (Unresolved Executor): missing declared executor fails evidence-run (audio-feed-4oe2)", async () => {
   const tempDir = await Deno.makeTempDir({ prefix: "4oe2-run-fail-" });
