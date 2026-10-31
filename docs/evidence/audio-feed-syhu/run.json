@@ -1,0 +1,20 @@
+{
+  "script": "scripts/csp-nonce-browser-proof.ts",
+  "sha": "18a6b738051a771c532f61d4c835ad8a5dede297",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T21:45:17.524Z",
+  "endedAt": "2026-10-31T21:45:25.856Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "account-1280x900.png": "sha256:664429ec4c0473bd5284ec184b9f9988a8b59dc32cb08284c760f1f7ca43c0b2",
+    "admin-1280x900.png": "sha256:119ac70d9954de6a9e4ced1942f8b79d2ce4bbbb547f45bed06e29856f33e94f",
+    "home-1280x900.png": "sha256:664429ec4c0473bd5284ec184b9f9988a8b59dc32cb08284c760f1f7ca43c0b2",
+    "listen-landing-1280x900.png": "sha256:0c80f5e8aa39bdbfec3fc3d80dfb9854cc6cd8158e9cf4607784bafd16992da3",
+    "listen-player-1280x900.png": "sha256:0c80f5e8aa39bdbfec3fc3d80dfb9854cc6cd8158e9cf4607784bafd16992da3",
+    "login-1280x900.png": "sha256:295d9e9a4b34693ae8f7e93aaa60e0274e1417d780303f64c4c2dc6709061a4c"
+  }
+}
