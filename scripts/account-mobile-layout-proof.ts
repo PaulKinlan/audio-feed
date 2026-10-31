@@ -259,6 +259,19 @@ await runProof("audio-feed-lma7", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 15s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, label: string, timeout = 15_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -329,7 +342,6 @@ await runProof("audio-feed-lma7", async (checker) => {
        * answers still fails, in two minutes rather than hanging until something outside the proof
        * kills the lane - and it fails with a message naming what was asked and the budget it had.
        */
-      const MEASURED_STARVED_POLL_MS = 8_000;
       const MEASURE_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
 
       /**
@@ -481,13 +493,21 @@ await runProof("audio-feed-lma7", async (checker) => {
 
         await viewport(390, 844);
         await cdp("Page.navigate", { url: `file://${controlFile}` });
-        await until(`document.readyState === "complete"`, "control document");
+        await until(
+          `document.readyState === "complete"`,
+          "control document",
+          UNTIL_HANG_BOUND_MS,
+        );
         const control = await measure(MEASURE_HANG_BOUND_MS);
         const escaped = control.panels.filter((p) => !p.insideWrap);
 
         // ---------------------------------------------------------------- 2/3. THE FIXED PAGE
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "served /account");
+        await until(
+          `document.readyState === "complete"`,
+          "served /account",
+          UNTIL_HANG_BOUND_MS,
+        );
         check(
           "the browser is on the served /account page, not redirected to /login",
           String(
@@ -525,7 +545,11 @@ await runProof("audio-feed-lma7", async (checker) => {
         for (const [width, height] of MOBILE_VIEWPORTS) {
           await viewport(width, height);
           await cdp("Page.navigate", { url: `${BASE}/account` });
-          await until(`document.readyState === "complete"`, `served /account at ${width}px`);
+          await until(
+            `document.readyState === "complete"`,
+            `served /account at ${width}px`,
+            UNTIL_HANG_BOUND_MS,
+          );
           const at = await measure(MEASURE_HANG_BOUND_MS);
           check(
             `at ${width}x${height} the page column exists, so a panel has somewhere to be contained BY`,
@@ -573,7 +597,11 @@ await runProof("audio-feed-lma7", async (checker) => {
         // panel - the first panel that used to escape the page column.
         await viewport(390, 844);
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "mobile /account for capture");
+        await until(
+          `document.readyState === "complete"`,
+          "mobile /account for capture",
+          UNTIL_HANG_BOUND_MS,
+        );
         const afterClip = (await withHangBound(
           js(clipAround),
           "clipAround (the Your feeds panel box framed by 01/02-*-390x844)",
@@ -586,13 +614,21 @@ await runProof("audio-feed-lma7", async (checker) => {
         await screenshot("02-after-390x844.png", afterClip!);
 
         await cdp("Page.navigate", { url: `file://${controlFile}` });
-        await until(`document.readyState === "complete"`, "control document for capture");
+        await until(
+          `document.readyState === "complete"`,
+          "control document for capture",
+          UNTIL_HANG_BOUND_MS,
+        );
         await screenshot("01-before-390x844.png", afterClip!);
 
         // 4. The desktop column is not flattened by the fix.
         await viewport(1280, 900);
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "desktop /account");
+        await until(
+          `document.readyState === "complete"`,
+          "desktop /account",
+          UNTIL_HANG_BOUND_MS,
+        );
         const desktop = await measure(MEASURE_HANG_BOUND_MS);
         check(
           "at 1280x900 the panels sit inside the 58rem column, not the full window",
