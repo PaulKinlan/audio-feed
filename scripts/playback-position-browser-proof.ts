@@ -104,6 +104,19 @@ await runProof("playback-position-browser-proof", async (checker) => {
     checker.check(name, pass, detail);
   }
 
+  /**
+   * The two-argument until() calls below pass no explicit budget, so each inherits this
+   * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+   * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+   * That measured starved floor is the unit.
+   *
+   * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+   * bound: a page whose main thread never answers still fails, in two minutes rather
+   * than hanging until something outside the proof kills the lane - and it fails with a
+   * message naming what was asked and the budget it had.
+   */
+  const MEASURED_STARVED_POLL_MS = 8_000;
+  const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
   async function until(expr: string, desc: string, timeoutMs = 8000) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -126,7 +139,11 @@ await runProof("playback-position-browser-proof", async (checker) => {
 
     // 1. Navigate to player
     await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-    await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page load 5 rows");
+    await until(
+      `document.querySelectorAll("#episodes .episode").length === 5`,
+      "page load 5 rows",
+      UNTIL_HANG_BOUND_MS,
+    );
 
     // 2. Play episode 1 and set position to 45s, save to localStorage
     await js(`
@@ -144,7 +161,11 @@ await runProof("playback-position-browser-proof", async (checker) => {
 
     // 3. Reload page and check UI affordance
     await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-    await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page reloaded");
+    await until(
+      `document.querySelectorAll("#episodes .episode").length === 5`,
+      "page reloaded",
+      UNTIL_HANG_BOUND_MS,
+    );
 
     const row1 = `document.querySelector('li.episode[data-episode-id="ep-1"]')`;
     const badgeText = await js(`${row1}?.querySelector(".ep-resume-badge")?.textContent`);
@@ -178,6 +199,7 @@ await runProof("playback-position-browser-proof", async (checker) => {
     await until(
       `Math.round(document.getElementById("audio")?.currentTime || 0) === 45`,
       "audio seeked to 45s",
+      UNTIL_HANG_BOUND_MS,
     );
     const currentPos = await js(`Math.round(document.getElementById("audio")?.currentTime || 0)`);
     check("clicking resume seeks audio to 45s", currentPos === 45, `currentTime is ${currentPos}`);
@@ -187,6 +209,7 @@ await runProof("playback-position-browser-proof", async (checker) => {
     await until(
       `Math.round(document.getElementById("audio")?.currentTime || 0) === 0`,
       "audio restarted to 0s",
+      UNTIL_HANG_BOUND_MS,
     );
     const clearedStored = await js(`
     JSON.parse(localStorage.getItem("audio-feed-positions:user-1") || "{}")["ep-1"]
