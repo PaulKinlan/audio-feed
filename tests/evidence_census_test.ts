@@ -23,7 +23,8 @@ import {
   splitCreditedWrites,
   WRITE_CALLS,
 } from "../scripts/evidence-census.ts";
-import { collect } from "../scripts/evidence-run.ts";
+import { collect, referencesProofInCode } from "../scripts/evidence-run.ts";
+import { deriveReadRelationReport, suitesObservingExact } from "../scripts/test-selection.ts";
 
 const dir = (id: string) => `audio-feed-${id}`;
 /**
@@ -896,7 +897,9 @@ const INTENTIONALLY_UNREGISTERED: Record<string, string> = {
 
 /**
  * KNOWN_UNRUN — declared proof scripts that NO test executes, pinned by EXACT SET with a one-line
- * reason each. INTENTIONALLY_UNREGISTERED above proves every proof script is DECLARED; this set
+ * reason each. "Executes" means SPAWNS (the narrowed census predicate below): a proof a suite runs
+ * only through a mutated temp copy or an in-process import belongs in EXECUTED_WITHOUT_SPAWN, not
+ * here. INTENTIONALLY_UNREGISTERED above proves every proof script is DECLARED; this set
  * closes the audio-feed-u9e7s gap that declaration alone leaves open: the fast gate derives its
  * selection from what test sources literally mention, so a declared script no test mentions is an
  * unmapped file — the COVERAGE WARNING the fleet reporter prints and nobody reads. Derived from
@@ -919,6 +922,8 @@ const KNOWN_UNRUN: Record<string, string> = {
     "real-browser acceptance proof - drives the served app in a real Chrome (withChrome), which the gate does not have",
   "account-mobile-layout-proof.ts":
     "real-browser layout proof at a mobile viewport - needs a real Chrome (withChrome), which the gate does not have",
+  "admin-module-browser-proof.ts":
+    "real-browser proof (withChrome) against the served app - not gate-safe",
   "admin-retry-browser-proof.ts":
     "real-browser acceptance proof (withChrome) against the served app - not gate-safe",
   "bookmarklet-browser-proof.ts":
@@ -935,27 +940,97 @@ const KNOWN_UNRUN: Record<string, string> = {
     "real-browser home-player proof (withChrome) - not gate-safe",
   "listen-browser-proof.ts": "real-browser listen-page proof (withChrome) - not gate-safe",
   "listen-filter-browser-proof.ts": "real-browser listen-filter proof (withChrome) - not gate-safe",
+  "passkey-provider-browser-proof.ts":
+    "real-browser proof (withChrome) against the served app - not gate-safe",
+  "playback-csp-browser-proof.ts":
+    "asserts CSP nonces as served to a real Chrome (withChrome) - not gate-safe",
+  "playback-position-browser-proof.ts":
+    "drives real Chrome over CDP through scripts/listen-harness.ts and a pagehide reload - not gate-safe",
   "repro_b6nr_token_storage.ts":
     "drives the passkey token flow through a real Chrome (withChrome) - no headless substitute in the gate",
   "repro_tts_brittleness_9yu8.ts":
     "drives live TTS through the external gemini proxy - a live network call, never gate-safe",
   "repro_tts_failure_bp6r.ts":
     "drives live TTS failure through the external gemini proxy - a live network call, never gate-safe",
+  "repro_u2ve_rate_limit_ff.ts":
+    "by-hand deployment probe per its own header's Run line: drives the served app with TRUST_PROXY_HEADERS=1 and rewrites its committed evidence files on every run - wire it with the runAndRestore executor shape (tests/declared_proof_helpers.ts) before citing it as executed",
+  "request-access-browser-proof.ts":
+    "real-browser proof over CDP against the served app - not gate-safe",
+  "spend-visibility-browser-proof.ts":
+    "real-browser proof over CDP through scripts/account-harness.ts - not gate-safe",
   "tokens-browser-proof.ts": "real-browser tokens-page proof (withChrome) - not gate-safe",
+  "tooltip-top-layer-browser-proof.ts": "real-browser proof (withChrome) - not gate-safe",
   "verify_3asd_bookmarklet_browser.ts":
     "bookmarklet verification in a real Chrome (withChrome) - not gate-safe",
   "verify_dfbu_pagehide_browser.ts":
     "exercises the pagehide lifecycle, which only a real Chrome (withChrome) fires - not gate-safe",
+  "verify_i7vi_browser.ts":
+    "real-browser proof (withChrome) against the served app - not gate-safe",
   "verify_ieek_canonical_urls.ts":
     "canonical-URL verification in a real Chrome (withChrome) - not gate-safe",
   "verify_kvnw_account_bookmarklet_browser.ts":
     "account bookmarklet verification in a real Chrome (withChrome) - not gate-safe",
+  "verify_live_e2e_tts.ts":
+    "live end-to-end TTS run - needs GEMINI_API_KEY (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
+  "verify_live_tts.ts":
+    "live TTS run - needs GEMINI_API_KEY (only its evidence-dir helpers are imported and asserted, by tests/verify_live_e2e_tts_output_test.ts)",
+  "verify_qz3x_confirm_dismiss_browser.ts": "real-browser proof (withChrome) - not gate-safe",
   "voice-audition-browser-proof.ts":
     "real-browser voice-audition proof (withChrome) - not gate-safe",
 };
 
+/**
+ * Declared proof scripts that a test EXECUTES without earning a SPAWN relation, pinned by EXACT SET
+ * with the harness that runs them and the reason no execute relation can name them. Two shapes live
+ * here, both measured on this tree: a MUTATED TEMP COPY (the suite copies the proof source,
+ * injects or redirects, and spawns the COPY - the repo path itself is never a spawn argument, and a
+ * computed argument deliberately derives nothing, audio-feed-4kl3/9rer), and an IN-PROCESS IMPORT
+ * (a math module whose assertion is the suite running its function - there is no process to spawn).
+ *
+ * WHY A RELATION AND NOT A KNOWN_UNRUN PIN: these proofs RUN today; pinning them as known-unrun
+ * would be a lie about the one fact this census exists to keep true. Each entry is checked against
+ * the tree it claims, in four directions, so the mapping cannot silently rot:
+ *   1. the harness suite still EXISTS,
+ *   2. it still NAMES the proof path in CODE (referencesProofInCode, the audio-feed-377of rule:
+ *      comments stripped, quoted path) - delete or dequote the reference and this reds,
+ *   3. the selector's derivation still derives the harness reading/importing the proof
+ *      (suitesObservingExact over report.relations) - the derivable edge must survive,
+ *   4. no spawn relation may appear (the set only shrinks: a suite that starts SPAWNING the proof
+ *      makes the entry stale and the census says so).
+ * And the EXECUTION itself cannot rot silently either: each harness's own rows assert the proof's
+ * behaviour through the copy or the import (tests/outbox_proof_test.ts:54 spawns the mutated copy
+ * and asserts its exit codes; tests/l7m1_proof_test.ts:204 does the same for the l7m1 mutant;
+ * tests/exww_mutants_test.ts:35,128 recompute the committed attempt distribution through the
+ * imported function), and those rows run in the same gates as this census - a harness that stops
+ * calling its proof fails ITS OWN rows, and a mapping that drifts fails THIS one.
+ */
+const EXECUTED_WITHOUT_SPAWN: Readonly<Record<string, { by: string; reason: string }>> = {
+  "outbox-proof.ts": {
+    by: "tests/outbox_proof_test.ts",
+    reason:
+      "executed as a MUTATED TEMP COPY: tests/outbox_proof_test.ts:54 copies the proof source, injects a console.log line and spawns the copy, asserting its exit codes - the repo path itself is never spawned, so the execute relation cannot name it (the declaring README audio-feed-np5 names the same suite as - Executed by:)",
+  },
+  "verify_main_l7m1_e2e.ts": {
+    by: "tests/l7m1_proof_test.ts",
+    reason:
+      "executed as a MUTATED TEMP COPY: tests/l7m1_proof_test.ts:204 copies the proof source, redirects OUT to a temp dir and spawns the mutant copy, asserting its exit codes - the repo path itself is never spawned (tests/verify_script_ledger_test.ts labels it the same way)",
+  },
+  "exww-attempt-measure.ts": {
+    by: "tests/exww_mutants_test.ts",
+    reason:
+      "executed IN-PROCESS: tests/exww_mutants_test.ts:35 imports deriveLadderConstants and :128 recomputes the committed attempt distribution, asserting the derived constants - a math module has no process to spawn, and the declaring README audio-feed-8u4x1 names this suite as - Executed by:",
+  },
+};
+
+/**
+ * The relation report memoised per process (tests/verify_script_ledger_test.ts pays it the same
+ * way): the census asks the derivation several questions below and should pay ONE whole-tree scan.
+ */
+let reportOnce: ReturnType<typeof deriveReadRelationReport> | undefined;
+const relationReport = (root: string) => (reportOnce ??= deriveReadRelationReport(root));
+
 Deno.test(
-  "unregistered-proof census: every scripts/*-proof.ts, scripts/verify_*.ts and scripts/repro_*.ts is declared by an evidence README or pinned as intentionally-unregistered, and every declared script is exercised by a test or pinned as known-unrun",
+  "unregistered-proof census: every scripts/*-proof.ts, scripts/verify_*.ts and scripts/repro_*.ts is declared by an evidence README or pinned as intentionally-unregistered, and every declared script is spawned by a test, executed through a documented harness, or pinned as known-unrun",
   async () => {
     const root = new URL("..", import.meta.url).pathname;
 
@@ -1020,23 +1095,16 @@ Deno.test(
     );
 
     // EXERCISED-OR-PINNED: the checks so far prove every proof script is DECLARED; they do not
-    // prove any test runs a declared script. This closes exactly the audio-feed-u9e7s gap: the
-    // coverage selector reads test SOURCE TEXT, so a declared script no test source mentions is an
-    // unmapped file, and here it is a failing row with its own remedy instead of a warning.
-    // "Exercised" means the script path appears LITERALLY in some tests/**/*.ts source — a test
-    // that names or runs it — the same bar the selector applies.
-    const testSources: string[] = [];
-    const walkTestSources = async (dir: string): Promise<void> => {
-      for await (const entry of Deno.readDir(dir)) {
-        const child = `${dir}/${entry.name}`;
-        if (entry.isDirectory) await walkTestSources(child);
-        else if (entry.isFile && entry.name.endsWith(".ts")) {
-          testSources.push(await Deno.readTextFile(child));
-        }
-      }
-    };
-    await walkTestSources(`${root}/tests`);
-    const exercisedIn = testSources.join("\n");
+    // prove any test RUNS one. "Exercised" used to mean the script path appeared LITERALLY in some
+    // tests/**/*.ts source — the bar the coverage selector applied to source text — and that let a
+    // proof with no runner look protected: a comment, an import, a readTextFile or a contract-table
+    // string naming the path is a MENTION, and a mention executes nothing. The predicate is now the
+    // selector's own EXECUTE relation (deriveReadRelationReport().executedRelations — the
+    // audio-feed-q6ecj spawn class the script ledger already asks for): a declared script counts as
+    // exercised only when a suite SPAWNS it — the command's semantics must PROVE the program
+    // (Deno.execPath() or a known runner, first non-flag positional after `run`) — or it is executed
+    // without a spawn through EXECUTED_WITHOUT_SPAWN below, or pinned in KNOWN_UNRUN.
+    const report = await relationReport(root);
 
     // THE PIN SET MUST NOT OUTLIVE ITS FACTS (same rule as INTENTIONALLY_UNREGISTERED): an entry
     // whose script is no longer declared, or which a test now exercises, is a claim about a tree
@@ -1051,38 +1119,80 @@ Deno.test(
         declared.has(`scripts/${name}`),
         `stale known-unrun pin: scripts/${name} is no longer declared by any evidence README - remove the entry`,
       );
-      assert(
-        !exercisedIn.includes(`scripts/${name}`),
-        `known-unrun pin is now false: scripts/${name} is exercised by a test - remove the entry (the set only shrinks)`,
+      const spawnedBy = suitesObservingExact(`scripts/${name}`, report.executedRelations);
+      assertEquals(
+        spawnedBy,
+        [],
+        `known-unrun pin is now false: scripts/${name} is SPAWNED by a test (${
+          spawnedBy.join(", ")
+        }) - remove the entry (the set only shrinks; wiring is the remedy)`,
       );
     }
     assertEquals(
       Object.keys(KNOWN_UNRUN).length,
-      20,
+      32,
       "the known-unrun set is pinned; growing it is a decision, not an edit",
     );
 
+    // THE EXECUTED-WITHOUT-SPAWN RELATION MUST NOT OUTLIVE ITS FACTS: the same rule as the two
+    // sets above, checked in the four directions documented on EXECUTED_WITHOUT_SPAWN.
+    for (const [name, entry] of Object.entries(EXECUTED_WITHOUT_SPAWN)) {
+      const script = `scripts/${name}`;
+      const harnessSpawns = suitesObservingExact(script, report.executedRelations);
+      assertEquals(
+        harnessSpawns,
+        [],
+        `${script} now has a spawn relation (${
+          harnessSpawns.join(", ")
+        }) - remove the entry from EXECUTED_WITHOUT_SPAWN (the set only shrinks; the execute relation is the stronger evidence)`,
+      );
+      const harnessPath = `${root}${entry.by}`;
+      const harnessStat = await Deno.stat(harnessPath).catch(() => null);
+      assert(
+        harnessStat?.isFile,
+        `stale executed-without-spawn entry: ${entry.by}, the harness for ${script}, no longer exists - remove the entry`,
+      );
+      const harnessText = await Deno.readTextFile(harnessPath);
+      assert(
+        referencesProofInCode(harnessText, script),
+        `stale executed-without-spawn entry: ${entry.by} no longer names ${script} in code (comments stripped, quoted path) - the harness relation is a lie, remove the entry`,
+      );
+      const readers = suitesObservingExact(script, report.relations);
+      assert(
+        readers.includes(entry.by),
+        `stale executed-without-spawn entry: the derivation no longer derives ${entry.by} reading ${script} (readers: ${
+          readers.join(", ") || "none"
+        }) - the harness relation is a lie, remove the entry`,
+      );
+    }
+
     const unexercised = [...declared].filter((s) =>
-      !exercisedIn.includes(s) &&
-      !Object.hasOwn(KNOWN_UNRUN, s.slice("scripts/".length))
+      suitesObservingExact(s, report.executedRelations).length === 0 &&
+      !Object.hasOwn(KNOWN_UNRUN, s.slice("scripts/".length)) &&
+      !Object.hasOwn(EXECUTED_WITHOUT_SPAWN, s.slice("scripts/".length))
     );
     assertEquals(
       unexercised,
       [],
-      `declared proof script(s) that NO TEST EXERCISES and KNOWN_UNRUN does not pin: ` +
-        `${unexercised.join(", ")}. For each one: add a test that runs it - a suite whose own ` +
-        `source contains the script path as a literal (that is what the coverage selector reads) - ` +
-        `or add its basename to KNOWN_UNRUN in tests/evidence_census_test.ts with a one-line ` +
-        `reason. A declared proof no test runs and no pin names is exactly the unmapped-file ` +
-        `COVERAGE WARNING this row turns into a failing row.`,
+      `declared proof script(s) that NO TEST SPAWNS and no pin covers: ` +
+        `${
+          unexercised.join(", ")
+        }. For each one: add a test that SPAWNS it - the proof path as a ` +
+        `LITERAL in the suite's own new Deno.Command args, because that call text is what the ` +
+        `execute relation derives (a mention, import or comment exercises nothing) - or add its ` +
+        `basename to KNOWN_UNRUN in tests/evidence_census_test.ts with a one-line reason. A ` +
+        `declared proof no suite runs and no pin names is exactly the unmapped-file COVERAGE ` +
+        `WARNING this row turns into a failing row.`,
     );
 
     // POSITIVE CONTROL for the exercised relation: the corpus must be real or every exclusion
-    // above passes vacuously - a meaningful share of declared scripts must be test-exercised.
-    const exercisedCount = [...declared].filter((s) => exercisedIn.includes(s)).length;
+    // above passes vacuously - a meaningful share of declared scripts must have a spawn relation.
+    const exercisedCount =
+      [...declared].filter((s) => suitesObservingExact(s, report.executedRelations).length > 0)
+        .length;
     assert(
-      exercisedCount >= 10,
-      `expected a real exercised corpus, got ${exercisedCount}`,
+      exercisedCount >= 5,
+      `expected a real spawned corpus, got ${exercisedCount} (measured 7 when the predicate narrowed: six repro_* executors plus the exww mapping row)`,
     );
 
     // POSITIVE CONTROLS: the walk found a real corpus on both sides, or every exclusion above
