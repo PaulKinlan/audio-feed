@@ -8,6 +8,15 @@
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Render a polled expression's last value for a timeout message without throwing on it. */
+function renderValue(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export interface CdpClient {
   ws: WebSocket;
   // deno-lint-ignore no-explicit-any
@@ -59,12 +68,28 @@ export async function connectCdp(target: number | { port: number }): Promise<Cdp
   }
 
   async function until(expr: string, desc: string, timeoutMs = 8000) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-      if (await js(expr)) return;
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let polls = 0;
+    let last: unknown;
+    while (Date.now() - startedAt < timeoutMs) {
+      last = await js(expr);
+      if (last) return;
+      polls++;
       await sleep(50);
     }
-    throw new Error(`timed out waiting for: ${desc}`);
+    // audio-feed-ev6wj: never a bare "timed out waiting for: <desc>". A reader of a gate log
+    // could not tell the 8s default from the 120s budget a slow row passes explicitly, could
+    // not see WHICH expression never held, and could not see whether the poll ran once (the
+    // host never gave the page a slice) or two thousand times (the page really never got
+    // there) - the two failures need opposite responses.
+    throw new Error(
+      `until: '${desc}' did not hold within ${timeoutMs}ms of entry ` +
+        `(expression \`${expr}\`, entry ${new Date(startedAt).toISOString()}, ` +
+        `deadline ${new Date(deadline).toISOString()}, ` +
+        `elapsed ${Date.now() - startedAt}ms, polls ${polls}, ` +
+        `last value ${renderValue(last)})`,
+    );
   }
 
   function close() {
