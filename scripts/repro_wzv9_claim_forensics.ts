@@ -82,9 +82,13 @@ runProof("audio-feed-wzv9", async () => {
     "A: the terminal record carries a duration",
     afterA.some((r) => r.type === "claim.lifecycle" && typeof r.durationMs === "number"),
   );
+  // correlationId is producer-scoped (audio-feed-9d7l5): lifecycle records and spans join on the
+  // episode id, but a synthesis.stage mark carries invocationId. The single-join property is about
+  // the claim story, so it is scoped to claim.lifecycle records.
   chk.check(
-    "A: every record for the episode shares one correlation id",
-    new Set(afterA.map((r) => r.correlationId)).size === 1,
+    "A: every claim.lifecycle record for the episode shares one correlation id",
+    new Set(afterA.filter((r) => r.type === "claim.lifecycle").map((r) => r.correlationId))
+      .size === 1,
   );
 
   // -- B. the siv1 case: a claim that dies before its terminal write -----------------------------
@@ -200,7 +204,7 @@ runProof("audio-feed-wzv9", async () => {
       "A: a failed narration attempt recorded its reason",
       "A: a terminal outcome recorded the reason",
       "A: the terminal record carries a duration",
-      "A: every record for the episode shares one correlation id",
+      "A: every claim.lifecycle record for the episode shares one correlation id",
       "B: the claim was taken",
       "B: the claim is readable after the worker vanished",
       "B: no terminal record exists, which is itself the finding",
