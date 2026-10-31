@@ -1,0 +1,15 @@
+{
+  "script": "scripts/tooltip-top-layer-browser-proof.ts",
+  "sha": "18a6b738051a771c532f61d4c835ad8a5dede297",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T21:45:04.601Z",
+  "endedAt": "2026-10-31T21:45:09.835Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "share-dialog-tooltip-top-layer-1280x900.png": "sha256:59fd38878dde09979e3cc8bff3750c1f9255080468a3daa07e0b4ea0c16cb940"
+  }
+}
