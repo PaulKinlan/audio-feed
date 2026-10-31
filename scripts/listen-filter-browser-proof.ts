@@ -30,6 +30,7 @@ import {
   withChrome,
   writeEvidenceReadme,
 } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const ASSERTS = [
   "initial load shows 5 rows and '5 episodes'",
@@ -296,6 +297,7 @@ try {
           `${OUT}01-listen-filter-desktop.png`,
           Uint8Array.from(atob(shotDesktop.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}01-listen-filter-desktop.png`);
         console.log(`Saved screenshot to ${OUT}01-listen-filter-desktop.png`);
 
         const axNodes = await cdp("Accessibility.getFullAXTree");
@@ -337,6 +339,7 @@ try {
           `${OUT}02-listen-filter-mobile-390.png`,
           Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
         );
+        await quantiseEvidencePng(`${OUT}02-listen-filter-mobile-390.png`);
         console.log(`Saved screenshot to ${OUT}02-listen-filter-mobile-390.png`);
 
         // ------------------------------------------------- 10. THE iOS FOCUS FLOOR (audio-feed-nmw3)
