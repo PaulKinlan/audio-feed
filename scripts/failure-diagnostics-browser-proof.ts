@@ -137,6 +137,19 @@ await runProof("audio-feed-e1d", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 10s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 10_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -166,8 +179,16 @@ await runProof("audio-feed-e1d", async (checker) => {
 
       // 1. Visit /admin
       await cdp("Page.navigate", { url: `${BASE}/admin` });
-      await until(`document.readyState === "complete"`, "admin page loaded");
-      await until(`document.getElementById("runsBody")?.children?.length > 0`, "runs loaded");
+      await until(
+        `document.readyState === "complete"`,
+        "admin page loaded",
+        UNTIL_HANG_BOUND_MS,
+      );
+      await until(
+        `document.getElementById("runsBody")?.children?.length > 0`,
+        "runs loaded",
+        UNTIL_HANG_BOUND_MS,
+      );
 
       // Verify details.run-errors exists on the failed run row
       const detailsExists = await js(
@@ -184,6 +205,7 @@ await runProof("audio-feed-e1d", async (checker) => {
       await until(
         `document.querySelector("#runsBody details.run-errors")?.open === true`,
         "run-errors details expanded",
+        UNTIL_HANG_BOUND_MS,
       );
 
       const isOpen = await js(`document.querySelector("#runsBody details.run-errors")?.open`);
@@ -214,10 +236,15 @@ await runProof("audio-feed-e1d", async (checker) => {
 
       // 2. Visit /listen/:token (player)
       await cdp("Page.navigate", { url: `${BASE}/listen/${user.feedToken}` });
-      await until(`document.readyState === "complete"`, "player loaded");
+      await until(
+        `document.readyState === "complete"`,
+        "player loaded",
+        UNTIL_HANG_BOUND_MS,
+      );
       await until(
         `document.querySelectorAll("#episodes .episode").length > 0`,
         "episodes loaded in player",
+        UNTIL_HANG_BOUND_MS,
       );
 
       // Click download on the episode whose audio 404s
@@ -227,6 +254,7 @@ await runProof("audio-feed-e1d", async (checker) => {
       await until(
         `document.querySelector(".ep-download-error")?.textContent.length > 0`,
         "inline download error rendered",
+        UNTIL_HANG_BOUND_MS,
       );
 
       const downloadErrorText = String(
