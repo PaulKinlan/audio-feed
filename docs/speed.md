@@ -407,18 +407,21 @@ each touched file was re-run green with four CPU burners saturating the box.
 The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection
 is the BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait
 surface one gate red at a time. First measured directly on `origin/main` at `ea949d2e`; recounted
-2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker, and recounted again the
-same day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges — the `ed7116fb`
-recount is the aggregate below:
+2026-10-31 at `origin/main` `275df1da` with a trailing-comma-safe walker, recounted again the same
+day at `origin/main` `ed7116fb` after five `fleet/until-sweep-*` merges, and recounted once more
+after the sixth — the `265131c3` recount (2026-10-31) is the aggregate below:
 
-- **31 `until()` call sites pass only the two required arguments** (expression, description) and
-  inherit their file's default, spread over **10 files** under `scripts/`, out of 176 `until(` calls
-  in 29 files. Method (2026-10-31, `ed7116fb`): paren/quote/template-aware walk of each `until(`
-  argument list, counting only non-empty argument spans, with definitions and type positions
-  excluded — **145** sites pass an explicit third argument and are not part of this count. Count it
-  rather than trusting either figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
-  which prints each two-argument site as `file:line` and then the file tally. All 31 sit in files
-  that declare their own `until`, so none of them inherits the shared `proof-cdp.ts` default. The
+- **Zero `until()` call sites pass only the two required arguments** — the two-argument population
+  is **0 across 0 files** at `origin/main` `265131c3`, out of 176 `until(` calls in 29 files, and
+  **all 176** sites pass an explicit third argument: the sweep series below is complete. Method
+  (2026-10-31, `265131c3`): paren/quote/template-aware walk of each `until(` argument list,
+  counting only non-empty argument spans, with definitions and type positions excluded. Count it
+  rather than trusting this figure: `deno run --allow-read scripts/call-arity.ts --only-2arg until scripts`,
+  which prints each two-argument site as `file:line` and then the file tally — it prints none
+  today, and the full variant `deno run --allow-read scripts/call-arity.ts until scripts` counts
+  every site with its argument count (176 sites, all argc 3). The 31 sites the `ed7116fb` recount
+  found sat in files that declare their own `until`, so none of them inherited the shared
+  `proof-cdp.ts` default. The
   originally published aggregate for the base this census first measured (`ea949d2e`) — 101
   two-argument sites across 28 files, 75 explicit-bound — was an undercount: re-walking that same
   `ea949d2e` with the safe walker gives **170 two-argument sites across 28 files, 6
@@ -426,14 +429,15 @@ recount is the aggregate below:
   splits an argument list on top-level commas reads a trailing comma before the closing paren as one
   more argument, which is how the eight unbounded waits in `scripts/account-browser-proof.ts` (15
   two-argument calls, none explicit at either base) were described as bounded. The six-site drop
-  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift, and the
-  164 → 31 drop is the five sweeps below, not drift either. Landed check
-  (`git merge-base --is-ancestor` against `origin/main` `ed7116fb`, 2026-10-31): `fleet/anchor-wait`
+  from `ea949d2e` to `275df1da` (170 → 164) is `fleet/proof-waits` landing, not drift; the
+  164 → 31 drop is the first five sweeps below and the 31 → 0 drop is the sixth — none of it
+  is drift. Landed check
+  (`git merge-base --is-ancestor` against `origin/main` `265131c3`, 2026-10-31): `fleet/anchor-wait`
   (`d0a546ca`), `fleet/proof-waits` (`0ef5368f`), `fleet/measure-waits` (`4cc6b4b3`),
   `fleet/js-waits` (`9921a815`), this census commit (`789eeca7`), the cwv retry-after row
-  (`11ba107c`) and all five sweeps — `fleet/until-sweep-1` (`f5cafa86`, 30 sites), `-2` (`64cfdead`,
-  24), `-3` (`081f7006`, 32), `-4` (`912b310c`, 23) and `-5` (`f8b5a0ab`, 24) — are in; those 133
-  converted sites are the whole of the 164 → 31 drop.
+  (`11ba107c`) and all six sweeps — `fleet/until-sweep-1` (`f5cafa86`, 30 sites), `-2` (`64cfdead`,
+  24), `-3` (`081f7006`, 32), `-4` (`912b310c`, 23), `-5` (`f8b5a0ab`, 24) and `-6` (`a0a98744`,
+  31) — are in; those 164 converted sites are the whole of the 164 → 0 drop.
 - **The shared helper no longer defaults to 8s; that default survives only in private copies.**
   `scripts/proof-cdp.ts` exports `MEASURED_STARVED_POLL_MS = 8_000` and derives
   `HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS` = **120_000**, and that derived bound is the
@@ -487,9 +491,9 @@ Failure modes, kept explicit: an inherited 8s default that fires early on a load
 HEALTHY page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A
 missing bound on a bare `js()` evaluate has no per-wait ceiling: it runs until the lane's killer or
 the gate's own `CHECK_FAST_TIMEOUT` (the 1800 s ceiling in the section above) fires, so it burns a
-lane AND a gate slot, which is strictly worse. The 31-site count is the map for extending the
-anchor/proof-waits idiom file by file; the layout proof's bare evaluates are the only sites where a
-poll is wrong in principle and the race is required.
+lane AND a gate slot, which is strictly worse. The two-argument count is zero and the sweep series
+is complete, so the anchor/proof-waits idiom has no map left to walk; the layout proof's bare
+evaluates are the only sites where a poll is wrong in principle and the race is required.
 
 ### Two rows found after the sweep: a frozen clock and a browser wait (`fleet/census-two`, 2026-10-31)
 
