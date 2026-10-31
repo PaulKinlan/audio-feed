@@ -402,6 +402,62 @@ the type-check), because the real budget it used to arm was never the mechanism.
 rows 2, 5 and 8: every fixed row asserts an order, an identity or a product-computed figure, and
 each touched file was re-run green with four CPU burners saturating the box.
 
+### Two rows found after the sweep: a frozen clock and a browser wait (`fleet/census-two`, 2026-10-31)
+
+Two more load-sensitive sites turned up in a later gate. They are recorded here so the next person
+does not rediscover them, and they are deliberately NOT folded into the arithmetic above: the
+79-site count (28 + 43 + 8) is the sweep's, and one of these has already left class (c) on its own
+lane while the other is not a real-clock budget row at all.
+
+1. `audio-feed-m182: an operator's fleet ceiling is reported as configured, and a default warns
+   once` (`tests/synthesis_global_budget_test.ts`) — **CONVERTED**, on `fleet/budget-clock` (tip
+   `3bdee4c8`, base `ea949d2e`, cleared but not landed when this was written; at `ea949d2e` the row
+   still calls `spend()` with no `clock`, so `main` still arms the 90 s budget). It seeds
+   `DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET + 1` = **501** episodes and decided the built-in-default
+   ceiling on the REAL invocation clock; `DEFAULT_MAX_INVOCATION_DURATION_MS` is 90 s
+   (`src/config.ts:57`), so the preflight break at `src/worker/synthesis.ts:2096-2108`
+   (`remaining < turn estimate + flush margin`) cut the sweep. On a loaded host **268 of 501 turns**
+   completed, `deferred` came back empty, the warn-once never fired, and the gate reported a bare
+   **Actual 268 / Expected 500** — a row that passed on a quiet box while testing nothing. It now
+   injects `controlledInvocationClock()` from `tests/fixtures/invocation_clock.ts` as
+   `clock: time.clock` and **never advances it**, so elapsed reads 0 for the whole sweep and the
+   ceiling at episode 501 is actually reachable.
+
+   **What it gained:** determinism — the ceiling, not the host, decides the last episode, and the
+   row can no longer pass without reaching it. **What it gave up:** with elapsed frozen at 0 the
+   preflight break (`src/worker/synthesis.ts:2096-2108`), the turn-estimate/flush-margin preflights
+   (`:891-897`, `:985-990`) and the post-yield break (`:2436-2450`) are **inert for this row**, so
+   cut-vs-ceiling interaction is **no longer covered here**. That coverage lives in the rows that
+   actually drive `advance()`: the `audio-feed-mv1d` and `audio-feed-avgc` rows in
+   `tests/synthesis_claim_lifecycle_test.ts` (`advance(60_000)` at :2004, :2052 and :2399) and the
+   beats in `tests/synthesis_upload_budget_test.ts` (:677-678, :762).
+
+   The legibility guard is `paid + deferred.length == 501`
+   (`tests/synthesis_global_budget_test.ts:239-243` at `3bdee4c8`), whose message names the cut and
+   its remedy — *"the sweep must consider every seeded episode for the ceiling to decide the last
+   one; fewer means the invocation budget cut the batch early (inject
+   tests/fixtures/invocation_clock.ts and never advance it) — not the ceiling under test"*. It
+   exists because the gate had reported a bare `Actual 268, Expected 500`: a number with no cause.
+   The guard makes "the sweep did not consider every seeded episode" its own named failure, so the
+   next reader is told to inject the clock rather than to widen the ceiling.
+
+2. `audio-feed-lvyit: anchor-positioning: native popover tooltip fades in and out over 150ms`
+   (`tests/anchor_positioning_test.ts`) — **NOT converted: a BROWSER/CDP wait hazard**, the browser
+   branch of the same family. It failed in the same gate after **3m35s** with
+   `Error: timed out waiting for: fade samples` thrown at `scripts/proof-cdp.ts:67`, from `until()`
+   called by `measure` (`tests/anchor_positioning_test.ts:730-733`) under `withChrome`
+   (`scripts/proof-helper.ts:793`, body awaited at `:801`). The waited-on condition is a real CDP
+   animation sample: the page script promotes the popover, pauses the opacity transition, samples it
+   at 0 / 75 / 150 ms and writes JSON into `#results`, and the row polls until that element has
+   text. So on a starved host it **times out waiting for samples instead of failing an assertion** —
+   every assertion in the row (`:747-761`) is downstream of the wait and never runs.
+
+   **The bound is FIXED, not derived:** `until(expr, desc, timeoutMs = 8000)` in
+   `scripts/proof-cdp.ts:61` hard-codes 8 s, derives nothing from any observed time, and this call
+   site passes no override — 8 s of polling for a page timeline of 30 ms plus two animation frames
+   plus two 150 ms samples. The fix is left to a separate bead: nothing here is changed, and the row
+   still carries its fixed 8 s bound.
+
 ## Widening verdict boundary
 
 These records are different gate workloads, not a same-workload before/after widening measurement.
