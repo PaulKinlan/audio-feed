@@ -124,7 +124,19 @@ const caseTtsRequest = {
 };
 
 // Case B — the whole worker batch, with the claim lease a real episode gets.
-const config: AppConfig = { port: 8000, publicBaseUrl: "https://audio.example.com" };
+// The per-attempt deadline is declared on the CONFIG, not only on the injected client: the worker
+// states each turn's own bound (`deps.perTurnTimeoutMs ?? ctx.config.ttsTimeoutMs ??
+// DEFAULT_TIMEOUT_MS`, src/worker/synthesis.ts), so a 200ms deadline set only on the client is
+// never reached — the turn runs to the invocation budget abort (~85s) and the batch classifies it
+// as a zero-progress yield instead of a named timeout. That is what made this proof red as a
+// "still alive 30s after the work finished" watchdog, when the work had in fact not finished.
+// Production reads the same `config.ttsTimeoutMs` on both sides; the harness was the one place
+// they disagreed.
+const config: AppConfig = {
+  port: 8000,
+  publicBaseUrl: "https://audio.example.com",
+  ttsTimeoutMs: 200,
+};
 const stores = memoryStores();
 await stores.metadata.putUser(makeUser({ id: "user-1", status: "approved" }));
 await stores.metadata.putSource(makeSource({ id: "inbox", userId: "user-1" }));
