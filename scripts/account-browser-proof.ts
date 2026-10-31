@@ -71,6 +71,19 @@ await runProof("account-browser-proof", async (checker) => {
         }
         return r.result.value;
       }
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expression: string, label: string, ms = 8000) {
         const end = Date.now() + ms;
         while (Date.now() < end) {
@@ -84,7 +97,11 @@ await runProof("account-browser-proof", async (checker) => {
       async function go(path: string) {
         await cdp("Page.navigate", { url: `${BASE}${path}` });
         await sleep(150);
-        await until(`document.readyState === "complete"`, `load ${path}`);
+        await until(
+          `document.readyState === "complete"`,
+          `load ${path}`,
+          UNTIL_HANG_BOUND_MS,
+        );
       }
       const status = () => js(`performance.getEntriesByType("navigation")[0]?.responseStatus ?? 0`);
       const path = () => js(`location.pathname + location.hash`);
@@ -218,7 +235,11 @@ await runProof("account-browser-proof", async (checker) => {
 
         // 1. Setup link -> register a passkey (bootstrap: ADMIN_TOKEN issues it).
         await go("/login#setup=" + (await issue("paul\u0040example.com")).split("#setup=")[1]);
-        await until(`!document.getElementById("createPasskey").disabled`, "setup options");
+        await until(
+          `!document.getElementById("createPasskey").disabled`,
+          "setup options",
+          UNTIL_HANG_BOUND_MS,
+        );
         recordCheck(
           "setup link: secret scrubbed from the address bar",
           !(await path()).includes("setup="),
@@ -226,7 +247,11 @@ await runProof("account-browser-proof", async (checker) => {
         );
         await sweep("04-login-setup");
         await js(`document.getElementById("createPasskey").click()`);
-        await until(`location.pathname === "/account"`, "account after register");
+        await until(
+          `location.pathname === "/account"`,
+          "account after register",
+          UNTIL_HANG_BOUND_MS,
+        );
         const creds = (await cdp("WebAuthn.getCredentials", { authenticatorId })).credentials;
         recordCheck(
           "register a passkey from the setup link",
@@ -239,6 +264,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `location.pathname === "/" && !!document.querySelector('.who .sign-in')`,
           "signed out",
+          UNTIL_HANG_BOUND_MS,
         );
         await go("/account");
         recordCheck(
@@ -249,7 +275,11 @@ await runProof("account-browser-proof", async (checker) => {
 
         // 3. Sign in.
         await js(`document.getElementById("signIn").click()`);
-        await until(`location.pathname === "/account"`, "account after sign in");
+        await until(
+          `location.pathname === "/account"`,
+          "account after sign in",
+          UNTIL_HANG_BOUND_MS,
+        );
         const whoText = await js(`document.querySelector(".who .name")?.textContent ?? ""`);
         recordCheck(
           "sign in with the passkey",
@@ -267,6 +297,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("profileFeedback").textContent === "Saved."`,
           "profile saved",
+          UNTIL_HANG_BOUND_MS,
         );
         await sleep(900);
         await go("/account");
@@ -286,6 +317,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("sendFeedback").textContent.startsWith("Queued")`,
           "send to audio",
+          UNTIL_HANG_BOUND_MS,
         );
         const sendFeedbackText = await js(
           `document.getElementById("sendFeedback")?.textContent ?? ""`,
@@ -317,11 +349,13 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("regenFeedback").textContent === "Queued for regeneration."`,
           "regenerate one episode",
+          UNTIL_HANG_BOUND_MS,
         );
         const firstConfirm = await js(`window.__confirms[0]`);
         await until(
           `document.getElementById("regenOutdated").textContent === "Regenerate outdated (1)"`,
           "count drops after the reload",
+          UNTIL_HANG_BOUND_MS,
         );
         await js(`
           window.__confirms = [${JSON.stringify(firstConfirm)}];
@@ -333,6 +367,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("regenFeedback").textContent.includes("queued for regeneration")`,
           "regenerate outdated",
+          UNTIL_HANG_BOUND_MS,
         );
         const regen = await js(
           `[window.__confirms, document.getElementById("regenFeedback").textContent]`,
@@ -356,6 +391,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("usersBody").children.length === 3`,
           "admin user list",
+          UNTIL_HANG_BOUND_MS,
         );
         recordCheck(
           "admin console loads subscriber data on session with token controls removed (audio-feed-0jp)",
@@ -371,6 +407,7 @@ await runProof("account-browser-proof", async (checker) => {
         await until(
           `document.getElementById("setupLinkUrl").value.includes("#setup=")`,
           "setup link from console",
+          UNTIL_HANG_BOUND_MS,
         );
         const ritaLink = await js(`document.getElementById("setupLinkUrl").value`);
         recordCheck(
@@ -381,11 +418,23 @@ await runProof("account-browser-proof", async (checker) => {
 
         // 6. A non-admin gets 403 at /admin.
         await js(`document.querySelector('form[action="/api/auth/logout"] button').click()`);
-        await until(`location.pathname === "/"`, "signed out again");
+        await until(
+          `location.pathname === "/"`,
+          "signed out again",
+          UNTIL_HANG_BOUND_MS,
+        );
         await go("/login#setup=" + ritaLink.split("#setup=")[1]);
-        await until(`!document.getElementById("createPasskey").disabled`, "rita setup options");
+        await until(
+          `!document.getElementById("createPasskey").disabled`,
+          "rita setup options",
+          UNTIL_HANG_BOUND_MS,
+        );
         await js(`document.getElementById("createPasskey").click()`);
-        await until(`location.pathname === "/account"`, "rita account");
+        await until(
+          `location.pathname === "/account"`,
+          "rita account",
+          UNTIL_HANG_BOUND_MS,
+        );
         await go("/admin");
         const code = await status();
         recordCheck(

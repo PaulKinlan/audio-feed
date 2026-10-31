@@ -82,6 +82,19 @@ await runProof("audio-feed-vpw", async (checker) => {
     checker.check(name, pass, detail);
   };
 
+  /**
+   * The two-argument until() calls below pass no timeout, so each inherits the private
+   * copy's 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+   * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+   * measured starved floor is the unit.
+   *
+   * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+   * bound: a page whose main thread never answers still fails, in two minutes rather
+   * than hanging until something outside the proof kills the lane - and it fails with a
+   * message naming what was asked and the budget it had.
+   */
+  const MEASURED_STARVED_POLL_MS = 8_000;
+  const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
   async function until(expr: string, desc: string, timeoutMs = 8000) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -164,7 +177,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // 1. Visit Home (/)
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "home loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "home loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const homeSpace4 = await js(
           `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
@@ -186,7 +203,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // 2. Visit Admin (/admin)
         await cdp("Page.navigate", { url: `${BASE}/admin` });
-        await until(`document.readyState === "complete"`, "admin loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "admin loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const adminSpace4 = await js(
           `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
@@ -208,7 +229,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // 3. Visit Listen Landing (/listen)
         await cdp("Page.navigate", { url: `${BASE}/listen` });
-        await until(`document.readyState === "complete"`, "listen landing loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "listen landing loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const landingSpace4 = await js(
           `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
@@ -230,7 +255,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // 4. Visit Web Player (/listen/:token)
         await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-        await until(`document.readyState === "complete"`, "player loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "player loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
 
         const playerSpace4 = await js(
           `getComputedStyle(document.documentElement).getPropertyValue("--space-4").trim()`,
@@ -269,7 +298,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // Mobile home
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "mobile home loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "mobile home loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         const homeOverflow = await js(
           `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
         );
@@ -277,7 +310,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // Mobile admin
         await cdp("Page.navigate", { url: `${BASE}/admin` });
-        await until(`document.readyState === "complete"`, "mobile admin loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "mobile admin loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         const adminOverflow = await js(
           `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
         );
@@ -285,7 +322,11 @@ await runProof("audio-feed-vpw", async (checker) => {
 
         // Mobile player
         await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-        await until(`document.readyState === "complete"`, "mobile player loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "mobile player loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         const playerOverflow = await js(
           `document.documentElement.scrollWidth > document.documentElement.clientWidth`,
         );
