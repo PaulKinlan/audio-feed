@@ -1,0 +1,16 @@
+{
+  "script": "scripts/listen-filter-browser-proof.ts",
+  "sha": "497476c99cb62cdac5f06906696b588385ac8cb4",
+  "bound": {
+    "ms": 120000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-10-31T21:58:05.311Z",
+  "endedAt": "2026-10-31T21:58:25.323Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-listen-filter-desktop.png": "sha256:99fe4493c21647987c3b790d688a5f1a32d80cf1d8b8476824498e0495f3bcab",
+    "02-listen-filter-mobile-390.png": "sha256:0fef404d45199a469f7d17b94a20f379a18746aca2eeff4bd43da84fe4d120ba"
+  }
+}
