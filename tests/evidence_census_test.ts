@@ -935,16 +935,8 @@ const KNOWN_UNRUN: Record<string, string> = {
     "real-browser home-player proof (withChrome) - not gate-safe",
   "listen-browser-proof.ts": "real-browser listen-page proof (withChrome) - not gate-safe",
   "listen-filter-browser-proof.ts": "real-browser listen-filter proof (withChrome) - not gate-safe",
-  "repro_0cmu_linger.ts":
-    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern, see the wzv9 executor in this directory) and then remove this entry",
-  "repro_0rmn_script_body_read.ts":
-    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern, see the wzv9 executor in this directory) and then remove this entry",
   "repro_b6nr_token_storage.ts":
     "drives the passkey token flow through a real Chrome (withChrome) - no headless substitute in the gate",
-  "repro_khk3_unbounded_budget.ts":
-    "cheap memory-only proof (in-process handler calls, no live network), NOT YET WIRED - wire it (executor-suite pattern) and then remove this entry",
-  "repro_m182_global_ceiling.ts":
-    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern) and then remove this entry",
   "repro_tts_brittleness_9yu8.ts":
     "drives live TTS through the external gemini proxy - a live network call, never gate-safe",
   "repro_tts_failure_bp6r.ts":
@@ -1066,7 +1058,7 @@ Deno.test(
     }
     assertEquals(
       Object.keys(KNOWN_UNRUN).length,
-      24,
+      20,
       "the known-unrun set is pinned; growing it is a decision, not an edit",
     );
 
