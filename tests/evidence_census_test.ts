@@ -952,8 +952,6 @@ const KNOWN_UNRUN: Record<string, string> = {
     "drives live TTS through the external gemini proxy - a live network call, never gate-safe",
   "repro_tts_failure_bp6r.ts":
     "drives live TTS failure through the external gemini proxy - a live network call, never gate-safe",
-  "repro_u2ve_rate_limit_ff.ts":
-    "by-hand deployment probe per its own header's Run line: drives the served app with TRUST_PROXY_HEADERS=1 and rewrites its committed evidence files on every run - wire it with the runAndRestore executor shape (tests/declared_proof_helpers.ts) before citing it as executed",
   "request-access-browser-proof.ts":
     "real-browser proof over CDP against the served app - not gate-safe",
   "spend-visibility-browser-proof.ts":
@@ -1130,7 +1128,11 @@ Deno.test(
     }
     assertEquals(
       Object.keys(KNOWN_UNRUN).length,
-      32,
+      // 31, not 32: fleet/u2ve-executor (1a6fc68b, landed as 9d9229f0) added
+      // tests/repro_u2ve_rate_limit_ff_test.ts, so repro_u2ve_rate_limit_ff.ts left this set in the
+      // same series as the suite that licences its removal (the shrink-only rule in practice).
+      // Growing the set is a decision, not an edit; shrinking it requires a test that runs the proof.
+      31,
       "the known-unrun set is pinned; growing it is a decision, not an edit",
     );
 
