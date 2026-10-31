@@ -159,27 +159,45 @@ export const RECORD_MAX_AGE_DAYS = 30;
  *    run.json per runnable declared dir (43 declared - 2 suite-owned = 41 such dirs). The seed
  *    advances INCREMENTALLY - the run path writes a record after every proof it actually runs -
  *    so a partial seed is honest progress and nothing else: a record exists only where a proof
- *    ran. Census at 912b310c (audio-feed-evidence-arming lane, 2026-10-31): 4 of 41 seeded
- *    (audio-feed-wzv9 exit 1 - REAL red at main, CheckFailureError from
- *    repro_wzv9_claim_forensics.ts:85; audio-feed-icl4 exit 1 - REAL red at main:
+ *    ran. Census at 265131c3 + the evidence-seed2 lane (2026-10-31): 7 of 41 seeded.
+ *    912b310c seeding lane: audio-feed-wzv9 exit 1 (REAL red at 912b310c, CheckFailureError
+ *    from repro_wzv9_claim_forensics.ts:85), audio-feed-icl4 exit 1 (REAL red at 912b310c:
  *    repro_icl4_nonok_body_read.ts's final assertion, case A's episode still "pending" with no
- *    failed entry and namesTheDeadline:false while case B passed (no stdout captured, so product
- *    vs environment is UNCLASSIFIED - triage: audio-feed-9d7l5);
- *    audio-feed-m182 and audio-feed-0rmn exit 0). 37 remain, nearly all browser proofs or
- *    live-network verifies that need the heavy slot - THAT IS THE BLOCKER ON ARMING: with 37
- *    dirs unseeded, the armed missing-record rule would exit-1 the tier's first run over any of
- *    them. A `--plan`-style mode writing declared-but-unrun records was weighed and REJECTED:
+ *    failed entry and namesTheDeadline:false while case B passed; triage was audio-feed-9d7l5),
+ *    audio-feed-m182 and audio-feed-0rmn exit 0. Those two reds were fixed by
+ *    fleet/red-fixtures (9d7l5) AFTER that seed, so their records still describe the red they
+ *    ran at - a record names its own commit, which is the point; re-run them to refresh it.
+ *    evidence-seed2 lane: audio-feed-khk3 exit 0 (2.0s), audio-feed-0cmu exit 0 (8.3s), and
+ *    audio-feed-u2ve exit 1 - see step 2.
+ *    The 34 that remain are ALL browser proofs (30, need Chrome) or live-network / paid TTS
+ *    verifies (4: 9vns, 9yu8, bp6r, u60a) - none can be seeded without the heavy slot and a
+ *    real provider call, and the cheap ones are exhausted (verified by reading every declared
+ *    script for withChrome / fetch / Deno.Command: exactly 7 runnable declared dirs are
+ *    non-browser and non-live). THAT IS THE BLOCKER ON ARMING: with 34 dirs unseeded, the armed
+ *    missing-record rule would exit-1 the tier's first run over any of them, and a heavy-slot
+ *    full seed is what has to happen first - not a cheaper way to write the same records.
+ *    A `--plan`-style mode writing declared-but-unrun records was weighed and REJECTED:
  *    the format must not be able to represent a run that did not happen. A complete-shaped
  *    record (exit 0, marker true, ISO stamps, current sha, on-disk artefact hashes) for a run
  *    that never happened would pass EVERY validator rule, so no status field is added and
  *    ABSENCE stays the only honest never-run marker. Arming waits for the real runs.
  * 2. JUDGE THE SEED BY READING THE RECORDS, not by the tier's exit code. `deno task evidence`
- *    exits non-zero on any red proof, and reds ALREADY EXIST in the seed: on Deno 2.9.7 a
- *    `deno eval` child that owns an aborted `AbortSignal.any` composite does not exit on its
- *    own, so docs/evidence/audio-feed-0cmu is expected to record exit 1 / marker false from its
- *    mechanism probe, and wzv9 + icl4 recorded exit 1 at 912b310c (step 1). Each is a fact for a
- *    judge to read before arming, never silence to skip; fixing any of them is a separate bead
- *    from arming this constant.
+ *    exits non-zero on any red proof, and reds ALREADY EXIST in the seed. audio-feed-u2ve
+ *    records exit 1 / marker false at 6fa4867c: all three `cf-connecting-ip`-only rotations
+ *    report evaded:true, which is NOT a key-selection regression - the rejected values land in
+ *    the ONE unaddressed bucket, and audio-feed-0t8el (e4924f19) gives that bucket a
+ *    deployment-sized quota of maxRequests * UNADDRESSED_QUOTA_MULTIPLIER (5 * 25), so 20
+ *    attempts cannot reach it. The proof's bound arithmetic predates 0t8el: a stale-assertion
+ *    triage, not a product bug, and NOT to be fixed by editing the proof.
+ *    audio-feed-u2ve's red also rewrote its committed demonstration repro.json; that was
+ *    restored byte-for-byte from the
+ *    base commit (this file's contract), so the dir pre-flights with RECORD TAMPERED until the
+ *    proof next runs green. wzv9 + icl4 recorded exit 1 at 912b310c (step 1). audio-feed-0cmu
+ *    was EXPECTED to record exit 1 from its mechanism probe on Deno 2.9.7 and recorded exit 0 /
+ *    marker true at 36f19e07 - the probe still records the runtime fact (compositeAfterAbort:
+ *    exitCode 137, exitedOnItsOwn false) under "Recorded, not asserted", and the assertions the
+ *    proof owns pass. Each is a fact for a judge to read before arming, never silence to skip;
+ *    fixing any of them is a separate bead from arming this constant.
  * 3. COMMIT THE SEED ON ITS OWN, then flip this constant in a SEPARATE commit whose body names
  *    that commit as the arming commit. The same commit arms the census row in
  *    tests/evidence_run_test.ts (it is otherwise gated on this constant) and turns the
