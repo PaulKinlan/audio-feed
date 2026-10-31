@@ -90,6 +90,13 @@
  * ran <dir> and wrote no record" and goes red (that guarantee is NEVER gated: it is the detector for
  * the exact "ran and wrote nothing" silence this bead exists to close).
  *
+ * WHAT AN ARTEFACT HASH PROVES (audio-feed-fufd0): each `artefacts` entry is the sha256 of the bytes
+ * on disk when the record was written, so it attests "this is the file on disk at record time" and
+ * detects a file edited afterwards - NOT that a re-run reproduces the file: audio-feed-icl4's
+ * repro.json embeds `capturedAt`, so its hash differs every run and still pre-flights clean (the
+ * record is rewritten from the same disk it describes), while audio-feed-wzv9's artefacts are stable.
+ * Canonicalising volatile fields before hashing is a separate decision, not what this tier does.
+ *
  * AMENDMENT 1 (Paul): the "no run.json => exit 1" rule must NOT be armed until the records exist.
  * It lives behind the single constant EVIDENCE_RECORDS_ENFORCED below. While it is false the run path
  * quietly seeds a record for any dir that lacks one ("a red wall nobody reads is how a rule gets
