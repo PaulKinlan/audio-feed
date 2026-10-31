@@ -1981,6 +1981,11 @@ async function runSynthesisBatchCore(
         // to every subscriber at once, and reading it per check means a tick that spends up to it
         // stops there rather than at the snapshot taken when the tick started.
         const globalToday = await metadata.getDailySynthesisCount(today);
+        // audio-feed-m182: GATHER/eligibility pass, not the spend gate. This runs before any episode
+        // is claimed or paid, so on a fresh day globalToday is 0 and the condition admits episodes
+        // up front; it only refuses here when the ceiling was already reached at gather time.
+        // The condition is textually identical to the spend gate's copy in the claim loop below —
+        // mutating this one alone leaves the fleet-ceiling rows green.
         if (globalToday >= globalBudget.limit) {
           reason = globalCeilingDeferReason(globalBudget, globalToday);
           if (globalBudget.source === "default" && !warnedGlobalCeiling) {
@@ -2067,6 +2072,10 @@ async function runSynthesisBatchCore(
       // to today's total. This is the check that stops the money; the gather pass only decides who
       // gets the batch.
       const globalToday = await metadata.getDailySynthesisCount(today);
+      // audio-feed-m182: the SPEND gate — the copy that actually defers. The count is re-read here
+      // after this tick's earlier episodes were paid, so this is the condition that defers episode
+      // 501 and reports the built-in default. Textually identical to the gather pass's copy in
+      // `isUserAuthorized` above, which only decides eligibility; the rows red only when this moves.
       if (globalToday >= globalBudget.limit) {
         const reason = globalCeilingDeferReason(globalBudget, globalToday);
         if (globalBudget.source === "default" && !warnedGlobalCeiling) {

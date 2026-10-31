@@ -404,57 +404,115 @@ each touched file was re-run green with four CPU burners saturating the box.
 
 ### Browser/CDP waits: unbounded `until()` polls and `js()` evaluates in the proof scripts (`fleet/cdp-census`, 2026-10-31)
 
-The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection is the
-BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait surface one gate red
-at a time. Measured directly on `origin/main` at `ea949d2e`:
+The unit census above is the tests-asserting-on-the-real-clock branch of the family; this subsection
+is the BROWSER branch, recorded so the next person does not rediscover the proof scripts' wait
+surface one gate red at a time. Measured directly on `origin/main` at `ea949d2e`:
 
-- **101 `until()` call sites pass only the two required arguments** (expression, description) and inherit the
-  8s default, spread over **28 files** under `scripts/`. Method: a balanced-paren scan of every `.ts` file in
-  `scripts/` counting top-level commas inside each `until(` argument list, with definitions and type
-  positions excluded — 75 other sites pass an explicit third argument and are not part of this count. An
-  earlier review measured 97 sites across 26 files; the delta is base drift as branches land, not a
-  disagreement about the shape.
+- **101 `until()` call sites pass only the two required arguments** (expression, description) and
+  inherit the 8s default, spread over **28 files** under `scripts/`. Method: a balanced-paren scan
+  of every `.ts` file in `scripts/` counting top-level commas inside each `until(` argument list,
+  with definitions and type positions excluded — 75 other sites pass an explicit third argument and
+  are not part of this count. An earlier review measured 97 sites across 26 files; the delta is base
+  drift as branches land, not a disagreement about the shape.
 - **The 8s default is re-declared 25 times.** `scripts/proof-cdp.ts:61` owns the shared harness copy
   (`until(expr, desc, timeoutMs = 8000)`), and 25 private copies live beside it: **14 default
-  `timeoutMs = 8000`** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-, request-access-,
-  playback-position-, spend-visibility-, voice-audition-, home-player-link- and listen-filter-browser-proof.ts,
-  verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts, verify_qz3x_confirm_dismiss_browser.ts —
-  this confirms the earlier count of 14), 7 default to 15s and 4 to 10s. There is no single file to fix: the
-  default itself is forked per script.
-- **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()` layout reads
-  (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five inline asserts/reads at
-  398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all still unbounded on `main`. The four
-  reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the remaining evaluates on `fleet/js-waits`
-  (`9921a815`, in progress); neither branch is merged into the base this census measured, so on `main` a
-  hung evaluate waits for the lane's killer, not for any timeout.
+  `timeoutMs = 8000`** (bootstrap-, bootstrap-refusal-, tokens-, bookmarklet-, account-,
+  request-access-, playback-position-, spend-visibility-, voice-audition-, home-player-link- and
+  listen-filter-browser-proof.ts, verify_dfbu_pagehide_browser.ts, verify_ieek_canonical_urls.ts,
+  verify_qz3x_confirm_dismiss_browser.ts — this confirms the earlier count of 14), 7 default to 15s
+  and 4 to 10s. There is no single file to fix: the default itself is forked per script.
+- **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()`
+  layout reads (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five
+  inline asserts/reads at 398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all still
+  unbounded on `main`. The four reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the
+  remaining evaluates on `fleet/js-waits` (`9921a815`, in progress); neither branch is merged into
+  the base this census measured, so on `main` a hung evaluate waits for the lane's killer, not for
+  any timeout.
 
 Two fixes exist and are the pattern to copy, not a complaint to file:
 
-- **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes an
-  explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS` (8_000), and `proof-cdp.ts`'s timeout error
-  now names the expression, deadline, elapsed time, poll count and last polled value, so a red says which
-  wait failed and whether the page ever got a slice.
+- **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes
+  an explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS` (8_000), and `proof-cdp.ts`'s
+  timeout error now names the expression, deadline, elapsed time, poll count and last polled value,
+  so a red says which wait failed and whether the page ever got a slice.
 - **`fleet/proof-waits` (`0ef5368f`)** — six `until` call sites in `listen-browser-proof.ts` and
   `tooltip-top-layer-browser-proof.ts`, one derived constant per file
   (`LOAD_AND_RENDER_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS`).
-- **`fleet/measure-waits` (`4cc6b4b3`)** is the variant for single reads: RACE the one evaluate against a
-  timer rather than polling it, because a poll would re-run the read and could report a box from a later
-  state than the call asked about.
+- **`fleet/measure-waits` (`4cc6b4b3`)** is the variant for single reads: RACE the one evaluate
+  against a timer rather than polling it, because a poll would re-run the read and could report a
+  box from a later state than the call asked about.
 
-The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured starved-poll
-floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under an eight-way
-saturated host (audio-feed-6gst1) — a HANG bound, never a latency promise about the page. One myth this
-census kills by measurement: the precedent sometimes cited, "`verify_main_l7m1_e2e.ts` runs 120 s", is
-FALSE — that file's local `until` defaults to `timeoutMs = 8000` (line 248) and the file contains no
-`120000` anywhere; even the fix branches' comments repeat the claim. The 8s default IS the measured floor,
-and the derived bound is 15× it.
+The derivation, stated honestly wherever the constant appears: **120 s = 15 × the measured
+starved-poll floor** — an 8s `document.readyState` wait was observed to legitimately exceed 8s under
+an eight-way saturated host (audio-feed-6gst1) — a HANG bound, never a latency promise about the
+page. One myth this census kills by measurement: the precedent sometimes cited,
+"`verify_main_l7m1_e2e.ts` runs 120 s", is FALSE — that file's local `until` defaults to
+`timeoutMs = 8000` (line 248) and the file contains no `120000` anywhere; even the fix branches'
+comments repeat the claim. The 8s default IS the measured floor, and the derived bound is 15× it.
 
-Failure modes, kept explicit: an inherited 8s default that fires early on a loaded host reports a HEALTHY
-page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A missing bound on a
-bare `js()` evaluate has no ceiling at all and hangs until the lane is killed — it consumes a LANE, not a
-gate slot, which is strictly worse. The 101-site count is the map for extending the anchor/proof-waits idiom
-file by file; the layout proof's bare evaluates are the only sites where a poll is wrong in principle and
-the race is required.
+Failure modes, kept explicit: an inherited 8s default that fires early on a loaded host reports a
+HEALTHY page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A
+missing bound on a bare `js()` evaluate has no ceiling at all and hangs until the lane is killed —
+it consumes a LANE, not a gate slot, which is strictly worse. The 101-site count is the map for
+extending the anchor/proof-waits idiom file by file; the layout proof's bare evaluates are the only
+sites where a poll is wrong in principle and the race is required.
+
+### Two rows found after the sweep: a frozen clock and a browser wait (`fleet/census-two`, 2026-10-31)
+
+Two more load-sensitive sites turned up in a later gate. They are recorded here so the next person
+does not rediscover them, and they are deliberately NOT folded into the arithmetic above: the
+79-site count (28 + 43 + 8) is the sweep's, and one of these has already left class (c) on its own
+lane while the other is not a real-clock budget row at all.
+
+1. `audio-feed-m182: an operator's fleet ceiling is reported as configured, and a default warns
+   once`
+   (`tests/synthesis_global_budget_test.ts`) — **CONVERTED**, on `fleet/budget-clock` (tip
+   `3bdee4c8`, base `ea949d2e`, cleared but not landed when this was written; at `ea949d2e` the row
+   still calls `spend()` with no `clock`, so `main` still arms the 90 s budget). It seeds
+   `DEFAULT_GLOBAL_DAILY_EPISODE_BUDGET + 1` = **501** episodes and decided the built-in-default
+   ceiling on the REAL invocation clock; `DEFAULT_MAX_INVOCATION_DURATION_MS` is 90 s
+   (`src/config.ts:57`), so the preflight break at `src/worker/synthesis.ts:2096-2108`
+   (`remaining < turn estimate + flush margin`) cut the sweep. On a loaded host **268 of 501 turns**
+   completed, `deferred` came back empty, the warn-once never fired, and the gate reported a bare
+   **Actual 268 / Expected 500** — a row that passed on a quiet box while testing nothing. It now
+   injects `controlledInvocationClock()` from `tests/fixtures/invocation_clock.ts` as
+   `clock: time.clock` and **never advances it**, so elapsed reads 0 for the whole sweep and the
+   ceiling at episode 501 is actually reachable.
+
+   **What it gained:** determinism — the ceiling, not the host, decides the last episode, and the
+   row can no longer pass without reaching it. **What it gave up:** with elapsed frozen at 0 the
+   preflight break (`src/worker/synthesis.ts:2096-2108`), the turn-estimate/flush-margin preflights
+   (`:891-897`, `:985-990`) and the post-yield break (`:2436-2450`) are **inert for this row**, so
+   cut-vs-ceiling interaction is **no longer covered here**. That coverage lives in the rows that
+   actually drive `advance()`: the `audio-feed-mv1d` and `audio-feed-avgc` rows in
+   `tests/synthesis_claim_lifecycle_test.ts` (`advance(60_000)` at :2004, :2052 and :2399) and the
+   beats in `tests/synthesis_upload_budget_test.ts` (:677-678, :762).
+
+   The legibility guard is `paid + deferred.length == 501`
+   (`tests/synthesis_global_budget_test.ts:239-243` at `3bdee4c8`), whose message names the cut and
+   its remedy — _"the sweep must consider every seeded episode for the ceiling to decide the last
+   one; fewer means the invocation budget cut the batch early (inject
+   tests/fixtures/invocation_clock.ts and never advance it) — not the ceiling under test"_. It
+   exists because the gate had reported a bare `Actual 268, Expected 500`: a number with no cause.
+   The guard makes "the sweep did not consider every seeded episode" its own named failure, so the
+   next reader is told to inject the clock rather than to widen the ceiling.
+
+2. `audio-feed-lvyit: anchor-positioning: native popover tooltip fades in and out over 150ms`
+   (`tests/anchor_positioning_test.ts`) — **NOT converted: a BROWSER/CDP wait hazard**, the browser
+   branch of the same family. It failed in the same gate after **3m35s** with
+   `Error: timed out waiting for: fade samples` thrown at `scripts/proof-cdp.ts:67`, from `until()`
+   called by `measure` (`tests/anchor_positioning_test.ts:730-733`) under `withChrome`
+   (`scripts/proof-helper.ts:793`, body awaited at `:801`). The waited-on condition is a real CDP
+   animation sample: the page script promotes the popover, pauses the opacity transition, samples it
+   at 0 / 75 / 150 ms and writes JSON into `#results`, and the row polls until that element has
+   text. So on a starved host it **times out waiting for samples instead of failing an assertion** —
+   every assertion in the row (`:747-761`) is downstream of the wait and never runs.
+
+   **The bound is FIXED, not derived:** `until(expr, desc, timeoutMs = 8000)` in
+   `scripts/proof-cdp.ts:61` hard-codes 8 s, derives nothing from any observed time, and this call
+   site passes no override — 8 s of polling for a page timeline of 30 ms plus two animation frames
+   plus two 150 ms samples. The fix is left to a separate bead: nothing here is changed, and the row
+   still carries its fixed 8 s bound.
 
 ## Widening verdict boundary
 
