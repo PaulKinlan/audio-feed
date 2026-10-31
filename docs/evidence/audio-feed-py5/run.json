@@ -1,0 +1,15 @@
+{
+  "script": "scripts/listen-browser-proof.ts",
+  "sha": "713a5525270f824a93a59a916d3681034fcfa2e8",
+  "bound": {
+    "ms": 300000,
+    "provenance": "default"
+  },
+  "startedAt": "2026-10-31T22:59:10.072Z",
+  "endedAt": "2026-10-31T22:59:54.371Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-listen-harness-5-episodes.png": "sha256:8e48ef507336394e3bf390778475e42507004ee83adae1218be43db2bef80019"
+  }
+}
