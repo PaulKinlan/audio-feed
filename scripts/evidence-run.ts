@@ -36,7 +36,14 @@
  * their own committed artefacts under docs/evidence, so the tier is a WRITER and must not share a
  * worktree with anything else that writes - a gate run in the same tree while a proof rewrites its
  * PNGs fails for reasons that have nothing to do with the diff. Run it in its own worktree (or one no
- * gate is using) and restore the artefacts afterwards. It is also bounded twice over, per proof and in
+ * gate is using) and restore the artefacts afterwards. The restore is the OPERATOR's job after a
+ * RED run, never the tier's: a red still rewrites the artefacts it writes, so it can overwrite a
+ * committed demonstration with a pending/empty placeholder (the 2026-10-31 seed overwrote
+ * audio-feed-icl4's demonstrated repro.json of 2026-10-10 with a status:"pending" placeholder;
+ * restored by hand, triage on audio-feed-9d7l5). The record is left exactly as written - it
+ * describes the run that happened - so a restored dir pre-flights with a RECORD TAMPERED hash
+ * mismatch until the proof next runs green and rewrites record + artefact together.
+ * It is also bounded twice over, per proof and in
  * total, which is what lets it run in the fleet's single heavy slot: `--timeout <s>` bounds each proof
  * and the invocation itself is wrapped in a total bound.
  *
@@ -154,7 +161,10 @@ export const RECORD_MAX_AGE_DAYS = 30;
  *    so a partial seed is honest progress and nothing else: a record exists only where a proof
  *    ran. Census at 912b310c (audio-feed-evidence-arming lane, 2026-10-31): 4 of 41 seeded
  *    (audio-feed-wzv9 exit 1 - REAL red at main, CheckFailureError from
- *    repro_wzv9_claim_forensics.ts:85; audio-feed-icl4 exit 1 - REAL red at main;
+ *    repro_wzv9_claim_forensics.ts:85; audio-feed-icl4 exit 1 - REAL red at main:
+ *    repro_icl4_nonok_body_read.ts's final assertion, case A's episode still "pending" with no
+ *    failed entry and namesTheDeadline:false while case B passed (no stdout captured, so product
+ *    vs environment is UNCLASSIFIED - triage: audio-feed-9d7l5);
  *    audio-feed-m182 and audio-feed-0rmn exit 0). 37 remain, nearly all browser proofs or
  *    live-network verifies that need the heavy slot - THAT IS THE BLOCKER ON ARMING: with 37
  *    dirs unseeded, the armed missing-record rule would exit-1 the tier's first run over any of
