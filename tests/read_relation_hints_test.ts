@@ -591,6 +591,134 @@ Deno.test("audio-feed-snww: a runtime-assembled name is REPORTED, and still cann
   );
 });
 
+Deno.test("audio-feed-97qyp: a bare filename composed onto a runtime base is a FRAGMENT, not an unresolved path", async (t) => {
+  // THE FAILURE THIS PINS. scripts/evidence-run.ts writes one record per evidence directory
+  // (`RECORD_FILE = "run.json"`) and reads it back with `join(dirAbs, RECORD_FILE)`. Read as a repo path, the
+  // bare value `run.json` names nothing at the root, so it landed in `unresolved` - and one unresolved hint
+  // disables the inert class for EVERY change (audio-feed-q0ky), costing the full suite on every docs-only
+  // edit. The same read spelled `` `${dirAbs}/run.json` `` was already a fragment, so the verdict depended on
+  // the spelling of one read. The steps below pin the repaired side AND the boundaries, because "a bare name
+  // is never fatal" would be a global loosening and is not what was fixed.
+  await t.step(
+    "join(dirAbs, RECORD_FILE) reports the name as a fragment, and in no blocking bucket",
+    async () => {
+      await withTempTree({
+        "tests/record_test.ts": [
+          'const RECORD_FILE = "run.json";',
+          "export async function readRecord(dirAbs: string) {",
+          "  return await Deno.readTextFile(join(dirAbs, RECORD_FILE));",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/record_test.ts"]);
+        assertEquals(
+          report.unattributed,
+          ["run.json"],
+          `a filename composed onto a runtime base is a fragment: ${JSON.stringify(report)}`,
+        );
+        assertEquals(
+          report.unresolved,
+          [],
+          "and it must not disable the inert class for every change",
+        );
+        // Still REPORTED (audio-feed-q0ky): the fragment is inert-neutral, not silent.
+        assert(
+          !couldHideInertRead("run.json"),
+          "a fragment with no directory part cannot hide an inert read",
+        );
+        assertEquals(
+          couldBeTheChangedFile("run.json", ["run.json"]),
+          true,
+          "but a change to that exact name still blocks, so the fragment is not exempt",
+        );
+      });
+    },
+  );
+
+  await t.step(
+    "the SAME bare constant read with no base stays an unresolved path (mutation control)",
+    async () => {
+      // Without the base there is nothing to append the name to: it IS the read argument, `toRepoPath`'s
+      // CWD rule places it, and a name that is not in the tree is a read the detector could not confirm. This
+      // step is what makes the fix a classification of the composed shape rather than an exemption for bare
+      // names.
+      await withTempTree({
+        "tests/record_test.ts": [
+          'const RECORD_FILE = "run.json";',
+          "export async function readRecord() {",
+          "  return await Deno.readTextFile(RECORD_FILE);",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/record_test.ts"]);
+        assertEquals(
+          report.unresolved,
+          ["run.json"],
+          `an uncomposed bare read is still a read the detector must resolve: ${
+            JSON.stringify(report)
+          }`,
+        );
+        assertEquals(report.unattributed, [], "and it is not softened into a fragment");
+      });
+    },
+  );
+
+  await t.step(
+    "a constant WITH a directory part stays an unresolved path when composed",
+    async () => {
+      // The fragment rule is for names that cannot be placed, not for values that name a place. A constant
+      // holding `docs/evidence/README.md` states where in the repo it lives, so a miss is a real miss and stays
+      // loud even when it arrives through the same `join`.
+      await withTempTree({
+        "tests/record_test.ts": [
+          'const README = "docs/evidence/README.md";',
+          "export async function readIt(dirAbs: string) {",
+          "  return await Deno.readTextFile(join(dirAbs, README));",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/record_test.ts"]);
+        assertEquals(
+          report.unresolved,
+          ["docs/evidence/README.md"],
+          `a placeable constant that names nothing is still an unresolved hint: ${
+            JSON.stringify(report)
+          }`,
+        );
+      });
+    },
+  );
+
+  await t.step(
+    "and a bare constant that DOES exist keeps its relation",
+    async () => {
+      // The mirror error: the fix must not cost a real read its relation. `join(dirAbs, NAME)` with the name
+      // present is a proven relation today and stays one.
+      await withTempTree({
+        "record.json": "{}\n",
+        "tests/record_test.ts": [
+          'const RECORD_FILE = "record.json";',
+          "export async function readRecord(dirAbs: string) {",
+          "  return await Deno.readTextFile(join(dirAbs, RECORD_FILE));",
+          "}",
+          "",
+        ].join("\n"),
+      }, async (root) => {
+        const report = await deriveReadRelationReport(root, ["tests/record_test.ts"]);
+        assertEquals(
+          report.relations.get("record.json"),
+          ["tests/record_test.ts"],
+          `a composed name that EXISTS is still a relation: ${JSON.stringify(report)}`,
+        );
+        assertEquals(report.unresolved, [], "and nothing is reported missing");
+      });
+    },
+  );
+});
+
 Deno.test("audio-feed-snww: a LITERAL command name and its flags stay silent - the bucket is for reads", async () => {
   // The boundary that keeps the bucket readable, and the reason it is collected in the tail-candidate loop
   // rather than everywhere: `Deno.Command` is a read call in this detector, and its literals are a command
