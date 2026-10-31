@@ -987,7 +987,9 @@ const KNOWN_UNRUN: Record<string, string> = {
  *
  * WHY A RELATION AND NOT A KNOWN_UNRUN PIN: these proofs RUN today; pinning them as known-unrun
  * would be a lie about the one fact this census exists to keep true. Each entry is checked against
- * the tree it claims, in four directions, so the mapping cannot silently rot:
+ * the tree it claims, in five directions, so the mapping cannot silently rot:
+ *   0. the proof it names IS DECLARED by an evidence README (`- Script:`), which the four checks
+ *      below all presume - an undeclared script has no evidence for a harness to run,
  *   1. the harness suite still EXISTS,
  *   2. it still NAMES the proof path in CODE (referencesProofInCode, the audio-feed-377of rule:
  *      comments stripped, quoted path) - delete or dequote the reference and this reds,
@@ -1136,10 +1138,29 @@ Deno.test(
       "the known-unrun set is pinned; growing it is a decision, not an edit",
     );
 
+    // THE TWO PIN SETS MUST NOT OVERLAP. KNOWN_UNRUN says "no test executes this"; EXECUTED_WITHOUT_SPAWN
+    // says "a test executes this, through a harness the spawn relation cannot name". An entry in both is a
+    // contradiction - and it is a silent one, because each loop above checks its own set and neither asks
+    // whether the other claims the same script, so the census would pass while asserting both. Same
+    // basenames on both sides (`scripts/` is composed at runtime), so the keys compare directly.
+    assertEquals(
+      Object.keys(KNOWN_UNRUN).filter((name) => Object.hasOwn(EXECUTED_WITHOUT_SPAWN, name)),
+      [],
+      "a proof cannot be both known-unrun and executed-without-spawn: whichever is true, drop the other entry",
+    );
+
     // THE EXECUTED-WITHOUT-SPAWN RELATION MUST NOT OUTLIVE ITS FACTS: the same rule as the two
-    // sets above, checked in the four directions documented on EXECUTED_WITHOUT_SPAWN.
+    // sets above, checked in the five directions documented on EXECUTED_WITHOUT_SPAWN.
     for (const [name, entry] of Object.entries(EXECUTED_WITHOUT_SPAWN)) {
       const script = `scripts/${name}`;
+      // Direction 0, the one every other check here presumes: the proof the entry names is DECLARED by an
+      // evidence README. An undeclared script is not evidence, so "a harness runs this proof" would be a
+      // claim about a proof the tree does not present - and the four directions below would all still
+      // pass, because they never ask whether the script is declared at all.
+      assert(
+        declared.has(script),
+        `executed-without-spawn entry ${script} is not DECLARED by any evidence README's \`- Script:\` line - undeclared proof scripts have no evidence to run, so remove the entry or declare the script`,
+      );
       const harnessSpawns = suitesObservingExact(script, report.executedRelations);
       assertEquals(
         harnessSpawns,

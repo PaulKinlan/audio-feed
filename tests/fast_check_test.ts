@@ -33,6 +33,7 @@ import {
   stripCapturedTestOutput,
   suiteMarker,
   testSuiteSummary,
+  unmappedMarker,
   withoutRouteAuditFixture,
 } from "../scripts/fast-check.ts";
 
@@ -721,6 +722,37 @@ Deno.test("a failing run never claims to have passed (dywc)", () => {
   const line = suiteMarker("ran", ["tests/a_test.ts"]);
   assert(!/passed/.test(line), `a failed run must not claim a pass: ${line}`);
   assert(line.startsWith("fast-gate: ran:"), line);
+});
+
+Deno.test("the coverage marker that names nothing is never emitted (p14sc)", () => {
+  // PROBLEM: an empty `unmapped:` marker is a WARNING-SHAPED line that makes no claim. The fleet's banner
+  // says "COVERAGE WARNING: 0 unmapped changed file(s):" whenever a candidate suite was omitted
+  // (bin/fleet-check: `num_unmapped -gt 0 || num_omitted -gt 0`), so a marker this gate emitted with an
+  // empty list reads as a coverage warning about nothing - and the channel people need for a genuinely
+  // uncovered change is the one that gets ignored.
+  assertEquals(unmappedMarker([]), null, "an empty list must produce NO line at all");
+
+  // The non-empty case is unchanged: the host parses it token by token
+  // (remote/check-coverage.py: `m_unm.group(1).split()` into `explicit_unmapped`).
+  const reporter = /(?:fast-gate:.*?)?unmapped:\s*(.*)/;
+  const line = unmappedMarker(["README.md"]);
+  assert(line !== null, "a non-empty list must still be marked");
+  const match = reporter.exec(line);
+  assert(match !== null, line);
+  assertEquals(match[1]!.split(/\s+/), ["README.md"]);
+
+  // SOURCE-LEVEL, deliberately (same reason as the `passed:`/`ran:` emission tests): the guard bites only
+  // if it is on the emission, so an inline `console.log(suiteMarker("unmapped", ...))` coming back reds.
+  const src = Deno.readTextFileSync(new URL("../scripts/fast-check.ts", import.meta.url));
+  assertEquals(
+    (src.match(/console\.log\(suiteMarker\("unmapped"/g) ?? []).length,
+    0,
+    "the emission must go through unmappedMarker, which emits nothing for an empty list",
+  );
+  assert(
+    src.includes("unmappedMarker(changed ?? [])"),
+    "and the empty-selection path is the caller",
+  );
 });
 
 Deno.test("the gate actually emits the marker on both success paths (dywc)", async () => {
