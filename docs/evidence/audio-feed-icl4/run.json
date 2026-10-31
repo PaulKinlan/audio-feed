@@ -1,15 +1,15 @@
 {
   "script": "scripts/repro_icl4_nonok_body_read.ts",
-  "sha": "912b310c9fc48dc59df8bf6270e3cbffbd7541f6",
+  "sha": "3ca313e67e0936fedd2197cdeb78be31ab834256",
   "bound": {
     "ms": 300000,
     "provenance": "default"
   },
-  "startedAt": "2026-10-31T16:19:29.627Z",
-  "endedAt": "2026-10-31T16:20:55.551Z",
-  "exit": 1,
-  "marker": false,
+  "startedAt": "2026-10-31T17:31:26.307Z",
+  "endedAt": "2026-10-31T17:31:26.927Z",
+  "exit": 0,
+  "marker": true,
   "artefacts": {
-    "repro.json": "sha256:2813c3743cf0f839974deadd8379772f1ddf07895b9ecdc50dc0b099ac2e3984"
+    "repro.json": "sha256:1e6a15a6caab56d65e071e74d658a49a64a1a7076bf2ad3ea97fac32ace275b6"
   }
 }
