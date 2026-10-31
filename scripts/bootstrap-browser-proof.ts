@@ -76,6 +76,19 @@ await runProof("audio-feed-8eh", async (checker) => {
         return r.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -87,7 +100,7 @@ await runProof("audio-feed-8eh", async (checker) => {
 
       async function go(path: string) {
         await cdp("Page.navigate", { url: `${BASE}${path}` });
-        await until(`document.readyState === "complete"`, `load ${path}`);
+        await until(`document.readyState === "complete"`, `load ${path}`, UNTIL_HANG_BOUND_MS);
         await sleep(100);
       }
 
@@ -115,7 +128,7 @@ await runProof("audio-feed-8eh", async (checker) => {
 
         // 2. Click through to /login?next=%2Fadmin#bootstrap
         await js(`document.querySelector('a[href="/login?next=%2Fadmin#bootstrap"]').click()`);
-        await until(`location.pathname === "/login"`, "login navigation");
+        await until(`location.pathname === "/login"`, "login navigation", UNTIL_HANG_BOUND_MS);
         check(
           "#bootstrap fragment auto-opens Admin bootstrap details",
           await js(`document.getElementById("bootstrapDetails")?.open === true`),
@@ -131,6 +144,7 @@ await runProof("audio-feed-8eh", async (checker) => {
         await until(
           `document.getElementById("bootstrapFeedback").dataset.tone === "error"`,
           "error on invalid token",
+          UNTIL_HANG_BOUND_MS,
         );
         check(
           "invalid admin token shows error feedback",
@@ -159,6 +173,7 @@ await runProof("audio-feed-8eh", async (checker) => {
         await until(
           `document.getElementById("usersBody")?.children?.length > 0`,
           "console subscribers loaded",
+          UNTIL_HANG_BOUND_MS,
         );
         const adminEmail = await js(
           `document.querySelector(".signin-card strong")?.textContent || ""`,

@@ -140,6 +140,19 @@ await runProof("audio-feed-kvnw", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 15_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -178,7 +191,11 @@ await runProof("audio-feed-kvnw", async (checker) => {
 
         // 1. Visit /account
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "account page loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "account page loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         const currentPath = String(await js(`window.location.pathname`));
         check(
           "the browser is ON /account with the seeded session (not redirected to /login)",
@@ -239,6 +256,7 @@ await runProof("audio-feed-kvnw", async (checker) => {
         await until(
           `document.querySelector("details.bookmarklet-code")?.open === true`,
           "details open",
+          UNTIL_HANG_BOUND_MS,
         );
 
         // 5. Assert the snippet text EQUALS the anchor href (the copy fallback must install the same script)
@@ -342,11 +360,12 @@ await runProof("audio-feed-kvnw", async (checker) => {
         // The rule that un-clips the snippet is SHARED (src/routes/shell.ts UTILITY_CSS), so the front door's
         // disclosure is checked here too.
         await cdp("Page.navigate", { url: `${BASE}/` });
-        await until(`document.readyState === "complete"`, "front door loaded");
+        await until(`document.readyState === "complete"`, "front door loaded", UNTIL_HANG_BOUND_MS);
         await js(`document.querySelector("details.bookmarklet-code summary")?.click()`);
         await until(
           `document.querySelector("details.bookmarklet-code")?.open === true`,
           "front-door disclosure open",
+          UNTIL_HANG_BOUND_MS,
         );
         const frontBox = (await js(
           `(() => { const p = document.querySelector(".bookmarklet-snippet");

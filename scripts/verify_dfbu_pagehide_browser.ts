@@ -79,6 +79,19 @@ try {
         return r.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -102,6 +115,7 @@ try {
       await until(
         `document.querySelectorAll("#episodes .episode").length === 5`,
         "page load 5 rows",
+        UNTIL_HANG_BOUND_MS,
       );
 
       // 2. Play episode 1 and set currentTime to 35s
@@ -163,6 +177,7 @@ try {
       await until(
         `document.querySelectorAll("#episodes .episode").length === 5`,
         "bfcache restored",
+        UNTIL_HANG_BOUND_MS,
       );
       await sleep(300);
 
@@ -196,7 +211,11 @@ try {
 
       // 8. Reload page and check UI resume affordance
       await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-      await until(`document.querySelectorAll("#episodes .episode").length === 5`, "page reloaded");
+      await until(
+        `document.querySelectorAll("#episodes .episode").length === 5`,
+        "page reloaded",
+        UNTIL_HANG_BOUND_MS,
+      );
 
       const row1 = `document.querySelector('li.episode[data-episode-id="ep-1"]')`;
       const badgeText = await js(`${row1}?.querySelector(".ep-resume-badge")?.textContent`);

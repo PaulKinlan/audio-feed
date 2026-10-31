@@ -92,6 +92,19 @@ await runProof("audio-feed-3xq", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 15_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -123,7 +136,7 @@ await runProof("audio-feed-3xq", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: BASE });
-        await until(`document.readyState === "complete"`, "home page loaded");
+        await until(`document.readyState === "complete"`, "home page loaded", UNTIL_HANG_BOUND_MS);
 
         // audio-feed-dc2y: compiled once per distinct suffix instead of once per captured CDP event
         const assetPatterns = new Map<string, RegExp>();
@@ -213,10 +226,15 @@ await runProof("audio-feed-3xq", async (checker) => {
           mobile: true,
         });
         await cdp("Page.navigate", { url: BASE });
-        await until(`document.readyState === "complete"`, "home page reloaded at 390x844");
+        await until(
+          `document.readyState === "complete"`,
+          "home page reloaded at 390x844",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.getElementById("url") !== null`,
           "home form present at 390x844",
+          UNTIL_HANG_BOUND_MS,
         );
         check(
           "no console errors/warnings/exceptions at 390x844",
