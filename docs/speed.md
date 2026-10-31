@@ -423,12 +423,15 @@ at a time. Measured directly on `origin/main` at `ea949d2e`:
   default itself is forked per script.
 - **`scripts/account-mobile-layout-proof.ts` evaluates with no bound at all.** Four `measure()` layout reads
   (call sites at lines 390, 401, 422, 483) and seven `await js(...)` call sites (five inline asserts/reads at
-  398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all still unbounded on `main`. The four
-  reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the remaining evaluates on `fleet/js-waits`
-  (`9921a815`, in progress); neither branch is merged into the base this census measured, so on `main` a
-  hung evaluate waits for the lane's killer, not for any timeout.
+  398, 399, 450, 467, 493 plus the two helpers' own evaluates) — all unbounded on `main` at the base this
+  census measured (`ea949d2e`). The four reads are bounded on `fleet/measure-waits` (`4cc6b4b3`) and the
+  remaining evaluates on `fleet/js-waits` (`9921a815`, in progress); neither branch is merged into the base
+  this census measured, so on `main` a hung evaluate waits for the lane's killer, not for any timeout.
+  (Landed after, checked 2026-10-31: `fleet/measure-waits` has since merged into `origin/main` as
+  `9210dd55`, so the four reads are bounded on `main` today; `fleet/js-waits` (`9921a815`) has not, and
+  the bare evaluates still wait as described.)
 
-Two fixes exist and are the pattern to copy, not a complaint to file:
+Three fixes exist and are the pattern to copy, not a complaint to file:
 
 - **`fleet/anchor-wait` (`d0a546ca`)** — one test row's `until` (the native popover fade row) passes an
   explicit `FADE_SAMPLES_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS` (8_000), and `proof-cdp.ts`'s timeout error
@@ -451,8 +454,9 @@ and the derived bound is 15× it.
 
 Failure modes, kept explicit: an inherited 8s default that fires early on a loaded host reports a HEALTHY
 page as broken and reds the row — a slow failure, costing a gate slot and a re-run. A missing bound on a
-bare `js()` evaluate has no ceiling at all and hangs until the lane is killed — it consumes a LANE, not a
-gate slot, which is strictly worse. The 101-site count is the map for extending the anchor/proof-waits idiom
+bare `js()` evaluate has no per-wait ceiling: it runs until the lane's killer or the gate's own
+`CHECK_FAST_TIMEOUT` (the 1800 s ceiling in the section above) fires, so it burns a lane AND a gate slot,
+which is strictly worse. The 101-site count is the map for extending the anchor/proof-waits idiom
 file by file; the layout proof's bare evaluates are the only sites where a poll is wrong in principle and
 the race is required.
 
