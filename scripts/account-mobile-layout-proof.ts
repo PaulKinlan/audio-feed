@@ -309,21 +309,65 @@ await runProof("audio-feed-lma7", async (checker) => {
         };
       })()`;
 
-      async function measure() {
-        return (await js(MEASURE)) as {
-          viewportWidth: number;
-          clientWidth: number;
-          documentScrollWidth: number;
-          scrollXAfterScrollTo20: number;
-          wrapPresent: boolean;
-          panels: Array<{
-            label: string;
-            insideWrap: boolean;
-            left: number;
-            right: number;
-            width: number;
-          }>;
-        };
+      /**
+       * HANG BOUNDS, NOT LATENCY BOUNDS. `MEASURE` is a synchronous layout read -
+       * `getBoundingClientRect()` over the page's `section.panel`s, `closest("div.wrap")` containment
+       * and `scrollWidth` after a real `scrollTo(20, 0)` - so a healthy answer costs one forced reflow,
+       * tens of ms, and nothing inside it waits on the network or on a timer. What can take arbitrarily
+       * long is the EVALUATE being scheduled at all: `Runtime.evaluate` queues behind whatever the
+       * page's main thread is doing, and this host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * 120s = 15 x that 8s floor, and ~4000x a real 30ms reflow. A page whose main thread never
+       * answers still fails, in two minutes rather than hanging until something outside the proof
+       * kills the lane - and it fails with a message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const MEASURE_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
+
+      /**
+       * The bound is applied HERE rather than by polling `MEASURE`: a poll would re-run the read and
+       * could report a box from a later state than the call asked about, and this file's `js()` has no
+       * bound of its own. Racing the evaluate leaves the abandoned promise pending; the throw fails
+       * the proof and `withChrome` closes the browser in its teardown, so nothing waits on it.
+       */
+      async function measure(timeoutMs = MEASURE_HANG_BOUND_MS) {
+        let timer: ReturnType<typeof setTimeout> | 0 = 0;
+        const expired = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `MeasureTimeout: the MEASURE evaluate (section.panel boxes via getBoundingClientRect, ` +
+                    `div.wrap containment, scrollWidth after scrollTo(20, 0)) got no answer in ` +
+                    `${timeoutMs}ms - the hang bound in force (the default is 15 x the ` +
+                    `${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor), not a latency bound, ` +
+                    `and MEASURE is a single synchronous layout read with no poll behind it, so the ` +
+                    `page's main thread never answered it.`,
+                ),
+              ),
+            timeoutMs,
+          );
+        });
+        try {
+          return (await Promise.race([js(MEASURE), expired])) as {
+            viewportWidth: number;
+            clientWidth: number;
+            documentScrollWidth: number;
+            scrollXAfterScrollTo20: number;
+            wrapPresent: boolean;
+            panels: Array<{
+              label: string;
+              insideWrap: boolean;
+              left: number;
+              right: number;
+              width: number;
+            }>;
+          };
+        } finally {
+          clearTimeout(timer);
+        }
       }
 
       async function screenshot(name: string, clip: Record<string, number>) {
@@ -387,7 +431,7 @@ await runProof("audio-feed-lma7", async (checker) => {
         await viewport(390, 844);
         await cdp("Page.navigate", { url: `file://${controlFile}` });
         await until(`document.readyState === "complete"`, "control document");
-        const control = await measure();
+        const control = await measure(MEASURE_HANG_BOUND_MS);
         const escaped = control.panels.filter((p) => !p.insideWrap);
 
         // ---------------------------------------------------------------- 2/3. THE FIXED PAGE
@@ -398,7 +442,7 @@ await runProof("audio-feed-lma7", async (checker) => {
           String(await js(`window.location.pathname`)) === "/account",
           `pathname: ${String(await js(`window.location.pathname`))}`,
         );
-        const fixedAt390 = await measure();
+        const fixedAt390 = await measure(MEASURE_HANG_BOUND_MS);
         const servedEscaped = fixedAt390.panels.filter((p) => !p.insideWrap);
 
         check(
@@ -419,7 +463,7 @@ await runProof("audio-feed-lma7", async (checker) => {
           await viewport(width, height);
           await cdp("Page.navigate", { url: `${BASE}/account` });
           await until(`document.readyState === "complete"`, `served /account at ${width}px`);
-          const at = await measure();
+          const at = await measure(MEASURE_HANG_BOUND_MS);
           check(
             `at ${width}x${height} the page column exists, so a panel has somewhere to be contained BY`,
             at.wrapPresent && at.panels.length >= 6,
@@ -480,7 +524,7 @@ await runProof("audio-feed-lma7", async (checker) => {
         await viewport(1280, 900);
         await cdp("Page.navigate", { url: `${BASE}/account` });
         await until(`document.readyState === "complete"`, "desktop /account");
-        const desktop = await measure();
+        const desktop = await measure(MEASURE_HANG_BOUND_MS);
         check(
           "at 1280x900 the panels sit inside the 58rem column, not the full window",
           desktop.panels.every((p) => p.insideWrap) &&
