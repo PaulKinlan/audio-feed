@@ -177,14 +177,20 @@ async function* walkTs(dir: string): AsyncIterable<string> {
 }
 
 /** Minimal glob over one tree: `**` crosses directories, `*` and `?` stay within one segment. Only what the CLI needs — no dependency added. */
+function globToRegExp(pattern: string): RegExp {
+  let source = "";
+  for (const [i, part] of pattern.split("**").entries()) {
+    if (i > 0) source += ".*";
+    source += part.replace(
+      /[.+^${}()|[\]\\*?]/g,
+      (ch) => ch === "*" ? "[^/]*" : ch === "?" ? "[^/]" : `\\${ch}`,
+    );
+  }
+  return new RegExp(`^${source}$`);
+}
+
 async function* expandGlob(pattern: string, rootDir: string): AsyncIterable<string> {
-  const re = new RegExp(
-    `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, "\u0000")
-      .replace(/\*/g, "[^/]*")
-      .replace(/\?/g, "[^/]")
-      .replace(/\u0000/g, ".*")}$`,
-  );
+  const re = globToRegExp(pattern);
   for await (const path of walkTs(rootDir)) {
     if (re.test(path)) yield path;
   }
@@ -197,7 +203,9 @@ async function main(): Promise<void> {
   if (only2) {
     const [callee, ...paths] = rest;
     if (!callee || paths.length === 0) {
-      console.error("usage: deno run --allow-read scripts/call-arity.ts --only-2arg <callee> <file|dir|glob>...");
+      console.error(
+        "usage: deno run --allow-read scripts/call-arity.ts --only-2arg <callee> <file|dir|glob>...",
+      );
       Deno.exit(2);
     }
     const files = await resolveTargets(paths);
