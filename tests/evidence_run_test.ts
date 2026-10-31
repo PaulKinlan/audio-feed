@@ -1280,12 +1280,31 @@ async function gitRun(
   };
 }
 
+/** Writes a deterministic artefact, so its sha256 is stable across runs. */
+const DETERMINISTIC_PROOF =
+  `const dir = new URL("../docs/evidence/h22ml-scratch/", import.meta.url);\n` +
+  `await Deno.writeTextFile(new URL("repro.json", dir), JSON.stringify({ n: 1 }));\n` +
+  `console.log("PASS trivial proof");\n`;
+
 /**
- * A scratch evidence tree with one trivial proof that writes a DETERMINISTIC artefact (stable
- * sha256 across runs), declared in a README, inside a real one-commit git repository that also
- * carries an orphan `ghost` commit (a valid commit that is NOT an ancestor of HEAD).
+ * Writes an artefact that embeds the wall clock, the shape audio-feed-icl4's repro.json has
+ * (`capturedAt`): the bytes, and therefore the sha256, differ on every run.
  */
-async function makeRecordScratch(): Promise<{
+const VOLATILE_PROOF =
+  `const dir = new URL("../docs/evidence/h22ml-scratch/", import.meta.url);\n` +
+  `await Deno.writeTextFile(\n` +
+  `  new URL("repro.json", dir),\n` +
+  `  JSON.stringify({ capturedAt: new Date().toISOString(), n: 1 }, null, 2) + "\\n",\n` +
+  `);\n` +
+  `console.log("PASS volatile proof");\n`;
+
+/**
+ * A scratch evidence tree with one trivial proof declared in a README, inside a real one-commit git
+ * repository that also carries an orphan `ghost` commit (a valid commit that is NOT an ancestor of
+ * HEAD). The proof writes a DETERMINISTIC artefact (stable sha256 across runs) unless a caller passes
+ * `proofSource`, which is how audio-feed-fufd0 runs the same tree with a volatile artefact.
+ */
+async function makeRecordScratch(proofSource: string = DETERMINISTIC_PROOF): Promise<{
   root: string;
   dirAbs: string;
   ghostSha: string;
@@ -1295,12 +1314,7 @@ async function makeRecordScratch(): Promise<{
   const dirAbs = join(root, "docs", "evidence", "h22ml-scratch");
   await Deno.mkdir(dirAbs, { recursive: true });
   await Deno.mkdir(join(root, "scripts"), { recursive: true });
-  await Deno.writeTextFile(
-    join(root, "scripts", "trivial-proof.ts"),
-    `const dir = new URL("../docs/evidence/h22ml-scratch/", import.meta.url);\n` +
-      `await Deno.writeTextFile(new URL("repro.json", dir), JSON.stringify({ n: 1 }));\n` +
-      `console.log("PASS trivial proof");\n`,
-  );
+  await Deno.writeTextFile(join(root, "scripts", "trivial-proof.ts"), proofSource);
   await Deno.writeTextFile(
     join(dirAbs, "README.md"),
     "- Script: scripts/trivial-proof.ts\n- Asserts: the trivial proof passes\n",
@@ -1338,6 +1352,14 @@ async function makeRecordScratch(): Promise<{
 function expectOk(read: Awaited<ReturnType<typeof readRunRecord>>): RunRecord {
   if (read.state !== "ok") throw new Error(`record must parse; got state ${read.state}`);
   return read.record;
+}
+
+/**
+ * Reads an artefact back from a scratch evidence dir. Both bases are parameters (runtime values), so
+ * the read-relation scan sees a fragment rather than an unresolved repo path (audio-feed-97qyp).
+ */
+async function readArtefact(dirAbs: string, name: string): Promise<string> {
+  return await Deno.readTextFile(join(dirAbs, name));
 }
 
 async function mutateRecord(dirAbs: string, patch: Partial<RunRecord>): Promise<void> {
@@ -1462,6 +1484,67 @@ Deno.test(
         0,
         "the run rewrites a parseable record",
       );
+    } finally {
+      await h.cleanup();
+    }
+  },
+);
+
+/**
+ * audio-feed-fufd0 - WHAT AN ARTEFACT HASH PROVES, PINNED SO NOBODY OVER-READS IT. `hashEvidenceDir`
+ * hashes the bytes on disk at record time, so the record's `artefacts` map is a DISK-COINCIDENCE
+ * CHECK, not a reproducibility claim. audio-feed-icl4's repro.json embeds `capturedAt`, so its
+ * recorded hash changes every run; audio-feed-wzv9's artefacts happen to be stable. Both readings are
+ * asserted here through the real CLI, so neither can be assumed - and a canonical-projection hash
+ * (timestamps normalised before hashing) would RED this test's first row, which is the point: it is a
+ * change of meaning, not a refactor.
+ */
+Deno.test(
+  "an artefact hash attests the bytes on disk at record time, not reproducibility (audio-feed-fufd0)",
+  async () => {
+    const h = await makeRecordScratch(VOLATILE_PROOF);
+    try {
+      // ROW 1 (GREEN): two real runs of a volatile proof. The bytes and the recorded hash both
+      // differ, and BOTH pre-flights are clean: the tier never notices that run 2 did not reproduce
+      // run 1's file, because the record is rewritten from the same disk it describes. That is the
+      // limit this row pins - it becomes a failure the day the hash claims more than coincidence.
+      const first = await runTier(h.root);
+      assertEquals(first.code, 0, `first run must pass: ${first.stdout}\n${first.stderr}`);
+      const firstBytes = await readArtefact(h.dirAbs, "repro.json");
+      const firstRecord = expectOk(await readRunRecord(h.dirAbs));
+      const firstHash = firstRecord.artefacts["repro.json"]!;
+      assertStringIncludes(firstBytes, "capturedAt", "the artefact must embed the volatile field");
+
+      const second = await runTier(h.root);
+      assertEquals(second.code, 0, `second run must pre-flight clean: ${second.stdout}`);
+      assertEquals(
+        second.stdout.includes("record incident"),
+        false,
+        "a volatile artefact is not an incident: the record matched the disk before the run",
+      );
+      const secondBytes = await readArtefact(h.dirAbs, "repro.json");
+      const secondRecord = expectOk(await readRunRecord(h.dirAbs));
+      const secondHash = secondRecord.artefacts["repro.json"]!;
+      assert(firstBytes !== secondBytes, "the artefact bytes must differ between the two runs");
+      assert(
+        firstHash !== secondHash,
+        "the recorded hash must change with them - it cannot attest that a re-run reproduces the file",
+      );
+      // The one thing the hash DOES attest still holds: it equals the hash of the bytes on disk.
+      const onDisk = await hashEvidenceDir(h.dirAbs);
+      assertEquals(Object.entries(onDisk), [["repro.json", secondHash]]);
+
+      // ROW 2 (RED): put the FIRST run's bytes back without touching the record - a file edited
+      // after the run. This is the only divergence the hash detects.
+      await Deno.writeTextFile(join(h.dirAbs, "repro.json"), firstBytes);
+      const edited = await runTier(h.root);
+      assertEquals(edited.code, 1, `a file edited after the run must exit 1: ${edited.stdout}`);
+      assertStringIncludes(
+        edited.stdout,
+        "RECORD TAMPERED: docs/evidence/h22ml-scratch artefact repro.json hash mismatch",
+      );
+      assertStringIncludes(edited.stdout, `recorded ${secondHash}`);
+      assertStringIncludes(edited.stdout, "1 record incident(s)");
     } finally {
       await h.cleanup();
     }
