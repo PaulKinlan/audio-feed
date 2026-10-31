@@ -405,6 +405,13 @@ export async function collect(options: Options): Promise<{
  * ILL-FORMED suite, a quoted path after a never-closed `/*` therefore still links. It is stated
  * rather than assumed away, and it requires BOTH an unbalanced comment AND a quoted path inside it.
  * Also not treated as linkage: a path assembled from fragments (`"../scripts/" + "proof.ts"`).
+ *
+ * DECLARED HOLE, RULED RATHER THAN CLOSED: an UNUSED quoted literal still buys ownership -
+ * `const unused = "scripts/outbox-proof.ts";` links. Accepted because this rule strictly dominates
+ * mention-anywhere (faking now needs CODE-SHAPED text instead of a passive comment), an unused const
+ * also trips deno lint no-unused-vars, and closing it properly needs import/AST parsing, which is
+ * disproportionate for a text tier. So this RAISES THE COST OF FAKING; it does not close the class -
+ * do not read it as a guarantee that a linked suite actually runs the proof.
  */
 export function referencesProofInCode(suiteText: string, declared: string): boolean {
   const { stripped } = stripComments(suiteText);
