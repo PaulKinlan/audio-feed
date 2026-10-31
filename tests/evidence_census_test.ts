@@ -894,8 +894,76 @@ const INTENTIONALLY_UNREGISTERED: Record<string, string> = {
     "HISTORICAL per its own header (audio-feed-byh4j): no suite executes or reads this script, so it is NOT evidence of current behaviour (audio-feed-opqvh); docs/evidence/audio-feed-s2pi no longer declares it and the live coverage of those error shapes is tests/observability_api_test.ts; re-derive before citing it",
 };
 
+/**
+ * KNOWN_UNRUN — declared proof scripts that NO test executes, pinned by EXACT SET with a one-line
+ * reason each. INTENTIONALLY_UNREGISTERED above proves every proof script is DECLARED; this set
+ * closes the audio-feed-u9e7s gap that declaration alone leaves open: the fast gate derives its
+ * selection from what test sources literally mention, so a declared script no test mentions is an
+ * unmapped file — the COVERAGE WARNING the fleet reporter prints and nobody reads. Derived from
+ * the tree itself: each declared script's source was scanned for what it needs to run — the
+ * real-Chrome harness (`withChrome`, exported by the proof-helper), a live external fetch target,
+ * or nothing but wiring — and every entry names its blocker.
+ *
+ * Entries carry BASENAMES ONLY, composed with `scripts/` at runtime, deliberately: a literal
+ * scripts/<name>.ts in THIS file would make the census an observer of every pinned script and
+ * shift the coverage relations the subset pins assert (the same composed-path rule the runtime
+ * evidence fixtures at the top of this file follow).
+ *
+ * THE SET MAY ONLY SHRINK: removing an entry requires a test that runs the script — wiring is the
+ * remedy, never re-typing the reason. A pinned-unrun proof can still ROT: nothing executes it, so
+ * its demonstration can silently stop holding until someone wires or re-derives it. That residual
+ * risk is accepted per entry and discharged only by removal.
+ */
+const KNOWN_UNRUN: Record<string, string> = {
+  "account-browser-proof.ts":
+    "real-browser acceptance proof - drives the served app in a real Chrome (withChrome), which the gate does not have",
+  "account-mobile-layout-proof.ts":
+    "real-browser layout proof at a mobile viewport - needs a real Chrome (withChrome), which the gate does not have",
+  "admin-retry-browser-proof.ts":
+    "real-browser acceptance proof (withChrome) against the served app - not gate-safe",
+  "bookmarklet-browser-proof.ts":
+    "installs and clicks a bookmarklet in a real Chrome (withChrome) - not gate-safe",
+  "bootstrap-browser-proof.ts":
+    "real-browser bootstrap acceptance proof (withChrome) - not gate-safe",
+  "bootstrap-refusal-browser-proof.ts":
+    "real-browser refusal-path proof (withChrome) - not gate-safe",
+  "csp-nonce-browser-proof.ts":
+    "asserts CSP nonces as served to a real Chrome (withChrome) - not gate-safe",
+  "failure-diagnostics-browser-proof.ts":
+    "real-browser failure-diagnostics proof (withChrome) - not gate-safe",
+  "home-player-link-browser-proof.ts":
+    "real-browser home-player proof (withChrome) - not gate-safe",
+  "listen-browser-proof.ts": "real-browser listen-page proof (withChrome) - not gate-safe",
+  "listen-filter-browser-proof.ts": "real-browser listen-filter proof (withChrome) - not gate-safe",
+  "repro_0cmu_linger.ts":
+    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern, see the wzv9 executor in this directory) and then remove this entry",
+  "repro_0rmn_script_body_read.ts":
+    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern, see the wzv9 executor in this directory) and then remove this entry",
+  "repro_b6nr_token_storage.ts":
+    "drives the passkey token flow through a real Chrome (withChrome) - no headless substitute in the gate",
+  "repro_khk3_unbounded_budget.ts":
+    "cheap memory-only proof (in-process handler calls, no live network), NOT YET WIRED - wire it (executor-suite pattern) and then remove this entry",
+  "repro_m182_global_ceiling.ts":
+    "cheap memory-only proof, NOT YET WIRED into a suite - wire it (executor-suite pattern) and then remove this entry",
+  "repro_tts_brittleness_9yu8.ts":
+    "drives live TTS through the external gemini proxy - a live network call, never gate-safe",
+  "repro_tts_failure_bp6r.ts":
+    "drives live TTS failure through the external gemini proxy - a live network call, never gate-safe",
+  "tokens-browser-proof.ts": "real-browser tokens-page proof (withChrome) - not gate-safe",
+  "verify_3asd_bookmarklet_browser.ts":
+    "bookmarklet verification in a real Chrome (withChrome) - not gate-safe",
+  "verify_dfbu_pagehide_browser.ts":
+    "exercises the pagehide lifecycle, which only a real Chrome (withChrome) fires - not gate-safe",
+  "verify_ieek_canonical_urls.ts":
+    "canonical-URL verification in a real Chrome (withChrome) - not gate-safe",
+  "verify_kvnw_account_bookmarklet_browser.ts":
+    "account bookmarklet verification in a real Chrome (withChrome) - not gate-safe",
+  "voice-audition-browser-proof.ts":
+    "real-browser voice-audition proof (withChrome) - not gate-safe",
+};
+
 Deno.test(
-  "unregistered-proof census: every scripts/*-proof.ts, scripts/verify_*.ts and scripts/repro_*.ts is declared by an evidence README or pinned as intentionally-unregistered",
+  "unregistered-proof census: every scripts/*-proof.ts, scripts/verify_*.ts and scripts/repro_*.ts is declared by an evidence README or pinned as intentionally-unregistered, and every declared script is exercised by a test or pinned as known-unrun",
   async () => {
     const root = new URL("..", import.meta.url).pathname;
 
@@ -957,6 +1025,72 @@ Deno.test(
       Object.keys(INTENTIONALLY_UNREGISTERED).length,
       10,
       "the intentionally-unregistered set is pinned; growing it is a decision, not an edit",
+    );
+
+    // EXERCISED-OR-PINNED: the checks so far prove every proof script is DECLARED; they do not
+    // prove any test runs a declared script. This closes exactly the audio-feed-u9e7s gap: the
+    // coverage selector reads test SOURCE TEXT, so a declared script no test source mentions is an
+    // unmapped file, and here it is a failing row with its own remedy instead of a warning.
+    // "Exercised" means the script path appears LITERALLY in some tests/**/*.ts source — a test
+    // that names or runs it — the same bar the selector applies.
+    const testSources: string[] = [];
+    const walkTestSources = async (dir: string): Promise<void> => {
+      for await (const entry of Deno.readDir(dir)) {
+        const child = `${dir}/${entry.name}`;
+        if (entry.isDirectory) await walkTestSources(child);
+        else if (entry.isFile && entry.name.endsWith(".ts")) {
+          testSources.push(await Deno.readTextFile(child));
+        }
+      }
+    };
+    await walkTestSources(`${root}/tests`);
+    const exercisedIn = testSources.join("\n");
+
+    // THE PIN SET MUST NOT OUTLIVE ITS FACTS (same rule as INTENTIONALLY_UNREGISTERED): an entry
+    // whose script is no longer declared, or which a test now exercises, is a claim about a tree
+    // that no longer exists and reds here. Removal is the only legitimate change, and removing an
+    // entry requires a test that runs the script — that is the shrink-only rule in practice.
+    for (const [name, reason] of Object.entries(KNOWN_UNRUN)) {
+      assert(
+        reason.trim().length > 0,
+        `known-unrun entry ${name} must carry a reason`,
+      );
+      assert(
+        declared.has(`scripts/${name}`),
+        `stale known-unrun pin: scripts/${name} is no longer declared by any evidence README - remove the entry`,
+      );
+      assert(
+        !exercisedIn.includes(`scripts/${name}`),
+        `known-unrun pin is now false: scripts/${name} is exercised by a test - remove the entry (the set only shrinks)`,
+      );
+    }
+    assertEquals(
+      Object.keys(KNOWN_UNRUN).length,
+      24,
+      "the known-unrun set is pinned; growing it is a decision, not an edit",
+    );
+
+    const unexercised = [...declared].filter((s) =>
+      !exercisedIn.includes(s) &&
+      !Object.hasOwn(KNOWN_UNRUN, s.slice("scripts/".length))
+    );
+    assertEquals(
+      unexercised,
+      [],
+      `declared proof script(s) that NO TEST EXERCISES and KNOWN_UNRUN does not pin: ` +
+        `${unexercised.join(", ")}. For each one: add a test that runs it - a suite whose own ` +
+        `source contains the script path as a literal (that is what the coverage selector reads) - ` +
+        `or add its basename to KNOWN_UNRUN in tests/evidence_census_test.ts with a one-line ` +
+        `reason. A declared proof no test runs and no pin names is exactly the unmapped-file ` +
+        `COVERAGE WARNING this row turns into a failing row.`,
+    );
+
+    // POSITIVE CONTROL for the exercised relation: the corpus must be real or every exclusion
+    // above passes vacuously - a meaningful share of declared scripts must be test-exercised.
+    const exercisedCount = [...declared].filter((s) => exercisedIn.includes(s)).length;
+    assert(
+      exercisedCount >= 10,
+      `expected a real exercised corpus, got ${exercisedCount}`,
     );
 
     // POSITIVE CONTROLS: the walk found a real corpus on both sides, or every exclusion above
