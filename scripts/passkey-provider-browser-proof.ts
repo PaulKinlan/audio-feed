@@ -128,6 +128,19 @@ await runProof("audio-feed-25t", async (checker) => {
         return res.result?.value;
       }
 
+      /**
+       * The two-argument until() calls below pass no explicit budget, so each inherits this
+       * private copy's default. This host has MEASURED a bare `readyState === "complete"`
+       * evaluate legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1).
+       * That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc = expr, timeout = 10_000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
@@ -157,10 +170,11 @@ await runProof("audio-feed-25t", async (checker) => {
 
       // 1. Visit /account
       await cdp("Page.navigate", { url: `${BASE}/account` });
-      await until(`document.readyState === "complete"`, "account page loaded");
+      await until(`document.readyState === "complete"`, "account page loaded", UNTIL_HANG_BOUND_MS);
       await until(
         `document.querySelectorAll("[aria-labelledby='passkeys-h'] .rows li").length === 3`,
         "3 passkeys rendered",
+        UNTIL_HANG_BOUND_MS,
       );
 
       const passkeysText = String(
