@@ -1447,6 +1447,54 @@ function toRepoPath(
   return normalisePath(path);
 }
 
+/**
+ * True when the occurrence of a name at `offset` in `text` is an argument of a `join()`/`resolve()` call AFTER
+ * its first argument - the shape in which a binding's value is a SEGMENT of a path, not a path:
+ * `join(dirAbs, RECORD_FILE)` with `const RECORD_FILE = "run.json"`.
+ *
+ * THE MEASUREMENT THIS ANSWERS (audio-feed-97qyp). `toRepoPath` places a bare relative path against the process
+ * CWD, which is the repo root for both gates. That is correct for a literal an author wrote as the WHOLE read
+ * argument (`Deno.readTextFile("deno.json")`) and WRONG for a filename the code appends to a base it can only
+ * compute at run time. Measured on a temp tree, the SAME read got two different verdicts from its spelling:
+ * `` `${dirAbs}/run.json` `` was reported as a fragment, while `join(dirAbs, RECORD_FILE)` reported `run.json` as
+ * an UNRESOLVED repo path - and one unresolved hint disables the inert class for every change (audio-feed-q0ky).
+ * On the real tree that turned the per-directory record the evidence tier WRITES (scripts/evidence-run.ts,
+ * RECORD_FILE) into a full-suite tax on every docs-only edit.
+ *
+ * The audit has no write model, so "the code creates this file" is not a fact it can hold. What it does hold is
+ * the fragment class (`unattributed`), and a filename composed onto a runtime base is a fragment whichever way
+ * the composition is spelled. This function recognises only the `join`/`resolve` spelling; ANY OTHER shape stays
+ * on the loud path and is still reported as unresolved, so the boundary is safe in the direction that matters:
+ * the unrecognised case is reported, never dropped.
+ */
+function isJoinedSegment(text: string, offset: number): boolean {
+  let depth = 0;
+  let open = -1;
+  for (let i = offset - 1; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      if (depth === 0) {
+        open = i;
+        break;
+      }
+      depth--;
+    }
+  }
+  if (open < 0) return false;
+  if (!/\b(?:path\.)?(?:join|resolve)\s*$/.test(text.slice(0, open))) return false;
+  // A comma at depth 0 between the open paren and the name means the name is NOT the first argument, so its
+  // value is appended to a base and cannot be placed in the tree by itself.
+  depth = 0;
+  for (let i = open + 1; i < offset; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0) return true;
+  }
+  return false;
+}
+
 /** Collapse `.` and `..` segments; null when the path escapes the repo root. */
 function normalisePath(path: string): string | null {
   const parts: string[] = [];
@@ -2079,6 +2127,18 @@ export async function deriveReadRelationReport(
               } else {
                 outOfRepoHints.add(name);
               }
+            } else if (
+              // audio-feed-97qyp: a BARE filename held in a constant and appended to a runtime base is a
+              // SEGMENT of a path, not a path - the same fragment the template spelling of this read already
+              // reports. It is still reported (audio-feed-q0ky), in the bucket that is inert-neutral and blocks
+              // only when the changed file could be this name. A value with a directory part is a placeable repo
+              // path and keeps the loud `unresolved` verdict when it names nothing.
+              !resolvedValue.includes("/") && isJoinedSegment(scanText, identifier.index ?? 0)
+            ) {
+              tails.push(resolvedValue);
+              // An EXECUTE call also keeps its class: a spawn's dependency is a ledger fact (audio-feed-q6ecj),
+              // and the fragment rule must not silently drop it.
+              if (isExecuteCall) executed.push(resolvedValue);
             } else {
               (isExecuteCall ? executed : resolved).push(resolvedValue);
             }
