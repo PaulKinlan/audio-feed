@@ -35,6 +35,32 @@ import {
 import { connectCdp } from "./proof-cdp.ts";
 import { quantiseEvidencePng } from "./evidence-png.ts";
 
+/**
+ * Wait bound for every `until` in this proof, DERIVED rather than left at the 8s default
+ * (same class of fix as fleet/anchor-wait's fade row, audio-feed-ev6wj).
+ *
+ * What the three waits actually wait for, and how long that can legitimately take:
+ * - `document.readyState === "complete"`: the harness-served player page finishing its HTML
+ *   parse plus the listen.js module load, all on localhost - tens of ms nominal.
+ * - episode rows rendered: boot()'s async prefix (a CacheStorage open + key scan, no
+ *   network) before a synchronous render() of the server-seeded episodes - a few ms.
+ * - share dialog open: the click handler reaches showModal() SYNCHRONOUSLY once
+ *   navigator.share is stubbed out (this proof stubs it), so ~0ms once the click task runs.
+ * The page was never what could take 8s; nominal page work is tens of milliseconds in total.
+ *
+ * What CAN take 8s is the poll itself: `until` evaluates over a CDP round-trip, and on a
+ * loaded host the navigation, the first evaluate and every later poll queue behind other
+ * work. This repo has MEASURED that stretch: under eight-way CPU saturation a bare
+ * `document.readyState === "complete"` poll legitimately exceeded 8s (audio-feed-6gst1),
+ * which is why verify_main_l7m1_e2e.ts's copy of `until` runs with 120s.
+ *
+ * 120s = 15x that measured starved-poll floor, and >1000x this page's tens-of-ms timeline.
+ * It is a HANG bound, not a latency bound: a page that never opens the dialog still fails,
+ * in two minutes instead of eight seconds.
+ */
+const MEASURED_STARVED_POLL_MS = 8_000;
+const LOAD_AND_RENDER_WAIT_MS = 15 * MEASURED_STARVED_POLL_MS;
+
 const OUT = new URL("../docs/evidence/audio-feed-tyu77/", import.meta.url).pathname;
 
 await Deno.mkdir(OUT, { recursive: true });
@@ -67,10 +93,15 @@ await runProof("audio-feed-tyu77", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/listen/${TOKEN}` });
-        await until(`document.readyState === "complete"`, "load player page");
+        await until(
+          `document.readyState === "complete"`,
+          "load player page",
+          LOAD_AND_RENDER_WAIT_MS,
+        );
         await until(
           `document.querySelectorAll("#episodes .episode").length > 0`,
           "episode rows rendered",
+          LOAD_AND_RENDER_WAIT_MS,
         );
 
         // Force the in-page dialog path: the share button prefers navigator.share when
@@ -81,7 +112,11 @@ await runProof("audio-feed-tyu77", async (checker) => {
         await js(
           `document.querySelector("#episodes .episode button[data-action='share']")?.click()`,
         );
-        await until(`document.getElementById("shareDialog")?.open === true`, "share dialog open");
+        await until(
+          `document.getElementById("shareDialog")?.open === true`,
+          "share dialog open",
+          LOAD_AND_RENDER_WAIT_MS,
+        );
         check(
           "clicking an episode's share button opens #shareDialog modally",
           await js(
