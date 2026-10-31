@@ -291,6 +291,19 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
         }
         return r.result?.value;
       }
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits the private
+       * copy's 15s default - still far below what a starved host can need. This host has
+       * MEASURED a bare `readyState === "complete"` evaluate legitimately exceeding 8s under
+       * eight-way CPU saturation (audio-feed-6gst1). That measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 15_000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -301,7 +314,11 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       }
       async function go(path: string) {
         await cdp("Page.navigate", { url: `${BASE}${path}` });
-        await until(`document.readyState === "complete"`, `load ${path}`);
+        await until(
+          `document.readyState === "complete"`,
+          `load ${path}`,
+          UNTIL_HANG_BOUND_MS,
+        );
       }
       /** Fill the real file input through CDP, then submit the real form. */
       async function uploadVia(path: string) {
@@ -361,10 +378,22 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       const setupSecret = String(setupUrl).split("#setup=")[1] ?? "";
       if (!setupSecret) throw new Error("setup link carried no #setup= secret");
       await go("/login#setup=" + setupSecret);
-      await until(`document.getElementById("createPasskey")?.disabled === false`, "setup options");
+      await until(
+        `document.getElementById("createPasskey")?.disabled === false`,
+        "setup options",
+        UNTIL_HANG_BOUND_MS,
+      );
       await js(`document.getElementById("createPasskey").click()`);
-      await until(`location.pathname === "/account"`, "signed in on /account");
-      await until(`document.getElementById("uploadFile") !== null`, "upload form on /account");
+      await until(
+        `location.pathname === "/account"`,
+        "signed in on /account",
+        UNTIL_HANG_BOUND_MS,
+      );
+      await until(
+        `document.getElementById("uploadFile") !== null`,
+        "upload form on /account",
+        UNTIL_HANG_BOUND_MS,
+      );
       cookieCache = null;
 
       console.log("[d82rv] signed in, listing episodes…");
@@ -376,7 +405,11 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
         const started = Date.now();
         try {
           await go("/account");
-          await until(`document.getElementById("uploadFile") !== null`, `upload form (${type})`);
+          await until(
+            `document.getElementById("uploadFile") !== null`,
+            `upload form (${type})`,
+            UNTIL_HANG_BOUND_MS,
+          );
           await uploadVia(paths[type]!);
           // 60s, not the 15s default: a cold pdf-parse/readability import can
           // exceed 15s on a first upload, and a type that fails must fail on
@@ -483,7 +516,11 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
 
       // ---- condition 2: the legacy .doc is rejected in the UI ----------------------
       await go("/account");
-      await until(`document.getElementById("uploadFile") !== null`, "upload form (.doc)");
+      await until(
+        `document.getElementById("uploadFile") !== null`,
+        "upload form (.doc)",
+        UNTIL_HANG_BOUND_MS,
+      );
       await uploadVia(legacyDocPath);
       const docFeedback = await withDeadline(
         "legacy .doc rejection message",
@@ -524,7 +561,11 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
 
       // ---- condition 3: the narration ceiling --------------------------------------
       await go("/account");
-      await until(`document.getElementById("uploadFile") !== null`, "upload form (ceiling)");
+      await until(
+        `document.getElementById("uploadFile") !== null`,
+        "upload form (ceiling)",
+        UNTIL_HANG_BOUND_MS,
+      );
       await uploadVia(overLimitPath);
       const ceilingFeedback = await withDeadline("ceiling response", 90_000, async () => {
         while (true) {
@@ -581,7 +622,11 @@ await runProof("uploads-six-type-browser-proof", async (checker) => {
       /** Upload, wait for a TERMINAL feedback state, then count fresh episodes. */
       async function rejectedUpload(path: string, desc: string) {
         await go("/account");
-        await until(`document.getElementById("uploadFile") !== null`, `upload form (${desc})`);
+        await until(
+          `document.getElementById("uploadFile") !== null`,
+          `upload form (${desc})`,
+          UNTIL_HANG_BOUND_MS,
+        );
         await uploadVia(path);
         const fb = await withDeadline(desc, 90_000, async () => {
           while (true) {
