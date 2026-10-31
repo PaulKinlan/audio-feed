@@ -481,6 +481,13 @@ function configuredHostOrigin(entry: string, fallbackProto: "http" | "https"): s
  * the deployment's configured host (PUBLIC_BASE_URL), an allowed host (ALLOWED_HOSTS),
  * or loopback in local dev. Reports from untrusted or absent origins must not be
  * counted against a visitor's write budget or mixed into their attribution.
+ *
+ * "Loopback in local dev" is enforced, not assumed: the loopback exemption applies
+ * only when the report itself ARRIVED on loopback without a client-supplied
+ * forwarded host standing in for it — the same rule `requestHostAllowed` applies
+ * to the arrival host. `Origin` is a plain header a non-browser can set to
+ * anything, so on a deployed host (whose arrivals are never loopback) a loopback
+ * Origin is forged text and is refused.
  */
 export function isTrustedReportOrigin(config: OriginConfig, request: Request): boolean {
   const origin = request.headers.get("origin");
@@ -491,7 +498,9 @@ export function isTrustedReportOrigin(config: OriginConfig, request: Request): b
     if (!host) return false;
     const allowed = allowedHostSet(config);
     if (allowed.has(host)) return true;
-    return isLoopbackHost(host);
+    if (!isLoopbackHost(host)) return false;
+    const effective = effectiveRequestHost(request, config.trustProxyHeaders);
+    return effective !== null && !effective.forwarded && isLoopbackHost(effective.host);
   } catch {
     return false;
   }
