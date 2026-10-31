@@ -900,6 +900,11 @@ export function createGeminiSynthesizer(
       return false;
     };
 
+    // The per-turn deadline is owned by THIS per-call value (deps.perTurnTimeoutMs ??
+    // config.ttsTimeoutMs ?? DEFAULT_TIMEOUT_MS) and always shadows a client instance's
+    // constructor timeoutMs, so configure the deadline here — see
+    // tests/tts_brittleness_test.ts, "the per-turn deadline is owned by the per-call option"
+    // (audio-feed-1qvdl).
     const ttsOptions = {
       ...(leaseSignal ? { signal: leaseSignal } : {}),
       ...(wrappedResume ? { resume: wrappedResume } : (resume ? { resume } : {})),

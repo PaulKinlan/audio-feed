@@ -18,12 +18,15 @@ import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from 
 import { loadConfig, memoryStores } from "../src/config.ts";
 import { createGeminiSynthesizer } from "../src/worker/synthesis.ts";
 import {
+  decodedFromWav,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_TIMEOUT_RETRIES,
   GeminiTtsClient,
   GeminiTtsError,
+  pcmToWav,
   ttsClientConfig,
 } from "../src/tts/gemini.ts";
+import type { DecodedAudioResult } from "../src/tts/gemini.ts";
 import { makeArticle, makeEpisode } from "./fixtures.ts";
 import type { AppConfig } from "../src/config.ts";
 import type { AppContext } from "../src/app.ts";
@@ -65,6 +68,23 @@ const request = {
 
 const client = (fetchFn: typeof fetch, config: Record<string, unknown> = {}) =>
   new GeminiTtsClient({ apiKey: "test-key", fetchFn, retryBaseDelayMs: 1, ...config });
+
+/** A decode result a mocked client can hand back without any provider round-trip. */
+const fakeAudio = (): DecodedAudioResult => {
+  const pcm = new Uint8Array(64);
+  const wav = pcmToWav(pcm, { sampleRate: 24000, numChannels: 1, bitsPerSample: 8 });
+  return { ...decodedFromWav(wav), durationSeconds: 10 };
+};
+
+/** A client whose per-call options are recorded, so a test can see WHICH deadline the batch passed. */
+const recordingClient = (constructorTimeoutMs: number, seen: Array<number | undefined>) => {
+  const mock = new GeminiTtsClient({ apiKey: "dummy-key", timeoutMs: constructorTimeoutMs });
+  mock.synthesizeNarration = (_input, options) => {
+    seen.push(options?.timeoutMs);
+    return Promise.resolve(fakeAudio());
+  };
+  return mock;
+};
 
 Deno.test("the default deadline is 120s and carries one timeout retry (audio-feed-9yu8)", () => {
   // The two numbers this bead exists to change. 9vns measured 45-55s/segment and the recorded
@@ -255,6 +275,79 @@ Deno.test("createGeminiSynthesizer drives the real client with the configured de
     );
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+Deno.test("the per-turn deadline is owned by the per-call option, never by the client constructor (audio-feed-1qvdl)", async () => {
+  // THE TRAP (audio-feed-1qvdl, the icl4 proof ad9c10a8): runSynthesisBatch spreads a per-call
+  // `timeoutMs` into EVERY synthesizeNarration call (the ttsOptions spread in
+  // src/worker/synthesis.ts), and the client prefers per-call options over its constructor value
+  // (src/tts/gemini.ts sendRequest: `options.timeoutMs ?? this.timeoutMs`). A hand-configured
+  // client instance's constructor timeoutMs therefore NEVER arms through the batch — the proof
+  // kept passing while proving nothing. These rows pin the precedence chain the batch computes,
+  // observed at the client boundary through the injected-client seam.
+  const seen: Array<number | undefined> = [];
+  const synthesizeWith = (
+    config: AppConfig,
+    deps: { client: GeminiTtsClient; perTurnTimeoutMs?: number },
+  ) =>
+    createGeminiSynthesizer(
+      { config, stores: memoryStores() } as unknown as AppContext,
+      { scriptGenerator: null, ...deps },
+    );
+  const call = () => ({
+    article: makeArticle(),
+    source: null,
+    episode: makeEpisode(),
+    mode: "direct" as const,
+  });
+
+  // 1. deps.perTurnTimeoutMs wins over BOTH the client constructor (5s, never armed) and config.
+  const configured = { port: 0, geminiApiKey: "test-key", ttsTimeoutMs: 150 } as AppConfig;
+  await synthesizeWith(configured, { client: recordingClient(5_000, seen), perTurnTimeoutMs: 50 })(
+    call(),
+  );
+  assertEquals(seen.at(-1), 50, "the per-call deps.perTurnTimeoutMs must win");
+
+  // 2. No deps value: the configured deadline is passed per-call, still shadowing the constructor.
+  await synthesizeWith(configured, { client: recordingClient(5_000, seen) })(call());
+  assertEquals(seen.at(-1), 150, "config.ttsTimeoutMs must be the per-call fallback");
+
+  // 3. Neither is configured: the 120s default. The batch NEVER leaves per-call timeoutMs unset,
+  // which is precisely why a client constructor timeoutMs cannot ever arm through this path.
+  const unconfigured = { port: 0, geminiApiKey: "test-key" } as AppConfig;
+  await synthesizeWith(unconfigured, { client: recordingClient(5_000, seen) })(call());
+  assertEquals(seen.at(-1), DEFAULT_TIMEOUT_MS, "the batch always passes a per-call deadline");
+});
+
+Deno.test("the client's own precedence: a per-call timeoutMs beats the constructor value, which applies when no per-call value is given (audio-feed-1qvdl)", async () => {
+  // src/tts/gemini.ts sendRequest: `options.timeoutMs ?? this.timeoutMs`. The icl4 proof built its
+  // client with `timeoutMs: 200` expecting that to arm; the moment callers pass per-call values it
+  // cannot. If this precedence ever inverts, the first row's hang burns the 5s constructor
+  // deadline and the message names 5000ms instead of 50ms.
+  let message = "";
+  try {
+    await client(hangs(), { timeoutMs: 5_000, retryOn: "none" })
+      .sendRequest(request, { timeoutMs: 50 });
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 50ms/.test(message)) {
+    throw new Error(`a per-call timeoutMs must win over the constructor value: ${message}`);
+  }
+
+  // With no per-call value the constructor/config deadline still applies — the constructor is a
+  // fallback, not a dead option.
+  message = "";
+  try {
+    await client(hangs(), { timeoutMs: 150, retryOn: "none" }).sendRequest(request);
+  } catch (error) {
+    message = String((error as Error).message);
+  }
+  if (!/timed out after 150ms/.test(message)) {
+    throw new Error(
+      `the constructor timeoutMs must apply when no per-call value is given: ${message}`,
+    );
   }
 });
 
