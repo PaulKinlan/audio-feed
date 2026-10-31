@@ -129,6 +129,19 @@ await runProof("audio-feed-msw", async (checker) => {
         checker.check(name, pass, detail);
         if (!pass) throw new Error(`step failed: ${name}`);
       }
+      /**
+       * The two-argument until() calls below pass no timeout, so each inherits this copy's
+       * 8s default. This host has MEASURED a bare `readyState === "complete"` evaluate
+       * legitimately exceeding 8s under eight-way CPU saturation (audio-feed-6gst1). That
+       * measured starved floor is the unit.
+       *
+       * UNTIL_HANG_BOUND_MS = 120s = 15 x that 8s floor. It is a HANG bound, not a latency
+       * bound: a page whose main thread never answers still fails, in two minutes rather
+       * than hanging until something outside the proof kills the lane - and it fails with a
+       * message naming what was asked and the budget it had.
+       */
+      const MEASURED_STARVED_POLL_MS = 8_000;
+      const UNTIL_HANG_BOUND_MS = 15 * MEASURED_STARVED_POLL_MS;
       async function until(expr: string, desc: string, timeoutMs = 8000) {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
@@ -172,10 +185,15 @@ await runProof("audio-feed-msw", async (checker) => {
         });
 
         await cdp("Page.navigate", { url: `${BASE}/account` });
-        await until(`document.readyState === "complete"`, "account loaded");
+        await until(
+          `document.readyState === "complete"`,
+          "account loaded",
+          UNTIL_HANG_BOUND_MS,
+        );
         await until(
           `document.querySelectorAll("[data-voice-sample]").length === 5`,
           "five audition buttons",
+          UNTIL_HANG_BOUND_MS,
         );
 
         // 1. Every voice has a named player, and there is ONE audio element.
@@ -210,6 +228,7 @@ await runProof("audio-feed-msw", async (checker) => {
         await until(
           `document.getElementById("voiceSampleAudio")?.paused === false && document.getElementById("voiceSampleAudio")?.currentTime > 0.05`,
           "Aoede sample playing",
+          UNTIL_HANG_BOUND_MS,
         );
         const first = await js(`(() => {
         const audio = document.getElementById("voiceSampleAudio");
@@ -247,6 +266,7 @@ await runProof("audio-feed-msw", async (checker) => {
           `document.querySelector('[data-voice-sample="Kore"]')?.getAttribute("aria-pressed") === "true" &&
          document.querySelector('[data-voice-sample="Aoede"]')?.getAttribute("aria-pressed") === "false"`,
           "Kore took over from Aoede",
+          UNTIL_HANG_BOUND_MS,
         );
         const second = await js(`(() => {
         const audio = document.getElementById("voiceSampleAudio");
@@ -285,7 +305,11 @@ await runProof("audio-feed-msw", async (checker) => {
 
         // 4. Clicking the playing sample stops it.
         await js(`document.querySelector('[data-voice-sample="Kore"]').click()`);
-        await until(`document.getElementById("voiceSampleAudio")?.paused === true`, "Kore stopped");
+        await until(
+          `document.getElementById("voiceSampleAudio")?.paused === true`,
+          "Kore stopped",
+          UNTIL_HANG_BOUND_MS,
+        );
         const stopped = await js(`(() => ({
         pressed: Array.from(document.querySelectorAll("[data-voice-sample]")).filter((b) => b.getAttribute("aria-pressed") === "true").length,
         label: document.querySelector('[data-voice-sample="Kore"]').getAttribute("aria-label"),
@@ -316,11 +340,13 @@ await runProof("audio-feed-msw", async (checker) => {
         await until(
           `document.getElementById("profileFeedback")?.textContent.includes("Saved")`,
           "profile saved",
+          UNTIL_HANG_BOUND_MS,
         );
         await cdp("Page.navigate", { url: `${BASE}/account` });
         await until(
           `document.readyState === "complete" && !!document.querySelector('input[name=voice]:checked')`,
           "account reloaded",
+          UNTIL_HANG_BOUND_MS,
         );
         const saved = await js(`document.querySelector('input[name=voice]:checked')?.value`);
         check(
@@ -347,6 +373,7 @@ await runProof("audio-feed-msw", async (checker) => {
         await until(
           `document.querySelectorAll("[data-voice-sample]").length === 5`,
           "mobile audition grid loaded",
+          UNTIL_HANG_BOUND_MS,
         );
         const mobile = await js(`({
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
