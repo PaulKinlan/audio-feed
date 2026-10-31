@@ -13,13 +13,21 @@ import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/a
 import { fromFileUrl, join } from "@std/path";
 import {
   collect,
+  EVIDENCE_RECORDS_ENFORCED,
   findNestedEvidence,
+  hashEvidenceDir,
   parseOptions,
   readDeclaration,
+  readRunRecord,
+  RECORD_FILE,
+  RECORD_MAX_AGE_DAYS,
   referencesProofInCode,
   resolveBound,
+  shaIsAncestor,
   stripAnsi,
+  validateRunRecord,
 } from "../scripts/evidence-run.ts";
+import type { RunRecord } from "../scripts/evidence-run.ts";
 
 const EVIDENCE_RUN_SCRIPT = new URL("../scripts/evidence-run.ts", import.meta.url).pathname;
 
@@ -503,10 +511,11 @@ Deno.test("evidence-run --list shows [executed by: ...] for declared executor an
       "declared   docs/evidence/audio-feed-stale -> scripts/proof.ts [UNRESOLVED EXECUTOR: tests/ghost_test.ts]",
     );
 
-    // Negative control: no executor annotation
+    // Negative control: no executor annotation; the record annotation for a fresh fixture is
+    // ` [no record]` (audio-feed-h22ml: --list annotates records, never fails on them).
     assertStringIncludes(
       res.stdout,
-      "declared   docs/evidence/audio-feed-no-exec -> scripts/proof.ts\n",
+      "declared   docs/evidence/audio-feed-no-exec -> scripts/proof.ts [no record]",
     );
 
     // Inventory line notes unresolved executor
@@ -1242,3 +1251,370 @@ Deno.test("malformed - Timeout: is an UNRESOLVED failure (exit 1) refusing the r
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+/**
+ * audio-feed-h22ml — THE RUN.JSON RECORD TIER, under test.
+ *
+ * The fabrication matrix below walks every state a record can be in and asserts the named failure
+ * for each, through the real CLI against a scratch root (`--root`, the tier's own mechanism), plus
+ * exit 0 for the honest state. The scratch root is a REAL git repository because staleness is
+ * `git merge-base --is-ancestor`, and it carries an ORPHAN commit so the foreign-sha row exercises
+ * the true not-an-ancestor path rather than a malformed-sha one.
+ */
+
+async function gitRun(
+  root: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const command = new Deno.Command("git", { args, cwd: root, stdout: "piped", stderr: "piped" });
+  const output = await command.output();
+  return {
+    code: output.code,
+    stdout: new TextDecoder().decode(output.stdout).trim(),
+    stderr: new TextDecoder().decode(output.stderr).trim(),
+  };
+}
+
+/**
+ * A scratch evidence tree with one trivial proof that writes a DETERMINISTIC artefact (stable
+ * sha256 across runs), declared in a README, inside a real one-commit git repository that also
+ * carries an orphan `ghost` commit (a valid commit that is NOT an ancestor of HEAD).
+ */
+async function makeRecordScratch(): Promise<{
+  root: string;
+  dirAbs: string;
+  ghostSha: string;
+  cleanup(): Promise<void>;
+}> {
+  const root = await Deno.makeTempDir({ prefix: "h22ml-" });
+  const dirAbs = join(root, "docs", "evidence", "h22ml-scratch");
+  await Deno.mkdir(dirAbs, { recursive: true });
+  await Deno.mkdir(join(root, "scripts"), { recursive: true });
+  await Deno.writeTextFile(
+    join(root, "scripts", "trivial-proof.ts"),
+    `const dir = new URL("../docs/evidence/h22ml-scratch/", import.meta.url);\n` +
+      `await Deno.writeTextFile(new URL("repro.json", dir), JSON.stringify({ n: 1 }));\n` +
+      `console.log("PASS trivial proof");\n`,
+  );
+  await Deno.writeTextFile(
+    join(dirAbs, "README.md"),
+    "- Script: scripts/trivial-proof.ts\n- Asserts: the trivial proof passes\n",
+  );
+  const seedSteps = [
+    ["init"],
+    ["config", "user.email", "fleet@example.invalid"],
+    ["config", "user.name", "fleet"],
+    ["add", "-A"],
+    ["commit", "-m", "seed"],
+  ];
+  for (const args of seedSteps) {
+    const res = await gitRun(root, args);
+    assertEquals(res.code, 0, `git ${args.join(" ")} must succeed: ${res.stderr}`);
+  }
+  const seedSha = (await gitRun(root, ["rev-parse", "HEAD"])).stdout;
+  for (
+    const args of [["checkout", "--orphan", "ghost"], ["commit", "-m", "ghost"], [
+      "checkout",
+      seedSha,
+    ]]
+  ) {
+    const res = await gitRun(root, args);
+    assertEquals(res.code, 0, `git ${args.join(" ")} must succeed: ${res.stderr}`);
+  }
+  const ghostSha = (await gitRun(root, ["rev-parse", "ghost"])).stdout;
+  assertEquals(
+    /^[0-9a-f]{40}$/.test(ghostSha),
+    true,
+    "the ghost commit must be a real 40-hex commit",
+  );
+  return { root, dirAbs, ghostSha, cleanup: () => Deno.remove(root, { recursive: true }) };
+}
+
+function expectOk(read: Awaited<ReturnType<typeof readRunRecord>>): RunRecord {
+  if (read.state !== "ok") throw new Error(`record must parse; got state ${read.state}`);
+  return read.record;
+}
+
+async function mutateRecord(dirAbs: string, patch: Partial<RunRecord>): Promise<void> {
+  const record = expectOk(await readRunRecord(dirAbs));
+  await Deno.writeTextFile(
+    join(dirAbs, RECORD_FILE),
+    JSON.stringify({ ...record, ...patch }, null, 2) + "\n",
+  );
+}
+
+Deno.test(
+  "FABRICATION MATRIX (audio-feed-h22ml): missing record / foreign sha / 31-day-old / exit 1 / marker false / tampered artefact each name their failure; the honest state exits 0",
+  async () => {
+    const h = await makeRecordScratch();
+    try {
+      // SEED: one honest tier run writes the record the matrix then fabricates against.
+      const seed = await runTier(h.root);
+      assertEquals(seed.code, 0, `seed run must pass: ${seed.stdout}\n${seed.stderr}`);
+      assertStringIncludes(seed.stdout, "has no run.json yet (seed phase");
+      const seeded = expectOk(await readRunRecord(h.dirAbs));
+      assertEquals(seeded.exit, 0);
+      assertEquals(seeded.marker, true);
+
+      // THE HONEST STATE: exit 0, no incidents, and the rewritten record is well-formed.
+      const honest = await runTier(h.root);
+      assertEquals(honest.code, 0, `honest state must exit 0: ${honest.stdout}\n${honest.stderr}`);
+      assertStringIncludes(honest.stdout, "ok   docs/evidence/h22ml-scratch");
+      assertEquals(honest.stdout.includes("record incident"), false);
+      const fresh = expectOk(await readRunRecord(h.dirAbs));
+      assertEquals(fresh.exit, 0);
+      assertEquals(fresh.marker, true);
+      assertEquals(fresh.bound.provenance, "default");
+      assertEquals(fresh.bound.ms, 300_000);
+      assertEquals(/^[0-9a-f]{40}$/.test(fresh.sha), true, "sha must be 40-hex HEAD");
+      assertEquals(Object.keys(fresh.artefacts), ["repro.json"]);
+      assert(fresh.artefacts["repro.json"]!.startsWith("sha256:"));
+      assert(Number.isNaN(Date.parse(fresh.startedAt)) === false, "startedAt must be ISO");
+      assert(Number.isNaN(Date.parse(fresh.endedAt)) === false, "endedAt must be ISO");
+      assertEquals(fresh.script, "scripts/trivial-proof.ts");
+
+      // MISSING RECORD. Amendment 1: the missing-record incident is ARMED only behind
+      // EVIDENCE_RECORDS_ENFORCED; while unarmed the tier seeds silently (this branch asserts the
+      // behaviour that matches the constant, and the armed validator is pinned by its own row).
+      await Deno.remove(join(h.dirAbs, RECORD_FILE));
+      const missing = await runTier(h.root);
+      if (EVIDENCE_RECORDS_ENFORCED) {
+        assertEquals(missing.code, 1, "armed: a missing record is a named failure");
+        assertStringIncludes(
+          missing.stdout,
+          "RECORD MISSING: no run.json in docs/evidence/h22ml-scratch",
+        );
+        assertStringIncludes(missing.stdout, "a claimed run must leave a checkable record");
+      } else {
+        assertEquals(missing.code, 0, "unarmed: a missing record seeds silently (amendment 1)");
+        assertStringIncludes(
+          missing.stdout,
+          "has no run.json yet (seed phase: writing one this run)",
+        );
+      }
+      assertEquals(
+        expectOk(await readRunRecord(h.dirAbs)).exit,
+        0,
+        "the run must still leave a record",
+      );
+
+      // FOREIGN SHA: a real commit that is not an ancestor of HEAD is visibly stale.
+      await mutateRecord(h.dirAbs, { sha: h.ghostSha });
+      const foreign = await runTier(h.root);
+      assertEquals(foreign.code, 1, "a foreign sha must exit 1");
+      assertStringIncludes(
+        foreign.stdout,
+        `sha ${h.ghostSha} is not in HEAD's history (sha not in history)`,
+      );
+      assertStringIncludes(foreign.stdout, "1 record incident(s)");
+
+      // 31-DAY-OLD endedAt: over the 30-day freshness bound.
+      await mutateRecord(h.dirAbs, {
+        endedAt: new Date(Date.now() - 31 * 86_400_000).toISOString(),
+      });
+      const old = await runTier(h.root);
+      assertEquals(old.code, 1, "a 31-day-old record must exit 1");
+      assertStringIncludes(old.stdout, "is 31 days old (bound: 30 days)");
+
+      // BOUNDARY: 29 days is inside the bound and must NOT incident (exit 0).
+      await mutateRecord(h.dirAbs, {
+        endedAt: new Date(Date.now() - 29 * 86_400_000).toISOString(),
+      });
+      const young = await runTier(h.root);
+      assertEquals(young.code, 0, `a 29-day-old record is inside the bound: ${young.stdout}`);
+
+      // RECORDED EXIT 1: the record says the last actual run failed.
+      await mutateRecord(h.dirAbs, { exit: 1 });
+      const failedRecord = await runTier(h.root);
+      assertEquals(failedRecord.code, 1);
+      assertStringIncludes(failedRecord.stdout, "records exit 1 (not a clean exit");
+
+      // MARKER FALSE: the record says the last run asserted nothing.
+      await mutateRecord(h.dirAbs, { marker: false });
+      const unasserted = await runTier(h.root);
+      assertEquals(unasserted.code, 1);
+      assertStringIncludes(unasserted.stdout, "records marker false");
+
+      // TAMPERED ARTEFACT: on-disk content no longer matches the recorded hash.
+      await Deno.writeTextFile(join(h.dirAbs, "repro.json"), JSON.stringify({ n: 2 }));
+      const tampered = await runTier(h.root);
+      assertEquals(tampered.code, 1);
+      assertStringIncludes(
+        tampered.stdout,
+        "RECORD TAMPERED: docs/evidence/h22ml-scratch artefact repro.json hash mismatch",
+      );
+
+      // UNPARSEABLE RECORD: a record that cannot be read cannot be believed.
+      await Deno.writeTextFile(join(h.dirAbs, RECORD_FILE), "not json at all");
+      const unparseable = await runTier(h.root);
+      assertEquals(unparseable.code, 1);
+      assertStringIncludes(
+        unparseable.stdout,
+        "RECORD UNPARSEABLE: docs/evidence/h22ml-scratch/run.json does not parse",
+      );
+      assertEquals(
+        expectOk(await readRunRecord(h.dirAbs)).exit,
+        0,
+        "the run rewrites a parseable record",
+      );
+    } finally {
+      await h.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "the armed missing-record validator names the incident; the unarmed one is silent (audio-feed-h22ml amendment 1)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "h22ml-armed-" });
+    try {
+      const ctx = {
+        root: tempDir,
+        dir: "docs/evidence/x",
+        recordsEnforced: false,
+        historyCheckable: false,
+      };
+      assertEquals(
+        await validateRunRecord({ state: "missing" }, ctx),
+        [],
+        "unarmed: a missing record is not an incident",
+      );
+      const armed = await validateRunRecord({ state: "missing" }, {
+        ...ctx,
+        recordsEnforced: true,
+      });
+      assertEquals(armed.length, 1);
+      assertStringIncludes(armed[0]!, "RECORD MISSING");
+      assertStringIncludes(armed[0]!, "a claimed run must leave a checkable record");
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "124 and 137 stay distinct from a clean exit and from each other in the record incidents (audio-feed-h22ml)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "h22ml-bound-" });
+    try {
+      const dirAbs = join(tempDir, "docs", "evidence", "x");
+      await Deno.mkdir(dirAbs, { recursive: true });
+      const ctx = {
+        root: tempDir,
+        dir: "docs/evidence/x",
+        recordsEnforced: false,
+        historyCheckable: false,
+      };
+      const now = new Date().toISOString();
+      const base = {
+        script: "scripts/p.ts",
+        sha: "",
+        bound: { ms: 300_000, provenance: "default" as const },
+        startedAt: now,
+        endedAt: now,
+        artefacts: {},
+      };
+      for (const code of [124, 137, 1]) {
+        const incidents = await validateRunRecord(
+          { state: "ok", record: { ...base, exit: code, marker: false } },
+          ctx,
+        );
+        assert(
+          incidents.some((incident) => incident.includes(`records exit ${code}`)),
+          `exit ${code} must be named in its own incident, got: ${incidents.join(" | ")}`,
+        );
+        assert(incidents.some((incident) => incident.includes("marker false")));
+      }
+      const clean = await validateRunRecord(
+        { state: "ok", record: { ...base, exit: 0, marker: true } },
+        ctx,
+      );
+      assertEquals(
+        clean.filter((incident) => incident.includes("exit")),
+        [],
+        "a clean exit must produce no exit incident",
+      );
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "shaIsAncestor fails closed: malformed and unknown shas are unverifiable, never ancestors (audio-feed-h22ml)",
+  async () => {
+    const root = fromFileUrl(new URL("../", import.meta.url));
+    const malformed = await shaIsAncestor(root, "not-a-sha");
+    assertEquals(malformed.state, "unverifiable");
+    const unknown = await shaIsAncestor(root, "f".repeat(40));
+    assertEquals(
+      unknown.state,
+      "unverifiable",
+      "an unknown-but-well-formed sha must not read as an ancestor",
+    );
+  },
+);
+
+Deno.test(
+  "hashEvidenceDir covers nested files and excludes README.md and run.json (audio-feed-h22ml)",
+  async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "h22ml-hash-" });
+    try {
+      await Deno.mkdir(join(tempDir, "assets"), { recursive: true });
+      await Deno.writeTextFile(join(tempDir, "README.md"), "excluded");
+      await Deno.writeTextFile(join(tempDir, RECORD_FILE), "excluded");
+      await Deno.writeTextFile(join(tempDir, "repro.json"), '{"n":1}\n');
+      await Deno.writeTextFile(join(tempDir, "assets", "shot.txt"), "pixels");
+      const artefacts = await hashEvidenceDir(tempDir);
+      assertEquals(Object.keys(artefacts).sort(), ["assets/shot.txt", "repro.json"]);
+      assertEquals(artefacts["repro.json"]!.startsWith("sha256:"), true);
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "CENSUS ROW (audio-feed-h22ml): every declared evidence dir carries a parseable run.json",
+  { sanitizeResources: false, sanitizeOps: false },
+  async () => {
+    const root = fromFileUrl(new URL("../", import.meta.url));
+    const { declarations } = await collect({
+      list: true,
+      timeoutMs: 300_000,
+      root,
+      explicitTimeout: false,
+    });
+    // Suite-owned proofs are executed by their suite and UNRESOLVED declarations never resolve:
+    // both are exempt from the record rules rather than permanently red (audio-feed-h22ml).
+    const required = declarations.filter((d) => d.exists && d.executedBy === null);
+    assert(required.length > 40, "the real tree must still carry its declared evidence dirs");
+    const missing: string[] = [];
+    const bad: string[] = [];
+    for (const declaration of required) {
+      const read = await readRunRecord(join(root, declaration.dir));
+      if (read.state === "missing") missing.push(declaration.dir);
+      else if (read.state === "unparseable") bad.push(`${declaration.dir}: ${read.error}`);
+    }
+    assertEquals(
+      bad,
+      [],
+      `every EXISTING record must parse, armed or not: ${bad.join("; ")}`,
+    );
+    if (!EVIDENCE_RECORDS_ENFORCED) {
+      // SEED GATE (amendment 1): the full-tree seed has not landed yet, so this row is gated behind
+      // the same constant that arms the missing-record rule; it asserts fully once that commit lands.
+      console.log(
+        `[h22ml census] seed pending: ${missing.length}/${required.length} declared dirs have no ${RECORD_FILE} ` +
+          `(row arms with EVIDENCE_RECORDS_ENFORCED; ${RECORD_MAX_AGE_DAYS}-day freshness is a run-path rule only)`,
+      );
+      return;
+    }
+    assertEquals(
+      missing,
+      [],
+      `someone deleted the records - every declared evidence dir must carry a parseable ${RECORD_FILE}: ` +
+        missing.join(", "),
+    );
+  },
+);

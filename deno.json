@@ -24,7 +24,9 @@
     "lint": "deno lint",
     "smoke": "deno run --allow-net --allow-env --allow-read --allow-write --unstable-kv scripts/smoke.ts",
     "evidence:compress": "deno run --allow-read --allow-write --allow-run=convert,git scripts/evidence-compress.ts",
-    "evidence": "deno run --allow-read --allow-run=deno,timeout --allow-env scripts/evidence-run.ts",
+    // audio-feed-h22ml: the tier WRITES its own records now (docs/evidence/<id>/run.json) and reads
+    // git history for staleness (rev-parse / merge-base --is-ancestor), hence --allow-write and git.
+    "evidence": "deno run --allow-read --allow-write --allow-run=deno,timeout,git --allow-env scripts/evidence-run.ts",
     "evidence:mutants": "deno run --allow-read --allow-write --allow-run=timeout,deno --allow-env scripts/exww-mutants.ts",
     "proof": "deno run --allow-all --unstable-kv",
     // audio-feed-p2la: the pre-push guard (scripts/hooks/pre-push) refuses an ungated push and a

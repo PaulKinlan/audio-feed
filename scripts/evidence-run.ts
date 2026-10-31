@@ -59,6 +59,43 @@
  * - a declared script that is not a file is an UNRESOLVED FAILURE, never a skip: a tier that skips
  *   quietly is satisfied by construction, which is the defect class this fleet has been closing all
  *   evening.
+ *
+ * audio-feed-h22ml — EVERY CLAIMED RUN LEAVES A CHECKABLE RECORD. The tier wrote NOTHING: no log, no
+ * digest, no state, so "declared" was mistaken for "green" all night - a proof that could never
+ * complete went unnoticed for weeks, and a suite-owned proof was SIGKILLed at the 300s default bound
+ * every run while the tier printed "every declared proof passed". After each proof run the tier now
+ * writes `docs/evidence/<id>/run.json` (the committed per-dir file is the SAME churn class the proofs
+ * already own - they rewrite repro.json and PNGs today):
+ *
+ *     { "script": "scripts/...", "sha": "<40-hex HEAD of the run>",
+ *       "bound": { "ms": 300000, "provenance": "flag" | "declared" | "default" },
+ *       "startedAt": "<ISO>", "endedAt": "<ISO>", "exit": 0, "marker": true,
+ *       "artefacts": { "<file>": "sha256:..." } }   // every file in the dir except README.md and run.json
+ *
+ * The bound comes from resolveBound() - reused, never recomputed. Staleness is GIT, not arithmetic:
+ * `git merge-base --is-ancestor <record.sha> HEAD`; a sha that is not an ancestor is visibly stale
+ * and never silently believed. On the RUN path these are incidents that make the invocation exit
+ * non-zero while the proof still runs (running is how a stale or failed record is refreshed): no
+ * run.json (when armed, see below); sha not in history or unverifiable; endedAt older than 30 days;
+ * exit !== 0 or marker === false (124 and 137 stay distinct from a clean exit in the record and in
+ * the incident text); any artefact hash mismatch, missing artefact, or unrecorded file. A proof the
+ * tier RAN must leave a parseable record afterward - if the writer is broken the tier names "the tier
+ * ran <dir> and wrote no record" and goes red (that guarantee is NEVER gated: it is the detector for
+ * the exact "ran and wrote nothing" silence this bead exists to close).
+ *
+ * AMENDMENT 1 (Paul): the "no run.json => exit 1" rule must NOT be armed until the records exist.
+ * It lives behind the single constant EVIDENCE_RECORDS_ENFORCED below. While it is false the run path
+ * quietly seeds a record for any dir that lacks one ("a red wall nobody reads is how a rule gets
+ * disabled" - 44 dirs have no record tonight); ARming is the one-line commit that flips it to true
+ * AFTER the full-tree seed lands. The other rules need an existing record to fire at all, so they
+ * self-gate and arm with this commit. Suite-owned proofs (skipped by name, executed by their suite)
+ * and UNRESOLVED declarations never run here, so they are EXEMPT from the record rules rather than
+ * permanently red; their record is the owning suite's gate.
+ *
+ * AMENDMENT 2 (Paul): --list MUST NOT exit non-zero for staleness/freshness - it annotates
+ * ("[stale: sha not in history]", "[no record]") and exits 0. --list is used by other lanes and by
+ * the census; making a diagnostic fail on age would turn it into an outage. Only the RUN path may
+ * exit non-zero for these states.
  */
 import { fromFileUrl, join, relative, resolve } from "@std/path";
 import { stripComments } from "./test-selection.ts";
@@ -94,6 +131,66 @@ export interface Options {
   timeoutMs: number;
   root: string;
   explicitTimeout: boolean;
+}
+
+/** The per-dir record every executed proof leaves behind (audio-feed-h22ml). */
+export const RECORD_FILE = "run.json";
+/** A record older than this is stale: proofs must actually re-run at least this often. */
+export const RECORD_MAX_AGE_DAYS = 30;
+
+/**
+ * AMENDMENT 1 (audio-feed-h22ml). FALSE while the seed is out: the run path then quietly seeds a
+ * record wherever one is missing, and --list annotates `[no record]` without failing. ARming is the
+ * one-line follow-up commit that flips this to true AFTER the full-tree seed (run.json for every
+ * runnable declared dir) has landed; from that commit on, a MISSING record is a named run-path
+ * incident that exits non-zero (the run still executes and seeds the record, so arming can never
+ * deadlock a new or deleted record). Nothing else is gated on this constant.
+ */
+export const EVIDENCE_RECORDS_ENFORCED = false;
+
+/** The record itself, written after every proof run (audio-feed-h22ml). */
+export interface RunRecord {
+  /** The declared script path, as in the README's `- Script:` line. */
+  script: string;
+  /** 40-hex HEAD of the tree the proof ran in; "" when the root is not a git work tree. */
+  sha: string;
+  /** The bound the proof ran under, reused from resolveBound(), never recomputed. */
+  bound: { ms: number; provenance: BoundProvenance };
+  startedAt: string;
+  endedAt: string;
+  /** The proof process's raw exit code; 124 and 137 stay distinct from a clean exit. */
+  exit: number;
+  /** Whether stdout carried a PASS or OK assertion line. */
+  marker: boolean;
+  /** sha256 of every file in the evidence dir except README.md and run.json. */
+  artefacts: Record<string, string>;
+}
+
+export type RunRecordRead =
+  | { state: "missing" }
+  | { state: "unparseable"; error: string }
+  | { state: "ok"; record: RunRecord };
+
+export function runRecordPath(root: string, dir: string): string {
+  return join(root, dir, RECORD_FILE);
+}
+
+export async function readRunRecord(dirAbs: string): Promise<RunRecordRead> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(join(dirAbs, RECORD_FILE));
+  } catch {
+    return { state: "missing" };
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("record is not a JSON object");
+    }
+    return { state: "ok", record: parsed as RunRecord };
+  } catch (err) {
+    return { state: "unparseable", error: (err as Error).message };
+  }
 }
 
 const USAGE =
@@ -262,6 +359,263 @@ export function resolveBound(
   }
   const boundSec = timeoutMs / 1000;
   return { timeoutMs, boundSec, provenance };
+}
+
+async function gitCapture(
+  root: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const command = new Deno.Command("git", { args, cwd: root, stdout: "piped", stderr: "piped" });
+  const output = await command.output();
+  return {
+    code: output.code,
+    stdout: new TextDecoder().decode(output.stdout).trim(),
+    stderr: new TextDecoder().decode(output.stderr).trim(),
+  };
+}
+
+/** 40-hex HEAD of `root`, or null when it is not a git work tree with a commit (audio-feed-h22ml). */
+export async function gitHeadSha(root: string): Promise<string | null> {
+  const res = await gitCapture(root, ["rev-parse", "HEAD"]);
+  return res.code === 0 && /^[0-9a-f]{40}$/.test(res.stdout) ? res.stdout : null;
+}
+
+export type ShaHistoryState =
+  | { state: "ancestor" }
+  | { state: "foreign" }
+  | { state: "unverifiable"; detail: string };
+
+/**
+ * Staleness IS GIT, not arithmetic (audio-feed-h22ml): a record's sha counts as in-history only when
+ * `git merge-base --is-ancestor` accepts it. git exit 1 is the DEFINITE not-an-ancestor; any other
+ * failure (bad sha, no repo) is UNVERIFIABLE and fails closed - a record that cannot be checked is
+ * never silently believed.
+ */
+export async function shaIsAncestor(root: string, sha: string): Promise<ShaHistoryState> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    return { state: "unverifiable", detail: `sha is not 40-hex: ${JSON.stringify(sha)}` };
+  }
+  const res = await gitCapture(root, ["merge-base", "--is-ancestor", sha, "HEAD"]);
+  if (res.code === 0) return { state: "ancestor" };
+  if (res.code === 1) return { state: "foreign" };
+  return { state: "unverifiable", detail: res.stderr || `git exit ${res.code}` };
+}
+
+const RECORD_EXCLUDED = new Set(["README.md", RECORD_FILE]);
+
+/**
+ * sha256 of every file under the evidence dir, except README.md and run.json (audio-feed-h22ml).
+ * Keys are dir-relative paths with a stable sort so records diff cleanly. Symlinks are skipped here
+ * (the tree walk refuses them outright); nested directories are walked because a declared dir may
+ * carry README-less asset subdirectories.
+ */
+export async function hashEvidenceDir(dirAbs: string): Promise<Record<string, string>> {
+  const artefacts: Record<string, string> = {};
+  async function walk(rel: string): Promise<void> {
+    const abs = rel === "" ? dirAbs : join(dirAbs, rel);
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(abs)) entries.push(entry);
+    entries.sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const entry of entries) {
+      if (entry.isSymlink) continue;
+      const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory) {
+        await walk(childRel);
+        continue;
+      }
+      if (rel === "" && RECORD_EXCLUDED.has(entry.name)) continue;
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        await Deno.readFile(join(dirAbs, childRel)),
+      );
+      artefacts[childRel] = `sha256:${
+        [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
+      }`;
+    }
+  }
+  await walk("");
+  return artefacts;
+}
+
+export interface RecordValidationContext {
+  root: string;
+  /** `docs/evidence/<dir>`, as in Declaration.dir. */
+  dir: string;
+  /** Whether a MISSING record is itself an incident (EVIDENCE_RECORDS_ENFORCED - amendment 1). */
+  recordsEnforced: boolean;
+  /**
+   * Whether the ROOT has a git HEAD at all. Without one there is no history to be an ancestor of,
+   * so the sha staleness rule is undefined rather than failed - the sha check is skipped and the
+   * caller says so ("records are written but not history-checked"). Every OTHER rule (exit, marker,
+   * age, artefact hashes) is git-independent and still applies. A repo whose git ERRORS is a
+   * different case: shaIsAncestor then reports unverifiable, which is an incident (fail closed).
+   */
+  historyCheckable: boolean;
+}
+
+/**
+ * The failure rules of the record tier (audio-feed-h22ml), each naming its own incident: no record
+ * (only when recordsEnforced); unparseable record; sha not an ancestor of HEAD; endedAt older than
+ * 30 days; exit !== 0; marker === false; any artefact hash mismatch, missing artefact, or file
+ * present but unrecorded. An empty list means the record can be believed.
+ */
+export async function validateRunRecord(
+  read: RunRecordRead,
+  ctx: RecordValidationContext,
+): Promise<string[]> {
+  const incidents: string[] = [];
+  if (read.state === "missing") {
+    if (ctx.recordsEnforced) {
+      incidents.push(
+        `RECORD MISSING: no ${RECORD_FILE} in ${ctx.dir} - a claimed run must leave a checkable record ` +
+          `(the proof runs anyway; it seeds a fresh one)`,
+      );
+    }
+    return incidents;
+  }
+  if (read.state === "unparseable") {
+    incidents.push(
+      `RECORD UNPARSEABLE: ${ctx.dir}/${RECORD_FILE} does not parse (${read.error}) - ` +
+        `a record that cannot be read cannot be believed`,
+    );
+    return incidents;
+  }
+  const record = read.record;
+
+  if (ctx.historyCheckable) {
+    const shaState = await shaIsAncestor(ctx.root, record.sha ?? "");
+    if (shaState.state === "foreign") {
+      incidents.push(
+        `RECORD STALE: ${ctx.dir} ${RECORD_FILE} sha ${record.sha} is not in HEAD's history (sha not in history)`,
+      );
+    } else if (shaState.state === "unverifiable") {
+      incidents.push(
+        `RECORD UNVERIFIABLE: ${ctx.dir} ${RECORD_FILE} sha could not be checked against history (${shaState.detail})`,
+      );
+    }
+  }
+
+  const ended = Date.parse(record.endedAt ?? "");
+  if (Number.isNaN(ended)) {
+    incidents.push(
+      `RECORD UNDATED: ${ctx.dir} ${RECORD_FILE} endedAt ${
+        JSON.stringify(record.endedAt ?? null)
+      } is not an ISO timestamp`,
+    );
+  } else {
+    const ageDays = Math.floor((Date.now() - ended) / 86_400_000);
+    if (ageDays > RECORD_MAX_AGE_DAYS) {
+      incidents.push(
+        `RECORD STALE: ${ctx.dir} ${RECORD_FILE} endedAt ${record.endedAt} is ${ageDays} days old ` +
+          `(bound: ${RECORD_MAX_AGE_DAYS} days)`,
+      );
+    }
+  }
+
+  if (typeof record.exit !== "number") {
+    incidents.push(`RECORD INCOMPLETE: ${ctx.dir} ${RECORD_FILE} has no numeric exit`);
+  } else if (record.exit !== 0) {
+    incidents.push(
+      `RECORD FAILED: ${ctx.dir} ${RECORD_FILE} records exit ${record.exit} ` +
+        `(not a clean exit; 124 and 137 mean the bound killed the recorded run)`,
+    );
+  }
+  if (typeof record.marker !== "boolean") {
+    incidents.push(`RECORD INCOMPLETE: ${ctx.dir} ${RECORD_FILE} has no boolean marker`);
+  } else if (record.marker === false) {
+    incidents.push(
+      `RECORD UNASSERTED: ${ctx.dir} ${RECORD_FILE} records marker false (the recorded run produced no PASS or OK line)`,
+    );
+  }
+
+  const recorded = record.artefacts ?? {};
+  if (typeof recorded !== "object" || Array.isArray(recorded)) {
+    incidents.push(`RECORD INCOMPLETE: ${ctx.dir} ${RECORD_FILE} has no artefact map`);
+  } else {
+    const actual = await hashEvidenceDir(join(ctx.root, ctx.dir));
+    const names = new Set([...Object.keys(recorded), ...Object.keys(actual)]);
+    for (const name of [...names].sort()) {
+      const expected = recorded[name];
+      const got = actual[name];
+      if (typeof expected !== "string") {
+        incidents.push(
+          `RECORD GAP: ${ctx.dir} artefact ${name} is present on disk but not in ${RECORD_FILE}`,
+        );
+      } else if (got === undefined) {
+        incidents.push(
+          `RECORD GAP: ${ctx.dir} artefact ${name} is in ${RECORD_FILE} but missing on disk`,
+        );
+      } else if (expected !== got) {
+        incidents.push(
+          `RECORD TAMPERED: ${ctx.dir} artefact ${name} hash mismatch (recorded ${expected}, on disk ${got})`,
+        );
+      }
+    }
+  }
+  return incidents;
+}
+
+/**
+ * Write `<evidence dir>/run.json` after a proof run (audio-feed-h22ml): the record of what ran,
+ * under which bound, from which commit, with what outcome, and the sha256 of every artefact on disk
+ * at write time. Called on EVERY outcome - a failed proof's record (exit 3, marker false) is exactly
+ * the evidence that it failed.
+ */
+export async function writeRunRecord(
+  root: string,
+  declaration: Declaration,
+  bound: ResolvedBound,
+  startedAt: string,
+  result: RunResult,
+): Promise<void> {
+  const sha = await gitHeadSha(root);
+  const artefacts = await hashEvidenceDir(join(root, declaration.dir));
+  const record: RunRecord = {
+    script: declaration.declared,
+    sha: sha ?? "",
+    bound: { ms: bound.timeoutMs, provenance: bound.provenance },
+    startedAt,
+    endedAt: result.endedAt,
+    exit: result.code,
+    marker: result.hasAssertionSignal,
+    artefacts,
+  };
+  await Deno.writeTextFile(
+    runRecordPath(root, declaration.dir),
+    JSON.stringify(record, null, 2) + "\n",
+  );
+}
+
+/**
+ * The --list annotation for one dir's record (audio-feed-h22ml, amendment 2): ANNOTATION ONLY, never
+ * a failure - --list is a diagnostic used by other lanes and the census, so it exits 0 no matter how
+ * stale the records are. Suite-owned and UNRESOLVED declarations get no annotation (they never run
+ * here, so they are exempt from the record rules rather than permanently red).
+ */
+export async function recordAnnotation(
+  root: string,
+  dir: string,
+  historyCheckable: boolean,
+): Promise<string> {
+  const read = await readRunRecord(join(root, dir));
+  if (read.state === "missing") return ` [no record]`;
+  if (read.state === "unparseable") return ` [UNPARSEABLE RECORD: ${read.error}]`;
+  const record = read.record;
+  const parts: string[] = [];
+  if (historyCheckable) {
+    const shaState = await shaIsAncestor(root, record.sha ?? "");
+    if (shaState.state === "foreign") parts.push("stale: sha not in history");
+    else if (shaState.state === "unverifiable") parts.push("stale: sha unverifiable");
+  }
+  const ended = Date.parse(record.endedAt ?? "");
+  if (Number.isNaN(ended)) parts.push("undated record");
+  else {
+    const ageDays = Math.floor((Date.now() - ended) / 86_400_000);
+    if (ageDays > RECORD_MAX_AGE_DAYS) parts.push(`stale: ${ageDays}d old`);
+  }
+  if (typeof record.exit === "number" && record.exit !== 0) parts.push(`last exit: ${record.exit}`);
+  if (record.marker === false) parts.push("marker: false");
+  return parts.length > 0 ? ` [${parts.join("; ")}]` : "";
 }
 
 export async function collect(options: Options): Promise<{
@@ -435,6 +789,9 @@ export interface RunResult {
   hasAssertionSignal: boolean;
   passed: boolean;
   failureReason?: string;
+  /** Wall-clock bounds of the run, recorded verbatim in run.json (audio-feed-h22ml). */
+  startedAt: string;
+  endedAt: string;
 }
 
 /**
@@ -461,6 +818,7 @@ export async function runProof(
   declaration: Declaration,
   onChild: (pid: number | null) => void,
 ): Promise<RunResult> {
+  const startedAt = new Date().toISOString();
   const started = performance.now();
   const { timeoutMs: effectiveTimeoutMs, boundSec } = resolveBound(options, declaration);
   const command = new Deno.Command("timeout", {
@@ -501,6 +859,7 @@ export async function runProof(
   const tail = rawText.split("\n").filter((line) => line.trim() !== "").slice(-6).join("\n  ");
 
   let passed = output.code === 0;
+  const endedAt = new Date().toISOString();
   let failureReason: string | undefined;
   if (output.code === 0) {
     if (outputEmpty) {
@@ -523,11 +882,22 @@ export async function runProof(
     hasAssertionSignal,
     passed,
     failureReason,
+    startedAt,
+    endedAt,
   };
 }
 
 export async function main(args: string[] = Deno.args): Promise<void> {
   const options = parseOptions(args);
+  // audio-feed-h22ml: history checks need a git HEAD. A root without one (a scratch fixture) gets
+  // records WRITTEN and the git-independent rules applied, but the sha rule is skipped and the skip
+  // is named here once. A root whose git ERRORS still fails closed inside shaIsAncestor.
+  const historyCheckable = (await gitHeadSha(options.root)) !== null;
+  if (!historyCheckable) {
+    console.log(
+      `[evidence] note: records are written but not history-checked under ${options.root} (no git HEAD)`,
+    );
+  }
   const { declarations, undeclared, withoutReadme, refused, symlinks, malformedTimeouts } =
     await collect(options);
   const unresolved = declarations.filter((declaration) => !declaration.exists);
@@ -606,10 +976,16 @@ export async function main(args: string[] = Deno.args): Promise<void> {
         : declaration.timeoutMs !== undefined
         ? ` [timeout: ${declaration.timeoutMs / 1000}s]`
         : "";
+      // audio-feed-h22ml (AMENDMENT 2): the record state is an ANNOTATION here, never a failure -
+      // --list is a diagnostic used by other lanes and by the census, and exits 0 regardless of how
+      // stale or missing the records are. Only the RUN path may exit non-zero for these states.
+      const recordSuffix = declaration.executedBy === null && declaration.exists
+        ? await recordAnnotation(options.root, declaration.dir, historyCheckable)
+        : "";
       console.log(
         `${
           declaration.exists ? "declared  " : "UNRESOLVED"
-        } ${declaration.dir} -> ${declaration.declared}${execSuffix}${timeoutSuffix}`,
+        } ${declaration.dir} -> ${declaration.declared}${execSuffix}${timeoutSuffix}${recordSuffix}`,
       );
     }
     const unresolvedExecNote = (unresolvedExecutors.length > 0
@@ -725,6 +1101,10 @@ export async function main(args: string[] = Deno.args): Promise<void> {
   const debt = printDebt();
   const results: Array<{ declaration: Declaration; result?: RunResult }> = [];
   const suiteOwned: Declaration[] = [];
+  // audio-feed-h22ml: every claimed run leaves a checkable record. Incidents accumulate here and
+  // redden the invocation; seeding during the unarmed phase is a NOTE, never an incident.
+  const recordIncidents: string[] = [];
+  let seededRecords = 0;
   let running: number | null = null;
   try {
     for (const declaration of declarations) {
@@ -747,16 +1127,50 @@ export async function main(args: string[] = Deno.args): Promise<void> {
         suiteOwned.push(declaration);
         continue;
       }
+      // audio-feed-h22ml: pre-flight the EXISTING record (named incidents, seeded quietly while
+      // unarmed), run the proof, write the fresh record, then require the record to exist - the
+      // post-run guarantee is what catches a broken writer even during the seed phase.
+      const bound = resolveBound(options, declaration);
+      const dirAbs = join(options.root, declaration.dir);
+      const pre = await readRunRecord(dirAbs);
+      if (pre.state === "missing" && !EVIDENCE_RECORDS_ENFORCED) {
+        console.log(
+          `[evidence] note: ${declaration.dir} has no ${RECORD_FILE} yet (seed phase: writing one this run)`,
+        );
+        seededRecords++;
+      } else {
+        for (
+          const incident of await validateRunRecord(pre, {
+            root: options.root,
+            dir: declaration.dir,
+            recordsEnforced: EVIDENCE_RECORDS_ENFORCED,
+            historyCheckable,
+          })
+        ) {
+          console.log(
+            `[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (${incident})`,
+          );
+          recordIncidents.push(`${declaration.dir}: ${incident}`);
+        }
+      }
       const result = await runProof(options, declaration, (pid) => running = pid);
+      await writeRunRecord(options.root, declaration, bound, result.startedAt, result);
+      const post = await readRunRecord(dirAbs);
+      if (post.state !== "ok") {
+        const reason = post.state === "missing"
+          ? `RECORD NOT WRITTEN: the tier ran ${declaration.dir} and wrote no ${RECORD_FILE} - the record writer is broken`
+          : `RECORD NOT WRITTEN: the tier ran ${declaration.dir} but ${RECORD_FILE} does not parse (${post.error})`;
+        console.log(`[evidence] FAIL ${declaration.dir} -> ${declaration.declared} (${reason})`);
+        recordIncidents.push(reason);
+      }
       results.push({ declaration, result });
       // A proof that exceeded the BOUND is UNKNOWN, not failed: 124/137/143 mean the bound killed it,
       // which is the fleet's own rule and the same distinction the gate draws. It is still non-zero,
       // because an unknown is not a pass - but calling it a failure would be this tier overclaiming.
       const verdict = result.passed ? "ok  " : result.timedOut ? "TIMEOUT" : "FAIL";
       const reasonNote = result.failureReason ? ` (${result.failureReason})` : "";
-      const { boundSec, provenance } = resolveBound(options, declaration);
       const note = result.timedOut
-        ? ` UNKNOWN (exceeded the ${boundSec}s bound [${provenance}]; raise --timeout to decide it)`
+        ? ` UNKNOWN (exceeded the ${bound.boundSec}s bound [${bound.provenance}]; raise --timeout to decide it)`
         : reasonNote;
       console.log(
         `[evidence] ${verdict} ${declaration.dir} -> ${declaration.declared} ` +
@@ -783,12 +1197,19 @@ export async function main(args: string[] = Deno.args): Promise<void> {
       `${declarations.length} declared ` +
       `(${unresolved.length} unresolved, ${suiteOwned.length} suite-owned not run directly, ` +
       `${undeclared.length} declare nothing, ` +
-      `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time`,
+      `${withoutReadme.length} without a README) in ${seconds.toFixed(1)}s of proof time` +
+      (seededRecords > 0 ? `, ${seededRecords} record(s) seeded` : ""),
   );
-  if (failed > 0 || unknown > 0) {
+  for (const incident of recordIncidents) {
+    console.log(`[evidence] record incident: ${incident}`);
+  }
+  if (failed > 0 || unknown > 0 || recordIncidents.length > 0) {
     console.log(
       `[evidence] RED: ${failed} declared proof(s) failed or asserted nothing` +
         (unknown > 0 ? ` and ${unknown} stayed UNKNOWN inside the bound` : "") +
+        (recordIncidents.length > 0
+          ? `; ${recordIncidents.length} record incident(s) - every claimed run must leave a checkable record`
+          : "") +
         " - an unknown is not a pass",
     );
     Deno.exit(1);
