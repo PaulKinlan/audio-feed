@@ -237,6 +237,23 @@ Deno.test("proof-cdp: connects to mock DevTools server and handles cdp, js, unti
       );
       assertStringIncludes(sharedSource, "js(expression: string, timeoutMs = HANG_BOUND_MS)");
 
+      // 9b. Browser-boot waits consume the SAME derived pair rather than a bare count. The
+      // css_escape_guard row used to hand-roll a fixed 50x100ms DevToolsActivePort wait, which
+      // reddened a healthy launch on the loaded gate host (union gate, loadavg 5-10) while the
+      // same tree passed in isolation - a fixed window is a coin flip under load. It now
+      // launches through proof-helper's launchChrome with portTimeoutMs: HANG_BOUND_MS, so the
+      // failure names the owner ("exited prematurely" = never started vs "Timed out after
+      // <waited>ms" = started slowly). Source-pinned, not waited out: the point is the wiring,
+      // not the wall time.
+      const guardSource = await Deno.readTextFile(
+        new URL("./css_escape_guard_test.ts", import.meta.url),
+      );
+      assertStringIncludes(guardSource, "portTimeoutMs: HANG_BOUND_MS");
+      assert(
+        !guardSource.includes("i < 50"),
+        "css_escape_guard must not return to the fixed 50-poll boot wait",
+      );
+
       // 10. js() BOUNDS one evaluate: an expression the page never answers rejects as its own
       // class, inside its own bound, naming what was evaluated, the bound in force, and denying
       // that it polled - and exactly ONE Runtime.evaluate reached the server, which is the
