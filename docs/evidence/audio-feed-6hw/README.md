@@ -1,7 +1,7 @@
 # Unified Bookmarklet Card Verification Report: audio-feed-6hw
 
 - Script: scripts/bookmarklet-browser-proof.ts
-- Asserts: bookmarklet inspects alternate RSS/Atom feeds; bookmarklet also inspects plain feed links; without ?add= the plain send form is the only card; prefill renders exactly one unified card; prefill renders NO second send form; the one card offers Queue this single page; the one card offers Subscribe to the feed; queue single episode feedback succeeds; feed subscription feedback succeeds; no-feed prefill is still exactly one card; no-feed prefill has no second form; no-feed prefill has no duplicate input; a page with no declared feed answers with zero feeds; the discovered feed appears without a second card; the server found the page's declared feed and resolved it; the discovered feed keeps its title; a hostile feed candidate never reaches the page; subscribing to the discovered feed succeeds; mobile prefill stays one card with no second form; mobile quick add zero horizontal overflow at 390px; front door pre-fills #feed-url input from ?feed= query param
+- Asserts: bookmarklet inspects alternate RSS/Atom feeds; bookmarklet also inspects plain feed links; without ?add= the plain send form is the only card; prefill renders exactly one unified card; prefill renders NO second send form; the one card offers Queue this single page; the one card offers Subscribe to the feed; queue single episode feedback succeeds; feed subscription feedback succeeds; no-feed prefill is still exactly one card; no-feed prefill has no second form; no-feed prefill has no duplicate input; a page with no declared feed answers with zero feeds; the discovered feed appears without a second card; the server found the page's declared feed and resolved it; the discovered feed keeps its title; a hostile feed candidate never reaches the page; subscribing to the discovered feed succeeds; mobile prefill stays one card with no second form; mobile quick add zero horizontal overflow at 390px; a bookmarked add URL still prefills the account quick-add card; a bookmarked feed URL still prefills the detected-feed line
 
 ## Verified Criteria
 
@@ -37,8 +37,8 @@ PASS  a hostile feed candidate never reaches the page  no javascript: candidate 
 PASS  subscribing to the discovered feed succeeds  feedback: 'Subscribed to Article With A Declared Feed. 0 post(s) queued.'
 PASS  mobile prefill stays one card with no second form  cards: 1, forms: 0
 PASS  mobile quick add zero horizontal overflow at 390px  no horizontal scroll
-PASS  front door pre-fills #url input from ?add= query param  url: 'https://example.com/blog/great-article'
-PASS  front door pre-fills #feed-url input from ?feed= query param  feed: 'https://example.com/feed.xml'
+PASS  a bookmarked add URL still prefills the account quick-add card  url: 'https://example.com/blog/great-article'
+PASS  a bookmarked feed URL still prefills the detected-feed line  hidden: false, feed: 'https://example.com/feed.xml'
 ```
 
 ## Screenshots
