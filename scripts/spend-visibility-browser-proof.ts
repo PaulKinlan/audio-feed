@@ -230,6 +230,25 @@ await runProof("spend-visibility-browser-proof", async (checker) => {
       title: "Browser Acceptance Proof: audio-feed-9mp",
       script: "scripts/spend-visibility-browser-proof.ts",
       asserts: ASSERTS,
+      // audio-feed-tgnu: the debt admission is a fact that must survive every regeneration, so the
+      // proof states it itself (writeEvidenceReadme's guard deletes unreproduced content on the
+      // headings it can see and would have wiped this bullet silently - it is not a heading).
+      notes: ["Debt: admitted (audio-feed-tgnu)"],
+      // The README's hand-written sections, restated by the proof so regeneration reproduces them
+      // (audio-feed-vavnp: writeEvidenceReadme refuses to overwrite a committed README carrying a
+      // section the generator does not produce - fold facts into notes/sections rather than delete).
+      sections: [
+        {
+          heading: "Feature",
+          body:
+            "Spend visibility and per-user daily episode budget:\n- Provides admin console container element for per-user synthesis statistics (`#synthesisBody`).\n- Displays operations metrics grid element for synthesised episodes (`#statSynthesis`).\n- Provides a DOM input field (`#newDailyBudget`) for an optional daily episode budget ceiling per subscriber on creation.",
+        },
+        {
+          heading: "Evidence Artifacts",
+          body:
+            '- `01-admin-spend-visibility.png`: Screenshot of `/admin` console showing the "Synthesis by subscriber" table, "Episodes synthesised" metric, and the daily budget input in the subscriber creation form.',
+        },
+      ],
       checker,
     });
   }
