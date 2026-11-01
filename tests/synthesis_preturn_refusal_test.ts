@@ -21,6 +21,8 @@ import { assert, assertEquals } from "@std/assert";
 import { memoryStores } from "../src/config.ts";
 import { MemoryBlobStore } from "../src/storage/memory.ts";
 import { KvMetadataStore } from "../src/storage/kv.ts";
+import { createApp } from "../src/app.ts";
+import { createHandlers } from "../src/compose.ts";
 import { createGeminiSynthesizer, runSynthesisBatch } from "../src/worker/synthesis.ts";
 import { decodedFromWav, GeminiTtsClient, pcmToWav } from "../src/tts/gemini.ts";
 import type { DecodedAudioResult, SynthesisOptions } from "../src/tts/gemini.ts";
@@ -499,6 +501,174 @@ row(
       terminal.failed.length,
       0,
       "the batch must not report a failure for an episode that is still playable",
+    );
+  },
+);
+
+/**
+ * The rehearsal's ONE client for the WHOLE run: invocation N pays that tick's pre-turn cost
+ * (the measured cold script/store work) before it asks the resume to reserve turn 1, then
+ * commits its audio as a durable segment exactly as the real narration client does.
+ *
+ * `paidTurns` records only the reservations the preflight ADMITTED, so it is this row's
+ * provider-spend counter - the same distinction `claimSpend.initiatedTurns` makes in
+ * production. `finalizedSegmentsSeen` is read back from the store right after a commit, so
+ * "a segment was written" is observed, not inferred from the episode's final status.
+ */
+function tickCostClient(
+  time: ReturnType<typeof controlledInvocationClock>,
+  stores: Stores,
+  preTurnCostsMs: number[],
+) {
+  const paidTurns: string[] = [];
+  const observed = { finalizedSegmentsSeen: 0 };
+  let tick = 0;
+  return {
+    paidTurns,
+    observed,
+    client: {
+      async synthesizeNarration(_input: NarrationInput, options: SynthesisOptions) {
+        // Out of ticks is a harness bug, not a product verdict: the run must be sized to the
+        // schedule this row supplies.
+        const burnMs = preTurnCostsMs[tick++];
+        assert(burnMs !== undefined, "the rehearsal ran more invocations than its cost schedule");
+        await time.advance(burnMs);
+        const admission = await options.resume?.prepare("segment-1", "voice-a");
+        if (admission !== "synthesize") return fakeAudio();
+        paidTurns.push(admission);
+        const audio = fakeAudio();
+        await options.resume?.commit("segment-1", audio, "voice-a");
+        const segments = await stores.metadata.listSynthesisSegments("user-1", "episode-1");
+        observed.finalizedSegmentsSeen = Math.max(
+          observed.finalizedSegmentsSeen,
+          segments.filter((segment) => segment.finalized).length,
+        );
+        return audio;
+      },
+    },
+  };
+}
+
+/**
+ * THE MISSING EVIDENCE (audio-feed-preturn end to end).
+ *
+ * The rows above drive one tick at a time and, on the recovery row, hand the fourth tick a
+ * DIFFERENT synthesizer. This one is Paul's shape driven the way the 2-minute cron drives it:
+ * one episode, one synthesizer, one store, several invocations, a fresh 90s budget per
+ * invocation — and it asserts the outcome a user sees rather than an internal flag.
+ *
+ * The pre-turn cost is the measured production one: 63s of a 90s invocation, three cold
+ * invocations in a row, then a warm invocation that pays nothing before turn 1. Ticks 1-3 are
+ * refused before any paid turn (zero spend), so with the fix the episode is still `pending`
+ * with attempts at 0 after three claims; tick 4 synthesises, commits a durable segment, writes
+ * the episode WAV, and the bytes come back over the real `GET /audio/:key+` route.
+ *
+ * On the pre-fix behaviour tick 3 is the third failed attempt and the episode is already
+ * terminally failed, so this row fails at (a) with the permanent-failure shape.
+ */
+
+row(
+  "audio-feed-preturn rehearsal: three cold invocations spend nothing, the warm one writes audio, and the episode is served ready",
+  async (stores) => {
+    await setupEnv(stores);
+    const ctx = { config, stores };
+    const time = controlledInvocationClock();
+    const rehearsal = tickCostClient(time, stores, [63_000, 63_000, 63_000, 0]);
+    const synth = createGeminiSynthesizer(ctx, {
+      client: rehearsal.client as unknown as GeminiTtsClient,
+      scriptGenerator: null,
+    });
+    const batchOpts = { maxInvocationDurationMs: 90_000, clock: time.clock };
+
+    // (e) Three cron ticks, three fresh invocation budgets, three refusals before turn 1.
+    for (let tick = 1; tick <= 3; tick++) {
+      const result = await runSynthesisBatch(ctx, synth, {
+        owner: `worker-rehearsal-${tick}`,
+        ...batchOpts,
+      });
+      assertEquals(
+        result.failed.length,
+        0,
+        `tick ${tick} must not fail the episode; got ${JSON.stringify(result.failed)}`,
+      );
+      assertEquals(result.yielded.length, 1, `tick ${tick} must yield before turn 1`);
+      assertEquals(
+        rehearsal.paidTurns.length,
+        0,
+        `tick ${tick} was refused before turn 1, so it must have spent nothing`,
+      );
+    }
+
+    // (a) Three claims have not failed the episode: it is still resumable, and no attempt
+    // has been burned, because no claim ever initiated a paid turn.
+    const afterRefusals = await stores.metadata.getEpisode("user-1", "episode-1");
+    assert(afterRefusals, "the episode must still exist after three cold ticks");
+    assertEquals(
+      afterRefusals.status,
+      "pending",
+      `three zero-spend claims must not permanently fail the episode: ${afterRefusals.status} / ${afterRefusals.error}`,
+    );
+    assertEquals(afterRefusals.attempts ?? 0, 0, "no claim initiated a paid turn: attempts stay 0");
+    assertEquals(afterRefusals.refusals ?? 0, 3, "each refusal lands on the refusal counter");
+    assert(
+      !(afterRefusals.error ?? "").includes("zero durable progress"),
+      "the episode must never reach the zero-progress terminal state: " + afterRefusals.error,
+    );
+
+    // (b) The warm tick: synthesis proceeds past the pre-turn stage and pays for turn 1.
+    const completing = await runSynthesisBatch(ctx, synth, {
+      owner: "worker-rehearsal-4",
+      ...batchOpts,
+    });
+    assertEquals(
+      completing.failed.length,
+      0,
+      `the warm tick must not fail: ${JSON.stringify(completing.failed)}`,
+    );
+    assertEquals(completing.ready.length, 1, "the warm tick must complete the episode");
+    // (d) It actually attempted TTS: one admitted paid turn, not a cached replay.
+    assertEquals(
+      rehearsal.paidTurns,
+      ["synthesize"],
+      "the warm tick must spend exactly one admitted TTS turn",
+    );
+    assert(
+      rehearsal.observed.finalizedSegmentsSeen > 0,
+      "a paid turn must leave at least one FINALIZED segment in the store (durable progress)",
+    );
+
+    // (c) The state a user sees, and the artefact behind it.
+    const ready = await stores.metadata.getEpisode("user-1", "episode-1");
+    assert(ready, "the episode must exist after the warm tick");
+    assertEquals(ready.status, "ready");
+    assert(ready.audioKey, "a ready episode must carry the key of its audio");
+    assert((ready.byteLength ?? 0) > 0, "a ready episode must carry a non-zero byte length");
+    assert(ready.readyAt, "a ready episode must be stamped with when it became ready");
+
+    const stored = await stores.blobs.get(ready.audioKey);
+    assert(stored, `the episode WAV must exist in the blob store under ${ready.audioKey}`);
+    const planned = new Uint8Array(await new Response(stored.body).arrayBuffer());
+    assertEquals(planned.byteLength, ready.byteLength, "the stored bytes must match byteLength");
+    assertEquals(
+      new TextDecoder().decode(planned.subarray(0, 4)),
+      "RIFF",
+      "the artefact must be a real WAV container, not a placeholder",
+    );
+
+    // The user-facing half: the bytes are retrievable over the route podcast clients hammer.
+    const { fetch } = createApp(ctx, createHandlers(ctx));
+    const response = await fetch(new Request(`${BASE}/audio/${ready.audioKey}`));
+    assertEquals(response.status, 200, "a podcast client must be able to fetch the audio");
+    assert(
+      (response.headers.get("content-type") ?? "").includes("audio/wav"),
+      "served content-type must be audio/wav; got " + response.headers.get("content-type"),
+    );
+    const served = new Uint8Array(await response.arrayBuffer());
+    assertEquals(served.byteLength, ready.byteLength, "served bytes must be the whole artefact");
+    assertEquals(
+      new TextDecoder().decode(served.subarray(0, 4)),
+      "RIFF",
+      "served bytes must be the same WAV that was stored",
     );
   },
 );
