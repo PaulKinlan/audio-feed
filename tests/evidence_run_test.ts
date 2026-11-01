@@ -1830,3 +1830,118 @@ console.log("PASS always passes");
     }
   },
 );
+
+// audio-feed (fleet/only-isolation): --only <dir> must isolate. One proof script can declare
+// SEVERAL evidence dirs (scripts/bookmarklet-browser-proof.ts serves audio-feed-ep1 AND
+// audio-feed-6hw), so running it under --only rewrote the sibling's recorded artefacts and left
+// the sibling's run.json hashing bytes that no longer existed - a real record tamper caused by
+// the tool that exists to detect tampering. The tier CAN know statically which dirs share the
+// script (the - Script: lines), so --only now refuses loudly by default; --allow-siblings
+// snapshots the siblings and restores + reports anything the run touched.
+
+async function seedSharedProofFixture(tempDir: string): Promise<void> {
+  const evidenceRoot = join(tempDir, "docs", "evidence");
+  const scriptsDir = join(tempDir, "scripts");
+  await Deno.mkdir(scriptsDir, { recursive: true });
+  await Deno.mkdir(join(evidenceRoot, "sib-a"), { recursive: true });
+  await Deno.mkdir(join(evidenceRoot, "sib-b"), { recursive: true });
+  // The shared proof writes a sibling artefact into BOTH declared dirs, like
+  // scripts/bookmarklet-browser-proof.ts writes both audio-feed-ep1 and audio-feed-6hw.
+  await Deno.writeTextFile(
+    join(scriptsDir, "shared-proof.ts"),
+    `const root = new URL("../", import.meta.url);
+await Deno.writeTextFile(new URL("docs/evidence/sib-a/artefact.txt", root), "rewritten " + Date.now());
+await Deno.writeTextFile(new URL("docs/evidence/sib-b/artefact.txt", root), "rewritten " + Date.now());
+console.log("PASS shared proof wrote both dirs");
+`,
+  );
+  await Deno.writeTextFile(
+    join(evidenceRoot, "sib-a", "README.md"),
+    "- Script: scripts/shared-proof.ts\n- Asserts: claim\n",
+  );
+  await Deno.writeTextFile(
+    join(evidenceRoot, "sib-b", "README.md"),
+    "- Script: scripts/shared-proof.ts\n- Asserts: claim\n",
+  );
+  // sib-b has the prior state a --only run must not touch: an artefact plus a record
+  // (run.json) whose artefact map hashes exactly those bytes - the audio-feed-ep1 shape.
+  await Deno.writeTextFile(join(evidenceRoot, "sib-b", "artefact.txt"), "original");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("original"));
+  const sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await Deno.writeTextFile(
+    join(evidenceRoot, "sib-b", RECORD_FILE),
+    JSON.stringify({
+      script: "scripts/shared-proof.ts",
+      sha: "",
+      bound: { ms: 300000, provenance: "default" },
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      exit: 0,
+      marker: true,
+      artefacts: { "artefact.txt": `sha256:${sha256}` },
+    }) + "\n",
+  );
+}
+
+Deno.test("--only refuses to run a proof that also declares a sibling evidence dir", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "onlyiso-refuse-" });
+  try {
+    await seedSharedProofFixture(tempDir);
+    const res = await runTier(tempDir, ["--only", "sib-a"]);
+    assertEquals(
+      res.code,
+      1,
+      `the tier must refuse a --only run that would write a sibling:\n${res.stdout}\n${res.stderr}`,
+    );
+    assertStringIncludes(res.stdout + res.stderr, "SIBLING WRITE");
+    assertStringIncludes(res.stdout + res.stderr, "docs/evidence/sib-b");
+    assertStringIncludes(res.stdout + res.stderr, "scripts/shared-proof.ts");
+    assertEquals(
+      await Deno.readTextFile(join(tempDir, "docs", "evidence", "sib-b", "artefact.txt")),
+      "original",
+      "the refusal must happen BEFORE the proof runs: the sibling artefact must be untouched",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("--allow-siblings snapshots the sibling and restores what the run rewrote", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "onlyiso-restore-" });
+  try {
+    await seedSharedProofFixture(tempDir);
+    const res = await runTier(tempDir, ["--only", "sib-a", "--allow-siblings"]);
+    assertEquals(
+      res.code,
+      0,
+      `the explicit opt-in run must pass and restore the sibling:\n${res.stdout}\n${res.stderr}`,
+    );
+    assertStringIncludes(res.stdout, "docs/evidence/sib-b");
+    assertStringIncludes(res.stdout, "RESTORED");
+    assertEquals(
+      await Deno.readTextFile(join(tempDir, "docs", "evidence", "sib-b", "artefact.txt")),
+      "original",
+      "the sibling artefact the proof rewrote must be restored byte-for-byte",
+    );
+    // The record must survive intact: the tier never rewrote it, and the restored bytes
+    // hash back to exactly what it recorded.
+    const read = await readRunRecord(join(tempDir, "docs", "evidence", "sib-b"));
+    assertEquals(read.state, "ok");
+    if (read.state === "ok") {
+      const incidents = await validateRunRecord(read, {
+        root: tempDir,
+        dir: "docs/evidence/sib-b",
+        recordsEnforced: true,
+        historyCheckable: false,
+      });
+      assertEquals(incidents, [], "the sibling's record must still validate after the run");
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("parseOptions accepts --allow-siblings and defaults it to false", () => {
+  assertEquals(parseOptions([]).allowSiblings, false);
+  assertEquals(parseOptions(["--allow-siblings"]).allowSiblings, true);
+});
