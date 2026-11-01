@@ -20,6 +20,7 @@ import { createSession } from "../src/auth/sessions.ts";
 import { makeArticle, makeEpisode } from "../tests/fixtures.ts";
 import type { AppConfig, Stores } from "../src/config.ts";
 import { runProof, withChrome, writeEvidenceReadme } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-e1d/", import.meta.url).pathname;
 
@@ -232,6 +233,7 @@ await runProof("audio-feed-e1d", async (checker) => {
         `${OUT}01-admin-runs-expanded-errors.png`,
         Uint8Array.from(atob(shotAdmin.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}01-admin-runs-expanded-errors.png`);
       console.log(`Saved screenshot to ${OUT}01-admin-runs-expanded-errors.png`);
 
       // 2. Visit /listen/:token (player)
@@ -273,6 +275,7 @@ await runProof("audio-feed-e1d", async (checker) => {
         `${OUT}02-player-download-error-inline.png`,
         Uint8Array.from(atob(shotPlayer.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}02-player-download-error-inline.png`);
       console.log(`Saved screenshot to ${OUT}02-player-download-error-inline.png`);
 
       await writeEvidenceReadme({

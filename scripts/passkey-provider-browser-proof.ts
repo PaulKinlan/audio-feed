@@ -26,6 +26,7 @@ import {
   writeEvidenceReadme,
 } from "./proof-helper.ts";
 import type { ElementMeasurement } from "./proof-helper.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const OUT = new URL("../docs/evidence/audio-feed-25t/", import.meta.url).pathname;
 
@@ -235,6 +236,7 @@ await runProof("audio-feed-25t", async (checker) => {
         `${OUT}01-account-passkey-providers-desktop.png`,
         Uint8Array.from(atob(shotDesktop.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}01-account-passkey-providers-desktop.png`);
       console.log(`Saved screenshot to ${OUT}01-account-passkey-providers-desktop.png`);
 
       // 2. Mobile viewport (390x844)
@@ -279,6 +281,7 @@ await runProof("audio-feed-25t", async (checker) => {
         `${OUT}02-account-passkey-providers-mobile-390.png`,
         Uint8Array.from(atob(shotMobile.data), (c) => c.charCodeAt(0)),
       );
+      await quantiseEvidencePng(`${OUT}02-account-passkey-providers-mobile-390.png`);
       console.log(`Saved screenshot to ${OUT}02-account-passkey-providers-mobile-390.png`);
 
       // Write summary markdown report

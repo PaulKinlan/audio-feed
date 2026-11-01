@@ -11,8 +11,11 @@
  *   deno run --allow-all --unstable-kv scripts/regenerate-browser-proof.ts <chrome> <profileDir> <outDir>
  *
  * Writes screenshots and evidence.json to <outDir>. Exits non-zero if a check fails.
+ * Captures are quantised 256-colour PNG8 in place before the record is written, so the
+ * evidence seed hashes the same bytes the run left on disk.
  */
 import { HARNESS_FEED_TOKEN, OLD_KEY, startRegenerateHarness } from "./regenerate-harness.ts";
+import { quantiseEvidencePng } from "./evidence-png.ts";
 
 const [chromePath, profileDir, outDir] = Deno.args;
 if (!chromePath || !profileDir || !outDir) {
@@ -212,6 +215,9 @@ async function screenshot(session: string, name: string) {
     `${outDir}/${name}.png`,
     Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
   );
+  // Not wrapped in runProof (pinned exempt, audio-feed-ebyy), so pass allowOutsideProof rather
+  // than letting the quantiser refuse: run.json must hash paletted bytes, never raw captures.
+  await quantiseEvidencePng(`${outDir}/${name}.png`, { allowOutsideProof: true });
   console.log(`screenshot ${name}.png`);
 }
 
