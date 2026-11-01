@@ -18,6 +18,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
+import { HANG_BOUND_MS, MEASURED_STARVED_POLL_MS } from "./proof-cdp.ts";
 import {
   hasGeneratedRegion,
   headingsNotReproduced,
@@ -861,16 +862,107 @@ export const SPAWN_HARNESS_HEALTH_TIMEOUT_MS = 15_000;
 export const SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE = 60;
 
 /**
+ * The FLOOR under which a derived startup window can never fall (audio-feed-v0o7k).
+ *
+ * `SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE` multiplies a MEASUREMENT, and a measurement
+ * inherits its luck: a bare-Deno-boot probe that ran on a momentarily idle box can
+ * return 100ms or less, and 60x that is 6s - BELOW the 12.0s/19.0s READY this repo
+ * measured at load, i.e. a healthy harness reported as never-ready. A multiplication
+ * is a ratio, not a bound; the bound comes from this repo's own measured starvation
+ * floor, IMPORTED from scripts/proof-cdp.ts, never redefined: `HANG_BOUND_MS` is
+ * 15 x `MEASURED_STARVED_POLL_MS` (the 8s a starved poll measurably costs), the same
+ * window the repo already accepts for starved work. A derived window smaller than
+ * that claims a Deno compile fails faster than the repo has measured a starved host
+ * to take for ONE poll. What the multiplier still buys: proportionality ABOVE the
+ * floor - a genuinely slow host (3s probe) derives 180s, where a bare floor would
+ * starve it again.
+ */
+export const STARTUP_BACKSTOP_FLOOR_MS = HANG_BOUND_MS;
+
+/**
  * The startup window for a host that booted the baseline in `measuredBootMs`.
  *
- * Proportional BY CONSTRUCTION - `startupBackstopMs(2 * b) === 2 * startupBackstopMs(b)` -
- * so a host that is twice as slow gets twice the window. Pinned BY NAME by
+ * Proportional BY CONSTRUCTION above the floor - `startupBackstopMs(2 * b) ===
+ * 2 * startupBackstopMs(b)` for baselines whose 60x derivation exceeds
+ * `STARTUP_BACKSTOP_FLOOR_MS` - so a host that is twice as slow gets twice the
+ * window. Below the floor the floor dominates, deliberately: a fast/implausible
+ * probe can never mint a sub-floor window (audio-feed-v0o7k). Pinned BY NAME by
  * "proof-helper: the harness startup window is derived from the measured boot
- * baseline, never a fixed 15s (audio-feed-3n0xs)" in tests/proof_helper_test.ts,
- * which reds if a constant is ever returned from here again.
+ * baseline, never a fixed 15s (audio-feed-3n0xs)" and "proof-helper: the derived
+ * startup window is FLOORED at the repo's measured hang bound, never below it
+ * (audio-feed-v0o7k)" in tests/proof_helper_test.ts, which red if a constant is
+ * ever returned from here or the floor is dropped again.
  */
 export function startupBackstopMs(measuredBootMs: number): number {
-  return Math.round(measuredBootMs * SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE);
+  return Math.max(
+    STARTUP_BACKSTOP_FLOOR_MS,
+    Math.round(measuredBootMs * SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE),
+  );
+}
+
+/**
+ * The startup phase of a harness timeout report, as a PURE string builder
+ * (audio-feed-v0o7k review): "timed out after <startupMs>ms waiting for the
+ * harness to log READY", plus a derivation clause whenever the window was
+ * derived from a measured boot baseline. The branch compares the DERIVED term
+ * (`probeMs` x `SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE`) against `floorMs`, NOT
+ * `startupMs`: at a 2000ms probe the derivation equals the 120_000ms floor
+ * exactly, and an `startupMs === floorMs` comparison would falsely report that
+ * the floor dominated a measurement it merely tied. Derived above floor names
+ * the multiplication; derived EQUAL to floor names the tie and claims no
+ * dominance either way; derived below floor names the floor and the probe it
+ * dominated. An undefined `probeMs` is an explicit window: no clause, nothing
+ * claimed. Pinned branch-by-branch (and at the tie) in
+ * tests/proof_helper_test.ts, with no child process and no waiting.
+ */
+export function startupTimeoutPhaseMessage(
+  { startupMs, probeMs, floorMs }: {
+    startupMs: number;
+    probeMs?: number;
+    floorMs: number;
+  },
+): string {
+  const derivedMs = probeMs === undefined
+    ? undefined
+    : Math.round(probeMs * SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE);
+  const clause = derivedMs === undefined
+    ? ""
+    : derivedMs > floorMs
+    ? ` (a window derived from the ${probeMs}ms measured boot baseline x ${SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE}, above the ${floorMs}ms floor)`
+    : derivedMs === floorMs
+    ? ` (a window derived from the ${probeMs}ms measured boot baseline x ${SPAWN_HARNESS_STARTUP_BOOT_MULTIPLE}, equal to the ${floorMs}ms floor)`
+    : ` (a window floored at ${floorMs}ms = HANG_BOUND_MS = 15 x the ${MEASURED_STARVED_POLL_MS}ms measured starved-poll floor, which dominated the ${probeMs}ms measured boot baseline)`;
+  return `timed out after ${startupMs}ms waiting for the harness to log READY${clause}`;
+}
+
+/**
+ * The startup window spawnHarness will wait on, decided WITHOUT spawning
+ * anything (audio-feed-v0o7k review): an explicit `startupTimeoutMs` wins and
+ * stays unfloored (a directly chosen window is a decision, not a
+ * multiplication); otherwise the window is DERIVED through
+ * `startupBackstopMs(bootBaselineMs)` and carries the probe it came from, so a
+ * report can name both. spawnHarness's derived branches call THIS, so the
+ * derivation is pinned at unit level by "proof-helper: resolveStartupWindow
+ * derives through startupBackstopMs ..." and its runtime effect end-to-end by
+ * the still-awaiting row - mutating the derived value to any literal reddens
+ * without waiting the floor out.
+ */
+export function resolveStartupWindow(
+  window: { startupTimeoutMs?: number; bootBaselineMs?: number },
+): { startupMs: number; derived: boolean; probeMs?: number } {
+  if (window.startupTimeoutMs !== undefined) {
+    return { startupMs: window.startupTimeoutMs, derived: false };
+  }
+  if (window.bootBaselineMs !== undefined) {
+    return {
+      startupMs: startupBackstopMs(window.bootBaselineMs),
+      derived: true,
+      probeMs: window.bootBaselineMs,
+    };
+  }
+  throw new TypeError(
+    "no startup window source: pass startupTimeoutMs (explicit) or bootBaselineMs (derived)",
+  );
 }
 
 /**
@@ -1031,12 +1123,14 @@ export async function spawnHarness(
       .catch((error: unknown) => ({ ok: false as const, error }));
 
   let startupMs: number;
-  let startupDerived = false;
-  if (options.startupTimeoutMs !== undefined) {
-    startupMs = options.startupTimeoutMs;
-  } else if (options.bootBaselineMs !== undefined) {
-    startupMs = startupBackstopMs(options.bootBaselineMs);
-    startupDerived = true;
+  // The measurement the derived window came from, if it was derived - reported
+  // verbatim in the startup-timeout phase message (audio-feed-v0o7k). The
+  // decision itself is resolveStartupWindow, pinned at unit level.
+  let startupProbeMs: number | undefined;
+  if (
+    options.startupTimeoutMs !== undefined || options.bootBaselineMs !== undefined
+  ) {
+    ({ startupMs, probeMs: startupProbeMs } = resolveStartupWindow(options));
   } else {
     const probe = await baselineProbe!;
     if (!probe.ok) {
@@ -1048,8 +1142,7 @@ export async function spawnHarness(
           `Stdout:\n${stdoutBuf}\nStderr:\n${stderrBuf}`,
       );
     }
-    startupMs = startupBackstopMs(probe.ms);
-    startupDerived = true;
+    ({ startupMs, probeMs: startupProbeMs } = resolveStartupWindow({ bootBaselineMs: probe.ms }));
   }
 
   // STARTUP: spawn -> READY. Whichever event happens first decides; the derived
@@ -1148,9 +1241,11 @@ export async function spawnHarness(
     ? "the child never logged its READY line (no 'READY port=N' or server URL in stdout)"
     : `the child bound port ${assignedPort} but ${healthPath} never answered OK`;
   const phase = assignedPort === null
-    ? `timed out after ${startupMs}ms waiting for the harness to log READY${
-      startupDerived ? " (a window derived from the measured boot baseline)" : ""
-    }`
+    ? startupTimeoutPhaseMessage({
+      startupMs,
+      probeMs: startupProbeMs,
+      floorMs: STARTUP_BACKSTOP_FLOOR_MS,
+    })
     : `timed out after ${timeoutMs}ms waiting for ${healthPath}`;
   throw new Error(
     `Harness '${scriptRelPath}' ${phase}: ${condition}.\n` +
