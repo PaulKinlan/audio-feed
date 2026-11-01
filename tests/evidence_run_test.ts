@@ -1839,7 +1839,7 @@ console.log("PASS always passes");
 // script (the - Script: lines), so --only now refuses loudly by default; --allow-siblings
 // snapshots the siblings and restores + reports anything the run touched.
 
-async function seedSharedProofFixture(tempDir: string): Promise<void> {
+async function seedSharedProofFixture(tempDir: string, extraProof = ""): Promise<void> {
   const evidenceRoot = join(tempDir, "docs", "evidence");
   const scriptsDir = join(tempDir, "scripts");
   await Deno.mkdir(scriptsDir, { recursive: true });
@@ -1852,7 +1852,7 @@ async function seedSharedProofFixture(tempDir: string): Promise<void> {
     `const root = new URL("../", import.meta.url);
 await Deno.writeTextFile(new URL("docs/evidence/sib-a/artefact.txt", root), "rewritten " + Date.now());
 await Deno.writeTextFile(new URL("docs/evidence/sib-b/artefact.txt", root), "rewritten " + Date.now());
-console.log("PASS shared proof wrote both dirs");
+${extraProof}console.log("PASS shared proof wrote both dirs");
 `,
   );
   await Deno.writeTextFile(
@@ -1944,4 +1944,94 @@ Deno.test("--allow-siblings snapshots the sibling and restores what the run rewr
 Deno.test("parseOptions accepts --allow-siblings and defaults it to false", () => {
   assertEquals(parseOptions([]).allowSiblings, false);
   assertEquals(parseOptions(["--allow-siblings"]).allowSiblings, true);
+});
+
+// fleet/onlyiso-p2 (P2): removing the FILES a proof created left the DIRECTORIES it created behind,
+// so an allowed sibling run that wrote docs/evidence/sib-b/sub/new.txt left an empty `sub/` - state
+// the sibling never had. The restore now prunes created directories deepest-first, once empty, and
+// says so per directory.
+Deno.test("--allow-siblings prunes a directory the run created under the sibling", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "onlyiso-prune-" });
+  try {
+    await seedSharedProofFixture(
+      tempDir,
+      `await Deno.mkdir(new URL("docs/evidence/sib-b/sub/", root), { recursive: true });\n` +
+        `await Deno.writeTextFile(new URL("docs/evidence/sib-b/sub/new.txt", root), "created");\n`,
+    );
+    const res = await runTier(tempDir, ["--only", "sib-a", "--allow-siblings"]);
+    assertEquals(
+      res.code,
+      0,
+      `the explicit opt-in run must pass and restore the sibling:\n${res.stdout}\n${res.stderr}`,
+    );
+    assertEquals(
+      await Deno.readTextFile(join(tempDir, "docs", "evidence", "sib-b", "artefact.txt")),
+      "original",
+      "the sibling artefact must still be restored",
+    );
+    let subExists = true;
+    try {
+      await Deno.stat(join(tempDir, "docs", "evidence", "sib-b", "sub"));
+    } catch {
+      subExists = false;
+    }
+    assertEquals(
+      subExists,
+      false,
+      `the directory the proof created under the sibling must be pruned:\n${res.stdout}`,
+    );
+    assertStringIncludes(
+      res.stdout,
+      "removed docs/evidence/sib-b/sub (directory created by the --only run)",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+// fleet/onlyiso-p2 (P2): a sibling's top-level README.md/run.json were invisible to both the
+// snapshot and the restore (they were excluded to match hashEvidenceDir's validation walk), so a
+// proof that overwrote a sibling's record left the tampered bytes in place and nothing would notice
+// - the tier never validates a sibling's record. Restoring bytes is all this needs to do.
+Deno.test("--allow-siblings restores a sibling README.md and run.json the proof overwrote", async () => {
+  const tempDir = await Deno.makeTempDir({ prefix: "onlyiso-record-" });
+  try {
+    await seedSharedProofFixture(
+      tempDir,
+      `await Deno.writeTextFile(new URL("docs/evidence/sib-b/README.md", root), "- Capture: overwritten by the proof\\n");\n` +
+        `await Deno.writeTextFile(new URL("docs/evidence/sib-b/${RECORD_FILE}", root), "{}\\n");\n`,
+    );
+    const siblingDir = join(tempDir, "docs", "evidence", "sib-b");
+    const readmeBefore = await Deno.readTextFile(join(siblingDir, "README.md"));
+    const recordBefore = await Deno.readTextFile(join(siblingDir, RECORD_FILE));
+    const res = await runTier(tempDir, ["--only", "sib-a", "--allow-siblings"]);
+    assertEquals(
+      res.code,
+      0,
+      `the explicit opt-in run must pass and restore the sibling's record:\n${res.stdout}\n${res.stderr}`,
+    );
+    assertEquals(
+      await Deno.readTextFile(join(siblingDir, "README.md")),
+      readmeBefore,
+      "the sibling README.md the proof overwrote must be restored byte-for-byte",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(siblingDir, RECORD_FILE)),
+      recordBefore,
+      "the sibling run.json the proof overwrote must be restored byte-for-byte",
+    );
+    const read = await readRunRecord(siblingDir);
+    assertEquals(read.state, "ok", "the sibling's restored record must still parse");
+    if (read.state === "ok") {
+      const incidents = await validateRunRecord(read, {
+        root: tempDir,
+        dir: "docs/evidence/sib-b",
+        recordsEnforced: true,
+        historyCheckable: false,
+      });
+      assertEquals(incidents, [], "the sibling's restored record must still validate");
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
 });
