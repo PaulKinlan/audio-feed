@@ -105,12 +105,36 @@ export function wav(seconds: number): Uint8Array {
   return new Uint8Array(buffer);
 }
 
+/**
+ * Pinned base instant for reproducible evidence captures (audio-feed-zey80).
+ * Same convention as account-harness.ts: the default is a fixed instant, so the
+ * seeded episode dates are byte-identical across runs separated by days. The
+ * player renders <=6-day ages as relative labels but >=7-day ages as an ABSOLUTE
+ * calendar date, so rows seeded 9 and 21 days back used to advance one calendar
+ * day per day (audio-feed-zey80). With the seeds pinned, every row sits >7 days
+ * behind any real "today" the page can render against, so every label is a
+ * calendar date that never changes. For manual/interactive exploration, pass
+ * LISTEN_HARNESS_NOW=live or a specific ISO timestamp.
+ */
+const HARNESS_BASE_INSTANT_DEFAULT = "2026-10-12T03:30:00.000Z";
+const baseInstantMs = (() => {
+  const env = Deno.env.get("LISTEN_HARNESS_NOW");
+  if (env === "live" || env === "now") return Date.now();
+  if (env) {
+    const parsed = Date.parse(env);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Date.parse(HARNESS_BASE_INSTANT_DEFAULT);
+})();
+
 export async function createListenHarness(port = 8131) {
   const base = `http://localhost:${port}`;
   const stores = memoryStores();
   const config = { port, publicBaseUrl: base, adminToken: "harness-admin" };
   const ctx = { config, stores };
-  const now = new Date();
+  // Seeds come from the pinned base instant, not the wall clock, so the capture
+  // cannot drift with the run date (audio-feed-zey80).
+  const now = new Date(baseInstantMs);
 
   await stores.metadata.putUser({
     id: "user-1",
@@ -223,7 +247,7 @@ export async function createListenHarness(port = 8131) {
           url,
           title: "Sample Article",
           author: "Sample Author",
-          publishedAt: new Date().toISOString(),
+          publishedAt: new Date(baseInstantMs).toISOString(),
           lead: "A test article lead.",
           body: "Article content for the harness.",
         }),
