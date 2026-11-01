@@ -1,0 +1,16 @@
+{
+  "script": "scripts/home-player-link-browser-proof.ts",
+  "sha": "30b3d3faa404c3243efa508bf0c6070573d830a2",
+  "bound": {
+    "ms": 420000,
+    "provenance": "flag"
+  },
+  "startedAt": "2026-11-01T02:39:15.704Z",
+  "endedAt": "2026-11-01T02:39:48.096Z",
+  "exit": 0,
+  "marker": true,
+  "artefacts": {
+    "01-home-player-link-desktop.png": "sha256:8df547ae41f96b1016fdf732a45846adfb6b4f0b492918be23edc5de6910c713",
+    "02-home-player-link-mobile-390.png": "sha256:5ad6b1fe3c6fd30d066e952aa41353d42cf4852973165fdbd88447bd4b327b99"
+  }
+}
